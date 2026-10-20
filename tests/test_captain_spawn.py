@@ -10,6 +10,7 @@ captain's own MCP server; and there is exactly one per home.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +25,7 @@ from aisquare.core.store import store_session
 from aisquare.core.workspace import project_id_for
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 from aisquare.services.captain import brain
 from aisquare.services.captain import state as captain_state
@@ -267,14 +269,17 @@ def _captain_at_its_prompt(
     tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[FleetAgent, Path]:
     """A captain started bare, its session registered and waiting — the state a reboot
-    leaves in the store — and where the fleet resolves its socket file."""
+    leaves in the store — and where the fleet resolves its socket file: the one its row
+    recorded at spawn (0.8.0), in a folder of the test's own (the suite's fake server
+    says ``/run/fake``, which no test may write)."""
+    tmp = Path(str(brain.brain_dir().parent / "tmux-tmp"))
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp))
+    monkeypatch.setattr(tmux, "socket_path", lambda: tmp / "tmux-1000" / tmux.socket)
     agent = brain.start().agent
     assert agent.session_id is not None
     _captain_window_env(monkeypatch, agent.id)
     team_service.hook_session_start(agent.session_id, brain.brain_dir(), "startup")
-    tmp = Path(str(brain.brain_dir().parent / "tmux-tmp"))
-    monkeypatch.setenv("TMUX_TMPDIR", str(tmp))
-    socket = fleet_service.server_for(agent.tmux_socket).socket_path()
+    socket = fleet_service.server_of(agent).socket_path()
     return agent, socket
 
 
@@ -319,16 +324,17 @@ def test_a_silent_server_with_its_socket_present_is_refused_fast_naming_reap(
     socket.parent.mkdir(parents=True, exist_ok=True)
     socket.touch()
     home = captain_state.home_project()
-    with pytest.raises(brain.Unreachable, match=f"aisquare fleet reap -P {home.id} --server-down"):
+    reap = project_service.fleet_command("reap", home, "--server-down")
+    with pytest.raises(brain.Unreachable, match=re.escape(reap)):
         brain.find()
     spawned_before = len(tmux.spawned)
     result = runner.invoke(app, ["captain"])
     assert result.exit_code == 1, result.output
-    assert "reap -P" in result.output and "already running" not in result.output
+    assert reap in result.output and "already running" not in result.output
     assert len(tmux.spawned) == spawned_before, "nothing was started over a row that may be alive"
     slept: list[float] = []
     monkeypatch.setattr(brain, "_sleep", slept.append)
-    with pytest.raises(brain.NoReply, match="reap -P") as caught:
+    with pytest.raises(brain.NoReply, match=re.escape(reap)) as caught:
         brain.say("what is up", timeout=60)
     assert caught.value.timed_out is False and slept == [], "said at once, not waited out"
     with store_session() as store:
@@ -351,7 +357,9 @@ def test_a_tmux_that_cannot_be_asked_is_refused_not_recovered(
         tmux.installed = False
     else:
         tmux.socket_denied = True
-    with pytest.raises(brain.Unreachable, match=r"tmux could not be (run|asked) .*reap -P") as got:
+    with pytest.raises(
+        brain.Unreachable, match=r"tmux could not be (run|asked) .*fleet reap"
+    ) as got:
         brain.find()  # said as a question that could not be put, not as a missing socket
     assert "sweep" not in str(got.value), (
         "refused before any sweep ran (coderp's delta gate, 13233)"
@@ -426,7 +434,9 @@ def test_the_captains_restart_prompt_names_its_tools_not_a_shell(
 
 
 def test_the_captain_role_cycle_names_tools_never_shell_verbs() -> None:
-    cycle = "\n".join(role_cycle("captain", "abcd1234"))
+    cycle = "\n".join(
+        role_cycle("captain", "abcd1234", fleet=lambda verb: f"aisquare fleet {verb}")
+    )
     assert "attention()" in cycle
     assert "one item at a time" in cycle
     assert "confirm=true" in cycle

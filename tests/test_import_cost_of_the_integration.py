@@ -71,7 +71,8 @@ import sys
 #:
 #:   ssl, _ssl, http     TLS and HTTP for the gateway probes
 #:   sqlite3, _sqlite3   the spool's store
-#:   hashlib, _hashlib, _blake2   correlation and spool naming
+#:   hashlib, _hashlib, _blake2   correlation and spool naming (from pydantic
+#:                       2.14 the base pays for these too: see _missing_load_bearing)
 #:   shlex               quoting for the printed proxy command
 UNIQUELY_IMPORTED = {
     "_blake2",
@@ -190,6 +191,23 @@ def test_the_integration_pulls_in_nothing_unrecorded() -> None:
     )
 
 
+def _missing_load_bearing(with_code: str = _WITH, base_code: str = _BASE) -> set[str]:
+    """The LOAD_BEARING members that do not arrive with ``with_code``: neither among what
+    it adds to ``base_code`` (:func:`_uniquely_imported`, the same door as the controls)
+    nor in the base it shares.
+
+    A member the base already imports still arrives with this CLI; it is only no longer
+    this integration's cost. pydantic 2.14 made that so for ``hashlib``:
+    ``pydantic.types`` imports ``secrets``, so ``hmac`` and ``hashlib``, and every
+    command loads pydantic through ``core.config``. ``hashlib`` left the difference on
+    CI's fresh install with nothing changed in this package (review of #257), so asking
+    for the difference alone had pinned what a dependency happens to import.
+    """
+    base = _top_level_modules(base_code)
+    added = _uniquely_imported(with_code, base_code)
+    return {name for name in LOAD_BEARING if name not in added and name not in base}
+
+
 def test_the_load_bearing_imports_are_still_there() -> None:
     """The "removed" direction, restricted to the members that mean something.
 
@@ -198,16 +216,29 @@ def test_the_load_bearing_imports_are_still_there() -> None:
     about this package rather than about CPython: lose `ssl` and the gateway
     probe is not doing TLS from module scope any more, lose `sqlite3` and the
     spool's store moved. Either is worth a red test; `array` arriving on 3.13
-    is not.
+    is not, and neither is the base starting to import one of them too.
     """
-    added = _uniquely_imported()
+    missing = _missing_load_bearing()
 
-    assert added >= LOAD_BEARING, (
-        f"{sorted(LOAD_BEARING - added)} no longer arrives with the explainability "
-        "CLI.\nIf that is deliberate — an import deferred into the function that "
-        "needs it, or a feature removed — update LOAD_BEARING so the record keeps "
-        "describing the truth."
+    assert not missing, (
+        f"{sorted(missing)} no longer arrives with the explainability CLI.\n"
+        "If that is deliberate — an import deferred into the function that needs it, "
+        "or a feature removed — update LOAD_BEARING so the record keeps describing "
+        "the truth."
     )
+
+
+def test_the_load_bearing_rule_still_reports_a_member_that_did_not_arrive() -> None:
+    """POSITIVE control on the load-bearing RULE, through the same door as the test.
+
+    Widening the rule to accept a member the base already imports must not make it
+    accept anything: with nothing added to the base, the members the base does not
+    import (``ssl`` first, which ``test_the_measurement_is_looking_at_something`` keeps
+    out of it) must still be reported.
+    """
+    missing = _missing_load_bearing(_BASE)
+
+    assert "ssl" in missing, f"the rule no longer reports a member that did not arrive: {missing}"
 
 
 def test_nothing_heavier_than_the_standard_library_is_imported() -> None:

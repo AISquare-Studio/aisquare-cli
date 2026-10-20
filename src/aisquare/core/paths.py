@@ -126,7 +126,7 @@ def restrict_to_owner(path: Path) -> bool:
         return False
     if result.returncode != 0:
         return False
-    sddl = _dacl_sddl(path)
+    sddl = dacl_sddl(path)
     return sddl is not None and _grants_only_owner(sddl, sid, _local_account_domain())
 
 
@@ -243,7 +243,7 @@ def _local_account_domain() -> str | None:
     What ``LA`` stands for, less its RID: ``ConvertStringSidToSidW`` resolves an
     SDDL abbreviation as the DACL's own text means it, so there is no second
     rule to keep in step with SDDL's. Read in process through ``advapi32``, as
-    :func:`_dacl_sddl` reads the DACL. Cached: the machine's domain does not
+    :func:`dacl_sddl` reads the DACL. Cached: the machine's domain does not
     change under a running process.
     """
     if sys.platform != "win32":
@@ -280,8 +280,8 @@ def _local_account_domain() -> str | None:
     return domain if rid == "500" and domain.startswith("S-1-5-21-") else None
 
 
-def _dacl_sddl(path: Path) -> str | None:
-    """``path``'s DACL as SDDL, read in process; ``None`` when it cannot be read.
+def dacl_sddl(path: Path) -> str | None:
+    """``path``'s DACL as SDDL, read in process; ``None`` off Windows or when it cannot be read.
 
     Through ``advapi32`` rather than ``icacls``: ``icacls <path>`` prints
     display names, which are localised and contain spaces, and a read that
@@ -345,6 +345,29 @@ def _dacl_sddl(path: Path) -> str | None:
             local_free(ctypes.cast(text, ctypes.c_void_p))
     finally:
         local_free(descriptor)
+
+
+def expand_user(path: Path) -> Path:
+    """``path`` with a leading ``~`` expanded, or as written when pathlib cannot expand it.
+
+    ``Path.expanduser`` raises RuntimeError, on every Python, for a ``~olduser`` naming
+    a user this machine does not have: a recorded or exported ``~olduser/.claude`` ended
+    doctor, status, ``agents list``, ``accounts list`` and uninstall in a traceback
+    (sweep of #257). Read as written it names a directory that does not exist, and
+    :func:`names_no_home` lets anything that would MAKE it refuse instead. Not for
+    :func:`aisquare_home`: a home read as written would be made in the cwd.
+    """
+    try:
+        return path.expanduser()
+    except RuntimeError:
+        return path
+
+
+def names_no_home(path: Path) -> bool:
+    """Whether ``path`` still starts with a ``~user`` that :func:`expand_user` could not
+    expand: a home this machine does not have, where nothing may be made (relative, it
+    would land in the cwd)."""
+    return bool(path.parts) and path.parts[0].startswith("~") and not path.is_absolute()
 
 
 def aisquare_home() -> Path:
@@ -441,6 +464,32 @@ def last_injection_path() -> Path:
 def state_path() -> Path:
     """Path of the small runtime-state file (e.g. the pinned active project)."""
     return aisquare_home() / "state.json"
+
+
+def remote_state_path() -> Path:
+    """``remote.json`` — the Remote Control server's token, password, switches and devices."""
+    return aisquare_home() / "remote.json"
+
+
+def remote_audit_path() -> Path:
+    """One line per write the Remote Control server let through (``ts sid endpoint summary``)."""
+    return aisquare_home() / "remote-audit.log"
+
+
+def remote_dist_dir() -> Path:
+    """Default location of the built Remote Control page the server serves."""
+    return aisquare_home() / "remote-dist"
+
+
+def remote_needs_path() -> Path:
+    """``remote-needs.json`` — the needs-you items a phone dismissed, and when the watcher
+    first saw the ones it dates itself (a pane gone, tmux not answering)."""
+    return aisquare_home() / "remote-needs.json"
+
+
+def remote_push_path() -> Path:
+    """``remote-push.json`` — the Web Push keys, each device's subscription, what was pushed."""
+    return aisquare_home() / "remote-push.json"
 
 
 def project_data_dir(project_id: str) -> Path:

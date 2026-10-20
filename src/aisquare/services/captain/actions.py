@@ -56,6 +56,7 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamEvent, TeamTask
 from aisquare.services import fleet
+from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 from aisquare.services.captain import queue as captain_queue
 from aisquare.services.captain import screen, words
@@ -780,9 +781,10 @@ def _no_trust_dialog(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) 
         ) from exc
     showing = screen.prompt_showing(lines)
     if showing is not None and showing.shape == "trust":
+        attach = project_service.fleet_command("attach", fleet.project_of(agent))
         raise Refused(
             f"the trust dialog is showing on {label}: trust this folder first — trusting a "
-            f"folder is the owner's to answer (aisquare fleet attach) — nothing {verb}"
+            f"folder is the owner's to answer ({attach}) — nothing {verb}"
         )
     return lines
 

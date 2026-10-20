@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator, Sequence
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as metadata_version
 from pathlib import Path
@@ -25,6 +26,7 @@ import pytest
 from typer.testing import CliRunner
 
 import aisquare
+from aisquare.core import agents as agent_core
 from aisquare.core import experimental
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
@@ -172,6 +174,17 @@ AMBIENT_ENV_VARS = (
     # second login exported would see its directory in both. The account tests
     # cleared it locally; this makes it the suite's answer rather than theirs.
     "CLAUDE_CODE_TMPDIR",
+    # Where the plugin's launcher keeps uv's answers (`lifecycle.plugin_answers`) and
+    # uv its cache (`install_route`). Left set, a test of `uninstall --purge` would
+    # plan, and delete, the developer's own answers file.
+    "XDG_CACHE_HOME",
+    # The uvx the plugin's launcher ran a hook with, which session start names to the
+    # agent (`services.hooks._log_command`). Set in a hook's own environment only.
+    "AISQUARE_PLUGIN_UVX",
+    # The build the launcher runs in place of the pinned release, which session start
+    # names to the agent too. Left set by a developer checking a wheel, the log-command
+    # tests would read their wheel where the pinned release is expected.
+    "AISQUARE_PLUGIN_FROM",
     # The copies of the shell's own two a launch onto a managed slot keeps
     # (`core.claude_accounts.PLAIN_VARS`). `plain_environment` reads them
     # whenever CLAUDE_CONFIG_DIR names a managed slot, which the account tests
@@ -181,6 +194,10 @@ AMBIENT_ENV_VARS = (
     # round).
     "AISQUARE_PLAIN_CLAUDE_CONFIG_DIR",
     "AISQUARE_PLAIN_CLAUDE_CODE_TMPDIR",
+    # Claude Code's override of the directory its macOS Keychain item is keyed on
+    # (`core.claude_accounts.keychain_service`), which it hands to the teammates it
+    # spawns: a suite run from one of those would name every account's item after it.
+    "CLAUDE_SECURESTORAGE_CONFIG_DIR",
     "AISQUARE_TEAM",
     "AISQUARE_ROLE",
     # Exported by `launch --persona`; a fleet agent running the suite has one.
@@ -195,6 +212,16 @@ AMBIENT_ENV_VARS = (
     # show-token tests, which print the port a client should dial.
     "AISQUARE_SERVE_PORT",
     "AISQUARE_SERVE_CLOSE_AFTER",
+    # `aisquare remote serve`'s --port (`status` and `regenerate-password` read it
+    # too, for their link), --auto-off and --public-url, the same typer `envvar=`
+    # kind; the last is also the static domain the TUI's ngrok serves on
+    # (`services.ngrok_tunnel.NGROK_URL_ENV`), which an operator with a reserved
+    # domain keeps exported. Measured: AISQUARE_REMOTE_AUTO_OFF=1 and
+    # AISQUARE_REMOTE_NGROK_URL set in the shell fail test_remote_server.py's
+    # serve test, which asserts the hour of auto-off and no public URL.
+    "AISQUARE_REMOTE_PORT",
+    "AISQUARE_REMOTE_AUTO_OFF",
+    "AISQUARE_REMOTE_NGROK_URL",
     "AISQUARE_TEAM_HUB",
     "AISQUARE_TEAM_DELTA",
     "AISQUARE_TEAM_LEASE_MIN",
@@ -280,15 +307,22 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_RUN_TRACE_ID",
     # A sign-in token in the operator's shell would make every test run as them.
     "AISQUARE_TOKEN",
-    # What `core.browser.open_url` launches. Its `is_headless` also reads
-    # SSH_CONNECTION, SSH_TTY, CI, CODESPACES, DISPLAY and WAYLAND_DISPLAY, and
-    # those stay out on purpose: it answers "headless" whenever stdout is not a
-    # terminal, and under CliRunner or pytest's capture it never is, so no
-    # command a test runs can reach a browser whatever they say — the tests of
-    # the detection itself pass an environ. Clearing CI would cost something:
-    # pytest reads it while it explains a failing assert, and it is why CI's
-    # log shows the whole diff rather than a truncated one.
+    # What `core.browser.open_url` launches. Its `is_headless` also reads CI,
+    # DISPLAY and WAYLAND_DISPLAY, and those stay out on purpose: it answers
+    # "headless" whenever stdout is not a terminal, and under CliRunner or
+    # pytest's capture it never is, so no command a test runs can reach a browser
+    # whatever they say — the tests of the detection itself pass an environ.
+    # Clearing CI would cost something: pytest reads it while it explains a
+    # failing assert, and it is why CI's log shows the whole diff rather than a
+    # truncated one.
     "BROWSER",
+    # `core.browser.REMOTE_MARKERS`, which `is_headless` reads as well. They are
+    # cleared for the clipboard (`core.clipboard.session_is_remote`): a suite run
+    # over SSH or in a Codespace would see every native-clipboard test's copy as
+    # remote, and skip the tool it asserts was run.
+    "SSH_CONNECTION",
+    "SSH_TTY",
+    "CODESPACES",
     # The CI test bed's switches. An operator who has them exported would
     # otherwise run the suite's hooks against THEIR endpoint, with THEIR
     # token — measured once: four real POSTs to a listener during a green
@@ -311,6 +345,16 @@ AMBIENT_ENV_VARS = (
     "EDITOR",  # core.editor: a seam that escapes its patch launches the real one
     "VISUAL",  # same
     "TERM",  # rendering assertions vary by terminal
+    # What a copy's toast says becomes of an OSC 52 (`core.clipboard.osc52_terminal`):
+    # the tests that ask it, with the real classifier back, would read the terminal
+    # that ran the suite — Terminal.app's "did not reach the clipboard", or kitty's
+    # "copied" where an unnamed terminal's hedge is asserted. TMUX and TERM, which it
+    # reads too, are above.
+    "TERM_PROGRAM",
+    "LC_TERMINAL",
+    "KITTY_WINDOW_ID",
+    "WT_SESSION",
+    "STY",
     "TMUX_TMPDIR",  # core.tmux socket path
     "TMUX",  # services.fleet: shutdown's "inside the fleet's own server" guard
     # How a terminal renders. Read by the libraries rather than by `src/`, which
@@ -344,6 +388,81 @@ AMBIENT_ENV_VARS = (
 #: were read and not cleared.
 AMBIENT_ENV_PREFIXES = ("AISQUARE_BIN_", "AISQUARE_MODEL_", "AISQUARE_EFFORT_")
 
+#: The home the shell named, if it named one; ``None`` leaves the run to name its own
+#: for wherever no test's own home is in force (:func:`home_outside_a_test`).
+SHELL_HOME: str | None = os.environ.get(HOME_ENV_VAR) or None
+
+#: The developer's home directory as the run found it, and which project markers
+#: (``core.workspace.ROOT_MARKERS``) it held already: one that appears in it during the
+#: run is named in the summary (:func:`pytest_terminal_summary`).
+_DEVELOPERS_HOME = Path.home()
+_ROOT_MARKERS = (".git", ".hg", ".aisquare")
+_MARKERS_AT_START = frozenset(m for m in _ROOT_MARKERS if (_DEVELOPERS_HOME / m).exists())
+_RUN_HOME: list[Path] = []
+_OUTSIDE_A_TEST: dict[str, str] = {}
+"""What appeared outside every test's own home, and the test that had just ended."""
+
+
+@pytest.fixture(scope="session", autouse=True)
+def home_outside_a_test(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The home ``aisquare_home()`` names wherever no test's own home is in force.
+
+    ``isolated_home`` names a home for each test, and its ``monkeypatch`` takes it away
+    again at teardown, but what a test started can outlive it: the needs watcher's scan
+    runs on past its lifespan's five-second join, and the R panel's writer thread runs
+    the writes still queued on it. Between two tests ``AISQUARE_HOME`` was unset, so
+    what they read and wrote then went to ``~/.aisquare``: the developer's own home, and
+    on Windows ``%USERPROFILE%``, which holds ``%TEMP%`` and so every ``tmp_path``. Once
+    anything of theirs landed there with no ``config.toml``, ``context.db`` or
+    ``agents.json`` beside it (a ``remote-needs.json``, a ``state.json``), the marker
+    walk took it for a project's ``.aisquare``, and every markerless directory of every
+    later test resolved to the user's home as its project root: 49 failures and errors
+    on the windows-latest leg of #243, in tests that never started a Remote.
+
+    So the run names a home of its own, in its own temp tree beside the tests' and above
+    none of them, for module-scoped fixtures and for what outlives a test. Left set at
+    the end on purpose: the panel's writer thread is joined at the interpreter's exit,
+    and what it still had to write lands here, not in the developer's home. A home the
+    shell named is kept: the CI ``ambient`` job names a configured one, and a fixture
+    reading it outside a test is the leak that job exists to catch.
+    """
+    if SHELL_HOME is not None:
+        return Path(SHELL_HOME)
+    home = tmp_path_factory.mktemp("home-outside-a-test", numbered=False)
+    os.environ[HOME_ENV_VAR] = str(home)
+    _RUN_HOME.append(home)
+    return home
+
+
+def pytest_runtest_logfinish(nodeid: str, location: tuple[str, int | None, str]) -> None:
+    """Note what appeared outside every test's own home by the time ``nodeid`` ended."""
+    appeared: list[Path] = []
+    for home in _RUN_HOME:
+        with contextlib.suppress(OSError):  # a run home something removed holds nothing
+            appeared += home.iterdir()
+    appeared += [
+        _DEVELOPERS_HOME / name
+        for name in _ROOT_MARKERS
+        if name not in _MARKERS_AT_START and (_DEVELOPERS_HOME / name).exists()
+    ]
+    for path in appeared:
+        _OUTSIDE_A_TEST.setdefault(str(path), nodeid)
+
+
+def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
+    """Say what a test left running wrote outside its own home, and after which test.
+
+    Said, not failed: when it lands depends on how fast the machine is, and in the
+    run's own home it does no harm. A project marker new in the developer's home does:
+    every markerless ``tmp_path`` below it resolves to that home from then on, and the
+    failures that follow are in other tests, so this names the test it came after.
+    """
+    if not _OUTSIDE_A_TEST:
+        return
+    terminalreporter.section("written outside every test's own home")
+    for path, nodeid in _OUTSIDE_A_TEST.items():
+        terminalreporter.write_line(f"{path}  (there when {nodeid} ended)")
+
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -373,6 +492,9 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # lru_cached, like core.insights._config), so a cached read from the previous
     # test's HOME would outlive the home it came from.
     ci_client.reset_cache()
+    # Cached once per process (core.agents.current_install), and tests change what it
+    # reads: the interpreter (sys.executable) and the distribution's RECORD on sys.path.
+    agent_core.current_install.cache_clear()
     return home
 
 
@@ -514,12 +636,14 @@ def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     monkeypatch.setenv("PATH", f"{standin}{os.pathsep}{os.environ.get('PATH', '')}")
     real_runner = tmux_core._tmux
 
-    def guarded(argv: Sequence[str], stdin: bytes | None) -> Completed:
+    def guarded(
+        argv: Sequence[str], stdin: bytes | None, *, timeout: float | None = None
+    ) -> Completed:
         target = _tmux_target(argv, guard.uid)
         if target is not None and target.parent.resolve() in _OWNER_TMUX_DIRS:
             guard.reached.append(tuple(argv))
             return Completed(1, "", "refused: a test addressed the owner's tmux server\n")
-        return real_runner(argv, stdin)
+        return real_runner(argv, stdin, timeout=timeout)
 
     monkeypatch.setattr(tmux_core, "_tmux", guarded)
     try:
@@ -550,6 +674,16 @@ def _kill_private_servers(private: Path, uid: int, tmux: str | None) -> None:
                 timeout=10,
                 check=False,
             )
+
+
+@pytest.fixture
+def project_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``[projects] capture`` on: every directory a hooked session runs in gets a row, as
+    0.8.0 did (#139), for the tests written against that. Off is the default. Patched, not
+    written to config.toml, which a test's own ``save_config(AppConfig(...))`` replaces."""
+    from aisquare.services import project as project_service
+
+    monkeypatch.setattr(project_service, "capture_on", lambda: True)
 
 
 @pytest.fixture(autouse=True)
@@ -624,6 +758,18 @@ def private_ui_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def fresh_file_checks() -> Iterator[None]:
+    """Forget what connect's checks said of each file (``services.agents._SAID``): a file a
+    test rewrites at the same size within one tick of the file system's clock reads as
+    unchanged, and no test may inherit another's answer."""
+    from aisquare.services import agents as agents_service
+
+    agents_service._SAID.clear()
+    yield
+    agents_service._SAID.clear()
+
+
+@pytest.fixture(autouse=True)
 def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point agent detection and the Claude accounts at a temp home so tests never read
     ``~/.claude*``.
@@ -655,13 +801,87 @@ def isolated_agent_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
     return home
 
 
+CLAUDE_ACCOUNTS_NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+"""The clock :func:`fake_home` stops the Claude accounts code at.
+
+Tests that write credentials against it import it (``NOW`` in
+test_claude_accounts.py), so a token they mint and the clock that grades it agree.
+"""
+
+
+@pytest.fixture
+def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A home of our own: the default slot's files land here, never in the developer's.
+
+    For every file that writes Claude Code's files or the accounts registry. It
+    lived in test_claude_accounts.py and the others imported it from there,
+    which coupled test modules (review of #258). test_agents.py keeps a
+    narrower ``fake_home`` of its own, which takes precedence there.
+    """
+    from aisquare.core import claude_accounts as core
+    from aisquare.services import claude_accounts as service
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(core, "_home", lambda: home)
+    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
+    monkeypatch.setattr(core, "keychain_platform", lambda: False)
+    # The clock the production code reads is the clock the fixtures write
+    # credentials against: tokens here expire at NOW + 7 h, and a command that
+    # asked the wall clock would find them expired the same evening.
+    monkeypatch.setattr(core, "_now", lambda: CLAUDE_ACCOUNTS_NOW)
+    monkeypatch.setattr(service, "_now", lambda: CLAUDE_ACCOUNTS_NOW)
+    return home
+
+
+@pytest.fixture(autouse=True)
+def no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Never read the macOS Keychain of the machine the suite runs on.
+
+    The credentials are read from the files the tests write, on every platform; a test of
+    the Keychain turns it on itself, with a fake ``security`` (tests/test_claude_keychain.py).
+    Run on a Mac, the plain account's item is the developer's own login.
+    """
+    from aisquare.core import claude_accounts as core
+
+    monkeypatch.setattr(core, "keychain_platform", lambda: False)
+    monkeypatch.setattr(core, "KEYCHAIN_TOOL", os.devnull)
+    core.forget_keychain_reads()
+    yield
+    core.forget_keychain_reads()
+
+
+@pytest.fixture(autouse=True)
+def no_native_clipboard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never write the clipboard of the machine the suite runs on.
+
+    On a local session every copy in the TUI also runs the platform's clipboard tool
+    (``core.clipboard.local_writer``): ``pbcopy`` on a Mac, ``wl-copy`` on a Wayland
+    desktop. Left to it, the pane tests would overwrite the developer's clipboard
+    hundreds of times, and each copy's toast would wait on a real process. Here a copy
+    carries OSC 52 alone, to a terminal known to take it (``osc52_terminal``), so its
+    toast is the caller's own "copied …" that the gesture tests assert, raised at once
+    (``cached_writer`` says no tool, so nothing waits on the clipboard thread). The
+    tests of the native route and of the other terminals put the real functions back,
+    beside a fake tool on PATH (tests/fake_clipboard.py). ``native_writer`` is the search
+    inside tmux, where only the remote question is asked again at each copy.
+    """
+    from aisquare.core import clipboard
+
+    clipboard.forget_writer()
+    monkeypatch.setattr(clipboard, "local_writer", lambda: None)
+    monkeypatch.setattr(clipboard, "native_writer", lambda: None)
+    monkeypatch.setattr(clipboard, "cached_writer", lambda: None)
+    monkeypatch.setattr(clipboard, "osc52_terminal", lambda env: "accepts")
+
+
 @pytest.fixture(autouse=True)
 def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never run a hook's aisquare for its version; answer as this install.
 
     Hooks written by ``agents connect`` under the suite name whatever
     ``_aisquare_command`` resolves: the console script beside this interpreter
-    when PATH has it, otherwise the machine's ``aisquare`` — a pyenv shim on the
+    when there is one, otherwise the machine's ``aisquare`` — a pyenv shim on the
     author's box. Which one is ambient state, and running it would grade the
     developer's PATH rather than this tree. Same shape as ``no_repomix`` below.
     Tests of the probe itself capture the real function at import and call it
@@ -698,7 +918,7 @@ def no_detached_distill(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     from aisquare.services import distill
 
-    monkeypatch.setattr(distill, "spawn_drain", lambda cwd=None, *, root=None: None)
+    monkeypatch.setattr(distill, "spawn_drain", lambda cwd=None, *, root=None, board=None: None)
 
 
 @pytest.fixture(autouse=True)
@@ -746,3 +966,11 @@ def captain_on(monkeypatch: pytest.MonkeyPatch) -> None:
     pins (``tests/test_captain_flag.py``) unset it or set it themselves.
     """
     monkeypatch.setenv(experimental.CAPTAIN_ENV, "1")
+
+
+@pytest.fixture
+def captain_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The experimental captain OFF, as it ships: for a test that pins what the shell shows by
+    default (main's own UI pins, written before the captain was in it). ``captain_on`` turns
+    it on for every other test."""
+    monkeypatch.delenv(experimental.CAPTAIN_ENV, raising=False)

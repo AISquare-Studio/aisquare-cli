@@ -2,8 +2,8 @@
 
 Everything the view reaches for outside the store is monkeypatched at the
 module the view imports — ``services.fleet`` for the manager, the two
-explainability services for the tracing tab, ``ProjectView(doctor=…)`` for the
-Doctor tab — so no test starts tmux, dials a gateway or depends on ``claude``.
+explainability services for the tracing tab — so no test starts tmux, dials a
+gateway or depends on ``claude``.
 What each test asserts is the artefact the claim is about: the spawn call the
 button made, the bytes ``config.toml`` holds after Save, the rows the board
 table shows for THIS project and not another.
@@ -26,6 +26,7 @@ here is about widgets.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 import sys
@@ -37,32 +38,42 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from textual import events
 from textual.app import App, ComposeResult
+from textual.content import Content
 from textual.geometry import Region
-from textual.notifications import Notification, SeverityLevel
+from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Button, Checkbox, DataTable, Input, OptionList, Select, Static
-from textual.widgets._toast import Toast
+from textual.widgets import (
+    Button,
+    Checkbox,
+    ContentSwitcher,
+    DataTable,
+    Input,
+    OptionList,
+    Static,
+)
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.cli.ui.board import BoardPanel
+from aisquare.cli.ui.board import COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, BoardPanel
+from aisquare.cli.ui.divider import Divider
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import project as project_view_module
+from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
-from aisquare.cli.ui.views.settings import NO_PERSONA, SettingsView
+from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
-from aisquare.core.config import ExplainabilityTarget, FleetRoleSettings, load_config, save_config
+from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.tmux import Capture, Completed, PaneFacts, TmuxServer
 from aisquare.core.workspace import project_id_for
 from aisquare.models import (
-    CheckStatus,
     DoctorCheck,
     FleetAgent,
     FleetAgentStatus,
@@ -70,10 +81,12 @@ from aisquare.models import (
     TeamEvent,
     TeamSession,
 )
+from aisquare.services import diagnostics, install_route
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
+from tests.ci_support import git
 from tests.ui_workers import settle_page
 
 T = TypeVar("T")
@@ -84,34 +97,17 @@ default (``models.py``) and the developer's real fleet — see the module
 docstring."""
 
 
-def _stub_checks() -> list[DoctorCheck]:
-    return [DoctorCheck(name="stub", status=CheckStatus.ok, detail="no doctor was asked for")]
-
-
 class Host(App[None]):
     """A bare app around one ``ProjectView`` that records every notification."""
 
-    def __init__(
-        self,
-        project: ProjectInfo,
-        *,
-        doctor: Callable[[Path], list[DoctorCheck]] | None = None,
-        refresh_seconds: float = 60.0,
-    ) -> None:
+    def __init__(self, project: ProjectInfo, *, refresh_seconds: float = 60.0) -> None:
         super().__init__()
         self._project = project
-        # Never the real ``diagnostics.doctor``: it probes git, tmux and claude.
-        self._doctor = doctor if doctor is not None else (lambda root: _stub_checks())
         self._refresh_seconds = refresh_seconds
         self.notices: list[tuple[str, str]] = []
 
     def compose(self) -> ComposeResult:
-        yield ProjectView(
-            self._project,
-            id="project",
-            refresh_seconds=self._refresh_seconds,
-            doctor=self._doctor,
-        )
+        yield ProjectView(self._project, id="project", refresh_seconds=self._refresh_seconds)
 
     def notify(
         self,
@@ -130,13 +126,12 @@ def drive(
     project: ProjectInfo,
     scenario: Callable[[Pilot[None], Host], Coroutine[Any, Any, T]],
     *,
-    doctor: Callable[[Path], list[DoctorCheck]] | None = None,
     refresh_seconds: float = 60.0,
 ) -> T:
     """Run ``scenario`` against a mounted Project view and return what it observed."""
 
     async def run() -> T:
-        host = Host(project, doctor=doctor, refresh_seconds=refresh_seconds)
+        host = Host(project, refresh_seconds=refresh_seconds)
         async with host.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             return await scenario(pilot, host)
@@ -235,14 +230,33 @@ class ScriptedServer(TmuxServer):
     def resize(self, pane_id: str, width: int, height: int) -> None:
         self.resizes.append((pane_id, width, height))
 
+    def at(self, path: Path | None) -> TmuxServer:
+        """This server asked for at ``path`` (``tmux -S``): scripted there too, and saying
+        where it was asked (:attr:`path`), so no real tmux is run for a recorded row."""
+        if path is None or path == self.path:
+            return self
+        there = ScriptedServer(self.socket)
+        there.path = path
+        return there
+
 
 # --- fixtures ---------------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)
 def work_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The project's directory: a repository of its own, so that is its root, whatever
+    lies above it.
+
+    A plain directory is resolved by git and the marker walk climbing the shared temp
+    tree, and resolved twice — by the ``project`` fixture, then by *Save setup*'s worker
+    (``key_project``) — it was one project, then another, once a marker or a repository
+    appeared above it in between: the key went under the other's id, and the test found
+    no file where its notice said it went (a full run at 1ada4bd3).
+    """
     work = tmp_path / "repo"
     work.mkdir()
+    git(work, "init", "-q")
     monkeypatch.chdir(work)
     return work
 
@@ -337,25 +351,49 @@ def _config_toml() -> dict[str, Any]:
 # --- the tabs -----------------------------------------------------------------------------
 
 
-def test_project_view_has_the_six_tabs_with_their_widgets(project: ProjectInfo) -> None:
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[int, list[str], str]:
+def test_project_view_has_the_five_tabs_with_their_widgets(project: ProjectInfo) -> None:
+    """Manager, Board, AISquare, Settings, Personas: no Doctor tab — the doctor is the app's
+    page."""
+
+    async def scenario(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[int, list[str], str, list[str], str, int, str]:
         view = host.query_one(ProjectView)
         for pane_id, widget_type in (
             ("#tab-manager", ManagerTab),
             ("#tab-board", BoardPanel),
-            ("#tab-doctor", DoctorView),
             ("#tab-explainability", ExplainabilityView),
             ("#tab-settings", SettingsView),
             ("#tab-personas", PersonasTab),
         ):
             assert view.query_one(pane_id).query_one(widget_type)
         ids = [pane.id or "" for pane in view.query("TabPane")]
-        return view.tab_count, ids, view.active
+        labels = [view.get_tab(pane_id).label_text for pane_id in ids]
+        first = view.query_one(ExplainabilityView).children[0]
+        heading = first.render()
+        assert isinstance(heading, Content)
+        bold = any(
+            span.end - span.start == len(heading.plain) and "bold" in str(span.style)
+            for span in heading.spans
+        )
+        return (
+            view.tab_count,
+            ids,
+            view.active,
+            labels,
+            f"{first.id}:{'bold' if bold else 'plain'}",
+            len(view.query(DoctorView)),
+            heading.plain,
+        )
 
-    count, ids, active = drive(project, scenario)
-    assert count == 6
+    count, ids, active, labels, first_id, doctors, heading = drive(project, scenario)
+    assert count == 5
     assert ids == list(ProjectView.TAB_IDS)
     assert active == "tab-manager"  # the manager first: that is where the goal goes
+    assert labels == ["Manager", "Board", "AISquare", "Settings", "Personas"]
+    assert doctors == 0
+    # The AISquare tab opens on an "Explainability" heading, above the status block as before.
+    assert first_id == "explainability-heading:bold" and heading == "Explainability"
 
 
 # --- the Manager tab ----------------------------------------------------------------------
@@ -392,6 +430,38 @@ def test_start_manager_button_spawns_once_and_attaches_the_pane(
     assert pane_id == "%7"  # attached to the pane the receipt named
 
 
+def test_a_share_the_manager_spawn_made_is_told_as_done_not_as_a_warning(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final gate NIT 3: a folder's trust copied into the manager's account is good news; it
+    came up as a warning beside the ones that are (a prompt not typed)."""
+    shared = "accounts: /work is trusted on plain claude — now on account 2 too"
+    warning = "the agent exited before the prompt could be typed"
+    fleet: dict[str, FleetAgent | None] = {"manager": None}
+
+    def spawn(target: ProjectInfo, role: str, **_: object) -> fleet_service.SpawnReceipt:
+        fleet["manager"] = fake_agent(target)
+        return fleet_service.SpawnReceipt(
+            agent=fake_agent(target),
+            asked_label=None,
+            tmux_session="asq-amber-otter",
+            notes=[shared, warning],
+            shared=[shared],
+        )
+
+    monkeypatch.setattr(fleet_service, "spawn", spawn)
+    monkeypatch.setattr(fleet_service, "manager_of", lambda target: fleet["manager"])
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        await pilot.click("#start-manager")
+        await settle(pilot)
+        return host.notices
+
+    notices = drive(project, scenario)
+    assert (shared, "information") in notices
+    assert (warning, "warning") in notices
+
+
 def test_the_manager_pane_is_scripted_and_never_addresses_the_real_fleet(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, no_real_tmux: NoTmux
 ) -> None:
@@ -424,6 +494,79 @@ def test_the_manager_pane_is_scripted_and_never_addresses_the_real_fleet(
     # The recorder is checked in this fixture's teardown; assert it here too, so
     # the failure names this test rather than an error on the way out.
     assert no_real_tmux.ran == []
+
+
+def test_the_manager_pane_asks_its_server_at_the_path_its_row_recorded(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round 29 of #257: the Manager tab's pane and its attach line, and an agent view's pane,
+    named the row's server by its socket's name (``tmux -L``). From a shell under another
+    ``TMUX_TMPDIR`` that is another server, and its ``%7`` — another agent — was shown and
+    typed into. A row recorded elsewhere is asked at its path (``tmux -S``); one from before
+    v25, by its name.
+
+    Where, the listed status says (``socket_at``, worked out with the listing's config): each
+    frame asked ``fleet_service.socket_at``, which reloaded config.toml on the UI thread for
+    every open project (round 29 of #257)."""
+    elsewhere = tmp_path / "elsewhere" / "tmux-1000" / PRIVATE_SOCKET  # not where `-L` looks
+    recorded = fake_agent(project, pane_id="%7").model_copy(update={"socket_path": elsewhere})
+    monkeypatch.setattr(fleet_service, "manager_of", lambda target: recorded)
+    monkeypatch.setattr(
+        fleet_service,
+        "status_of",
+        lambda agent: FleetAgentStatus(agent=agent, state="waiting", socket_at=elsewhere),
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host) -> TmuxServer | None:
+        await pilot.pause(0.25)  # past the 100 ms resize debounce
+        return host.query_one("#manager-pane", TerminalPane).server
+
+    server = drive(project, scenario)
+    named = fake_agent(project, pane_id="%7")
+
+    def no_config(config: object = None) -> object:
+        raise AssertionError("a frame read config.toml on the UI thread")
+
+    monkeypatch.setattr(fleet_service, "settings", no_config)
+
+    def attach_line(agent: FleetAgent, socket_at: Path | None) -> str:
+        status = FleetAgentStatus(
+            agent=agent, state="waiting", tmux_session="asq-amber-otter", socket_at=socket_at
+        )
+        return project_view_module.manager_text(status).plain
+
+    assert isinstance(server, ScriptedServer) and server.path == elsewhere, server
+    assert server.captures, "the frame came from the server at the recorded path"
+    assert f"tmux -S {elsewhere} attach -t =asq-amber-otter" in attach_line(recorded, elsewhere)
+    assert f"tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter" in attach_line(named, None)
+    shown = FleetAgentStatus(agent=recorded, socket_at=elsewhere)
+    assert AgentView(shown, escape_key="ctrl+]").server.path == elsewhere
+    by_name = AgentView(FleetAgentStatus(agent=named), escape_key="ctrl+]")
+    assert by_name.server.path is None, "asked by its name"
+
+
+def test_the_attach_line_quotes_the_path_and_the_socket_name_it_prints(
+    project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Round 29 of #257: the Manager tab pasted the recorded socket path into its attach line
+    as it was, so a ``TMUX_TMPDIR`` with a space or a ``$`` gave a line that failed or named
+    another path, and so did a free-form ``[fleet] tmux_socket``. Quoted for this shell, it
+    reads back as the command it names."""
+    odd = tmp_path / "my $HOME" / "tmux-1000" / "asq one"
+    recorded = fake_agent(project, pane_id="%7").model_copy(
+        update={"socket_path": odd, "tmux_socket": "asq one"}
+    )
+
+    def attach_argv(socket_at: Path | None) -> list[str]:
+        status = FleetAgentStatus(
+            agent=recorded, state="waiting", tmux_session="asq-amber-otter", socket_at=socket_at
+        )
+        header = project_view_module.manager_text(status).plain.splitlines()[0]
+        return install_route.split_line(header.split("  ·  ", 1)[1])
+
+    session = ["attach", "-t", "=asq-amber-otter"]
+    assert attach_argv(odd) == ["tmux", "-S", str(odd), *session]
+    assert attach_argv(None) == ["tmux", "-L", "asq one", *session]
 
 
 def test_no_button_and_no_spawn_when_a_manager_already_runs(
@@ -539,7 +682,9 @@ def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(
 
     header, button, pane, without = drive(project, scenario)
     assert "manager exited (130)" in header and "Restart on its sidebar row" in header
-    assert "aisquare fleet restart manager" in header and "no manager yet" not in header
+    # Naming the project: alone, it restarted the active project's manager (#259, round 21).
+    restart = f"aisquare fleet restart --project {project.codename or project.id} manager"
+    assert restart in " ".join(header.split()) and "no manager yet" not in header
     assert button is True and pane is False  # the way to a NEW session is right there
     assert "has no manager yet" in without and "exited" not in without  # the control
 
@@ -639,13 +784,13 @@ def test_a_hidden_board_tab_stops_polling_and_catches_up_when_shown(
     app, N-1 of them invisible.
     """
     reads: list[float] = []
-    real = team_service.board_data
+    real = team_service.board_read
 
     def counting(*args: Any, **kwargs: Any) -> Any:
         reads.append(1.0)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(team_service, "board_data", counting)
+    monkeypatch.setattr(team_service, "board_read", counting)
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[int, int, int, bool]:
         view = host.query_one(ProjectView)
@@ -665,6 +810,114 @@ def test_a_hidden_board_tab_stops_polling_and_catches_up_when_shown(
     assert at_mount == 1  # one read at mount primes the first frame
     assert hidden == at_mount  # …and not one more while nobody can see it
     assert after_show >= hidden + 2  # shown: on_show, then the ticks resume
+
+
+def test_b_on_the_board_tab_hides_and_brings_back_the_column_every_time(
+    project: ProjectInfo,
+) -> None:
+    """The fleet UI's Board tab is the same panel as ``board -w``: ``b`` hides the column with
+    focus on the tasks, and the next ``b`` still reaches the panel to bring it back."""
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[bool, str | None]]:
+        host.query_one(ProjectView).active = "tab-board"
+        await pilot.pause()
+        panel = host.query_one("#board-panel", BoardPanel)
+        panel.query_one("#tasks").focus()
+        await pilot.pause()
+        states = []
+        for _ in range(3):
+            await pilot.press("b")
+            await pilot.pause()
+            focused = host.focused
+            states.append(
+                (
+                    panel.query_one("#board-side").display,
+                    focused.id if focused is not None else None,
+                )
+            )
+        return states
+
+    assert drive(project, scenario) == [(False, "feed"), (True, "tasks"), (False, "feed")]
+
+
+class TwoProjects(App[None]):
+    """Two Project views mounted at once, the second shown — the fleet UI keeps one per project
+    ever selected, so every id inside a board is on the screen once per project."""
+
+    def __init__(self, first: ProjectInfo, second: ProjectInfo) -> None:
+        super().__init__()
+        self._projects = (first, second)
+
+    def compose(self) -> ComposeResult:
+        with ContentSwitcher(initial="project-b"):
+            for project, view_id in zip(self._projects, ("project-a", "project-b"), strict=True):
+                yield ProjectView(project, id=view_id, refresh_seconds=60.0)
+
+
+def test_a_board_line_resizes_its_own_project_board_and_restores_in_the_tab(
+    project: ProjectInfo, tmp_path: Path, isolated_home: Path
+) -> None:
+    """Each line finds what it sizes beside itself. Looked up across the screen, the shown
+    board's line sized the FIRST project's hidden ``#board-side`` and left its own alone."""
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    other = team_service.activate(other_dir)
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    (isolated_home / "state.json").write_text(json.dumps({COLUMN_WIDTH_KEY: 60}))
+
+    async def run() -> dict[str, object]:
+        host = TwoProjects(project, other)
+        async with host.run_test(size=(120, 50)) as pilot:
+            first, second = host.query_one("#project-a"), host.query_one("#project-b")
+            for view in (first, second):
+                assert isinstance(view, ProjectView)
+                view.active = "tab-board"
+            await settle(pilot)
+            for divider in second.query("#side-divider, #detail-divider"):
+                await divider.wait_for_refresh()  # the restore queued at mount has run
+                await divider.wait_for_refresh()  # and the layout it asked for is done
+
+            def sizes(view: Widget) -> tuple[object, object]:
+                return (
+                    view.query_one("#board-side").styles.width,
+                    view.query_one("#detailwrap").styles.height,
+                )
+
+            seen: dict[str, object] = {
+                "restored": second.query_one("#board-side").outer_size.width,
+                "first_before": sizes(first),
+            }
+            for kind, x, y in (
+                (events.MouseDown, second.query_one("#side-divider").region.x, 10),
+                (events.MouseMove, 70, 10),
+                (events.MouseUp, 70, 10),
+                (events.MouseDown, 40, second.query_one("#detail-divider").region.y),
+                (events.MouseMove, 40, 30),
+                (events.MouseUp, 40, 30),
+            ):
+                host.post_message(kind(None, x, y, 0, 0, 1, False, False, False))
+                await host.wait_for_refresh()
+                await settle(pilot)
+            side = second.query_one("#board-side")
+            seen["second"] = (
+                side.outer_size.width + side.region.x,
+                second.query_one("#detailwrap").outer_size.height,
+            )
+            seen["first_after"] = sizes(first)
+            for divider in second.query(Divider):
+                # This bare app joins no saver at quit, as the fleet UI's does: wait here.
+                saver = divider._autosave
+                assert saver is not None and await asyncio.to_thread(saver.settled, 5.0)
+            return seen
+
+    seen = asyncio.run(run())
+    assert seen["restored"] == 60, "the width on file, shown in the fleet UI's Board tab"
+    # The board starts where the tab does; its column now ends at the pointer's column 70,
+    # and its detail pane runs from row 31 to the bottom of the 50-row terminal.
+    assert seen["second"] == (70, 50 - 31)
+    assert seen["first_after"] == seen["first_before"], "the hidden project's board is untouched"
+    state = json.loads((isolated_home / "state.json").read_text())
+    assert DETAIL_HEIGHT_KEY in state and state[COLUMN_WIDTH_KEY] != 60
 
 
 def test_the_board_names_its_accounts_from_a_worker_never_from_the_ui_thread(
@@ -692,7 +945,11 @@ def test_the_board_names_its_accounts_from_a_worker_never_from_the_ui_thread(
         )
         for account in (two, three)
     ]
-    monkeypatch.setattr(team_service, "board_data", lambda **kwargs: (project, sessions, [], []))
+    monkeypatch.setattr(
+        team_service,
+        "board_read",
+        lambda **kwargs: team_service.BoardRead(project, sessions, [], [], {}),
+    )
     asked: list[str] = []
 
     def slot_labels(store: Any = None) -> dict[int, str]:
@@ -740,10 +997,10 @@ def test_the_feed_keeps_its_last_lines_and_forgets_the_rest(
     """
     events = [_event(project, index) for index in range(12)]
 
-    def board_data(*args: Any, **kwargs: Any) -> Any:
-        return (project, [], [], list(events))
+    def board_read(*args: Any, **kwargs: Any) -> Any:
+        return team_service.BoardRead(project, [], [], list(events), {})
 
-    monkeypatch.setattr(team_service, "board_data", board_data)
+    monkeypatch.setattr(team_service, "board_read", board_read)
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[int, list[str], str]:
         panel = host.query_one("#board-panel", BoardPanel)
@@ -769,164 +1026,140 @@ def test_the_feed_keeps_its_last_lines_and_forgets_the_rest(
     assert "line 11" in frozen and "line 6" not in frozen  # …and select mode agrees
 
 
-# --- the Doctor tab -------------------------------------------------------------------------
+# --- no doctor here ------------------------------------------------------------------------
 
 
-def test_the_doctor_tab_runs_this_projects_checks_when_it_is_opened(project: ProjectInfo) -> None:
-    """It was a scaffold nothing filled: ``(no checks yet)``, forever, in every project."""
-    roots: list[Path] = []
+def test_a_project_view_runs_no_doctor_whatever_tab_is_opened(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The doctor runs at start and when its page opens, never per project or per tab: the
+    project view's own Doctor tab used to run it on every activation."""
+    runs: list[Path | None] = []
 
-    def doctor(root: Path) -> list[DoctorCheck]:
-        roots.append(root)
-        return [
-            DoctorCheck(
-                name="tmux",
-                status=CheckStatus.warn,
-                detail="tmux 3.7c, no fleet server",
-                fix="aisquare fleet spawn manager",
-            )
-        ]
+    def doctor(*, cwd: Path | None = None) -> list[DoctorCheck]:
+        runs.append(cwd)
+        return []
 
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, Path | None, str, Path | None]:
+    monkeypatch.setattr(diagnostics, "doctor", doctor)
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
         view = host.query_one(ProjectView)
-        report = host.query_one("#project-doctor", DoctorView)
-        before = shown(report.query_one("#doctor-report", Static))
-        cwd_before = report.cwd
-        view.active = "tab-doctor"
-        await settle(pilot)
-        return before, cwd_before, shown(report.query_one("#doctor-report", Static)), report.cwd
+        opened = []
+        for tab in (*ProjectView.TAB_IDS, "tab-manager"):
+            view.active = tab
+            await settle(pilot)
+            opened.append(view.active)
+        return opened
 
-    before, cwd_before, after, cwd = drive(project, scenario, doctor=doctor)
-    assert "(no checks yet)" in before  # the negative: nothing runs before the tab is opened
-    assert roots == [project.root]  # this project's root, not the UI process's cwd
-    assert "tmux 3.7c, no fleet server" in after and "(no checks yet)" not in after
-    assert "aisquare fleet spawn manager" in after  # the fix line, under its check
-    # The fixes run in the project, from the moment the tab exists — not only
-    # once a report has landed in it.
-    assert cwd_before == project.root == cwd
-
-
-def test_a_crashed_project_doctor_is_a_report_not_a_traceback(project: ProjectInfo) -> None:
-    """The control for the wiring above: the tab survives a doctor that raises."""
-
-    def doctor(root: Path) -> list[DoctorCheck]:
-        raise RuntimeError("git rev-parse exploded")
-
-    async def scenario(pilot: Pilot[None], host: Host) -> str:
-        host.query_one(ProjectView).active = "tab-doctor"
-        await settle(pilot)
-        return shown(host.query_one("#doctor-report", Static))
-
-    report = drive(project, scenario, doctor=doctor)
-    assert "the checks crashed: RuntimeError: git rev-parse exploded" in report
-    assert "aisquare doctor" in report  # …and says how to see the traceback
+    opened = drive(project, scenario)
+    assert opened == [*ProjectView.TAB_IDS, "tab-manager"], "the premise: every tab was opened"
+    assert runs == []
 
 
 # --- the Settings tab -----------------------------------------------------------------------
 
 
-def test_settings_saves_a_changed_permission_mode_to_config_toml(project: ProjectInfo) -> None:
-    assert not paths.config_path().exists()  # nothing written before the user saves
-
-    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-settings"
-        await pilot.pause()
-        host.query_one("#perm-coder", Select).value = "plan"
-        host.query_one("#worktree-dir", Input).value = ".fleet-trees"
-        host.query_one("#save-settings", Button).press()
-        await settle(pilot)
-        return host.notices
-
-    notices = drive(project, scenario)
-    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
-    fleet_on_disk = _config_toml()["fleet"]
-    on_disk = fleet_on_disk["roles"]
-    assert on_disk["coder"]["permission_mode"] == "plan"  # the bytes, not the widget
-    assert on_disk["coder"]["worktree"] is True  # untouched fields survive the write
-    assert on_disk["manager"]["permission_mode"] == "auto"  # only the changed role changed
-    assert fleet_on_disk["worktree_dir"] == ".fleet-trees"  # the worktree root (§4.2)
-    assert fleet_on_disk["escape_key"] == "f12"  # an untouched fleet field keeps its default
-    assert load_config().fleet.roles["coder"].permission_mode == "plan"
-
-
-def test_settings_rejects_a_bad_agent_cap_and_writes_nothing(project: ProjectInfo) -> None:
-    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-settings"
-        await pilot.pause()
-        host.query_one("#max-agents", Input).value = "0"
-        host.query_one("#save-settings", Button).press()
-        await settle(pilot)
-        return host.notices
-
-    notices = drive(project, scenario)
-    assert any("at least 1" in m and severity == "error" for m, severity in notices), notices
-    assert not paths.config_path().exists()  # a refused form never reaches the writer
-
-
-def test_settings_rejects_an_invalid_codename_and_renames_a_valid_one(
-    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+def test_settings_holds_the_nickname_and_shows_the_codename_without_a_rename(
+    project: ProjectInfo,
 ) -> None:
-    renames: list[tuple[str, str]] = []
+    """The project's own settings only: its nickname, editable, and its codename as a line —
+    the machine-wide form is App settings."""
+    named = project.model_copy(update={"codename": "amber-otter", "nickname": "Auth work"})
 
-    def rename(
-        target: ProjectInfo, codename: str, *, notes: list[str] | None = None
-    ) -> ProjectInfo:
-        # `notes` is the service's fail-open channel: a tmux rename it had to
-        # swallow is reported there, and the view shows it.
-        renames.append((target.id, codename))
-        if notes is not None:
-            notes.append("tmux kept the old session name (fake)")
-        return target.model_copy(update={"codename": codename})
-
-    monkeypatch.setattr(fleet_service, "rename", rename)
-
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[tuple[str, str]], int, str]:
-        host.query_one(ProjectView).active = "tab-settings"
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, str, str, list[str], str]:
+        form = SettingsView(named, id="probe-settings")
+        await host.mount(form)
         await pilot.pause()
-        field = host.query_one("#codename", Input)
-        field.value = "Not Valid!"
-        host.query_one("#rename-codename", Button).press()
-        await settle(pilot)
-        after_invalid = len(renames)
-        field.value = "amber-otter"
-        host.query_one("#rename-codename", Button).press()
-        await settle(pilot)
-        return host.notices, after_invalid, field.value
+        field = form.query_one("#nickname", Input)
+        line = shown(form.query_one("#fleet-id", Static))
+        machine = [
+            wid
+            for wid in ("#codename", "#rename-codename", "#role-perm-coder", "#accounts-pick")
+            if form.query(wid)
+        ]
+        note = shown(form.query_one("#settings-note", Static))
+        return field.value, str(field.placeholder), line, machine, note
 
-    notices, after_invalid, shown_value = drive(project, scenario)
-    assert after_invalid == 0  # the invalid name never reached the service
-    assert any("not a valid codename" in m and s == "error" for m, s in notices), notices
-    assert renames == [(project.id, "amber-otter")]  # the valid one did, once
-    assert shown_value == "amber-otter"
-    assert any("is now amber-otter" in m for m, _ in notices)
+    value, placeholder, line, machine_fields, note = drive(project, scenario)
+    assert value == "Auth work" and placeholder == project.root.name
+    assert line == (
+        "fleet id: amber-otter — tmux session asq-amber-otter, branches fleet/amber-otter/…"
+    )
+    assert machine_fields == [], "no codename rename, and nothing machine-wide"
+    assert "aisquare project rename sets the same" in note
+    assert "`" not in note, "the note is a Text: backticks would show as they are"
 
 
-def test_a_rejected_codename_reaches_the_toast_with_its_brackets(project: ProjectInfo) -> None:
-    """A notification's text is DATA, not a Rich template — measured on the toast.
+def test_settings_saves_a_nickname_and_a_blank_one_clears_it(project: ProjectInfo) -> None:
+    """Enter saves what the field holds through ``set_nickname`` — what ``project rename``
+    does — the title follows, and the app is told; a blank field clears it."""
+    from aisquare.cli.ui.sidebar import ProjectRenamed
+    from aisquare.core.store import store_session
 
-    The user typed the name being quoted back at them, so it is the one string
-    in that message that cannot be trusted to markup. Rendered as markup,
-    ``'[amber]-otter'`` reaches the screen as ``'-otter'``: the notice names a
-    name nobody typed.
-    """
+    renamed: list[str] = []
 
-    async def scenario(pilot: Pilot[None], host: Host) -> list[Notification]:
+    async def scenario(pilot: Pilot[None], host: Host) -> list[object]:
         host.query_one(ProjectView).active = "tab-settings"
-        await pilot.pause()
-        host.query_one("#codename", Input).value = "[amber]-otter"
-        host.query_one("#rename-codename", Button).press()
         await settle(pilot)
-        return [n for n in host._notifications if "not a valid codename" in n.message]
+        form = host.query_one(SettingsView)
+        original = form.post_message
 
-    notifications = drive(project, scenario)
-    assert len(notifications) == 1
-    notice = notifications[0]
-    assert notice.markup is False
-    assert "'[amber]-otter'" in str(Toast(notice).render())  # what the user sees
-    # The control: the same text with the flag flipped loses what the user typed,
-    # so the assertion above is about that flag and not about Textual being kind.
-    as_markup = Notification(message=notice.message, severity=notice.severity, markup=True)
-    assert "[amber]" not in str(Toast(as_markup).render())
+        def recorded(message: Any) -> bool:
+            if isinstance(message, ProjectRenamed):
+                renamed.append(message.project.id)
+            return original(message)
+
+        form.post_message = recorded  # type: ignore[method-assign]
+        field = host.query_one("#nickname", Input)
+        seen: list[object] = []
+        field.value = "  Auth [wip] 🚀  "
+        await pilot.click("#nickname")
+        await pilot.press("enter")
+        await settle(pilot)
+        with store_session() as store:
+            seen.append(store.get_project(project.id).nickname)  # type: ignore[union-attr]
+        seen.append(field.value)
+        seen.append(shown(host.query_one("#settings-title", Static)))
+        field.value = ""
+        host.query_one("#save-nickname", Button).press()
+        await settle(pilot)
+        with store_session() as store:
+            seen.append(store.get_project(project.id).nickname)  # type: ignore[union-attr]
+        seen.append(shown(host.query_one("#settings-title", Static)))
+        seen.append(host.notices)
+        return seen
+
+    saved, field_value, title, cleared, title_after, notices = drive(project, scenario)
+    assert saved == "Auth [wip] 🚀" and field_value == "Auth [wip] 🚀"  # trimmed, kept as typed
+    assert title == "project settings — Auth [wip] 🚀"
+    assert cleared is None
+    assert title_after == f"project settings — {project.root.name}"
+    assert renamed == [project.id, project.id], "the app hears of both, to repaint the name"
+    assert isinstance(notices, list)
+    assert any("is now called Auth [wip] 🚀" in m for m, _ in notices), notices
+    assert any("shows its folder name again" in m for m, _ in notices), notices
+
+
+def test_a_nickname_the_store_refuses_is_said_and_nothing_is_written(
+    project: ProjectInfo,
+) -> None:
+    from aisquare.core.store import store_session
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
+        host.query_one(ProjectView).active = "tab-settings"
+        await settle(pilot)
+        host.query_one("#nickname", Input).value = "two\tparts"
+        host.query_one("#save-nickname", Button).press()
+        await settle(pilot)
+        return host.notices
+
+    notices = drive(project, scenario)
+    assert any(
+        m.startswith("the nickname was not saved: a nickname is one line") and s == "error"
+        for m, s in notices
+    ), notices
+    with store_session() as store:
+        assert store.get_project(project.id).nickname is None  # type: ignore[union-attr]
 
 
 # --- the Explainability tab -----------------------------------------------------------------
@@ -950,7 +1183,8 @@ def test_explainability_enable_writes_the_switch_and_disable_clears_it(
         return (
             enabled,
             status_after_enable,
-            _config_toml()["explainability"]["enabled"],
+            # Off is the default, which the file does not hold.
+            _config_toml().get("explainability", {}).get("enabled", False),
             host.notices,
         )
 
@@ -961,7 +1195,7 @@ def test_explainability_enable_writes_the_switch_and_disable_clears_it(
     assert quiet_explainability["shipping_state"] >= 3  # mount, after enable, after disable
     assert any(m.startswith("✓ tracing enabled") for m, _ in notices)
     assert any(m.startswith("✓ tracing disabled") for m, _ in notices)
-    assert _config_toml()["explainability"]["target"] == "stg"  # nothing else was touched
+    assert load_config().explainability.target == "stg"  # nothing else was touched
 
 
 def test_explainability_ship_drains_through_the_service_and_register_refuses_unconfigured(
@@ -998,303 +1232,6 @@ def test_explainability_ship_drains_through_the_service_and_register_refuses_unc
     assert ("shipped 3 records\nruns: run-1", "information") in notices
     assert rosters == []  # no gateway configured → refused before any request
     assert any("has no gateway URL" in m and s == "error" for m, s in notices), notices
-
-
-def test_settings_saves_a_roles_persona_to_config_toml_and_reads_it_back(
-    project: ProjectInfo,
-) -> None:
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[tuple[str, str]], object]:
-        host.query_one(ProjectView).active = "tab-settings"
-        await pilot.pause()
-        host.query_one("#persona-coder", Select).value = "skeptic"
-        host.query_one("#save-settings", Button).press()
-        await pilot.pause()
-        return host.notices, host.query_one("#persona-coder", Select).value
-
-    notices, shown_after = drive(project, scenario)
-    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
-    raw = paths.config_path().read_text(encoding="utf-8")
-    coder = raw.split("[fleet.roles.coder]", 1)[1].split("\n[", 1)[0]
-    assert 'persona = "skeptic"' in coder  # the bytes, under the coder's own table
-    assert "persona" not in raw.split("[fleet.roles.tester]", 1)[1].split("\n[", 1)[0]
-    assert load_config().fleet.roles["coder"].persona == "skeptic"
-    assert shown_after == "skeptic"  # re-read after save
-
-
-def test_settings_shows_a_configured_persona_the_project_lacks_as_custom(
-    project: ProjectInfo,
-) -> None:
-    config = load_config()
-    config.fleet.roles["coder"] = config.fleet.roles.get("coder", FleetRoleSettings()).model_copy(
-        update={"persona": "ghost"}
-    )
-    save_config(config)
-
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[object, list[str]]:
-        host.query_one(ProjectView).active = "tab-settings"
-        await pilot.pause()
-        field = host.query_one("#persona-coder", Select)
-        overlay = field.query_one(OptionList)
-        prompts = [str(overlay.get_option_at_index(i).prompt) for i in range(overlay.option_count)]
-        return field.value, prompts
-
-    value, prompts = drive(project, scenario)
-    assert value == "ghost"
-    assert prompts[0] == "(none)" and "skeptic" in prompts
-    assert prompts[-1] == "ghost (custom)"
-
-
-def test_settings_says_why_it_lists_no_personas_when_the_catalogue_cannot_be_read(
-    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def unreadable(root: Path | None = None) -> Any:
-        raise PermissionError(13, "Permission denied", "/repo/.aisquare/personas")
-
-    monkeypatch.setattr("aisquare.core.personas.catalogue", unreadable)
-
-    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
-        host.query_one(ProjectView).active = "tab-settings"
-        await pilot.pause()
-        note = host.query_one("#settings-personas-unavailable", Static)
-        field = host.query_one("#persona-coder", Select)
-        overlay = field.query_one(OptionList)
-        prompts = [str(overlay.get_option_at_index(i).prompt) for i in range(overlay.option_count)]
-        return [note.display, str(note.render()), prompts]
-
-    displayed, text, prompts = drive(project, scenario)
-    assert displayed is True
-    assert text == (
-        "personas unavailable — PermissionError: "
-        "[Errno 13] Permission denied: '/repo/.aisquare/personas'"
-    )
-    assert prompts == ["(none)"]  # no names, and the tab is still up
-
-
-def test_settings_choosing_none_removes_the_roles_persona_from_config_toml(
-    project: ProjectInfo,
-) -> None:
-    config = load_config()
-    config.fleet.roles["coder"] = config.fleet.roles.get("coder", FleetRoleSettings()).model_copy(
-        update={"persona": "skeptic"}
-    )
-    save_config(config)
-
-    async def scenario(pilot: Pilot[None], host: Host) -> list[Any]:
-        host.query_one(ProjectView).active = "tab-settings"
-        await pilot.pause()
-        field = host.query_one("#persona-coder", Select)
-        before = field.value
-        field.value = NO_PERSONA
-        host.query_one("#save-settings", Button).press()
-        await pilot.pause()
-        return [before, list(host.notices)]
-
-    before, notices = drive(project, scenario)
-    assert before == "skeptic"
-    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
-    raw = paths.config_path().read_text(encoding="utf-8")
-    coder = raw.split("[fleet.roles.coder]", 1)[-1].split("\n[", 1)[0]
-    assert "persona" not in coder  # (none) removes the key rather than writing persona = ""
-    assert load_config().fleet.roles.get("coder", FleetRoleSettings()).persona is None
-
-
-def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_profile(
-    project: ProjectInfo,
-) -> None:
-    """The select beside each role is `team bind <role> --account` with a mouse (#145)."""
-    from aisquare.core import claude_accounts as accounts_core
-
-    accounts_core.create_account()  # slot 2, under the isolated AISQUARE_HOME
-
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str], list[tuple[str, str]]]:
-        host.query_one(ProjectView).active = "tab-settings"
-        await settle(pilot)  # the slots arrive from a worker
-        select = host.query_one("#acct-coder", Select)
-        labels = [str(label) for label, _value in select._options]
-        select.value = "2"
-        host.query_one("#save-settings", Button).press()
-        await settle(pilot)
-        return labels, host.notices
-
-    labels, notices = drive(project, scenario)
-    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
-    assert labels[0] == "(no account binding)"
-    assert any(label.startswith("2 · account 2") for label in labels), labels
-    assert load_config().team.profiles["coder"].account == "2"  # the binding's one home
-    assert _config_toml()["team"]["profiles"]["coder"]["account"] == "2"  # the bytes
-    assert "manager" not in load_config().team.profiles  # an untouched role gains no profile
-
-    async def clear(pilot: Pilot[None], host: Host) -> str | None:
-        host.query_one(ProjectView).active = "tab-settings"
-        await settle(pilot)
-        select = host.query_one("#acct-coder", Select)
-        shown_value = select.value
-        select.value = ""
-        host.query_one("#save-settings", Button).press()
-        await settle(pilot)
-        return str(shown_value)
-
-    shown_value = drive(project, clear)
-    assert shown_value == "2"  # the form opened on what the file held
-    assert "coder" not in load_config().team.profiles  # nothing else bound: the table goes
-
-
-def test_settings_save_leaves_the_bindings_it_did_not_change_as_the_file_has_them(
-    project: ProjectInfo,
-) -> None:
-    """Final review of #203, accounts F3: Save wrote every role's account select back, so a
-    binding changed since the tab was read was reverted by a save of any other field. The
-    sharp case is ``accounts remove``, run from the Accounts page of the same app: it clears
-    a binding to a slot that had no login, so the next ``add`` into that slot is not
-    inherited by the role, and the kept-alive tab put the number straight back."""
-    from aisquare.core import claude_accounts as accounts_core
-    from aisquare.services import claude_accounts as accounts_service
-    from aisquare.services import settings as settings_service
-
-    removed = accounts_core.create_account()  # slot 2, never signed in
-    accounts_core.create_account()  # slot 3
-    settings_service.bind_role("coder", account="2")
-    settings_service.bind_role("tester", account="2")
-
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str], list[tuple[str, str]]]:
-        host.query_one(ProjectView).active = "tab-settings"
-        await settle(pilot)  # the form holds coder → 2 and tester → 2
-        notes: list[str] = []
-        accounts_service.remove(removed, notes=notes)  # the Accounts page's Remove
-        settings_service.bind_role("reviewer", account="3")  # `team bind` in another shell
-        host.query_one("#acct-tester", Select).value = "3"  # the one change made here
-        host.query_one("#max-agents", Input).value = "7"
-        host.query_one("#save-settings", Button).press()
-        await settle(pilot)
-        return notes, host.notices
-
-    notes, notices = drive(project, scenario)
-    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
-    assert any("role coder was bound to slot 2" in note for note in notes), notes
-    profiles = load_config().team.profiles
-    assert "coder" not in profiles or profiles["coder"].account is None  # the clear stands
-    assert profiles["reviewer"].account == "3"  # the other shell's binding stands
-    assert profiles["tester"].account == "3"  # what the operator changed here lands
-    assert load_config().fleet.max_agents_per_project == 7
-    assert accounts_core.create_account().slot == 2  # the slot the stale "2" would have named
-
-
-def test_the_settings_form_reads_its_file_once_and_the_slots_off_the_ui_thread(
-    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Review of #205, fourth round: the constructor read ``config.toml`` three times —
-    ``[fleet]``, ``[accounts]``, the bindings — and listed the accounts, a store open, a
-    directory scan and maybe a reconcile write, on the event loop. One read of the file;
-    the slots come from a thread worker, and the select keeps what it showed meanwhile."""
-    import threading
-
-    from aisquare.cli.ui.views import settings as settings_view
-    from aisquare.core import claude_accounts as accounts_core
-    from aisquare.services import claude_accounts as accounts_service
-    from aisquare.services import settings as settings_service
-
-    accounts_core.create_account()  # slot 2
-    settings_service.bind_role("coder", account="2")
-    loads: list[str] = []
-    for module in (settings_view, fleet_service, accounts_service, settings_service):
-        real_load = module.load_config
-
-        def counted(real: Any = real_load, name: str = module.__name__) -> Any:
-            loads.append(name)
-            return real()
-
-        monkeypatch.setattr(module, "load_config", counted)
-    listed: list[str] = []
-    real_list = accounts_service.list_accounts
-
-    def list_accounts() -> Any:
-        listed.append(threading.current_thread().name)
-        return real_list()
-
-    monkeypatch.setattr(accounts_service, "list_accounts", list_accounts)
-
-    form = SettingsView(project)
-    assert len(loads) == 1 and listed == []  # the constructor reads the file once, lists nothing
-
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[list[str], str]:
-        host.query_one(ProjectView).active = "tab-settings"
-        await settle(pilot)
-        select = host.query_one("#acct-coder", Select)
-        return [str(label) for label, _value in select._options], str(select.value)
-
-    labels, value = drive(project, scenario)
-    assert listed and threading.main_thread().name not in listed
-    assert any(label.startswith("2 · account 2") for label in labels), labels
-    assert value == "2"  # the binding, shown before the slots arrived and after
-    assert form.accounts.pick == "default" and form.fleet.escape_key == "f12"
-
-
-def test_a_slot_removed_between_two_reads_falls_back_to_the_binding_on_the_form(
-    project: ProjectInfo,
-) -> None:
-    """The slots arrive from a worker, so a select can hold a slot an earlier answer offered
-    and the next one does not: set as its value, the select refuses it and the handler
-    raises. It falls back to what the file binds instead."""
-    import shutil
-
-    from aisquare.core import claude_accounts as accounts_core
-
-    accounts_core.create_account()  # slot 2
-    third = accounts_core.create_account()  # slot 3, removed below
-
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, list[str]]:
-        host.query_one(ProjectView).active = "tab-settings"
-        await settle(pilot)
-        select = host.query_one("#acct-coder", Select)
-        select.value = "3"
-        shutil.rmtree(third.config_dir)
-        host.query_one(SettingsView)._load_accounts()
-        await settle(pilot)
-        return str(select.value), [str(value) for _label, value in select._options]
-
-    value, offered = drive(project, scenario)
-    assert value == ""  # nothing bound: "no account binding"
-    assert "3" not in offered and "2" in offered
-
-
-def test_settings_saves_the_accounts_section_and_rejects_a_bad_line(project: ProjectInfo) -> None:
-    """`[accounts]` (#146) on the same form, through the same one writer."""
-
-    async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[str, str]]:
-        host.query_one(ProjectView).active = "tab-settings"
-        await pilot.pause()
-        host.query_one("#accounts-pick", Select).value = "headroom"
-        host.query_one("#accounts-switch-at", Input).value = "70"
-        host.query_one("#accounts-on-limit", Select).value = "switch"
-        host.query_one("#accounts-wait-minutes", Input).value = "5"
-        host.query_one("#save-settings", Button).press()
-        await settle(pilot)
-        return host.notices
-
-    notices = drive(project, scenario)
-    assert any(m.startswith("✓ fleet settings saved") for m, _ in notices), notices
-    on_disk = _config_toml()["accounts"]
-    assert on_disk == {
-        "pick": "headroom",
-        "switch_at": 70,
-        "on_limit": "switch",
-        "wait_if_reset_within_minutes": 5,
-    }
-    assert load_config().accounts.pick == "headroom"
-
-    async def bad(pilot: Pilot[None], host: Host) -> tuple[str, list[tuple[str, str]]]:
-        host.query_one(ProjectView).active = "tab-settings"
-        await pilot.pause()
-        shown_pick = str(host.query_one("#accounts-pick", Select).value)
-        host.query_one("#accounts-switch-at", Input).value = "250"
-        host.query_one("#save-settings", Button).press()
-        await settle(pilot)
-        return shown_pick, host.notices
-
-    shown_pick, notices = drive(project, bad)
-    assert shown_pick == "headroom"  # the form opened on what the file holds
-    assert any("between 1 and 100" in m and sev == "error" for m, sev in notices), notices
-    assert load_config().accounts.switch_at == 70  # a refused form never reaches the writer
 
 
 @pytest.mark.parametrize("columns", [120, 200])
@@ -1396,12 +1333,22 @@ def _attach_in_setup(host: Host, key: str, **fields: str) -> None:
     host.query_one("#explainability-save", Button).press()
 
 
+@pytest.mark.parametrize("above", [None, ".aisquare", ".git"])
 def test_the_explainability_tab_attaches_a_key_to_the_active_project_without_echoing_it(
-    project: ProjectInfo, quiet_explainability: dict[str, int]
+    project: ProjectInfo, quiet_explainability: dict[str, int], work_dir: Path, above: str | None
 ) -> None:
     """#141: the shell-only gap — a key per project, from the UI. The value goes to a
     mode-600 file and a binding row, not to the machine file; the toast names the
-    path, never the key."""
+    path, never the key.
+
+    ``above``: a project marker or a repository appears above the project's directory
+    after the fixture resolved it and before *Save setup* resolves it again — what a
+    full run's shared temp tree may do. The key still lands under the page's project
+    (``work_dir``)."""
+    if above == ".git":
+        git(work_dir.parent, "init", "-q")
+    elif above is not None:
+        (work_dir.parent / above).mkdir()
 
     async def scenario(
         pilot: Pilot[None], host: Host
@@ -1840,42 +1787,37 @@ def test_a_machine_key_beside_its_own_variable_names_the_box_that_would_work(
     assert "tick 'this project only'" in refused
 
 
-def test_under_a_hub_the_tab_follows_its_project_as_its_seats_do(
+def test_under_a_hub_the_box_and_the_tab_say_whose_key_it_is(
     project: ProjectInfo,
     quiet_explainability: dict[str, int],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The owner's decision (card tsk_01m3nwrzqe61fy5t6tph5z7wv3): the tab follows the
-    project. A fleet window carries its fleet's own root as its hub and names its row
-    (#230), so the seats a page spawns trace with the PAGE's key whatever hub the UI runs
-    under. The box says "this project only", the key typed with it is the page's, and the
-    page's own key is the one in use. Main's 0.7.0 sent all three to the hub (review of
-    #170, G5 and B7), when a window carried its spawner's hub."""
+    """Under AISQUARE_TEAM_HUB the key goes to the hub project, which every project under
+    the hub launches with, and the box read "this project only" (G5). A key the page
+    had of its own vanished from the tab while its file stayed on disk (B7)."""
     ops.attach_project_key(project, "pk-page-0123456789", target="stg")  # the page's own
     hub = tmp_path / "hub"
     hub.mkdir()
     monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))
-    name = project.root.name or project.id
 
     async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, list[tuple[str, str]], str]:
         host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
         label = str(host.query_one("#explainability-key-project", Checkbox).label)
-        _attach_in_setup(host, "pk-page-9876543210")
+        _attach_in_setup(host, "pk-hub-0123456789")
+        await settle(pilot)
+        _attach_in_setup(host, "", gateway="https://g.example")  # the box, and no key
         await settle(pilot)
         return label, list(host.notices), host.query_one(ExplainabilityView).status_text
 
     label, notices, status = drive(project, scenario)
-    assert label == "this project only", label
+    assert label == "the hub (hub) only", label
+    assert any(m.startswith("'the hub (hub) only' attaches") for m, _ in notices), notices
     [attached] = [m for m, _ in notices if m.startswith("✓ key attached to")]
-    assert attached.startswith(f"✓ key attached to {name} for target stg"), attached
-    assert "AISQUARE_TEAM_HUB" not in attached
-    assert f"{name}: its own key for target stg (in use)" in status, status
-    assert "is not used" not in status, status
-    with store_session() as store:
-        assert store.project_explainability(project.id) is not None
-        assert store.project_explainability(project_id_for(hub)) is None, "never the hub's"
+    assert attached.startswith("✓ key attached to hub (the AISQUARE_TEAM_HUB project"), attached
+    assert "its own key for target stg is not used — its launches join hub" in status, status
+    assert f"key clear --project {project.id}" in status
 
 
 def test_a_project_key_lands_where_its_destination_does_and_never_over_a_minted_one(
@@ -2016,7 +1958,7 @@ def test_a_store_that_cannot_say_whether_the_key_was_minted_refuses_the_attach(
 
 def _another_project_pinned(tmp_path: Path) -> ProjectInfo:
     """A second registered project, pinned by ``project switch`` — the one the tab must ignore."""
-    from aisquare.core.workspace import pin_project, project_id_for
+    from aisquare.core.workspace import pin_project
 
     root = (tmp_path / "pinned-elsewhere").resolve()
     root.mkdir()
@@ -2087,15 +2029,17 @@ def test_the_explainability_tab_registers_the_roster_under_its_projects_key(
     assert any(m.startswith("✓ registered") for m, _ in notices), notices
 
 
-def test_under_a_hub_register_uses_the_key_the_pages_seats_launch_with(
+def test_under_a_hub_the_explainability_tab_is_about_the_hub_its_launches_join(
     project: ProjectInfo,
     quiet_explainability: dict[str, int],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Register roster names the key the page's seats launch with. Under a hub that is the
-    PAGE's own key (card tsk_01m3nwrzqe61fy5t6tph5z7wv3; a fleet window joins its fleet's
-    board, #230), where main's 0.7.0 registered under the hub's (review of #170)."""
+    """``AISQUARE_TEAM_HUB`` puts a fleet window's ``launch`` on the hub's board, so its
+    agents authenticate with the hub's key — the one ``key set`` binds from any
+    repo under the hub. The tab showed, attached and registered under the PAGE's
+    key, which no launch from the page read (review of #170)."""
+
     config = load_config()
     config.explainability.targets = {
         "stg": ExplainabilityTarget(gateway_url="https://stg.example"),
@@ -2116,7 +2060,7 @@ def test_under_a_hub_register_uses_the_key_the_pages_seats_launch_with(
     async def scenario(pilot: Pilot[None], host: Host) -> str:
         host.query_one(ProjectView).active = "tab-explainability"
         await settle(pilot)
-        _attach_in_setup(host, "pk-page-0123456789")
+        _attach_in_setup(host, "pk-hub-0123456789")
         await settle(pilot)
         await pilot.click("#explainability-register")
         await settle(pilot)
@@ -2124,50 +2068,10 @@ def test_under_a_hub_register_uses_the_key_the_pages_seats_launch_with(
 
     status = drive(project, scenario)
     with store_session() as store:
-        assert store.project_explainability(project.id) is not None
-        assert store.project_explainability(project_id_for(hub)) is None, "not the hub's"
-    assert f"{project.root.name or project.id}: its own key for target stg (in use)" in status
-    assert keys == ["pk-page-0123456789"]
-
-
-def test_the_tabs_project_under_a_hub_is_the_one_its_seats_join(
-    project: ProjectInfo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The card's pin. Under a hub, the project whose key the tab shows is the one a seat
-    spawned for the page joins inside its window, whose hub is the fleet's own root and
-    whose row names it (#230). With no hub it is the page too. This pinned
-    ``team_project(page.root)`` there, which is the enclosing repository's project for a
-    page rooted inside one, and no seat of the page joins that (review of #240, finding 12;
-    tests/test_the_explainability_tab_speaks_for_its_page_with_no_hub.py)."""
-    from aisquare.cli.ui.views import explainability as explainability_view
-    from aisquare.core import orchestrator
-
-    with store_session() as store:
-        seat = store.upsert_fleet_agent(
-            FleetAgent(
-                id="agt_seatforthepage",
-                project_id=project.id,
-                label="coder-1",
-                role="coder",
-                pane_id="%1",
-                cwd=project.root,
-                created_at=datetime.now(tz=UTC),
-            )
-        )
-    assert explainability_view.key_project(project) == project, "with no hub: the page"
-    assert explainability_view.own_key_label() == "this project only"
-
-    hub = tmp_path / "hub"
-    hub.mkdir()
-    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub))  # the UI's own process, under a hub
-    tab = explainability_view.key_project(project)
-    label = explainability_view.own_key_label()
-    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(project.root))  # inside the seat's window
-    monkeypatch.setenv("AISQUARE_FLEET_AGENT", seat.id)
-    joined = orchestrator.team_project()
-
-    assert tab is not None and tab.id == joined.id == project.id
-    assert label == "this project only"
+        assert store.project_explainability(project_id_for(hub)) is not None
+        assert store.project_explainability(project.id) is None, "not the page under a hub"
+    assert "hub: its own key for target stg (in use)" in status
+    assert keys == ["pk-hub-0123456789"]
 
 
 def test_the_key_row_names_a_missing_file_instead_of_contradicting_itself(

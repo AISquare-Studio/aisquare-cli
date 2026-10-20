@@ -26,6 +26,10 @@ from tests.ci_schemas import assert_valid
 from tests.ci_support import RUN, SESSION, wire
 from tests.stub_ci_server import StubCI, live_descriptor, serve
 
+# These record in a directory nobody added (``tmp_path``), as they were written to:
+# with ``[projects] capture`` on. What capture off records — nothing — is tests/test_hooks.py's.
+pytestmark = pytest.mark.usefixtures("project_capture")
+
 SPEC = ci_override.EXAMPLE
 DIRECT_API = live_descriptor(delivery=[{"kind": "direct_api"}])
 

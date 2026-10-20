@@ -47,7 +47,12 @@ def test_the_base_install_gains_no_dependencies() -> None:
     and a skill's frontmatter is full YAML (docs/plans/spawn-personas.md §3.3,
     accepted by the owner for interchange fidelity); it is imported inside the
     parser only. ``tzdata`` is Windows' zone database, and only Windows installs
-    it (the test below)."""
+    it (the test below).
+
+    ``segno`` (pure python, typed, one module) is the Remote modal's QR. It is
+    imported lazily by the QR renderer alone (``cli/ui/views/remote.py``), so the
+    hook path never loads it; when it is absent the modal says the QR is unavailable, and the
+    command that puts segno back in the install that runs, instead of failing."""
     import re
     import tomllib
 
@@ -56,7 +61,16 @@ def test_the_base_install_gains_no_dependencies() -> None:
     # Split on every specifier character, so a future `foo<2` upper bound reads
     # as `foo` rather than failing with a confusing diff.
     required = {re.split(r"[<>=!~\[; ]", dep)[0].strip() for dep in data["project"]["dependencies"]}
-    assert required == {"typer", "rich", "pydantic", "tomli-w", "textual", "pyyaml", "tzdata"}
+    assert required == {
+        "typer",
+        "rich",
+        "pydantic",
+        "tomli-w",
+        "textual",
+        "pyyaml",
+        "tzdata",
+        "segno",
+    }
 
 
 def test_windows_installs_a_time_zone_database_and_nothing_else_does() -> None:

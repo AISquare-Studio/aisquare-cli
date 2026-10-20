@@ -55,6 +55,7 @@ from aisquare.core.config import ExplainabilitySettings, ExplainabilityTarget
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import UNKNOWN_KEY_UID, PendingRevocation, ProjectInfo, TraceDestination
 from aisquare.services import iam
+from aisquare.services import project as project_service
 from aisquare.services.explainability import (
     KEY_ENV_VAR,
     clear_project_api_key,
@@ -231,8 +232,9 @@ def deployment_target(
     exception: it is the entry ``use`` tells them to write for a host outside
     the table (its gateway and proxy), and the machine's prod key went to the
     self-hosted gateway and proxy with it (review of #203). Nor is one that
-    writes the default out: ``save_config`` writes every field, so every entry
-    the CLI saved names it, and the two cannot be told apart. The one exception
+    names the default variable: releases up to 0.8.0 wrote every field of every
+    entry, and ``save_config`` now writes only what differs, so whether an entry
+    names it says nothing of whether anyone chose it. The one exception
     is the deployment the machine key already serves
     (:func:`_machine_key_serves`), where that key is exactly the right one and a
     new variable would only take it away.
@@ -509,6 +511,19 @@ def pick_studio(ref: str | None, studios: list[Studio], workspace: Workspace) ->
 # ── the choice ─────────────────────────────────────────────────────────────────
 
 
+def require_project(store: ContextStore, project: ProjectInfo) -> None:
+    """Make sure ``project`` has the row a destination references, or refuse.
+
+    ``use`` may run in a directory nothing has registered yet. With ``[projects]
+    capture`` on, it is captured, not onboarded (#139): choosing where traces land is
+    not adding it to the list. Off, a directory nobody added is refused
+    (``not_added``), with the command that adds it.
+    """
+    if not project_service.tracked(store, project):
+        raise DestinationError("not_added", str(project_service.NotAdded(project)))
+    project_service.capture(store, project)
+
+
 def choose(
     store: ContextStore,
     project: ProjectInfo,
@@ -530,11 +545,9 @@ def choose(
     "The same workspace" is the id on the same API: workspace ids are per
     deployment, so a staging 7 and a production 7 are two workspaces.
 
-    The project row is made sure of first — a destination references it, and
-    ``use`` may run in a directory nothing has registered yet. Captured, not
-    onboarded (#139): choosing where traces land is not adding it to the list.
+    The project row is made sure of first (:func:`require_project`).
     """
-    store.ensure_project(project)
+    require_project(store, project)
     key_uid = None
     if (
         previous is not None

@@ -142,6 +142,10 @@ class FakeServer:
     def reachable(self) -> bool:
         return self._up
 
+    def at(self, path: Path | None) -> FakeServer:
+        """The server at ``path`` (``tmux -S``, 0.8.0): this fake is the only one there is."""
+        return self
+
     def socket_path(self) -> Path:
         return self._socket if self._socket is not None else Path("/nonexistent/tmux-0/asq")
 
@@ -221,7 +225,7 @@ class Fleet:
         )
         if self.on_tell is not None:
             self.on_tell(project, label, text)
-        return fleet.TellResult(True, "typed into its pane (it was waiting)")
+        return fleet.TellResult("yes", "typed into its pane (it was waiting)")
 
     def spawn(self, project: ProjectInfo, role: str, **kwargs: Any) -> fleet.SpawnReceipt:
         self.calls.append(("spawn", {"project": project.id, "role": role, **kwargs}))

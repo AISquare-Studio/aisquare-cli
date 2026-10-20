@@ -240,7 +240,7 @@ def test_a_task_ref_is_checked_against_the_board_the_note_names(boards: Boards) 
 
 
 def test_a_note_that_names_no_project_resolves_its_board_as_before(
-    boards: Boards, monkeypatch: pytest.MonkeyPatch
+    boards: Boards, monkeypatch: pytest.MonkeyPatch, project_capture: None
 ) -> None:
     """The control: only the fleet's fallback names a project. ``aisquare note`` under a hub
     still files on the hub's board, and a note ``--as`` a session still follows the session

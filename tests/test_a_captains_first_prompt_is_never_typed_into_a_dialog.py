@@ -113,7 +113,7 @@ def test_the_spawn_dialogs_first_prompt_is_never_typed_into_the_trust_dialog(
     tmux.screen = list(shots.REAL_TRUST)
     receipt = spawn_dialog.start_captain({"prompt": FIRST})
     assert tmux.reached() == [], "nothing reached the dialog, whose Enter picks No, exit"
-    assert receipt.prompt_typed is False, "never reported typed when it was not"
+    assert receipt.prompt_typed == "no", "never reported typed when it was not"
     (note,) = _about_the_prompt(receipt)
     assert note.startswith("the first prompt was NOT typed: ")
     assert "trust its folder" in note and str(brain.brain_dir()) in note
@@ -137,7 +137,7 @@ def test_a_first_prompt_is_never_typed_into_a_dialog_and_the_note_names_what_sho
     tmux.screen = list(screen)
     receipt = brain.start(FIRST)
     assert tmux.reached() == []
-    assert receipt.prompt_typed is False
+    assert receipt.prompt_typed == "no"
     (note,) = _about_the_prompt(receipt)
     assert note.startswith(f"the first prompt was NOT typed: the captain's pane shows {showing}")
     assert note in receipt.failures
@@ -149,7 +149,7 @@ def test_a_first_prompt_is_not_typed_blind_into_a_pane_that_cannot_be_read(
     tmux.unreadable = True
     receipt = brain.start(FIRST)
     assert tmux.reached() == []
-    assert receipt.prompt_typed is False
+    assert receipt.prompt_typed == "no"
     (note,) = _about_the_prompt(receipt)
     assert "could not read the captain's pane" in note
 
@@ -163,7 +163,7 @@ def test_a_first_prompt_is_not_typed_when_the_box_never_draws(
     tmux.screen = []
     receipt = brain.start(FIRST)
     assert tmux.reached() == []
-    assert receipt.prompt_typed is False
+    assert receipt.prompt_typed == "no"
     (note,) = _about_the_prompt(receipt)
     assert f"never drew its prompt for {brain.SEND_TIMEOUT_S:g}s" in note
     assert brain.SEND_TIMEOUT_S <= wait.slept < brain.SEND_TIMEOUT_S + 5
@@ -177,7 +177,7 @@ def test_a_first_prompt_never_types_while_a_say_waits_for_its_reply(
     with brain._one_at_a_time(brain._now() + timedelta(seconds=5), 5.0):
         receipt = brain.start(FIRST)
     assert tmux.reached() == []
-    assert receipt.prompt_typed is False
+    assert receipt.prompt_typed == "no"
     (note,) = _about_the_prompt(receipt)
     assert "another message to the captain is still waiting" in note
 
@@ -199,7 +199,7 @@ def test_a_first_prompt_is_still_typed_at_a_drawn_input_box(
     tmux.screen = list(box)
     receipt = brain.start(FIRST)
     assert tmux.reached() == [("paste", FIRST), ("key", "Enter")]
-    assert receipt.prompt_typed is True
+    assert receipt.prompt_typed == "yes"
     assert _about_the_prompt(receipt) == [] and receipt.failures == []
 
 
@@ -229,7 +229,7 @@ def test_a_first_prompt_waits_for_the_box_and_is_typed_once_it_shows(
     monkeypatch.setattr(brain, "_sleep", draw_after_three_polls)
     receipt = brain.start(FIRST)
     assert tmux.reached() == [("paste", FIRST), ("key", "Enter")]
-    assert receipt.prompt_typed is True
+    assert receipt.prompt_typed == "yes"
     assert drawn_at, "typed only after the box had drawn"
     assert wait.slept - drawn_at[0] >= brain.TYPE_SETTLE_S, "and after its one settle"
 

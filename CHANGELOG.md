@@ -243,23 +243,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **Each fleet seat lands on its own fleet's board.** A tmux server started from
-  a shell that exported `AISQUARE_TEAM_HUB` handed that hub to every window, and
-  the hub overrode everything, so the seats of two fleets on one server
-  registered on a third board and their deltas mixed both trains. Every window
-  `fleet spawn` opens now carries its own fleet's root as the hub; inside a
-  fleet window the fleet row's board wins over an inherited hub, said once on
-  stderr; and a session that registered on the wrong board moves to its fleet's
-  board when a restart resumes it. This replaces 0.7.0's rule that a window
-  carries its spawner's hub: under it, the captain, which runs under the home's
-  hub, put every seat it spawned for a project on the home board.
-  `AISQUARE_EXPLAINABILITY_TARGET` still travels from the spawner.
-- **Under an exported `AISQUARE_TEAM_HUB`, a project page's Explainability tab
-  follows its project.** It shows, attaches and registers the page's own key,
-  the one its fleet seats launch with, since a fleet window joins its fleet's
-  board whatever hub is exported (the rule above), and *this project only* means
-  the page. Under 0.7.0's rule the tab named the hub's key, which the page's
-  seats no longer use. With no hub nothing changes.
+- **A tmux server the fleet starts holds no team variable,** so a window opened on
+  it by hand inherits no hub, seat, role or persona from the shell that first
+  started it. `aisquare doctor`'s `fleet server env` row warns when a running server
+  pins one, naming a hub unlike the board a fleet on it reads, and each delta and
+  wake-up line names the board it came from.
 - **`aisquare serve --stdio` no longer exits in the middle of a tool call.** Its
   idle deadline (`--close-after`, `AISQUARE_SERVE_CLOSE_AFTER`) counted inbound
   client messages only, while a tool runs on a worker thread and the client sends
@@ -283,6 +271,985 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   positive control stays: the same fenced page at the repo's own level is still
   reported.
 
+## [0.8.2] - 2026-10-19
+
+**A hotfix: a copy in `asq` reaches the clipboard on macOS. Every agent can now be
+restarted or stopped at once. A restart no longer takes you off the pane you are on,
+and Stop or Restart no longer acts on a click aimed at what was under the pointer a
+moment before.**
+
+### Added
+- Restart or stop every running agent in every project at once, or only the
+  managers. In `asq`, *⚙ Settings ▸ Fleet* has *Restart all…* and *Stop all…*.
+  Each opens a dialog that lists, by project, the agents it will act on, and has a
+  *Managers only* switch. Its confirm button names the count, and *Cancel* has the
+  focus. On the command line it is `aisquare fleet restart --all [--managers]` and
+  `aisquare fleet stop --all [--managers]`. Both print one line per agent, then
+  the count, and exit 1 if any agent failed. Interrupted with Ctrl-C, they still
+  say how far they got (`--json` too) and exit 130. With four managers running, a restart
+  of all of them used to mean clicking into each one. Exited (💤) agents are left
+  as they are, and so is one that exits or is stopped while the run goes on. So
+  is the agent that runs the command, so a manager's
+  `restart --all` doesn't stop itself half-way. A restart resumes each agent's
+  session from its transcript when that is on disk, as a single restart does. An
+  agent that fails doesn't stop the rest: it is named, with the reason. While a
+  run from *Settings* goes on, `q` doesn't quit `asq`: it says the run is still going.
+
+### Fixed
+- Run on your Mac, a copy in `asq` reaches your clipboard in Terminal.app and
+  in iTerm2 as it comes. 0.8.1 sent every copy as OSC 52 alone, and said "copied" either way:
+  Terminal.app never implemented OSC 52 and iTerm2 drops it unless its clipboard
+  setting is on, so ⌘V pasted what the clipboard held before. On a local session
+  a copy now also goes through the platform's own tool (`pbcopy` on macOS,
+  `clip.exe` on Windows and on WSL with interop on, and on Linux and the BSDs
+  `wl-copy` under Wayland, else `xclip` or `xsel` under X), and still as OSC 52.
+  A tool that fails is not run again for a minute, so a broken one doesn't hold
+  up each copy's toast.
+  On a remote session (over SSH, under `sudo` or `su` there, in a tmux last
+  attached over SSH, or in a Codespace) OSC 52 is the only route. Inside tmux,
+  tmux's word on its last attach decides, so a tmux created over SSH and
+  attached at the machine since is local. The toast says
+  "copied" only when the copy can have landed: the native tool took it, or OSC
+  52 went to a terminal known to take it. In Terminal.app a copy only
+  OSC 52 carried says it did not reach the clipboard, and how to select with the
+  terminal itself. In iTerm2, whose clipboard setting nothing outside it can
+  see, it says the text was sent through OSC 52 and, if paste is empty, to turn
+  that setting on or hold ⌥ while you drag. On a terminal nothing names (over SSH from
+  Terminal.app, or behind tmux or screen) it says the text was sent through OSC
+  52, and that an empty paste means the terminal ignored it.
+- A restart no longer takes you off the pane you are on. A restart started
+  from an agent's view showed the new row when it finished, wherever you had
+  gone meanwhile: on manager 1's pane, manager 0's restart took the screen back
+  to manager 0, with its Stop and Restart under the pointer aimed at manager 1.
+  The view now follows the new row only while the restarted agent's view is
+  still the one on screen. Anywhere else your view, the sidebar's highlight,
+  the selection asq reopens at and the keyboard stay where they were. The
+  sidebar lists the new row, and a toast names the restart and its project
+  (`✓ restarted manager (alpha) — resumed its session`). A row replaced from
+  outside the view (`fleet restart` or `fleet switch` in a shell, the hand-over
+  on a usage limit, the phone) never moved the view, and still doesn't.
+- Stop and Restart in an agent's view ignore a mouse click that lands within a
+  second of the view coming up, moving, or a dialog over it closing. Such a
+  click was aimed at whatever was there before, and it no longer stops or
+  restarts the agent now under the pointer. The first ignored click says so
+  (`ignored a click on Restart — the view had just changed under the
+  pointer`), and it doesn't take the keyboard focus either, so the next Enter
+  goes where it was going. Click again a moment later, or press Enter on the
+  focused button: a key is never ignored.
+
+### Changed
+- When you type on a Mac (`asq` on your Mac, or reached from Terminal.app or
+  iTerm2, iTerm2 over SSH included, but not through tmux or screen on another
+  machine, which keep the terminal of whoever started them) the help screens
+  name the copy and paste keys a Mac has, whatever machine `asq` runs on. The board's
+  copy row names `c`, not ⌘C, which Terminal.app and iTerm2 keep as their own
+  Copy, and the fleet's `?` lists ctrl+c, ⌘V and the terminal's own selection
+  (Option-drag in iTerm2, Fn-drag in Terminal.app on most Macs). docs/fleet.md
+  has "Copy and paste on macOS", and its mouse section no longer lists iTerm2
+  among the terminals that accept OSC 52 as they come.
+- `aisquare doctor`'s `fleet terminal` row names iTerm2 over SSH by the
+  `LC_TERMINAL=iTerm2` that ssh sends, though not behind tmux or screen, which keep
+  the terminal of whoever started them. It names Ghostty and WezTerm by their `TERM`
+  (`xterm-ghostty`, `wezterm`) when their own variables are gone, as over SSH, and
+  says both speak the kitty keyboard protocol. It said `unknown (TERM=…)` for all
+  three. The row and the copy's toast read one table of terminals.
+
+## [0.8.1] - 2026-10-19
+
+**The fleet on your phone: `aisquare remote`, through your own ngrok tunnel.**
+- One server on `127.0.0.1:8750` serves a page that ships with aisquare-cli,
+  behind a secret link and a four-word passphrase. It is read-only until
+  `aisquare remote allow-write on`.
+- In `asq`, `R` opens the Remote panel: Remote on and off, the link, a QR code,
+  the passphrase, the devices, the write switch and an auto-off timer.
+- What needs you across every project is one feed, with notifications. You also
+  get each agent's live screen and conversation and the board. With writes on,
+  you can answer a prompt, tell an agent something, or stop, restart or switch it.
+- `aisquare remote serve` runs it without the UI. `status`, `allow-write`,
+  `regenerate-password`, `revoke`, `needs` and `install-page` manage it from the
+  machine.
+
+**A quieter `asq`: projects you can name, one ⚙ Settings, and an Accounts page
+that reads at a glance. A folder trusted on one Claude account is trusted on
+all of them, and the fleet cleans up the worktrees it made.**
+- A project has a nickname, which you rename in place on its card. The card's
+  **⋯** menu holds *Rename*, *Pin*, *Open settings* and *Remove from fleet…*.
+- The sidebar is your projects, then **⚙ Settings** (App settings, Accounts,
+  Doctor) and a status line with two dots: your AISquare sign-in, and the room
+  left across your Claude accounts.
+- The Accounts page is an aligned table with the usage **used** per window.
+  You rename an account in place, **Log in** shows where a login is due, and
+  usage is read at most every five minutes, with **↻ Refresh usage** and how old
+  the readings are.
+- Tasks are numbered on their board, `#1`, `#2`, …, and every task command takes
+  the number. The board's tasks table is the number, a status icon and the
+  title, `?` explains the icons, and every line in the board drags to resize.
+- Your `config.toml` holds only what you changed. New launches go where there
+  is room (`pick = "headroom"`), and an agent that hits its limit moves
+  (`on_limit = "switch"`). `aisquare config reset` puts every setting back.
+- A launch copies a folder's trust from the Claude account that gave it, so an
+  agent on another account no longer stops at "trust this folder?".
+- `fleet reap` removes a finished agent's worktree once its work is pushed to
+  any branch, and its `fleet/…` branch once the default branch has that work.
+  It keeps and names a tree or a branch that holds work found nowhere else. The
+  manager stops and reaps agents whose work is done.
+
+**Upgrading:**
+- From 0.8.0, run `aisquare upgrade`. It keeps your install's extras. The
+  `remote` extra is new, so to use Remote, install it as
+  [docs/remote.md](docs/remote.md) says. `aisquare remote serve` and the R panel
+  print the line for your install.
+- `segno`, a small pure-Python QR library, is a new core dependency. Every
+  upgrade installs it.
+- **`config.toml` is now only your changes** (`config_version = 2`), apart from
+  each `[fleet.roles.<role>]` table, which is written whole. On first load, a
+  value equal to 0.8.0's default for that key is dropped and follows today's
+  default; every other value stays yours. The next save writes the file down to
+  those. 0.8.0 wrote every setting into the file, so a value you chose that
+  happens to be 0.8.0's default cannot be told apart from one it wrote for you.
+  **An explicit `pick = "default"` or `on_limit = "wait"` therefore moves to
+  the new defaults, `headroom` and `switch`.** To keep the old behaviour, set
+  them again after upgrading: `aisquare config set accounts.pick default` and
+  `aisquare config set accounts.on_limit wait`.
+- **Moving back to 0.8.0 or earlier**: that release reads `config.toml`
+  without today's defaults under it. Your own settings read the same there, and
+  so do the fleet roles, as their tables are written whole. A setting the file
+  leaves to today's default takes that release's instead: `pick` reads
+  `default` and `on_limit` reads `wait`. `aisquare upgrade --version 0.8.0`
+  names those settings before it moves; to keep one there, set it after the
+  move. When that release saves the file whole again, this release reads it as
+  it did the first time: values equal to 0.8.0's defaults follow today's.
+- **Nothing becomes a project on its own any more** (`[projects] capture`, off;
+  see Changed). The directories 0.8.0 captured stay in the store, unlisted, and
+  `asq` no longer shows them, even where `a` was left on. `aisquare project list
+  --all` lists them, `aisquare doctor` counts them, and `aisquare project prune
+  --captured-only --older-than 0` drops every one that holds no context entry.
+  A project you use that only a hook ever registered is one of them: add it with
+  `aisquare project onboard <path>`, and its prompts and boards are there again.
+  `aisquare config set projects.capture true` keeps 0.8.0's behaviour instead.
+- The store migrates to schema v32 on first open, from 0.8.0's v25, in seven
+  steps:
+  - v26: `fleet_agent.server_started_at`, when each agent's tmux server
+    started, as the server said at spawn. It is the identity of the server the
+    agent's pane id names, which `stop`, `shutdown`, `reap` and `uninstall`
+    compare before ending a row (see Fixed). An agent started before 0.8.1
+    recorded none, and is judged as before. `fleet ls --json` carries the
+    field. Also an index, `team_event_project_created`, on when each board
+    event was written, which the Remote needs feed reads its last day by (a
+    store an earlier 0.8.1 candidate made v26 or v30 gets it at its next open).
+  - v27: a project nickname column.
+  - v28: `claude_usage.token_fingerprint`, a digest of the login a reading was
+    taken with, never the token. A reading recorded before it is served to no
+    login, so each account is asked once after the upgrade.
+  - v29: `team_task.number`, backfilled per board in creation order.
+  - v30: a unique index on (project, number), and one of the tasks without a
+    number, which every open asks for (a store an earlier 0.8.1 candidate made
+    v30 gets it at its next open).
+  - v31: `fleet_agent.branch`, the branch each agent's worktree was on, as git
+    said at spawn, at stop and at reap before the tree went. A restart or
+    switch makes a gone tree again on it. An agent started before 0.8.1
+    recorded none, so a restart of one whose tree is gone is refused, saying
+    so. `fleet ls --json` carries the field.
+  - v32: `fleet_agent.board`, the board each agent's sessions read, as its
+    spawn gave it: the hub's under `AISQUARE_TEAM_HUB`, else its project's
+    checkout's. A restart, a switch, an exit, a pause and Remote's needs feed
+    read it, whoever runs them (see Fixed). An agent started before it reads
+    the board its session registered on, else its own project's. `fleet ls
+    --json` carries the field.
+
+  0.8.0 opens a v32 store as it is. A task it adds gets no number there; the
+  next open by 0.8.1 numbers it after the last number on its board, in the
+  order such tasks were added. An agent it spawns records no board there, and
+  0.8.1 reads it as one started before v32: its session's board, else its
+  project's.
+- Remote keeps its state in `~/.aisquare`: `remote.json` (owner-only),
+  `remote-audit.log`, `remote-needs.json` and `remote-push.json`. Each is
+  written only once Remote is used. `aisquare uninstall --purge` removes them
+  with the rest.
+- Text typed into an agent's pane, in `asq` as from the phone, now reaches tmux
+  as hex (`send-keys -H`). A trailing space or a lone `;` arrives as typed.
+- **`"name"` in `project list --json` is now the project's nickname** when it
+  has one, where it was always the folder's name; so is `name` in `fleet ls
+  --json` and Remote's project list. A script that wants the folder reads `root`.
+  Each project also carries `nickname` (`null` when unset). Task JSON carries
+  `number`. Usage JSON adds `session_used_percent`,
+  `week_used_percent`, `session_left_percent`, `week_left_percent`,
+  `needs_login` and `last_failed_at` (when a try after the reading failed,
+  else `null`). `session_percent` and `week_percent` stay, and mean percent
+  used, as they always did.
+
+### Added
+- **Phone control: `aisquare remote`.** The fleet on a phone, through the
+  user's own ngrok tunnel: one server on `127.0.0.1:8750` (never anything else;
+  8747 to 8749 belong to `serve`, cliXR and the captain's voice). Every path
+  sits under `/r/<32-char token>/`, and a wrong token is a 404 everywhere. The
+  guide is [docs/remote.md](docs/remote.md).
+- **A page that ships with aisquare-cli.** `aisquare.web.remote` is a
+  hand-written page (HTML, one script, one stylesheet, a service worker and a
+  manifest; no build step, nothing from another origin) served whenever no
+  other is installed, so a fresh machine just works. `asq remote install-page
+  <dist>` and `serve --dist` still override it. It is served with a strict
+  Content-Security-Policy (this origin only, no inline script or style), no
+  referrer and no framing, and every string the server sends reaches it as
+  text: escape sequences are dropped (an OSC link with its target), colours are
+  clamped integers, and no server string ever becomes a URL or an attribute.
+  Screens: the needs-you feed, projects (fleet, board with a note composer,
+  tasks, memory), an agent (its live pane, its transcript wrapped to the phone,
+  its explainability card, an input bar and a key pad), devices and settings.
+  It greys out and holds every action after 25 s without an update, and
+  reconnects and re-reads everything when the phone wakes.
+- **In the fleet UI, on `R`.** A panel that turns Remote on and off (the server
+  plus ngrok), shows the link, a QR (`segno`, a new core dependency imported only
+  by the QR renderer) and the passphrase, lists the devices with revoke, and
+  holds the write switch (off by default) and an auto-off timer (30/60/120
+  minutes or Never). Whether Remote is on and the timer live in `state.json`
+  beside the theme; the write switch is the server's, in `remote.json`, the one
+  `asq remote allow-write` sets. No ngrok outlives the UI, however it ends. A
+  Remote that was on comes back on at the next start, with writes off and a
+  notice that it is back and when auto-off comes, unless its auto-off time
+  passed while the UI was gone (a closed terminal, a kill): then it stays off
+  and the notice says so; a dead ngrok is restarted
+  within 30 s. With `AISQUARE_REMOTE_NGROK_URL`
+  set, ngrok runs on that static domain (`--url=`), so the link survives.
+- **`asq remote serve [--port] [--auto-off MINUTES] [--public-url URL] [--dist DIR]`**,
+  for a machine without the UI open. Auto-off defaults to 60 minutes (`0` is
+  never, and the banner says so); the phone can extend it an hour at a time,
+  up to 8 hours ahead. `status` and `regenerate-password --new-link` take the
+  same `--port` (and `AISQUARE_REMOTE_PORT`) for the link they print.
+- **Needs you.** Every 3 s, while a phone has the page open or notifications on,
+  the server works out what waits on the human across every project: a
+  permission prompt (each prompt of a turn on its own), a
+  question, a plan to approve, a board question or result, a crashed agent, a
+  stopped manager, a usage limit, a turn that died on an API error (an expired
+  login, credit run out), a lost pane, tmux not answering, a turn that ended
+  with a question, an interruption. Each card carries what must be read
+  first (the command, every question and its options, the plan, and what of
+  them it had to cut) and the quick answers it offers, checked against the
+  agent as it is now before a key is typed (`409 stale` otherwise).
+  `GET api/needs`, a `needs_you` frame, `POST api/needs/answer`,
+  `POST api/needs/dismiss`, and `asq remote needs`.
+- **Notifications (Web Push).** When an item has stood for two scans, the phone
+  gets a notification that opens its card: encrypted to the browser
+  (RFC 8291 and VAPID, through `cryptography`, now in the `remote` extra), built
+  from fixed sentences with every name cut to 40 characters, and never holding
+  an excerpt or anything else from an agent. Plus warnings before auto-off and
+  before a phone's sign-in ends, a goodbye at Remote off, and an alert on a
+  password-guessing lockout. iOS needs the page on the Home Screen.
+- **Agent actions.** `agent/tell` (modes `auto`, `prompt` and `interrupt`: one
+  Esc, then the text once the agent is back at its prompt), `agent/stop`,
+  `agent/restart` and `agent/switch`. Each is pinned to the agent the phone
+  looked at (`agent_id`, and a card's `needs_id`), refused while the agent shows
+  a dialog that an Enter would answer, has a tool pending that may be a prompt
+  just opened, or cannot be read at all (`no hooks`, or a transcript the machine
+  cannot open) (`dialog_open`, with `dismiss_dialog` to press Esc first),
+  and run at most once per `request_id`: a retry after the phone slept is
+  answered from the server's ledger (`GET api/actions/recent`, and an `action`
+  frame). A restart or a switch answers how its replacement began and what did
+  not happen (`how`, `failures`, in `fleet restart|switch --json` too), and the
+  page says when the replacement's first line was not typed, so it needs a Tell.
+- **Reads by project.** `api/board`, `api/tasks`, `api/memory` and
+  `api/explainability/<agent>` take `?project=` as `api/fleet` does, each cached
+  per project; `api/transcript/<agent>` takes `?width=`; pane subscriptions name
+  their project. Reads are built by the builders `asq --json` prints with
+  (`projects_json`, `agents_json` and `board_json`), with two differences: the
+  board carries its newest 200 events where `asq board --json` has five, and
+  `api/projects` adds each project's agents counted by state.
+- **`GET api/explainability/<agent>`**: `{available, reason?, model?, tokens_in?,
+  tokens_out?, policy?, updated_at?}`, `available` only when the explainability
+  SDK is present and no doctor check is RED. It never raises; an unknown agent
+  is a 404 like `panes/<agent>`.
+- **Writes, off until `asq remote allow-write on`.** `send-keys`, `note`,
+  `task/claim`, `task/done`, `project/switch|add|remove`, the agent actions,
+  quick answers and extend answer 403 `read_only` until then. Each write that
+  goes through is one line in `~/.aisquare/remote-audit.log` (owner-only), with
+  control characters scrubbed; a tell keeps its first 120 characters, a note or
+  a task change the author it claimed. When the log will not write (a full
+  disk, a home that is not writable) the write still answers, so that the phone
+  does not send it again, and the server's log warns with the line that is
+  missing. A running server re-reads
+  `~/.aisquare/remote.json` when its content changes, so `allow-write`,
+  `regenerate-password` and `revoke` from another shell reach it within a second.
+- **`aisquare team bind <role> --env-file KEY=PATH`: a variable whose value is
+  read from a file at every launch**, for a secret. config.toml, the launch
+  banner and `team spawn`'s printed command hold the path, never the value
+  (the printed command reads the file itself, in a subshell, with the launch's
+  reader, `aisquare team read-env-file`: its trailing newlines and any
+  byte-order mark dropped, a token saved as UTF-16 read too, and an empty,
+  blank or unreadable file stops the line before the role starts). It is for the
+  reviewer, which keeps its shell: bound to a GitHub token that cannot write
+  the repository's contents, it can review and comment but not push or merge
+  through `gh`. [docs/fleet.md](docs/fleet.md#a-reviewer-that-cannot-push)
+  gives the token's permissions and the branch protection to pair it with, for
+  the pushes that token does not govern. It is opt-in; the reviewer's default
+  stays Bash with Edit, Write and NotebookEdit denied. A file that cannot be
+  read, or holds nothing, refuses the launch (`env_file_unreadable`) rather
+  than start the role on this shell's credentials. `fleet spawn`, `restart`
+  and `switch` refuse before a window opens or a running agent is stopped.
+  `team bind` refuses a KEY no shell can set (`--env` too: letters, digits and
+  `_`, not starting with a digit), as `team spawn` prints each as a shell
+  word, and `team spawn` refuses one written into config.toml by hand.
+  `team bind` reads the file when it binds, and keeps a relative PATH as the
+  full path of the file it read; a relative path written into config.toml by
+  hand refuses every launch, wherever it is launched from. A key lives in `env` or
+  `env_files`, never both, and `--unset` removes it from either. `team
+  harness` names the key, and `team harness --json` carries `env_files`, each
+  key to its path, on every role, one whose file cannot be read included: the
+  role's refusal is a ⚠ line under it, and `refusal` in `--json`. `aisquare upgrade --version` to a release
+  before 0.8.1, which ignores `env_files`, names each role bound to a file and
+  its variables before it moves back (`env_files_dropped` in `--json`): there
+  those roles launch with whatever value the launching shell has.
+- **Project nicknames.** Free text on one line, up to 255 characters:
+  `aisquare project rename "API: auth rewrite"` (`--clear` drops it), or
+  double-click a card's title (or `F2`) and type, where Enter or a click away
+  saves and Esc cancels. Emoji are fine, joined ones (👩‍💻, 🏳️‍🌈) included. A
+  name with an invisible formatting character (a bidi control, a zero-width
+  space, a variation selector after a letter) is refused, as are bytes the
+  terminal could not decode. The project's *Settings* tab sets it too. The sidebar,
+  `project list`, `fleet ls` and `project info` show it, and `--project`
+  accepts it when no id prefix, folder name or codename matches first. Cards no
+  longer show the codename; the *Settings* tab names it, beside the tmux session
+  and branch prefix it gives.
+- **A card's menu**: **⋯** on hover or on the selected card, `.`, or a
+  right-click. It holds *Rename*, *Pin* / *Unpin*, *Open settings* and *Remove
+  from fleet…*, which asks first and then forgets the project as `project
+  forget` does. Its folder and history are kept, and `aisquare project onboard
+  <root>` brings it back. A project with live agents is refused, naming them.
+  So is a hub another project's agents read, live or stopped (a restart starts
+  a stopped one under its hub again): `project forget` refuses it, naming every
+  project that reads it, each with what frees it, and `project prune` keeps it,
+  `--purge` included, naming those projects, unless their agents are all
+  stopped and the same prune drops them too.
+- **⚙ Settings in the sidebar** opens a hub with **App settings**,
+  **Accounts** and **Doctor**. Under it is a dim status line,
+  `● aisquare  ● 2× claude ⚠`:
+  - The aisquare dot is green when signed in, red when signed out, grey when
+    not known.
+  - The claude dot is the room **left** across your usable accounts. Each
+    account is `100 − max(session % used, week % used)`, and the dot shows the
+    average: green over 50 %, yellow 25–50 %, orange-red 5–25 %, red under 5 %,
+    💀 none left. Grey means usage could not be read: offline, a locked macOS
+    Keychain, or no usable account.
+  - `N×` counts the usable accounts. ⚠ says an enabled account needs a login:
+    signed out, or its token expired or was refused. These are the Accounts
+    page's *Log in* rows. The dot is red when no account is usable for want of
+    one.
+
+  It reads through the usage cache every minute, never on the UI's two-second
+  tick, and follows the Accounts page as soon as the page reads. A click on it
+  opens Accounts, and `?` explains it.
+- **App settings**: the machine-wide settings that were on every project's
+  *Settings* tab (each role's permission mode, worktree and account, the escape
+  key, the agent cap, the worktree directory, native agent teams, and the
+  `[accounts]` settings). *Save* writes only the settings changed on the page,
+  so one changed in a shell while it was open is kept. It also has **Reset all
+  settings to default**, which asks first.
+- **`aisquare config reset [--yes]`** moves `config.toml` aside to
+  `config.toml.bak-<stamp>` beside it, so moving it back undoes the reset, and
+  every setting is its default again. Through a symlink, the file it points at
+  is copied aside and emptied. It asks at a terminal, does a dry run off one,
+  and never prunes earlier backups. With no file, or one that holds no setting,
+  it says `nothing to reset: <path> holds no setting…`, asks nothing and moves
+  nothing. **`config list --overrides`** shows what you changed, and nothing
+  else.
+- **Rename a Claude account in place** on the Accounts page: double-click its
+  name, or press Enter or F2 on its row. An account's name is free text up to 64
+  characters (`Work laptop`), with case kept and matched ignoring case. A name
+  is refused if it is only digits, has an `@`, has an invisible formatting
+  character, or is another slot's own name (`account 3`, `plain claude`).
+  Emoji are fine, joined ones included, as in nicknames. Left blank, it clears
+  the name. `aisquare accounts alias 2 "Work laptop"` sets the same name, and
+  `--account "work laptop"` takes it (#258).
+- **Log in** on an account's row whose login is missing, expired or rejected.
+  The status beside it says which. The sign-in pane waits for a fresh login,
+  not the stale one on disk, then the row reads its usage again.
+- **↻ Refresh usage** on the Accounts page asks every account now. Beside it, a
+  dim line says how old the readings are:
+  - `last refreshed 3m ago`, from the oldest reading actually read.
+  - `· last try failed 2m ago` when the endpoint did not answer.
+  - An account that needs a login counts in neither part.
+
+  A try that fails with nothing to say about the login (the endpoint
+  unreachable, an HTTP 5xx) keeps the account's figure on its row while that
+  figure is under five minutes old, and the line says the try failed. A
+  refused token shows at once.
+- **`--refresh`** on `aisquare accounts usage` and `accounts list --usage`
+  fetches now. Otherwise both share a five-minute cache with the Accounts page
+  and say how old their figures are (`usage as of 3m ago (percent USED;
+  refreshed at most every 5 min)`). A failed try is said as on the page
+  (`usage as of 3m ago · last try failed 1m ago`), and `no usage read · last
+  try failed just now` when no account could be read.
+- **Task numbers.** Every task has a number on its board, `#1`, `#2`, … in the
+  order tasks were added there. It shows on the board, in `task list` and
+  `task show`, in every receipt (`✓ claimed: #12 tsk_… [doing] …`), and in the
+  briefing and the wake-ups. Any task command, `--needs`, `--task` and the MCP
+  task tools take `12` or `#12` for the caller's board, or the id as before.
+  `12` and `#12` are only ever a number on the caller's board: a board with no
+  task #12 says `no task #12 on this board (<name>)`, and never takes another
+  board's task whose id ends in `12`.
+- **The board explains itself.** The tasks table is `#`, a status icon and the
+  title, cut to the width there is, so it never scrolls sideways:
+  - ○ to do
+  - ⧗ waiting on a task it needs
+  - ▶ doing
+  - 👀 in review
+  - ⛔ blocked
+  - ✓ done
+  - ✗ dropped
+
+  The detail opens with `#12 · doing · tsk_… · claimed by <who> (lease until
+  14:05) · for <role>`. `?` lists the board's keys and the icons, in `board -w` and in
+  `asq`, where it now opens from the board too.
+- **Every line in the board drags to resize**: beside the tasks column, above
+  the detail, and between the sessions and the tasks. A double-click puts a
+  line back. The sizes are kept in `state.json`, one for every project's board.
+- **The Doctor page** has **Re-run checks**, and a header that names what it
+  checked: `checks for <project>` or `checks for this machine`. What the last
+  run found shows beside the sidebar's settings row (`⚙︎ Settings  ✗ 1  ⚠ 2`,
+  nothing when all is clear) and on the hub's Doctor link, so the run at start
+  is seen without opening the page. Opening the page shows that report while
+  it runs the checks again (`… running the checks again`).
+- **A folder trusted on one Claude account is trusted on all of them.** Claude
+  Code asks "trust this folder?" once per account, and its highlighted answer is
+  *No, exit*, so agents on the other accounts sat at the question and the first
+  prompt typed into it ended them. A launch (`fleet spawn`, `restart`, `switch`,
+  `aisquare launch`, `accounts run`) now copies the folder's trust from any
+  account that has it into the one it runs on, and the receipt says so. Only
+  that entry of the account's `.claude.json` is written, under Claude Code's own
+  lock, and never a trust nobody gave. `aisquare accounts trust [<dir>]` trusts
+  a folder on every account at once; `--sync` shares every trusted folder. An
+  agent still at the question reads **🔔 NEEDS YOU** (*waiting for folder
+  trust*) in `fleet ls`, `asq` and the Remote, and a spawn never types its
+  prompt into it. On by default: *share folder trust* in App settings
+  (`accounts.share_trust`).
+- **One settings.json for every account, if you want it.** *share settings.json*
+  in App settings (`accounts.share_settings`, off by default) links each
+  managed account's `settings.json` to the plain claude's at launch, keeping its
+  own beside it; `aisquare accounts settings --sync` does it now and
+  `--unshare` undoes it. Logins are never shared: `.claude.json` and
+  `.credentials.json` stay per account, and a `settings.json` that sets an API
+  key, a token, a cloud provider or a forced login is left as it is.
+
+### Changed
+- **A directory becomes a project only when someone adds it** (#139). 0.8.0 gave
+  every directory a hooked Claude Code session ran in a project row, captured and
+  unlisted, with its prompts, turn rows and board, and a saved `a` toggle in `asq`
+  listed them all. Now `[projects] capture` is off by default: a project is what
+  `aisquare project onboard`, `init`, `project link` or `switch`, Welcome or `+` in
+  `asq`, `team on` or a fleet spawn added, or what a manager added when asked.
+  Anywhere else the hooks record nothing: no project row, no prompt, no turn row,
+  no board, no record for the Explainability spool. A board write from there
+  (`note`, `task add`, `task next --claim`, `team signal`), the MCP server's
+  session and `explainability use` are refused with the command that adds the
+  project (`--json` error `not_added`); board reads answer empty and write
+  nothing. A fleet spawn adds the project it starts in, and `fleet attach` or a
+  stop asks for a codename without writing a row. `asq` lists no captured row and
+  `a` is no key; doctor names `aisquare project prune --captured-only --older-than
+  0` for the rows left from before, and apart from them the rows that prune keeps
+  (saved context, live agents, or a hub another project's agents read), each
+  with what frees it. `aisquare config set projects.capture true`
+  restores 0.8.0's capture.
+- **`aisquare upgrade` warns, and `aisquare uninstall` refuses, while Remote is
+  on in another process**, as they already do for running fleet agents. Both
+  name it: `aisquare remote serve` in another shell, or another asq's R panel,
+  with its port and process id, and say how to turn it off. An upgrade replaces
+  the install under that server, which goes on running the old release. An
+  uninstall would leave it serving with nothing left to turn it off, sign its
+  phones out or switch its writes off. asq's Update and Uninstall run the same
+  checks, and asq turns its own Remote off before either starts. `--json` gains
+  `remote` in both plans, and the refusal's error is `remote_on`. To be named,
+  a Remote writes `remote-serve.json` beside its lock in `~/.aisquare`.
+- **`fleet ls --json` and `fleet status --json` carry `socket_at` on every
+  agent.** 0.8.0 added it and its notes left it out. It is the path the agent's
+  tmux server is asked at (`tmux -S`). It is `null` where the server is asked by
+  its socket's name (`tmux -L`): a row spawned before 0.8.0, which recorded no
+  path, or one whose recorded path is where `-L` finds that name from this
+  shell anyway. The field is additive, and Remote's `api/fleet` carries it too,
+  as it carries those agents. They carry `held` too, `true` for a row held as
+  another tmux server's (see Fixed): its state is `unknown` whatever its board
+  says, and its pane id is no pane of its own, so asq shows none under it.
+- **The defaults**: `[accounts] pick = "headroom"` (a launch takes the first
+  account in priority order with room) and `on_limit = "switch"` (an agent
+  that hits its limit is moved to one with room). See Upgrading.
+- **A launch's headroom pick reads the usage cache**, where it asked every
+  account on every launch. It uses a reading up to a minute old, so a burst of
+  spawns asks once, and reads nothing when only one account could be picked. A
+  hand-over (`fleet switch`, or an agent moved off its limit) and `doctor
+  --live` still ask the endpoint now.
+- **The sidebar** is your projects, then ⚙ Settings and its status line. The
+  Accounts and Doctor sections and the doctor summary at the bottom are gone;
+  both pages live under ⚙ Settings. A page you had open under them comes back
+  there at the next launch.
+- **A project's *Settings* tab** holds only that project: its nickname, and
+  its fleet id. The machine-wide settings moved to App settings.
+- **The doctor runs** once when `asq` starts, about the project it reopens, and
+  when its page opens, about the project selected last. It also runs on *Re-run
+  checks*, after one of its fixes, and when Welcome connects Claude Code. It
+  never runs on a selection, a tab or `r`, which now refreshes the fleet only.
+  A project page has no Doctor tab.
+- **A project's Explainability tab is *AISquare*.** It opens on an
+  *Explainability* heading; nothing in it changed.
+- **The Accounts page is an aligned table**, one row per account:
+  - its columns are ★, the slot, the name, who is signed in, the plan, the
+    session and week windows (a bar and the percent **used**), the status with
+    *Log in* beside it, then when each window resets.
+  - a value too long for its column ends in `…`, and hovering shows the rest.
+  - on a narrow page, the table scrolls sideways as one, header included.
+  - every button can be reached at any width.
+
+  The page reads usage through the shared five-minute cache, where it used to
+  ask once a minute.
+- **Usage says "used".** Every figure is percent USED (40 % used is 60 % left),
+  and says so:
+  - `accounts usage` and `list --usage` head their columns `session used` and
+    `week used`.
+  - the headroom notes read `account 2 20% used (80% left)`.
+  - `doctor --live` says `85% used is the line`.
+  - the manager's cycle says it too.
+- `fleet switch` names both accounts as the board does, a renamed one by its
+  name.
+- A launch on a machine with no signed-in account no longer prints `headroom:
+  no enabled, signed-in account to pick from` every time. A hand-over still
+  says it.
+- **`fleet reap` removes an ended agent's worktree once nothing in it is found
+  only there.** The rule was "its branch is merged into the default branch", so
+  a tree pushed to an integration branch (`push HEAD:feat/…`) was never
+  removed. A tree now goes when it is clean and its commits are on the default
+  branch or pushed to **any** remote branch. Its branch stays. Every `reap`
+  deletes a `fleet/…` branch an ended agent's row recorded, and no tree has out,
+  once the default branch has its work (its tip, or, pushed, every change it
+  makes, after a squash or rebase merge), and keeps one with commits the default
+  branch lacks, so a coder spawned again for its task checks it out and carries
+  on with them. A kept branch is named on every reap, with its repo and `git -C
+  <repo> branch -D` to drop it. Reap never deleted a branch before, and deletes no other: not one
+  made by hand, nor one an agent left for another, nor one whose tip moved after
+  reap judged it (the next reap judges it again), nor one a worktree is rebasing
+  or bisecting, which `git branch -D` refuses too. A tree with uncommitted changes, an untracked file that is not
+  ignored, or unpushed commits is kept and named with why; push it, and the
+  next `reap` removes it. `--json` adds `worktrees_kept`, and `branches_deleted`
+  and `branches_kept` (each `{repo, branch}`), beside `worktrees_removed`. A live agent's tree is never
+  touched, as before. A restart or switch of an agent whose tree is gone —
+  reaped, or deleted by hand — makes it again on the branch it was on, which
+  its row records (whatever its name, and through any `git worktree prune`),
+  and is refused, saying so, only when that branch is gone too.
+- **`fleet stop` says** that `fleet reap` removes the agent's worktree once its
+  work is pushed, for an agent that had one.
+- **The role cycles clean up.** The manager's cycle says to stop (`fleet stop`)
+  and reap (`fleet reap`) an agent whose task is done with no queued task that
+  fits it, and to reap again when the validator's gate is PASS. Coder, tester,
+  runner, reviewer, validator and ui-tester are told to remove the scratch
+  worktrees and temp dirs they made before they finish or go idle, never the
+  worktree they were spawned in, which is reap's.
+- **`project prune` reads why each candidate is one again before it drops
+  anything**, as its confirmation may sit open meanwhile; 0.8.0 re-read only
+  live agents. One no longer stale is kept and marked as changed since the plan:
+  a capture added on purpose or given an entry, or a missing root back on disk.
+  0.8.0 dropped it all the same, and under `--purge` the entry just saved went
+  with it. One stale for another reason the prune asks for is dropped under that
+  reason: a worktree whose tree went is dropped as missing by a plain prune.
+  Asked for `--worktrees` alone, such a worktree is kept, and the row and the
+  summary say its root went and name the `aisquare project forget` that drops
+  each (with `--purge` after a purging prune). Under
+  `--purge`, a candidate another shell forgot meanwhile is purged if it is
+  still stale, and otherwise left forgotten and said so. `--json` gains
+  `changed`, the ids kept as changed since the plan, `root_gone`, those of them
+  that are worktrees whose tree went, and `forgotten`, the ids forgotten
+  elsewhere since the plan that the run left forgotten. An id the run did not
+  drop is in `kept`, `changed` or `forgotten`, or in none for a row purged since
+  the plan, and the table says which.
+
+### Fixed
+- `fleet spawn` no longer starts a tmux server at a socket path a running
+  server lost. systemd-tmpfiles or a logout can take the socket file from
+  under the fleet's server, which runs on; `tmux -L` then found no file and
+  started a second server there, which answered for the old rows from then on,
+  while their agents kept running where nothing could reach them. A spawn
+  into that path is now refused, for every project on the socket, naming the
+  agents, `SIGUSR1` as the way back to their server, and `fleet shutdown
+  --forget` for agents that are not running. A stale socket file (the server
+  exited) and rows from another boot still get a fresh server. `fleet restart`
+  and `switch` give the same refusal before they stop the agent, rather than
+  after, which left it down. asq's Accounts sign-in window, which opens on the
+  fleet's server too, is refused the same way, and over a stale socket file it
+  takes the same step a spawn takes (below): every window at the fleet's
+  socket now opens through one entry that asks both.
+- A tmux server that took the socket path from a running one no longer
+  answers for that one's agents. Every spawn now records when its server
+  started (`fleet_agent.server_started_at`, schema v26), and a server at the
+  row's socket that started at another time is not the row's: `fleet ls` and
+  asq show the row as `unknown (another tmux server on its socket)`, `reap`
+  leaves it and names it with the way out (with `--server-down` too, and under
+  `held` in `--json`), `fleet stop` and `restart` refuse it
+  with the way back, `fleet tell` and the phone's Tell file a board note to it
+  rather than type into the pane the newcomer gave its id, Remote's needs-you
+  gives it one `lost` card saying it is out of reach (not prompts whose every
+  answer is refused, nor nothing once its board goes stale), `fleet shutdown`
+  leaves it live until `--forget` (and spares none of its project's sessions on
+  the server that took its socket, where its agent does not run), and
+  `upgrade` and `uninstall` count it as running and name `--forget`
+  (`uninstall` says to send its server `SIGUSR1` only once no server answers
+  on that socket, as tmux's handler takes the path from whatever listens). A
+  server that exited (a `kill-server`, a crash) leaves its socket file with
+  nothing listening, and the next spawn, in any project, or asq's Accounts
+  sign-in window, sees it before it starts a server there: that server's rows
+  read lost from then on, as in
+  0.8.0, not held under the new one, so `reap` records them and `restart`
+  brings them back; the receipt names them. Before,
+  the newcomer's missing pane read as the row's pane gone, and `stop`,
+  `shutdown` and `reap` ended the row while its agent ran on, where nothing
+  could reach it. The doctor says the same for such a row, instead of
+  prescribing `reap --all` for a pane that is gone.
+- `fleet reap --server-down` no longer marks a row lost whose agent may still
+  run. tmux reports no server for a socket file taken from under a running one
+  too, and the flag marked such rows lost under their agents, on a server under
+  another `TMUX_TMPDIR` as well; only the doctor warned. It now asks each row
+  the one rule `stop`, `shutdown` and `uninstall` ask, and ends only a row
+  from another boot or one whose socket file has nothing behind it. The rest
+  are left live and named, with `SIGUSR1` as the way back to their server and
+  `fleet shutdown --forget` as your word that they are not running; `reap
+  --json` lists them under `held`. The doctor's advice says the same.
+- `fleet attach` with no live agent finds an ended manager's lingering window
+  where its row recorded its server (`tmux -S`), the latest to end first, and
+  only then falls back to `tmux -L`. From a shell under another `TMUX_TMPDIR`,
+  the 💤 manager's last screen stood on its server while attach said "nothing
+  to attach to".
+- `fleet ls` and asq's tick work out where each agent's server is asked once
+  per row per listing, instead of about five times, each resolving two paths.
+  The answer itself is still never cached across listings: a stale "same
+  socket" would send `tmux -L` to another server.
+- The `aisquare uninstall` and `upgrade` refusals name a running agent by its
+  project's root path when `<label> (<folder>)` would collide: two projects in
+  folders of one name (`~/work/api`, `~/oss/api`) each with a manager printed
+  `manager (api)` twice. Every other row keeps the folder. The `live_agents`
+  strings in `uninstall --json` and `upgrade --json` change the same way.
+- `b` on the board brings the tasks column back however often it is pressed.
+  Hiding the column took the keyboard with it, so the next `b` went nowhere.
+- On macOS, usage works for every Claude account. Claude Code keeps each
+  account's login in the login Keychain, which aisquare did not read, so every
+  row said only that the credentials were there. aisquare now reads
+  that item for the plain claude and every managed slot, through
+  `/usr/bin/security`, as Claude Code names it, and falls back to
+  `.credentials.json` when there is none. `aisquare accounts usage`, `accounts
+  list --usage`, the Accounts page, the status line's dot and headroom picks
+  all read it, through the five-minute cache. A missing login offers Log in,
+  and an expired one says so, as on Linux. A locked Keychain, or one that
+  refuses aisquare, says so on the row with what to do. It is not asked again by
+  itself, so its unlock dialog does not come back every tick: opening the
+  Accounts page, **↻ Refresh usage**, a Log in or an `aisquare` command asks it
+  again. Such an account's `token_state` in `accounts list --json` is the new
+  value `unreadable`. The token is never printed or logged.
+  - Known limit: a Log in on the plain claude (slot 1) from asq's Accounts page
+    may not close by itself when your shell's `CLAUDE_CONFIG_DIR` is written
+    with `~`, relative or with a trailing slash. The window's Claude Code then
+    stores its login under another Keychain item than the one aisquare reads.
+    An absolute path with no trailing slash, or no `CLAUDE_CONFIG_DIR`, is not
+    affected.
+- Under `AISQUARE_TEAM_HUB`, an agent keeps the board it was spawned under,
+  whoever acts on it. Each agent's board is now recorded when it is spawned
+  (`fleet_agent.board`, schema v32), and is no longer worked out again from the
+  environment of whoever asks:
+  - `fleet restart` and `fleet switch` from `asq`, the phone or a shell
+    without the hub no longer refuse an agent's task with "belongs to another
+    project's board". The replacement reads the same board as the agent it
+    replaces, and its window gets the hub the agent's own window was given
+    (recorded at spawn, `launch_spec.hub` in `fleet ls --json`), not the
+    caller's. An agent spawned before 0.8.1 recorded none: its replacement
+    gets the hub that gives its board, none for its checkout's. Its project's
+    own board, where the checkout is another's, is kept, under the project's
+    root as the hub, when the agent's session registered on it or its task is
+    on it; otherwise the replacement reads the checkout's. A task the
+    replacement could not take is refused before the agent is stopped.
+  - `fleet tell` to an agent that is not at its prompt files the note on the
+    board the agent reads, from the phone, `asq` or a shell without the hub
+    too. Before, it went to the caller's board, was reported filed, and the
+    agent never saw it.
+  - An agent's exit is announced on the board its manager reads, even when it
+    ended before its session registered and was reaped by a process with
+    another hub, or none.
+  - `fleet spawn --task` in a project rooted in a sub-folder of its
+    repository, or at a linked worktree, finds the task on the checkout's
+    board, where that project's manager and sessions add tasks.
+  - `fleet pause` sets the `fleet-paused` signal where the project's manager
+    reads, or would next: the board its newest manager was spawned on (running
+    or stopped, since a restart hands it on), its checkout's, and the one a spawn
+    from where you run it gives; and the boards its running agents read, where
+    a manager spawned beside them reads. A board only an old agent read is left
+    alone. `fleet
+    resume` clears the pause wherever it is on, and only there, and `fleet
+    shutdown` clears it too, whichever agents are still running, so the next
+    manager spawned there is not paused. A pause signal that does not parse is
+    named and nothing is written, on pause and resume alike, and so is one a
+    locked store refuses on any board, with "try again": every board's signal is
+    written in one transaction, or none is. A store found damaged says so and how
+    to move it aside, as every other command does. On a board other projects read too
+    (the hub's, under a hub) the signal is the project's own,
+    `fleet-paused.<project id>`, and its manager's cycle names it, so pausing,
+    resuming or shutting down one project leaves the others' managers alone.
+    A manager whose project could not be told is given that name to fill in,
+    not the bare `fleet-paused`, which under a hub is the hub project's own.
+  - A board write by a writer with no agent row (a note to the manager from
+    the phone, a question from your own shell, an MCP client's task update)
+    wakes the waiting manager that reads that board. A task update wakes the
+    manager of the agent working the task (the one spawned for it, else the
+    one that claimed it). Otherwise, with several managers on one board, it
+    wakes the one whose project holds the writer's directory, the innermost
+    when one project is rooted inside another. Before, it woke nobody. The
+    phone's task update that names no project has no directory, and picks
+    none: the folder Remote was started in is not the phone's.
+  - Remote's needs feed finds an agent's exit, its failed turns, its
+    usage-limit events and its questions and results on the board the agent
+    was spawned under, even when Remote (or `asq`, whose R panel starts it)
+    runs under another hub, or none. A coder whose hand-over never started its
+    replacement, or whose turn failed, is a card again, a manager's failed
+    hand-over says so, a parked agent's limit card keeps its id, and a
+    coder's question there is a card unless its manager reads that board.
+    The phone's Reply to such a card is posted on that board too, where the
+    agent reads it, and the card stays when the reply could not be posted. A
+    Reply to the card of a session no agent row holds (one you launched by hand)
+    is posted on the board the card was read on, which the machine looks up by
+    the card; a card gone from the feed is refused, and nothing is posted: the
+    card is marked gone, and Post again sends the words as a note with no card,
+    as Tell again does for a Tell, saying first which board that note goes to.
+  - Remote's Board and Tasks tabs show the board the project's agents read, as
+    recorded when they were spawned, and a note from the Board tab is posted
+    there, even when Remote runs under another hub, or none. A claim or a
+    close of a task on that board by id finds it, and `done #12` reads #12
+    there, not on another board that happens to have a #12. With no agent
+    running, they show the board `aisquare board` shows in the project's
+    directory, not the board its last agents read.
+  - Under a hub, a live manager keeps its own agents' questions and results to
+    it, their crashes and their failed hand-overs off the phone, and holds back
+    a usage limit's push, as it does without a hub. Before, each was a card and
+    a push while the manager was already woken for it. Another project's
+    agents' items, and posts by a session no agent row holds, are still cards,
+    each once.
+  - A manager is woken only for a write or an exit on the board it reads. A
+    coder spawned from a shell without the hub its manager was spawned under
+    writes on its project's board: its question used to wake the manager to a
+    delta without it, and the phone showed no card since a manager was live.
+    Now the manager is left alone and the phone shows the card, wherever
+    Remote runs.
+
+### Security
+- **One choke point.** Every request and every socket handshake passes the
+  token, auto-off, `Origin` (every write and socket must come from the page's
+  own origin; `X-Forwarded-Host` and `Origin: null` are never trusted), the
+  device behind the cookie, and a 64 KiB body cap, before any route sees it.
+  One body parser, field caps (2 048 characters a keystroke message, 8 000 a
+  note or tell), at most 4 sockets per device and a pane-capture pool of its own.
+- **Keys reach tmux as keys only.** `send-keys` accepts names from a fixed list
+  (no `;`, no flags, `C-c`/`C-d`/`C-l`/`C-o`/`C-r`/`C-u` only), text travels as
+  literal text, and a second Ctrl-C or Ctrl-D within 3 s is refused unless
+  confirmed; `core.tmux` ends flag parsing and escapes a trailing `;` for every
+  caller.
+- **Unlocking.** The passphrase is 4 words of 512 (about 36 bits), typed with
+  spaces, dashes or capitals as the phone likes. Unlocks are limited per client
+  (keyed on the real peer, never a client-supplied `X-Forwarded-For`) and to 20
+  failures in 30 minutes across everyone; a phone that unlocked before still
+  can, and `asq remote regenerate-password --new-link` also replaces a leaked
+  link.
+- **Devices, not cookies.** A device has a public id (`dev_…`) and its cookie is
+  stored only as a digest. It is signed out after 24 h idle (and unlocks back
+  into the same id, notifications included) and removed after 7 days. At most
+  32 are kept: an unlock past that removes the signed-out device unused longest,
+  and is refused (`too_many_devices`) while all 32 are signed in. Remote
+  off and auto-off revoke every device (sockets close 4410); `asq remote revoke
+  <id>` and `revoke --all` work from the machine, and a phone can sign itself
+  out or, with writes on, revoke another. `remote.json` moves to version 2 and
+  drops the sessions it held; a version aisquare does not know (a later
+  release's) is refused, never migrated, and never written over by a Remote
+  that was already running.
+- **`project/add`** accepts only a git checkout (or a folder of them) under the
+  home directory, never a hidden one.
+- **Where a notification leads** comes only from the panel's own ngrok, for the
+  tunnel it asked for to Remote's port, or `serve --public-url`
+  (`AISQUARE_REMOTE_NGROK_URL`), never from a request's `Host` or from ngrok's
+  local API, which any user of the machine can answer before the human's ngrok
+  does, or start a tunnel through. Without one a notification opens the page.
+- **ngrok without its inspector or its local API.** The panel starts ngrok with
+  `--inspect=false` and, merged over the human's own `ngrok.yml`, `web_addr:
+  false`, and says when its ngrok's API is on all the same; the docs and `serve`
+  give that advice: left on, ngrok keeps every request and answer, the
+  passphrase and every cookie included, on a local web interface any user of the
+  machine can read, and its agent API there starts and stops tunnels for anyone.
+
+## [0.8.0] - 2026-10-12
+
+**A first run you can follow, from an empty home to a manager and two coders,
+and an aisquare that upgrades and uninstalls itself.**
+- `asq` opens on Welcome: a project, Claude Code connected, then a manager and
+  two coders, all from the keyboard.
+- `aisquare upgrade` and `aisquare uninstall`, also as Update and Uninstall in
+  asq's Doctor.
+- A Claude Code plugin gives aisquare's memory hooks with no installer:
+  `/plugin install aisquare@aisquare-cli`.
+- `aisquare doctor` has a row for each coding agent, and with no Node the
+  codebase snapshot reads "off (optional)" instead of three warnings.
+- The README is a one-page front page, on GitHub and on PyPI, with a GIF of
+  the Welcome walkthrough; its long form moved into `docs/`.
+
+**Upgrading:**
+- From 0.7.0 or earlier, re-run the one-line installer, or run
+  `UV_PYTHON_DOWNLOADS=automatic uv tool install --force --python 3.13 --with tiktoken --refresh-package aisquare-cli 'aisquare-cli>=0.8.0'`.
+  Not `uv tool upgrade`: on a pinned install it silently does nothing. Both
+  replace the install and drop its extras; with the command, name yours, as in
+  `'aisquare-cli[serve]>=0.8.0'`. Under a uv cooldown (`exclude-newer`) that
+  still hides 0.8.0, the command stops with "No solution found" instead of
+  moving you back. From 0.8.0 on, `aisquare upgrade` does it for you and keeps
+  them.
+- The store migrates to schema v25 on first open, from 0.7.0's v24. The step
+  adds two columns to `fleet_agent`: `socket_path` and `boot_id`, the socket
+  each agent's tmux server listened on and the boot it started in, recorded at
+  spawn. `upgrade` and `uninstall` ask that socket whether the agent may still
+  run. An agent started before 0.8.0 recorded neither, so its socket is asked
+  where this shell's tmux looks, and it counts as running until `aisquare fleet
+  shutdown` ends it. Where its socket is gone it counts too, as `--forget` is
+  then the way, unless it started before this boot: a reboot clears `/tmp`.
+  0.7.0 opens a v25 store as it is, and the agents it starts record neither
+  column.
+- `aisquare agents connect codex` and `… cursor` now exit 1 with "can't connect
+  … yet", instead of reporting a connection that installed nothing. One 0.7.0
+  recorded no longer reads as connected; `aisquare agents disconnect codex` (or
+  `cursor`) clears it.
+
+### Added
+- `asq` opens on **Welcome**, the guided first run: use the folder you are in
+  or choose another, connect Claude Code (Welcome names the install command if
+  it is missing and offers the sign-in if it is signed out), then start a
+  manager and two coders, each a real Claude Code session. After a reboot,
+  *Start the coders* restarts the coders whose windows are gone (#248).
+- **The Claude Code plugin route**: in Claude Code, run
+  `/plugin marketplace add AISquare-Studio/aisquare-cli`, then
+  `/plugin install aisquare@aisquare-cli`. Its six hooks run the installed
+  CLI, or `uvx` when there is none, and stand down where `settings.json`
+  already has aisquare's hooks, so nothing runs twice. See
+  `docs/claude-code-plugin.md` (#249).
+- **`aisquare upgrade`** reinstalls the one-liner's uv tool install in place,
+  keeps its extras and rewrites the hooks without re-importing `CLAUDE.md`. It
+  never moves an install back to an older release, under a uv cooldown either,
+  and says when the release you have is the newest the cooldown allows.
+  `--check` says whether PyPI has a newer release (under a uv cooldown, one
+  the cooldown allows), any other install is shown the command that updates
+  it, and fleet agents still running are named before their hooks' program is
+  replaced (#251).
+- **`aisquare uninstall`** takes aisquare's hooks out of every Claude Code
+  directory, then removes the package of a uv tool install, whatever it was
+  installed from; any other install, and any install on native Windows, is
+  shown the command that removes it. It keeps `~/.aisquare` (your memory and
+  boards) unless you add `--purge`, shows its plan and asks first, and
+  `--dry-run` removes nothing. An enabled aisquare plugin, which keeps running
+  aisquare, is named with the command that removes it, and `--purge` waits
+  for it (#253). `--purge` also deletes the one file aisquare keeps outside
+  the home: the plugin's answers about uv, in `~/.cache/aisquare`.
+- `aisquare fleet shutdown --forget` ends on your word the rows of agents it
+  cannot reach, for agents you know are not running: a server whose socket
+  file is gone, or every row where tmux cannot be used here, but never a row
+  whose socket a server still answers on. Without it, `shutdown` leaves such a
+  row live and says what to do, as `aisquare uninstall` still counts it. The
+  plan it asks you to confirm reads the run's own verdict for each row: a row
+  another tmux server answers for is shown recorded lost under `--forget`,
+  never stopped, and `--json` carries the run's reason for each `lost` row
+  under `lost_why`. Uninstall names `--forget` for those rows, which it otherwise refused with no
+  way out. Every fleet command (`fleet ls` and asq's tick, `tell`, `stop`,
+  `restart`, `reap`, `shutdown`) and the doctor ask each agent's tmux server at
+  the socket its row recorded, so one started under another `TMUX_TMPDIR` is
+  found and stopped from any shell, and another server on the same socket name
+  is never taken for it: a dead pane there no longer ends a running agent's
+  row.
+- **Update and Uninstall in asq's Doctor** hand the terminal to
+  `aisquare upgrade` and `aisquare uninstall`, which show their plan and ask;
+  after an update, asq reopens on the version just installed (#254). Work
+  still writing (a fix, a start, a sign-in) is named, and they refuse until it
+  ends; every other read still running (the accounts, the doctor, a status)
+  is waited out, and none starts meanwhile. Only a pending AISquare sign-in,
+  which a quit cancels with nothing stored, is not waited for. A wait past
+  10 seconds names what still runs, and a second press stays in asq, which
+  then reads what it held back meanwhile.
+- **A doctor row for each coding agent.** Claude Code keeps its one-click
+  Connect, Codex and Cursor say what was found and that aisquare cannot
+  connect them yet, and "is Claude Code connected?" is one shared check that
+  doctor, `agents list`/`status`, the Accounts page and Welcome all read
+  (#247).
+
+### Changed
+- The README is a front page under 250 lines whose every link is absolute, so
+  it renders on PyPI too; its long form moved verbatim into `docs/` (#245).
+- One identity sentence, the same in the README, on PyPI and in `--help`, held
+  together by a test; Quickstart 2 walks through Welcome (#255).
+- With no Node, the `repomix`, `snapshot` and `tiktoken` doctor rows, `init`
+  and `project onboard` say snapshots are "off (optional)", and the Pack
+  button that could never turn green is gone; the installer still exits 2
+  when its own Node install failed (#244).
+- PyPI lists aisquare as Beta, `SECURITY.md` says only what the code does,
+  issue templates send questions to Discussions, and CONTRIBUTING has a
+  "Where to start" (#246).
+- The README's GIF is rendered from `docs/demo.tape` (`docs/demo/render.sh`),
+  and a walkthrough that no longer matches the UI fails the render (#250).
+- The demo GIF is the Welcome walkthrough, from an empty home to a manager and
+  two coders, with a stand-in agent (#256).
+
+### Fixed
+- `aisquare agents connect claude-code` and `aisquare init --agent claude-code`
+  connect a Claude Code from npm or Homebrew that has never started: they make
+  its `~/.claude`, as Welcome's Connect did, instead of saying it is not
+  installed.
+- `aisquare agents connect` and `init --agent` refuse a `settings.json` that
+  is not valid JSON, that you may not write, or that links into a folder that
+  is gone, and a `CLAUDE.md` they cannot read, and name the file, instead of
+  rewriting `settings.json` with aisquare's hooks and nothing else. The
+  doctor, Welcome and `agents list`/`status` name such a file and why, one
+  they cannot even look at too, instead of offering a Connect that would fail,
+  calling the hooks missing, or ending in a traceback. The doctor and Welcome
+  also name a `CLAUDE_CONFIG_DIR` in a home this machine does not have, and
+  what to change before starting asq again, instead of offering a Connect that
+  would fail.
+- `aisquare agents disconnect` refuses, naming the file, to leave aisquare's
+  hooks behind in a `settings.json` it cannot rewrite or read, instead of saying
+  ✓ while they stay; the directory stays recorded until it can take them out.
+- A Claude Code config dir this home connected with `--config-dir`, and that
+  was since removed or became a symlink loop, reads as gone in the doctor,
+  with the `aisquare agents disconnect claude-code --config-dir` that forgets
+  it, and `agents list` names it with the system's own error. The one sessions
+  from this shell read is remade by Connect when it was removed (with `claude`
+  on PATH), as on a first start. Turned into a link that leads nowhere, or
+  under one, it is named with the path that blocks, and the doctor and Welcome
+  offer pointing `CLAUDE_CONFIG_DIR` at a directory you can write and starting
+  asq again, instead of a Connect that would fail.
+- `aisquare doctor`, `status` and `agents list`/`status`/`scan` answer when
+  `CLAUDE_CONFIG_DIR` is in a folder you cannot enter, instead of ending in a
+  traceback with nothing on stdout under `--json`. The doctor also names a
+  `CLAUDE_CONFIG_DIR` that is a file (such as `~/.claude.json`) beside a
+  connected `~/.claude`, where its row read connected.
+- The one-line installer no longer tells you to sign in to Claude Code for a
+  hooks problem signing in cannot fix: an unexpected Claude Code state exits 2
+  and prints the doctor's own detail and fix. With `--no-agent`, it leaves
+  Claude Code alone: its state is named, never counted against the run.
+- The Accounts page could say `usage: …` for up to a minute after it opened;
+  it now reads usage on its first frame. CI: the frequent Windows-leg flakes
+  are gone, CI also runs nightly and on demand, and ruff and mypy are pinned
+  (#252).
+- `doctor`'s `install` row no longer sends a developer's checkout to PyPI. A
+  venv first on PATH that is this process's own environment is judged by its
+  install route, not by the `.venv` in its path: an editable or local-source
+  install is green and named, a plain `pip install` into a venv keeps the
+  `pipx install aisquare-cli` advice, and so does a venv that is not this
+  process.
+- The fleet's reviewer can review again. 0.6.0 and 0.7.0 launched it
+  `--restricted`, which takes away Claude Code's Bash, so it could run none of
+  `gh pr diff`, `gh pr review` or its `aisquare` cycle, and no agent it started
+  could either. It now launches with its shell and without the tools that edit
+  files (`--disallowedTools=Edit Write NotebookEdit`); pushing and merging are
+  refused by its briefing. A config file holding that old default (any
+  `aisquare config set` saved it) loads with today's, once: the next save
+  records `config_version = 1` at the top of the file, so `--restricted` set
+  again afterwards is kept. A reviewer
+  started under those releases is restarted (`fleet restart`, `fleet switch`,
+  Restart) with today's arguments too, followed by any it was spawned with;
+  where today's do not deny the editing tools (`extra_args = []`, say), that
+  restart adds the denial, because its record cannot tell the old default from
+  a `--restricted` it was spawned with, and a fresh spawn gets every tool. A
+  reviewer `extra_args` you wrote yourself stays as written, and so do the
+  arguments of a reviewer it started: one led by `--restricted` restarts
+  without the shell, as a fresh spawn does.
 
 ## [0.7.0] - 2026-09-25
 
@@ -3217,7 +4184,10 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.4.0rc2...v0.5.0

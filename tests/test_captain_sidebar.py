@@ -18,7 +18,7 @@ from textual.pilot import Pilot
 from textual.widgets import Button, Static
 from textual.widgets._toast import Toast
 
-from aisquare.cli.ui.sidebar import Activatable, AgentRow, DoctorTitle, ProjectCard
+from aisquare.cli.ui.sidebar import Activatable, AgentRow, ProjectCard
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.project import ProjectView
@@ -129,7 +129,7 @@ def _remembered() -> str | None:
 
 @pytest.mark.parametrize("shown_by", ["the a key", "the saved setting"])
 def test_with_the_captured_directories_shown_the_home_is_still_no_card(
-    tmp_path: Path, script: Script, shown_by: str
+    tmp_path: Path, script: Script, shown_by: str, project_capture: None
 ) -> None:
     """``a`` lists the captured directories, and the home is one — it stays off the list.
 
@@ -239,20 +239,19 @@ def test_selecting_the_captain_leaves_the_doctor_global_not_scoped_to_the_home(
 
     async def body(pilot: Pilot[None]) -> tuple[tuple[str | None, ...], tuple[str | None, ...]]:
         app = fleet_app(pilot)
-        title = app.sidebar.query_one(DoctorTitle)
         row_for(app, coder.agent.id).activate()
         await until(pilot, agent_opened(pilot, coder.agent.id), what="the coder selected")
-        control = (app.doctor_scope, title.project_id)
+        control = (app.doctor_scope,)
         row_for(app, captain.agent.id).activate()
         await until(pilot, agent_opened(pilot, captain.agent.id), what="the captain selected")
         view = app.current_view()
         opened = view.id if view is not None else None
         await quiet(pilot)
-        return control, (app.doctor_scope, title.project_id, opened)
+        return control, (app.doctor_scope, opened)
 
     control, selected = drive(body)
-    assert control == ("prj_aaa", "prj_aaa"), "an ordinary agent scopes the Doctor to its project"
-    assert selected == (None, None, f"agent-{captain.agent.id}"), "the captain's: global"
+    assert control == ("prj_aaa",), "an ordinary agent scopes the Doctor to its project"
+    assert selected == (None, f"agent-{captain.agent.id}"), "the captain's: global"
 
 
 def test_restarting_the_captain_selects_its_new_row_and_keeps_the_doctor_global(
@@ -289,7 +288,9 @@ def test_restarting_the_captain_selects_its_new_row_and_keeps_the_doctor_global(
         await until(pilot, agent_opened(pilot, exited.agent.id), what="the exited captain selected")
         view = app.current_view()
         assert isinstance(view, AgentView)
-        await pilot.click(view.query_one("#agent-restart", Button))
+        # Pressed, as Enter on it would: the click guard (0.8.2) drops a mouse press this
+        # soon after the view came up, and the guard is not what is tested here.
+        view.query_one("#agent-restart", Button).press()
         await ui_suite.settle(app)
         await until(pilot, agent_opened(pilot, "agt_captain_new"), what="the new row selected")
         await quiet(pilot)

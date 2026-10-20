@@ -8,11 +8,12 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import tomli_w
 import typer
 from rich.table import Table
+from rich.text import Text
 
 from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
@@ -41,6 +42,15 @@ from aisquare.models import (
 )
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
+
+
+USAGE_ERROR: type[Exception] = typer.BadParameter.__bases__[0]
+"""Click's ``UsageError``, for a usage error raised by hand: exit 2, and ``{"error": "usage"}``
+under ``--json``. Click is vendored (``typer._click``), and ``import click`` is another
+package whose errors typer does not catch, so like tests/cli_tree.py this stays on the
+public typer surface: ``UsageError`` is the direct base of ``typer.BadParameter``. One
+copy: ``cli.global_flags`` and ``cli.fleet`` each reached it, and a change to the bases
+would have had to find both (review of #266, round 3)."""
 
 
 def refuse_conflicting_scope(every: bool, project: str | None) -> None:
@@ -225,7 +235,7 @@ def emit_project_detail(project: ProjectInfo) -> None:
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="bold")
     grid.add_column()
-    grid.add_row("name", project.root.name or project.id)
+    grid.add_row("name", Text(_project_name(project)))
     grid.add_row("id", project.id)
     grid.add_row("root", str(project.root))
     if project.linked_repos:
@@ -234,7 +244,31 @@ def emit_project_detail(project: ProjectInfo) -> None:
 
 
 def _project_name(project: ProjectInfo) -> str:
-    return project.root.name or project.id
+    """``services.project.display_name``: the nickname, else the directory, else the id.
+
+    Imported here, not at module scope, for :func:`project_for_ref`'s reason. A
+    nickname is free text, so a line that prints it prints it as data
+    (``markup=False``, a :class:`~rich.text.Text` cell): ``[wip]`` is not a style.
+    """
+    from aisquare.services.project import display_name  # lazy: see project_for_ref
+
+    return display_name(project)
+
+
+def projects_json(
+    projects: list[ProjectInfo], *, group_names: Mapping[str, str] | None = None
+) -> list[dict[str, object]]:
+    """The ``project list --json`` payload — shared with the Remote Control server verbatim."""
+    names = group_names or {}
+    return [
+        {
+            **project.model_dump(mode="json"),
+            "name": _project_name(project),
+            "group": names.get(project.group_id or "", project.group_id),
+            "pinned": project.pinned_at is not None,
+        }
+        for project in projects
+    ]
 
 
 def emit_projects(
@@ -259,19 +293,7 @@ def emit_projects(
     """
     names = group_names or {}
     if get_state().json_output:
-        typer.echo(
-            json.dumps(
-                [
-                    {
-                        **project.model_dump(mode="json"),
-                        "name": _project_name(project),
-                        "group": names.get(project.group_id or "", project.group_id),
-                        "pinned": project.pinned_at is not None,
-                    }
-                    for project in projects
-                ]
-            )
-        )
+        typer.echo(json.dumps(projects_json(projects, group_names=names)))
         return
     if not projects and filtered:
         stdout_console().print(filtered)
@@ -305,7 +327,9 @@ def emit_projects(
         marker = "*" if project.id == active_id else ""
         if project.pinned_at is not None:
             marker = (marker + "📌").strip()
-        cells = [marker, project.root.name or "—", project.id, str(project.root)]
+        # display_name's order, with a dash for the id the next column shows anyway.
+        name = Text(project.nickname or project.root.name or "—")
+        cells: list[str | Text] = [marker, name, project.id, str(project.root)]
         if captured:
             cells.append("captured" if project.onboarded_at is None else "yes")
         if arranged:
@@ -325,7 +349,7 @@ def emit_project_action(message: str, project: ProjectInfo) -> None:
     if get_state().json_output:
         typer.echo(project.model_dump_json())
     else:
-        stdout_console().print(message)
+        stdout_console().print(message, markup=False)  # a nickname is text, not markup
 
 
 def _active_note(
@@ -358,7 +382,9 @@ def emit_project_forget(report: ProjectForgetReport) -> None:
         return
     console = stdout_console()
     project = report.project
-    console.print(f"✓ forgot {_project_name(project)} ({project.id}) at {project.root}")
+    console.print(
+        f"✓ forgot {_project_name(project)} ({project.id}) at {project.root}", markup=False
+    )
     if report.purged:
         counts = ", ".join(f"{count} {table}" for table, count in report.removed.items() if count)
         console.print(f"  deleted: {counts or 'no rows'}")
@@ -372,7 +398,7 @@ def emit_project_forget(report: ProjectForgetReport) -> None:
     _say_keys_still_live(report.keys_still_live)
     note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
-        console.print(f"  {note}")
+        console.print(f"  {note}", markup=False)
 
 
 def _say_keys_still_live(owed: list[PendingRevocation]) -> None:
@@ -401,7 +427,18 @@ def emit_prune(report: ProjectPruneReport) -> None:
     if not report.candidates:
         console.print("nothing to prune")
         return
-    kept = {candidate.project.id for candidate in report.kept}
+    # Each kept row's reason as the run re-read it (``prune``'s ``kept``), not the plan's copy
+    # in ``candidates``: a hold that changed while the prompt sat open read "kept: 0 live
+    # agent(s)" beside a summary that named a hub (review of #259, round 34, 6/10). A dry
+    # run's ``kept`` is the plan's own.
+    kept = {candidate.project.id: candidate for candidate in report.kept}
+    # A run marks what it dropped, not what it did not keep: a candidate forgotten elsewhere
+    # while the prompt sat open is in neither list, and was marked ✓ beside a count that left
+    # it out (review of #259, round 35, 4/8).
+    dropped = set(report.dropped)
+    changed = set(report.changed)
+    forgotten = set(report.forgotten)
+    root_gone = set(report.root_gone)
     table = Table(show_header=True, header_style="bold")
     table.add_column("", no_wrap=True)
     table.add_column("WHY", no_wrap=True)
@@ -413,10 +450,36 @@ def emit_prune(report: ProjectPruneReport) -> None:
         why: str = candidate.reason
         if candidate.principal is not None:
             why = f"worktree of {_project_name(candidate.principal)}"
-        if project.id in kept:
-            why += f" (kept: {candidate.live_agents} live agent(s))"
-        marker = "" if report.dry_run else ("·" if project.id in kept else "✓")
-        table.add_row(marker, why, _project_name(project), project.id, str(project.root))
+        held = kept.get(project.id)
+        if held is not None and held.read_by:
+            # Not "the board api, web's fleet agents read", as if the last one's alone (review
+            # of #259, round 36, 6/9); the names early, before a narrow terminal cuts the cell.
+            whose = ", ".join(_project_name(reader) for reader in held.read_by)
+            why += f" (kept: the fleet agents of {whose} read its board)"
+        elif held is not None:
+            why += f" (kept: {held.live_agents} live agent(s))"
+        elif project.id in root_gone:
+            # Not "changed since the plan" alone: its root went, and --missing drops it (round
+            # 39, 5/9).
+            why += " (kept: its root went since the plan)"
+        elif project.id in changed:
+            # Added, given an entry or back on disk while the prompt sat open (round 37, 2/7).
+            why += " (kept: changed since the plan)"
+        elif not report.dry_run and project.id not in dropped:
+            # By its fate, not this run's --purge (round 41, 6/6): one the run found forgotten
+            # (a purge purges one still stale, round 36, 5/9, and leaves the others, round 39,
+            # 4/9; a plain run passes over each), else one purged since the plan. Said
+            # forgotten whenever the run was plain, a purged row read as one an onboard
+            # brings back.
+            fate = "forgotten" if project.id in forgotten else "purged"
+            why += f" (gone already: {fate} since the plan)"
+        marker = ""
+        if not report.dry_run:
+            kept_here = held is not None or project.id in changed
+            marker = "✓" if project.id in dropped else "·" if kept_here else "-"
+        table.add_row(
+            marker, Text(why), Text(_project_name(project)), project.id, str(project.root)
+        )
     console.print(table)
     if report.dry_run:
         return
@@ -424,8 +487,35 @@ def emit_prune(report: ProjectPruneReport) -> None:
     noun = "registration" if count == 1 else "registrations"
     what = "purged" if report.purged else "forgot"
     console.print(f"✓ {what} {count} {noun}")
-    if report.kept:
-        console.print(f"  kept {len(report.kept)} with live fleet agents — stop or reap them first")
+    hubs = sum(bool(candidate.read_by) for candidate in report.kept)
+    if len(report.kept) > hubs:
+        console.print(
+            f"  kept {len(report.kept) - hubs} with live fleet agents — stop or reap them first"
+        )
+    if hubs:
+        console.print(
+            f"  kept {hubs} whose board another project's fleet agents read, as a hub's — "
+            "its row names each project"
+        )
+    if len(report.changed) > len(report.root_gone):
+        stale_no_more = len(report.changed) - len(report.root_gone)
+        console.print(f"  kept {stale_no_more} that changed since the plan: no longer stale")
+    if report.root_gone:
+        # Each row's own forget, as doctor's capture-off line names them: `prune --missing`
+        # drops every registration whose root is missing, not only these, and under --purge
+        # deletes each one's entries, prompts and data directory (round 41, 5/6). With this
+        # run's --purge: a plain forget only forgets them, and nothing lists a forgotten row
+        # to purge it after (round 40, 2/6).
+        from aisquare.services.project import forget_command  # lazy: see project_for_ref
+
+        roots = {candidate.project.id: candidate.project.root for candidate in report.candidates}
+        forgets = [forget_command(roots[gone], purge=report.purged) for gone in report.root_gone]
+        drop = f"drop it: {forgets[0]}" if len(forgets) == 1 else f"drop them: {'; '.join(forgets)}"
+        console.print(
+            f"  kept {len(report.root_gone)} whose root went since the plan, which this prune "
+            f"did not ask for — {drop}",
+            markup=False,
+        )
     if not report.purged and count:
         console.print(
             "  their context entries, prompt history and board rows stay in the store, hidden "
@@ -434,7 +524,7 @@ def emit_prune(report: ProjectPruneReport) -> None:
     _say_keys_still_live(report.keys_still_live)
     note = _active_note(report.active, changed=report.active_changed, pin_error=report.pin_error)
     if note is not None:
-        console.print(f"  {note}")
+        console.print(f"  {note}", markup=False)
 
 
 def emit_setup(report: SetupReport) -> None:
@@ -474,6 +564,39 @@ def emit_config(config: AppConfig) -> None:
         typer.echo(tomli_w.dumps(config.model_dump(mode="json", exclude_none=True)), nl=False)
 
 
+def emit_config_overrides(overrides: Mapping[str, Any]) -> None:
+    """Render the settings the user changed — a JSON object under ``--json``, TOML otherwise.
+
+    The TOML goes through ``typer.echo`` as :func:`emit_config`'s does, never the Rich
+    console, which would take ``[fleet.roles.coder]`` for markup and print nothing of
+    it. Nothing changed prints one TOML comment, so the output still parses.
+    """
+    if get_state().json_output:
+        typer.echo(json.dumps(overrides))
+    elif overrides:
+        typer.echo(tomli_w.dumps(dict(overrides)), nl=False)
+    else:
+        typer.echo("# no overrides: every setting is at its system default")
+
+
+def emit_config_reset(config: Path, backup: Path | None) -> None:
+    """Report ``config reset``: where the user's file went, or that there was nothing to reset."""
+    if get_state().json_output:
+        payload = {"config": str(config), "reset": backup is not None, "backup": None}
+        if backup is not None:
+            payload["backup"] = str(backup)
+        typer.echo(json.dumps(payload))
+    elif backup is None:
+        stdout_console().print(
+            f"nothing to reset: {config} holds no setting, so every setting is at its "
+            "system default"
+        )
+    else:
+        stdout_console().print(
+            f"✓ every setting is back at its system default; your file is kept as {backup}"
+        )
+
+
 def emit_config_value(key: str, value: str) -> None:
     """Render one config value — ``{key: value}`` under ``--json``, ``key = value`` otherwise."""
     if get_state().json_output:
@@ -509,29 +632,60 @@ def _hook_sites(agent: AgentInfo) -> str:
     """One cell summarising where an agent's hooks live and whether they're healthy.
 
     Parallel installs each own a config dir, so a bare yes/no would hide a dir
-    whose hooks went missing — name the broken ones explicitly.
+    whose hooks went missing — name the broken ones explicitly. A dir whose
+    settings switch every hook off is named as that, and so is one whose files
+    `agents connect` refuses, with connect's reason as the doctor gives it (the file
+    and why, or that the directory does not exist): "missing" pointed at Connect,
+    which cannot change either, and the directory alone named no file (review of
+    #257).
     """
     if not agent.sites:
         return "—"
-    broken = [site.config_dir for site in agent.sites if not site.hooks_installed]
-    if not broken:
+    off = [site.config_dir for site in agent.sites if site.hooks_off is not None]
+    down = [site for site in agent.sites if not site.hooks_installed and site.hooks_off is None]
+    missing = [site.config_dir for site in down if site.refused is None]
+    if not off and not down:
         if len(agent.sites) == 1:
             return str(agent.sites[0].config_dir)
         return f"{len(agent.sites)} dirs, all ok"
-    listed = ", ".join(str(path) for path in broken)
-    return f"{len(agent.sites) - len(broken)}/{len(agent.sites)} ok — missing in {listed}"
+    clauses = [
+        f"{what} in {', '.join(str(path) for path in dirs)}"
+        for what, dirs in (("missing", missing), ("switched off", off))
+        if dirs
+    ]
+    clauses.extend(
+        f"cannot be written in {site.config_dir}: {site.refused}"
+        + (f" — {'; or '.join(site.remedies)}" if site.remedies else "")
+        for site in down
+        if site.refused is not None
+    )
+    ok = len(agent.sites) - len(off) - len(down)
+    return f"{ok}/{len(agent.sites)} ok — {'; '.join(clauses)}"
 
 
 def emit_connected(connection: AgentConnection) -> None:
-    """Confirm an agent connection: hook install + context ingested."""
+    """Confirm an agent connection: hook install + context ingested.
+
+    Hooks installed where the settings switch every hook off are not a connection:
+    Claude Code runs none of them until that key goes, so the line says so and
+    names the file (review of #257).
+    """
     if get_state().json_output:
         typer.echo(connection.model_dump_json())
         return
-    hooks = "hooks installed" if connection.hooks_installed else "no hooks for this agent"
+    # Always installed: `connect` refuses rather than return a connection without hooks.
     noun = "entry" if connection.imported == 1 else "entries"
-    stdout_console().print(
-        f"✓ connected {connection.name} — {hooks}; imported {connection.imported} {noun}"
-    )
+    imported = f"imported {connection.imported} {noun}"
+    if connection.hooks_off is not None:
+        stdout_console().print(
+            f"hooks installed for {connection.name}, but switched off — {imported}"
+        )
+        stderr_console().print(
+            f'note: {connection.hooks_off} sets "disableAllHooks": true, so Claude Code runs '
+            "none of its hooks, aisquare's included — remove that key to turn them on"
+        )
+        return
+    stdout_console().print(f"✓ connected {connection.name} — hooks installed; {imported}")
 
 
 def emit_onboard(report: OnboardReport) -> None:
@@ -541,21 +695,27 @@ def emit_onboard(report: OnboardReport) -> None:
         return
     console = stdout_console()
     snapshot = report.snapshot
-    if snapshot is not None and snapshot.status == "ready":
+    if report.snapshot_note is not None:
+        # Nothing packed: off, a pack that failed and why, or a --refresh that kept
+        # the last pack -- the service's sentence, which `init` prints too.
+        console.print(f"snapshot: {report.snapshot_note}")
+    elif snapshot is not None and snapshot.status == "ready":
         line = f"✓ snapshot: {snapshot.file_count} files, {snapshot.token_count} tokens"
         if snapshot.skeleton_token_count:
             line += f" (skeleton {snapshot.skeleton_token_count} tokens)"
         console.print(line)
     elif snapshot is not None and snapshot.status == "skeleton_only":
         console.print(f"snapshot: {snapshot_core.skeleton_only_detail(snapshot)}")
-    elif snapshot is not None and snapshot.status == "too_large":
+    elif snapshot is not None and snapshot.status == "too_large" and snapshot_core.can_pack():
         # The same sentence the doctor prints (one definition, so the two never
         # disagree on the numbers), plus what to run once a remedy is in place.
+        # Where nothing can pack, no remedy can run: the verdict reads off below,
+        # as the doctor's row does.
         console.print(
             f"snapshot: {snapshot_core.too_large_detail(snapshot)} {snapshot_core.REPACK_HINT}"
         )
     else:
-        console.print("snapshot: skipped (repomix/Node not available)")
+        console.print(f"snapshot: {snapshot_core.skipped_detail()}")
     if report.seeded:
         console.print(f"seeded {len(report.seeded)} project fact(s):")
         for entry in report.seeded:

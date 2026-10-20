@@ -157,7 +157,7 @@ _CARD_IN_TEXT = re.compile(r"\btsk_[a-z0-9]+\b")
 _ESCAPES = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
 _CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 #: The errnos that mean "another writer holds the lock": these are waited on; any
-#: other failure of the lock primitive is refused at once (``state_file._HELD``).
+#: other failure of the lock primitive is refused at once (``locking._HELD``).
 _HELD: frozenset[int] = frozenset(
     {errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES, getattr(errno, "EDEADLK", 35)}
 )

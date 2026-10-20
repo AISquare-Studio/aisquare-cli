@@ -23,6 +23,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("why",),
     ("status",),
     ("doctor",),
+    ("upgrade",),
+    ("uninstall",),
     ("log",),
     ("note",),
     ("board",),
@@ -106,6 +108,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "spawn",
             "harness",
             "bind",
+            "read-env-file",
         )
     ),
     *(
@@ -148,6 +151,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "list",
             "switch",
             "link",
+            "rename",
             "onboard",
             "forget",
             "prune",
@@ -157,8 +161,11 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "group",
         )
     ),
-    *(("config", command) for command in ("list", "get", "set", "redaction")),
-    *(("agents", command) for command in ("list", "scan", "status", "connect", "disconnect")),
+    *(("config", command) for command in ("list", "get", "set", "redaction", "reset")),
+    *(
+        ("agents", command)
+        for command in ("list", "scan", "status", "connect", "disconnect", "refresh-hooks")
+    ),
     *(
         ("accounts", command)
         for command in (
@@ -173,6 +180,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "move",
             "disable",
             "enable",
+            "trust",
+            "settings",
         )
     ),
     *(("metrics", command) for command in ("show", "list")),
@@ -188,6 +197,18 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "import",
             "export",
             "attach",
+        )
+    ),
+    *(
+        ("remote", command)
+        for command in (
+            "serve",
+            "install-page",
+            "status",
+            "allow-write",
+            "regenerate-password",
+            "revoke",
+            "needs",
         )
     ),
 }

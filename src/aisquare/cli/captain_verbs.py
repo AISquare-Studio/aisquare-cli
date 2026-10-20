@@ -23,7 +23,6 @@ captain's actions, queue and state load only inside a verb that runs.
 from __future__ import annotations
 
 import json
-import shlex
 import sqlite3
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
@@ -37,6 +36,7 @@ from aisquare.cli.common import fail, local_time
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.store import store_session
+from aisquare.services import install_route
 from aisquare.services.captain.errors import Failed, Refused
 
 if TYPE_CHECKING:
@@ -63,17 +63,19 @@ def _typed() -> str:
     The process's own argv when it carries this call (it ends with the words the group
     kept), root flags and all. Otherwise — the CLI run in-process, as tests do — the
     root's ``--json`` when it is on and not typed after ``captain``, then the words as
-    typed. ``-m 7`` stays ``-m 7`` and a default never appears. Shell-quoted, so the
-    line can be run again.
+    typed. ``-m 7`` stays ``-m 7`` and a default never appears. Quoted for this shell
+    (``install_route.command_line``), so the line can be run again.
     """
     import sys
 
     words = list(TYPED.get())
     argv = sys.argv[1:]
     if words and argv[-len(words) :] == words and "captain" in argv[: -len(words)]:
-        return shlex.join(["aisquare", *argv])
+        return install_route.command_line(["aisquare", *argv])
     json_root = get_state().json_output and "--json" not in words
-    return shlex.join(["aisquare", *(["--json"] if json_root else []), "captain", *words])
+    return install_route.command_line(
+        ["aisquare", *(["--json"] if json_root else []), "captain", *words]
+    )
 
 
 def _perform(tool: str, args: Mapping[str, Any]) -> dict[str, Any]:

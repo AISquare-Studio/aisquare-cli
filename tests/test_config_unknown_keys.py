@@ -70,7 +70,7 @@ def test_an_unknown_key_INSIDE_a_known_section_survives(tmp_path: Path) -> None:
     target = tmp_path / "config.toml"
     _write(
         target,
-        'profile = "default"\n\n[explainability]\nenabled = false\n'
+        'profile = "default"\n\n[explainability]\nenabled = true\n'
         'a_field_from_the_future = "keep me"\n',
     )
 
@@ -82,7 +82,8 @@ def test_an_unknown_key_INSIDE_a_known_section_survives(tmp_path: Path) -> None:
         "an unknown key inside a known section was dropped — this is exactly the "
         "shape that erased target/roles/ship/gateway_url"
     )
-    assert explainability["enabled"] is False, "the known field must still be written"
+    # Set apart from its default, or a save would leave it out (core.config.overrides).
+    assert explainability["enabled"] is True, "the known field must still be written"
 
 
 def test_the_model_still_wins_for_fields_it_owns(tmp_path: Path) -> None:
@@ -105,7 +106,7 @@ def test_the_model_still_wins_for_fields_it_owns(tmp_path: Path) -> None:
     cleared.team.profiles.pop("coder1", None)
     save_config(cleared, target)
 
-    assert "coder1" not in str(_sections(target)["team"]), (
+    assert "coder1" not in str(_sections(target).get("team", {})), (
         "a removed binding came back — the model is no longer authoritative for "
         "fields it owns, so clear/reinit have silently stopped working"
     )
@@ -225,8 +226,9 @@ def test_the_persona_import_section_round_trips_under_its_file_key(tmp_path: Pat
     save_config(config, target)
 
     assert config.persona.import_.engine == "off"
+    # The section's own key, at its default, is not written: since 0.8.1 the one writer
+    # keeps only what differs from the system defaults (`core.config.save_config`).
     assert _sections(target)["persona"] == {
-        "system_prompt": True,  # the section's own key, written with its default
         "import": {"engine": "off", "api_model": "claude-sonnet-5", "retries": 2},
     }
 
@@ -265,5 +267,6 @@ def test_an_unknown_field_inside_a_role_entry_survives_and_a_removed_entry_stays
     assert coder["account"] == "4", "the edit to the entry did not land"
     assert "tester" not in team["profiles"], "a removed entry came back"
     assert fleet["roles"]["coder"]["persona"] == "architect"
-    assert fleet["roles"]["coder"]["worktree"] is True
+    assert fleet["roles"]["coder"]["worktree"] is True, "the coder's table, written whole"
+    assert load_config(target).fleet.roles["coder"].worktree is True
     assert data["future_section"] == {"kept": 1}

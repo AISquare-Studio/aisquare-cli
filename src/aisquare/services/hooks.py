@@ -20,6 +20,7 @@ default agent does.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -30,12 +31,14 @@ from aisquare.core import snapshot as snapshot_core
 from aisquare.core import spawn as spawn_core
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
+from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
-from aisquare.services import auto_mode, ci_augment
+from aisquare.services import auto_mode, ci_augment, install_route
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
+from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 
 
@@ -87,6 +90,8 @@ def session_start_context(
         project = active_project(store, cwd)
         entries = store.entries(project_id=project.id)
         has_prompts = bool(store.recent_prompts(project.id, limit=1))
+        recorded = project_service.tracked(store, project)
+        stored = store.get_project(project.id) is not None
     directive = _directive(project.id, has_prompts=has_prompts)
     block = build_block(entries, project) if entries else ""
     team_block = (
@@ -98,15 +103,26 @@ def session_start_context(
     )
     # Last, and only when the experiment is on: the standing instruction to
     # consult the recall tool, then any retrieved material — closest to what
-    # the agent is about to do, and the part it should weigh least.
-    instruction, retrieved = _session_start_ci(project, session_id, cwd, began=began)
+    # the agent is about to do, and the part it should weigh least. Not in a
+    # directory nobody added while capture is off: its row would be a turn
+    # tied to a project that does not exist.
+    instruction, retrieved = (
+        _session_start_ci(project, session_id, cwd, began=began, stored=stored)
+        if recorded
+        else ("", "")
+    )
     return "\n\n".join(
         part for part in (directive, block, team_block, instruction, retrieved) if part
     )
 
 
 def _session_start_ci(
-    project: ProjectInfo, session_id: str | None, cwd: Path | None, *, began: datetime
+    project: ProjectInfo,
+    session_id: str | None,
+    cwd: Path | None,
+    *,
+    began: datetime,
+    stored: bool,
 ) -> tuple[str, str]:
     """Consult CI at session start and RECORD the outcome; never raises.
 
@@ -116,6 +132,15 @@ def _session_start_ci(
     would only say "off" again. A failure anywhere here costs the CI part of
     the context and nothing else — the saved entries and the board must reach
     the agent whatever the test bed does.
+
+    The directory is captured before its rows are written, with ``[projects] capture`` on
+    (the caller asked :func:`~aisquare.services.project.tracked`). The team hook captured
+    it for them until it captured only for a board (review of #259, round 18), and a
+    session start in a directory with no board then wrote a turn and an insights row for
+    a project with no row, which ``metrics show --project`` could not reach (round 19).
+    Not when the hook found its row there already (``stored``): a store session and a write
+    of its own on every session start, the team hook's capture moments before included, was
+    a second write lock as a fleet started its agents (round 20).
     """
     try:
         augmentation = ci_augment.for_session_start(
@@ -123,6 +148,9 @@ def _session_start_ci(
         )
         if not augmentation.configured:
             return "", ""
+        if not stored:
+            with store_session() as store:
+                project_service.capture(store, project)
         metrics_service.open_turn(augmentation.metric(project.id, session_id, closed=True))
         if augmentation.run_id:
             insights.record_turn(
@@ -253,14 +281,23 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
         return
     session = failure.session
     with store_session() as store:
-        agent = store.fleet_agent_for_session(session.project_id, session.id)
-        project = store.get_project(session.project_id)
+        # The row's own project, not the session's: under AISQUARE_TEAM_HUB the session is on
+        # the hub's board and the row is in its spawn's project, and asked by the board, no
+        # limited agent was ever handed over (review of #259, round 23).
+        agent = store.fleet_agent_for_session(session.id)
+        project = store.get_project(agent.project_id) if agent is not None else None
     if agent is None or project is None:
         return  # a hand-typed session is the operator's to move
     resets_at = failure.notice.resets_at if failure.notice is not None else None
     if resets_at is not None:
         wait = timedelta(minutes=settings.wait_if_reset_within_minutes)
         if resets_at - datetime.now(tz=UTC) <= wait:
+            # Asked before whether there is an account to go to, which reads every
+            # account's `.claude.json` (tens of MB) and, on macOS, its Keychain item, each
+            # with a 5 s timeout and perhaps an unlock dialog from a background hook: none
+            # of it changes a wait (review of #259, round 16). The note is true on one
+            # account too — `on_limit = "switch"` is what is not done — and comes only with
+            # a limit this close to its reset.
             team_service.hook_note(
                 session.project_id,
                 f"{agent.label}: usage limit lifts within {settings.wait_if_reset_within_minutes} "
@@ -268,6 +305,12 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
                 session_id=session.id,
             )
             return
+    # As `fleet.switch` reads where the agent is, and Remote's scan asks the same.
+    leaving = claude_accounts_service.leaving_slot(agent.account_slot, session.account)
+    if not claude_accounts_service.somewhere_to_hand_over(leaving):
+        # One account: `wait`, with no board note on every limit that it is. A registry
+        # that cannot be read is no answer, and goes on to the worker, which says so.
+        return
     window = failure.notice.window if failure.notice is not None else "usage"
     argv = selfcli.argv_for(
         ["--quiet", "hook", "hand-over", session.id, "--reason", f"{window} limit"]
@@ -343,8 +386,8 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
         session = store.get_session(session_id)
         if session is None:
             return
-        agent = store.fleet_agent_for_session(session.project_id, session.id)
-        project = store.get_project(session.project_id)
+        agent = store.fleet_agent_for_session(session.id)  # in its own project, as above
+        project = store.get_project(agent.project_id) if agent is not None else None
     if agent is None or project is None:
         return
     if session.state == team_service.HANDOVER_STATE:
@@ -417,11 +460,15 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
     try:
         with store_session() as store:
             project = active_project(store, cwd)
-            # Unconditionally, even for an empty prompt: a metric row is written
-            # for every turn below, and a row whose project_id has no `project`
-            # row is unreachable from `metrics show --project <name>`, which
-            # resolves names through that table.
-            store.ensure_project(project)
+            # Before anything is written, even for an empty prompt: a metric row is
+            # written for every turn below, and a row whose project_id has no
+            # `project` row is unreachable from `metrics show --project <name>`,
+            # which resolves names through that table. With `[projects] capture`
+            # off, a directory nobody added records nothing at all: no prompt, no
+            # spool, no CI consult, no turn row.
+            if not project_service.tracked(store, project):
+                return ""
+            project_service.capture(store, project)
             if prompt is not None and prompt.strip():
                 store.add_prompt(prompt, project.id, source="claude-code")
         if prompt is not None and prompt.strip():
@@ -477,9 +524,59 @@ def _directive(project_id: str, *, has_prompts: bool) -> str:
         ]
     if has_prompts:
         lines.append(
-            "Past user prompts here are captured — run `aisquare log` to see how the user "
-            "tends to ask, and honour that intent."
+            f"Past user prompts here are captured — run `{_log_command()}` to see how the "
+            "user tends to ask, and honour that intent."
         )
     if not lines:
         return ""
     return "<aisquare-context>\n" + "\n".join(lines) + "\n</aisquare-context>"
+
+
+#: The uvx the plugin's launcher ran this hook with, by the path it found
+#: (plugins/claude-code/scripts/aisquare-hook): ``~/.local/bin/uvx`` where PATH has none.
+PLUGIN_UVX_ENV = "AISQUARE_PLUGIN_UVX"
+
+#: What the plugin's launcher runs in place of the release it pins, when set: a wheel or a
+#: checkout, for testing a build not on PyPI yet. The hook inherits it from the launcher.
+PLUGIN_FROM_ENV = "AISQUARE_PLUGIN_FROM"
+
+
+def _log_command() -> str:
+    """``aisquare log`` as the agent's own shell can run it.
+
+    The plugin's launcher runs the hooks through ``uvx`` only where no aisquare is
+    installed, so there "run `aisquare log`" was command not found, and on that
+    route it was often the only thing session start said (review of #257). uvx
+    puts its environment's ``bin`` on the HOOK's PATH, not the agent's, so the
+    route is asked before PATH is. Elsewhere: the bare name when PATH has one, else
+    this interpreter (hooks that name a virtualenv that is not on PATH).
+
+    On that route, the uvx the launcher ran and the Python this hook runs on
+    (round 20). The launcher finds uvx in ``~/.local/bin`` or ``~/.cargo/bin`` when
+    PATH has none, the desktop app's case, where a bare ``uvx`` is command not found
+    too; and uv resolves a command with no ``--python`` on its default Python, which
+    may be outside the range the launcher asked for (3.14 on Fedora 43), so it built
+    another environment where the hook's is cached, or failed. And the requirement it ran:
+    with ``AISQUARE_PLUGIN_FROM`` set, the agent was told the pinned release, which PyPI
+    does not have before it is published, or is another build than the hooks' (round 21).
+    """
+    if install_route.runs_from_uv_cache():
+        python = f"{sys.version_info.major}.{sys.version_info.minor}"
+        requirement = os.environ.get(PLUGIN_FROM_ENV) or f"{DISTRIBUTION}=={__version__}"
+        argv = [_plugin_uvx(), "--python", python, "--from", requirement, "aisquare", "log"]
+    elif shutil.which("aisquare") is not None:
+        return "aisquare log"
+    else:
+        argv = selfcli.argv_for(["log"])
+    return install_route.command_line(argv)
+
+
+def _plugin_uvx() -> str:
+    """The uvx the launcher ran: ``uvx`` when that is the one PATH finds, else its path."""
+    ran = os.environ.get(PLUGIN_UVX_ENV, "")
+    if not ran:
+        return "uvx"
+    found = shutil.which("uvx")
+    if found is not None and os.path.realpath(found) == os.path.realpath(ran):
+        return "uvx"
+    return ran

@@ -13,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 _SIGNAL_TEXT = re.compile(r"^([a-z0-9][a-z0-9._-]*): (\S+)(?: \(was (\S+)\))?$")
 """The anchored serialization of a signal event's text: ``name: value`` with
@@ -75,6 +75,18 @@ class AgentHookSite(BaseModel):
 
     config_dir: Path
     hooks_installed: bool = False
+    hooks_off: Path | None = None
+    """The directory's settings file, when it switches every hook off (``"disableAllHooks":
+    true``): Claude Code runs none of them however complete they are, so ``hooks_installed``
+    is False, and ``agents connect`` cannot change that. ``None`` otherwise."""
+    refused: str | None = None
+    """Why ``agents connect`` would refuse the directory, in its words, when its hooks are
+    not installed and it would: a settings.json that is not a JSON object or that this
+    user may not write, a CLAUDE.md it cannot read, or a recorded directory that no
+    longer exists and that connect would not make ("<dir> does not exist"). Connect can
+    only fail there, as the doctor and Welcome say. ``None`` otherwise."""
+    remedies: list[str] = Field(default_factory=list)
+    """What changes ``refused``, as Welcome and the doctor give it (``agents.remedies``)."""
 
 
 class AgentInfo(BaseModel):
@@ -110,6 +122,10 @@ class ProjectInfo(BaseModel):
     arranged, which sorts after every arranged project, by name."""
     pinned_at: datetime | None = None
     """Set when the project is pinned: it renders in the Pinned section, in pin order."""
+    nickname: str | None = None
+    """What a person calls the project, free text like a browser tab's name; ``None``
+    shows the directory's name. Unlike the codename it names nothing else, so it can
+    hold any text — see ``services.project.set_nickname``."""
 
 
 class InjectionRecord(BaseModel):
@@ -266,19 +282,63 @@ class ClaudeIdentity(BaseModel):
     account_uuid: str | None = None
 
 
+def _left(used: float | None) -> float | None:
+    return None if used is None else min(100.0, max(0.0, 100.0 - used))
+
+
 class ClaudeUsage(BaseModel):
-    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them."""
+    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them.
+
+    Every percentage here is percent USED (0-100), never the share left: 40
+    means 40 % used and 60 % left. An agent on a fresh install read the bare
+    ``session_percent`` as what remained and rationed an account that was
+    nearly empty, so the JSON carries both sides under names that say which:
+    ``*_used_percent`` and ``*_left_percent`` (``session_percent`` and
+    ``week_percent`` stay, for the readers that already know them).
+    """
 
     available: bool
     reason: str | None = None
     """Why nothing could be read, when ``available`` is False."""
+    needs_login: bool = False
+    """Signed in, but the stored token has expired or was rejected: a session on the
+    account refreshes it. False for every other reason nothing could be read."""
     session_percent: float | None = None
-    """The rolling five-hour window, 0-100."""
+    """The rolling five-hour window: percent USED (0-100)."""
     session_resets_at: datetime | None = None
     week_percent: float | None = None
-    """The rolling seven-day window, 0-100."""
+    """The rolling seven-day window: percent USED (0-100)."""
     week_resets_at: datetime | None = None
     fetched_at: datetime | None = None
+    """When the reading was taken — or, when nothing could be read, when that was found out."""
+    last_failed_at: datetime | None = None
+    """When a later try to read failed without replacing this reading: an unreachable
+    endpoint or an HTTP error after it, while it is still within the five-minute cache.
+    The figure stands; the line that says how old it is says the try failed too."""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def session_used_percent(self) -> float | None:
+        """The five-hour window: percent USED (0-100) — ``session_percent``, named for it."""
+        return self.session_percent
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def week_used_percent(self) -> float | None:
+        """The seven-day window: percent USED (0-100) — ``week_percent``, named for it."""
+        return self.week_percent
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def session_left_percent(self) -> float | None:
+        """The five-hour window: percent LEFT (0-100), ``100 - session_used_percent``."""
+        return _left(self.session_percent)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def week_left_percent(self) -> float | None:
+        """The seven-day window: percent LEFT (0-100), ``100 - week_used_percent``."""
+        return _left(self.week_percent)
 
 
 class UsageSample(BaseModel):
@@ -296,6 +356,10 @@ class UsageSample(BaseModel):
     session_resets_at: datetime | None = None
     week_percent: float | None = None
     week_resets_at: datetime | None = None
+    token_fingerprint: str | None = None
+    """Which token took the reading: a fingerprint of it (never the token), so the
+    five-minute cache serves a reading only to the login that took it. ``None`` on a
+    reading recorded before it was kept (schema v28)."""
 
 
 class UsageTrend(BaseModel):
@@ -311,6 +375,30 @@ class UsageTrend(BaseModel):
     """How long the samples behind the rate cover — the reader's measure of how much to trust it."""
 
 
+HeadroomLevel = Literal["good", "fair", "low", "critical", "empty", "unknown"]
+"""How much room the fleet's accounts have left, in one word (see ``HeadroomSummary``)."""
+
+
+class HeadroomSummary(BaseModel):
+    """What is LEFT across the fleet's accounts, in one figure and one word.
+
+    Built by ``services.claude_accounts.fleet_headroom``, whose docstring states
+    the formula; the sidebar's dot and ``n x claude`` are drawn from it.
+    """
+
+    level: HeadroomLevel
+    percent_left: float | None = None
+    """The mean share LEFT over the usable accounts (0-100); ``None`` when none is usable."""
+    usable: int = 0
+    """Enabled accounts with a readable reading — what a spawn could run on."""
+    needs_login: int = 0
+    """Signed-in accounts whose token has expired or was rejected: a session on each fixes it."""
+    left_by_slot: dict[int, float] = Field(default_factory=dict)
+    """Each usable account's share LEFT, ``100 - max(session used, week used)``."""
+    fetched_at: datetime | None = None
+    """The OLDEST reading behind the figure: the summary is no staler than this."""
+
+
 class ClaudeAccountStatus(BaseModel):
     """Everything the Accounts page shows about one slot, minus the usage it fetches live."""
 
@@ -320,7 +408,10 @@ class ClaudeAccountStatus(BaseModel):
     identity: ClaudeIdentity | None = None
     signed_in: bool = False
     token_state: str = "missing"
-    """``ok``, ``expired`` or ``missing`` — the state of the stored OAuth token."""
+    """``ok``, ``expired``, ``missing`` or ``unreadable`` — the state of the stored OAuth token.
+
+    ``unreadable``: on macOS, a Keychain that would not show it (locked, an unlock cancelled,
+    access refused, no answer); the account still counts as signed in."""
     subscription: str | None = None
     """The plan the credentials file names (``max``, ``team``, …), when it does."""
     hooks_installed: bool = False
@@ -602,6 +693,12 @@ class TeamTask(BaseModel):
 
     id: str
     project_id: str
+    number: int | None = None
+    """The task's number on its board (``#12``): 1, 2, … in the order tasks were added to
+    the project, given by the store at insert and never reused. ``None`` on a task that
+    has not been stored yet, and on one a build from before numbers inserted until the
+    store is next opened, which numbers it after the board's highest. An id for people to
+    say, not an order of work."""
     key: str
     """Idempotency key: re-adding the same key returns the existing task."""
     title: str
@@ -702,6 +799,11 @@ class OnboardReport(BaseModel):
 
     seeded: list[ContextEntry] = Field(default_factory=list)
     snapshot: Snapshot | None = None
+    snapshot_note: str | None = None
+    """Why this run packed nothing, as ``init`` and ``onboard`` say it: off, or the
+    pack failed and why. ``None`` when a pack was made or reused. Set beside a
+    ``snapshot``, it is a ``--refresh`` that failed: that is the last pack, kept,
+    and agents still get it."""
 
 
 class ProjectForgetReport(BaseModel):
@@ -745,16 +847,43 @@ class PruneCandidate(BaseModel):
     """For a ``worktree`` candidate, the registered project it is a worktree of."""
     live_agents: int = 0
     """Live fleet agents on the registration. Non-zero means prune keeps it."""
+    read_by: list[ProjectInfo] = Field(default_factory=list)
+    """The other projects whose fleet agents read this registration's board, as a hub's
+    (``project forget`` refuses it too), every one. Any means prune keeps it."""
+
+    @property
+    def held(self) -> bool:
+        """Whether prune keeps it: live agents of its own, or another project's on its board."""
+        return bool(self.live_agents) or bool(self.read_by)
 
 
 class ProjectPruneReport(BaseModel):
     """Outcome of ``project prune``: the plan, and what was actually dropped."""
 
     candidates: list[PruneCandidate] = Field(default_factory=list)
+    """The plan's candidates. After a run, each one it found a candidate still is as the run
+    read it: its reason now (a worktree whose tree went is ``missing``) and what holds it.
+    Each other one, no longer a candidate (:attr:`changed`, :attr:`forgotten`) or gone since
+    the plan, is the plan's with no hold: the run did not read its hold again, and nothing
+    held it (review of #259, round 40, 5/6)."""
     dropped: list[str] = Field(default_factory=list)
     """Ids dropped. Empty on a dry run."""
     kept: list[PruneCandidate] = Field(default_factory=list)
-    """Candidates NOT dropped because they have live fleet agents."""
+    """Candidates NOT dropped because fleet agents hold them (:attr:`PruneCandidate.held`)."""
+    changed: list[str] = Field(default_factory=list)
+    """Ids NOT dropped because why each was a candidate no longer held when the run re-read
+    it: added on purpose or given an entry since the plan, a root back on disk. Empty on a
+    dry run."""
+    forgotten: list[str] = Field(default_factory=list)
+    """Ids the run found forgotten elsewhere since the plan, and left as it found them: not
+    dropped, and not kept either (review of #259, round 39, 4/9). A ``--purge`` run purges
+    one a candidate still is, and lists the others; a plain run passes over, and lists,
+    each. A candidate in none of :attr:`dropped`, :attr:`kept`, :attr:`changed` and this is
+    gone: purged since the plan (round 41, 6/6). Empty on a dry run."""
+    root_gone: list[str] = Field(default_factory=list)
+    """Of :attr:`changed`, the worktrees whose tree went since the plan: none now, they are
+    kept by a run not asked for missing roots, and ``prune --missing`` drops them (review of
+    #259, round 39, 5/9). Empty on a dry run."""
     dry_run: bool = True
     purged: bool = False
     active: ProjectInfo | None = None
@@ -772,6 +901,10 @@ class AgentConnection(BaseModel):
     name: str
     hooks_installed: bool = False
     imported: int = 0
+    hooks_off: Path | None = None
+    """The settings file the hooks went into, when it switches every hook off
+    (``"disableAllHooks": true``): they are installed, and Claude Code runs none of them
+    until that key goes. ``agents connect`` leaves the key alone. ``None`` otherwise."""
 
 
 FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]
@@ -917,6 +1050,15 @@ class LaunchSpec(BaseModel):
     account_slot: int | None = None
     worktree: bool = False
     command: list[str] = Field(default_factory=list)
+    recorded_by: str | None = None
+    """The aisquare version that recorded the spec; ``None`` on one recorded before 0.8.0,
+    whose reviewer may hold that release's built-in ``--restricted``, which nobody chose
+    and a replay replaces (``services.fleet``)."""
+    hub: str | None = None
+    """The ``AISQUARE_TEAM_HUB`` its window was given: the hub's absolute path, ``""`` for none
+    (``core.orchestrator.window_team_hub``). A restart or switch gives the replacement's
+    window the same, whoever runs it (``services.fleet._board_and_hub``). ``None`` on a spec
+    recorded before 0.8.1 kept it."""
 
 
 class FleetAgent(BaseModel):
@@ -948,6 +1090,31 @@ class FleetAgent(BaseModel):
     ``None`` when nothing chose one and the window ran on whatever its shell had."""
     launch_spec: LaunchSpec | None = None
     """How it was launched (#144); ``None`` on rows spawned before the spec existed."""
+    socket_path: Path | None = None
+    """The socket its server listened on at spawn, as tmux said (``#{socket_path}``):
+    where uninstall and upgrade ask whether it may still run, whatever shell asks.
+    ``None`` on rows spawned before 0.8.0, or when tmux did not say."""
+    boot_id: str | None = None
+    """The boot it was spawned in (``core.tmux.boot_id``): a row from another boot is
+    no running agent. ``None`` on rows spawned before 0.8.0, or where none is kept."""
+    server_started_at: datetime | None = None
+    """When its server started, as it said at spawn (``#{start_time}``, whole seconds):
+    the identity of the server its ``pane_id`` names, since every server numbers its
+    panes from ``%0``. A server at its socket that started at another time is not the
+    one it runs on, which lost its socket file and may run on (``core.tmux.server_may_run``,
+    ``services.fleet._outlived``). ``None`` on rows spawned before 0.8.1, or when tmux did
+    not say."""
+    branch: str | None = None
+    """The branch its worktree was on, as git said at spawn, at stop, and at reap before
+    the tree went: where a restart or switch makes a gone tree again
+    (``services.fleet._remake_worktree``). ``None`` for an agent with no worktree, one on
+    a detached HEAD, or a row spawned before 0.8.1."""
+    board: str | None = None
+    """The id of the board its sessions read, as its spawn gave it: the hub's under
+    ``AISQUARE_TEAM_HUB``, else its project's principal checkout's
+    (``services.fleet._board_for``). A replacement inherits it. Every question of which
+    board an agent reads asks this (``services.fleet._board_of_row``). ``None`` only before
+    the row is stored, which records the row's project then."""
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None
@@ -966,3 +1133,13 @@ class FleetAgentStatus(BaseModel):
     hooks" for a binary without lifecycle hooks, "pane gone"."""
     session: TeamSession | None = None
     tmux_session: str | None = None
+    socket_at: Path | None = None
+    """Where the agent's server is asked (``tmux -S``), worked out once with the listing's
+    config (``services.fleet.socket_at``); ``None`` when it is asked by its socket's name
+    (``tmux -L``). Carried so the UI's panes and attach line read it off the frame."""
+    held: bool = False
+    """The listing held the row as another server's (``services.fleet.ANOTHER_SERVER``): a
+    server answers at its socket, and it is not the one the row was started on, which may
+    run on where no client reaches it. Its state is ``unknown`` whatever its board says, and
+    its pane id is no pane of its own there: that server numbers its panes from ``%0``
+    again."""

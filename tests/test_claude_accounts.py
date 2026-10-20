@@ -41,8 +41,10 @@ from aisquare.models import ClaudeAccount
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from aisquare.services import team as team_service
+from tests.conftest import CLAUDE_ACCOUNTS_NOW
+from tests.fsperms import can_deny_reads, can_symlink
 
-NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
+NOW = CLAUDE_ACCOUNTS_NOW  # the clock ``fake_home`` (tests/conftest.py) stops the code at
 
 #: What https://api.anthropic.com/api/oauth/usage answered on 2026-09-09 (Claude Code
 #: 2.1.266), trimmed to the keys the parser reads plus two it must ignore.
@@ -63,22 +65,6 @@ LIVE_USAGE = {
 
 
 # --------------------------------------------------------------------------- fixtures
-
-
-@pytest.fixture
-def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A home of our own: the default slot's files land here, never in the developer's."""
-    home = tmp_path / "home"
-    (home / ".claude").mkdir(parents=True)
-    monkeypatch.setattr(core, "_home", lambda: home)
-    monkeypatch.setattr("aisquare.core.agents._home", lambda: home)
-    monkeypatch.setattr(core, "keychain_platform", lambda: False)
-    # The clock the production code reads is the clock the fixtures write
-    # credentials against: tokens here expire at NOW + 7 h, and a command that
-    # asked the wall clock would find them expired the same evening.
-    monkeypatch.setattr(core, "_now", lambda: NOW)
-    monkeypatch.setattr(service, "_now", lambda: NOW)
-    return home
 
 
 def _sign_in(
@@ -390,17 +376,13 @@ def test_credentials_are_read_redacted_and_judged_for_expiry(fake_home: Path) ->
     assert core.subscription_label(core.credentials(account)) == "team"
 
 
-def test_signed_in_needs_both_files_on_linux_and_only_the_identity_on_a_keychain_platform(
-    fake_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_signed_in_needs_both_the_identity_and_the_credentials(fake_home: Path) -> None:
+    """On macOS too, where the credentials are the Keychain item's (test_claude_keychain.py)."""
     account = core.create_account()
     assert not core.signed_in(account)
     _sign_in(account, "two@example.com", credentials=False)
     assert core.identity(account) is not None
     assert not core.signed_in(account)  # /logout deletes the credentials; the identity lingers
-    monkeypatch.setattr(core, "keychain_platform", lambda: True)
-    assert core.signed_in(account)  # macOS: the file never exists, the identity is the answer
-    monkeypatch.setattr(core, "keychain_platform", lambda: False)
     _sign_in(account, "two@example.com")
     assert core.signed_in(account)
 
@@ -525,6 +507,8 @@ def test_usage_says_why_when_the_endpoint_does_not_answer_properly(
     assert usage.reason is not None and expected in usage.reason
     assert usage.session_percent is None and usage.week_percent is None
     assert "sk-ant" not in usage.reason  # no reason ever carries the token
+    # Only a refused token is a log-in to do; a down or odd endpoint is not (asq's Log in).
+    assert usage.needs_login is (fetch.status == 401)
 
 
 def test_usage_never_sends_an_expired_or_missing_token(fake_home: Path) -> None:
@@ -535,6 +519,7 @@ def test_usage_never_sends_an_expired_or_missing_token(fake_home: Path) -> None:
     _sign_in(account, "two@example.com", expires_in=timedelta(minutes=-1))
     expired = service.usage(account, now=NOW, fetch=fetch)
     assert not expired.available and "expired" in (expired.reason or "")
+    assert expired.needs_login and not missing.needs_login  # no login: signed_in says so
     assert fetch.calls == []  # neither case reached the network
     _sign_in(account, "two@example.com")
     assert service.usage(account, now=NOW, fetch=fetch).available
@@ -633,6 +618,33 @@ def test_a_sign_in_lands_when_both_files_exist_and_completing_it_installs_the_ho
     assert "SessionStart" in settings["hooks"]
     assert not service.abandon_sign_in(account)  # a signed-in slot is never discarded
     assert account.config_dir.is_dir()
+
+
+def test_a_log_in_over_a_stale_token_lands_only_once_the_token_is_a_new_one(
+    fake_home: Path,
+) -> None:
+    """asq's *Log in* on an expired or rejected token: the directory is still signed in, so
+    ``sign_in_landed`` alone answered at the first poll and closed the window before Claude
+    Code had refreshed anything. Given the login it was opened over, it waits for another."""
+    account = core.create_account()
+    assert service.login_fingerprint(account) is None  # nothing stored: nothing to tell apart
+    _sign_in(account, "two@example.com", expires_in=timedelta(minutes=-5))  # expired
+    stale = service.login_fingerprint(account)
+    assert stale is not None and "sk-ant" not in stale  # a digest, never the token
+    assert service.sign_in_landed(account) is not None  # the control: signed in, as before
+    assert service.sign_in_landed(account, since=stale) is None  # but not a NEW login
+    _sign_in(account, "two@example.com")  # Claude Code refreshed it: a later expiry
+    landed = service.sign_in_landed(account, since=stale)
+    assert landed is not None and landed.email == "two@example.com"
+    # A rejected token whose expiry did not move: a new access token is a new login too.
+    rejected = service.login_fingerprint(account)
+    creds = core.credentials_path(account)
+    data = json.loads(creds.read_text())
+    data["claudeAiOauth"]["accessToken"] = "sk-ant-oat01-fresh"
+    creds.write_text(json.dumps(data))
+    assert service.sign_in_landed(account, since=rejected) is not None
+    creds.unlink()  # /logout meanwhile: no login at all lands nothing
+    assert service.sign_in_landed(account, since=rejected) is None
 
 
 def test_an_abandoned_sign_in_discards_the_fresh_slot_and_only_that(
@@ -963,6 +975,43 @@ def test_accounts_add_records_a_landed_sign_in_and_discards_one_that_did_not(
     assert [a.slot for a in core.managed_accounts()] == [2]  # slot 3 was discarded again
 
 
+def test_accounts_add_names_the_connect_to_run_quoted_for_a_slot_under_a_path_with_a_space(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Where the hooks did not install into a new slot, `accounts add` printed the connect to
+    run with the slot's directory bare: under an AISQUARE_HOME with a space, pasted, it
+    split into extra arguments (review of #257). Quoted for this shell, it runs as shown."""
+    from aisquare.services import install_route
+
+    _installed(monkeypatch)
+    monkeypatch.setattr(accounts_cli, "not_interactive_reason", lambda: None)
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "aisquare home"))
+
+    def signs_in(account: ClaudeAccount, *args: Any, **kwargs: Any) -> int:
+        _sign_in(account, "two@example.com")
+        return 0
+
+    real = service.complete_sign_in
+
+    def unhooked(account: ClaudeAccount) -> Any:
+        return real(account).model_copy(update={"hooks_installed": False})
+
+    monkeypatch.setattr(service, "run_session", signs_in)
+    monkeypatch.setattr(service, "complete_sign_in", unhooked)
+    result = runner.invoke(app, ["accounts", "add"])
+    account = core.find_account(2)
+    printed = result.stderr.split("run: ", 1)[-1].splitlines()[0]
+    argv = install_route.split_line(printed)
+    again = runner.invoke(app, argv[1:])
+
+    assert result.exit_code == 0 and account is not None, result.output
+    assert " " in str(account.config_dir), "the slot is under a path with a space"
+    connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir"]
+    assert argv == [*connect, str(account.config_dir)], printed
+    assert printed == install_route.command_line(argv), "quoted for this shell"
+    assert again.exit_code == 0, again.output
+
+
 def test_run_session_leaves_ctrl_c_to_the_child_and_restores_the_handler(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1084,3 +1133,28 @@ def test_launch_account_sets_the_slots_variables_over_the_binding(
     captured.clear()
     assert runner.invoke(app, ["launch", "coder", *bound]).exit_code == 0
     assert captured["env"][core.CONFIG_DIR_VAR] == "/elsewhere"
+
+
+def test_a_slot_this_user_cannot_enter_is_no_slot_and_raises_nothing(tmp_path: Path) -> None:
+    """``Path.is_dir`` and ``Path.is_file`` raised PermissionError on 3.11 to 3.13 for a slot
+    linked into a folder this user cannot enter, and for one it may list but not enter, so
+    every reader of the slots ended in a traceback, uninstall's plan among them (review of
+    #257). Neither is a slot; the slot beside them still is."""
+    if sys.platform == "win32" or not can_deny_reads() or not can_symlink():
+        pytest.skip("needs links and a folder this user cannot enter")
+    root = core.accounts_root()
+    for slot in (2, 4):
+        (root / str(slot)).mkdir(parents=True)
+        (root / str(slot) / core.MARKER).write_text(json.dumps({"slot": slot}), encoding="utf-8")
+    locked = tmp_path / "locked"
+    (locked / "x").mkdir(parents=True)
+    (root / "3").symlink_to(locked / "x", target_is_directory=True)
+    locked.chmod(0)
+    (root / "4").chmod(0o600)  # listed, never entered
+    try:
+        found = [account.slot for account in core.managed_accounts()]
+    finally:
+        locked.chmod(0o700)
+        (root / "4").chmod(0o700)
+
+    assert found == [2]

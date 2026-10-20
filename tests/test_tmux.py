@@ -28,7 +28,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -47,12 +47,18 @@ from aisquare.core.tmux import (
     Capture,
     Completed,
     PaneFacts,
+    SocketAnswer,
+    SocketReads,
     TmuxError,
+    TmuxPartlyTyped,
     TmuxServer,
+    TmuxTimedOut,
     TmuxUnavailable,
     WindowInfo,
     _tmux,
     parse_version,
+    server_may_run,
+    socket_answer,
 )
 from tests import fakebin
 from tests.fsperms import can_deny_reads, can_deny_writes
@@ -105,6 +111,8 @@ def _facts_line(**overrides: str) -> str:
         "mouse_sgr_flag": "0",
         "mouse_button_flag": "0",
         "mouse_all_flag": "0",
+        "start_time": "1790343472",
+        "window_activity": "1790350000",
         "pane_title": "fedora",
     }
     values.update(overrides)
@@ -239,6 +247,31 @@ def test_argv_names_the_socket_and_the_conf(fake_bin: Path, conf: Path) -> None:
         "-F",
         "#S",
     ]
+
+
+def test_at_asks_for_the_socket_at_its_path_through_the_same_runner(
+    fake_bin: Path, conf: Path
+) -> None:
+    """Round 28 of #257: a recorded row's server is asked where it said it listened (``-S``),
+    not where ``-L`` finds the name from this shell, which may be another server."""
+    fake = FakeTmux(Completed(0, "3.7\n", ""))
+    server = _server(fake, fake_bin, conf, socket="asq-x")
+    recorded = Path("/run/user/1000/tmux-1000/asq-x")
+
+    there = server.at(recorded)
+
+    assert server.at(None) is server and there.at(recorded) is there
+    assert there.argv("list-sessions") == [
+        str(fake_bin),
+        "-S",
+        str(recorded),
+        "-f",
+        str(conf),
+        "list-sessions",
+    ]
+    assert there.socket_path() == recorded and there.listener() == socket_answer(recorded)
+    assert there.socket == "asq-x" and server.path is None, "the name kept, the first untouched"
+    assert there.reachable() and fake.calls[0][0][1:3] == ["-S", str(recorded)]
 
 
 def test_run_maps_a_failure_to_tmux_error_carrying_stderr(fake_bin: Path, conf: Path) -> None:
@@ -682,17 +715,24 @@ def test_spawn_window_refuses_a_cwd_tmux_would_replace_with_home(
 def test_list_windows_parses_each_pane_and_skips_a_malformed_line(
     fake_bin: Path, conf: Path
 ) -> None:
-    live = _SEP.join(["@0", "manager", "%0", "0", "", "claude", "1"])
-    dead = _SEP.join(["@1", "coder-1", "%1", "1", "3", "sh", "0"])
+    live = _SEP.join(["@0", "manager", "%0", "0", "", "claude", "1", "1760346007"])
+    dead = _SEP.join(["@1", "coder-1", "%1", "1", "3", "sh", "0", "1760346007"])
+    old = _SEP.join(["@3", "coder-2", "%3", "0", "", "sh", "0", ""])  # a tmux without it
     broken = _SEP.join(["@2", "only-two-fields"])
-    fake = FakeTmux(Completed(0, f"{live}\n{dead}\n{broken}\n", ""))
+    fake = FakeTmux(Completed(0, f"{live}\n{dead}\n{old}\n{broken}\n", ""))
     windows = _server(fake, fake_bin, conf).list_windows("asq-amber-fox")
     assert fake.commands() == [
         ["list-panes", "-s", "-t", "=asq-amber-fox", "-F", tmux_module._WINDOW_FORMAT]
     ]
+    # When the server started comes in the same answer, so a listing says which server's
+    # lifetime its pane ids belong to without a second process (review of #259, round 3).
+    started = datetime.fromtimestamp(1760346007, tz=UTC)
     assert windows == [
-        WindowInfo("asq-amber-fox", "@0", "manager", "%0", False, None, "claude", True),
-        WindowInfo("asq-amber-fox", "@1", "coder-1", "%1", True, 3, "sh", False),
+        WindowInfo(
+            "asq-amber-fox", "@0", "manager", "%0", False, None, "claude", True, None, started
+        ),
+        WindowInfo("asq-amber-fox", "@1", "coder-1", "%1", True, 3, "sh", False, None, started),
+        WindowInfo("asq-amber-fox", "@3", "coder-2", "%3", False, None, "sh", False),
     ]
 
     gone = FakeTmux(Completed(1, "", "can't find session: asq-amber-fox"))
@@ -734,7 +774,31 @@ def test_pane_facts_parses_a_live_pane(fake_bin: Path, conf: Path) -> None:
         in_mode=False,
         current_command="claude",
         title="fedora",
+        server_started=datetime(2026, 9, 25, 13, 37, 52, tzinfo=UTC),
+        last_output=datetime(2026, 9, 25, 15, 26, 40, tzinfo=UTC),
     )
+
+
+def test_the_facts_say_when_their_pane_last_printed_or_nothing() -> None:
+    """``#{window_activity}`` rides in the facts too: the remote's needs-you asked for it in a
+    third process, after the facts and the server's start, on every quarter-second poll of
+    an agent action. A tmux that does not say prints nothing, which is ``None``."""
+    printed = tmux_module._facts(_facts_line(window_activity="1790350000")).last_output
+    assert printed == datetime.fromtimestamp(1790350000, tz=UTC)
+    for silent in ("", "soon", "-1"):
+        assert tmux_module._facts(_facts_line(window_activity=silent)).last_output is None
+
+
+def test_the_facts_say_when_their_server_started_or_nothing(fake_bin: Path, conf: Path) -> None:
+    """``#{start_time}`` rides in the facts, the same answer :meth:`TmuxServer.started_at` gives:
+    the remote's live stream asked it in a second process for every frame. A tmux that does
+    not know the variable prints nothing for it, which judges nothing, as there."""
+    asked = _server(FakeTmux(Completed(0, "1790343472\n", "")), fake_bin, conf).started_at()
+    assert tmux_module._facts(_facts_line()).server_started == asked
+    for silent in ("", "soon", "-1"):
+        assert tmux_module._facts(_facts_line(start_time=silent)).server_started is None
+    title = f"a{_SEP}1790343472"
+    assert tmux_module._facts(_facts_line(start_time="", pane_title=title)).title == title
 
 
 def test_pane_facts_reads_which_mouse_reports_the_program_asked_for(
@@ -820,6 +884,237 @@ def test_socket_path_is_unavailable_where_there_is_no_uid(monkeypatch: pytest.Mo
     monkeypatch.delattr(os, "getuid", raising=False)
     with pytest.raises(TmuxUnavailable, match="POSIX host"):
         TmuxServer("asq").socket_path()
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith(("linux", "darwin")), reason="where a boot is named"
+)
+def test_the_boot_is_named_where_the_machine_names_it() -> None:
+    first = tmux_module.boot_id()
+    assert first and tmux_module.boot_id() == first, "one boot, one name"
+
+
+def test_the_boot_is_asked_of_sysctl_where_macos_keeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A launchd or cron PATH leaves /usr/sbin out (round 25 of #257): ``sysctl`` is
+    looked for where macOS keeps it too, once per process, as the boot cannot change
+    while it runs (round 26). Where the machine keeps no boot id, none."""
+    monkeypatch.setattr(tmux_module, "_boot", None)  # put back after: the next test's is real
+    monkeypatch.setattr(tmux_module, "_BOOT_ID", tmp_path / "no-proc")
+    monkeypatch.setattr(shutil, "which", lambda _name, *a, **k: None)
+    monkeypatch.setattr(os, "access", lambda place, _mode: place == "/usr/sbin/sysctl")
+    asked: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        asked.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "6B7A1D2E-0000-4000-8000-000000000001\n", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000001"
+    assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000001"
+    assert asked == [["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]], "asked once"
+
+    monkeypatch.setattr(tmux_module, "_boot", None)  # another process
+    monkeypatch.setattr(sys, "platform", "freebsd13")  # only a boot time, which moves
+    assert tmux_module.boot_id() is None and len(asked) == 1
+
+
+def test_a_boot_id_that_could_not_be_had_is_asked_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 28 of #257: a ``sysctl`` that failed or timed out once was kept for the life of
+    the process, so asq recorded no boot for every agent it spawned after. Only an answer
+    found is kept."""
+    monkeypatch.setattr(tmux_module, "_boot", None)  # put back after: the next test's is real
+    monkeypatch.setattr(tmux_module, "_BOOT_ID", tmp_path / "no-proc")
+    monkeypatch.setattr(shutil, "which", lambda _name, *a, **k: "/usr/sbin/sysctl")
+    answers: list[subprocess.CompletedProcess[str] | subprocess.TimeoutExpired] = [
+        subprocess.TimeoutExpired(["sysctl"], 5),
+        subprocess.CompletedProcess(["sysctl"], 1, "", "sysctl: unknown oid"),
+        subprocess.CompletedProcess(["sysctl"], 0, "6B7A1D2E-0000-4000-8000-000000000002\n", ""),
+    ]
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        answer = answers.pop(0)
+        if isinstance(answer, subprocess.TimeoutExpired):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    assert tmux_module.boot_id() is None, "timed out"
+    assert tmux_module.boot_id() is None, "failed"
+    assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000002"
+    assert tmux_module.boot_id() == "6B7A1D2E-0000-4000-8000-000000000002" and answers == []
+
+
+def test_a_row_with_no_boot_to_compare_is_gone_when_its_socket_is_and_it_predates_the_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 28 of #257: a row from before v25 recorded no boot, and a reboot clears /tmp, so
+    its socket reads "gone", which counts as may still run: every 0.7.0 row left at a reboot
+    held uninstall and shutdown until --forget. Created before this boot started, a missing
+    socket is the reboot's doing. The start moves with the clock, so it explains away only
+    a missing file: never a socket that answers or could not be asked, and never what the
+    boot ids already decide."""
+    booted = datetime(2026, 10, 12, 6, 0, tzinfo=UTC)
+    monkeypatch.setattr(tmux_module, "boot_started", lambda: booted)
+    monkeypatch.setattr(tmux_module, "boot_id", lambda: "b00t")
+    before, after = datetime(2026, 10, 11, tzinfo=UTC), datetime(2026, 10, 12, 7, tzinfo=UTC)
+
+    def may_run(
+        said: str | None, created: datetime | None, recorded_boot: str | None = None
+    ) -> str | None:
+        srv = TmuxServer("asq")
+        monkeypatch.setattr(srv, "listener", lambda recorded=None: said)
+        return server_may_run(srv, None, recorded_boot, created)
+
+    assert may_run("gone", before) is None, "cleared by the reboot"
+    assert may_run("gone", after) == "gone", "since the boot: taken from under its server"
+    assert may_run("gone", None) == "gone", "no time to compare"
+    assert may_run("answers", before) == "answers", "a listener is no stepped clock's to deny"
+    assert may_run("unasked", before) == "unasked"
+    assert may_run("gone", before, recorded_boot="b00t") == "gone", "the boot ids decide"
+    assert may_run("answers", after, recorded_boot="other") is None, "another boot"
+
+
+def test_a_listener_that_started_at_another_time_is_another_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follow-up of #257: a server that lost its socket file runs on, and the next `tmux -L`
+    starts a second server at the freed path, which answers for the row from then on. The
+    row records when its server started, and the server that answers is asked the same:
+    another time is another server, and the row's may still run. A row that recorded no
+    start, and a start that cannot be asked now, leave a listener standing as the row's."""
+    recorded = Path("/run/user/1000/tmux-1000/asq")
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    asked: list[Path | None] = []
+    monkeypatch.setattr(tmux_module, "boot_id", lambda: "b00t")
+
+    def may_run(
+        now: datetime | TmuxError | None, started: datetime | None = then
+    ) -> SocketAnswer | None:
+        srv = TmuxServer("asq")
+
+        def started_at(self: TmuxServer) -> datetime | None:
+            asked.append(self.path)
+            if isinstance(now, TmuxError):
+                raise now
+            return now
+
+        monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
+        monkeypatch.setattr(TmuxServer, "started_at", started_at)
+        return server_may_run(srv, recorded, "b00t", then, started)
+
+    assert may_run(then) == "answers", "the server the row was started on"
+    assert may_run(then + timedelta(minutes=5)) == "another"
+    assert may_run(then - timedelta(days=1)) == "another", "any other time"
+    assert may_run(None) == "answers", "a start tmux does not report judges nothing"
+    assert may_run(TmuxUnavailable("no tmux")) == "answers", "could not be asked: may be its"
+    assert may_run(TmuxError("Permission denied")) == "answers"
+    assert asked == [recorded] * 6, "asked at the path the row recorded, by `-S`"
+    assert may_run(then + timedelta(minutes=5), started=None) == "answers", "nothing recorded"
+    assert asked == [recorded] * 6, "and then not asked at all"
+
+    srv = TmuxServer("asq")
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "gone")
+    assert server_may_run(srv, recorded, "b00t", then, then) == "gone", "no listener"
+    assert server_may_run(srv, recorded, "0ld", then, then) is None, "another boot"
+
+
+def test_the_boot_is_asked_once_a_read_and_only_for_a_row_that_recorded_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 7, 5/9: callers asked :func:`boot_id` themselves, for every read
+    and before any row needed it, beside the ``SocketReads`` that asked it too: where
+    ``sysctl`` fails now and then (it keeps only an id it found, each failure another 5 s
+    run), one read could get two answers. The rule asks it of the read's ``reads`` alone."""
+    answers = iter(["b00t", None])
+    asked: list[str | None] = []
+
+    def boot_id() -> str | None:
+        asked.append(answer := next(answers))
+        return answer
+
+    monkeypatch.setattr(tmux_module, "boot_id", boot_id)
+    monkeypatch.setattr(tmux_module, "boot_started", lambda: None)
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "gone")
+    srv, recorded = TmuxServer("asq"), Path("/tmp/tmux-1000/asq")
+    then = datetime(2026, 10, 13, 9, 0, tzinfo=UTC)
+    reads = SocketReads()
+    assert server_may_run(srv, recorded, None, then, reads=reads) == "gone"
+    assert asked == [], "a row that recorded no boot asks none"
+    judged = [server_may_run(srv, recorded, "0ld", then, reads=reads) for _ in range(3)]
+    assert judged == [None, None, None], "one answer for every row of the read"
+    assert asked == ["b00t"]
+
+
+def test_a_row_with_no_boot_to_compare_is_not_held_by_the_server_after_a_reboot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #259, round 1: with no boot id (the BSDs, a macOS whose `sysctl` failed) a
+    row that recorded its server's start read `"another"` against the server the first
+    spawn after a reboot started, before the boot-start rule was asked: `uninstall`
+    refused, `shutdown` held the row until `--forget`, and `stop` refused, for an agent the
+    reboot ended. Created before this boot started, its server is the reboot's doing, as a
+    socket that is gone is. Since the boot, it is another server's still; and the boot ids,
+    where both are known, decide alone."""
+    booted = datetime(2026, 10, 12, 6, 0, tzinfo=UTC)
+    monkeypatch.setattr(tmux_module, "boot_started", lambda: booted)
+    monkeypatch.setattr(TmuxServer, "listener", lambda _self, _recorded=None: "answers")
+    monkeypatch.setattr(TmuxServer, "started_at", lambda _self: booted + timedelta(minutes=3))
+    recorded = Path("/tmp/tmux-1000/asq")
+    before, after = datetime(2026, 10, 11, tzinfo=UTC), datetime(2026, 10, 12, 7, tzinfo=UTC)
+
+    def may_run(created: datetime, boots: tuple[str | None, str | None]) -> str | None:
+        then = created - timedelta(seconds=1)  # its server started just before the row
+        recorded_boot, this_boot = boots
+        monkeypatch.setattr(tmux_module, "boot_id", lambda: this_boot)
+        return server_may_run(TmuxServer("asq"), recorded, recorded_boot, created, then)
+
+    assert may_run(before, (None, None)) is None, "the reboot ended it"
+    assert may_run(before, ("b00t", None)) is None, "this boot's id could not be had"
+    assert may_run(before, (None, "b00t")) is None, "a row that recorded none"
+    assert may_run(after, (None, None)) == "another", "since the boot: its server may run"
+    assert may_run(before, ("b00t", "b00t")) == "another", "the boot ids decide"
+    monkeypatch.setattr(tmux_module, "boot_started", lambda: None)
+    assert may_run(before, (None, None)) == "another", "no boot start to compare"
+
+
+def test_the_boot_start_is_read_where_the_machine_says_and_kept_once_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Linux's ``btime`` in /proc/stat; ``kern.boottime`` of macOS and the BSDs, asked of
+    ``sysctl`` where macOS keeps it too. Kept once found, asked again until then."""
+    monkeypatch.setattr(tmux_module, "_booted_at", None)  # put back after
+    stat = tmp_path / "stat"
+    stat.write_text("cpu  1 2 3\nbtime 1760000000\nprocesses 9\n", encoding="ascii")
+    monkeypatch.setattr(tmux_module, "_PROC_STAT", stat)
+    assert tmux_module.boot_started() == datetime.fromtimestamp(1760000000, tz=UTC)
+
+    monkeypatch.setattr(tmux_module, "_booted_at", None)  # another process, on macOS
+    monkeypatch.setattr(tmux_module, "_PROC_STAT", tmp_path / "no-proc")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(shutil, "which", lambda _name, *a, **k: None)
+    monkeypatch.setattr(os, "access", lambda place, _mode: place == "/usr/sbin/sysctl")
+    answers = [
+        subprocess.CompletedProcess(["sysctl"], 1, "", "sysctl: unknown oid"),
+        subprocess.CompletedProcess(["sysctl"], 0, "{ sec = 1760001234, usec = 5 } Fri\n", ""),
+    ]
+    asked: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        asked.append(argv)
+        return answers.pop(0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert tmux_module.boot_started() is None, "it failed"
+    assert tmux_module.boot_started() == datetime.fromtimestamp(1760001234, tz=UTC)
+    assert tmux_module.boot_started() == datetime.fromtimestamp(1760001234, tz=UTC)
+    assert asked == [["/usr/sbin/sysctl", "-n", "kern.boottime"]] * 2, "kept once found"
 
 
 def test_kill_and_rename_and_attach_build_exact_targets(fake_bin: Path, conf: Path) -> None:
@@ -944,13 +1239,20 @@ def test_capture_raises_when_the_pane_is_gone(fake_bin: Path, conf: Path) -> Non
 # --- input --------------------------------------------------------------------------------------
 
 
-def test_send_keys_and_send_literal_build_their_argv(fake_bin: Path, conf: Path) -> None:
-    """…including the escape send_literal's docstring records.
+def _hex(text: str) -> list[str]:
+    return [f"{byte:02x}" for byte in text.encode("utf-8")]
 
-    A TRAILING ``;`` is tmux's command separator even after ``-l --``: measured
-    on 3.7c, ``send-keys -l -- 'a;'`` puts ``a`` in the pane and drops the
-    semicolon (proved live in ``test_live_send_literal_delivers_a_trailing_semicolon``).
-    A ``;`` anywhere else is already data — the negative control on the escape.
+
+def test_send_keys_and_send_literal_build_their_argv(fake_bin: Path, conf: Path) -> None:
+    """Named keys go as NAMES; literal text goes as BYTES.
+
+    Literal text used to go as ``-l -- <string>``, which put tmux's argument
+    parser between the text and the pane: measured on 3.7c, ``-l -- 'a;'`` puts
+    ``a`` in the pane and drops the semicolon, so :func:`_data_arg` escaped the
+    separator. ``-H`` removes the string entirely, so nothing needs escaping and
+    the whole class of quirk is gone — including the trailing space that was
+    eating the remote page's space bar. (``_data_arg`` still guards
+    :meth:`spawn_window`, where an argv really is a command.)
     """
     fake = FakeTmux()
     server = _server(fake, fake_bin, conf)
@@ -960,10 +1262,89 @@ def test_send_keys_and_send_literal_build_their_argv(fake_bin: Path, conf: Path)
     server.send_keys("%3")
     server.send_literal("%3", "")
     assert fake.commands() == [
-        ["send-keys", "-t", "%3", "C-c", "Enter"],
-        ["send-keys", "-t", "%3", "-l", "--", "-dash text; not a command"],
-        ["send-keys", "-t", "%3", "-l", "--", "a\\;"],
+        ["send-keys", "-t", "%3", "--", "C-c", "Enter"],
+        ["send-keys", "-t", "%3", "-H", *_hex("-dash text; not a command")],
+        ["send-keys", "-t", "%3", "-H", *_hex("a;")],
     ], "nothing to send is not a tmux call"
+
+
+def test_a_key_that_would_end_the_command_or_read_as_a_flag_stays_data(
+    fake_bin: Path, conf: Path
+) -> None:
+    """Keys are caller data: before ``--`` and :func:`_data_arg`, ``['Enter;', 'kill-server']``
+    killed the private server and ``[';', 'run-shell', …]`` ran a shell command (measured on
+    3.7c). ``--`` ends the flags, so ``-l`` is a key; a trailing ``;`` is escaped, so the next
+    argument is never a command of its own."""
+    fake = FakeTmux()
+    server = _server(fake, fake_bin, conf)
+    server.send_keys("%3", "-l", "Enter;", "kill-server", ";", "M-;")
+    assert fake.commands() == [
+        ["send-keys", "-t", "%3", "--", "-l", "Enter\\;", "kill-server", "\\;", "M-\\;"]
+    ]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "",
+        " ",
+        "Enter\n",
+        "C-c\r",
+        "a\tb",
+        "\x1b",
+        "Up\x00",
+        # Review of #259, round 2: `ord(char) < 0x20` let DEL and the C1 controls through.
+        "\x7f",
+        "M-\x7f",
+        "\x80",
+        "Up\x9b",  # CSI
+        "\x9f",
+        "M-\udc9b",  # a lone surrogate: the argv's encoding makes it the byte 0x9b
+    ],
+)
+def test_a_key_no_tmux_name_could_be_is_refused_before_tmux_runs(
+    fake_bin: Path, conf: Path, key: str
+) -> None:
+    fake = FakeTmux()
+    server = _server(fake, fake_bin, conf)
+    with pytest.raises(TmuxError, match="not a tmux key name"):
+        server.send_keys("%3", "Enter", key)
+    assert fake.commands() == [], "nothing at all was sent, not even the valid key before it"
+
+
+def test_a_printable_key_of_any_script_is_still_sent(fake_bin: Path, conf: Path) -> None:
+    """The control-character floor refuses controls, not text: an alt chord on a key of
+    another script is a key name tmux takes (`M-é`), as is a character past the C1 block."""
+    fake = FakeTmux()
+    server = _server(fake, fake_bin, conf)
+    server.send_keys("%3", "M-é", "M-ж", "M-\xa1", "C-\u00e0")
+    assert fake.commands() == [["send-keys", "-t", "%3", "--", "M-é", "M-ж", "M-¡", "C-à"]]
+
+
+#: The most arguments tmux 3.7 takes in one command ("Limit MSG_COMMAND argument to
+#: between 0 and 1000", CHANGES 3.6b to 3.7); past it the client says "command too long".
+_TMUX_ARGUMENT_LIMIT = 1000
+
+
+def test_a_long_send_literal_is_cut_into_commands_tmux_37_accepts(
+    fake_bin: Path, conf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``-H`` spends an argument per byte, and chunks of 1024 failed every paste of 997
+    bytes or more on tmux 3.7. The live chunking test cannot see that on a tmux older than
+    the limit, CI's among them, so the arguments are counted here; the control is the old
+    chunk size, which the same count has to catch. Either way every byte goes, in order."""
+    text = "".join(chr(ord("a") + i % 26) for i in range(3000))
+
+    def longest_command() -> int:
+        fake = FakeTmux()
+        _server(fake, fake_bin, conf).send_literal("%3", text)
+        commands = fake.commands()
+        assert [byte for command in commands for byte in command[4:]] == _hex(text)
+        return max(len(command) for command in commands)
+
+    assert longest_command() <= _TMUX_ARGUMENT_LIMIT
+    monkeypatch.setattr(tmux_module, "_HEX_CHUNK", 1024)
+    assert longest_command() > _TMUX_ARGUMENT_LIMIT
 
 
 def test_paste_loads_the_buffer_from_stdin_then_pastes_bracketed(
@@ -1025,6 +1406,59 @@ def test_a_paste_that_fails_does_not_leave_its_text_on_the_server(
     assert [command[0] for command in quiet.commands()] == ["load-buffer", "paste-buffer"]
 
 
+@pytest.mark.parametrize("fails", ["load-buffer", "paste-buffer"])
+def test_a_paste_tmux_did_not_answer_says_whether_it_can_still_land_and_tidies_up_briefly(
+    fake_bin: Path, conf: Path, monkeypatch: pytest.MonkeyPatch, fails: str
+) -> None:
+    """Review of #259, round 11, 7/13. A ``load-buffer`` that timed out never sent its
+    ``paste-buffer``, so nothing can arrive: a plain ``TmuxError``, where a timeout read
+    "it may still arrive". A ``paste-buffer`` that timed out may still paste. Either way
+    the buffer is tidied away, waiting ``_ASK_TIMEOUT`` at most on a server that just did
+    not answer: its ``delete-buffer`` held the agent's lock another 30 s."""
+    asked: list[tuple[str, float | None]] = []
+
+    def wedged(
+        argv: Sequence[str], stdin: bytes | None, *, timeout: float | None = None
+    ) -> Completed:
+        command = argv[5]
+        asked.append((command, timeout))
+        if command == fails:
+            raise TmuxTimedOut(f"tmux did not answer within 30s: {command}")
+        return OK
+
+    monkeypatch.setattr(tmux_module, "_tmux", wedged)
+    server = TmuxServer("sock", binary=str(fake_bin), conf=conf)
+    with pytest.raises(TmuxError) as raised:
+        server.paste("%3", "the prompt")
+    assert isinstance(raised.value, TmuxTimedOut) is (fails == "paste-buffer"), raised.value
+    tried = ["load-buffer", "paste-buffer"][: 1 + (fails == "paste-buffer")]
+    assert asked == [*((command, None) for command in tried), ("delete-buffer", 5.0)]
+
+
+def test_a_literal_whose_later_chunk_fails_says_how_much_of_it_was_typed(
+    fake_bin: Path, conf: Path
+) -> None:
+    """Review of #259, round 11, 7/13: of ``send_literal``'s up to 16 ``send-keys -H``
+    calls, one that failed after the first left the chunks before it in the pane and sent
+    none after it. As a plain refusal it read "nothing was typed", as a plain timeout "the
+    text may still arrive"; ``TmuxPartlyTyped`` says how many bytes went. A first chunk
+    that fails typed nothing, and is the plain error it was."""
+    text = "x" * (3 * 512)
+    refused = Completed(1, "", "server exited unexpectedly\n")
+    fake = FakeTmux(OK, refused)
+    with pytest.raises(TmuxPartlyTyped) as raised:
+        _server(fake, fake_bin, conf).send_literal("%3", text)
+    assert (raised.value.typed, raised.value.size) == (512, 3 * 512)
+    assert str(raised.value.cause) == "server exited unexpectedly"
+    assert len(fake.commands()) == 2, "no chunk is sent after the one that failed"
+
+    first = FakeTmux(refused)
+    with pytest.raises(TmuxError) as plain:
+        _server(first, fake_bin, conf).send_literal("%3", text)
+    assert not isinstance(plain.value, TmuxPartlyTyped)
+    assert len(first.commands()) == 1
+
+
 def test_resize_never_asks_for_a_zero_sized_window(fake_bin: Path, conf: Path) -> None:
     fake = FakeTmux()
     server = _server(fake, fake_bin, conf)
@@ -1045,8 +1479,9 @@ def test_the_seam_maps_a_vanished_binary_to_unavailable() -> None:
 
 
 def test_the_seam_maps_a_hung_server_to_tmux_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A :class:`TmuxError` its callers catch, of its own kind: what it asked may still run."""
     monkeypatch.setattr(tmux_module, "_COMMAND_TIMEOUT", 0.2)
-    with pytest.raises(TmuxError, match="did not answer within 0s"):
+    with pytest.raises(TmuxTimedOut, match="did not answer within 0s"):
         _tmux([sys.executable, "-c", "import time; time.sleep(5)"], None)
 
 
@@ -1261,6 +1696,8 @@ def test_live_capture_returns_the_screen_with_colours_and_consumes_the_facts_lin
     assert all(_SEP not in line for line in capture.lines)
     assert capture.facts.pane_id == window.pane_id
     assert capture.facts.dead is False and capture.facts.dead_status is None
+    assert capture.facts.server_started is not None
+    assert capture.facts.server_started == live.started_at()
     assert capture.scrollback == 0
     assert _wait(lambda: live.capture(window.pane_id).facts.current_command == "cat")
 
@@ -1401,6 +1838,26 @@ def test_live_send_literal_delivers_a_trailing_semicolon(live: TmuxServer) -> No
     live.send_literal(window.pane_id, "RAW")
     live.send_keys(window.pane_id, "Enter")
     assert _wait(lambda: "run makeRAW" in _screen(live, window.pane_id))
+
+
+@requires_tmux
+def test_live_send_keys_sends_keys_and_never_tmux_syntax(live: TmuxServer) -> None:
+    """``--`` and the escaped separator, measured on the pane the keys go to.
+
+    ``-l`` is no key name, so it arrives as the text it spells instead of being read as
+    the flag that turns every other key into text. ``;`` arrives as itself, and what
+    follows it is typed, not run: the option it would have set stays unset. Enter and
+    C-c still do what they name.
+    """
+    window = _spawn(live, "asq-test-fox", "w0", CAT)
+    assert _wait(lambda: "plain" in _screen(live, window.pane_id))
+
+    live.send_keys(window.pane_id, "-l", ";", "set-option", "-g", "@asq_injected", "yes", "Enter")
+    assert _wait(lambda: "-l;set-option-g@asq_injectedyes" in _screen(live, window.pane_id))
+    assert live.run("show-options", "-gqv", "@asq_injected").strip() == "", "nothing ran"
+
+    live.send_keys(window.pane_id, "C-c")
+    assert _wait(lambda: (facts := live.pane_facts(window.pane_id)) is not None and facts.dead)
 
 
 @requires_tmux
@@ -1634,12 +2091,42 @@ def test_live_a_new_server_reuses_pane_ids_and_says_when_it_started(live: TmuxSe
 
 @requires_tmux
 def test_live_socket_path_is_where_tmux_put_it_and_outlives_the_server(live: TmuxServer) -> None:
+    assert live.server_socket_path() is None, "no server, so nothing says where it listens"
     _spawn(live, "asq-test-fox", "w0", CAT)
     assert live.run("display-message", "-p", "#{socket_path}").strip() == str(live.socket_path())
+    assert live.server_socket_path() == live.socket_path(), "what a spawn records"
     assert live.socket_path().is_socket()
     live.kill_server()
     assert live.list_sessions() == []
     assert live.socket_path().exists(), "the file tmux leaves behind — what the fixture tidies"
+
+
+@requires_tmux
+def test_live_a_server_under_another_tmux_tmpdir_is_reached_at_the_path_it_said(
+    live: TmuxServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 28 of #257: ``-L`` from a shell without the spawning shell's ``TMUX_TMPDIR`` asks
+    another directory; the path the server said it listens on (what a spawn records) reaches
+    it from any shell."""
+    import tempfile
+
+    elsewhere = Path(tempfile.mkdtemp(prefix="asq-", dir="/tmp"))  # an AF_UNIX path is short
+    monkeypatch.setenv("TMUX_TMPDIR", str(elsewhere))
+    window = _spawn(live, "asq-test-elk", "w0", CAT)
+    recorded = live.server_socket_path()
+    monkeypatch.delenv("TMUX_TMPDIR")
+    assert recorded is not None and recorded.parent.parent == elsewhere
+    there = live.at(recorded)
+    try:
+        assert live.reachable() is False, "-L asks this shell's directory, where none is"
+        assert there.reachable() is True
+        facts = there.pane_facts_or_raise(window.pane_id)
+        assert facts is not None and facts.pane_id == window.pane_id
+    finally:
+        with contextlib.suppress(TmuxError):
+            there.kill_server()
+        shutil.rmtree(elsewhere, ignore_errors=True)
+    assert there.reachable() is False, "no server at the path: tmux says none"
 
 
 @requires_tmux

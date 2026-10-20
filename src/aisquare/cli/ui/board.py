@@ -6,6 +6,9 @@ click or Enter on a task or a feed line shows its full content below; ``d``
 flips the table to the done archive; ``o`` opens the author session's
 transcript at the selected moment; ``v`` freezes the feed into selectable text;
 ``a`` toggles autoscroll; ``b`` hides the board column; ``r`` refreshes now.
+Every line between two parts is a ``Divider``: drag it to resize, double-click
+it to put the stylesheet's size back; each size is remembered in ``state.json``
+under one key for every project's board.
 
 Lifted out of ``cli.watch`` (docs/plans/fleet-tui.md §4.2, §9 Phase 6) so the
 fleet UI's Project view can show a project's board as one tab while
@@ -37,19 +40,26 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.coordinate import Coordinate
+from textual.geometry import Size
 from textual.message import Message
+from textual.screen import ModalScreen
 from textual.widgets import DataTable, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli import watch
 from aisquare.cli.common import local_time
+from aisquare.cli.ui.clipboard import copy_and_tell
+from aisquare.cli.ui.divider import Divider, floor_of
+from aisquare.cli.ui.ticks import while_running
 from aisquare.core.store import unmet_needs
+from aisquare.core.terminal import mac_keyboard
 from aisquare.models import CLOSED_STATUSES, ProjectInfo, TeamEvent, TeamSession, TeamTask
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import team as team_service
@@ -64,6 +74,75 @@ the board column is 48 wide and a feed narrower than ~32 shows nothing readable.
 Measured against the PANEL, not the terminal — inside the fleet UI a 30-column
 sidebar sits beside it, and at 92 a 120-column terminal never showed the tasks."""
 TRANSCRIPT_HINT = "\npress o to open the transcript at this moment"
+COLUMN_WIDTH_KEY = "board_column_width"
+"""The ``state.json`` key of the board column's width (the line beside the live feed)."""
+TEAM_HEIGHT_KEY = "board_team_height"
+"""The ``state.json`` key of the team block's height (the line above the tasks)."""
+DETAIL_HEIGHT_KEY = "board_detail_height"
+"""The ``state.json`` key of the detail pane's height (the line above it)."""
+
+WAITING = "waiting"
+"""Not a status: a ``todo`` whose ``needs`` are not all done yet, which gets its own icon."""
+STATUS_ICONS: dict[str, tuple[str, str, str]] = {
+    "todo": ("○", "bold", "to do — nobody has it yet"),
+    WAITING: ("⧗", "yellow", "to do, waiting on a task it needs"),
+    "doing": ("▶", "green", "doing — claimed and being worked on"),
+    "review": ("👀", "cyan", "in review — waiting to be checked"),
+    "blocked": ("⛔", "red", "blocked — the detail says on what"),
+    "done": ("✓", "green", "done"),
+    "dropped": ("✗", "dim", "dropped — no longer worth doing"),
+}
+"""status → (glyph, style, what it means): the tasks table's one icon per state, and the
+legend the help screens print from it. Each glyph is one or two cells wide."""
+ICON_CELLS = 2
+"""The status column's width: the widest glyph, so every row's title starts at one column."""
+TASK_COLUMNS = ("#", "st", "title")
+"""The tasks table: the number on the board, the status icon, the title."""
+BOARD_KEYS: tuple[tuple[str, str], ...] = (
+    ("click Enter", "a task or feed line: its full content below"),
+    ("d", "the done archive · back to the open tasks"),
+    ("o", "the author's transcript at that moment"),
+    ("v  c", "freeze the feed to select text · copy it"),
+    ("a", "feed autoscroll on or off"),
+    ("b", "hide or show the tasks column"),
+    ("r", "refresh now"),
+    ("lines", "drag a line to resize; double-click resets it"),
+)
+"""The board's own keys, as the help screens list them."""
+MAC_COPY_KEY = ("v  c", "freeze the feed to select text · c copies (not ⌘C)")
+"""The copy row for a Mac's keyboard, where a copy key left unnamed reads as ⌘C: Terminal.app and
+iTerm2 keep ⌘C as their own Copy, so it never reaches the board."""
+
+
+def board_keys() -> tuple[tuple[str, str], ...]:
+    """:data:`BOARD_KEYS` as the user's help reads them: with :data:`MAC_COPY_KEY` when they
+    type on a Mac (``core.terminal.mac_keyboard``), whatever the host runs."""
+    if not mac_keyboard():
+        return BOARD_KEYS
+    return tuple(
+        MAC_COPY_KEY if key == MAC_COPY_KEY[0] else (key, what) for key, what in BOARD_KEYS
+    )
+
+
+def status_icon(status: str, *, waiting: bool = False) -> Text:
+    """The status as its icon, coloured, padded to :data:`ICON_CELLS`."""
+    glyph, style, _meaning = STATUS_ICONS.get(WAITING if waiting else status, ("?", "dim", ""))
+    return Text(glyph + " " * max(0, ICON_CELLS - cell_len(glyph)), style=style)
+
+
+def board_help() -> Text:
+    """The board's keys and the icon legend, for a help screen."""
+    text = Text()
+    for key, what in board_keys():
+        text.append(f"  {key:<11}", style="bold cyan")
+        text.append(f" {what}\n")
+    text.append("\n  task icons\n", style="bold")
+    for state, (glyph, style, meaning) in STATUS_ICONS.items():
+        text.append("  ")
+        text.append(glyph + " " * max(0, ICON_CELLS - cell_len(glyph)), style=style)
+        text.append(f"  {meaning}", style="dim" if state == "dropped" else "")
+        text.append("\n")
+    return text
 
 
 class PickableTable(DataTable[Text]):
@@ -95,6 +174,12 @@ class PickableTable(DataTable[Text]):
             self.row_key = row_key
             super().__init__()
 
+    class Resized(Message):
+        """The table's width changed (a terminal, a dragged line): titles refit to it."""
+
+    def on_resize(self, event: events.Resize) -> None:
+        self.post_message(self.Resized())
+
     async def _on_click(self, event: events.Click) -> None:
         meta = event.style.meta
         row = meta.get("row", -1)
@@ -109,29 +194,121 @@ class PickableTable(DataTable[Text]):
         self.post_message(self.RowPicked(key))
 
 
+class TeamBlock(Static):
+    """The team block: as tall as its lines, up to :attr:`AUTO_ROWS` — until a drag says otherwise.
+
+    The cap was the stylesheet's ``max-height: 10``; the column now writes the
+    block's ``max-height`` as the room the tasks leave it (:class:`BoardColumn`),
+    so a dragged height may go past ten rows. Capping the AUTO height here keeps
+    the undragged block what it was — Textual asks for the content height only
+    when the height is ``auto`` — and a height the divider set is the user's.
+    """
+
+    AUTO_ROWS: ClassVar[int] = 8
+    """Content rows an undragged block shows: ten rows less its border."""
+
+    def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
+        return min(super().get_content_height(container, viewport, width), self.AUTO_ROWS)
+
+
+def _number_cell(task: TeamTask) -> Text:
+    """The task's number on its board; its id's tail, dimmed, for a task that has none."""
+    if task.number is not None:
+        return Text(str(task.number))
+    return Text(task.id[-8:], style="dim")
+
+
+class BoardHelp(ModalScreen[None]):
+    """``aisquare board -w``'s keys and the task icons; Esc, q or ? closes.
+
+    The fleet UI's own help screen prints the same :func:`board_help` under its
+    "Board" section; ``extra`` is the hosting app's keys (a theme picker, quit).
+    """
+
+    CSS = """
+    BoardHelp { align: center middle; }
+    #boardhelpbox { width: 72; height: auto; max-height: 90%; border: heavy $accent;
+                    background: $surface; padding: 1 2; }
+    #boardhelpbox Static { height: auto; }
+    """
+    BINDINGS: ClassVar = [
+        ("escape", "close_help", "close"),
+        ("q", "close_help", "close"),
+        ("question_mark", "close_help", "close"),
+    ]
+
+    def __init__(self, extra: tuple[tuple[str, str], ...] = ()) -> None:
+        super().__init__()
+        self._extra = extra
+
+    def compose(self) -> ComposeResult:
+        text = Text("aisquare board — keys\n\n", style="bold")
+        text.append_text(board_help())
+        if self._extra:
+            text.append("\n")
+            for key, what in self._extra:
+                text.append(f"  {key:<11}", style="bold cyan")
+                text.append(f" {what}\n")
+        text.append("\nEsc closes this", style="dim")
+        with VerticalScroll(id="boardhelpbox"):
+            yield Static(text)
+
+    def action_close_help(self) -> None:
+        self.dismiss(None)
+
+
+class BoardColumn(Vertical):
+    """The board column: the team block over the tasks, and the line between them.
+
+    The column keeps the team block's ceiling — its height less the line and
+    the rows the tasks must keep — as the block's ``max-height`` whenever its
+    own height changes: the panel resizing, or the detail pane's line moving.
+    Textual then clamps the block on every layout pass, as ``app.Panes`` does
+    for the navigator.
+    """
+
+    def on_resize(self, event: events.Resize) -> None:
+        if event.size.height <= 0:
+            return  # behind a hidden tab: nothing to fit, and the next show resizes
+        sessions = self.query_children("#sessions").first()
+        tasks = self.query_children("#tasks").first()
+        floor = floor_of(sessions, "height")
+        sessions.styles.max_height = max(floor, event.size.height - 1 - floor_of(tasks, "height"))
+
+
 class BoardPanel(Vertical):
     """Sessions, tasks, the live feed and a detail pane for one project's board.
 
     ``project`` may be ``None``: the board then resolves from the process cwd
     on every read, which is what ``board -w`` does when its own resolution
     failed at start. ``interval`` is the refresh period in seconds.
+
+    Three lines resize it, each a :class:`Divider` that finds its target among
+    its own siblings — the fleet UI mounts a board per project at once, and the
+    ids repeat: the column beside the feed, the detail pane below everything,
+    and the team block over the tasks (:class:`BoardColumn`). The panel keeps
+    the first two ceilings current from its own size, so the feed and the
+    board above the detail pane keep their stylesheet minimums whatever the
+    drag or the terminal does.
     """
 
     DEFAULT_CSS = """
     BoardPanel { height: 1fr; }
-    BoardPanel #board-main { height: 1fr; }
+    BoardPanel #board-main { height: 1fr; min-height: 8; }
     BoardPanel #board-side { width: 48; min-width: 32; }
     BoardPanel #board-side.collapsed { display: none; }
-    BoardPanel #sessions { height: auto; max-height: 10; border: round $primary;
+    BoardPanel #side-divider.collapsed { display: none; }
+    BoardPanel #sessions { height: auto; min-height: 3; border: round $primary;
                            padding: 0 1; }
-    BoardPanel #tasks { height: 1fr; border: round $primary; }
-    BoardPanel #feedpane { width: 1fr; }
+    BoardPanel #tasks { height: 1fr; min-height: 4; border: round $primary; }
+    BoardPanel #feedpane { width: 1fr; min-width: 32; }
     BoardPanel #feed { height: 1fr; border: round $secondary; }
     BoardPanel #feed.hidden { display: none; }
     BoardPanel #feedtext { height: 1fr; border: round $success; display: none;
                            padding: 0 1; }
     BoardPanel #feedtext.active { display: block; }
-    BoardPanel #detailwrap { height: 8; border: heavy $warning; padding: 0 1; }
+    BoardPanel #detailwrap { height: 8; min-height: 3; border: heavy $warning;
+                             padding: 0 1; }
     """
     BINDINGS: ClassVar = [
         ("b", "toggle_board", "board on/off"),
@@ -149,7 +326,7 @@ class BoardPanel(Vertical):
     The panel outlives every tab switch, so the feed is the one structure here
     that only grows: ``_events_by_id``, ``_feed_order`` and the OptionList all
     gain a row per event for the life of the app. 2000 lines is ~5x the first
-    fetch (``board_data(events=400)``) — deep enough that scrolling back has
+    fetch (``board_read(events=400)``) — deep enough that scrolling back has
     somewhere to go, bounded enough that a week-long session cannot swell.
     """
 
@@ -178,6 +355,8 @@ class BoardPanel(Vertical):
         self._select_mode = False
         self._show_done = False
         self._sessions: dict[str, TeamSession] = {}
+        self._switches: dict[str, str] = {}
+        """The ``fleet switch`` of each limited session the last refresh read, by its id."""
         self._labels: Mapping[int, str] = {}
         self._labels_asked_at: float | None = None
         self._all_tasks: list[TeamTask] = []
@@ -189,19 +368,40 @@ class BoardPanel(Vertical):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="board-main"):
-            with Vertical(id="board-side"):
-                yield Static(id="sessions")
+            with BoardColumn(id="board-side"):
+                yield TeamBlock(id="sessions")
+                yield Divider(
+                    "#sessions",
+                    orientation="horizontal",
+                    state_key=TEAM_HEIGHT_KEY,
+                    what="the board's team height",
+                    id="team-divider",
+                )
                 yield PickableTable(id="tasks", cursor_type="row")
+            yield Divider(
+                "#board-side",
+                state_key=COLUMN_WIDTH_KEY,
+                what="the board column's width",
+                id="side-divider",
+            )
             with Vertical(id="feedpane"):
                 yield OptionList(id="feed")
                 with VerticalScroll(id="feedtext"):
                     yield Static(id="feedstatic")
+        yield Divider(
+            "#detailwrap",
+            orientation="horizontal",
+            side="after",
+            state_key=DETAIL_HEIGHT_KEY,
+            what="the board's detail height",
+            id="detail-divider",
+        )
         with VerticalScroll(id="detailwrap"):
             yield Static(id="detail")
 
     def on_mount(self) -> None:
         table = self.query_one("#tasks", DataTable)
-        table.add_columns("id", "st", "who", "title")
+        table.add_columns(*TASK_COLUMNS)
         table.border_title = "tasks"
         self.query_one("#sessions", Static).border_title = "team"
         self.query_one("#feed", OptionList).border_title = "live feed"
@@ -211,6 +411,7 @@ class BoardPanel(Vertical):
         self.refresh_data()
         self.set_interval(self.interval, self._tick)
 
+    @while_running
     def _tick(self) -> None:
         """The polled read — skipped while the panel is off screen.
 
@@ -237,7 +438,7 @@ class BoardPanel(Vertical):
         finding 11): ``aisquare captain log`` reads it.
         """
         try:
-            project, sessions, tasks, events = team_service.board_data(
+            project, sessions, tasks, events, switches = team_service.board_read(
                 events=400 if self._last_seq == 0 else 200,
                 since_seq=self._last_seq or None,
                 project=self.project,
@@ -255,7 +456,10 @@ class BoardPanel(Vertical):
         self._statuses = {t.id: t.status for t in tasks}
         self._all_tasks = tasks
         self._refresh_labels(sessions)
-        self.query_one("#sessions", Static).update(watch._session_lines(sessions, self._labels))
+        self._switches = switches
+        self.query_one("#sessions", Static).update(
+            watch._session_lines(sessions, self._labels, switches=self._switches)
+        )
         self._ring_on_attention(sessions)
         # Events first: a task_done/dropped this tick flushes the attribution
         # cache BEFORE the archive rebuilds, so the closer is never one frame stale.
@@ -298,7 +502,9 @@ class BoardPanel(Vertical):
             self._labels = event.worker.result
             if self.is_mounted:
                 self.query_one("#sessions", Static).update(
-                    watch._session_lines(list(self._sessions.values()), self._labels)
+                    watch._session_lines(
+                        list(self._sessions.values()), self._labels, switches=self._switches
+                    )
                 )
 
     def _ring_on_attention(self, sessions: list[TeamSession]) -> None:
@@ -331,41 +537,57 @@ class BoardPanel(Vertical):
         return self._terminal_by_task.get(task_id)
 
     def _refresh_tasks(self, tasks: list[TeamTask]) -> None:
+        """Rebuild the table: the task's number, its status as an icon, and its title.
+
+        Who has it, its full id and the rest are one click away in the detail pane.
+        The title is cut, with an ellipsis, to the room the table has, so it takes
+        the rest of the width and the table never scrolls sideways; a resize
+        rebuilds (``PickableTable.Resized``).
+        """
         table = self.query_one("#tasks", DataTable)
         selected = self._cursor_task_id(table)
-        table.clear()
+        # The columns too: a column keeps the widest cell it ever held, so a title cut
+        # to a narrower table still scrolled sideways to the width of the uncut one.
+        table.clear(columns=True)
+        table.add_columns(*TASK_COLUMNS)
         self._tasks_by_id = {}
+        rows: list[tuple[TeamTask, Text, Text]] = []
         if self._show_done:
             closed = [t for t in tasks if t.status in CLOSED_STATUSES]
             closed.sort(key=lambda t: t.updated_at, reverse=True)
             table.border_title = f"done archive ({len(closed)}) — d for open tasks"
             for task in closed:
-                self._tasks_by_id[task.id] = task
-                event = self._done_event_for(task.id)
-                who = team_service.short_id(event.session_id) if event and event.session_id else ""
                 when = f"{local_time(task.updated_at):%H:%M}"
-                table.add_row(
-                    Text(task.id[-8:], style="dim"),
-                    Text(f"{'✅' if task.status == 'done' else '🗑'} {when}"),
-                    Text(who),
-                    Text(task.title, no_wrap=True, overflow="ellipsis"),
-                    key=task.id,
-                )
+                rows.append((task, _number_cell(task), status_icon(task.status) + f" {when}"))
         else:
             table.border_title = "tasks — d for done archive"
             for task in (t for t in tasks if t.status in OPEN_STATUSES):
-                self._tasks_by_id[task.id] = task
-                marker = "⧗" if unmet_needs(task, self._statuses) else ""
-                who = team_service.short_id(task.claimed_by) if task.claimed_by else ""
-                table.add_row(
-                    Text(task.id[-8:], style="dim"),
-                    Text(f"{task.status}{marker}"),
-                    Text(who),
-                    Text(task.title, no_wrap=True, overflow="ellipsis"),
-                    key=task.id,
-                )
+                waiting = task.status == "todo" and bool(unmet_needs(task, self._statuses))
+                rows.append((task, _number_cell(task), status_icon(task.status, waiting=waiting)))
+        room = self._title_room(table, rows)
+        for task, number, icon in rows:
+            self._tasks_by_id[task.id] = task
+            title = Text(task.title, no_wrap=True, overflow="ellipsis")
+            if room is not None:
+                title.truncate(room, overflow="ellipsis")
+            table.add_row(number, icon, title, key=task.id)
         if selected in self._tasks_by_id:
             table.move_cursor(row=table.get_row_index(selected))
+
+    @staticmethod
+    def _title_room(table: DataTable[Any], rows: list[tuple[TeamTask, Text, Text]]) -> int | None:
+        """The cells the title column may take: what the table has less the other two
+        columns and every column's padding — ``None`` before the table has a size."""
+        width = table.scrollable_content_region.width
+        if width <= 0:
+            return None
+        pad = 2 * table.cell_padding
+        number = max([1, *(row[1].cell_len for row in rows)]) + pad
+        status = max([ICON_CELLS, *(row[2].cell_len for row in rows)]) + pad
+        return max(8, width - number - status - pad)
+
+    def on_pickable_table_resized(self, event: PickableTable.Resized) -> None:
+        self._refresh_tasks(self._all_tasks)
 
     def _cursor_task_id(self, table: DataTable[Any]) -> str | None:
         try:
@@ -555,18 +777,54 @@ class BoardPanel(Vertical):
                 "nothing selected — v enters select mode, then drag", timeout=4, markup=False
             )
             return
-        self.app.copy_to_clipboard(selected)
-        self.notify(f"copied {len(selected)} chars", timeout=3, markup=False)
+        copy_and_tell(self.app, selected, f"copied {len(selected)} chars", timeout=3)
 
     def action_toggle_board(self) -> None:
-        self.query_one("#board-side").toggle_class("collapsed")
+        """``b``: the board column off or on, and focus with it when it comes back."""
+        shown = self.query_one("#board-side").has_class("collapsed")
+        self._collapse(not shown)
+        if shown:
+            self.query_one("#tasks").focus()
 
     def action_refresh_now(self) -> None:
         self.refresh_data()
 
-    def on_resize(self, event: events.Resize) -> None:
+    def _collapse(self, collapsed: bool) -> None:
+        """Hide (or show) the board column and the line that resizes it, together.
+
+        Focus inside a column going out of sight moves to the feed beside it, as it is
+        shown (the live list, or its frozen text in select mode). Left on the hidden
+        tasks table it went to nothing, and with nothing focused no key reaches this
+        panel: the next ``b`` could not bring the column back.
+        """
         side = self.query_one("#board-side")
-        if event.size.width < COLLAPSE_BELOW:
-            side.add_class("collapsed")
-        else:
-            side.remove_class("collapsed")
+        side.set_class(collapsed, "collapsed")
+        self.query_one("#side-divider").set_class(collapsed, "collapsed")
+        focused = self.app.focused
+        if collapsed and focused is not None and side in focused.ancestors_with_self:
+            feed = self.query_one("#feed")
+            (self.query_one("#feedtext") if feed.has_class("hidden") else feed).focus()
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._collapse(event.size.width < COLLAPSE_BELOW)
+        if event.size.width > 0 and event.size.height > 0:
+            self._fit(event.size.width, event.size.height)
+
+    def _fit(self, width: int, height: int) -> None:
+        """Write the column's and the detail pane's ceilings from the panel's size.
+
+        Each is the panel less its line and what the other side must keep —
+        the feed's ``min-width``, the board's ``min-height`` above the detail
+        pane — so Textual clamps the dragged part on every layout pass and a
+        shrinking terminal re-clamps it with no handler. Too small for both
+        minimums, the dragged part's floor wins.
+        """
+        side = self.query_one("#board-side")
+        side.styles.max_width = max(
+            floor_of(side), width - 1 - floor_of(self.query_one("#feedpane"))
+        )
+        detail = self.query_one("#detailwrap")
+        detail.styles.max_height = max(
+            floor_of(detail, "height"),
+            height - 1 - floor_of(self.query_one("#board-main"), "height"),
+        )

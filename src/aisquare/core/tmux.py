@@ -75,11 +75,15 @@ import itertools
 import os
 import re
 import shutil
+import socket as socket_module
 import subprocess
+import sys
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from aisquare.core import paths
 from aisquare.core.spawn import tmux_client_env
@@ -112,6 +116,10 @@ CONF_NAME = "fleet-tmux.conf"
 CHECK_SOCKET_SUFFIX = "-check"
 """Where :meth:`TmuxServer.check_conf` starts its throwaway server: ``<socket>-check``."""
 _COMMAND_TIMEOUT = 30.0
+_ASK_TIMEOUT = 5.0
+"""How long a question an upgrade or uninstall plan puts to a server waits for its answer
+(:func:`asking_server`): a wedged server (it takes the connect and never answers) held the
+plan :data:`_COMMAND_TIMEOUT` per socket, where the socket's own probe gave up after 2 s."""
 
 #: The bundled server configuration. Applied with ``-f`` when the server starts
 #: (harmless afterwards). Every line has a reason: docs/plans/fleet-tui.md §3.1.
@@ -210,6 +218,8 @@ _FACTS_FIELDS = (
     "mouse_sgr_flag",
     "mouse_button_flag",
     "mouse_all_flag",
+    "start_time",
+    "window_activity",
     "pane_title",
 )
 _FACTS_FORMAT = _SEP.join(f"#{{{name}}}" for name in _FACTS_FIELDS)
@@ -221,6 +231,7 @@ _WINDOW_FIELDS = (
     "pane_dead_status",
     "pane_current_command",
     "window_activity_flag",
+    "start_time",
 )
 _WINDOW_FORMAT = _SEP.join(f"#{{{name}}}" for name in _WINDOW_FIELDS)
 _VERSION = re.compile(r"(\d+)\.(\d+)")
@@ -248,6 +259,16 @@ _UNTARGETABLE = frozenset(".:")
 #: :func:`_data_arg` first.
 _ARGV_SEPARATOR = ";"
 
+_HEX_CHUNK = 512
+"""Bytes per ``send-keys -H`` call — one argument each, so a paste is cut up.
+
+tmux 3.7 refuses a command of more than 1000 arguments ("Limit MSG_COMMAND
+argument to between 0 and 1000", CHANGES 3.6b to 3.7) with "command too long",
+and ``send-keys -t <pane> -H`` spends four of them: measured on 3.7c, 996 bytes
+go and 997 do not, so chunks of 1024 failed every paste of 997 bytes or more.
+512 leaves room for a flag added to the call later. Older tmux has no such
+limit, CI's included, so ``tests/test_tmux.py`` counts the arguments instead."""
+
 
 class TmuxError(RuntimeError):
     """A tmux command failed; the message carries tmux's own stderr."""
@@ -255,6 +276,25 @@ class TmuxError(RuntimeError):
 
 class TmuxUnavailable(TmuxError):
     """No usable tmux: missing from PATH, or older than :data:`MIN_VERSION`."""
+
+
+class TmuxTimedOut(TmuxError):
+    """The server did not answer in time (:func:`_tmux`). Its client is killed, but what it
+    asked may be queued in a server that is wedged, which runs it once it recovers: unlike a
+    refusal, it may still happen."""
+
+
+class TmuxPartlyTyped(TmuxError):
+    """A write of several tmux calls that failed after its first went through
+    (:meth:`TmuxServer.send_bytes`): ``typed`` of its ``size`` bytes reached the pane, and
+    ``cause`` is how the next call failed. The calls after that one were never sent, so of
+    the rest only the chunk a :class:`TmuxTimedOut` asked for may still arrive. Taken for a
+    plain timeout, it was "the text may still arrive", true of a prefix only; taken for a
+    refusal, "nothing was typed" (review of #259, round 11, 7/13)."""
+
+    def __init__(self, cause: TmuxError, typed: int, size: int) -> None:
+        super().__init__(f"{cause} (after {typed} of its {size} bytes)")
+        self.cause, self.typed, self.size = cause, typed, size
 
 
 #: How tmux says a LIVE server has no such session/window/pane — a benign
@@ -278,30 +318,32 @@ Runner = Callable[[Sequence[str], bytes | None], Completed]
 """How commands run: the real :func:`_tmux`, or a fake in tests."""
 
 
-def _tmux(argv: Sequence[str], stdin: bytes | None) -> Completed:
+def _tmux(argv: Sequence[str], stdin: bytes | None, *, timeout: float | None = None) -> Completed:
     """THE seam: run one tmux invocation with the tracing identity and the team variables
     stripped (:func:`~aisquare.core.spawn.tmux_client_env`), so a server it starts holds none.
 
     Every way the process can fail to run at all is mapped onto the module's
     own exceptions, so a caller that catches :class:`TmuxError` has caught
     everything: a binary that vanished between ``which`` and ``exec`` is
-    :class:`TmuxUnavailable`; a server that stops answering (``_COMMAND_TIMEOUT``)
-    or any other OS refusal is :class:`TmuxError`.
+    :class:`TmuxUnavailable`; a server that stops answering (``timeout``,
+    :data:`_COMMAND_TIMEOUT` unless given) is :class:`TmuxTimedOut`, and any other
+    OS refusal :class:`TmuxError`.
     """
+    timeout = _COMMAND_TIMEOUT if timeout is None else timeout
     try:
         result = subprocess.run(
             list(argv),
             input=stdin,
             capture_output=True,
             env=tmux_client_env(),
-            timeout=_COMMAND_TIMEOUT,
+            timeout=timeout,
             check=False,
         )
     except FileNotFoundError as exc:
         raise TmuxUnavailable(f"tmux is not runnable: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
-        raise TmuxError(
-            f"tmux did not answer within {_COMMAND_TIMEOUT:.0f}s: {' '.join(argv[:6])} …"
+        raise TmuxTimedOut(
+            f"tmux did not answer within {timeout:.0f}s: {' '.join(argv[:6])} …"
         ) from exc
     except OSError as exc:
         raise TmuxError(f"could not run tmux: {exc}") from exc
@@ -310,6 +352,274 @@ def _tmux(argv: Sequence[str], stdin: bytes | None) -> Completed:
         stdout=result.stdout.decode("utf-8", errors="replace"),
         stderr=result.stderr.decode("utf-8", errors="replace"),
     )
+
+
+#: Where Linux names this boot: a random UUID the kernel draws as it boots.
+_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+#: Where macOS keeps ``sysctl``, for a PATH without ``/usr/sbin`` (launchd, cron).
+_SYSCTL = ("/usr/sbin/sysctl", "/sbin/sysctl")
+#: Where Linux says when it booted (``btime``, seconds since the epoch).
+_PROC_STAT = Path("/proc/stat")
+
+
+#: This boot's identity once :func:`boot_id` has found it; ``None`` until then.
+_boot: str | None = None
+
+
+def boot_id() -> str | None:
+    """This boot's identity, or ``None`` where the machine keeps none.
+
+    No process outlives a reboot, so a fleet row recorded in another boot
+    (``FleetAgent.boot_id``) is no running agent. An identity, not a time:
+    Linux's ``btime`` is the wall clock less the time since boot, and moves
+    whenever the wall clock is stepped (a WSL2 VM resumed after the host slept,
+    NTP on a board with no clock), so rows from before the step read as from
+    before the boot (round 25 of #257). Linux draws ``boot_id`` at boot; macOS
+    keeps ``kern.bootsessionuuid``, asked of ``sysctl`` on PATH or where macOS
+    keeps it. The BSDs keep only a time, which moves the same way: ``None``.
+
+    Kept for the process once found, since the boot cannot change while it runs: on macOS
+    each question is a ``sysctl`` run, and asq asked once per spawn and again in each
+    upgrade or uninstall plan (round 26 of #257). Only once found: asq is one process that
+    spawns every agent, and a ``sysctl`` that failed or timed out once, kept, left every
+    later spawn with no boot recorded (round 28).
+    """
+    global _boot
+    if _boot is None:
+        _boot = _ask_boot_id()
+    return _boot
+
+
+def _ask_boot_id() -> str | None:
+    """:func:`boot_id`, asked of the machine."""
+    with contextlib.suppress(OSError, UnicodeDecodeError):
+        said = _BOOT_ID.read_text(encoding="ascii").strip()
+        if said:
+            return said
+    if sys.platform != "darwin":
+        return None
+    asked = _sysctl("kern.bootsessionuuid")
+    return asked or None
+
+
+def _sysctl(name: str) -> str | None:
+    """What ``sysctl -n <name>`` says, from ``sysctl`` on PATH or where macOS keeps it;
+    ``None`` when it cannot be asked or does not answer."""
+    sysctl = shutil.which("sysctl") or next(
+        (place for place in _SYSCTL if os.access(place, os.X_OK)), None
+    )
+    if sysctl is None:
+        return None
+    try:
+        completed = subprocess.run(
+            [sysctl, "-n", name], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout.strip() if completed.returncode == 0 else None
+
+
+#: When this boot started once :func:`boot_started` has found it; ``None`` until then.
+_booted_at: datetime | None = None
+
+
+def boot_started() -> datetime | None:
+    """When this machine booted, by the wall clock, where it says (Linux's ``btime``, the
+    ``kern.boottime`` of macOS and the BSDs); ``None`` elsewhere. Kept once found, as
+    :func:`boot_id` is.
+
+    Not an identity: it is the wall clock less the time since boot, so it moves whenever
+    the clock is stepped (a WSL2 VM resumed after the host slept, NTP on a board with no
+    clock), and a row from before the step reads as from before the boot (round 25 of
+    #257). :func:`server_may_run` asks it only for a row with no boot to compare.
+    """
+    global _booted_at
+    if _booted_at is None:
+        _booted_at = _ask_boot_started()
+    return _booted_at
+
+
+def _ask_boot_started() -> datetime | None:
+    """:func:`boot_started`, asked of the machine."""
+    with contextlib.suppress(OSError, UnicodeDecodeError, ValueError, IndexError):
+        for line in _PROC_STAT.read_text(encoding="ascii").splitlines():
+            if line.startswith("btime "):
+                return datetime.fromtimestamp(int(line.split()[1]), tz=UTC)
+    if sys.platform.startswith(("linux", "win")):
+        return None  # Linux said above, or could not; Windows keeps no tmux
+    found = re.search(r"\bsec = (\d+)", _sysctl("kern.boottime") or "")  # { sec = 17…, usec
+    return datetime.fromtimestamp(int(found.group(1)), tz=UTC) if found else None
+
+
+SocketAnswer = Literal["answers", "gone", "unasked", "another"]
+"""What a server's socket file says when asked directly (:func:`socket_answer`): a listener
+(``"answers"``), no file there (``"gone"``), or no answer to be had (``"unasked"``); and
+what :func:`server_may_run` adds, a listener that is not the server the row was started on
+(``"another"``)."""
+
+
+def socket_answer(path: Path | None) -> SocketAnswer | None:
+    """Whether a server may be listening on the socket at ``path``, asked of the socket
+    itself (no tmux needed), and why. ``None`` is a host with no POSIX uid, where no tmux
+    server can exist.
+
+    ``None`` only on evidence that none is, because the cost of being wrong is ending the
+    row of a running agent, or removing hooks (with ``uninstall --purge``, the home) under
+    it: a file nobody listens on. tmux leaves its socket file when its server exits (tmux
+    3.7, measured), so a stale file is that evidence. No file is not (``"gone"``):
+    something else took it while the server may run on, systemd-tmpfiles ageing out
+    ``/tmp/tmux-<uid>``, logind removing ``/run/user/<uid>`` at logout, or a private
+    ``/tmp`` (round 26 of #257). Neither is a refusal to look, a denied directory, or a
+    connect that timed out (``"unasked"``).
+    """
+    family = getattr(socket_module, "AF_UNIX", None)
+    if path is None or family is None:
+        return None  # no POSIX uid or no AF_UNIX, so no tmux server can exist here
+    probe = socket_module.socket(family, socket_module.SOCK_STREAM)
+    probe.settimeout(2.0)
+    try:
+        probe.connect(str(path))
+    except ConnectionRefusedError:
+        return None
+    except FileNotFoundError:
+        return "gone"
+    except OSError:
+        return "unasked"
+    finally:
+        probe.close()
+    return "answers"
+
+
+class SocketReads:
+    """What :func:`server_may_run` asks of the machine for one read of the fleet (a plan, a
+    run, a sweep, a listing), each asked at most once: a socket's listener, and when the
+    server that answers there started, per socket; and this boot's identity and start.
+
+    The answers belong to the server, not to the row, and every caller asks them row by row
+    over rows that share a server. With ten live agents on one answering server, a plan ran
+    ten ``display-message`` processes and ten socket connects for one answer, and its run
+    as many again (review of #259, round 3). A start that could not be asked is ``None``
+    here too, as :func:`server_may_run` has always judged it.
+    """
+
+    def __init__(self) -> None:
+        self._listeners: dict[object, SocketAnswer | None] = {}
+        self._starts: dict[object, datetime | None] = {}
+        self._booted: tuple[datetime | None] | None = None
+        self._boot: tuple[str | None] | None = None
+
+    @staticmethod
+    def _key(srv: TmuxServer, recorded: Path | None) -> object:
+        """The socket asked: the path a row recorded, else where ``-L`` finds ``srv``'s."""
+        return recorded if recorded is not None else (srv.socket, srv.path)
+
+    def listener(self, srv: TmuxServer, recorded: Path | None) -> SocketAnswer | None:
+        """:meth:`TmuxServer.listener` at ``recorded``, asked once per socket."""
+        key = self._key(srv, recorded)
+        if key not in self._listeners:
+            self._listeners[key] = srv.listener(recorded)
+        return self._listeners[key]
+
+    def started(self, srv: TmuxServer, recorded: Path | None) -> datetime | None:
+        """When the server answering at ``recorded`` started, asked once per socket; ``None``
+        when it could not be asked (no usable tmux, a denied socket)."""
+        key = self._key(srv, recorded)
+        if key not in self._starts:
+            try:
+                self._starts[key] = (srv if recorded is None else srv.at(recorded)).started_at()
+            except TmuxError:  # TmuxUnavailable included: a server listens, and may be the row's
+                self._starts[key] = None
+        return self._starts[key]
+
+    def heard_listener(
+        self, srv: TmuxServer, recorded: Path | None, answer: SocketAnswer | None
+    ) -> None:
+        """Keep what the socket at ``recorded`` said, as a caller read it already, so
+        :meth:`listener` does not ask it again."""
+        self._listeners.setdefault(self._key(srv, recorded), answer)
+
+    def heard_started(self, srv: TmuxServer, recorded: Path | None, started: datetime) -> None:
+        """Keep when the server answering at ``recorded`` started, as an answer that named one
+        of its panes said it (``#{start_time}``), so :meth:`started` does not ask it again."""
+        self._starts.setdefault(self._key(srv, recorded), started)
+
+    def boot_started(self) -> datetime | None:
+        """:func:`boot_started`, asked once."""
+        if self._booted is None:
+            self._booted = (boot_started(),)
+        return self._booted[0]
+
+    def boot_id(self) -> str | None:
+        """:func:`boot_id`, asked once: it keeps only an id it found (round 28 of #257), so
+        where ``sysctl`` fails each question is another ``sysctl`` run, with a 5 s timeout."""
+        if self._boot is None:
+            self._boot = (boot_id(),)
+        return self._boot[0]
+
+
+def server_may_run(
+    srv: TmuxServer,
+    recorded: Path | None,
+    booted: str | None,
+    created: datetime | None = None,
+    started: datetime | None = None,
+    *,
+    reads: SocketReads | None = None,
+) -> SocketAnswer | None:
+    """Whether the agent of a live fleet row may still be running on ``srv``, and why; ``None``
+    when it cannot be. The one rule ``upgrade``, ``uninstall``, ``fleet shutdown``, ``stop``
+    and ``reap --server-down`` ask, so a row one of them counts as running is never one
+    another ends as gone (round 27 of #257).
+
+    Asked of what its spawn recorded, never inferred from the shell asking (round 25). A row
+    from another boot (``booted``, against this one's, :meth:`SocketReads.boot_id`) cannot
+    be running: no process outlives a reboot. Otherwise its server's socket is asked
+    (:meth:`TmuxServer.listener`) at ``recorded``, where the server said it listened,
+    whatever ``TMUX_TMPDIR`` this shell has and wherever this tmux build keeps sockets; a
+    row from before v25 recorded neither and is asked where this shell's tmux looks.
+
+    A listener there is not thereby the row's server. One that lost its socket file runs
+    on, and the next ``tmux -L`` there starts a second server at the freed path, which
+    answers for the row from then on while its agent runs where no client reaches it
+    (follow-up of #257). So the server that answers is asked when it started
+    (:meth:`TmuxServer.started_at`) and compared with ``started``, what the row's server
+    said at spawn (``FleetAgent.server_started_at``): another time is ``"another"``, which
+    ``stop`` refuses, ``shutdown`` holds until ``--forget``, and ``uninstall`` counts. A
+    row that recorded no start, or a start that cannot be asked now (no usable tmux, a
+    denied socket), leaves ``"answers"`` standing: a server listens, which may be its.
+
+    With no boot to compare (a row from before v25, or a boot id that could not be had: the
+    BSDs, a macOS whose ``sysctl`` failed), a socket the row's server no longer holds, gone
+    or taken by ``"another"``, is explained by a reboot when the row was ``created`` before
+    this boot started (:func:`boot_started`): a reboot clears ``/tmp``, and the first spawn
+    after it starts the server that answers there now. Without it, every row a 0.7.0 fleet
+    left behind at a reboot was held until ``--forget`` (round 28), and so was every row
+    after a reboot on such a host, against the next server (review of #259, round 1). That
+    start moves with the clock, so it explains only a socket the row's server lost, never
+    one that answers as the row's or could not be asked: a row misjudged by a stepped
+    clock is ended only when its server's socket is gone as well.
+
+    ``reads`` is the caller's :class:`SocketReads` for one read of the fleet, so rows on
+    one server ask it once; each call asks afresh without one. This boot is asked there too,
+    and only for a row that recorded one: callers asked it of :func:`boot_id` themselves, for
+    every read, beside the ``reads`` that asks it too, so one read could get two answers
+    where ``sysctl`` fails now and then (review of #259, round 7, 5/9).
+    """
+    reads = reads or SocketReads()
+    this_boot = None if booted is None else reads.boot_id()
+    if booted is not None and this_boot is not None and booted != this_boot:
+        return None
+    answer = reads.listener(srv, recorded)
+    if answer == "answers" and started is not None:
+        now = reads.started(srv, recorded)
+        if now is not None and now != started:
+            answer = "another"
+    unbooted = booted is None or this_boot is None
+    if answer in ("gone", "another") and unbooted and created is not None:
+        booted_at = reads.boot_started()
+        if booted_at is not None and created < booted_at:
+            return None
+    return answer
 
 
 def parse_version(text: str) -> tuple[int, int] | None:
@@ -347,6 +657,17 @@ class PaneFacts:
     tracking) or for every motion (``?1003``). Without either, a program gets
     presses and releases only, and a drag forwarded to it would be a report it
     never asked for (#148)."""
+    server_started: datetime | None = None
+    """When the server that answered started (``#{start_time}``), as
+    :meth:`TmuxServer.started_at` says it, and ``None`` when tmux does not say.
+    Asked in the same command as the rest, so a frame says which server's
+    lifetime its pane id belongs to without a second process: the remote's live
+    stream asked separately, once per watched pane per tick."""
+    last_output: datetime | None = None
+    """When the pane's window last printed (``#{window_activity}``), to the second rounded
+    down; ``None`` when tmux does not say. Asked with the rest for the same reason: the
+    remote's needs-you asked whether a pane was quiet in a third process, after two for
+    the facts and the start, on every quarter-second poll of an agent action."""
 
 
 @dataclass(frozen=True)
@@ -394,6 +715,11 @@ class WindowInfo:
     landed, when there was none to make, and on every window a listing reports.
     The spawn fails open on it; this is how the refusal still reaches the
     caller's receipt (review of #162, round 1)."""
+    server_started: datetime | None = None
+    """When the server that listed the window started (``#{start_time}``), as
+    :meth:`TmuxServer.started_at` says it, ``None`` when tmux does not say: asked in the same
+    ``list-panes``, as :attr:`PaneFacts.server_started` is, so a listing says which server's
+    lifetime its pane ids belong to without a second process (review of #259, round 3)."""
 
 
 def _int(value: str, default: int = 0) -> int:
@@ -408,6 +734,14 @@ def _optional_int(value: str) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _epoch(epoch: str) -> datetime | None:
+    """A time as tmux prints one (``#{start_time}``, ``#{window_activity}``), whole seconds
+    since the epoch; ``None`` for anything else, a tmux too old to know the variable (an
+    empty answer) included."""
+    epoch = epoch.strip()
+    return datetime.fromtimestamp(int(epoch), tz=UTC) if epoch.isdigit() else None
 
 
 def _facts(line: str) -> PaneFacts:
@@ -433,6 +767,8 @@ def _facts(line: str) -> PaneFacts:
         mouse_on=values["mouse_any_flag"] == "1",
         mouse_sgr=values["mouse_sgr_flag"] == "1",
         mouse_drag=values["mouse_button_flag"] == "1" or values["mouse_all_flag"] == "1",
+        server_started=_epoch(values["start_time"]),
+        last_output=_epoch(values["window_activity"]),
     )
 
 
@@ -485,8 +821,28 @@ size on first attach (``TerminalPane._sync_size``), as before.
 """
 
 
+def _tmux_asking(argv: Sequence[str], stdin: bytes | None) -> Completed:
+    """:func:`_tmux`, given :data:`_ASK_TIMEOUT` (:func:`asking_server`)."""
+    return _tmux(argv, stdin, timeout=_ASK_TIMEOUT)
+
+
+def asking_server(socket: str = DEFAULT_SOCKET) -> TmuxServer:
+    """A handle on ``socket`` for what the upgrade and uninstall plans ask of it, which write
+    nothing and are put quickly.
+
+    Every command of a :class:`TmuxServer` hands tmux its conf (:meth:`TmuxServer.conf_path`),
+    which makes the aisquare home and rewrites a conf that drifted: a plan that asked a
+    server when it started (:func:`server_may_run`) could do both, as #253 kept its store
+    read from doing. This one hands tmux ``-f /dev/null`` instead: the conf is read only
+    when a server starts, and no question asked here starts one. And it waits
+    :data:`_ASK_TIMEOUT` for an answer, not :data:`_COMMAND_TIMEOUT` (round 4 of #259). A
+    handle at a recorded socket (:meth:`TmuxServer.at`) keeps both.
+    """
+    return TmuxServer(socket, conf=Path(os.devnull), runner=_tmux_asking)
+
+
 class TmuxServer:
-    """A handle on one private tmux server (``-L socket``).
+    """A handle on one private tmux server (``-L socket``, or ``-S path``: :meth:`at`).
 
     Every method raises :class:`TmuxUnavailable` when there is no usable tmux
     and :class:`TmuxError` when a command fails, so callers decide what a
@@ -500,8 +856,12 @@ class TmuxServer:
         binary: str | None = None,
         conf: Path | None = None,
         runner: Runner | None = None,
+        path: Path | None = None,
     ) -> None:
         self.socket = socket
+        self.path = path
+        """Where this handle asks for the socket (``tmux -S``), set by :meth:`at`; ``None``
+        asks for it by name (``tmux -L``), in the directory this shell's tmux looks in."""
         self._binary = binary
         self._conf = conf
         self._runner: Runner = runner or _tmux
@@ -661,7 +1021,26 @@ class TmuxServer:
 
     def argv(self, *args: str) -> list[str]:
         """The full command line for one tmux invocation on this server."""
+        if self.path is not None:
+            return [self.binary(), "-S", str(self.path), "-f", str(self.conf_path()), *args]
         return self._argv_on(self.socket, str(self.conf_path()), *args)
+
+    def at(self, path: Path | None) -> TmuxServer:
+        """This server asked for at ``path`` (``tmux -S``), the socket a recorded row's server
+        said it listened on (``FleetAgent.socket_path``); this handle when ``path`` is ``None``.
+
+        ``-L`` finds a socket by name in the directory this shell's tmux looks in. A server
+        started under another ``TMUX_TMPDIR`` is not there, and another server on the same
+        name may be, whose pane ids, numbered from ``%0`` by every server, name other agents
+        (round 28 of #257). tmux answers at a path as it does for a name, measured on 3.7c:
+        ``no server running on <path>`` for a stale file, ``error connecting to <path> (No
+        such file or directory)`` for none.
+        """
+        if path is None or path == self.path:
+            return self
+        return TmuxServer(
+            self.socket, binary=self._binary, conf=self._conf, runner=self._runner, path=path
+        )
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
         """Run one tmux command (``;`` arguments chain several) and return stdout."""
@@ -809,7 +1188,10 @@ class TmuxServer:
         from the spawning shell's asks at a path that never had a server, and
         gets the second message for a fleet that is alive elsewhere. That is why
         ``fleet reap --server-down`` stays the operator's word — this predicate
-        narrows what the word may act on, it does not replace it.
+        narrows what the word may act on, it does not replace it — and why
+        ``reap`` then asks :func:`server_may_run` of each row there: the second
+        message is also a socket file taken from under a server that runs on,
+        and such a row is held, not marked (follow-up of #257).
 
         A question that could not be put — no client, a wedged server's 30 s
         timeout, an OS refusal — is no evidence either, like :meth:`answers`.
@@ -845,8 +1227,7 @@ class TmuxServer:
             if _ABSENT.search(completed.stderr):
                 return None
             raise TmuxError(completed.stderr.strip() or "tmux display-message could not be reached")
-        epoch = completed.stdout.strip()
-        return datetime.fromtimestamp(int(epoch), tz=UTC) if epoch.isdigit() else None
+        return _epoch(completed.stdout)
 
     def spawn_window(
         self,
@@ -1002,6 +1383,7 @@ class TmuxServer:
                     dead_status=_optional_int(values["pane_dead_status"]),
                     current_command=values["pane_current_command"],
                     activity=values["window_activity_flag"] == "1",
+                    server_started=_epoch(values["start_time"]),
                 )
             )
         return windows
@@ -1125,13 +1507,44 @@ class TmuxServer:
 
         :class:`TmuxUnavailable` where there is no uid (Windows outside WSL):
         the fleet modules must import there (plan §3.9), but there is no tmux
-        and so no socket to point at.
+        and so no socket to point at. A handle asked for at a path (:meth:`at`)
+        answers that path.
         """
+        if self.path is not None:
+            return self.path
         getuid = getattr(os, "getuid", None)
         if getuid is None:
             raise TmuxUnavailable("no tmux socket on this platform — the fleet needs a POSIX host")
         base = os.environ.get("TMUX_TMPDIR") or "/tmp"
         return Path(base) / f"tmux-{getuid()}" / self.socket
+
+    def listener(self, recorded: Path | None = None) -> SocketAnswer | None:
+        """:func:`socket_answer` for this server's socket: at ``recorded``, the path the server
+        said it listened on (``FleetAgent.socket_path``), else at :meth:`socket_path`. Asked of
+        the socket, so it needs no tmux. Whether that path's directory is there settles
+        nothing: tmux makes it as it looks, so any probe made it there (round 24 and 25 of
+        #257)."""
+        if recorded is None:
+            try:
+                recorded = self.socket_path()
+            except TmuxUnavailable:
+                return None  # no POSIX uid: no tmux server can exist here
+        return socket_answer(recorded)
+
+    def server_socket_path(self) -> Path | None:
+        """The socket the RUNNING server listens on, as it says (``#{socket_path}``).
+
+        :meth:`socket_path` rebuilds the path from the asking shell, and a server
+        started under another ``TMUX_TMPDIR``, or by a tmux built to keep its
+        sockets elsewhere (Termux), is not there. Asked once a window is made on
+        the server and kept on the fleet row (``FleetAgent.socket_path``), so a
+        later question about the row goes to that path whatever shell asks it.
+        ``None`` when the server does not answer with an absolute path; a question
+        that could not be put raises :class:`TmuxError`.
+        """
+        completed = self._runner(self.argv("display-message", "-p", "#{socket_path}"), None)
+        said = completed.stdout.strip()
+        return Path(said) if completed.returncode == 0 and os.path.isabs(said) else None
 
     def rename_session(self, old: str, new: str) -> None:
         _require_targetable(new)
@@ -1185,6 +1598,29 @@ class TmuxServer:
             wrapped=None if wrapped is None else wrapped[: facts.height],
         )
 
+    def capture_history(self, pane_id: str, *, history: int) -> Capture:
+        """Scrollback PLUS the live screen, oldest row first, in ONE contiguous frame.
+
+        :meth:`capture` answers "what is on this screen now" and so slices to
+        exactly one screen height; this answers "what has this pane said", a
+        different question, and keeping the rows above the screen is the whole
+        point of it.
+
+        Still one process: ``capture-pane -S -<n>`` with no ``-E`` runs from n
+        lines above the screen top to the bottom of the live screen, and tmux
+        clamps n to the history it actually has. The alternative — calling
+        :meth:`capture` once per screenful and stitching — costs a process per
+        ~50 rows AND cannot produce a consistent snapshot, because a live pane
+        moves between the calls, so the seams would duplicate or drop rows.
+
+        ``Capture.scrollback`` is MEASURED here rather than inferred: the frame
+        keeps every row, so the count above the screen is ``len(rows) - height``
+        and does not have to be predicted from ``history_size``.
+        """
+        history = max(0, history)
+        rows, _, facts = self._frame(pane_id, history, None, False)
+        return Capture(lines=rows, facts=facts, scrollback=max(0, len(rows) - facts.height))
+
     def _frame(
         self, pane_id: str, scrollback: int, height: int | None, flags: bool
     ) -> tuple[list[str], list[bool] | None, PaneFacts]:
@@ -1215,20 +1651,52 @@ class TmuxServer:
     # --- input --------------------------------------------------------------------------
 
     def send_keys(self, pane_id: str, *keys: str) -> None:
-        """Named keys (``Enter``, ``C-c``, ``BTab``…) — tmux's own vocabulary."""
-        if keys:
-            self.run("send-keys", "-t", pane_id, *keys)
+        """Named keys (``Enter``, ``C-c``, ``BTab``…) — tmux's own vocabulary, and only that.
+
+        Every argument after ``-t <pane>`` used to go to tmux as it came, and a
+        key is caller data: measured on 3.7c, ``'Enter;' set -g @x 1`` set the
+        option and ``';' run-shell …`` ran the shell command, because tmux ends
+        a command at any argument whose LAST character is ``;``
+        (:data:`_ARGV_SEPARATOR`), and a key starting with ``-`` parsed as a
+        flag. So ``--`` ends the flags (``-l`` is the KEY ``-l``, sent as the
+        text it spells), :func:`_data_arg` escapes a trailing separator, and a
+        key that is empty or holds whitespace or a control character is
+        refused: no key name has one, and tmux would split or mangle it. This
+        is the floor under every caller; the remote's allowlist
+        (``remote_server.check_remote_key_names``) is the boundary itself.
+
+        A control character is any of Unicode's (``Cc``): C0, DEL and the C1 controls,
+        ``"\\x9b"`` (CSI) among them. ``ord(char) < 0x20`` let DEL and C1 through (review of
+        #259, round 2). So is a lone surrogate (``Cs``), which the argv's encoding turns
+        into the raw byte it escapes, ``"\\udc9b"`` into that CSI. A printable character
+        of any script stays a key: an alt chord sends ``M-é``.
+        """
+        if not keys:
+            return
+        for key in keys:
+            if not key or any(
+                char.isspace() or unicodedata.category(char) in ("Cc", "Cs") for char in key
+            ):
+                raise TmuxError(f"{key!r} is not a tmux key name")
+        self.run("send-keys", "-t", pane_id, "--", *(_data_arg(key) for key in keys))
 
     def send_literal(self, pane_id: str, text: str) -> None:
-        """Literal text, exactly as typed (``-l``), even when it starts with ``-``.
+        """Literal text, byte for byte, through the hex path — nothing parses it.
 
-        A TRAILING ``;`` is tmux's command separator even after ``-l`` — measured
-        on 3.7c: ``send-keys -l -- ';'`` sends nothing and ``'a;'`` sends ``a``,
-        while ``'a\\;'`` arrives as ``a;``. So the last ``;`` is escaped
-        (:func:`_data_arg`, the same escape :meth:`spawn_window` applies).
+        This used to go through ``send-keys -l -- <arg>``, where tmux's own
+        argument handling reads the string before the pane does: measured on
+        3.7c, ``-l -- ';'`` sends NOTHING and ``'a;'`` sends ``a``, which is why
+        :func:`_data_arg` exists to escape a trailing separator. That workaround
+        is one known quirk of a parser whose behaviour varies by version, and
+        every character typed from the remote page crosses it.
+
+        ``-H`` takes the bytes as hex pairs, so there is no string for any
+        version of any parser to interpret — a space, a trailing space, a tab, a
+        lone ``;`` and a multi-byte character all arrive exactly as sent. The
+        cost is argv length, which :meth:`send_bytes` bounds.
         """
         if text:
-            self.run("send-keys", "-t", pane_id, "-l", "--", _data_arg(text))
+            self.send_bytes(pane_id, text.encode("utf-8"))
 
     def send_bytes(self, pane_id: str, data: bytes) -> None:
         """Raw bytes, one hex pair per argument (``-H``).
@@ -1237,9 +1705,23 @@ class TmuxServer:
         a string and tmux re-emits it as UTF-8, so ``chr(0x98)`` arrives as
         ``C2 98`` — measured on 3.7c, the X10 mouse encoding's column byte for
         any cell past 95 split in two, with the row byte then read as text.
+
+        Sent in chunks of :data:`_HEX_CHUNK` bytes because ``-H`` costs one argv
+        element PER BYTE: a pasted paragraph would otherwise build a command tmux
+        3.7 refuses (more than 1000 arguments) and, longer still, a command line
+        that fails with E2BIG. Chunks go in order down one synchronous path, so
+        the pane sees one uninterrupted stream; a typed run is one call. A chunk
+        after the first that fails is :class:`TmuxPartlyTyped`: the chunks before
+        it are in the pane.
         """
-        if data:
-            self.run("send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in data))
+        for start in range(0, len(data), _HEX_CHUNK):
+            chunk = data[start : start + _HEX_CHUNK]
+            try:
+                self.run("send-keys", "-t", pane_id, "-H", *(f"{byte:02x}" for byte in chunk))
+            except TmuxError as exc:
+                if not start:
+                    raise
+                raise TmuxPartlyTyped(exc, start, len(data)) from exc
 
     def paste(self, pane_id: str, text: str) -> None:
         """Bracketed paste: the agent sees one paste, not one Enter per line.
@@ -1247,11 +1729,20 @@ class TmuxServer:
         The buffer belongs to THIS call (:data:`PASTE_BUFFER` says what one
         shared name cost), so ``-d`` deletes exactly the buffer this call
         created and an interleaved paste elsewhere cannot be delivered here.
+
+        A ``load-buffer`` that timed out is a plain :class:`TmuxError`: ``paste-buffer``
+        was never sent, so no server, recovered or not, can type the text. It was a
+        :class:`TmuxTimedOut`, "it may still arrive" (review of #259, round 11, 7/13).
         """
         if not text:
             return
         buffer_name = f"{PASTE_BUFFER}-{os.getpid()}-{next(_PASTE_SEQUENCE)}"
-        self.run("load-buffer", "-b", buffer_name, "-", stdin=text.encode("utf-8"))
+        try:
+            self.run("load-buffer", "-b", buffer_name, "-", stdin=text.encode("utf-8"))
+        except TmuxTimedOut as exc:
+            # A wedged server may still load it, and keep it: tidied as below, behind it.
+            self._tidy("delete-buffer", "-b", buffer_name)
+            raise TmuxError(f"{exc} — nothing was pasted") from exc
         try:
             self.run("paste-buffer", "-p", "-d", "-b", buffer_name, "-t", pane_id)
         except TmuxError:
@@ -1261,9 +1752,18 @@ class TmuxServer:
             # are looking at — and a per-call name is never reused, so nothing
             # overwrites it. Tidy it away; the error the caller gets is the
             # paste's, never the tidy-up's.
-            with contextlib.suppress(TmuxError):
-                self.run("delete-buffer", "-b", buffer_name)
+            self._tidy("delete-buffer", "-b", buffer_name)
             raise
+
+    def _tidy(self, *args: str) -> None:
+        """Run ``args`` after a command failed, to leave nothing of it behind: never raising,
+        and waiting :data:`_ASK_TIMEOUT` at most, not :data:`_COMMAND_TIMEOUT`. The server may
+        be wedged: a paste that timed out held the agent's lock 30 s more for its tidy-up
+        before its ``maybe`` was answered (review of #259, round 11, 7/13). Queued in a
+        wedged server, it runs after the command it tidies once the server recovers."""
+        runner = _tmux_asking if self._runner is _tmux else self._runner
+        with contextlib.suppress(TmuxError):
+            runner(self.argv(*args), None)
 
     def list_buffers(self) -> list[str]:
         """The server's paste buffers by name, the most recently written first.

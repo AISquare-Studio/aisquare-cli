@@ -182,6 +182,29 @@ debug() {
     printf '  %s· %s%s\n' "$C_DIM" "$*" "$C_RESET"
 }
 
+# A path as this script shows it: the home as `~`.
+# shellcheck disable=SC2088  # display text: a tilde for a person to read.
+shown_path() {
+    case "$1" in
+        "$HOME") printf '~' ;;
+        "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# Where init writes the aisquare home, and the settings.json it merges Claude
+# Code's hooks into, as aisquare resolves them: AISQUARE_HOME and
+# CLAUDE_CONFIG_DIR when set (core/paths.py aisquare_home, core/agents.py
+# _claude_home), else the defaults. Shown, never used as paths.
+aisquare_home_shown() {
+    _ah_dir=${AISQUARE_HOME:-$HOME/.aisquare}
+    shown_path "${_ah_dir%/}"
+}
+claude_settings_shown() {
+    _cs_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+    shown_path "${_cs_dir%/}/settings.json"
+}
+
 # ---------------------------------------------------------------------------
 # Primitives
 # ---------------------------------------------------------------------------
@@ -802,9 +825,9 @@ short_circuit() {
     say "${C_BOLD}aisquare $CLI_VERSION is already the latest.${C_RESET}"
     note "uv $UV_VERSION · Claude Code ${CLAUDE_VERSION:-skipped} · tmux $TMUX_VERSION · gh $GH_VERSION · git $GIT_VERSION · Node $NODE_VERSION"
     if [ "$WANT_AGENT" = 1 ]; then
-        note "~/.aisquare configured · claude-code hooks installed"
+        note "$(aisquare_home_shown) configured · claude-code hooks installed"
     else
-        note "~/.aisquare configured (--no-agent: no agent hooks)"
+        note "$(aisquare_home_shown) configured (--no-agent: no agent hooks)"
     fi
     # Gated per line, the way `summary` is. The unconditional version named
     # gbrain as the reason on a machine that HAS gbrain — reachable, since
@@ -814,6 +837,12 @@ short_circuit() {
     _why=""
     case " $_amber " in
         *" brain "*) _why="gbrain is out of scope" ;;
+    esac
+    case " $_amber " in
+        *" claude-code "*)
+            [ -n "$_why" ] && _why="$_why; "
+            _why="${_why}Claude Code left alone (--no-agent)"
+            ;;
     esac
     case " $_amber " in
         *" snapshot "*)
@@ -852,43 +881,70 @@ banner() {
     say ""
     say "${C_BOLD}aisquare installer${C_RESET} — this will:"
 
+    # A real newline between entries, never an escape a printf expands: the plan
+    # holds paths (PROJECT_DIR, AISQUARE_HOME), and a % or a backslash in one is text.
+    _bn_nl='
+'
     _plan=""
-    [ "$CLI_ACTION" = install ] && _plan="$_plan\n  install  Python $PYTHON_VERSION + $PYPI_PACKAGE + tiktoken (via uv, into its own venv)"
-    [ "$CLI_ACTION" = upgrade ] && _plan="$_plan\n  upgrade  $PYPI_PACKAGE $CLI_VERSION -> ${LATEST_VERSION:-latest}"
-    [ "$CLI_ACTION" = current ] && _plan="$_plan\n  keep     $PYPI_PACKAGE $CLI_VERSION"
-    [ -z "$UV_VERSION" ] && _plan="$_plan\n  install  uv (the bootstrap: a static binary that brings its own Python)"
+    [ "$CLI_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Python $PYTHON_VERSION + $PYPI_PACKAGE + tiktoken (via uv, into its own venv)"
+    [ "$CLI_ACTION" = upgrade ] && _plan="$_plan$_bn_nl  upgrade  $PYPI_PACKAGE $CLI_VERSION -> ${LATEST_VERSION:-latest}"
+    [ "$CLI_ACTION" = current ] && _plan="$_plan$_bn_nl  keep     $PYPI_PACKAGE $CLI_VERSION"
+    [ -z "$UV_VERSION" ] && _plan="$_plan$_bn_nl  install  uv (the bootstrap: a static binary that brings its own Python)"
+    # Named like Claude Code's own updater below: `uv self update` replaces uv
+    # wherever uv put itself, and refuses for a package manager's uv.
+    [ -n "$UV_VERSION" ] && [ "$UPGRADE_ALL" = 1 ] && _plan="$_plan$_bn_nl  update   uv $UV_VERSION (uv self update, --upgrade-all)"
 
     if [ "$WANT_SYSTEM_DEPS" = 1 ]; then
-        [ "$TMUX_ACTION" = install ] && _plan="$_plan\n  install  tmux (the fleet's substrate)"
-        [ "$GH_ACTION" = install ] && _plan="$_plan\n  install  gh (the fleet's PR flow)"
-        [ "$GIT_ACTION" = install ] && _plan="$_plan\n  install  git (the fleet's per-agent worktrees)"
-        [ "$NODE_ACTION" = install ] && _plan="$_plan\n  install  Node $MIN_NODE_MAJOR+ (Repomix snapshots)"
+        [ "$TMUX_ACTION" = install ] && _plan="$_plan$_bn_nl  install  tmux (the fleet's substrate)"
+        [ "$GH_ACTION" = install ] && _plan="$_plan$_bn_nl  install  gh (the fleet's PR flow)"
+        [ "$GIT_ACTION" = install ] && _plan="$_plan$_bn_nl  install  git (the fleet's per-agent worktrees)"
+        [ "$NODE_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Node $MIN_NODE_MAJOR+ (Repomix snapshots)"
     else
-        _plan="$_plan\n  skip     tmux/gh/Node (--no-system-deps)"
+        _plan="$_plan$_bn_nl  skip     tmux/gh/Node (--no-system-deps)"
     fi
 
     if [ "$WANT_AGENT" = 1 ]; then
-        [ "$CLAUDE_ACTION" = install ] && _plan="$_plan\n  install  Claude Code"
-        [ "$CLAUDE_ACTION" = update ] && _plan="$_plan\n  update   Claude Code $CLAUDE_VERSION (via its own updater)"
+        [ "$CLAUDE_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Claude Code"
+        [ "$CLAUDE_ACTION" = update ] && _plan="$_plan$_bn_nl  update   Claude Code $CLAUDE_VERSION (via its own updater)"
     else
-        _plan="$_plan\n  skip     Claude Code (--no-agent)"
+        _plan="$_plan$_bn_nl  skip     Claude Code (--no-agent)"
     fi
 
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
-        _plan="$_plan\n  register $PROJECT_DIR as a project, and connect claude-code's hooks"
+        _plan="$_plan$_bn_nl  register $PROJECT_DIR as a project"
     else
-        _plan="$_plan\n  set up   ~/.aisquare (no project registered)"
+        _plan="$_plan$_bn_nl  set up   $(aisquare_home_shown) (no project registered)"
     fi
+    # Its own line: init connects the hooks with or without a project, and not
+    # at all under --no-agent.
+    [ "$WANT_AGENT" = 1 ] && _plan="$_plan$_bn_nl  connect  claude-code's hooks"
 
-    # shellcheck disable=SC2059  # the format string is ours, built above.
-    printf "$_plan\n"
+    # As text: as the format a % in a path was a conversion, and under %b a \c
+    # ended the banner there and \t or \0NNN were rewritten (review of #257).
+    printf '%s\n' "$_plan"
 
+    # Only what THIS run's own steps write, from the same decisions as the plan
+    # above: uv when it installs uv, aisquare and asq when it installs or upgrades
+    # the CLI, claude when it installs Claude Code. The updaters the plan names
+    # (`uv self update`, `claude update`) write at their own paths.
+    _written=""
+    [ -z "$UV_VERSION" ] && _written="uv"
+    case "$CLI_ACTION" in
+        install | upgrade) _written="${_written:+$_written, }aisquare, asq" ;;
+    esac
+    [ "$WANT_AGENT" = 1 ] && [ "$CLAUDE_ACTION" = install ] && _written="${_written:+$_written, }claude"
     say ""
     say "Written to:"
-    note "~/.local/bin/                     uv, aisquare, asq, claude"
-    note "~/.local/share/uv/tools/          the $PYPI_PACKAGE tool environment"
-    note "~/.aisquare/                      config.toml, context.db, projects/"
-    note "~/.claude/settings.json           MERGED — aisquare's hook groups only"
+    [ -n "$_written" ] && note "~/.local/bin/                     $_written"
+    case "$CLI_ACTION" in
+        install | upgrade) note "~/.local/share/uv/tools/          the $PYPI_PACKAGE tool environment" ;;
+    esac
+    # Where this run's init writes, as aisquare resolves it: AISQUARE_HOME and
+    # CLAUDE_CONFIG_DIR redirect both, and the one-liner inherits them.
+    note "$(printf '%-33s %s' "$(aisquare_home_shown)/" "config.toml, context.db, projects/")"
+    if [ "$WANT_AGENT" = 1 ]; then
+        note "$(printf '%-33s %s' "$(claude_settings_shown)" "MERGED — aisquare's hook groups only")"
+    fi
     say ""
 
     if [ "$DRY_RUN" = 1 ]; then
@@ -1520,9 +1576,13 @@ _install_node_via_fnm() {
         _reread_node
         good "Node ${NODE_VERSION:-$MIN_NODE_MAJOR} via fnm"
         INSTALLED_LIST="$INSTALLED_LIST node(fnm)"
+        # Not "doctor reads snapshots as off": the project this run registers is
+        # packed now, on this PATH, and agents keep getting that pack in a shell
+        # with no node. What such a shell cannot do is pack or refresh one.
         warn "fnm's Node is only on PATH in shells that have run its hook. Add to your profile:
          eval \"\$(fnm env --use-on-cd)\"
-         Until then \`aisquare doctor\` will report no node on PATH."
+         Until then those shells have no node, so they cannot pack or refresh a codebase
+         snapshot; agents still get any pack this run makes."
     else
         warn "fnm could not install Node $MIN_NODE_MAJOR — snapshots need it; everything else works."
     fi
@@ -1590,10 +1650,10 @@ install_claude() {
 # (never file-wide, where a real `cd "~/x"` bug would then hide).
 # shellcheck disable=SC2088
 init_home() {
-    step "Setting up ~/.aisquare"
+    step "Setting up $(aisquare_home_shown)"
 
-    # --agent claude-code installs the five lifecycle hooks and ingests
-    # ~/.claude/CLAUDE.md; without --no-onboard it also packs the Repomix
+    # --agent claude-code installs the six lifecycle hooks and ingests the
+    # CLAUDE.md of the config dir sessions from this shell read; without --no-onboard it also packs the Repomix
     # snapshot in the same run. That is `claude-code` and `snapshot` fixed in one
     # command (§4).
     #
@@ -1617,9 +1677,9 @@ init_home() {
         die "\`aisquare $*\` failed. Rerun with --verbose to see its output."
     fi
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
-        good "~/.aisquare set up, $PROJECT_DIR registered"
+        good "$(aisquare_home_shown) set up, $PROJECT_DIR registered"
     else
-        good "~/.aisquare set up"
+        good "$(aisquare_home_shown) set up"
     fi
 }
 
@@ -1642,6 +1702,14 @@ DOCTOR_AMBER=""
 expected_amber() {
     # Alphabetical, to read the same way as doctor_amber's sorted output.
     _exp="$EXPECTED_AMBER"
+    if [ "$WANT_AGENT" = 0 ]; then
+        # `--no-agent` asked for Claude Code to be left alone, and the run touches
+        # none of it, so no claude-code state is one this run caused or could
+        # change: not connected, a settings.json `agents connect` refuses, hooks
+        # switched off, hooks running another aisquare. Each is the requested
+        # state; `summary` names it in the doctor's words, as information.
+        _exp="$_exp claude-code"
+    fi
     if [ "$WANT_SYSTEM_DEPS" = 0 ]; then
         # `--no-system-deps` ASKED for these to be missing, so their amber lines
         # are the requested state, not a surprise. Measured before this: a
@@ -1677,6 +1745,83 @@ is_expected_amber() {
     return 1
 }
 
+# `aisquare --json doctor` as this script judges it: every check as this folder
+# answers it, except claude-code, which is asked from `/`. One check per line, the
+# `tr '{' '\n'` form every reader below splits a payload into anyway.
+#
+# The doctor answers claude-code for the folder it runs in, and inside a
+# repository whose project- or local-scope aisquare plugin is the only route that
+# row is green: sessions started there run the plugin. What this script wires is
+# Claude Code's own config, which every other repository runs on, so it asks
+# where no repository's plugin loads. Asked here, a run from such a repository
+# printed "claude-code hooks installed", wired nothing and exited 0, and a run
+# whose hooks could not be written listed nothing (review of #257). The other
+# rows stay this folder's: snapshot, brain and harness are about its project.
+# Under --no-agent the script wires nothing, so claude-code stays this folder's
+# too: the row `aisquare doctor` shows here.
+#
+# `/` is asked only where this folder's answer could differ from it, and that is
+# a second full doctor otherwise spent on one row it already has (review of #257):
+# see _folder_may_load_a_repo_plugin.
+#
+# Empty when `/` gives no claude-code row though this folder did, which every
+# caller reads as "cannot verify", never as health.
+doctor_json() {
+    _dj_here=$(aisquare --json doctor 2>/dev/null | tr '{' '\n' || true)
+    _dj_row=$(printf '%s\n' "$_dj_here" | grep '"name": *"claude-code"' || true)
+    if [ -z "$_dj_row" ] || [ "$WANT_AGENT" = 0 ] || ! _folder_may_load_a_repo_plugin; then
+        printf '%s' "$_dj_here"
+        return 0
+    fi
+    _dj_row=$(
+        cd / || exit 0
+        aisquare --json doctor 2>/dev/null | tr '{' '\n' | grep '"name": *"claude-code"' || true
+    )
+    [ -n "$_dj_row" ] || return 0
+    printf '%s\n' "$_dj_here" | grep -v '"name": *"claude-code"' || true
+    printf '%s' "$_dj_row"
+}
+
+# True when the folder this runs in could change the doctor's claude-code row.
+#
+# It does so in one way only: the aisquare plugin installed for a repository a
+# session started here loads (core/agents.py claude_repo_plugin_here). Claude Code
+# enables a project-scope install in .claude/settings.json of the folder a session
+# starts in, never a parent, and a local-scope one in .claude/settings.local.json of
+# the folder the doctor's _local_settings_root names: the first folder up from here
+# that holds a .git, or this folder, and never the home unless the session starts
+# there. With neither file there, this folder's row is the one `/` gives. The walk
+# stops at that .git, so a ~/.claude/settings.local.json (Claude Code writes one
+# for a permission saved in a session started in ~) counts only from ~ itself, and
+# the home's .claude/settings.json is Claude Code's user settings, which every
+# folder reads alike. It looks at every folder up to that .git, more than the
+# doctor reads: a false "may" costs one doctor run; a false "may not" would be
+# S2-C19 again, so a folder whose own path cannot be read answers "may". Physical
+# paths, as the doctor resolves them.
+_folder_may_load_a_repo_plugin() {
+    _rp_dir=$(pwd -P 2>/dev/null) || return 0
+    # dash and BusyBox ash print nothing, and succeed, in a folder that was
+    # removed: walked up, "" became "." for ever and the installer hung.
+    case $_rp_dir in
+        /*) ;;
+        *) return 0 ;;
+    esac
+    _rp_home=$(cd "$HOME" 2>/dev/null && pwd -P) || _rp_home=""
+    if [ "$_rp_dir" != "$_rp_home" ] && [ -e "$_rp_dir/.claude/settings.json" ]; then
+        return 0
+    fi
+    [ -e "$_rp_dir/.claude/settings.local.json" ] && return 0
+    # Up to and including the first folder that holds a .git (of any kind, as the
+    # doctor's lstat sees it), skipping the home's own file on the way.
+    while [ ! -e "$_rp_dir/.git" ] && [ ! -L "$_rp_dir/.git" ]; do
+        [ "$_rp_dir" = / ] && return 1
+        _rp_dir=$(dirname "$_rp_dir")
+        [ "$_rp_dir" = "$_rp_home" ] && continue
+        [ -e "$_rp_dir/.claude/settings.local.json" ] && return 0
+    done
+    return 1
+}
+
 # The names of every check that is not ok, SORTED and space-separated.
 #
 # Sorted so a comparison is about the SET rather than the order checks happen to
@@ -1696,8 +1841,11 @@ is_expected_amber() {
 # every Mac perfectly healthy, never short-circuits, and can never surface an
 # unexpected check, which is exactly what §3.8 exists to prevent. Every
 # container cell in the matrix passed it, because none of them is a Mac.
+#
+# Of the payload $1 when one is given (the one its caller reads rows from), else
+# of a fresh doctor_json.
 doctor_amber() {
-    _raw=$(aisquare --json doctor 2>/dev/null || true)
+    _raw=${1-$(doctor_json)}
     [ -n "$_raw" ] || return 1
     # THE PAYLOAD IS CROSS-CHECKED HERE, not only in run_doctor. A `{` inside a
     # check's detail splits an object across two lines and loses it, so a count
@@ -1731,7 +1879,7 @@ run_doctor() {
         return 0
     fi
 
-    DOCTOR_RAW=$(aisquare --json doctor 2>/dev/null || true)
+    DOCTOR_RAW=$(doctor_json)
     if [ -z "$DOCTOR_RAW" ]; then
         warn "\`aisquare --json doctor\` produced no output — cannot verify this install."
         UNEXPECTED=$((UNEXPECTED + 1))
@@ -1750,7 +1898,7 @@ run_doctor() {
         return 0
     fi
 
-    DOCTOR_AMBER=$(doctor_amber || true)
+    DOCTOR_AMBER=$(doctor_amber "$DOCTOR_RAW" || true)
     note "doctor: $_total checks, $(printf '%s' "$DOCTOR_AMBER" | wc -w | tr -d ' ') not ok"
 }
 
@@ -1758,10 +1906,117 @@ run_doctor() {
 # 17  summary (§3.8) — three kinds of amber, never collapsed into one
 # ---------------------------------------------------------------------------
 
+# The JSON object of one doctor check ($1) in DOCTOR_RAW, on one line; empty without one.
+_doctor_row() {
+    printf '%s' "${DOCTOR_RAW:-}" | tr '{' '\n' | grep "\"name\": *\"$1\"" || true
+}
+
+# That check's "detail", still JSON-escaped; empty without one. Not the whole row:
+# a "fix" that names two directories joins them with "; " too.
+_doctor_detail() {
+    _doctor_row "$1" | sed -n 's/.*"detail": *"\([^"\\]*\(\\.[^"\\]*\)*\)".*/\1/p'
+}
+
+# That check's "fix", the same way; empty when it has none.
+_doctor_fix() {
+    _doctor_row "$1" | sed -n 's/.*"fix": *"\([^"\\]*\(\\.[^"\\]*\)*\)".*/\1/p'
+}
+
+# A JSON string's body ($1) as the text it encodes, for printing (RFC 8259 §7).
+#
+# In this shell alone, because nothing else can be counted on here. The doctor
+# writes every non-ASCII character as a \u escape, so a home named Zoë printed as
+# that escape. Each one (a surrogate pair as one) becomes its UTF-8 bytes, and
+# \" \\ \/ \n \t what they stand for. Any other control character keeps its
+# escape, so a directory name cannot send the terminal a sequence; so does a
+# malformed escape, and a lone surrogate prints as U+FFFD.
+_json_text() {
+    _jt_in=$1
+    _jt_out=""
+    while :; do
+        case "$_jt_in" in
+            *\\*) ;;
+            *) break ;;
+        esac
+        _jt_out=$_jt_out${_jt_in%%\\*}
+        _jt_in=${_jt_in#*\\}
+        _jt_c=${_jt_in%"${_jt_in#?}"}
+        _jt_in=${_jt_in#?}
+        case "$_jt_c" in
+            \" | \\ | /)
+                _jt_out=$_jt_out$_jt_c
+                continue
+                ;;
+            n) _jt_cp=10 ;;
+            t) _jt_cp=9 ;;
+            u)
+                _jt_hex=${_jt_in%"${_jt_in#????}"}
+                case "$_jt_hex" in
+                    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;;
+                    *)
+                        _jt_out="$_jt_out\\u"
+                        continue
+                        ;;
+                esac
+                _jt_in=${_jt_in#????}
+                _jt_cp=$((0x$_jt_hex))
+                if [ "$_jt_cp" -ge 55296 ] && [ "$_jt_cp" -le 57343 ]; then
+                    # 0xD800-0xDFFF: a high surrogate and the low one after it.
+                    _jt_lo=""
+                    case "$_jt_in" in
+                        \\u[dD][c-fC-F][0-9a-fA-F][0-9a-fA-F]*)
+                            _jt_lo=${_jt_in#??}
+                            _jt_lo=${_jt_lo%"${_jt_lo#????}"}
+                            ;;
+                    esac
+                    if [ "$_jt_cp" -le 56319 ] && [ -n "$_jt_lo" ]; then
+                        _jt_in=${_jt_in#??????}
+                        _jt_cp=$((65536 + (_jt_cp - 55296) * 1024 + 0x$_jt_lo - 56320))
+                    else
+                        _jt_cp=65533
+                    fi
+                fi
+                if [ "$_jt_cp" -lt 32 ] || { [ "$_jt_cp" -ge 127 ] && [ "$_jt_cp" -lt 160 ]; }; then
+                    if [ "$_jt_cp" != 9 ] && [ "$_jt_cp" != 10 ]; then
+                        _jt_out="$_jt_out\\u$_jt_hex"
+                        continue
+                    fi
+                fi
+                ;;
+            *)
+                _jt_out="$_jt_out\\$_jt_c"
+                continue
+                ;;
+        esac
+        # The x keeps a newline the command substitution would strip.
+        _jt_out=$_jt_out$(
+            _utf8 "$_jt_cp"
+            printf x
+        )
+        _jt_out=${_jt_out%x}
+    done
+    printf '%s\n' "$_jt_out$_jt_in"
+}
+
+# The UTF-8 bytes of code point $1, written with printf's octal escapes, so no
+# locale or other tool is involved.
+# shellcheck disable=SC2059  # the format string is built here, from numbers.
+_utf8() {
+    if [ "$1" -lt 128 ]; then
+        printf "\\$(printf '%o' "$1")"
+    elif [ "$1" -lt 2048 ]; then
+        printf "\\$(printf '%o' $((192 + $1 / 64)))\\$(printf '%o' $((128 + $1 % 64)))"
+    elif [ "$1" -lt 65536 ]; then
+        printf "\\$(printf '%o' $((224 + $1 / 4096)))\\$(printf '%o' $((128 + $1 / 64 % 64)))\\$(printf '%o' $((128 + $1 % 64)))"
+    else
+        printf "\\$(printf '%o' $((240 + $1 / 262144)))\\$(printf '%o' $((128 + $1 / 4096 % 64)))\\$(printf '%o' $((128 + $1 / 64 % 64)))\\$(printf '%o' $((128 + $1 % 64)))"
+    fi
+}
+
 # Actionable by the user: a real credential step this script deliberately does
-# not take (§3.6). Each gets the one command that fixes it.
-# shellcheck disable=SC2016  # the backticks are markdown for the reader, not
-# a command substitution — this string is printed, never evaluated.
+# not take (§3.6). Each gets the one command that fixes it, and only for the row
+# text that command fixes: any other amber row of the same check gets none, so it
+# is listed as unexpected and sent to `aisquare doctor`.
 _actionable_fix() {
     case "$1" in
         gh)
@@ -1778,8 +2033,20 @@ _actionable_fix() {
                 printf 'install it: %s' "$(pkg_hint gh)"
             fi
             ;;
-        claude-code) printf 'run `claude` once to authenticate it' ;;
-        snapshot) printf 'aisquare project onboard' ;;
+        # NO claude-code. It used to be told "run `claude` once to authenticate
+        # it", and no claude-code row is fixed by that: signing in writes no hooks,
+        # and `agents connect` makes a never-started ~/.claude itself. Every amber
+        # claude-code row this script did not expect is unexpected, exits 2, and
+        # `summary` prints the doctor's own detail and fix for it (review of #257).
+        snapshot)
+            # A project with no snapshot yet. A snapshot packed too large before
+            # 0.7.0 is reused by a plain onboard, so that advice never turned it
+            # green; the doctor's fix for it is a re-pack (#82).
+            case "$(_doctor_detail snapshot)" in
+                *"no codebase snapshot"*) printf 'aisquare project onboard' ;;
+                *) printf '' ;;
+            esac
+            ;;
         *) printf '' ;;
     esac
 }
@@ -1814,6 +2081,22 @@ summary() {
             UNEXPECTED=$((UNEXPECTED + 1))
         fi
     done
+    # A Node this run was asked for and could not put on PATH. `aisquare doctor`
+    # reads no Node at all as codebase snapshots OFF -- optional, since the memory
+    # route never needs it -- so no row above can tell "chose the memory route"
+    # from "the Node install failed". That knowledge is this script's: with system
+    # deps on, a missing node is unexpected and exits 2, as it did while the
+    # repomix row went amber for it. A Node that is too old, or a packer without a
+    # Node, still turns the repomix row amber, which the loop above has counted.
+    if [ "$WANT_SYSTEM_DEPS" = 1 ] && ! have node; then
+        case " $_unexpected " in
+            *" repomix "*) ;;
+            *)
+                _unexpected="$_unexpected node"
+                UNEXPECTED=$((UNEXPECTED + 1))
+                ;;
+        esac
+    fi
 
     if [ -n "$_expected" ]; then
         say ""
@@ -1826,6 +2109,23 @@ summary() {
             *" brain "*)
                 note "  brain    — gbrain is out of scope for this installer; team"
                 note "             decisions are simply not distilled without it."
+                ;;
+        esac
+        case " $_expected " in
+            *" claude-code "*)
+                # Information, not an instruction: under --no-agent no state of
+                # Claude Code is this run's to change, so the doctor's fix is not
+                # printed. Asked in this folder (doctor_json), so the doctor run
+                # here shows the same row.
+                _cc_said=$(_json_text "$(_doctor_detail claude-code)")
+                if [ -n "$_cc_said" ]; then
+                    note "  claude-code — left alone by --no-agent; aisquare doctor here says:"
+                    note "             $_cc_said"
+                else
+                    # A detail that could not be read off the payload (a `{` in a
+                    # path splits it): named where it can be read in full.
+                    note "  claude-code — left alone by --no-agent; aisquare doctor here shows its state."
+                fi
                 ;;
         esac
         case " $_expected " in
@@ -1858,10 +2158,45 @@ summary() {
     if [ -n "$_unexpected" ]; then
         say ""
         say "${C_YELLOW}Not expected, and worth a look:${C_RESET}"
+        # The doctor's checks first, and the pointer to the doctor only under them:
+        # for a Node that did not install, doctor's rows are all ok ("off", no fix),
+        # so pointing there for "the full detail and a fix" sent people nowhere.
+        #
+        # claude-code is not sent there either: it comes with its own detail and
+        # fix, from the row this verdict read. That row is Claude Code's own config,
+        # asked from `/` (doctor_json), and inside a repository whose aisquare
+        # plugin is its route `aisquare doctor` answers for that repository, where
+        # it read green while the run said otherwise (review of #257).
+        _from_doctor=""
+        _cc_detail=""
         for _check in $_unexpected; do
+            case "$_check" in
+                node) ;;
+                claude-code)
+                    _cc_detail=$(_json_text "$(_doctor_detail claude-code)")
+                    [ -n "$_cc_detail" ] || _from_doctor="$_from_doctor $_check"
+                    ;;
+                *) _from_doctor="$_from_doctor $_check" ;;
+            esac
+        done
+        for _check in $_from_doctor; do
             printf '  %s\n' "$_check"
         done
-        note "the full detail and a fix for each: aisquare doctor"
+        if [ -n "$_from_doctor" ]; then
+            note "the full detail and a fix for each: aisquare doctor"
+        fi
+        if [ -n "$_cc_detail" ]; then
+            printf '  claude-code — %s\n' "$_cc_detail"
+            _cc_fix=$(_json_text "$(_doctor_fix claude-code)")
+            if [ -n "$_cc_fix" ]; then
+                printf '    → %s\n' "$_cc_fix"
+            fi
+        fi
+        case " $_unexpected " in
+            # Its own line, with its own remedy: doctor only says snapshots are
+            # off, which is true and names no failure.
+            *" node "*) printf '  node — Node %s+ did not install, so codebase snapshots are off (nodejs.org, or fnm)\n' "$MIN_NODE_MAJOR" ;;
+        esac
     fi
 
     if [ -n "$PATH_HINT" ]; then
@@ -1878,8 +2213,9 @@ summary() {
 handoff() {
     _exit=0
     [ "$UNEXPECTED" -gt 0 ] && _exit=2
-    # Exit 2, not 0: the install completed but an unexpected check is amber. A
-    # script that exits 0 onto a broken machine is worse than one that never ran.
+    # Exit 2, not 0: the install completed but an unexpected check is amber, or
+    # the Node this run was asked for did not install. A script that exits 0
+    # onto a broken machine is worse than one that never ran.
 
     if [ "$DRY_RUN" = 1 ]; then
         exit "$_exit"
@@ -1963,7 +2299,8 @@ Environment
 Exit codes
   0  installed (or nothing to do), with nothing unexpected
   1  a fatal step failed — uv, or aisquare-cli itself
-  2  installed, but a check is amber for a reason this script did not expect
+  2  installed, but a check is amber for a reason this script did not expect,
+     or Node did not install
 
 Not installed, on purpose: gbrain (out of scope), explainability tracing (off
 unless asked for), and any credential — `claude` and `gh auth login` do their

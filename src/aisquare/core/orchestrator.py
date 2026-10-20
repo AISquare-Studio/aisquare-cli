@@ -13,9 +13,7 @@ branch is the gate:
 - ``AISQUARE_ROLE``        — role for this session (also activates the orchestrator
                              for the project on session start).
 - ``AISQUARE_TEAM_HUB``    — pin every session/command to one board rooted at
-                             this directory (multi-repo executions). Inside a
-                             fleet window the fleet row's board wins; see
-                             ``team_project``.
+                             this directory (multi-repo executions).
 - ``AISQUARE_TEAM_DELTA=0``— mute the per-prompt teammate delta injection.
 - ``AISQUARE_TEAM_LEASE_MIN`` — claim lease in minutes (default 120; long
                              agentic turns only renew on prompt submit).
@@ -32,7 +30,7 @@ import os
 import sys
 from pathlib import Path
 
-from aisquare.core.workspace import find_project_root, git_common_root, project_id_for
+from aisquare.core.workspace import _resolved_or_spelled, find_project_root, project_id_for
 from aisquare.models import ProjectInfo
 
 _OFF_VALUES = {"0", "false", "no", "off"}
@@ -119,50 +117,53 @@ def lease_minutes() -> int:
 
 TEAM_HUB_ENV_VAR = "AISQUARE_TEAM_HUB"
 """The hub that pins every session to one board (:func:`team_project`). ``fleet
-spawn`` sets it on every window it starts, to the fleet's own root
-(``services.fleet.spawn``), and inside a fleet window the row's board wins anyway
-(:func:`_fleet_board`)."""
+spawn`` sets it on every window it starts, as :func:`window_team_hub` says."""
+
+
+def window_team_hub() -> str:
+    """``AISQUARE_TEAM_HUB`` for a window this process spawns: the hub it honours, else blank.
+
+    A window inherits the tmux SERVER's environment, which was frozen when the
+    private server first started, and ``launch`` inside the window joins
+    ``team_project`` from there. The fleet UI's Explainability tab resolves the
+    same question in THIS process (``key_project``). With the hub exported in
+    one and not the other, the tab showed and attached one project's key while
+    the window's launches took another's: a 409 ``agent_not_registered`` on
+    every span, or traces in the other project's workspace (review of #170,
+    D1b round 2, B1). Set on the window, the window resolves as its spawner
+    does. The value is the hub's absolute path when this process honours one,
+    else blank. ``team_project`` reads blank as unset, and a relative value,
+    which this process ignores, becomes blank too. Blank, not absent, because
+    ``tmux -e`` can only set, and the server's retained value must not leak in
+    as ours.
+    """
+    hub = team_hub()
+    return str(hub) if hub is not None else ""
 
 
 def team_hub() -> Path | None:
     """The hub this process honours: ``AISQUARE_TEAM_HUB`` as an absolute path, else ``None``.
 
     :func:`team_project`'s rule without its warning: a relative value is
-    ignored. For a surface that has to say it is under a hub: the explainability
-    key commands, whose default project is then the hub's while a fleet seat
-    traces as its own fleet's (``cli/explainability.py``). The fleet UI's
-    Explainability tab asked it too while its key belonged to the hub project;
-    its key is the page's own now, hub or no hub (#235; review of #240, finding 12).
+    ignored. For a surface that has to say it is under a hub, such as the fleet
+    UI's Explainability tab, whose key then belongs to the hub project.
     """
     hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
     if not hub or not Path(hub).expanduser().is_absolute():
         return None
-    return Path(hub).expanduser().resolve()
+    return _hub_root(hub)
 
 
-def _fleet_board() -> ProjectInfo | None:
-    """The project of the fleet row ``AISQUARE_FLEET_AGENT`` names, or ``None``.
-
-    ``None`` outside a fleet window, for an id with no row or no project, and on
-    any failure to read the store: a stale or foreign id never strands a command,
-    and the resolution below stands as before. Read each time, never cached: a row
-    id is unique within ONE store, and a process can read another (a test, or a
-    command pointed at another ``AISQUARE_HOME``).
-    """
-    agent_id = env_fleet_agent()
-    if agent_id is None:
-        return None
-    try:
-        from aisquare.core.store import store_session  # lazy: this module is on every hook path
-
-        with store_session() as store:
-            row = store.get_fleet_agent(agent_id)
-            project = store.get_project(row.project_id) if row is not None else None
-    except Exception:  # fail open: the board falls back to the hub or the checkout
-        return None
-    if project is None:
-        return None
-    return ProjectInfo(id=project.id, root=project.root, linked_repos=[])
+def _hub_root(hub: str) -> Path:
+    """The board root an absolute ``hub`` names, resolved as every project root is, and
+    through a symlink loop as it is spelled, made absolute, as ``project.resolve`` reads a
+    root that became one (``workspace._resolved_or_spelled``): resolved raw, the loop raised
+    ``RuntimeError`` on 3.11 and 3.12, which the readers that skip a root they cannot ask
+    (``suppress(OSError)``) let through, and every phone board write that works out its
+    reach was a 500; from 3.13 ``resolve`` handed back the path as far as it got. A hub is a
+    board's name, and one that does not exist names it too: like a relative one, a bad hub
+    costs no command (review of #259, round 42, 6/11)."""
+    return _resolved_or_spelled(Path(hub).expanduser())
 
 
 #: Relative hub values already reported, so a command that resolves the board
@@ -174,34 +175,13 @@ _WARNED_HUBS: set[str] = set()
 def team_project(cwd: Path | None = None) -> ProjectInfo:
     """The project this directory's team traffic belongs to.
 
-    Inside a fleet window (``AISQUARE_FLEET_AGENT`` names a row) the board is
-    the fleet row's project, ahead of everything below: the window's hub may be
-    one its tmux server inherited, and the seat belongs to its own fleet.
-    Otherwise ``AISQUARE_TEAM_HUB`` overrides: an execution that spans
+    ``AISQUARE_TEAM_HUB`` overrides everything: an execution that spans
     several repositories (planner in one, coders and runner in others) sets
     it to one hub directory so every session shares a single board. Otherwise
     worktrees resolve to their principal checkout, so the team shares one board
     regardless of which worktree a session sits in.
     """
     hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
-    fleet = _fleet_board()
-    if fleet is not None:
-        # Inside a fleet window the seat belongs to its fleet's board, ahead of any
-        # hub the window inherited from its tmux server (card
-        # tsk_01m3k89b2f96tt7xc6crzvxzjk: a server started from a shell with a hub
-        # exported put every seat of two fleets on a third board).
-        pinned = Path(hub).expanduser()
-        differs = hub and pinned.is_absolute() and pinned.resolve() != fleet.root
-        if differs and hub not in _WARNED_HUBS:
-            _WARNED_HUBS.add(hub)
-            print(
-                # The path as typed, in plain quotes: repr doubled every backslash of a
-                # Windows path, and the owner could not find their own path in it (#230).
-                f"⚠ AISQUARE_TEAM_HUB='{hub}' names another board, but this is a fleet "
-                f"window of {fleet.root.name or fleet.id}, so the fleet's own board wins.",
-                file=sys.stderr,
-            )
-        return fleet
     if hub and not Path(hub).expanduser().is_absolute():
         # A RELATIVE hub inverts the feature. `Path('./').resolve()` is the
         # process cwd, so "one board for sessions in several repositories"
@@ -227,8 +207,23 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
             )
         hub = ""
     if hub:
-        root = Path(hub).expanduser().resolve()
+        root = _hub_root(hub)
         return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
-    start = (cwd or Path.cwd()).resolve()
-    root = git_common_root(start) or find_project_root(start)
+    return directory_project(cwd)
+
+
+def directory_project(cwd: Path | None = None) -> ProjectInfo:
+    """The project of the directory itself, whatever ``AISQUARE_TEAM_HUB`` says: its
+    principal checkout's, so every worktree of one repository answers alike.
+
+    :func:`team_project`'s answer when no hub is set. Under one, it is still where a
+    session's own work is: a session the human launched in ``/work/app`` is on the hub's
+    board, and its fleet commands are about ``app`` (review of #259, round 23).
+
+    One ``git`` call: ``find_project_root`` asks ``git_common_root`` first. Asked here
+    first too, it ran twice for a directory that is not a git checkout (review of #259,
+    round 30, 7/8). A symlink loop on the way to ``cwd`` raises ``OSError``, as
+    ``find_project_root`` resolves it (round 40, 3/6).
+    """
+    root = find_project_root(cwd or Path.cwd())
     return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])

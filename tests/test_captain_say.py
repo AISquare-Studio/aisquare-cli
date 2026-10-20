@@ -282,12 +282,12 @@ def captain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Captain, C
             asked_label="captain",
             tmux_session="asq-x",
             notes=list(fake.notes),
-            prompt_typed=prompt is not None and fake.prompt_typed,
+            prompt_typed=None if prompt is None else ("yes" if fake.prompt_typed else "no"),
         )
 
     def tell(*args: Any, **kwargs: Any) -> fleet.TellResult:
         fake.told.append(str(args))
-        return fleet.TellResult(False, "filed as a board note")
+        return fleet.TellResult("no", "filed as a board note")
 
     monkeypatch.setattr(brain, "_now", clock)
     monkeypatch.setattr(brain, "_sleep", sleep)

@@ -13,18 +13,20 @@ so repos that never opted in never see team output.
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
 import re
 import sqlite3
 import sys
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import NamedTuple
+from types import EllipsisType
+from typing import Any, Final, NamedTuple
 
 from aisquare.core import brain, harness, insights, orchestrator, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
@@ -42,6 +44,8 @@ from aisquare.models import (
     TeamTask,
 )
 from aisquare.services import distill as distill_service
+from aisquare.services import install_route
+from aisquare.services import project as project_service
 
 #: The fail-open reads of the fleet row say here what they swallowed. Nothing
 #: in the CLI configures logging, so a WARNING reaches stderr through the
@@ -230,6 +234,19 @@ class DeliveryUnconfirmedError(RuntimeError):
         self.board_name = board_name
 
 
+class NoSuchTaskNumber(KeyError):
+    """``12`` / ``#12`` names no task on the caller's board — said so, never looked for
+    elsewhere."""
+
+    def __init__(self, number: int, board: str) -> None:
+        super().__init__(f"#{number}")
+        self.number = number
+        self.board = board
+
+    def __str__(self) -> str:
+        return f"no task #{self.number} on this board ({self.board})"
+
+
 class ManagerWakeupError(RuntimeError):
     """The manager's wake-up branch failed; the row still says ``waiting``, as before.
 
@@ -331,9 +348,20 @@ def _require_enabled() -> None:
         raise TeamDisabledError()
 
 
-def _project(store: ContextStore, cwd: Path | None) -> ProjectInfo:
+def _project(store: ContextStore, cwd: Path | None, *, write: bool = False) -> ProjectInfo:
+    """The board ``cwd`` resolves to, captured as #139 did while ``[projects] capture`` is on.
+
+    Off, nothing is written: a read gets the project as resolved, whose board is empty
+    when nobody added it, and a ``write`` there is refused
+    (:class:`~aisquare.services.project.NotAdded`) — the board of a directory no list
+    shows is not where anyone meant to post.
+    """
     project = orchestrator.team_project(cwd)
-    store.ensure_project(project)
+    if not project_service.tracked(store, project):
+        if write:
+            raise project_service.NotAdded(project)
+        return project
+    project_service.capture(store, project)
     return project
 
 
@@ -396,7 +424,9 @@ def _resolve_session(store: ContextStore, ref: str | None) -> TeamSession | None
 
 @dataclass(frozen=True)
 class _Board:
-    """Where a command delivers, and how to talk about it in receipts."""
+    """Where a command delivers, and how to talk about it in receipts: ``name`` is the
+    project's as every list names it (``project.display_name``: its nickname, else its
+    directory, else its id), from its stored row."""
 
     id: str
     name: str
@@ -404,15 +434,82 @@ class _Board:
     warning: str | None = None
 
 
+TASK_NUMBER_REF = re.compile(r"^#?([0-9]{1,6})$")
+"""A task ref that is a board number: ``12`` or ``#12`` (:func:`find_task`)."""
+
+
+def task_number_of(ref: str) -> int | None:
+    """The board number ``ref`` spells (``12``, ``#12``), or ``None`` when it is not one."""
+    match = TASK_NUMBER_REF.match(ref.strip())
+    return int(match.group(1)) if match else None
+
+
+def task_label(task: TeamTask) -> str:
+    """``#12 tsk_01m4…`` — the number people read, then the id agents keep working with."""
+    return f"#{task.number} {task.id}" if task.number is not None else task.id
+
+
+def find_task(store: ContextStore, ref: str, board_id: str | Callable[[], str]) -> TeamTask | None:
+    """The task ``ref`` names, a board number first: ``12`` or ``#12`` on ``board_id``.
+
+    ``board_id`` is the CALLER's board (:func:`_caller_board_id`): numbers are per
+    project, so ``7`` means this board's seventh task, never another's. Given as a
+    callable, it is asked only for a number: working the board out runs ``git`` in the
+    current directory, which an id never needs, and Remote's claim and close, which pass
+    the id they resolved, paid it on every write, and failed in a directory since removed
+    (review of #259, round 13). A number the
+    board does not have, ``12`` or ``#12``, raises :class:`NoSuchTaskNumber` and is never
+    looked for as an id: the tail lookup (``get_task``) spans every board, so ``12``
+    would close whichever task's id happens to end in ``12``, here or on another
+    project's board (review of #261, M1). No real ref needs it: old board lines showed
+    eight-character tails, which :data:`TASK_NUMBER_REF` never matches. Anything else is
+    the id lookup it always was: a full id, a prefix, a tail.
+    """
+    number = task_number_of(ref)
+    if number is None:
+        return store.get_task(ref)
+    board = board_id() if callable(board_id) else board_id
+    task = store.task_by_number(board, number)
+    if task is None:
+        raise NoSuchTaskNumber(number, _board_of(store, board).name)
+    return task
+
+
+def _caller_board_id(store: ContextStore, session: TeamSession | None, cwd: Path | None) -> str:
+    """The board a task ref is read on: the session's (``--as``), else the directory's —
+    as :func:`_board` delivers, but without registering anything for a read."""
+    if session is not None:
+        return session.project_id
+    return orchestrator.team_project(cwd).id
+
+
 def _board_of(store: ContextStore, project_id: str) -> _Board:
-    """The board a known project id names (for task-ref commands)."""
-    project = store.get_project(project_id)
-    name = (project.root.name if project is not None else "") or project_id
-    return _Board(id=project_id, name=name, root=project.root if project is not None else None)
+    """The board a known project id names (for task-ref commands).
+
+    One forgotten since is still named and rooted by its row: its tasks and events are
+    kept, and the agents whose rows recorded it still read it. Read as one the store does
+    not hold, a note ``fleet tell`` or the phone put on a forgotten hub was named by its id,
+    and its drain ran in the caller's directory, with a ``git rev-parse``, distilling the
+    caller's board and not the hub's (review of #259, round 32, 7/9)."""
+    project = store.get_project(project_id, include_forgotten=True)
+    if project is None:
+        return _Board(id=project_id, name=project_id, root=None)
+    return _Board(id=project_id, name=project_service.display_name(project), root=project.root)
 
 
-def _board(store: ContextStore, session: TeamSession | None, cwd: Path | None) -> _Board:
-    """The board an attributed command delivers to.
+def _board_named(store: ContextStore, project: ProjectInfo) -> _Board:
+    """``project``'s board, named by its stored row: one worked out from a directory
+    (``orchestrator.team_project``) carries no nickname. Named by its folder, a refusal
+    said "no task #99 on this board (api-v2)" of the project every list calls "Billing"
+    (review of #259, round 14)."""
+    named = store.get_project(project.id) or project
+    return _Board(id=project.id, name=project_service.display_name(named), root=project.root)
+
+
+def _board(
+    store: ContextStore, session: TeamSession | None, cwd: Path | None, *, write: bool = False
+) -> _Board:
+    """The board an attributed command delivers to (``write``: :func:`_project`'s).
 
     With ``--as`` the SESSION's registered board wins — a session legitimately
     works across many worktrees and subdirectories, so cwd is a hint, not an
@@ -422,14 +519,13 @@ def _board(store: ContextStore, session: TeamSession | None, cwd: Path | None) -
     session's board produces a warning, never a reroute.
     """
     if session is None:
-        project = _project(store, cwd)
-        return _Board(id=project.id, name=project.root.name or project.id, root=project.root)
+        return _board_named(store, _project(store, cwd, write=write))
     board = _board_of(store, session.project_id)
     cwd_board = orchestrator.team_project(cwd)
     if cwd_board.id == board.id:
         return board
     warning = (
-        f"cwd resolves to board {cwd_board.root.name or cwd_board.id}, but session "
+        f"cwd resolves to board {_board_named(store, cwd_board).name}, but session "
         f"{short_id(session.id)} belongs to {board.name} — delivered to {board.name}"
     )
     return _Board(id=board.id, name=board.name, root=board.root, warning=warning)
@@ -527,8 +623,120 @@ def task_key(title: str) -> str:
     return slug[:64] or "task"
 
 
-def _nudge_manager(project_id: str, *, reason: str) -> None:
-    """Wake the project's WAITING manager after a board write it must act on (§7.3, path 2).
+class _Nowhere(enum.Enum):
+    """The type of :data:`NOWHERE`."""
+
+    NOWHERE = "nowhere"
+
+
+NOWHERE: Final = _Nowhere.NOWHERE
+"""The ``cwd`` of a writer with no directory of its own: the phone's task write that names no
+project. ``None`` is this process's directory, a shell's own; the directory Remote (or
+``asq``) was started in is nobody's, and of several managers on a board it picks none
+(:func:`_reading_manager`). Read as the process's, a done from the phone on a task no row
+works woke the manager of whichever project Remote was started in (review of #259, round
+28, 5/10)."""
+
+
+def _nudge_target(
+    store: ContextStore,
+    writer: str | None,
+    board_id: str,
+    cwd: Path | _Nowhere | None = None,
+    *,
+    task: TeamTask | None = None,
+) -> str:
+    """The project whose manager a nudge for session ``writer``'s write on board ``board_id``
+    wakes: that of the writer's own live fleet row; with none, for a write on ``task``, that
+    of the task's own row (:func:`_task_row`); else that of the manager that reads the board
+    (:func:`_reading_manager`); else ``board_id``'s, as every nudge was. The live rows those
+    two look among are read once: each read is every live row, twice on every phone, shell
+    and MCP task write by a writer with no row (review of #259, round 28, 7/10).
+
+    Which manager is a fleet question, the news a board one (docs/fleet.md, "Under a hub: one
+    board, many fleet projects"): the nudge types a fixed line into the manager row's pane,
+    and the delta that line wakes it to is read from the manager's session's board. Under
+    ``AISQUARE_TEAM_HUB`` every session is on the hub's board, where no manager has a row, so
+    a coder's ``task done`` or ``task review``, a question to the manager and a manager's own
+    deferred wake reached nobody, or woke the hub directory's own manager. The row is the
+    writer's, in whichever project: a coder's manager is in its own row's project, as round
+    22 spawns it there, and a manager's Stop wakes its own row (review of #259, round 24,
+    4/6). A writer with no row (the phone, the human's own shell, an MCP client, a manager
+    launched by hand) woke the board's project's manager: under a hub the hub's, where no
+    manager has a row, so a note to the manager from the phone never woke it (round 25,
+    5/10). Read in the write's own store session, after the write: it cannot raise, as a
+    read that fails costs the nudge its target, never the write. The manager it names is
+    woken only when it reads ``board_id`` (``fleet.nudge_manager``'s ``board``, which
+    :func:`_nudge_manager` passes).
+
+    A task write knows its project better than the writer's directory does. Asked by the
+    directory, a ``task done`` from ``~`` or through the MCP server, outside every root, woke
+    nobody, and the phone's done with no project, in the pinned one's root, woke that
+    project's manager for another's task (review of #259, round 27, 3/7). ``task`` is the
+    task as it was before the write, so its rows still name it and its claim is still held.
+    """
+    try:
+        row = store.fleet_agent_for_session(writer) if writer is not None else None
+        if row is not None:
+            return row.project_id
+        live = store.live_fleet_agents()
+        row = None if task is None else _task_row(store, task, live)
+        if row is not None:
+            return row.project_id
+        return _reading_manager(store, board_id, cwd, live) or board_id
+    except Exception:
+        return board_id
+
+
+def _task_row(store: ContextStore, task: TeamTask, live: Sequence[FleetAgent]) -> FleetAgent | None:
+    """The live fleet row a task is worked in: the newest of ``live``, the live rows, spawned
+    for it, else the row of the session that claimed it."""
+    spawned = [row for row in live if row.task_id == task.id]
+    if spawned:
+        return spawned[-1]
+    if task.claimed_by is None:
+        return None
+    return store.fleet_agent_for_session(task.claimed_by)
+
+
+def _reading_manager(
+    store: ContextStore, board_id: str, cwd: Path | _Nowhere | None, live: Sequence[FleetAgent]
+) -> str | None:
+    """The project of the ``manager`` row of ``live``, the live rows, whose agent reads board
+    ``board_id``, as its spawn recorded (``FleetAgent.board``). Of several, as under a hub,
+    the one whose project's root holds the writer's directory, ``cwd`` or this process's (the
+    phone writes a project's note in its root), the deepest root of those that do; of none
+    that holds it, none, and none for a writer with no directory (:data:`NOWHERE`).
+
+    The deepest, not the oldest: a project rooted in a sub-folder of another's reads the same
+    board, the checkout's, and its directory is inside both roots, so a note to its manager
+    from the phone woke the older project's, and its own waited on (review of #259, round 26,
+    5/11).
+    """
+    managers = [row for row in live if row.label == MANAGER_ROLE and row.board == board_id]
+    if len(managers) == 1:
+        return managers[0].project_id
+    if isinstance(cwd, _Nowhere):
+        return None
+    here = (cwd or Path.cwd()).resolve()
+    holding = [
+        project
+        for manager in managers
+        for project in [store.get_project(manager.project_id)]
+        if project is not None and here.is_relative_to(project.root)
+    ]
+    deepest = max(holding, key=lambda project: len(project.root.parts), default=None)
+    return deepest.id if deepest is not None else None
+
+
+def _nudge_manager(project_id: str, *, reason: str, board: str) -> None:
+    """Wake the project's WAITING manager after a board write it must act on (§7.3, path 2);
+    ``project_id`` is :func:`_nudge_target`'s, ``board`` the board the write went on.
+
+    Only a manager that reads ``board`` is woken (``fleet.nudge_manager``): the line wakes it
+    to its own board's delta. A coder spawned without the hub its manager was spawned under
+    writes on its project's board, and the manager it woke read the hub's, found nothing and
+    waited again, while Remote counted the question handled (review of #259, round 26, 4/11).
 
     Runs inside the writing agent's CLI process, after the write is confirmed, so
     it is an observer of the write: it may never raise, and a fleet that is not
@@ -542,7 +750,7 @@ def _nudge_manager(project_id: str, *, reason: str) -> None:
 
         nudge = getattr(fleet_service, "nudge_manager", None)
         if nudge is not None:
-            nudge(project_id, reason=reason)
+            nudge(project_id, reason=reason, board=board)
     except Exception:  # the write already succeeded; a lost nudge is the whole cost
         return
 
@@ -560,7 +768,7 @@ def activate(cwd: Path | None = None) -> ProjectInfo:
         event = None
         if not store.team_active(project.id):
             event = _emit(store, project.id, "activate", "agent orchestrator activated")
-        board = _Board(id=project.id, name=project.root.name or project.id, root=project.root)
+        board = _board_named(store, project)
     if event is not None:
         _record_delivery(event, board)
     return project
@@ -572,6 +780,7 @@ def board_data(
     events: int = _BOARD_EVENTS,
     since_seq: int | None = None,
     project: ProjectInfo | None = None,
+    glance: bool = False,
     exclude_kinds: Collection[str] = (),
 ) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
     """Everything the board shows: sessions, tasks and recent events.
@@ -580,6 +789,11 @@ def board_data(
     watch UI polling every few seconds does not rehydrate its whole window.
     ``project`` lets a long-lived caller resolve identity once and pass it in,
     sparing a ``git rev-parse`` per call (the watch TUI does this).
+    ``glance`` reads what a reader of the events alone needs: of the sessions
+    only those the events name, newest seen first as ever, and no task. The
+    rest is every session and task the project ever had, and the remote's
+    ``board`` frame, read every second while a phone shows its Board tab, read
+    all of it to drop it.
     ``exclude_kinds`` leaves those event kinds out of either fetch, inside the
     query, so ``events`` counts what is shown: the human board passes
     :data:`CAPTAIN_AUDIT_KINDS`, an agent's (the MCP ``team_board``)
@@ -587,19 +801,111 @@ def board_data(
     """
     _require_enabled()
     with store_session() as store:
-        resolved = project if project is not None else _project(store, cwd)
-        if since_seq is None:
-            fetched = store.recent_events(resolved.id, exclude_kinds=exclude_kinds, limit=events)
-        else:
-            fetched = store.events_since(
-                resolved.id, since_seq, exclude_kinds=exclude_kinds, limit=events
-            )
-        return (
-            resolved,
-            store.team_sessions(resolved.id),
-            store.team_tasks(resolved.id),
-            fetched,
+        return board_data_in(
+            store,
+            cwd,
+            events=events,
+            since_seq=since_seq,
+            project=project,
+            glance=glance,
+            exclude_kinds=exclude_kinds,
         )
+
+
+def board_data_in(
+    store: ContextStore,
+    cwd: Path | None = None,
+    *,
+    events: int = _BOARD_EVENTS,
+    since_seq: int | None = None,
+    project: ProjectInfo | None = None,
+    glance: bool = False,
+    exclude_kinds: Collection[str] = (),
+) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
+    """:func:`board_data` through a store the CALLER holds open: Remote's ``board`` frame,
+    which finds the board it shows in that store first (``remote_server``'s
+    ``remote_board_payload``), read every second while a phone shows its Board tab."""
+    _require_enabled()
+    return _read_board(
+        store,
+        cwd,
+        events=events,
+        since_seq=since_seq,
+        project=project,
+        glance=glance,
+        exclude_kinds=exclude_kinds,
+    )
+
+
+class BoardRead(NamedTuple):
+    """What a painted board shows: :func:`board_data`'s four, and the ``fleet switch`` of
+    each limited session's chip (:func:`fleet_switches`)."""
+
+    project: ProjectInfo
+    sessions: list[TeamSession]
+    tasks: list[TeamTask]
+    events: list[TeamEvent]
+    switches: dict[str, str]
+
+
+def board_read(
+    cwd: Path | None = None,
+    *,
+    events: int = _BOARD_EVENTS,
+    since_seq: int | None = None,
+    project: ProjectInfo | None = None,
+    exclude_kinds: Collection[str] = (),
+) -> BoardRead:
+    """:func:`board_data` for a board that paints its sessions, with their chips' switches,
+    in its one store session.
+
+    The board panel and ``aisquare board``'s frame asked :func:`fleet_switches` for them
+    after :func:`board_data` had closed its session, and that opened another: a new
+    connection, the migration check and the presence pass, on the event loop, at every 2 s
+    tick of every visible board for as long as a session stayed limited, which is hours
+    (review of #259, round 23). ``exclude_kinds`` as in :func:`board_data`.
+    """
+    _require_enabled()
+    with store_session() as store:
+        read = _read_board(
+            store,
+            cwd,
+            events=events,
+            since_seq=since_seq,
+            project=project,
+            exclude_kinds=exclude_kinds,
+        )
+        return BoardRead(*read, fleet_switches(store, read[1]))
+
+
+def _read_board(
+    store: ContextStore,
+    cwd: Path | None,
+    *,
+    events: int,
+    since_seq: int | None,
+    project: ProjectInfo | None,
+    glance: bool = False,
+    exclude_kinds: Collection[str] = (),
+) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
+    """The body of :func:`board_data`, through the caller's store."""
+    resolved = project if project is not None else _project(store, cwd)
+    if since_seq is None:
+        fetched = store.recent_events(resolved.id, exclude_kinds=exclude_kinds, limit=events)
+    else:
+        fetched = store.events_since(
+            resolved.id, since_seq, exclude_kinds=exclude_kinds, limit=events
+        )
+    if glance:
+        named = sorted({event.session_id for event in fetched if event.session_id})
+        sessions = store.team_sessions_seen_since(resolved.id, None, ids=named)
+        return resolved, sessions, [], fetched
+    return (
+        resolved,
+        store.team_sessions(resolved.id),
+        store.team_tasks(resolved.id),
+        fetched,
+    )
 
 
 def board_scope_note(cwd: Path | None = None) -> str | None:
@@ -681,7 +987,7 @@ def log_events(
         author = _resolve_session(store, by)
         task_id: str | None = None
         if task_ref is not None:
-            task = store.get_task(task_ref)
+            task = find_task(store, task_ref, board.id)
             if task is None:
                 raise KeyError(task_ref)
             task_id = task.id
@@ -736,15 +1042,13 @@ def verify_receipt(
         if event is None:
             return VerifyResult(event=None, board_id=board.id, board_name=board.name)
         if event.project_id != board.id:
-            holder = store.get_project(event.project_id)
-            elsewhere = (holder.root.name if holder is not None else "") or event.project_id
+            elsewhere = _board_of(store, event.project_id).name
             return VerifyResult(
                 event=None, board_id=board.id, board_name=board.name, elsewhere=elsewhere
             )
         roles = {s.id: s.role for s in store.team_sessions(board.id)}
-        return VerifyResult(
-            event=event, board_id=board.id, board_name=board.name, line=event_line(event, roles)
-        )
+        line = event_line(event, roles, store.task_numbers(board.id))
+        return VerifyResult(event=event, board_id=board.id, board_name=board.name, line=line)
 
 
 _SIGNAL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -762,8 +1066,12 @@ class SignalState:
     updated_at: datetime | None
 
 
+_SIGNALS = "signal/"
+"""The ``team_meta`` prefix every board's named states are kept under (:func:`_signal_key`)."""
+
+
 def _signal_key(project_id: str, name: str) -> str:
-    return f"signal/{project_id}/{name}"
+    return f"{_SIGNALS}{project_id}/{name}"
 
 
 def _signal_state(name: str, blob: str) -> SignalState:
@@ -806,30 +1114,46 @@ def set_signal(
         # reported B (review of #121, round 8). `_board_of` also skips
         # `ensure_project`, so a forgotten project's tombstone is not revived.
         board = (
-            _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
+            _board_of(store, project_id)
+            if project_id is not None
+            else _board(store, session, cwd, write=True)
         )
         state, prev, event = _write_signal(store, board, session, name, value)
     _record_delivery(event, board)  # the receipt for this write; `state.seq` is already the row's
     return state, prev
 
 
-def set_signal_in(store: ContextStore, project_id: str, name: str, value: str) -> None:
-    """:func:`set_signal` for ``project_id`` through a store the CALLER holds open.
+def set_signals_in(
+    store: ContextStore,
+    signals: Sequence[tuple[str, str]],
+    value: str,
+    *,
+    session_ref: str | None = None,
+) -> None:
+    """:func:`set_signal` of each (project id, name) of ``signals`` to ``value``, through a
+    store the CALLER holds open, in ONE transaction: every one is set, or none is.
 
-    For a pass over many projects — ``fleet shutdown`` clearing every confirmed
-    project's pause — which used to open a connection per project through
-    :func:`set_signal` (connect, WAL switch, migrations each time) on top of one
-    per row it ended (review of #203, round 4). Same validation, same
-    one-transaction write; no delivery receipt is published, because the caller
-    is not the ``team signal`` command and there is nobody to hand it to — and
-    the receipt of an EARLIER write in this process is cleared, so nothing reads
-    it as this one's (round 5). Returns nothing: its one caller reads nothing.
+    For a write to many boards — a project's pause, one signal on each board it lives on,
+    and ``fleet shutdown`` clearing every confirmed project's — which used to open a
+    connection a signal through :func:`set_signal` (connect, WAL switch, migrations each
+    time; review of #203, round 4), and committed each on its own: a store error part-way
+    (``database is locked`` while many agents' hooks write) left the project paused on the
+    boards before it and not on the rest, and ``fleet pause`` ended in a traceback (review
+    of #259, round 34, 5/10). Same validation, of every one before anything is written;
+    ``session_ref`` is ``--as``, resolved as :func:`set_signal` resolves it. No delivery
+    receipt is published, because the caller is not the ``team signal`` command and there
+    is nobody to hand it to — and the receipt of an EARLIER write in this process is
+    cleared, so nothing reads it as this one's (round 5 of #203). Returns nothing: its
+    callers read nothing.
     """
     _require_enabled()
-    _validate_signal(name, value)
+    for _, name in signals:
+        _validate_signal(name, value)
     _DELIVERY.set(None)
-    board = _board_of(store, project_id)
-    _write_signal(store, board, None, name, value)
+    session = _resolve_session(store, session_ref)
+    _write_signals(
+        store, [(_board_of(store, board), name) for board, name in signals], session, value
+    )
 
 
 def _validate_signal(name: str, value: str) -> None:
@@ -850,42 +1174,55 @@ def _write_signal(
     name: str,
     value: str,
 ) -> tuple[SignalState, str | None, TeamEvent]:
-    """The one write behind :func:`set_signal` and :func:`set_signal_in`.
+    """The one write behind :func:`set_signal`: :func:`_write_signals` of one."""
+    return _write_signals(store, [(board, name)], session, value)[0]
+
+
+def _write_signals(
+    store: ContextStore,
+    signals: Sequence[tuple[_Board, str]],
+    session: TeamSession | None,
+    value: str,
+) -> list[tuple[SignalState, str | None, TeamEvent]]:
+    """Set each (board, name) of ``signals`` to ``value`` in one transaction
+    (``ContextStore.add_signal_events``): each one's state, the value it replaced, and its
+    event.
 
     Validation is the CALLER's, before it opens or resolves anything:
     ``_board`` runs ``ensure_project``, which revives a forgotten project's
     tombstone, so a signal that was going to be refused used to register the
     directory first (review of the fold).
     """
-    key = _signal_key(board.id, name)
-    prior = store.get_meta(key)
-    prev = _signal_state(name, prior).value if prior is not None else None
-    text = f"{name}: {value}" if prev is None else f"{name}: {value} (was {prev})"
     now = _now()
-    event = store.add_signal_event(
-        TeamEvent(
+    by = session.id if session else None
+    priors: list[str | None] = []
+    writes: list[tuple[TeamEvent, str, dict[str, Any]]] = []
+    for board, name in signals:
+        key = _signal_key(board.id, name)
+        prior = store.get_meta(key)
+        prev = _signal_state(name, prior).value if prior is not None else None
+        text = f"{name}: {value}" if prev is None else f"{name}: {value} (was {prev})"
+        event = TeamEvent(
             id=new_event_id(),
             project_id=board.id,
-            session_id=session.id if session else None,
+            session_id=by,
             kind="signal",
             text=text,
             created_at=now,
-        ),
-        key,
-        {
-            "value": value,
-            "session_id": session.id if session else None,
-            "updated_at": now.isoformat(),
-        },
-    )
-    state = SignalState(
-        name=name,
-        value=value,
-        set_by=session.id if session else None,
-        seq=event.seq,
-        updated_at=now,
-    )
-    return state, prev, event
+        )
+        priors.append(prev)
+        writes.append(
+            (event, key, {"value": value, "session_id": by, "updated_at": now.isoformat()})
+        )
+    events = store.add_signal_events(writes)
+    return [
+        (
+            SignalState(name=name, value=value, set_by=by, seq=event.seq, updated_at=now),
+            prev,
+            event,
+        )
+        for (_, name), prev, event in zip(signals, priors, events, strict=True)
+    ]
 
 
 def read_signal(
@@ -905,11 +1242,30 @@ def read_signal(
         return _read_signal(store, board.id, name)
 
 
-def read_signal_in(store: ContextStore, project_id: str, name: str) -> SignalState | None:
-    """:func:`read_signal` for ``project_id`` through a store the CALLER holds open
-    (see :func:`set_signal_in` for why)."""
+def board_signals_in(
+    store: ContextStore, *, unreadable: list[tuple[str, str]] | None = None
+) -> dict[tuple[str, str], SignalState]:
+    """Every board's named states, by (board id, name), through a store the CALLER holds open
+    (see :func:`set_signals_in`): one read of them all, for a caller that looks a name up on
+    whichever boards hold it. A fleet project's pause is named for its project on each board
+    (``harness.pause_signal``), so the boards it is on are those that hold it by that name
+    (``fleet._pause_where_on``).
+
+    A state whose blob does not parse is left out, and its (board id, name) added to
+    ``unreadable`` when the caller gives one, to say whose it was. Read with the rest, one
+    malformed blob on any board raised for every caller: ``fleet resume`` of any project
+    ended in a traceback, and ``fleet shutdown --all`` confirmed no project down (review of
+    #259, round 32, 6/9)."""
     _require_enabled()
-    return _read_signal(store, project_id, name)
+    states: dict[tuple[str, str], SignalState] = {}
+    for key, blob in store.list_meta(_SIGNALS).items():
+        board, _, name = key.removeprefix(_SIGNALS).partition("/")
+        try:
+            states[(board, name)] = _signal_state(name, blob)
+        except (ValueError, TypeError, AttributeError):  # not JSON, not an object, a bad field
+            if unreadable is not None:
+                unreadable.append((board, name))
+    return states
 
 
 def _read_signal(store: ContextStore, project_id: str, name: str) -> SignalState | None:
@@ -967,28 +1323,32 @@ def add_note(
     to_role: str | None = None,
     kind: str = "note",
     cwd: Path | None = None,
+    board_id: str | None = None,
     project_id: str | None = None,
 ) -> TeamEvent:
     """Put a note/decision/question/result on the team pipe.
 
-    ``project_id`` names the board outright, for a caller whose note is FOR a project
-    rather than from wherever the caller stands: ``fleet tell``'s fallback for a busy
-    agent, which that agent reads on its own fleet's board. Everything else that can
-    pick a board can pick another one: an exported ``AISQUARE_TEAM_HUB`` and the
-    caller's own fleet row both win over ``cwd``, and a session delivers to the board it
-    is registered on. So with an id the session still says who filed the note, and no
-    longer where (review of #240, finding 8); ``_board_of`` as in :func:`set_signal`.
+    ``board_id`` names the board outright, whoever writes and from wherever: ``fleet tell``'s
+    note to an agent goes to the board the agent reads (``fleet._board_of_row``), not the
+    teller's. ``project_id`` is the same, by the project whose board it is (review of #240,
+    finding 8: a busy agent's note lands on its own board); ``board_id`` wins when both are
+    given. Everything else that can pick a board can pick another one, so with either the
+    session still says who filed the note, and no longer where; ``_board_of`` as in
+    :func:`set_signal`.
     """
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
+        named = board_id if board_id is not None else project_id
         board = (
-            _board_of(store, project_id) if project_id is not None else _board(store, session, cwd)
+            _board_of(store, named)
+            if named is not None
+            else _board(store, session, cwd, write=True)
         )
         task_id: str | None = None
         if task_ref is not None:
-            task = store.get_task(task_ref)
+            task = find_task(store, task_ref, board.id)
             if task is None:
                 raise KeyError(task_ref)
             if task.project_id != board.id:
@@ -1006,18 +1366,24 @@ def add_note(
             task_id=task_id,
             to_role=to_role,
         )
+        wakes = kind in ("result", "question") or _addressed_to_manager(to_role)
+        manager = (
+            _nudge_target(store, session.id if session else None, board.id, cwd)
+            if wakes
+            else board.id
+        )
     stored = _record_delivery(event, board)
     if kind in distill_service.DISTILL_KINDS:
-        distill_service.spawn_drain(root=board.root)
+        distill_service.spawn_drain(root=board.root, board=board.id)
     if kind in ("result", "question"):
-        _nudge_manager(board.id, reason=kind)
+        _nudge_manager(manager, reason=kind, board=board.id)
     elif _addressed_to_manager(to_role):
         # §7.3 path 2 lists `note --to manager` among the writes that wake a
         # waiting manager, and only the KIND was consulted here: a note
         # addressed to the manager reached a waiting one on no path at all —
         # 'note' is not a MANAGER_WAKE_KIND either, so its Stop hook did not
         # deliver it and it sat past the cursor until some unrelated event.
-        _nudge_manager(board.id, reason=f"{kind}_to_manager")
+        _nudge_manager(manager, reason=f"{kind}_to_manager", board=board.id)
     return stored
 
 
@@ -1040,10 +1406,10 @@ def add_task(
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
+        board = _board(store, session, cwd, write=True)
         resolved_needs: list[str] = []
         for ref in needs or []:
-            needed = store.get_task(ref)
+            needed = find_task(store, ref, board.id)
             if needed is None:
                 raise KeyError(ref)
             if needed.project_id != board.id:
@@ -1097,14 +1463,25 @@ def list_tasks(status: TaskStatus | None = None, cwd: Path | None = None) -> lis
     """The project's shared tasks, optionally filtered by status."""
     _require_enabled()
     with store_session() as store:
-        return store.team_tasks(_project(store, cwd).id, status=status)
+        return list_tasks_in(store, _project(store, cwd).id, status=status)
 
 
-def show_task(ref: str) -> TeamTask:
+def list_tasks_in(
+    store: ContextStore, board_id: str, *, status: TaskStatus | None = None
+) -> list[TeamTask]:
+    """:func:`list_tasks` of ``board_id`` through a store the CALLER holds open: Remote's
+    Tasks tab, which finds the board it shows in that store first (``remote_server``'s
+    ``tasks_payload``). The caller has refused a board that is off, as :func:`list_tasks`
+    does, before it looked the board up."""
+    return store.team_tasks(board_id, status=status)
+
+
+def show_task(ref: str, *, session_ref: str | None = None, cwd: Path | None = None) -> TeamTask:
     """One task in full. Raises ``KeyError`` if nothing matches."""
     _require_enabled()
     with store_session() as store:
-        task = store.get_task(ref)
+        session = _resolve_session(store, session_ref)
+        task = find_task(store, ref, lambda: _caller_board_id(store, session, cwd))
         if task is None:
             raise KeyError(ref)
         return task
@@ -1167,10 +1544,10 @@ def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        task = store.get_task(ref)
+        session = _resolve_session(store, session_ref)
+        task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
-        session = _resolve_session(store, session_ref)
         claimant = session.id if session else "cli"
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         if not store.claim_task(task.id, claimant, lease):
@@ -1199,13 +1576,26 @@ def _finish_task(
     *,
     note: str | None = None,
     session_ref: str | None = None,
-) -> tuple[TeamTask, _Board]:
+    wakes: bool = True,
+    cwd: Path | _Nowhere | None = None,
+) -> tuple[TeamTask, _Board, str]:
+    """Set the task's status with its event; the board, and the project whose manager the
+    write wakes (:func:`_nudge_target`): for a writer with no row the task's own row's, else
+    the one whose root holds ``cwd``. Asked before the write, as a closing status retires the
+    rows spawned for the task. ``wakes=False``, for a status that wakes nobody (``drop``):
+    the board's, with no lookup, as :func:`add_note` does for its quiet kinds (review of
+    #259, round 25, 9/10)."""
     _DELIVERY.set(None)
     with store_session() as store:
-        task = store.get_task(ref)
+        session = _resolve_session(store, session_ref)
+        task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
-        session = _resolve_session(store, session_ref)
+        manager = (
+            _nudge_target(store, session.id if session else None, task.project_id, cwd, task=task)
+            if wakes
+            else task.project_id
+        )
         updated = store.set_task_status(task.id, status)
         if status in CLOSED_STATUSES:
             # Rule 3 of the fleet-row section: the rows spawned for this task
@@ -1222,24 +1612,37 @@ def _finish_task(
         )
         board = _board_of(store, updated.project_id)
     _record_delivery(event, board)
-    return updated, board
+    return updated, board, manager
 
 
-def finish_task(ref: str, *, note: str | None = None, session_ref: str | None = None) -> TeamTask:
-    """Mark a task done (``task done``)."""
+def finish_task(
+    ref: str,
+    *,
+    note: str | None = None,
+    session_ref: str | None = None,
+    cwd: Path | _Nowhere | None = None,
+) -> TeamTask:
+    """Mark a task done (``task done``). ``cwd`` is the writer's directory, which picks the
+    manager a writer with no row wakes (:func:`_nudge_target`): the phone's is the project's
+    root, as for its note, not the directory Remote runs in, and :data:`NOWHERE` when it
+    names no project."""
     _require_enabled()
-    task, board = _finish_task(ref, "done", "task_done", note=note, session_ref=session_ref)
-    distill_service.spawn_drain(root=board.root)
-    _nudge_manager(board.id, reason="task_done")
+    task, board, manager = _finish_task(
+        ref, "done", "task_done", note=note, session_ref=session_ref, cwd=cwd
+    )
+    distill_service.spawn_drain(root=board.root, board=board.id)
+    _nudge_manager(manager, reason="task_done", board=board.id)
     return task
 
 
 def review_task(ref: str, *, note: str | None = None, session_ref: str | None = None) -> TeamTask:
     """Send a task to review — done coding, awaiting verification (``task review``)."""
     _require_enabled()
-    task, board = _finish_task(ref, "review", "task_review", note=note, session_ref=session_ref)
-    distill_service.spawn_drain(root=board.root)
-    _nudge_manager(board.id, reason="task_review")
+    task, board, manager = _finish_task(
+        ref, "review", "task_review", note=note, session_ref=session_ref
+    )
+    distill_service.spawn_drain(root=board.root, board=board.id)
+    _nudge_manager(manager, reason="task_review", board=board.id)
     return task
 
 
@@ -1252,10 +1655,11 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        task = store.get_task(ref)
+        session = _resolve_session(store, session_ref)
+        task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
-        session = _resolve_session(store, session_ref)
+        manager = _nudge_target(store, session.id if session else None, task.project_id, task=task)
         reopened = store.reopen_task(task.id)
         event = _emit(
             store,
@@ -1267,8 +1671,8 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
         )
         board = _board_of(store, reopened.project_id)
     _record_delivery(event, board)
-    distill_service.spawn_drain(root=board.root)
-    _nudge_manager(board.id, reason="task_reopened")
+    distill_service.spawn_drain(root=board.root, board=board.id)
+    _nudge_manager(manager, reason="task_reopened", board=board.id)
     return reopened
 
 
@@ -1291,7 +1695,7 @@ def next_task(
         raise ValueError("--claim only applies to todo tasks")
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        board = _board(store, session, cwd)
+        board = _board(store, session, cwd, write=claim)
         claimant = session.id if session else "cli"
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         event = None
@@ -1300,7 +1704,7 @@ def next_task(
         # a looper picking from a pool; it was wrong for an agent the manager
         # started FOR a task: that one took whatever was oldest, and two spawned
         # together raced for the same one while their own sat idle.
-        row = _fleet_row_hint(store, session, board.id, claim=claim)
+        row = _fleet_row_hint(store, session, claim=claim)
         prefer = row.task_id if row is not None else None
         picked: TeamTask | None = None
         while True:
@@ -1331,16 +1735,18 @@ def next_task(
 def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> TeamTask:
     """Mark a task blocked, with the reason on the pipe (``task block``)."""
     _require_enabled()
-    task, board = _finish_task(ref, "blocked", "task_blocked", note=reason, session_ref=session_ref)
-    distill_service.spawn_drain(root=board.root)
-    _nudge_manager(board.id, reason="task_blocked")
+    task, board, manager = _finish_task(
+        ref, "blocked", "task_blocked", note=reason, session_ref=session_ref
+    )
+    distill_service.spawn_drain(root=board.root, board=board.id)
+    _nudge_manager(manager, reason="task_blocked", board=board.id)
     return task
 
 
 def drop_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     """Drop a task that is no longer worth doing (``task drop``)."""
     _require_enabled()
-    task, _ = _finish_task(ref, "dropped", "task_dropped", session_ref=session_ref)
+    task, _, _ = _finish_task(ref, "dropped", "task_dropped", session_ref=session_ref, wakes=False)
     return task
 
 
@@ -1349,10 +1755,10 @@ def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        task = store.get_task(ref)
+        session = _resolve_session(store, session_ref)
+        task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
         if task is None:
             raise KeyError(ref)
-        session = _resolve_session(store, session_ref)
         released = store.release_task(task.id)
         event = _emit(
             store,
@@ -1367,13 +1773,17 @@ def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     return released
 
 
-def distill_now(cwd: Path | None = None, *, rescan: bool = False) -> int | None:
-    """Drain the pipe into the project brain synchronously (``team distill``).
+def distill_now(
+    cwd: Path | None = None, *, rescan: bool = False, board: str | None = None
+) -> int | None:
+    """Drain the pipe into the project brain synchronously (``team distill``): this
+    directory's board, or ``board``, the one a detached drain was spawned for
+    (``distill.spawn_drain``).
 
     ``None`` means another drain (usually a detached one) is already running.
     """
     _require_enabled()
-    return distill_service.drain(cwd, rescan=rescan)
+    return distill_service.drain(cwd, rescan=rescan, board=board)
 
 
 def recall(query: str, cwd: Path | None = None) -> str | None:
@@ -1388,7 +1798,7 @@ def recall(query: str, cwd: Path | None = None) -> str | None:
     with store_session() as store:
         backlog = distill_service.pending(store, project.id)
     if backlog:
-        distill_service.drain(cwd)  # a busy (None) drain still means progress
+        distill_service.drain(board=project.id)  # a busy (None) drain still means progress
     return brain.recall(project.id, query)
 
 
@@ -1470,15 +1880,22 @@ def hook_session_start(
 
     Silent (returns ``""``) unless the orchestrator is enabled and this project has
     been activated — or the session was launched with ``AISQUARE_ROLE``,
-    which activates it.
+    which activates it. With ``[projects] capture`` off, silent too in a project
+    nobody added, role or not: ``launch`` adds its own (``team on``), a fleet spawn its.
     """
     if not orchestrator.team_enabled():
         return ""
     with store_session() as store:
-        project = _project(store, cwd)
+        project = orchestrator.team_project(cwd)
+        if not project_service.tracked(store, project):
+            return ""  # capture is off and nobody added it: no session row, no board (#139)
         role = orchestrator.env_role()
         if not store.team_active(project.id) and role is None:
             return ""
+        # Only now, for the session row below: captured before the board was asked, every
+        # session start in any directory took the store's write lock for nothing (review of
+        # #259, round 18).
+        project_service.capture(store, project)
         known = store.get_session(session_id)
         now = _now()
         # Computed before upsert_session(), which overwrites transcript_path.
@@ -1487,7 +1904,9 @@ def hook_session_start(
         # other session's injected context.
         model = harness.clean_model_id(model)
         effort = harness.clean_effort(effort)
-        asked_persona, persona_note = _asked_persona(store, project.id)
+        # The row the window names, read once: for the persona, the assignment and the
+        # cycle's project.
+        asked_persona, persona_note, named = _asked_persona(store, project.id)
         session = store.upsert_session(
             TeamSession(
                 id=session_id,
@@ -1512,7 +1931,7 @@ def hook_session_start(
             # Bound like every fleet row (rule 1 of the fleet-row section), or a
             # `/clear` left the row on the ended id and `say` waited on a session that
             # would never answer. The captain has no task, so there is nothing to brief.
-            _assignment(store, session.id, project.id)
+            _assignment(store, session.id, project.id, named=named)
             _settle_owed_persona(store, session)  # this start briefs the persona itself
             if source != _COMPACT_SOURCE:
                 # A captain that just started, cleared or resumed sits at its prompt
@@ -1528,8 +1947,9 @@ def hook_session_start(
             return collision + _captain_briefing(project, session, persona_note)
         # Before the board is read below: the assignment may move this agent's
         # claims onto its new id, and a board read first still named the old one.
-        # ``source`` plays no part — see rule 1 of the fleet-row section.
-        assigned = _assignment(store, session.id, project.id)
+        # ``source`` plays no part — see rule 1 of the fleet-row section. The row the window
+        # names was read once, above, for the assignment and the cycle's project.
+        assigned = _assignment(store, session.id, project.id, named=named)
         _settle_owed_persona(store, session)  # this start briefs the persona itself
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
@@ -1543,6 +1963,7 @@ def hook_session_start(
             briefing=True,
             persona_note=persona_note,
             labels=lambda: slot_labels_via(store),
+            fleet=_cycle_project(store, project, cwd, session.id, named=named),
         )
 
 
@@ -1565,10 +1986,16 @@ def hook_prompt_heartbeat(
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None:
-            project = _project(store, cwd)
+            project = orchestrator.team_project(cwd)
+            if not project_service.tracked(store, project):
+                return ""  # as at session start: nothing on a board nobody added
             role = orchestrator.env_role()
             if not store.team_active(project.id) and role is None:
                 return ""
+            # Only now, as at session start: before the board was asked, every prompt of a
+            # session on no board took the store's write lock again, for a directory
+            # `capture_prompt` had captured already (review of #259, round 19).
+            project_service.capture(store, project)
             now = _now()
             session = store.upsert_session(
                 TeamSession(
@@ -1588,7 +2015,8 @@ def hook_prompt_heartbeat(
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
             # under its old holder on this very board (review of #135).
-            assigned = _assignment(store, session.id, project.id)
+            named = _hook_named_row(store)
+            assigned = _assignment(store, session.id, project.id, named=named)
             return _render_board(
                 project,
                 store.team_sessions(project.id),
@@ -1597,6 +2025,7 @@ def hook_prompt_heartbeat(
                 me=session,
                 assigned=assigned,
                 labels=lambda: slot_labels_via(store),
+                fleet=_cycle_project(store, project, cwd, session.id, named=named),
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -1640,7 +2069,13 @@ def hook_prompt_heartbeat(
         store.touch_session(session.id, cursor=shown[-1].seq, state="working")
         roles = {s.id: s.role for s in store.team_sessions(session.project_id)}
         board = _board_of(store, session.project_id).name
-        return collision + briefing + _render_delta(shown, roles, truncated=truncated, board=board)
+        # One read, and only when a line names a task: this runs on every prompt.
+        numbers = store.task_numbers(session.project_id) if any(e.task_id for e in shown) else {}
+        return (
+            collision
+            + briefing
+            + _render_delta(shown, roles, truncated=truncated, board=board, numbers=numbers)
+        )
 
 
 def hook_stop(
@@ -1688,11 +2123,14 @@ def hook_stop(
             return None
         failure: Exception | None = None
         deferred: str | None = None
+        manager: str | None = None
         if session.role == MANAGER_ROLE:
             try:
                 decision = _manager_wakeup(store, session, stop_hook_active=stop_hook_active)
                 if decision is None and stop_hook_active:
                     deferred = _deferred_wake_reason(store, session)
+                    if deferred is not None:
+                        manager = _own_manager_row(store, session)
             except Exception as exc:  # waiting is the contract; the wake-up is the extra
                 failure = exc
             else:
@@ -1702,13 +2140,25 @@ def hook_stop(
         # of an agent `fleet switch` is exiting, whose SessionEnd must still park
         # the claims (review of the #205 fold, round 1).
         store.touch_session(session.id, state="waiting")
-    if deferred is not None:
+    if deferred is not None and manager is not None:
         # After the row says waiting, never before: nudge_manager refuses every
         # other state. Outside the `with` too — it opens its own connection.
-        _nudge_manager(session.project_id, reason=deferred)
+        _nudge_manager(manager, reason=deferred, board=session.project_id)
     if failure is not None:
         raise ManagerWakeupError(failure)
     return None
+
+
+def _own_manager_row(store: ContextStore, session: TeamSession) -> str | None:
+    """The project of the live ``manager`` row of ``session`` itself, the one its deferred wake
+    types into (``fleet.nudge_manager``), in whichever project it is: under a hub, not the
+    board's. ``None`` for a manager no row holds, launched by hand, or a numbered seat: its
+    deferred news waits for its next prompt. Asked as any writer is (:func:`_nudge_target`),
+    a manager with no row woke the one manager that reads the board, another project's, and
+    typed its wake into that pane (review of #259, round 26, 7/11).
+    """
+    row = store.fleet_agent_for_session(session.id)
+    return row.project_id if row is not None and row.label == MANAGER_ROLE else None
 
 
 def continuation_key(session_id: str, when: datetime) -> str:
@@ -1812,10 +2262,11 @@ def _manager_wakeup(
     shown = events[:_DELTA_LIMIT]
     roles = {s.id: s.role for s in store.team_sessions(me.project_id)}
     board = _board_of(store, me.project_id).name
+    numbers = store.task_numbers(me.project_id) if any(e.task_id for e in shown) else {}
     store.set_meta(key, str(used + 1))
     store.touch_session(me.id, cursor=shown[-1].seq, state="working")
     return StopDecision(
-        reason=_render_wakeup(shown, roles, truncated=truncated, board=board),
+        reason=_render_wakeup(shown, roles, truncated=truncated, board=board, numbers=numbers),
         cursor=shown[-1].seq,
     )
 
@@ -1992,29 +2443,88 @@ def hook_stop_failure(
         already_limited = session.state in ("limited", HANDOVER_STATE)
         if session.state != HANDOVER_STATE:
             store.mark_limited(session.id, notice.resets_at if notice is not None else None)
-        agent = store.fleet_agent_for_session(session.project_id, session.id)
+        # The session's row in whichever project it is: under AISQUARE_TEAM_HUB the session
+        # is on the hub's board and its row in its spawn's project, and asked by the board,
+        # the line named no command and the agent by its short id (review of #259, round 23).
+        agent = store.fleet_agent_for_session(session.id)
         label = agent.label if agent is not None else (session.label or short_id(session.id))
+        manager: str | None = None
         if not already_limited:
+            # The row just read names the manager's project (`_nudge_target`'s rule); asked
+            # again there, the same row was read twice (review of #259, round 25, 8/10).
+            manager = (
+                agent.project_id
+                if agent is not None
+                else _nudge_target(store, None, session.project_id)
+            )
             _emit(
                 store,
                 session.project_id,
                 "limited",
-                _limited_text(label, text, notice, fleet=agent is not None),
+                _limited_text(
+                    label,
+                    text,
+                    notice,
+                    project=store.get_project(agent.project_id) if agent is not None else None,
+                ),
                 session_id=session.id,
             )
         refreshed = store.get_session(session.id) or session
-    if not already_limited:
+    if manager is not None:  # not already limited
         # After the row says limited, never before, and outside the `with`
         # (it opens its own connection): path 2 types into a WAITING manager;
-        # a working one reads the event on its next delta or its own Stop.
-        _nudge_manager(session.project_id, reason=f"{label} hit its usage limit")
+        # a working one reads the event on its next delta or its own Stop. The manager of
+        # the agent's own project, whose row is beside the agent's (`_nudge_target`).
+        _nudge_manager(manager, reason=f"{label} hit its usage limit", board=session.project_id)
     return TurnFailure(refreshed, kind, notice, already_limited=already_limited)
 
 
+def fleet_switches(store: ContextStore, sessions: list[TeamSession]) -> dict[str, str]:
+    """The ``fleet switch`` that moves each ``limited`` session's agent, by session id: the
+    project and label of its own live fleet row, in whichever project that is.
+
+    Not the board's project: under ``AISQUARE_TEAM_HUB`` the board is the hub's, every
+    session on it is a fleet agent of some other project, and ``fleet switch --project
+    <hub> <label>`` answered "no live agent" (review of #259, round 22). The row is the one
+    the store records against the session (``fleet_agent_for_session``), the lookup the
+    ``limited`` feed line and the hand-over make too. A session with no live row, or whose
+    row's project is gone, has none. Read through the board's own store session
+    (:func:`board_read`), and only when a live session is limited. A read that fails
+    costs the commands, never the board — logged, as
+    :func:`_cycle_project` does: swallowed silently, a store or schema regression took the
+    switch off every limited chip with nothing anywhere saying so (round 23).
+    """
+    limited = [s.id for s in sessions if s.ended_at is None and s.state == "limited"]
+    if not limited:
+        return {}
+    switches: dict[str, str] = {}
+    try:
+        for session_id in limited:
+            agent = store.fleet_agent_for_session(session_id)
+            project = store.get_project(agent.project_id) if agent is not None else None
+            if agent is not None and project is not None:
+                switches[session_id] = project_service.fleet_command("switch", project, agent.label)
+    except Exception as exc:
+        _log.warning(
+            "the fleet rows of %d limited session(s) could not be read, so their chips name "
+            "no fleet switch (%s: %s)",
+            len(limited),
+            type(exc).__name__,
+            exc,
+        )
+        return {}
+    return switches
+
+
 def _limited_text(
-    label: str, message: str, notice: claude_accounts_core.LimitNotice | None, *, fleet: bool
+    label: str,
+    message: str,
+    notice: claude_accounts_core.LimitNotice | None,
+    *,
+    project: ProjectInfo | None,
 ) -> str:
-    """The feed line: what stopped, when it lifts, and the one command that moves it."""
+    """The feed line: what stopped, when it lifts, and the one command that moves it — for a
+    fleet agent, whose ``project`` the command names (review of #259, round 21)."""
     if notice is None:
         head = f"{label} is rate limited: {message}"
     else:
@@ -2022,10 +2532,10 @@ def _limited_text(
         if notice.resets_at is not None:
             # The one formatter (#152; review of #205, finding 9).
             head += f" · resets {claude_accounts_core.format_reset(notice.resets_at, now=_now())}"
-    if fleet:
+    if project is not None:
         head += (
-            f" — `aisquare fleet switch {label}` moves it to the account with the most headroom"
-            " (or wait for the reset)"
+            f" — `{project_service.fleet_command('switch', project, label)}` moves it to the "
+            "account with the most headroom (or wait for the reset)"
         )
     return head
 
@@ -2089,8 +2599,8 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
                     file=sys.stderr,
                 )
         root = _project_root(store, session.project_id)
-    # Safety drain: catch anything a per-command spawn missed this session.
-    distill_service.spawn_drain(cwd, root=root)
+    # Safety drain: catch anything a per-command spawn missed this session, on its board.
+    distill_service.spawn_drain(cwd, root=root, board=session.project_id)
 
 
 @dataclass(frozen=True)
@@ -2275,7 +2785,7 @@ def prune_sessions(
                 f"{released_total} orphaned claim(s) back to the pool",
             )
             emitted.append(summary)
-        board = _Board(id=project.id, name=project.root.name or project.id, root=project.root)
+        board = _board_named(store, project)
     if summary is not None:
         # Every event in the batch committed in its OWN transaction, so a
         # mid-batch death can lose earlier release events while later ones
@@ -2298,11 +2808,16 @@ def prune_sessions(
 # --- rendering ----------------------------------------------------------------
 
 
-def _age(when: datetime, now: datetime) -> str:
-    minutes = max(0, int((now - when).total_seconds() // 60))
-    if minutes < 60:
-        return f"{minutes}m"
-    return f"{minutes // 60}h{minutes % 60:02d}m"
+def minutes_text(minutes: int) -> str:
+    """Whole minutes as the board writes an age: ``12m``, ``3h05m``. The one copy of the
+    rule: ``asq team prune`` and ``asq remote needs`` write theirs with it, and each had a
+    copy of its own to keep in step by hand."""
+    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h{minutes % 60:02d}m"
+
+
+def age_text(when: datetime, now: datetime) -> str:
+    """How long before ``now`` ``when`` was, as the board writes it (:func:`minutes_text`)."""
+    return minutes_text(max(0, int((now - when).total_seconds() // 60)))
 
 
 def render_board(
@@ -2330,12 +2845,15 @@ def _render_board(
     briefing: bool = False,
     persona_note: str | None = None,
     labels: Mapping[int, str] | Callable[[], Mapping[int, str]] | None = None,
+    fleet: ProjectInfo | None = None,
 ) -> str:
-    """The ``<aisquare-team>`` block. ``briefing`` is SessionStart's alone: it adds
+    """The board, and for ``me`` the protocol and its role's cycle, whose fleet commands
+    name ``fleet`` (:func:`_cycle_project`). ``briefing`` is SessionStart's alone: it adds
     ``me``'s persona after the role cycle — never on the board command, never on a
     per-prompt path, so no factual surface carries persona text (§3.1).
     ``persona_note`` is the one line saying why no attached persona was read."""
     now = _now()
+    numbers = {t.id: t.number for t in tasks if t.number is not None}
     lines = ["<aisquare-team>"]
     if me is not None:
         lines.append(
@@ -2373,7 +2891,7 @@ def _render_board(
                 parts.append(f"persona:{session.persona}")
             if session.focus:
                 parts.append(f"— focus: {session.focus}")
-            parts.append(f"— {_age(session.last_seen_at, now)} ago")
+            parts.append(f"— {age_text(session.last_seen_at, now)} ago")
             if stale:
                 parts.append("(stale)")
             lines.append(" ".join(parts))
@@ -2389,14 +2907,21 @@ def _render_board(
         for task in open_tasks[:_BOARD_TASKS]:
             claim = f" @{short_id(task.claimed_by)}" if task.claimed_by else ""
             waiting = unmet_needs(task, statuses)
-            waits = " ⧗ waits on " + ", ".join(need[-8:] for need in waiting) if waiting else ""
-            lines.append(f"  - {task.id} [{task.status}{claim}] {task.title}{waits}")
+            waits = (
+                " ⧗ waits on "
+                + ", ".join(
+                    f"#{numbers[need]}" if need in numbers else need[-8:] for need in waiting
+                )
+                if waiting
+                else ""
+            )
+            lines.append(f"  - {task_label(task)} [{task.status}{claim}] {task.title}{waits}")
         if len(open_tasks) > _BOARD_TASKS:
             lines.append(f"  … {len(open_tasks) - _BOARD_TASKS} more — `aisquare task list`")
     if events:
         roles = {s.id: s.role for s in sessions}
         lines.append("recent updates:")
-        lines.extend(f"  - {event_line(event, roles)}" for event in events)
+        lines.extend(f"  - {event_line(event, roles, numbers)}" for event in events)
     if me is not None:
         lines += [
             "Protocol: check this board before starting work; teammate updates",
@@ -2406,7 +2931,7 @@ def _render_board(
             f"`aisquare task done <id> --as {short_id(me.id)}`. Share decisions/results:",
             f'`aisquare note "…" --as {short_id(me.id)}`. Full board: `aisquare board`.',
             "Every ✓ prints a receipt (seq N); `aisquare team verify <seq>` re-checks it.",
-            *_role_cycle(me),
+            *_role_cycle(me, fleet),
         ]
         if briefing and me.persona:
             lines += _persona_briefing(me.persona, project.root)
@@ -2459,6 +2984,12 @@ def _render_board(
 #    and, for rows that predate the rule, from the briefing itself): a later
 #    session start is not briefed on finished work, and a reopened task claimed
 #    by someone else is not read as an order to stand down (finding 5).
+# 4. THE ROW IS FOUND WHATEVER THE BOARD. Under ``AISQUARE_TEAM_HUB`` a session is
+#    on the hub's board and its row in the project it was spawned into, so no
+#    lookup of a row filters by the board (docs/fleet.md, "Under a hub: one
+#    board, many fleet projects"). Filtered, a hub agent's ``SessionEnd`` found no
+#    row, and its hand-over or ``/clear`` released the claims its next id was to
+#    inherit (review of #259, round 24, 1/6). Only a task is the board's.
 #
 # Two doors read the row: the briefing — the session-start hook, and the
 # heartbeat's first-prompt board for a session that arrived before the
@@ -2467,12 +2998,15 @@ def _render_board(
 # the board and never the work loop.
 
 
-def _fleet_row_named(store: ContextStore, project_id: str) -> FleetAgent | None:
-    """The live fleet row ``AISQUARE_FLEET_AGENT`` names, when it is this project's.
+def _named_fleet_row(store: ContextStore) -> FleetAgent | None:
+    """The live fleet row ``AISQUARE_FLEET_AGENT`` names, in whichever project it is; free
+    to raise.
 
     The variable names a row; it does not prove the reader IS that row's agent
     (rule 1). Binding on the name goes through :func:`_adopt`; ``task next``
-    reads it for the order alone (:func:`_fleet_row_hint`).
+    reads it for the order alone (:func:`_fleet_row_hint`). A GLOB on the id, so a hook
+    reads it once (:func:`_hook_named_row`) and hands it to the assignment and the cycle's
+    project, which each read it again (review of #259, round 23).
     """
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is None:
@@ -2481,18 +3015,38 @@ def _fleet_row_named(store: ContextStore, project_id: str) -> FleetAgent | None:
         agent = store.get_fleet_agent(agent_id)
     except AmbiguousIdError:
         return None
-    if agent is None or agent.ended_at is not None or agent.project_id != project_id:
+    if agent is None or agent.ended_at is not None:
         return None
     return agent
 
 
+def _hook_named_row(store: ContextStore) -> FleetAgent | None:
+    """:func:`_named_fleet_row` for a hook, fail-open: a row that cannot be read costs the
+    assignment and the cycle's project, never the board, and is logged."""
+    try:
+        return _named_fleet_row(store)
+    except Exception as exc:
+        _log.warning(
+            "the fleet row AISQUARE_FLEET_AGENT names could not be read, so this session "
+            "has none (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+        return None
+
+
 def _fleet_row(
-    store: ContextStore, session_id: str, project_id: str, *, allow_unbound: bool
+    store: ContextStore,
+    session_id: str,
+    *,
+    named: FleetAgent | None,
+    allow_unbound: bool,
 ) -> FleetAgent | None:
     """The live fleet row for a session: the ONE lookup both doors make, free to raise.
 
-    The row ``AISQUARE_FLEET_AGENT`` names (:func:`_fleet_row_named`), when it
-    records this session; otherwise the row bound to the session, if any. With
+    The row ``AISQUARE_FLEET_AGENT`` names (:func:`_named_fleet_row`), when it
+    records this session; otherwise the row bound to the session, if any. In any project:
+    under a hub the session's board is another (rule 4). With
     ``allow_unbound`` the named row is returned whoever it records, because that
     is how a session comes to be bound: the briefing hands it to :func:`_adopt`,
     which decides. Nothing else may take it on the name alone.
@@ -2502,14 +3056,18 @@ def _fleet_row(
     copy and not the other: the session-identity check, the ended-row check,
     the fail-open ``try`` (review of #116). With one lookup, the next guard has
     one place to go.
+
+    ``named`` is what :func:`_named_fleet_row` read, whatever its project: a hook reads it
+    once for the assignment and the cycle's project both.
     """
-    named = _fleet_row_named(store, project_id)
     if named is not None and (allow_unbound or named.session_id == session_id):
         return named
-    return store.fleet_agent_for_session(project_id, session_id)
+    return store.fleet_agent_for_session(session_id)
 
 
-def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> FleetAgent | None:
+def _fleet_row_for(
+    store: ContextStore, session_id: str, *, named: FleetAgent | EllipsisType | None = ...
+) -> FleetAgent | None:
     """The live fleet row a session *is* — the row already bound to that session.
 
     The name in the environment is accepted only when the row it names records
@@ -2523,10 +3081,13 @@ def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> Fle
     — but it is logged: swallowed silently, a regression here (a renamed store
     method, a migrated column) put every spawned agent back on oldest-first with
     nothing anywhere saying the preference had stopped working (review of #116,
-    round 5).
+    round 5). ``named`` is the row a hook has read already (:func:`_hook_named_row`); left
+    out, it is read here.
     """
     try:
-        return _fleet_row(store, session_id, project_id, allow_unbound=False)
+        if named is ...:
+            named = _named_fleet_row(store)
+        return _fleet_row(store, session_id, named=named, allow_unbound=False)
     except Exception as exc:
         _log.warning(
             "the fleet row of session %s could not be read, so it has none (%s: %s)",
@@ -2538,7 +3099,7 @@ def _fleet_row_for(store: ContextStore, session_id: str, project_id: str) -> Fle
 
 
 def _fleet_row_hint(
-    store: ContextStore, session: TeamSession | None, project_id: str, *, claim: bool
+    store: ContextStore, session: TeamSession | None, *, claim: bool
 ) -> FleetAgent | None:
     """The row whose task ``task next`` should put first — for the ORDER, never for a claim.
 
@@ -2552,16 +3113,18 @@ def _fleet_row_hint(
     the older one, because the cycle passed no session and nothing else was
     consulted (review of #135, finding 11). A CLAIM is not taken on the name
     alone: that is identity, and the variable is inherited, so it keeps needing
-    a session the row is bound to.
+    a session the row is bound to. The row is found in any project (rule 4): the
+    board is asked for the task, by ``store.next_task``, which prefers it among the
+    board's own.
     """
     if session is not None:
-        row = _fleet_row_for(store, session.id, project_id)
+        row = _fleet_row_for(store, session.id)
         if row is not None:
             return row
     if claim:
         return None
     try:
-        return _fleet_row_named(store, project_id)
+        return _named_fleet_row(store)
     except Exception as exc:  # the order is a preference: logged, as in _fleet_row_for
         _log.warning(
             "the fleet row AISQUARE_FLEET_AGENT names could not be read, so task next "
@@ -2581,8 +3144,10 @@ def _pane_holds(agent: FleetAgent) -> bool | None:
     not adopted on a guess, because the guess that was wrong here handed a
     parent's task to its child. The fleet's own server factory is used so the
     row's socket is asked (``[fleet] tmux_socket`` may have changed since the
-    spawn) and so a test's fake tmux is seen; imported here because
-    ``services.fleet`` imports this module the same lazy way.
+    spawn), at the path its spawn recorded (another ``TMUX_TMPDIR`` reaches
+    another server on the name, whose ``%N`` is another agent), and so a test's
+    fake tmux is seen; imported here because ``services.fleet`` imports this
+    module the same lazy way.
     """
     pid = orchestrator.env_claude_pid()
     if pid is None:
@@ -2590,7 +3155,7 @@ def _pane_holds(agent: FleetAgent) -> bool | None:
     from aisquare.services import fleet as fleet_service
 
     try:
-        pane_pid = fleet_service.server_for(agent.tmux_socket).pane_pid(agent.pane_id)
+        pane_pid = fleet_service.server_of(agent).pane_pid(agent.pane_id)
     except TmuxError:
         return None
     if pane_pid is None:
@@ -2618,9 +3183,10 @@ def _adopt(store: ContextStore, agent: FleetAgent, session_id: str) -> bool:
 
 def _handing_over_a_fleet_row(store: ContextStore, session: TeamSession) -> bool:
     """Whether ``session`` is a live fleet row's — the premise of parking its claims for the
-    replacement. Fail-open towards RELEASING, like :func:`_clearing_its_own_pane`."""
+    replacement. Fail-open towards RELEASING, like :func:`_clearing_its_own_pane`. The row
+    in any project (rule 4): asked by the session's board, a hub agent had none."""
     try:
-        return _fleet_row_for(store, session.id, session.project_id) is not None
+        return _fleet_row_for(store, session.id) is not None
     except Exception:
         return False
 
@@ -2632,10 +3198,11 @@ def _clearing_its_own_pane(store: ContextStore, session: TeamSession) -> bool:
     the row and the claims kept for it. A nested child clearing its own session
     is not (its pid is not the pane's), nor is a binary without ``CLAUDE_PID``,
     and both release as before. Fail-open towards RELEASING: an unreadable row
-    must not leave claims parked on an id nothing will come back for.
+    must not leave claims parked on an id nothing will come back for. The row in any
+    project, as for a hand-over (rule 4).
     """
     try:
-        row = _fleet_row_for(store, session.id, session.project_id)
+        row = _fleet_row_for(store, session.id)
         return row is not None and _pane_holds(row) is True
     except Exception:
         return False
@@ -2659,7 +3226,9 @@ class Assignment(NamedTuple):
     holder_gone: bool
 
 
-def _assignment(store: ContextStore, session_id: str, project_id: str) -> Assignment | None:
+def _assignment(
+    store: ContextStore, session_id: str, project_id: str, *, named: FleetAgent | None
+) -> Assignment | None:
     """The task this session was spawned for, joining the session to its fleet row.
 
     ``fleet spawn --task`` recorded the task on the ``fleet_agent`` row and named
@@ -2672,9 +3241,10 @@ def _assignment(store: ContextStore, session_id: str, project_id: str) -> Assign
 
     Fail-open throughout: an unreadable row, a tmux that will not answer, a
     task that will not parse — each costs the assignment block, never the board.
+    ``named`` is the row the window's variable names (:func:`_hook_named_row`).
     """
     try:
-        return _resolve_assignment(store, session_id, project_id)
+        return _resolve_assignment(store, session_id, project_id, named)
     except Exception:
         return None
 
@@ -2694,17 +3264,32 @@ def _late_assignment(store: ContextStore, session: TeamSession) -> Assignment | 
     worst, and the ASSIGNED TO YOU block it was owed comes with it. A child
     that inherited the variable pays one ``display-message`` per prompt to be
     refused, exactly as it is at its start.
+
+    The named row is read once and handed to both lookups: read again for the
+    assignment, every prompt of every fleet agent paid for two GLOB lookups on its id
+    (review of #259, round 24, 6/6). With no live row named, nothing can be bound here:
+    a row of the session's own is bound already, and no other is taken.
     """
     if orchestrator.env_fleet_agent() is None:
         return None
-    if _fleet_row_for(store, session.id, session.project_id) is not None:
+    named = _hook_named_row(store)
+    if named is None or _fleet_row_for(store, session.id, named=named) is not None:
         return None
-    return _assignment(store, session.id, session.project_id)
+    return _assignment(store, session.id, session.project_id, named=named)
 
 
-def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -> Assignment | None:
-    """The body of :func:`_assignment`, free to raise; the rules are the section's."""
-    agent = _fleet_row(store, session_id, project_id, allow_unbound=True)
+def _resolve_assignment(
+    store: ContextStore, session_id: str, project_id: str, named: FleetAgent | None
+) -> Assignment | None:
+    """The body of :func:`_assignment`, free to raise; the rules are the section's.
+
+    The row is found, and adopted, in any project; only its task is asked of the board,
+    ``project_id`` (rule 4). With the row filtered by the board, a hub agent's ``/clear`` was
+    never adopted: the row stayed bound to the ended id, and every lookup by the new one
+    missed it, the usage-limit hand-over's and the board chip's included (review of #259,
+    round 24, 5/6).
+    """
+    agent = _fleet_row(store, session_id, named=named, allow_unbound=True)
     if agent is None:
         return None
     if agent.session_id != session_id and not _adopt(store, agent, session_id):
@@ -2714,7 +3299,7 @@ def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -
         # two doors read the same row now; this one used to give up here and
         # the agent lost its ASSIGNED TO YOU block while `task next` still put
         # its task first (round 8 of #203). The same lookup, bound rows only.
-        agent = _fleet_row(store, session_id, project_id, allow_unbound=False)
+        agent = _fleet_row(store, session_id, named=named, allow_unbound=False)
         if agent is None:
             return None
     if agent.task_id is None:
@@ -2727,6 +3312,8 @@ def _resolve_assignment(store: ContextStore, session_id: str, project_id: str) -
         # task was closed by a path that did not know the row.
         store.retire_fleet_assignments(task.id)
         return None
+    if task.project_id != project_id:
+        return None  # another board's task: this session would be told of work it cannot see
     # ``claimed_by is None`` is NOT this session's: an untouched ``todo`` task
     # read as work in flight told the agent to carry on, and it never claimed
     # it — the pool handed it to somebody else (review of #116, round 3).
@@ -2872,7 +3459,7 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
     ]
 
 
-def _role_cycle(me: TeamSession) -> list[str]:
+def _role_cycle(me: TeamSession, project: ProjectInfo | None) -> list[str]:
     """The standing work cycle for a role — injected so nobody has to paste it.
 
     The cycles themselves live in :mod:`aisquare.core.harness` (one source of
@@ -2881,8 +3468,109 @@ def _role_cycle(me: TeamSession) -> list[str]:
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) receives its
     role's cycle. Without that a seat got an empty briefing — the one thing the
     seat's own comment in ``cli/launch.py`` promises it does not lose.
+
+    Its fleet commands name ``project``, the session's fleet project
+    (:func:`_cycle_project`), through ``project_service.fleet_command``. With none, they
+    name a ``<project>`` placeholder, and a line above the cycle says to fill it in. Never
+    bare: alone, a fleet command acts on the active project, the machine-wide pin before
+    the working directory (round 21 of the review of #259), and a bare one came back for
+    every hand-launched session under a hub (round 23). A manager's pause is its project's on
+    the session's board (:func:`harness.pause_signal`). A session whose project could not be
+    told gets a placeholder for that too, and a line says how to fill it in. Told the bare
+    name, under a hub the hub project's own pause, a manager kept spawning in the project the
+    human then named while ``fleet pause`` paused that one (review of #259, round 27, 6/7).
     """
-    return harness.role_cycle(base_role(me.role), short_id(me.id))
+    if project is not None:
+        return harness.role_cycle(
+            base_role(me.role),
+            short_id(me.id),
+            fleet=lambda verb: project_service.fleet_command(verb, project),
+            paused=harness.pause_signal(project.id, me.project_id),
+        )
+    cycle = harness.role_cycle(
+        base_role(me.role),
+        short_id(me.id),
+        fleet=lambda verb: (
+            install_route.command_line(["aisquare", "fleet", verb, "--project"])
+            + f" {_NO_CYCLE_PROJECT}"
+        ),
+        paused=_NO_CYCLE_PAUSE,
+    )
+    if not any(_NO_CYCLE_PROJECT in line for line in cycle):
+        return cycle
+    told = [
+        f"The fleet commands below name {_NO_CYCLE_PROJECT}: this session's own project "
+        "could not be told, so put in the codename of the one they are for (`aisquare "
+        "project list` names them)."
+    ]
+    if any(_NO_CYCLE_PAUSE in line for line in cycle):
+        told.append(
+            f"Its pause is `{_NO_CYCLE_PAUSE}`: that project's ID, not its codename, in lower "
+            "case with `_` as `-` (`prj_ab12` → "
+            f"`{harness.pause_signal('prj_ab12', me.project_id)}`); `{harness.PAUSE_SIGNAL}` "
+            f"alone when it is this board's own project ({me.project_id})."
+        )
+    return [*told, *cycle]
+
+
+_NO_CYCLE_PROJECT = "<project>"
+"""What a cycle's fleet commands name when :func:`_cycle_project` has no project."""
+_NO_CYCLE_PAUSE = f"{harness.PAUSE_SIGNAL}.<project id>"
+"""The pause a cycle names when :func:`_cycle_project` has no project: that project's on a
+board it does not own (:func:`harness.pause_signal`)."""
+
+
+def _cycle_project(
+    store: ContextStore,
+    board: ProjectInfo,
+    cwd: Path | None,
+    session_id: str,
+    *,
+    named: FleetAgent | None,
+) -> ProjectInfo | None:
+    """The project a session's cycle names in its fleet commands: its fleet row's.
+
+    Not the board's. Under ``AISQUARE_TEAM_HUB`` the board is the hub's, and ``fleet
+    spawn`` sets the hub on every window it starts, while each row is in its own project.
+    Named by the board, a manager's cycle spawned its coders in the hub's directory, and
+    its ``stop``, ``tell`` and ``switch`` found no live agent there (review of #259, round
+    22). The row is the one ``AISQUARE_FLEET_AGENT`` names, whatever project it is in: a
+    child that inherited the variable runs in the same project. The hook read it already,
+    for the assignment, and hands it over as ``named``: read here too, a session start paid
+    for the same GLOB lookup twice (round 23). Without one, it is the row the store records
+    against the session (``fleet_agent_for_session``), the lookup the hand-over and the
+    board's chip make. Its project is read stored, codename and all.
+
+    A session with no live row is named by the board when no hub is set: the board is then
+    its directory's project. Read stored too: the board ``orchestrator.team_project`` builds
+    carries no codename, so every cycle named its project by its raw id, unlike ``fleet
+    ls``, the sidebar and every receipt (round 22). Under a hub it is the project of its
+    ``cwd``, the hub aside (``orchestrator.directory_project``), when that is registered:
+    left bare, the commands of a manager the human launched in ``/work/app`` acted on
+    whichever project another shell had pinned, and spawned its coders there (round 23).
+    A directory with no registration has ``None``. Fail-open, like the assignment: a read
+    that fails costs the project, never the board, and is logged. Every read, the stored
+    board's too: outside the guard, a ``get_project`` that raised took the session's whole
+    ``<aisquare-team>`` injection with it (round 23). Without a hub the board, as it is, is
+    still this session's project; under one, no project is.
+    """
+    hub = orchestrator.team_hub() is not None
+    try:
+        agent = named if named is not None else store.fleet_agent_for_session(session_id)
+        if agent is not None:
+            return store.get_project(agent.project_id)
+        if hub:
+            return store.get_project(orchestrator.directory_project(cwd).id)
+        return store.get_project(board.id) or board
+    except Exception as exc:
+        _log.warning(
+            "the project of session %s's cycle could not be read, so it names %s (%s: %s)",
+            short_id(session_id),
+            "no project" if hub else "the board's",
+            type(exc).__name__,
+            exc,
+        )
+        return None if hub else board
 
 
 def _captain_briefing(project: ProjectInfo, me: TeamSession, persona_note: str | None) -> str:
@@ -2893,7 +3581,7 @@ def _captain_briefing(project: ProjectInfo, me: TeamSession, persona_note: str |
         "project, working from the home board.",
         "Your only hands are the captain tools (mcp__captain__*) — no shell and no files; "
         "what you cannot do through them, you ask the owner or a project's manager to do.",
-        *_role_cycle(me),
+        *_role_cycle(me, project),
     ]
     if me.persona:
         lines += _persona_briefing(me.persona, project.root)
@@ -2922,7 +3610,9 @@ def _persona_briefing(name: str, root: Path, *, without: str = "launched without
         return [f'persona "{name}": {reason} — {without}']
 
 
-def _asked_persona(store: ContextStore, project_id: str) -> tuple[str | None, str | None]:
+def _asked_persona(
+    store: ContextStore, project_id: str
+) -> tuple[str | None, str | None, FleetAgent | None]:
     """The persona a session start asks for (docs/plans/spawn-personas.md §4.7).
 
     The persona on the ``fleet_agent`` row ``AISQUARE_FLEET_AGENT`` names, when
@@ -2934,13 +3624,17 @@ def _asked_persona(store: ContextStore, project_id: str) -> tuple[str | None, st
     launch with no fleet row has. ``None`` asks for nothing, and the session row
     keeps whatever it recorded before.
 
-    Returns ``(persona, note)``. Fail-open, but never silently: a row that cannot be
+    Returns ``(persona, note, row)``. Fail-open, but never silently: a row that cannot be
     read costs only the row, never the team block. It is logged with its traceback,
     and ``note`` is the one briefing line that tells the agent it started without
     an attached persona. The note names the exception class, never a value.
+
+    ``row`` is the fleet row it read, ``None`` for none or for one it could not read: the
+    start hands it on to the assignment and the cycle's project, so a session start reads
+    the row the window names once (:func:`_hook_named_row`'s rule, review of #259, round 23).
     """
     try:
-        row = _fleet_row_named(store, project_id)
+        row = _named_fleet_row(store)
     except Exception as exc:
         _log.warning(
             "session start: fleet row %s for project %s could not be read; "
@@ -2953,10 +3647,10 @@ def _asked_persona(store: ContextStore, project_id: str) -> tuple[str | None, st
             f"persona: the fleet row could not be read ({type(exc).__name__}) "
             "— started without an attached persona"
         )
-        return orchestrator.env_persona(), note
+        return orchestrator.env_persona(), note, None
     if row is not None and row.persona:
-        return row.persona, None
-    return orchestrator.env_persona(), None
+        return row.persona, None, row
+    return orchestrator.env_persona(), None, row
 
 
 # --- a persona attached to a BUSY agent: owed, then handed over by its own prompt --------
@@ -3044,7 +3738,7 @@ def _owed_persona(store: ContextStore, session: TeamSession) -> _OwedPersona | N
     value = store.get_meta(key)
     if not value:
         return None
-    row = _fleet_row(store, session.id, session.project_id, allow_unbound=False)
+    row = _fleet_row(store, session.id, named=_named_fleet_row(store), allow_unbound=False)
     if row is None or row.id != agent_id:
         return None
     return _OwedPersona(key, row, value.partition(":")[2] or None)
@@ -3111,20 +3805,32 @@ def _settle_owed_persona(store: ContextStore, session: TeamSession) -> None:
         )
 
 
-def event_line(event: TeamEvent, roles: dict[str, str]) -> str:
+def event_line(
+    event: TeamEvent, roles: dict[str, str], numbers: Mapping[str, int] | None = None
+) -> str:
+    """``583dc9a8 (manager) added → coder: [#12 tsk_…] title``; ``numbers`` is the board's
+    task id → number (``store.task_numbers``), so the task reads as the board shows it."""
     who = (
         f"{short_id(event.session_id)} ({roles.get(event.session_id, '?')})"
         if event.session_id
         else "cli"
     )
     target = f" → {event.to_role}" if event.to_role else ""
-    task = f" [{event.task_id}]" if event.task_id else ""
+    number = (numbers or {}).get(event.task_id) if event.task_id else None
+    task = ""
+    if event.task_id:
+        task = f" [#{number} {event.task_id}]" if number is not None else f" [{event.task_id}]"
     kind = event.kind.replace("task_", "")
     return f"{who} {kind}{target}:{task} {event.text}"
 
 
 def _render_delta(
-    events: list[TeamEvent], roles: dict[str, str], *, truncated: bool, board: str
+    events: list[TeamEvent],
+    roles: dict[str, str],
+    *,
+    truncated: bool,
+    board: str,
+    numbers: Mapping[str, int] | None = None,
 ) -> str:
     """The per-prompt delta. Each line names its board (fix 5 of the fleet-board card,
     tsk_01m3k89bkhpj): two fleets' updates once mixed in one delta, because the seats of
@@ -3133,7 +3839,7 @@ def _render_delta(
     lines = [
         "<aisquare-team-delta>",
         f"{count} teammate update(s) since your last prompt:",
-        *(f"- [{board}] {event_line(event, roles)}" for event in events),
+        *(f"- [{board}] {event_line(event, roles, numbers)}" for event in events),
     ]
     if truncated:
         lines.append("… more waiting — run `aisquare board` for the full picture.")
@@ -3201,7 +3907,12 @@ _ELLIPSIS_COST = _output_cost("…")
 
 
 def _render_wakeup(
-    events: list[TeamEvent], roles: dict[str, str], *, truncated: bool, board: str
+    events: list[TeamEvent],
+    roles: dict[str, str],
+    *,
+    truncated: bool,
+    board: str,
+    numbers: Mapping[str, int] | None = None,
 ) -> str:
     """The Stop reason: the delta in the same lines the prompt hook would have used,
     framed as the instruction Claude Code continues the turn with.
@@ -3233,7 +3944,10 @@ def _render_wakeup(
     # The board label is inside the clipped text, so the budget above still holds.
     lines = [
         head,
-        *(f"- {_clip(f'[{board}] {event_line(event, roles)}', per_line)}" for event in events),
+        *(
+            f"- {_clip(f'[{board}] {event_line(event, roles, numbers)}', per_line)}"
+            for event in events
+        ),
         *frame,
     ]
     return "\n".join(lines)

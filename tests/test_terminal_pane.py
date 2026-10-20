@@ -31,12 +31,14 @@ from collections.abc import Callable, Coroutine, Iterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TypeVar
 
 import pytest
 from rich.cells import cell_len, split_graphemes
 from rich.style import Style
 from textual import Logger, events
+from textual import message as textual_message
 from textual.app import App, ComposeResult
 from textual.dom import NoScreen
 from textual.geometry import Offset, Region, Size
@@ -67,6 +69,7 @@ from aisquare.cli.ui.views.agent import AgentView, header_text
 from aisquare.core.keys import Drop
 from aisquare.core.tmux import BUNDLED_CONF, PASTE_BUFFER, TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
+from tests import guard_clock
 from tests.pane_harness import (
     FakePane,
     FakeTmux,
@@ -264,6 +267,29 @@ async def wait_until(
 def scroll_event(pane: TerminalPane, *, up: bool) -> events.MouseScrollUp | events.MouseScrollDown:
     cls = events.MouseScrollUp if up else events.MouseScrollDown
     return cls(pane, 1, 1, 0, -1 if up else 1, 0, False, False, False)
+
+
+class Clock:
+    """A clock only the test moves. As :func:`clock`, the pane's and its events': the
+    duplicate-press window's (``terminal._monotonic``), and the stamp every event takes as
+    it is made, which both Textual's click chain and the pane's read. A double click is
+    then two clicks the TEST says came within the threshold, and never two the runner
+    happened to deliver fast enough (follow-up of #259, round 4)."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    ticking = Clock()
+    monkeypatch.setattr(terminal_module, "_monotonic", ticking)
+    # The events' stamps alone (`Message.time`): Textual's timers keep their own clock.
+    monkeypatch.setattr(textual_message, "_time", SimpleNamespace(get_time=ticking))
+    return ticking
 
 
 @pytest.fixture
@@ -558,6 +584,11 @@ def test_alt_p_reaches_the_agent_as_meta_p_not_as_the_letter(
     assert fake.sent() == [("M-p",)], fake.sent()
 
 
+def _literal_argv(text: str) -> tuple[str, ...]:
+    """A literal write as it goes on the wire now: hex pairs, no string to parse."""
+    return ("-H", *(f"{byte:02x}" for byte in text.encode("utf-8")))
+
+
 def test_keys_are_forwarded_in_tmux_vocabulary(fake: FakeTmux, tmp_path: Path) -> None:
     async def drive() -> None:
         host = Host(fake.server(tmp_path), "%1")
@@ -569,14 +600,16 @@ def test_keys_are_forwarded_in_tmux_vocabulary(fake: FakeTmux, tmp_path: Path) -
 
     run(drive())
     assert fake.sent() == [
-        ("-l", "--", "a"),
-        ("-l", "--", "A"),
-        ("-l", "--", " "),
+        _literal_argv("a"),
+        _literal_argv("A"),
+        _literal_argv(" "),  # the space bar: it used to be eaten before the pane saw it
         ("C-c",),
         ("BTab",),
         ("Up",),
         ("Escape",),
-        ("-l", "--", "-"),  # literal text may start with '-'; the '--' protects it
+        # A literal may start with '-'. As hex there is no string for any tmux
+        # argument parser to read as a flag, so it needs no '--' to protect it.
+        _literal_argv("-"),
     ]
 
 
@@ -650,10 +683,10 @@ def test_paste_goes_through_the_paste_buffer_not_send_keys(fake: FakeTmux, tmp_p
     assert fake.sent() == []  # the negative: no Enter per line
 
 
-def test_a_literal_ending_in_the_separator_takes_the_paste_path(
-    fake: FakeTmux, tmp_path: Path
-) -> None:
-    """tmux reads an argument ending in ';' as a command separator (measured: sends nothing)."""
+def test_a_typed_separator_is_a_keystroke_not_a_paste(fake: FakeTmux, tmp_path: Path) -> None:
+    """``;`` once went through the paste buffer, because ``send-keys -l -- ';'`` sent
+    nothing. Literal text now goes as hex bytes, which tmux never parses, so ``;`` is
+    typed like any other character: no bracketed paste, no two extra tmux processes."""
 
     async def drive() -> None:
         host = Host(fake.server(tmp_path), "%1")
@@ -664,8 +697,8 @@ def test_a_literal_ending_in_the_separator_takes_the_paste_path(
             await pilot.pause()
 
     run(drive())
-    assert ("load-buffer", ";") in fake.input and ("paste-buffer", "%1") in fake.input
-    assert fake.sent() == [("-l", "--", "a")]
+    assert fake.sent_text() == [";", "a"]
+    assert not [call for call in fake.input if call[0] in ("load-buffer", "paste-buffer")]
 
 
 def test_wheel_scrolls_history_clamped_and_any_key_returns_to_live(
@@ -793,7 +826,9 @@ def test_the_wheel_reaches_a_program_that_tracks_the_mouse_as_its_own_event(
 
     scrollback, sent = run(drive())
     assert scrollback == 0, "the history offset is not what a mouse-tracking program wants"
-    assert sent == [("send-keys", "%1", "-l", "--", "\x1b[<64;5;3M\x1b[<65;5;3M")], sent
+    assert len(sent) == 1, "both notches in ONE tmux call"
+    delivered = bytes(int(pair, 16) for pair in sent[0][sent[0].index("-H") + 1 :]).decode()
+    assert delivered == "\x1b[<64;5;3M\x1b[<65;5;3M", sent
 
 
 def test_the_x10_encoding_goes_as_raw_bytes_because_a_string_cannot_carry_it(
@@ -970,7 +1005,9 @@ def test_scroll_keys_go_to_a_program_that_owns_its_own_transcript(
     scrollback, calls, text = run(drive())
     assert scrollback == 0, "tmux history is not this program's transcript"
     sent = [c for c in calls if c[0] == "send-keys"]
-    assert sent == [("send-keys", "%1", "-l", "--", "\x1b[<64;21;4M")], sent
+    assert len(sent) == 1, sent
+    delivered = bytes(int(pair, 16) for pair in sent[0][sent[0].index("-H") + 1 :]).decode()
+    assert delivered == "\x1b[<64;21;4M", sent
     assert not any("pre-launch" in row for row in text)
 
 
@@ -1966,10 +2003,15 @@ def test_a_gesture_that_touches_no_pane_row_leaves_the_clipboard_alone(
     assert toasts_after == toasts, "and nothing claims a copy that did not happen"
 
 
-def test_a_double_click_does_not_leak_into_the_next_gesture(fake: FakeTmux, tmp_path: Path) -> None:
+def test_a_double_click_does_not_leak_into_the_next_gesture(
+    fake: FakeTmux, tmp_path: Path, clock: Clock
+) -> None:
     """A double click selects its word AFTER the gesture that caused it ended,
     so the selection change it makes must not count as taking part in the next
-    one — measured re-copying the word on the following release."""
+    one — measured re-copying the word on the following release. The two clicks
+    are a double click by the test's clock, which stamps them and stands still
+    between them (``clock``): on a loaded runner the loop's turn between them
+    outran the threshold, and the word was never selected (CI of #259)."""
 
     async def drive() -> tuple[str, int, str, int]:
         host = Host(fake.server(tmp_path), "%1", with_footer=True)
@@ -1980,6 +2022,7 @@ def test_a_double_click_does_not_leak_into_the_next_gesture(fake: FakeTmux, tmp_
             await click(pilot, pane, (8, 1), times=2)
             await pilot.pause()
             word, toasts = host.clipboard, len(host.notices)
+            clock.now += 5.0  # the next gesture comes a while later, as a person's does
             await press(pilot, footer, (1, 0))
             await move(pilot, footer, (6, 0), button=1)
             await release(pilot, footer, (6, 0))
@@ -1989,6 +2032,75 @@ def test_a_double_click_does_not_leak_into_the_next_gesture(fake: FakeTmux, tmp_
     word, toasts, after, toasts_after = run(drive())
     assert word == "row" and toasts == 1
     assert after == word and toasts_after == toasts
+
+
+def test_a_double_click_is_judged_by_the_panes_clock_not_the_runners(
+    fake: FakeTmux, tmp_path: Path, clock: Clock
+) -> None:
+    """Follow-up of #259: the chain is timed by each event's stamp, which Textual takes from
+    the wall clock, so whether two clicks made a double click depended on how fast the loop
+    turned between them. Stamped by the test's clock: two clicks 0.2 s apart select their
+    word, and two 0.6 s apart — past the app's threshold — select nothing, however fast the
+    test delivers them (stamped by the wall clock, the late pair copied "third" too)."""
+    threshold = Host.CLICK_CHAIN_TIME_THRESHOLD
+
+    async def drive() -> tuple[str, int, str, int]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 10)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await click(pilot, pane, (8, 1))
+            clock.now += threshold - 0.3
+            await click(pilot, pane, (8, 1))
+            await pilot.pause()
+            word, toasts = host.clipboard, len(host.notices)
+            host.screen.clear_selection()
+            await pilot.pause()
+            clock.now += 10.0
+            await click(pilot, pane, (1, 2))  # "third": a double click here would copy it
+            clock.now += threshold + 0.1
+            await click(pilot, pane, (1, 2))
+            await pilot.pause()
+            return word, toasts, host.clipboard, len(host.notices)
+
+    word, toasts, late, toasts_late = run(drive())
+    assert word == "row" and toasts == 1, "within the threshold by the pane's clock"
+    assert late == word and toasts_late == toasts, "past it: two single clicks, nothing copied"
+
+
+def test_the_panes_double_click_is_textuals_however_late_its_handler_runs(
+    fake: FakeTmux, tmp_path: Path, clock: Clock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 4: the pane timed its chain as its handler ran, Textual times
+    ``event.chain`` (which forwards a double click to the agent) by the events. With the
+    loop held between two clicks 0.2 s apart (the 2 s refresh, a doctor run), the second
+    was handled a second after the first: forwarded as a double click, and no word
+    selected. Both read the events' stamps, so the pane selects the word Textual chains."""
+    handled = Clock()  # when the handlers run: a second apart
+    monkeypatch.setattr(terminal_module, "_monotonic", handled)
+    chains: list[int] = []
+    counted = TerminalPane._own_click_chain
+
+    def spied(self: TerminalPane, event: events.Click) -> int:
+        chains.append(event.chain)
+        return counted(self, event)
+
+    monkeypatch.setattr(TerminalPane, "_own_click_chain", spied)
+
+    async def drive() -> str:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 10)) as pilot:
+            pane = host.pane
+            await wait_until(pilot, lambda: synced(pane))
+            await click(pilot, pane, (8, 1))
+            clock.now += 0.2
+            handled.now += 1.0
+            await click(pilot, pane, (8, 1))
+            await pilot.pause()
+            return host.clipboard
+
+    assert run(drive()) == "row", "Textual's double click selected no word in the pane"
+    assert chains == [1, 2]
 
 
 def test_a_right_button_drag_from_outside_the_pane_does_not_copy(
@@ -3695,14 +3807,17 @@ def test_the_too_old_notice_words_an_unknown_version_rather_than_asserting_it_aw
     assert severities == ["warning"]
 
 
+@pytest.mark.parametrize("at_a_path", [False, True], ids=["another-socket", "same-name-at-a-path"])
 def test_the_too_old_notice_follows_the_pane_to_its_next_server(
-    fake: FakeTmux, tmp_path: Path
+    fake: FakeTmux, tmp_path: Path, at_a_path: bool
 ) -> None:
     """The line names a server's version, and a pane outlives its server: a
     notice deduped across servers prescribed an upgrade for the server the
     pane had LEFT while the keystroke on the new one was lost without a word
     (review of #161, round 6). The line is deduped per server — per socket,
-    as two servers always are — so the next one hears it (round 7)."""
+    as two servers always are — so the next one hears it (round 7). A server
+    asked at a path under the same socket name is another server too (round 29
+    of #257)."""
     fake.version = "tmux 3.3"
     older = FakeTmux()
     older.version = "tmux 3.4"
@@ -3716,7 +3831,11 @@ def test_the_too_old_notice_follows_the_pane_to_its_next_server(
             await pilot.pause()
             await pilot.press("ctrl+shift+enter", "ctrl+shift+enter")
             await pilot.pause()
-            pane.server = older.server(tmp_path, socket="older")
+            pane.server = (
+                older.server(tmp_path).at(tmp_path / "elsewhere" / "fake")
+                if at_a_path
+                else older.server(tmp_path, socket="older")
+            )
             pane.attach("%1")
             await pilot.pause()
             await pilot.press("ctrl+shift+enter", "ctrl+shift+enter")
@@ -3797,6 +3916,40 @@ def test_attach_re_reads_the_version_for_a_new_server(fake: FakeTmux, tmp_path: 
     modern_sent, old_sent = run(drive())
     assert modern_sent == [("S-Enter",)]  # the 3.7c server got the chord…
     assert old_sent == [("C-j",)], "…and the 3.4 one its older spelling: the version was re-read"
+
+
+def test_two_servers_on_one_socket_name_are_asked_their_versions_apart(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Round 29 of #257: the version was cached by the socket's NAME, and a pane is now
+    built as ``TmuxServer(name).at(path)``: this shell's ``-L`` server and one asked at its
+    recorded path under another ``TMUX_TMPDIR`` share the name. Whichever was asked first
+    decided the chords for both, so a 3.4 server at the path was sent ``S-Enter``, which it
+    types into the agent. Each server is asked for its own version."""
+    old = FakeTmux()
+    old.version = "tmux 3.4"
+    old.panes["%1"] = FakePane(screen=["older server, same name"])
+    elsewhere = tmp_path / "elsewhere" / "tmux-1000" / "fake"
+
+    async def drive() -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.focus()
+            await pilot.pause()
+            await pilot.press("shift+enter")
+            await pilot.pause()
+            modern = fake.sent()
+            pane.server = old.server(tmp_path).at(elsewhere)  # the name "fake" again
+            pane.attach("%1")
+            await pilot.pause()
+            await pilot.press("shift+enter")
+            await pilot.pause()
+            return modern, old.sent()
+
+    modern_sent, old_sent = run(drive())
+    assert modern_sent == [("S-Enter",)]  # the 3.7c server got the chord…
+    assert old_sent == [("C-j",)], "…and the 3.4 one at the path its older spelling"
 
 
 def test_the_version_is_the_running_servers_not_the_binary_on_path(
@@ -3937,6 +4090,7 @@ def _status(
     task_id: str | None = "tsk_0123456789abcdef",
     exit_status: int | None = None,
     state: str = "working",
+    held: bool = False,
 ) -> FleetAgentStatus:
     agent = FleetAgent(
         id="fa_1",
@@ -3949,7 +4103,7 @@ def _status(
         created_at=datetime.now(UTC),
         exit_status=exit_status,
     )
-    return FleetAgentStatus.model_validate({"agent": agent, "state": state})
+    return FleetAgentStatus.model_validate({"agent": agent, "state": state, "held": held})
 
 
 def test_header_text_carries_every_field_as_data() -> None:
@@ -4105,8 +4259,54 @@ def test_agent_view_shows_and_types_into_no_pane_for_a_lost_row(
     assert "✗ lost" in header  # the header says what the row is
     lost_at_build, working, lost_later = typed
     assert lost_at_build == []  # nothing typed anywhere
-    assert working == [("-l", "--", "y")]  # the control: a row that is there gets the key
+    assert working == [_literal_argv("y")]  # the control: a row that is there gets the key
     assert turned_lost is None and lost_later == working  # detached, and deaf, once lost
+
+
+def test_agent_view_shows_and_types_into_no_pane_for_a_row_held_as_another_servers(
+    fake: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of #259, round 1: a row that recorded its server's start is not ``lost`` under
+    the next server on its socket but held (``FleetAgentStatus.held``), and reads its
+    board's state while that is fresh. Its id is the next server's all the same, here the
+    fake's ``%1``: told by the state word alone, the view showed that agent's screen under
+    the row's ``working`` header and typed into it. The same row not held is the control."""
+    server = fake.server(tmp_path)
+
+    class ViewHost(App[None]):
+        def compose(self) -> ComposeResult:
+            yield AgentView(
+                _status(state="working", held=True), server=server, escape_key="f12", id="held"
+            )
+
+    async def drive() -> tuple[str | None, list[list[tuple[str, ...]]], str | None]:
+        host = ViewHost()
+        async with host.run_test(size=(60, 8)) as pilot:
+            view = host.query_one("#held", AgentView)
+            view.pane.focus()
+            await pilot.pause()
+            await pilot.press("y", "enter")
+            await pilot.pause()
+            built_held = view.pane.pane_id
+            typed = [fake.sent()]
+            view.refresh_status(_status(state="working"))
+            await wait_until(pilot, lambda: view.pane.frames >= 1)
+            await pilot.press("y")
+            await pilot.pause()
+            typed.append(fake.sent())
+            view.refresh_status(_status(state="unknown", held=True))
+            await pilot.pause()
+            await pilot.press("x", "enter")
+            await pilot.pause()
+            typed.append(fake.sent())
+            return built_held, typed, view.pane.pane_id
+
+    built_held, typed, turned_held = run(drive())
+    assert built_held is None, "no pane for a row held as another server's"
+    held_at_build, own, held_later = typed
+    assert held_at_build == []  # nothing typed anywhere
+    assert own == [_literal_argv("y")]  # the control: the row's own pane gets the key
+    assert turned_held is None and held_later == own  # detached, and deaf, once held
 
 
 # --- mouse buttons (#148) ---------------------------------------------------------------------
@@ -4114,7 +4314,7 @@ def test_agent_view_shows_and_types_into_no_pane_for_a_lost_row(
 
 def _literals(fake: FakeTmux) -> str:
     """Everything sent to the pane as literal text, in order — the SGR reports concatenated."""
-    return "".join(call[-1] for call in fake.sent() if call[:1] == ("-l",))
+    return "".join(fake.sent_text())
 
 
 def _hex(fake: FakeTmux) -> list[str]:
@@ -4223,13 +4423,29 @@ def test_buttons_are_x10_bytes_for_a_program_that_did_not_ask_for_sgr(
             await pilot.pause(0.1)
 
     run(drive_plain())
-    # ESC [ M, then 32 + button / column / row: press 0 at (3,2); drag 32 at (4,2); release 3.
+    pane.width = 200
+
+    async def drive_wide() -> None:
+        host = Host(fake.server(tmp_path), "%1")
+        async with host.run_test(size=(140, 6)) as pilot:
+            widget = host.pane
+            await wait_until(pilot, lambda: synced(widget))
+            await pilot.mouse_down(widget, offset=(119, 1))  # column 120: 32 + 120 = 0x98
+            await pilot.mouse_up(widget, offset=(119, 1))
+            await pilot.pause(0.1)
+
+    run(drive_wide())
+    # ESC [ M, then 32 + button / column / row: press 0 at (3,2); drag 32 at (4,2); release 3;
+    # then a press and a release at column 120. Typed text rides ``-H`` too (send_literal),
+    # so below column 96 a string and the bytes look alike; past it a string is UTF-8 and
+    # its column byte arrives as two, c2 98, where the bytes keep the one byte, 98.
     assert _hex(fake) == [
         "1b", "5b", "4d", "20", "23", "22",
         "1b", "5b", "4d", "40", "24", "22",
         "1b", "5b", "4d", "23", "24", "22",
+        "1b", "5b", "4d", "20", "98", "22",
+        "1b", "5b", "4d", "23", "98", "22",
     ], _hex(fake)  # fmt: skip
-    assert _literals(fake) == "", "nothing went as text: a string cannot carry these bytes"
 
 
 def test_nothing_is_forwarded_in_copy_mode_into_history_or_to_a_program_without_the_mouse(
@@ -5068,6 +5284,7 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
     monkeypatch.setattr(fleet_service, "project_of", lambda agent: project)
     monkeypatch.setattr(fleet_service, "stop", fake_stop)
     monkeypatch.setattr(fleet_service, "restart", fake_restart)
+    clock = guard_clock.install(monkeypatch)  # each click comes after the guard's window
     posted: list[FleetAgent] = []
     asked: list[tuple[str, str]] = []
     tips: list[str] = []
@@ -5094,12 +5311,14 @@ def test_agent_view_offers_stop_and_restart_and_routes_them_through_the_service(
             await pilot.pause()
             stop_on_exited, restart_label = stop.display, str(restart.label)
             exited_tip = str(stop.tooltip)
+            clock.step()
             await pilot.click("#agent-restart")
             await wait_until(pilot, lambda: len(refreshed) >= 1 and len(posted) == 1)
             view.refresh_status(_status(state="working"))
             await pilot.pause()
             stop_on_working, restart_label_working = stop.display, str(restart.label)
             tips.extend([exited_tip, str(stop.tooltip)])
+            clock.step()  # Restart's new label moved Stop along the bar
             await pilot.click("#agent-stop")
             await wait_until(pilot, lambda: len(asked) == 1)
             return (
@@ -6006,7 +6225,7 @@ def test_a_numpad_operator_without_its_text_is_typed_not_swallowed(
             return host.notices, host.severities, fake.sent()
 
     notices, severities, sent = run(drive())
-    assert sent == [("-l", "--", "+"), ("-l", "--", "/"), ("-l", "--", "*")]
+    assert sent == [_literal_argv("+"), _literal_argv("/"), _literal_argv("*")]
     # The decimal key's text is the layout's to know — ``,`` on a German numpad
     # arrives under the same physical key code — so without it nothing is
     # guessed: one quiet line, the keystroke lost rather than mistyped (review

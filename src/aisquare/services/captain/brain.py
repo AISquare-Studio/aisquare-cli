@@ -49,6 +49,7 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
 from aisquare.models import FleetAgent, TeamSession
 from aisquare.services import fleet
+from aisquare.services import project as project_service
 from aisquare.services.captain import screen, words
 from aisquare.services.captain import state as captain_state
 
@@ -205,11 +206,11 @@ def find() -> FleetAgent | None:
             why = f"{why}, and the fleet's sweep did not end the row"
             state = "silent"
         if state == "silent":
+            reap = project_service.fleet_command("reap", home, "--server-down")
             raise Unreachable(
                 f"the captain's row ({agent.id}) is live but its tmux server does not answer "
                 f"— {why}. If that server is really gone (a kill-server; a reboot elsewhere), "
-                f"run `aisquare fleet reap -P {home.id} --server-down`, then `aisquare captain` "
-                "starts a fresh captain"
+                f"run `{reap}`, then `aisquare captain` starts a fresh captain"
             )
         return agent
     return None
@@ -265,7 +266,7 @@ def _first_prompt(receipt: fleet.SpawnReceipt, prompt: str) -> fleet.SpawnReceip
     the drawn box as the evidence typing needs, and its one settle, because the box is
     new. :data:`SEND_TIMEOUT_S` bounds the wait: the caller is a button. A prompt that did
     not go in is a note and a failure on the receipt, in the door's own words, and never
-    ``prompt_typed=True``. It is not raised: the captain is up, and the caller shows its
+    ``prompt_typed="yes"``. It is not raised: the captain is up, and the caller shows its
     pane, where the owner answers what is showing.
     """
     deadline = _now() + timedelta(seconds=SEND_TIMEOUT_S)
@@ -278,10 +279,10 @@ def _first_prompt(receipt: fleet.SpawnReceipt, prompt: str) -> fleet.SpawnReceip
         return replace(
             receipt,
             notes=[*receipt.notes, note],
-            prompt_typed=False,
+            prompt_typed="no",
             failures=[*receipt.failures, note],
         )
-    return replace(receipt, prompt_typed=True)
+    return replace(receipt, prompt_typed="yes")
 
 
 def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:

@@ -37,6 +37,7 @@ from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli import fleet as fleet_cli
+from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.sidebar import ALIVE_STATES, ROLE_ICON, STATE_CHIP, STOP_STATES, StopAgent
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.core.tmux import TmuxServer
@@ -100,7 +101,8 @@ def header_text(status: FleetAgentStatus, labels: Mapping[int, str] | None = Non
 
 
 def shown_pane(status: FleetAgentStatus) -> str | None:
-    """The pane a view of ``status`` shows and types into — ``None`` for a ``lost`` row.
+    """The pane a view of ``status`` shows and types into — ``None`` for a ``lost`` row, and
+    for one the listing held as another server's.
 
     ``lost`` is the listing's word for a live row it found no pane of its own
     for, and one way to be lost leaves ANOTHER agent's pane under the row's
@@ -113,8 +115,14 @@ def shown_pane(status: FleetAgentStatus) -> str | None:
     #203 final-round fixes, F1). The other way to be lost, a pane that is
     simply gone, has nothing to show either. ``unknown`` — tmux could not be
     asked — keeps the pane: that is no verdict about it.
+
+    A row that recorded its server's start is not ``lost`` under the next server but held
+    (``FleetAgentStatus.held``), and reads ``unknown`` (another tmux server on its socket):
+    its id is the next server's all the same, so it gets no pane either. Told by the state
+    word alone, the tabs showed and typed into another agent's pane under it (review of
+    #259, round 1).
     """
-    return None if status.state == "lost" else status.agent.pane_id
+    return None if status.state == "lost" or status.held else status.agent.pane_id
 
 
 RESTART_WORKER = "agent-restart"
@@ -125,7 +133,10 @@ class AgentView(Vertical):
 
     Stop asks the shell for its dialog (:class:`StopAgent`); the dialog runs the
     stop and owns its answer, including a refusal. Restart runs the service off
-    the UI thread here and the view then selects the new row (#138).
+    the UI thread here, and the shell then shows the new row if this view is still
+    the one on screen (:class:`AgentRestarted`, #138). Both buttons ignore a mouse
+    press that lands just as the view came up or moved under the pointer
+    (:class:`~aisquare.cli.ui.click_guard.GuardedButton`).
     """
 
     DEFAULT_CSS = """
@@ -146,8 +157,9 @@ class AgentView(Vertical):
         super().__init__(id=id)
         self.status = status
         # Both are defaults the caller may override (§3.10): the agent's own
-        # socket names its server; the escape key comes from ``[fleet]``.
-        self.server = server or TmuxServer(status.agent.tmux_socket)
+        # socket names its server, asked where its spawn said it listened
+        # (`FleetAgentStatus.socket_at`); the escape key comes from ``[fleet]``.
+        self.server = server or TmuxServer(status.agent.tmux_socket).at(status.socket_at)
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self._labels: Mapping[int, str] = {}
         self._labels_asked_at: float | None = None
@@ -188,8 +200,10 @@ class AgentView(Vertical):
     def compose(self) -> ComposeResult:
         with Horizontal(id="agent-bar"):
             yield Static(header_text(self.status, self._labels), id="agent-header")
-            yield Button("Stop", id="agent-stop", compact=True)
-            yield Button("Restart", id="agent-restart", compact=True, variant="primary")
+            # Guarded (``click_guard``): a click that was aimed at what this view replaced
+            # must not stop or restart the agent it shows instead.
+            yield GuardedButton("Stop", id="agent-stop", compact=True)
+            yield GuardedButton("Restart", id="agent-restart", compact=True, variant="primary")
         yield from self.compose_bars()
         yield TerminalPane(
             shown_pane(self.status),
@@ -215,8 +229,8 @@ class AgentView(Vertical):
     def refresh_status(self, status: FleetAgentStatus) -> None:
         """New facts about the same agent: redraw the header, re-attach on a new pane.
 
-        Detached from a row that turned ``lost`` (:func:`shown_pane`), whose id may
-        name another agent's pane by now.
+        Detached from a row that turned ``lost`` or was held as another server's
+        (:func:`shown_pane`), whose id may name another agent's pane by now.
         """
         self.status = status
         if not self.is_mounted:
@@ -246,10 +260,10 @@ class AgentView(Vertical):
         stop.display = self.status.state in STOP_STATES
         stop.disabled = busy
         stop.tooltip = (
-            "/exit, a grace period, then the window is killed (aisquare fleet stop)"
+            "/exit, a grace period, then the window is killed (as `fleet stop` does)"
             if self.status.state in ALIVE_STATES
             else "Remove the dead window tmux kept for the last screen; the row leaves the "
-            "listing (aisquare fleet stop)"
+            "listing (as `fleet stop` does)"
         )
         restart = self.query_one("#agent-restart", Button)
         restart.disabled = busy
@@ -257,7 +271,7 @@ class AgentView(Vertical):
         restart.tooltip = (
             "Start it again under this label — same role, task, worktree, account and "
             "persona; its session is resumed from the transcript when that is on disk "
-            "(aisquare fleet restart)"
+            "(as `fleet restart` does)"
         )
 
     @on(Button.Pressed, "#agent-stop")
@@ -300,10 +314,9 @@ class AgentView(Vertical):
         else:
             receipt = event.worker.result
             if isinstance(receipt, fleet_service.RestartReceipt):
-                self.notify(f"✓ restarted {label} — {receipt.how}", timeout=6, markup=False)
-                for note in receipt.notes:
-                    self.notify(note, severity="warning", timeout=8, markup=False)
-                self.post_message(AgentRestarted(receipt.started))
+                # The shell says it: it knows the project to name, and whether this view
+                # is still the one on screen by now (:class:`AgentRestarted`).
+                self.post_message(AgentRestarted(receipt))
         self._paint_actions()
         refresh = getattr(self.app, "refresh_data", None)
         if callable(refresh):
@@ -311,8 +324,25 @@ class AgentView(Vertical):
 
 
 class AgentRestarted(Message):
-    """A restart produced a new row; the shell selects it once its frame lists it."""
+    """A restart replaced a row with a new one; the shell says so, and shows the new row
+    only when the replaced row's view is the one on screen.
 
-    def __init__(self, agent: FleetAgent) -> None:
+    A restart runs for seconds, and the user may have moved on before it ends: shown
+    unconditionally, the new row took the screen back from whatever the user had opened
+    since, its Stop and Restart under the pointer that was aimed at the other view's
+    pane (user feedback, 2026-10-19: a manager destroyed that way more than once).
+    """
+
+    def __init__(self, receipt: fleet_service.RestartReceipt) -> None:
         super().__init__()
-        self.agent = agent
+        self.receipt = receipt
+
+    @property
+    def agent(self) -> FleetAgent:
+        """The row the restart started."""
+        return self.receipt.started
+
+    @property
+    def replaced(self) -> FleetAgent:
+        """The row it replaced: the one whose view, if shown, follows to the new row."""
+        return self.receipt.replaced

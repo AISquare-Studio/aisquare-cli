@@ -32,6 +32,10 @@ from tests.stub_ci_server import StubCI, live_descriptor, serve
 
 from .test_shipping_redaction import SECRETS
 
+# These record in a directory nobody added (``tmp_path``), as they were written to:
+# with ``[projects] capture`` on. What capture off records — nothing — is tests/test_hooks.py's.
+pytestmark = pytest.mark.usefixtures("project_capture")
+
 
 @pytest.fixture
 def stub() -> Iterator[StubCI]:
@@ -217,6 +221,97 @@ def test_the_default_descriptor_pushes_on_prompts_only_and_announces_the_tool(
     assert start.instruction_version == ci_augment.INSTRUCTION_VERSION
 
 
+def test_a_session_start_that_records_its_turn_captures_its_directory_first(
+    wired: StubCI, isolated_home: Path, tmp_path: Path
+) -> None:
+    """Review of #259, round 19: the team hook captured the directory at every session
+    start until it captured only for a board (round 18). A session start in a directory
+    with no board and no role then wrote its turn for a project with no row, which
+    ``metrics show --project`` could not reach. The turn's project is captured with it."""
+    from aisquare.core.store import store_session
+
+    hooks_service.session_start_context(tmp_path, session_id=SESSION)
+
+    start = _turn()
+    with store_session() as store:
+        row = store.get_project(start.project_id)
+        assert store.team_sessions(start.project_id) == [], "the premise: no board"
+    assert row is not None and row.onboarded_at is None, "captured, not added"
+
+
+def test_a_session_start_with_a_board_and_ci_captures_its_directory_once(
+    wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 20: ``_session_start_ci`` opened a store session of its own and
+    captured the directory, an upsert and a commit, on every session start with CI on, the
+    team hook's capture of the same directory moments earlier included. A fleet starting its
+    agents took the store's write lock twice for each. The directory is written once, by
+    whichever captures it first, and not at all once its row is there; nor does CI open a
+    session of its own then."""
+    import contextlib
+
+    from aisquare.core.store import SqliteStore, store_session
+
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")  # a board: the team hook captures first
+    real_write, real_session = SqliteStore.ensure_project, store_session
+    writes: list[str] = []
+    sessions: list[int] = []
+
+    def ensure_project(self: SqliteStore, project: ProjectInfo) -> None:
+        writes.append(project.id)
+        real_write(self, project)
+
+    @contextlib.contextmanager
+    def session() -> Iterator[Any]:
+        sessions.append(1)
+        with real_session() as store:
+            yield store
+
+    monkeypatch.setattr(SqliteStore, "ensure_project", ensure_project)
+    monkeypatch.setattr(hooks_service, "store_session", session)
+
+    hooks_service.session_start_context(tmp_path, session_id=SESSION)
+
+    start = _turn()
+    with store_session() as store:
+        assert store.team_sessions(start.project_id), "the premise: the team hook wrote"
+    assert writes == [start.project_id], "captured once"
+    writes.clear()
+    sessions.clear()
+
+    hooks_service.session_start_context(tmp_path, session_id=SESSION, source="resume")
+
+    assert writes == [], "its row is there: nothing to capture"
+    assert len(sessions) == 1, "CI asked the store again"
+
+
+def test_with_capture_off_only_a_project_added_on_purpose_consults_or_records(
+    wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[projects] capture`` off, the default (this module's mark turns it on): in a
+    directory nobody added neither hook consults the server or writes a row — the row
+    would be a turn of a project that does not exist. Once it is added, both do."""
+    from aisquare.core.store import store_session
+    from aisquare.core.workspace import current_project
+    from aisquare.services import project as project_service
+
+    monkeypatch.setattr(project_service, "capture_on", lambda: False)
+    assert hooks_service.session_start_context(tmp_path, session_id=SESSION) == ""
+    assert hooks_service.prompt_submitted("one", tmp_path, session_id=SESSION) == ""
+    assert wired.call_count == 0 and wired.descriptor_fetches == 0
+    assert metrics_service.recent(session_id=SESSION) == []
+    with store_session() as store:
+        assert store.list_projects(all=True, include_forgotten=True) == [], "nor a project"
+
+    with store_session() as store:
+        store.onboard_project(current_project(tmp_path))
+    assert RECALL_TOOL in hooks_service.session_start_context(tmp_path, session_id=SESSION)
+    hooks_service.prompt_submitted("two", tmp_path, session_id=SESSION)
+    assert wired.call_count == 1
+    turns = metrics_service.recent(session_id=SESSION)
+    assert len(turns) == 2 and {t.trigger for t in turns} == {"prompt_submit", "session_start"}
+
+
 def test_the_descriptor_is_fetched_once_and_reused(
     wired: StubCI, isolated_home: Path, tmp_path: Path
 ) -> None:
@@ -393,19 +488,50 @@ def test_a_dead_endpoint_records_transport_error_and_still_opens_the_row(
 
 
 def test_a_slow_endpoint_returns_within_the_ceiling_and_records_the_breach(
-    wired: StubCI, isolated_home: Path, tmp_path: Path
+    wired: StubCI, isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The exchange ends at the descriptor's 300 ms ceiling, before the server answers,
+    and the turn records the breach.
+
+    The exchange alone is timed, with the test's own clock, and bounded by the stub's
+    delay: it returned before the server could have answered, so the ceiling ended
+    it. The hook as a whole is not timed. Around the exchange it spools, records and
+    reads the store, and on windows-latest that took the whole hook 1.4 to 25 s
+    against the 1.3 s this used to allow (jobs 108294515313, 108259170919). That time
+    is not the ceiling's, and the outcome asserts below hold whatever it is.
+    """
     import time
 
+    delay_s = 1.5
     wired.descriptor_json(live_descriptor(client_safety_ms=300))
-    wired.respond(status=200, body=json.dumps(_response()), delay_s=1.5)
-    started = time.monotonic()
+    wired.respond(status=200, body=json.dumps(_response()), delay_s=delay_s)
+    took: list[float] = []
+    real_call = ci_client.call
+
+    def timed_call(*args: Any, **kwargs: Any) -> Any:
+        started = time.monotonic()
+        try:
+            return real_call(*args, **kwargs)
+        finally:
+            took.append(time.monotonic() - started)
+
+    monkeypatch.setattr(ci_client, "call", timed_call)
+
     out = hooks_service.prompt_submitted("q", tmp_path, session_id=SESSION)
-    assert time.monotonic() - started < 1.3
+
     assert out == ""
     turn = _turn()
     assert turn.client_reason is ClientReason.deadline_exceeded
     assert turn.deadline_breached is True
+    assert len(took) == 1, "precondition: the exchange happened, once"
+    # Every POST to the stub waits out its delay, so this is what keeps the hook as a
+    # whole from waiting on the slow server without timing it (review of #252): the
+    # one exchange ended at the ceiling, and there was no other.
+    assert wired.call_count == 1, "the hook made one exchange with the slow endpoint, no other"
+    assert took[0] < delay_s, (
+        f"the exchange took {took[0]:.2f} s: it waited for the server's {delay_s} s answer "
+        "instead of ending at the 300 ms ceiling"
+    )
 
 
 # --- the frame cannot be defeated by what it frames -------------------------------------

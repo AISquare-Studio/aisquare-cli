@@ -9,15 +9,21 @@ accounts page's copy had already learned the race (review of #65, R11).
 ``settle_page`` is here for the same reason. The loop was the project page's
 alone, and the accounts page, which waited only for the workers that existed,
 lost the race it closes on windows-latest.
+
+``settle_until`` is that settle, repeated until the fact a test is about to
+assert holds.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
+from collections.abc import Callable
 from typing import Any
 
 from textual.app import App
+from textual.css.query import NoMatches
 from textual.pilot import Pilot
 from textual.worker import Worker, WorkerError
 
@@ -94,8 +100,40 @@ async def settle_page(app: App[Any], *, group: str | None = None) -> None:
         await settle_workers(app, group=group)
 
 
+async def settle_until(
+    app: App[Any],
+    done: Callable[[], object],
+    *,
+    group: str | None = None,
+    timeout: float = 10.0,
+) -> None:
+    """Settle the page, round after round, until ``done()`` holds or ``timeout`` seconds pass.
+
+    A test that settles and then asserts trusts the settle to have seen everything
+    the page was going to do. A test that asserts what a worker did (the Accounts
+    page's usage reading recorded, its row painted) names that fact here instead,
+    and reads the page once it holds, however late the worker started. A widget
+    that ``done`` reads and that is not mounted yet is a fact that does not hold
+    yet.
+
+    Bounded and quiet, as ``settle_page`` is: when ``timeout`` passes it returns,
+    and the test's own assertion fails with what the page showed. ``group`` is
+    passed on to ``settle_page``, for a test that holds another worker on purpose.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        await settle_page(app, group=group)
+        with contextlib.suppress(NoMatches):
+            if done():
+                return
+        if time.monotonic() >= deadline:
+            return
+        await asyncio.sleep(_UNTIL_POLL_S)
+
+
 _SETTLE_ROUNDS = 20
 _HANDLED_S = 5.0
+_UNTIL_POLL_S = 0.02
 
 
 async def _handled(app: App[Any]) -> None:

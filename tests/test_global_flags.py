@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,8 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.cli.global_flags import INJECTED_MARK, SHARED_FLAG_DECLARATIONS
-from aisquare.core.state import get_state
+from aisquare.core import selfcli
+from aisquare.core.state import FLAGS, RuntimeState, get_state, reset_state, set_state
 from aisquare.services import team as team_service
 from tests.cli_tree import all_nodes
 from tests.rendered import plain as _plain
@@ -162,3 +164,63 @@ def test_quoted_positional_containing_json_is_not_a_flag(runner: CliRunner, work
     assert without_flag.exit_code == 0, without_flag.output
     assert get_state().json_output is False  # the quoted value never parsed as a flag
     assert "--json stays text" in without_flag.output
+
+
+def _given(field: dataclasses.Field[Any]) -> Any:
+    """A value for ``field`` its flag must carry: not the default, and for a value, one
+    that reads like a flag."""
+    return True if field.type in (bool, "bool") else "-dash"
+
+
+def _argv(flag: str, value: Any) -> list[str]:
+    return [flag] if value is True else [f"{flag}={value}"]
+
+
+def test_the_flags_table_names_every_field_of_the_state_and_every_flag_declared() -> None:
+    """``state.FLAGS`` is the one table of the global flags. A sixth field with no flag, or
+    a sixth flag declared by the root callback and every command but missing here, fails
+    this rather than being dropped on every hand-over (round 22 of #257)."""
+    fields = {field.name for field in dataclasses.fields(RuntimeState)}
+    long_forms = {decl for decl in SHARED_FLAG_DECLARATIONS if decl.startswith("--")}
+
+    assert set(FLAGS) == fields
+    assert set(FLAGS.values()) == long_forms
+
+
+@pytest.mark.parametrize("field", dataclasses.fields(RuntimeState), ids=lambda f: f.name)
+@pytest.mark.parametrize("where", ["before", "after"], ids=["root", "command"])
+def test_each_flag_sets_the_field_the_table_names_wherever_it_is(
+    runner: CliRunner, field: dataclasses.Field[Any], where: str
+) -> None:
+    """The table against the root callback's flags and the ones injected into every command:
+    each flag in it sets its own field, before the command and after it."""
+    value = _given(field)
+    flag = _argv(FLAGS[field.name], value)
+    argv = [*flag, "config", "list"] if where == "before" else ["config", "list", *flag]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 0, result.output
+    assert getattr(get_state(), field.name) == value
+    others = {f.name for f in dataclasses.fields(RuntimeState)} - {field.name}
+    assert all(getattr(get_state(), name) == getattr(RuntimeState(), name) for name in others)
+
+
+def test_every_field_but_json_round_trips_through_what_a_hand_over_passes_on(
+    runner: CliRunner,
+) -> None:
+    """``selfcli.global_flags`` reads the table, so every field of the state, a new one too,
+    reaches the command asq hands its terminal to, read back as it was. ``--json`` alone is
+    left behind: neither asq nor ``--reopen`` hands over under it."""
+    started = RuntimeState(
+        **{field.name: _given(field) for field in dataclasses.fields(RuntimeState)}
+    )
+    set_state(started)
+
+    carried = selfcli.global_flags()
+    reset_state()
+    result = runner.invoke(app, [*carried, "config", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert "--json" not in carried
+    assert get_state() == dataclasses.replace(started, json_output=False)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -113,6 +114,34 @@ def test_onboard_seeds_from_ecosystem_markers(
     assert any("Python project" in e["text"] for e in _json(listed.stdout))
 
 
+@pytest.mark.parametrize("command", [["project", "onboard"], ["init"]])
+@pytest.mark.parametrize(
+    ("typed", "why"), [("main.py", "is a file, not a directory"), ("typo", "does not exist")]
+)
+def test_onboard_or_init_of_a_path_that_is_no_folder_registers_nothing(
+    runner: CliRunner, tmp_path: Path, command: list[str], typed: str, why: str
+) -> None:
+    """Review of #259, round 43, 3/7: ``find_project_root`` takes a start that is not a
+    directory for its own root, for a stored root whose folder is gone, and typed paths
+    reached it unchecked: ``project onboard repo/src/main.py`` listed a project called
+    ``main.py``, and ``repo/src/typo`` one at a path that does not exist. Refused, as
+    Welcome and Remote refuse one, and nothing is registered."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "src" / "main.py").write_text("", encoding="utf-8")
+    path = repo / "src" / typed
+
+    refused = runner.invoke(app, ["--json", *command, str(path)])
+    said = runner.invoke(app, [*command, str(path)])
+    listed = runner.invoke(app, ["--json", "project", "list"])
+
+    assert refused.exit_code == 1, refused.output
+    assert _json(refused.stdout) == {"error": "not_a_directory", "ref": str(path)}
+    assert said.exit_code == 1 and f"✗ {path} {why}" in said.output, said.output
+    assert _json(listed.stdout) == []
+
+
 def test_workspace_alias_works(runner: CliRunner, work_dir: Path) -> None:
     result = runner.invoke(app, ["--json", "workspace", "info"])
     assert result.exit_code == 0, result.output
@@ -176,17 +205,19 @@ def test_onboard_over_budget_keeps_a_skeleton_and_the_knob_is_what_it_measures_a
 
 
 def test_onboard_reports_a_legacy_too_large_verdict_with_its_numbers(
-    runner: CliRunner, work_dir: Path
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A snapshot.json written before ``skeleton_only`` existed: a plain `onboard` reloads it.
 
     The line names all three numbers and both knobs — ``[snapshot]`` is bracketed
     text Rich would eat with markup on, so this reads the RENDERED output — and
-    ends with the ``--refresh`` that turns the verdict into a skeleton.
+    ends with the ``--refresh`` that turns the verdict into a skeleton. On a machine
+    that can pack: where nothing can, it reads off (test_snapshot_optional_without_node.py).
     """
     from aisquare.core import snapshot
     from aisquare.core.workspace import project_id_for
 
+    monkeypatch.setattr(snapshot, "can_pack", lambda: True)
     project_id = project_id_for(work_dir.resolve())
     snapshot.snapshot_dir(project_id).mkdir(parents=True, exist_ok=True)
     verdict = Snapshot(

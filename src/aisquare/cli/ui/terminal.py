@@ -117,6 +117,7 @@ import weakref
 from bisect import bisect_left
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 from typing import Any, ClassVar, Literal, NamedTuple, assert_never
 
 from rich.cells import cell_len, set_cell_size, split_graphemes
@@ -127,6 +128,7 @@ from textual import events
 from textual.actions import SkipAction
 from textual.app import App
 from textual.dom import NoScreen
+from textual.errors import NoWidget
 from textual.geometry import Offset, Region
 from textual.message import Message
 from textual.notifications import SeverityLevel
@@ -136,8 +138,8 @@ from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
 
+from aisquare.cli.ui.clipboard import ClipboardApp, characters, copy_and_tell
 from aisquare.core.keys import (
-    ARGV_SEPARATOR,
     EXTENDED_MINIMUM,
     Drop,
     Translation,
@@ -326,8 +328,20 @@ def _extract(selection: Selection, rows: list[DisplayedRow], width: int) -> str:
     return "".join(pieces).rstrip("\n")
 
 
-_SERVER_VERSIONS: dict[str, tuple[int, int]] = {}
-"""The servers' own versions, by socket — see :meth:`TerminalPane._server_version`."""
+_ServerKey = tuple[str, Path | None]
+"""What names one server here: its socket's name, and the path it is asked at
+(``tmux -S``, :meth:`~aisquare.core.tmux.TmuxServer.at`) when it is asked at one."""
+
+
+def _server_key(server: TmuxServer) -> _ServerKey:
+    """:data:`_ServerKey` for ``server``. The name alone no longer names one server: a pane is
+    built as ``TmuxServer(name).at(path)``, and this shell's ``-L asq`` and the ``-S`` server
+    at a path under another ``TMUX_TMPDIR`` both carry the name ``asq`` (round 29 of #257)."""
+    return server.socket, server.path
+
+
+_SERVER_VERSIONS: dict[_ServerKey, tuple[int, int]] = {}
+"""The servers' own versions, by server — see :meth:`TerminalPane._server_version`."""
 
 
 def forget_server_versions() -> None:
@@ -519,6 +533,17 @@ def copy_pane_selection(app: App[Any]) -> bool:
     return False
 
 
+class InPlaceField:
+    """A field opened in place over a name, which a press anywhere outside it leaves.
+
+    Leaving it saves, as Enter does: its blur is the save. But Textual moves the
+    focus on a press only to a FOCUSABLE widget under it, and a page body that takes
+    none — a project with no manager yet, the Settings hub — left the field open,
+    unsaved and focused (validator of PR #261, MINOR 1). :class:`PaneScreen` hands the
+    focus on for such a press.
+    """
+
+
 class PaneScreen(Screen[None]):
     """The default screen of a :class:`SelectionHost`: one copy key for the whole app.
 
@@ -533,8 +558,35 @@ class PaneScreen(Screen[None]):
     from anywhere; only when no pane has one does Textual's copy run, and it
     never copies nothing.
 
-    It also keeps the clock the panes are ordered by (:meth:`watch_selections`).
+    It also keeps the clock the panes are ordered by (:meth:`watch_selections`), and a
+    press away from an :class:`InPlaceField` closes it (:meth:`_forward_event`).
     """
+
+    def _forward_event(self, event: events.Event) -> None:
+        """Textual's, then: a press outside the focused :class:`InPlaceField` that left it
+        focused — nothing focusable was under it — hands the focus to the field's holder,
+        its nearest focusable ancestor (the sidebar, the account's row), as Enter does.
+
+        ``Screen._forward_event`` is Textual's (8.2) one way in for every mouse event
+        — the driver's, from ``App.on_event``, and ``Pilot``'s, which skips the app —
+        and it focuses what a press lands on before any handler can stop the press.
+        """
+        press = event if isinstance(event, events.MouseDown) and not event.is_forwarded else None
+        super()._forward_event(event)
+        field = self.focused
+        if press is None or not isinstance(field, InPlaceField):
+            return
+        try:
+            under, _ = self.get_widget_at(press.x, press.y)
+        except NoWidget:
+            under = None
+        if under is field:
+            return
+        holder = next(
+            (node for node in field.ancestors if isinstance(node, Widget) and node.focusable),
+            None,
+        )
+        self.set_focus(holder, scroll_visible=False)
 
     def watch_selections(self, old: dict[Widget, Selection], new: dict[Widget, Selection]) -> None:
         """Stamp every pane whose highlight this write changed, as the write happens.
@@ -575,7 +627,7 @@ class PaneScreen(Screen[None]):
         self.app.copy_to_clipboard(text)
 
 
-class SelectionHost(App[None]):
+class SelectionHost(ClipboardApp[None]):
     """An app that hosts panes: the app half of pane selection, in one class.
 
     ``FleetApp`` and the test host both derive from this, so the shell and its
@@ -612,19 +664,6 @@ class SelectionHost(App[None]):
 
     def get_default_screen(self) -> Screen[None]:
         return PaneScreen(id="_default")
-
-    def copy_to_clipboard(self, text: str) -> None:
-        """Textual's OSC 52 write — except that nothing is ever written for ``""``.
-
-        An OSC 52 with an empty payload CLEARS the terminal's clipboard, and no
-        gesture in this app means that: Textual's ``screen.copy_text`` produced
-        one whenever the screen's selections extracted as nothing (review of
-        #135, finding 10). Every copy in the app goes through here, so the rule
-        holds for the pane's own paths and Textual's alike.
-        """
-        if not text:
-            return
-        super().copy_to_clipboard(text)
 
     def _end_screen_drag(self) -> None:
         """End the active screen's drag-select the way its ``MouseUp`` would have.
@@ -932,8 +971,8 @@ class TerminalPane(Widget, can_focus=True):
         self._resize_timer: Timer | None = None
         self._resize_retry: float = self.RESIZE_RETRY
         self._synced: tuple[str, int, int] | None = None
-        self._warned: set[tuple[str | None, str]] = set()
-        """``(server socket or None, key)`` per notice said — see :meth:`_warn_once`."""
+        self._warned: set[tuple[_ServerKey | None, str]] = set()
+        """``(server or None, key)`` per notice said — see :meth:`_warn_once`."""
         self._reported_gone = False
         self._mouse_queue: list[tuple[str, int, int, int]] = []
         """Mouse events (kind, button code, pane column, pane row) awaiting one
@@ -1002,17 +1041,21 @@ class TerminalPane(Widget, can_focus=True):
         read ``(pane gone)``, and was sent ``S-Enter``, which it typed into the
         agent (final review of #203, F2).
 
-        Cached by SOCKET across attaches: ``_wrap_flags`` needs the answer for
+        Cached by SERVER across attaches: ``_wrap_flags`` needs the answer for
         the FIRST frame, and asking per attach put a blocking subprocess on the
         UI thread at every project switch, tab activation and re-mounted view
         (round 8 of #203). The server behind a socket is what the answer is
         about, and it does not change on an attach. Only an answer is cached — a
-        server that will not say is asked again next time.
+        server that will not say is asked again next time. A server is its
+        socket's name AND the path it is asked at (:func:`_server_key`): keyed by
+        the name, whichever of two servers on one name was asked first decided
+        the chords for both, and shift+enter went to a 3.4 server as ``S-Enter``,
+        which it types into the agent (round 29 of #257).
         """
         if not self._version_read:
             self._version = None
             if self.server is not None:
-                key = self.server.socket
+                key = _server_key(self.server)
                 if key in _SERVER_VERSIONS:
                     self._version = _SERVER_VERSIONS[key]
                 else:
@@ -1972,12 +2015,10 @@ class TerminalPane(Widget, can_focus=True):
         try:
             if translation.kind == "key":
                 self.server.send_keys(self.pane_id, translation.value)
-            elif translation.value.endswith(ARGV_SEPARATOR):
-                # tmux reads an argument ending in ';' as a command separator, so
-                # ``send-keys -l -- ';'`` sends nothing: such text goes through the
-                # paste buffer (stdin, never argv) until core.tmux escapes it.
-                self.server.paste(self.pane_id, translation.value)
             else:
+                # Hex bytes (``send-keys -H``), which no tmux parser reads: a typed
+                # ``;`` arrives as itself, never as tmux's command separator, and is
+                # a keystroke, not a bracketed paste the agent would see as one.
                 self.server.send_literal(self.pane_id, translation.value)
         except TmuxUnavailable:
             self._fail(TMUX_UNAVAILABLE)
@@ -2020,7 +2061,7 @@ class TerminalPane(Widget, can_focus=True):
                 self._warn_once(
                     key,
                     f"{have} cannot carry {_printable_name(key)} — {need} or newer can",
-                    server=self.server.socket if self.server is not None else None,
+                    server=_server_key(self.server) if self.server is not None else None,
                 )
             case "no_name":
                 self._warn_once(
@@ -2039,7 +2080,7 @@ class TerminalPane(Widget, can_focus=True):
         message: str,
         *,
         severity: SeverityLevel = "warning",
-        server: str | None = None,
+        server: _ServerKey | None = None,
     ) -> None:
         """Say ``message`` once per ``key`` — and per ``server``, when it names one.
 
@@ -2052,9 +2093,10 @@ class TerminalPane(Widget, can_focus=True):
         Once per PANE, not per session: ``_warned`` is this widget's, and the
         app composes a ``TerminalPane`` per view — so that is the scope
         ``docs/fleet.md`` promises, and no wider (review). A line about a
-        SERVER passes that server's socket as ``server`` — ``views/project.py``
-        builds a fresh ``TmuxServer`` for the same socket at every attach, so
-        the socket is what names a server here — and is said once per key name
+        SERVER passes that server's :func:`_server_key` as ``server`` —
+        ``views/project.py`` builds a fresh ``TmuxServer`` for the same socket at
+        every attach, so its socket, at the path it is asked at, is what names a
+        server here — and is said once per key name
         on EACH: the too-old line names the version, so a pane moved to another
         server hears it for that one (review of #161, round 6). A server
         restarted on the same socket under another tmux counts as the same
@@ -2139,6 +2181,14 @@ class TerminalPane(Widget, can_focus=True):
         the clipboard written by a gesture that was one left click (review of
         the eighth version; review of #135, second round, finding 2). Any other
         button breaks the run, so the next left click starts one afresh.
+
+        Timed by the event's own stamp, as Textual's ``event.chain`` is, which
+        :meth:`_on_click` reads to forward a double click: both take the time the
+        release was read, not the time a handler ran. Timed as this ran instead, a
+        loop held between two clicks 0.2 s apart (the 2 s refresh, a doctor run)
+        made them a double click to Textual, forwarded to the agent, and none here,
+        no word selected (review of #259, round 4). A test that must not depend on
+        how fast its runner turns the loop stamps the events with a clock it moves.
         """
         if event.button != 1:
             self._clicks = 0
@@ -2561,11 +2611,11 @@ class TerminalPane(Widget, can_focus=True):
         """Copy what the program copied to the outer clipboard, and say so; nothing for none."""
         if not text:
             return
-        self.app.copy_to_clipboard(text)
-        count = len(text)
-        self.notify(
-            f"copied {count} character{'s' if count != 1 else ''} — the agent's own selection",
-            markup=False,
+        copy_and_tell(
+            self.app,
+            text,
+            f"copied {characters(text)} — the agent's own selection",
+            sent=f"the agent's own selection ({characters(text)})",
         )
 
     def _set_own_selection(self, selection: Selection | None) -> None:
@@ -2669,7 +2719,7 @@ class TerminalPane(Widget, can_focus=True):
         return True
 
     def _copy_selection(self, *, standing: bool = True) -> bool:
-        """Copy the selected text to the clipboard (OSC 52); False when nothing is selected.
+        """Copy the selected text to the clipboard; False when nothing is selected.
 
         ``standing`` is whether the highlight survives this copy. The key paths
         clear it immediately afterwards, so telling the user there that "ctrl+c
@@ -2679,13 +2729,8 @@ class TerminalPane(Widget, can_focus=True):
         text = self.selected_text()
         if text is None:
             return False
-        self.app.copy_to_clipboard(text)
-        count = len(text)
         again = " — ctrl+c copies again while the selection stands" if standing else ""
-        self.notify(
-            f"copied {count} character{'s' if count != 1 else ''}{again}",
-            markup=False,
-        )
+        copy_and_tell(self.app, text, f"copied {characters(text)}{again}")
         return True
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:

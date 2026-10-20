@@ -407,7 +407,11 @@ def test_the_doctor_line_names_the_agents_still_running_in_auto(
     assert check is not None and check.status is CheckStatus.warn, check
     assert check.detail.startswith("the running agent coder-auto (repo) runs in auto mode")
     assert "141k" in check.detail
-    assert check.fix and "aisquare fleet restart <label> --permission-mode acceptEdits" in check.fix
+    # Its own restart, naming its project: alone, the active project's (#259, round 21).
+    restart = (
+        f"aisquare fleet restart --project {project.id} coder-auto --permission-mode acceptEdits"
+    )
+    assert check.fix and restart in check.fix, check.fix
     assert "config set" not in check.fix and "[fleet.roles" not in check.fix
 
 
@@ -426,39 +430,22 @@ def _follow_table_step(text: str) -> None:
 def test_the_printed_mode_fix_is_one_this_config_accepts(
     isolated_home: Path, runner: CliRunner
 ) -> None:
-    """`config set` only writes keys the config has; a trimmed [fleet.roles] has fewer."""
+    """`config set` only writes keys the config has. A file whose [fleet.roles] lists only
+    coder still has every fleet role, the rest at their defaults (``core.config._overlay``),
+    so the command is the step for manager too; the table step is for a role outside the
+    fleet's six (``test_the_spawn_note_names_a_step_a_restart_or_a_switch_receipt_can_follow``).
+    """
     paths.ensure_home()
-    # A [fleet.roles] that lists only coder: manager runs on the built-in auto, no table.
     _configure(tracing=True, modes={"coder": "acceptEdits"})
     check = auto_mode.doctor_check()
     assert check is not None and check.fix
-    assert "config set fleet.roles.manager" not in check.fix
-    assert (
-        'add a `[fleet.roles.manager]` table with `permission_mode = "acceptEdits"` '
-        f"to {paths.config_path()}"
-    ) in check.fix
-    # Never the header and the key as one line: TOML does not parse that, and a config
-    # that does not parse sends every role back to the built-in auto.
-    assert "] permission_mode" not in check.fix
-    refused = runner.invoke(
-        app, ["config", "set", "fleet.roles.manager.permission_mode", "acceptEdits"]
-    )
-    assert refused.exit_code != 0, "the command it no longer prints fails on this config"
-    # Followed as printed, the file still parses, manager is off auto, and the
-    # config's own customisation survives.
-    _follow_table_step(check.fix)
-    assert load_config().fleet.roles["coder"].permission_mode == "acceptEdits"
-    assert "manager" not in auto_mode.auto_roles()
-
-    # A role in auto WITH a table: the command is named for it, and it works.
-    _configure(tracing=True, modes={"coder": "acceptEdits", "tester": "auto"})
-    check = auto_mode.doctor_check()
-    assert check is not None and check.fix
-    command = "aisquare config set fleet.roles.tester.permission_mode acceptEdits"
-    assert command in check.fix
+    command = "aisquare config set fleet.roles.manager.permission_mode acceptEdits"
+    assert command in check.fix and "add a `[fleet.roles" not in check.fix
     result = runner.invoke(app, command.split()[1:])
     assert result.exit_code == 0, result.output
-    assert "tester" not in auto_mode.auto_roles()
+    # The config's own customisation survives, and manager is off auto.
+    assert load_config().fleet.roles["coder"].permission_mode == "acceptEdits"
+    assert "manager" not in auto_mode.auto_roles()
 
 
 def test_the_doctor_line_reads_the_evidence(isolated_home: Path, tmp_path: Path) -> None:
@@ -536,11 +523,19 @@ def test_a_transcript_doctor_may_not_stat_does_not_crash_doctor(
 # --- the spawn receipt ----------------------------------------------------------------------
 
 
+SPAWNED_IN = ProjectInfo(id="prj_spawned", root=Path("/work/spawned"), codename="calm-otter")
+"""The project a spawn note's agent is in, which its restart names."""
+
+
 def _note(mode: str | None, *, role: str = "coder", label: str = "coder-1") -> str | None:
     """The spawn note as ``fleet.spawn`` asks for it: the evidence for the mode, the role,
-    the label the row was recorded with, the loaded config."""
+    the label the row was recorded with, the loaded config, the spawn's project."""
     return auto_mode.spawn_note(
-        auto_mode.spawn_evidence(mode), role=role, label=label, config=load_config().fleet
+        auto_mode.spawn_evidence(mode),
+        role=role,
+        label=label,
+        config=load_config().fleet,
+        project=SPAWNED_IN,
     )
 
 
@@ -588,16 +583,32 @@ def test_the_spawn_note_names_a_step_a_restart_or_a_switch_receipt_can_follow(
     command = "aisquare config set fleet.roles.coder.permission_mode acceptEdits"
     assert (
         f"set a non-classifier mode for coder ({command}) and "
-        "`aisquare fleet restart coder-auth --permission-mode acceptEdits` (its session resumes)"
-        in note
+        "`aisquare fleet restart --project calm-otter coder-auth --permission-mode acceptEdits` "
+        "(its session resumes)" in note
     )
     result = runner.invoke(app, command.split()[1:])
     assert result.exit_code == 0, result.output
     assert "coder" not in auto_mode.auto_roles()
-    # A role this config's [fleet.roles] leaves out: the table, as the doctor line names it.
-    manager = _note("auto", role="manager", label="manager")
-    assert manager is not None and "config set fleet.roles.manager" not in manager
-    assert 'add a `[fleet.roles.manager]` table with `permission_mode = "acceptEdits"`' in manager
+    # A role outside the fleet's six, which no [fleet.roles] table holds unless the file
+    # adds one: `config set` would answer "unknown config key", so the step is the table.
+    planner = _note("auto", role="planner", label="planner")
+    assert planner is not None and "config set fleet.roles.planner" not in planner
+    assert (
+        'add a `[fleet.roles.planner]` table with `permission_mode = "acceptEdits"` '
+        f"to {paths.config_path()}"
+    ) in planner
+    refused = runner.invoke(
+        app, ["config", "set", "fleet.roles.planner.permission_mode", "acceptEdits"]
+    )
+    assert refused.exit_code != 0, "the command it does not print fails on this config"
+    # Never the header and the key as one line: TOML does not parse that, and a config
+    # that does not parse sends every role back to the built-in auto. Followed as
+    # printed, the file still parses, the role is off auto, and the rest survives.
+    assert "] permission_mode" not in planner
+    _follow_table_step(planner)
+    assert load_config().fleet.roles["planner"].permission_mode == "acceptEdits"
+    assert load_config().fleet.roles["coder"].permission_mode == "acceptEdits"
+    assert "planner" not in auto_mode.auto_roles()
 
 
 # --- the Stop hook ----------------------------------------------------------------------------
@@ -658,13 +669,37 @@ def test_a_refused_session_is_put_in_attention_once_with_one_board_line(
     assert (
         "5 refusals" in blocked[0] and "fleet.roles.coder.permission_mode acceptEdits" in blocked[0]
     )
-    assert "aisquare fleet restart coder-auth" in blocked[0]
+    assert f"aisquare fleet restart --project {project.id} coder-auth" in blocked[0]
 
     # The next Stop finds the same refusals: the feed does not repeat, the row is waiting again.
     again = runner.invoke(app, ["hook", "stop"], input=payload)
     assert again.exit_code == 0
     assert len([1 for kind, _ in _events(project) if kind == auto_mode.EVENT_KIND]) == 1
     assert _state("sess-coder") == "waiting"
+
+
+def test_under_a_hub_the_refused_agent_is_restarted_in_its_own_rows_project(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 23, 1/10: under ``AISQUARE_TEAM_HUB`` the session is on the
+    hub's board and its row in the project it was spawned in. Read by the board's project,
+    the row was not found: the line named the agent by its short id, with no restart. It
+    names the row's label and its own project's ``fleet restart``, on the hub's board."""
+    paths.ensure_home()
+    _configure(tracing=True, modes={"coder": "auto"})
+    _launched(monkeypatch, traced=True)
+    hub = _project(tmp_path / "hub")
+    team_service.activate(hub.root)
+    project = _project(tmp_path / "repo")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(hub.root))
+    _session(hub, "sess-coder", _sized(tmp_path / "t" / "coder.jsonl", 137_000, refusals=5))
+    _fleet_agent(project, "sess-coder", label="coder-auth", role="coder")
+
+    assert auto_mode.record_refusals("sess-coder") == 5
+
+    blocked = [text for kind, text in _events(hub) if kind == auto_mode.EVENT_KIND]
+    assert len(blocked) == 1 and blocked[0].startswith("coder-auth: auto mode"), blocked
+    assert f"aisquare fleet restart --project {project.id} coder-auth" in blocked[0]
 
 
 def test_fewer_refusals_than_the_threshold_or_no_transcript_change_nothing(
@@ -738,9 +773,9 @@ def test_only_a_session_launched_through_the_proxy_is_blamed_on_it(
     assert _state("sess-plain") == "attention"
     blocked = [text for kind, text in _events(project) if kind == auto_mode.EVENT_KIND]
     assert len(blocked) == 1 and "behind the explainability proxy" in blocked[0]
-    # coder has no [fleet.roles] table in this config: the step is the table, not `config set`.
-    assert 'add a `[fleet.roles.coder]` table with `permission_mode = "acceptEdits"`' in blocked[0]
-    assert "config set fleet.roles.coder" not in blocked[0]
+    # coder, a fleet role, has its table whatever the file holds: the step is `config set`.
+    assert "aisquare config set fleet.roles.coder.permission_mode acceptEdits" in blocked[0]
+    assert "add a `[fleet.roles" not in blocked[0]
 
 
 def test_a_config_that_does_not_parse_does_not_cost_the_notice(
@@ -824,7 +859,7 @@ def test_a_refused_turn_that_ends_inside_a_hand_over_leaves_the_notice_to_the_re
     assert _state("sess-coder") == "attention"
     [line] = _blocked(project)
     assert line.startswith("coder-auth: auto mode is refusing") and "(3 refusals" in line
-    assert "aisquare fleet restart coder-auth" in line
+    assert f"aisquare fleet restart --project {project.id} coder-auth" in line
     # Said once, as for any session.
     assert hooks_service.turn_stopped(project.root, session_id="sess-coder") is None
     assert len(_blocked(project)) == 1

@@ -1,20 +1,16 @@
-"""The Project view: Manager · Board · Doctor · Explainability · Settings tabs.
+"""The Project view: Manager · Board · AISquare · Settings tabs.
 
 One ``TabbedContent`` per selected project (docs/plans/fleet-tui.md §4.2). The
 Manager tab is where goal intake happens — the user types to the manager's real
 Claude Code session exactly as they would to any other, so the tab is the
 manager's ``TerminalPane`` and nothing more, plus a **Start manager** button
 while the project has none. The Board tab is ``cli.ui.board.BoardPanel``, the
-widgets of ``aisquare board -w``; Explainability and Settings are the two forms
-in this package.
+widgets of ``aisquare board -w``; AISquare (``ExplainabilityView``, under its
+"Explainability" heading — the first of the tab's sections) and Settings are
+the two forms in this package.
 
-Doctor is a ``DoctorView`` this view fills itself, with ``diagnostics.doctor``
-in the project's root as cwd — so its one-click fixes are the project's fixes,
-not the UI's cwd's. It runs when the tab is ACTIVATED and not before: a doctor
-is seconds of git/tmux/claude probing, and opening a project must not pay for
-a tab nobody looked at. The shell may push instead, through
-:meth:`ProjectView.show_doctor`; the app-level ``#doctor`` view is a different
-widget with a different scope (whatever the sidebar last selected).
+There is no Doctor tab: the doctor is the app's, on its own page, run at start
+and when that page opens — not once per project view, nor per tab activation.
 
 The shell pushes fresh data with :meth:`ProjectView.refresh_status`. The plan
 names that push ``refresh(status_snapshot)``, and Textual owns ``refresh`` on
@@ -27,8 +23,7 @@ is how the tests drive it.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from pathlib import Path
+from collections.abc import Sequence
 from typing import ClassVar, Self
 
 from rich.text import Text
@@ -42,34 +37,17 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.cli.ui.views.agent import shown_pane
-from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core.tmux import TmuxServer
-from aisquare.models import CheckStatus, DoctorCheck, FleetAgentStatus, ProjectInfo
-from aisquare.services import diagnostics
+from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
+from aisquare.services import install_route
+from aisquare.services import project as project_service
 
 SPAWN_WORKER = "spawn-manager"
 """Name of the worker that starts the manager; how its result is told apart."""
-
-DOCTOR_WORKER = "project-doctor"
-"""Name of the worker that runs the Doctor tab's checks.
-
-Deliberately NOT ``doctor``: ``FleetApp.on_worker_state_changed`` claims that
-name for its own app-level run, and a ``Worker.StateChanged`` bubbles from here
-up to the app.
-"""
-
-ProjectDoctor = Callable[[Path], list[DoctorCheck]]
-"""``project root -> checks``: how the Doctor tab runs the doctor for a project."""
-
-
-def project_doctor(root: Path) -> list[DoctorCheck]:
-    """The default: this project's checks, in-process, with its root as cwd."""
-    return diagnostics.doctor(cwd=root)
-
 
 _STATE_CHIP: dict[str, tuple[str, str]] = {
     "working": ("▶", "green"),
@@ -97,9 +75,16 @@ def manager_text(status: FleetAgentStatus) -> Text:
         text.append(f"  {status.session.model}", style="dim cyan")
     text.append(f"  {agent.pane_id}", style="dim")
     if status.tmux_session:
-        text.append(
-            f"  ·  tmux -L {agent.tmux_socket} attach -t ={status.tmux_session}", style="dim"
+        # Where the fleet asks its server: from a shell under another TMUX_TMPDIR, `-L`
+        # by the name reaches another server, and attaches to its session. Quoted as every
+        # printed path is: a TMUX_TMPDIR or `[fleet] tmux_socket` with a space or a `$` in
+        # it pasted as another command, or another path (round 29 of #257).
+        path = status.socket_at
+        where = ["-L", agent.tmux_socket] if path is None else ["-S", str(path)]
+        line = install_route.command_line(
+            ["tmux", *where, "attach", "-t", f"={status.tmux_session}"]
         )
+        text.append(f"  ·  {line}", style="dim")
     text.append(
         "\ntype to the manager as you would to any Claude session · F12 returns to the sidebar",
         style="dim",
@@ -124,10 +109,11 @@ def no_manager_text(
         status = exited.agent.exit_status
         suffix = f" ({status})" if status is not None else ""
         text.append(f"{name}'s manager exited{suffix}.\n", style="bold")
+        restart = project_service.fleet_command("restart", project, "manager")
         text.append(
             "Start manager begins a new session. Restart on its sidebar row brings the same "
-            "session back (its last screen is still there); aisquare fleet restart manager "
-            "does the same from a shell.",
+            f"session back (its last screen is still there); {restart} does the same from a "
+            "shell.",
         )
     else:
         text.append(f"{name} has no manager yet.\n", style="bold")
@@ -197,7 +183,7 @@ class ManagerTab(Vertical):
         try:
             status = fleet_service.status_of(manager)
         except fleet_service.FleetError:
-            status = FleetAgentStatus(agent=manager)
+            status = FleetAgentStatus(agent=manager, socket_at=fleet_service.socket_at(manager))
         self.show(status)
 
     def show(
@@ -210,9 +196,10 @@ class ManagerTab(Vertical):
         """Render ``status`` — the pane when there is a manager, the button when not.
 
         ``exited`` is the ended manager row the snapshot still lists (#138); it
-        only changes what the header above the button says. A ``lost`` manager
-        keeps its header and gets no pane (:func:`~aisquare.cli.ui.views.agent.shown_pane`):
-        after a reboot its id is the next server's, most often ANOTHER project's
+        only changes what the header above the button says. A ``lost`` manager, or one
+        held as another server's, keeps its header and gets no pane
+        (:func:`~aisquare.cli.ui.views.agent.shown_pane`): after a reboot or a
+        ``kill-server`` its id is the next server's, most often ANOTHER project's
         manager, and this tab showed that one and typed into it.
         """
         self.status = status
@@ -231,7 +218,9 @@ class ManagerTab(Vertical):
         pane.display = True
         if (wanted := shown_pane(status)) != pane.pane_id:
             if wanted is not None:
-                pane.server = TmuxServer(status.agent.tmux_socket)
+                # The row's own server, where its spawn said it listened: `-L` by the name
+                # alone, from another TMUX_TMPDIR, shows and types into another's %N.
+                pane.server = TmuxServer(status.agent.tmux_socket).at(status.socket_at)
             pane.attach(wanted)
 
     @on(Button.Pressed, "#start-manager")
@@ -282,7 +271,13 @@ class ManagerTab(Vertical):
                     markup=False,
                 )
                 for note in receipt.notes:
-                    self.notify(note, severity="warning", timeout=8, markup=False)
+                    done = note in receipt.shared
+                    self.notify(
+                        note,
+                        severity="information" if done else "warning",
+                        timeout=8,
+                        markup=False,
+                    )
             self.refresh_from_service()
         elif event.state is WorkerState.ERROR:
             self.notify(
@@ -296,12 +291,11 @@ class ManagerTab(Vertical):
 
 
 class ProjectView(TabbedContent):
-    """One project: its manager's pane first, then the board, doctor, tracing and settings."""
+    """One project: its manager's pane first, then the board, AISquare and settings."""
 
     TAB_IDS: ClassVar[tuple[str, ...]] = (
         "tab-manager",
         "tab-board",
-        "tab-doctor",
         "tab-explainability",
         "tab-settings",
         "tab-personas",
@@ -313,12 +307,10 @@ class ProjectView(TabbedContent):
         *,
         id: str | None = None,
         refresh_seconds: float = 2.0,
-        doctor: ProjectDoctor | None = None,
     ) -> None:
         super().__init__(id=id)
         self.project = project
         self.refresh_seconds = refresh_seconds
-        self._doctor: ProjectDoctor = doctor if doctor is not None else project_doctor
         # TabbedContent composes ITSELF from the panes handed to it — this is
         # what `with TabbedContent(): yield TabPane(...)` does at compose time,
         # so a subclass adds its panes here rather than overriding compose().
@@ -335,18 +327,10 @@ class ProjectView(TabbedContent):
                 id="tab-board",
             ),
             TabPane(
-                "Doctor",
-                # ``cwd``: the fixes this tab offers run in THIS project's root
-                # (§5.6 — the UI process never chdirs), and a project-scoped fix
-                # renders disabled without one.
-                DoctorView(cwd=project.root, id="project-doctor"),
-                id="tab-doctor",
-            ),
-            TabPane(
-                "Explainability",
+                "AISquare",
                 # ``project``: the key this tab shows and attaches is the one
-                # THIS page's launches use (#141) — the page's own project, which
-                # its fleet seats join — not the ``project switch`` pin's.
+                # THIS page's launches use (#141) — the project they join from
+                # its root — not the ``project switch`` pin's.
                 ExplainabilityView(project, id="project-explainability"),
                 id="tab-explainability",
             ),
@@ -359,6 +343,16 @@ class ProjectView(TabbedContent):
             self.compose_add_child(pane)
         self._pending: list[FleetAgentStatus] | None = None
         """A snapshot pushed before the tabs mounted, applied at mount."""
+
+    def refresh_project(self, project: ProjectInfo) -> None:
+        """Take the project as the store has it now — renamed from a card or the CLI, say.
+
+        The Settings tab shows its nickname and codename, so it is handed the fresh
+        row too; the other tabs read only the id and root, which do not change.
+        """
+        self.project = project
+        for settings in self.query(SettingsView):
+            settings.show_project(project)
 
     def refresh_status(self, agents: Sequence[FleetAgentStatus]) -> None:
         """Take the shell's fresh snapshot of this project's agents.
@@ -376,59 +370,11 @@ class ProjectView(TabbedContent):
             pending, self._pending = self._pending, None
             self.refresh_status(pending)
 
-    # --- the Doctor tab ----------------------------------------------------------------
-
-    def show_doctor(self, checks: Sequence[DoctorCheck]) -> None:
-        """Fill the Doctor tab with ``checks`` — the tab's own run, or the shell's push.
-
-        Safe before the tabs mount and safe with no Doctor tab: nothing to fill
-        is not an error, and the next activation runs the checks again.
-        """
-        views = self.query(DoctorView)
-        if views:
-            views.first().show(list(checks), cwd=self.project.root)
-
     @on(TabbedContent.TabActivated, pane="#tab-personas")
     def reload_personas(self) -> None:
         """Re-read the catalogue each time the tab is opened: the disk may have changed."""
         for tab in self.query(PersonasTab):
             tab.reload()
-
-    @on(TabbedContent.TabActivated, pane="#tab-doctor")
-    def run_project_doctor(self) -> None:
-        """Run this project's checks off the UI thread; the worker state paints them.
-
-        Lazy and exclusive: the tab is the only trigger, and re-opening it
-        refreshes the report instead of stacking runs.
-        """
-        root = self.project.root
-        self.run_worker(
-            lambda: self._doctor(root),
-            name=DOCTOR_WORKER,
-            group=DOCTOR_WORKER,
-            exclusive=True,
-            thread=True,
-            exit_on_error=False,  # a crashed doctor is a report, not an app crash
-        )
-
-    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        if event.worker.name != DOCTOR_WORKER:
-            return  # ManagerTab's spawn worker bubbles through here too
-        if event.state is WorkerState.SUCCESS:
-            result = event.worker.result
-            self.show_doctor(list(result) if isinstance(result, list) else [])
-        elif event.state is WorkerState.ERROR:
-            error = event.worker.error
-            self.show_doctor(
-                [
-                    DoctorCheck(
-                        name="doctor",
-                        status=CheckStatus.fail,
-                        detail=f"the checks crashed: {type(error).__name__}: {error}",
-                        fix="Run it in a terminal for the full traceback: aisquare doctor",
-                    )
-                ]
-            )
 
     def refresh(
         self,

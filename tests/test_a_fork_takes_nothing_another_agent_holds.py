@@ -136,14 +136,15 @@ def test_a_fork_never_moves_its_exited_sources_tree_to_another_branch(
 def test_a_fork_is_cut_at_its_sources_commit_not_on_a_branch_an_earlier_agent_left(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
-    """``reap`` removes an ended agent's merged worktree and keeps its branch. That label
-    is free among live agents, so the fork took it, and its worktree was the stale branch
-    checked out ("branch … already existed — checked it out"), not a new one cut at the
-    commit its source is on."""
+    """``reap`` removed an ended agent's merged worktree and kept its branch (0.7.0's; 0.8.x's
+    deletes a merged branch too, and a tree removed by hand still leaves its branch). That
+    label is free among live agents, so the fork took it, and its worktree was the stale
+    branch checked out ("branch … already existed — checked it out"), not a new one cut at
+    the commit its source is on."""
     earlier = fleet_service.spawn(project, "coder", label="coder-2", worktree=True).agent
     stale = _branch(Path(earlier.cwd))
     fleet_service.stop(project, "coder-2", force=True)
-    assert fleet_service.reap(project).worktrees_removed == [earlier.cwd]
+    _git("worktree", "remove", "--force", str(earlier.cwd), cwd=project.root)
     left_at = _git("rev-parse", stale, cwd=project.root)
     source = fleet_service.spawn(project, "coder", worktree=True).agent
     head = _commit(Path(source.cwd), "done.txt")

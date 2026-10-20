@@ -27,3 +27,6 @@ htmlcov/
 explainability_inbox.db
 # ...and SQLite's WAL sidecars, which appear only while the proxy is running.
 explainability_inbox.db-*
+
+# `make demo` (docs/demo/render.sh): the renders, and the demo's scratch home.
+/out/

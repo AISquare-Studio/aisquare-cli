@@ -18,6 +18,11 @@ from aisquare.cli.app import app
 from aisquare.core import insights, outbox
 from aisquare.core.config import AppConfig, load_config, save_config
 from aisquare.services import hooks as hooks_service
+from aisquare.services import project as project_service
+
+# These record in a directory nobody added (``tmp_path``), as they were written to:
+# with ``[projects] capture`` on. What capture off records — nothing — is tests/test_hooks.py's.
+pytestmark = pytest.mark.usefixtures("project_capture")
 
 
 @pytest.fixture(autouse=True)
@@ -72,6 +77,19 @@ def test_configured_prompt_is_spooled_with_its_session(tmp_path: Path) -> None:
     assert record["text"] == "ship the RC"
     assert record["session_id"] == "8dd460fb", "the session id is the Run key — it must survive"
     assert record["v"] == insights.RECORD_VERSION
+
+
+def test_with_capture_off_a_prompt_where_nothing_was_added_is_never_spooled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[projects] capture`` off, the default (this module's mark turns it on): a prompt
+    typed in a directory nobody added is kept nowhere, so it is shipped nowhere."""
+    monkeypatch.setattr(project_service, "capture_on", lambda: False)
+    _configure_shipping()
+
+    hooks_service.capture_prompt("ship the RC", tmp_path, session_id="8dd460fb")
+
+    assert _records() == []
 
 
 def test_configured_board_event_is_spooled_with_its_receipt(runner: CliRunner) -> None:

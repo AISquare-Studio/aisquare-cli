@@ -279,7 +279,7 @@ def _record_tell(monkeypatch: pytest.MonkeyPatch) -> Told:
 
     def tell(project: ProjectInfo, label: str, text: str, **_: Any) -> fleet_service.TellResult:
         told.calls.append((project.id, label, text))
-        return fleet_service.TellResult(True, "typed into the pane")
+        return fleet_service.TellResult("yes", "typed into the pane")
 
     monkeypatch.setattr(fleet_service, "tell", tell)
     return told

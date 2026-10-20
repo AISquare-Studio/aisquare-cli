@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from aisquare.core import state_file
+from aisquare.core import locking, state_file
 from aisquare.core.atomic import write_replacing
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import StateUnwritableError, read_state, update_state
@@ -231,7 +231,7 @@ def test_every_errno_that_means_held_is_waited_for_not_refused(
             raise OSError(held, "held")
         lock_exclusive(fd)
 
-    monkeypatch.setattr(state_file, "lock_exclusive", held_twice)
+    monkeypatch.setattr(locking, "lock_exclusive", held_twice)
     update_state("sidebar_width", 44)
     assert len(attempts) == 3, "waited through two 'held' answers, then took the lock"
     assert read_state() == {"board_theme": "nord", "sidebar_width": 44}
@@ -308,7 +308,7 @@ def test_a_lock_error_that_is_not_contention_is_refused_at_once(
     def no_locks(fd: int) -> None:
         raise OSError(errno.ENOLCK, "No locks available")
 
-    monkeypatch.setattr(state_file, "lock_exclusive", no_locks)
+    monkeypatch.setattr(locking, "lock_exclusive", no_locks)
     started = time.monotonic()
     with pytest.raises(StateUnwritableError, match=r"state\.json\.lock could not be locked"):
         update_state("sidebar_width", 44)

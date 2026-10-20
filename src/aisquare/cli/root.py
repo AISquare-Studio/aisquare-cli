@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli import auth as auth_cli
+from aisquare.cli import install as install_cli
 from aisquare.cli.common import (
     emit_block,
     emit_doctor,
@@ -28,6 +29,7 @@ from aisquare.services import diagnostics as diagnostics_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
 from aisquare.services import lifecycle as lifecycle_service
+from aisquare.services import project as project_service
 from aisquare.services import sync as sync_service
 
 
@@ -80,6 +82,8 @@ def init(
                 assume_yes=yes,
                 explainability=_explainability_decision(explainability),
             )
+    except project_service.NotAFolder as exc:
+        fail(str(exc), error="not_a_directory", ref=str(path or Path.cwd()))
     except lifecycle_service.UnreadableConfigResetRefused as refused:
         fail(
             f"--reinit would replace config.toml, which cannot be read ({refused.summary}), "
@@ -223,16 +227,6 @@ def open_() -> None:
     diagnostics_service.open_home()
 
 
-def upgrade() -> None:
-    """Upgrade aisquare and refresh agent hooks."""
-    lifecycle_service.upgrade()
-
-
-def uninstall() -> None:
-    """Remove agent hooks and optionally local data."""
-    lifecycle_service.uninstall()
-
-
 def register(app: typer.Typer) -> None:
     """Attach the top-level commands to ``app`` in display order.
 
@@ -253,5 +247,5 @@ def register(app: typer.Typer) -> None:
     app.command("login")(auth_cli.login)
     app.command("logout")(auth_cli.logout)
     app.command("whoami")(auth_cli.whoami)
-    app.command("upgrade", hidden=True)(upgrade)
-    app.command("uninstall", hidden=True)(uninstall)
+    app.command("upgrade")(install_cli.upgrade)
+    app.command("uninstall")(install_cli.uninstall)

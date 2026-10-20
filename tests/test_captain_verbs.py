@@ -359,7 +359,7 @@ def test_wololo_converts_an_idle_agent_and_refuses_a_missing_one(
 
     def tell(project: ProjectInfo, label: str, text: str, *, sender: str | None = None) -> Any:
         told.append(f"{label}: {text}")
-        return fleet_service.TellResult(True, "typed into its pane")
+        return fleet_service.TellResult("yes", "typed into its pane")
 
     monkeypatch.setattr(fleet_service, "tell", tell)
     code, data = run_json(runner, "wololo", "alpha", "coder-1", tid)

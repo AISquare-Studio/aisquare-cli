@@ -28,6 +28,7 @@ from aisquare.core.keys import EXTENDED_MINIMUM
 from aisquare.core.spawn import TEAM_ENV_VARS
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
+from aisquare.core.terminal import outer_terminal
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project, git_common_root
 from aisquare.models import (
@@ -35,10 +36,13 @@ from aisquare.models import (
     DoctorCheck,
     FleetAgent,
     InjectionRecord,
+    ProjectInfo,
     PromptRecord,
+    PruneCandidate,
     ShippingStatus,
     StatusReport,
 )
+from aisquare.services import agents as agents_service
 from aisquare.services import (
     auto_mode,
     ci_client,
@@ -47,12 +51,14 @@ from aisquare.services import (
     destinations,
     explainability_ops,
     iam,
+    install_route,
 )
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import credits as credits_service
 from aisquare.services import distill as distill_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.ci_contract import DeliveryDescriptor
@@ -122,7 +128,9 @@ def doctor(
     what the CLI means. The fleet UI hosts many projects in one process and
     must not ``os.chdir`` (docs/plans/fleet-tui.md §5.6), so it passes the
     selected project's root here and gets that project's report in-process.
-    The machine-wide checks ignore it — they are about this machine.
+    The machine-wide checks ignore it — they are about this machine — but for
+    claude-code it is the folder whose project- or local-scope plugin a session
+    there loads, as Welcome asks about the project it starts the fleet in.
 
     ``project_id`` is the project whose explainability key the explainability
     section resolves, as its launches do (``doctor --project``); ``None`` is
@@ -138,7 +146,8 @@ def doctor(
         _check_database(),
         _check_repomix(),
         _check_tiktoken(),
-        _check_claude_code(),
+        _check_claude_code(cwd),
+        *_planned_agent_checks(),
         *_claude_accounts_checks(),
         _check_tmux(),
         _check_gh(),
@@ -151,10 +160,10 @@ def doctor(
         *_check_resumable_agents(),
         *_check_captured_projects(),
         # After the actionable machine checks on purpose. The fleet UI's sidebar
-        # shows the first three not-ok rows (`DOCTOR_LINES == 3`, a stable sort
-        # within the warn group), so a row inserted at position 12 evicted one
-        # of `brain` / `snapshot` / a logged-out `gh` — the ones an operator can
-        # act on — from the only doctor surface visible without a click. The
+        # showed the first three not-ok rows (a stable sort within the warn
+        # group), so a row inserted at position 12 evicted one of `brain` /
+        # `snapshot` / a logged-out `gh` — the ones an operator can act on — from
+        # what was seen first; the Doctor page still lists them in this order. The
         # fleet terminal row (#147) can warn too, about a running server's kept
         # prefix, so it waits here with them rather than beside tmux.
         _check_browser_tools(cwd),
@@ -229,8 +238,37 @@ def _check_python() -> DoctorCheck:
 _GLOBAL_INSTALL = f"pipx install {DISTRIBUTION} (or: uv tool install {DISTRIBUTION})"
 
 
+def _route_of_this_process() -> install_route.InstallRoute | None:
+    """How THIS process was installed, or ``None`` when that cannot be read.
+
+    ``install_route.detect`` reads the package metadata and files under
+    ``sys.prefix``; a doctor row never fails on a question it cannot answer.
+    """
+    try:
+        return install_route.detect()
+    except Exception:
+        return None
+
+
 def _check_install() -> DoctorCheck:
-    """Where aisquare runs from — the Claude Code hook needs a stable path."""
+    """Where the ``aisquare`` a shell finds runs from — a Claude Code hook needs a
+    path that stays.
+
+    A console script inside a virtualenv is the one place a hook's program can
+    vanish from (the venv deleted or rebuilt), so a venv on PATH was a warning
+    with the global-install command, always. That read a developer's own
+    checkout — installed editable into its ``.venv``, which ``activate`` puts
+    first on PATH — as a stray environment, and sent them to PyPI for a release
+    the checkout is ahead of: on the 0.8.0 branch, before 0.8.0 was published,
+    following the advice would have replaced the branch with 0.6.0.
+
+    ``install_route`` knows the difference, from how THIS process was installed
+    rather than from the path's spelling. So a venv that is this process's own
+    environment is judged by its route: an editable or local-source install is
+    deliberate, green, and named as such; a plain ``pip install`` into some venv
+    keeps the advice. A venv on PATH that is NOT this process cannot be
+    classified from here and keeps it too.
+    """
     binary = shutil.which("aisquare")
     if binary is None:
         return _warn(
@@ -239,6 +277,13 @@ def _check_install() -> DoctorCheck:
             f"Install as a global tool: {_GLOBAL_INSTALL}",
         )
     if {".venv", "venv"} & set(Path(binary).parts):
+        # Paths alone, the hooks' own rule (`same_install`): the file itself, or the same
+        # file through a link (uv's ~/.local/bin/aisquare). One copy, so this row and the
+        # claude-code row cannot disagree about one aisquare (review of #257).
+        this = agent_core.same_install(agent_core.HookBinary(Path(binary)))
+        route = _route_of_this_process() if this else None
+        if route is not None and route.kind != install_route.VENV:
+            return _ok("install", f"aisquare at {binary} — {route.describe()}")
         return _warn(
             "install",
             f"aisquare runs from a virtualenv ({binary})",
@@ -592,15 +637,15 @@ def _check_database() -> DoctorCheck:
         counted = "" if count is None else f" ({count} user entries)"
         lacks = f"context.db opens{counted} but lacks part of this build's schema: {shown}"
         database = paths.db_path()
+        keep = install_route.command_line(["cp", str(database), f"{database}.bak"])
         return _fail(
             "database",
             "; ".join([lacks, *costs]),
             "The open that just ran adds back the tables and columns this build knows "
             "another line can skip, and these are not among them: another build or a "
             "hand edit changed the store in a way this build does not know. The history "
-            f"in it is intact, so do not move it aside: keep a copy (cp {database} "
-            f"{database}.bak) and report this line, with the output of `aisquare "
-            f"--version`, at {_ISSUES_URL}",
+            f"in it is intact, so do not move it aside: keep a copy ({keep}) and report "
+            f"this line, with the output of `aisquare --version`, at {_ISSUES_URL}",
         )
     marker = paths.truncation_marker_path()
     if marker.exists():
@@ -615,8 +660,8 @@ def _check_database() -> DoctorCheck:
             f"context.db is readable ({count} user entries) — but it was found "
             f"TRUNCATED and rebuilt at {when}; the sessions, tasks and notes it "
             "held are gone",
-            f"Nothing to repair — the history was lost before this. "
-            f"Acknowledge it with: rm {marker}",
+            "Nothing to repair — the history was lost before this. "
+            f"Acknowledge it with: {install_route.command_line(['rm', str(marker)])}",
         )
     return _ok("database", f"context.db is readable ({count} user entries)")
 
@@ -633,7 +678,7 @@ def _read_line(path: Path) -> str:
         return ""
 
 
-_NODE_FLOOR = ".".join(str(part) for part in snapshot_core.MIN_NODE)
+_NODE_FLOOR = snapshot_core.MIN_NODE_TEXT
 
 #: Deliberately NOT ``install_hint("nodejs")``. On the distributions that ship a
 #: Node too old for repomix, the package manager's ``nodejs`` IS the old one --
@@ -670,14 +715,26 @@ def _check_repomix() -> DoctorCheck:
     run -- a warning, not "untested". An unreadable Node stays ``ok``: failing
     open costs this line its verdict, while guessing "too old" would send
     someone to reinstall a working toolchain.
+
+    NO NODE AT ALL IS OFF, NOT BROKEN. Snapshots are optional and memory and
+    the hooks never touch Node, so a machine with none of ``repomix``,
+    ``npx`` or ``node`` made a choice rather than a mistake: ``ok``, with
+    :data:`snapshot_core.OFF_DETAIL` and no fix. Any ONE of the three present
+    means someone started on the toolchain, and the warnings below still say
+    what is missing.
     """
     name = "repomix"
     direct = shutil.which("repomix")
     if direct is None and shutil.which("npx") is None:
+        if shutil.which("node") is None:
+            return _ok(name, snapshot_core.OFF_DETAIL)
+        # A Node IS here, so the missing piece is npm: no npx almost always means
+        # no npm, which Arch, Alpine and Debian's own nodejs package separately.
         return _warn(
             name,
             "repomix not found — codebase snapshots are disabled",
-            f"Install Node.js {_NODE_FLOOR}+, then: npm install -g repomix",
+            f"Install npm (some distributions package it apart from Node; repomix needs "
+            f"Node.js {_NODE_FLOOR}+), then: npm install -g repomix",
         )
     how = "repomix found" if direct else "repomix available on demand via npx"
     if shutil.which("node") is None:
@@ -697,12 +754,11 @@ def _check_repomix() -> DoctorCheck:
             f"{how} — Node version not readable, so untested against the "
             f"{_NODE_FLOOR} minimum; snapshots enabled",
         )
-    floor = snapshot_core.installed_repomix_floor() if direct else None
-    required = floor or snapshot_core.MIN_NODE
+    required, own_floor = snapshot_core.pack_node_floor()
     found = ".".join(str(part) for part in node)
     if node < required:
         wanted = ".".join(str(part) for part in required)
-        whose = "the installed repomix needs" if floor else "repomix needs"
+        whose = "the installed repomix needs" if own_floor else "repomix needs"
         return _warn(
             name,
             f"{how}, but Node {found} is older than {whose} "
@@ -713,7 +769,20 @@ def _check_repomix() -> DoctorCheck:
 
 
 def _check_tiktoken() -> DoctorCheck:
-    if _has_module("tiktoken"):
+    installed = _has_module("tiktoken")
+    if not snapshot_core.can_pack():
+        # Only packing a snapshot counts tokens, so where nothing can pack there is
+        # nothing for it to sharpen, installed or not. An amber line here was a fix
+        # for a feature that is not running, on exactly the machines that chose not
+        # to run it; "enabled" was a claim about one, and the one-liner always adds
+        # tiktoken. It says packing, not snapshots: a pack made before Node went is
+        # still what agents get, and the snapshot row says so (review of #257).
+        return _ok(
+            "tiktoken",
+            ("installed, but unused" if installed else "off")
+            + " — only packing a codebase snapshot uses it, and nothing can pack here",
+        )
+    if installed:
         return _ok("tiktoken", "exact snapshot token counts enabled")
     # `pipx inject` takes the name of an INSTALLED PIPX ENVIRONMENT, which is
     # this distribution -- so `pipx inject aisquare tiktoken` failed on every
@@ -790,7 +859,11 @@ def _hook_binary_problems(sites: list[agent_core.HookSiteHealth]) -> list[str]:
     for (state, binary, version), dirs in groups.items():
         where = ", ".join(dirs)
         if state == agent_core.HOOK_BINARY_MISSING:
-            clauses.append(f"hooks in {where} point at {binary}, which does not exist")
+            gone = binary is None or not os.path.exists(binary)
+            clauses.append(
+                f"hooks in {where} point at {binary}, which "
+                + ("does not exist" if gone else "cannot start")
+            )
         elif state == agent_core.HOOK_BINARY_UNKNOWN:
             clauses.append(f"hooks in {where} point at {binary}, whose version could not be read")
         else:
@@ -798,34 +871,199 @@ def _hook_binary_problems(sites: list[agent_core.HookSiteHealth]) -> list[str]:
     return clauses
 
 
-def _check_claude_code() -> DoctorCheck:
+def _plugin_label(plugin: agent_core.ClaudePlugin) -> str:
+    label = f"the aisquare plugin {plugin.version}" if plugin.version else "the aisquare plugin"
+    if plugin.project is not None:
+        # Installed for one repository: it runs only in sessions started there.
+        label += f" at {plugin.scope} scope in {plugin.project}"
+    return label
+
+
+def _plugin_runner(pin: str | None) -> tuple[str, str | None, str | None]:
+    """What the plugin's hooks run here: ``(what, problem, fix)``, graded like a hook's binary.
+
+    The plugin's version is its manifest's, not the CLI's, and the launcher runs the
+    first aisquare it finds (``agent_core.plugin_runner``), else the pinned release
+    through uvx. An old CLI first on PATH is the #84 blind spot again, so it is
+    graded with the same probe the settings.json hooks get. ``pin`` is the version
+    the plugin was installed at, which the launcher pins uvx to.
+    """
+    program = agent_core.plugin_runner()
+    if program is None:
+        if agent_core.launcher_finds("uvx") is not None:
+            release = f"{DISTRIBUTION}=={pin}" if pin else f"the pinned {DISTRIBUTION}"
+            return f"{release} through uvx", None, None
+        return (
+            "",
+            "finds neither aisquare nor uvx on PATH, in ~/.local/bin or in ~/.cargo/bin, "
+            "so its hooks run nothing",
+            f"Install uv (https://docs.astral.sh/uv/), or the CLI: uv tool install {DISTRIBUTION}",
+        )
+    state, version = agent_core.classify_hook_binary(agent_core.HookBinary(program))
+    if state == agent_core.HOOK_BINARY_CURRENT:
+        return "this install", None, None
+    found = f"{program} ({version})" if version else f"{program}, whose version could not be read"
+    this = f"{agent_core.current_install()} ({__version__})"
+    return (
+        "",
+        f"runs {found} — this install is {this}",
+        f"put this install's aisquare first on PATH, or upgrade {program}",
+    )
+
+
+def _unmade_ambient_dir(sites: list[agent_core.HookSiteHealth]) -> Path | None:
+    """The config dir sessions from this shell read, when no graded site is that dir and it
+    is not a directory to grade: anything in its way (``agents_service.in_the_way``), a
+    file, a link to nothing, a folder this user cannot enter, on any PATH; or nothing
+    there yet, with Claude Code on PATH to make it. Paths only, like the rest of the row:
+    nothing is started or made here (``agents connect`` makes it).
+    """
+    ambient = agent_core.ambient_hook_dir("claude-code")
+    if ambient is None or os.path.isdir(ambient):
+        return None
+    if agents_service.in_the_way(ambient) is None and agent_core.claude_on_path() is None:
+        return None  # nothing there yet, and no Claude Code on PATH to make it
+    key = agent_core.dir_identity(ambient)
+    if any(agent_core.dir_identity(site.config_dir) == key for site in sites):
+        return None
+    return ambient
+
+
+@agents_service.one_reading()
+def _check_claude_code(cwd: Path | None = None) -> DoctorCheck:
     """Claude Code: are our hooks in every config dir, and do they run THIS install?
 
-    Graded per directory over recorded sites UNION the ambient dir UNION every
-    ``~/.claude*`` on disk that carries our hooks (``agent_core.hook_sites``).
-    Two ways a directory goes red, both with the same one-line fix:
+    ``cwd`` is where the sessions in question start (``doctor``'s project; the
+    process's working directory unless given): it decides a project- or local-scope
+    plugin (review of #257).
 
-    * hooks missing or partial — the check this always made;
+    Graded per directory over recorded sites UNION the ambient dir UNION every
+    ``~/.claude*`` on disk that carries our hooks or enables our plugin
+    (``agent_core.hook_sites``). An ambient dir Claude Code has not made yet, with
+    ``claude`` on PATH, has nothing to grade and is reported missing, with the bare
+    Connect that makes it. Two ways a directory goes red, both with the
+    same one-line fix:
+
+    * not connected (hooks missing or partial) — the check this always made,
+      asked of ``agents_service.claude_code_connected`` per directory, the one
+      answer the Welcome view and the plugin route share, so this row's Connect
+      fix (a button in asq) never offers to connect what is already connected;
     * hooks present but naming an aisquare that is not this install — the #84
       gap. The text of a hook is ours whichever binary it names; for weeks every
       board update on one box ran a 0.3-era checkout while this line was green.
 
-    Read-only, like every check here: doctor never rewrites ``settings.json``.
+    The aisquare Claude Code plugin is the other route in: a directory that
+    enables it is connected with no settings.json hooks at all, and saying
+    "missing" there offered a one-click ``agents connect`` that would make every
+    hook fire twice. A directory with BOTH warns: the plugin's hooks stand down
+    for the events settings.json runs, so nothing doubles, but two routes drift
+    apart (the plugin pins its own release), and keeping one is a choice the
+    operator makes -- so that fix is not a button. Not a plugin installed for one
+    repository (project or local scope): it runs there alone, so the directory's
+    hooks, which every other repository runs on, are not doubled but graded.
+
+    Read-only, like every check here: doctor never rewrites ``settings.json``. Connect's
+    and disconnect's answers for each directory are worked out once per run
+    (``agents_service.one_reading``); the row's other readers read the files as they go.
     """
     info = agent_core.detect("claude-code")
-    sites = agent_core.hook_sites("claude-code")
+    sites = agent_core.hook_sites("claude-code", cwd=cwd)
     if info is None or (not info.detected and not sites):
         return _ok("claude-code", "Claude Code not detected on this machine")
     version = claude_code_version()
     product = f"Claude Code {version}" if version else "Claude Code"
-    if not sites:
-        return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
-
-    unhooked = [site for site in sites if not site.hooks_installed]
-    wrong_binary = [
-        site for site in sites if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT)
+    # Hooks switched off ("disableAllHooks": true) run none of ours however complete
+    # they are, and `agents connect` cannot change that. The shared check answers
+    # False there, so such a directory must not reach `unhooked` below and be
+    # offered a Connect button that could never clear it. The switch is per
+    # directory, so it is one clause of the row and every other directory is graded
+    # as usual: reported alone, one switched-off profile hid that the directory
+    # sessions use was not connected, and its Connect (review of #257).
+    switched_off = [
+        site for site in sites if agent_core.hooks_disabled("claude-code", site.config_dir)
     ]
-    if not unhooked and not wrong_binary:
+    if not sites:
+        # Connect makes the directory a session from this shell reads, unless it refuses it
+        # (agents_service.access): a Connect that could only fail was offered (review of #257).
+        ambient = agent_core.ambient_hook_dir("claude-code")
+        refusal = agents_service.access("claude-code").connect
+        if ambient is not None and refusal is not None:
+            return _warn(
+                "claude-code",
+                f"{product} hooks cannot be written in {ambient}: {refusal.why}",
+                _refused_fix(ambient, refusal),
+            )
+        return _warn("claude-code", f"{product} {_STALE_HOOKS}", _RECONNECT)
+    graded = [site for site in sites if site not in switched_off]
+    # The directory sessions from this shell read, when no site grades it: not made yet
+    # (npm and Homebrew make it on the first start; CLAUDE_CONFIG_DIR can name a new
+    # profile), or not a directory. Beside any other site this row was green while those
+    # sessions ran no hooks, and Welcome offered Connect (review of #257).
+    unmade = _unmade_ambient_dir(sites)
+
+    # The shared answer, which counts the plugin route as connected.
+    unhooked = [
+        site
+        for site in graded
+        if not agents_service.claude_code_connected(site.config_dir, cwd=cwd)
+    ]
+    doubled = [
+        site
+        for site in graded
+        if site.plugin is not None and agent_core.hook_commands("claude-code", site.config_dir)
+    ]
+    # Doubled directories are graded too. The plugin's copies stand down only beside
+    # hooks whose program can start, as its launcher decides (``agent_core.starts``, the
+    # MISSING verdict), so beside dead ones the plugin runs instead: that is not "two
+    # ways", and those hooks fail on every event (review of #249).
+    dead = [site for site in doubled if site.binary_state == agent_core.HOOK_BINARY_MISSING]
+    wrong_binary = [
+        site
+        for site in graded
+        if site.binary_state not in (None, agent_core.HOOK_BINARY_CURRENT) and site not in dead
+    ]
+    # A directory `agents connect` refuses (agents_service.access) got a Connect that
+    # could only fail: home-manager's read-only settings.json never cleared. Named with
+    # connect's own reason and no button (review of #257). Hooks it holds that run the
+    # wrong program still say so: read only as "cannot be written", the row hid that
+    # every event fails.
+    refused = {
+        site.config_dir: refusal
+        for site in (*unhooked, *wrong_binary)
+        if (refusal := agents_service.access("claude-code", site.config_dir).connect) is not None
+    }
+    unhooked = [site for site in unhooked if site.config_dir not in refused]
+    if unmade is not None and (refusal := agents_service.access("claude-code").connect):
+        refused[unmade] = refusal
+        unmade = None
+    # Where the plugin is the route that runs, what it runs is graded like a hook.
+    plugin_runs = [site for site in graded if site.plugin is not None and site not in doubled]
+    plugin_runs += dead
+    pins = [site.plugin.version for site in plugin_runs if site.plugin is not None]
+    runs, runner_problem, runner_fix = (
+        _plugin_runner(next((pin for pin in pins if pin), None))
+        if plugin_runs
+        else ("", None, None)
+    )
+    healthy = (
+        not unhooked
+        and not wrong_binary
+        and not refused
+        and not doubled
+        and runner_problem is None
+        and unmade is None
+    )
+    # A plugin enabled for this folder alone misses where the fleet's coders start, by
+    # Welcome step 2's own rule: said on every branch of the row, with connect's refusal
+    # where it has one; only a green row said it, naming a Connect that refuses (#257).
+    coders = _coders_missed(
+        {
+            site.config_dir: agents_service.access("claude-code", site.config_dir).connect
+            for site in graded
+            if site.plugin is not None and _misses_the_coders(site.config_dir, site.plugin, cwd)
+        }
+    )
+    if healthy and not switched_off:
         # Installed, firing, and running THIS install — but a context hook may
         # still carry a shorter timeout than the CI hook can wait for (a
         # settings.json from 0.6.0, or one hand-edited). Its own sentence: the
@@ -837,42 +1075,253 @@ def _check_claude_code() -> DoctorCheck:
             if (shortfall := agent_core.hook_timeout_shortfall("claude-code", site.config_dir))
         }
         if short:
-            listed = ", ".join(f"{path} ({', '.join(events)})" for path, events in short.items())
-            return _warn(
-                "claude-code",
-                f"{product} connected, but the context hooks allow less than "
-                f"{agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS} s in: {listed} — a CI hook still "
-                "inside the run's ceiling would be cut off and its row never written",
-                "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in short),
-            )
+            return _short_timeouts(product, short, coders)
         where = f" in {len(sites)} config dirs" if len(sites) > 1 else ""
-        unrecorded = [str(site.config_dir) for site in sites if not site.recorded]
+        hooked = [site for site in sites if site.plugin is None]
+        plugins = [(site.config_dir, site.plugin) for site in sites if site.plugin is not None]
+        # A plugin user never runs `agents connect`, so "not connected in this
+        # home" would be true of every plugin directory and mean nothing.
+        unrecorded = [str(site.config_dir) for site in hooked if not site.recorded]
         note = (
             f"; {', '.join(unrecorded)} found on disk, not connected in this home"
             if unrecorded
             else ""
         )
-        return _ok(
-            "claude-code", f"{product} connected{where} (all lifecycle hooks installed{note})"
-        )
+        routes = [f"all lifecycle hooks installed{note}"] if hooked else []
+        # A project- or local-scope plugin for this repository is not the directory's
+        # (`hook_site_health`): beside its hooks the plugin's launcher stands down, so
+        # they run once here, as in every other repository (review of #257).
+        if hooked and agent_core.plugin_route_supported():
+            routes.extend(
+                f"{_plugin_label(beside)} stands down beside them"
+                for site in hooked
+                if (beside := agent_core.claude_repo_plugin_here(site.config_dir, cwd)) is not None
+            )
+        if len(plugins) == 1 and not hooked:
+            routes.append(f"through {_plugin_label(plugins[0][1])}, which runs {runs}")
+        else:
+            routes.extend(f"through {_plugin_label(p)} in {d}" for d, p in plugins)
+            if plugins:
+                routes.append(f"the plugin runs {runs}")
+        # Connected here, which is this row's verdict, as `agents list` says too.
+        if coders is not None:
+            routes.append(coders[0])
+        return _ok("claude-code", f"{product} connected{where} ({'; '.join(routes)})")
 
     problems: list[str] = []
+    fixes: list[str] = []
+    if switched_off:
+        listed = ", ".join(str(site.config_dir / "settings.json") for site in switched_off)
+        problems.append(
+            f'hooks are switched off ("disableAllHooks": true) in: {listed} — Claude Code '
+            "runs none of them, so no context is injected and no prompt is captured"
+        )
+        fixes.append(f'Turn hooks back on: remove "disableAllHooks" from {listed}')
     if unhooked:
         listed = ", ".join(_site_label(site) for site in unhooked)
         problems.append(f"{_STALE_HOOKS} in: {listed}")
+    if unmade is not None:
+        problems.append(
+            f"hooks are missing in {unmade}, which sessions from this shell read and Claude "
+            "Code has not made yet"
+        )
     if wrong_binary:
         clauses = "; ".join(_hook_binary_problems(wrong_binary))
         this = f"{agent_core.current_install()} ({__version__})"
         problems.append(f"{clauses} — this install is {this}")
+    stale = {site.config_dir for site in wrong_binary}
+    for directory, refusal in refused.items():
+        problems.append(f"hooks cannot be written in {directory}: {refusal.why}")
+        # Read-only by design (home-manager), the remedy is in what generates it.
+        also = "point its hooks at this install" if directory in stale else None
+        fixes.append(_refused_fix(directory, refusal, also=also))
+    live = [site for site in doubled if site not in dead]
+    if dead:
+        listed = ", ".join(str(site.config_dir) for site in dead)
+        problems.append(
+            f"settings.json hooks in: {listed} name an aisquare that does not exist or cannot "
+            "start, so they fail on every event and the aisquare plugin runs in their place"
+        )
+    if live:
+        listed = ", ".join(str(site.config_dir) for site in live)
+        problems.append(
+            f"runs aisquare two ways in: {listed} — settings.json hooks and the aisquare "
+            "plugin, whose hooks stand down while those are installed; keep one"
+        )
+    if runner_problem is not None:
+        listed = ", ".join(str(site.config_dir) for site in plugin_runs)
+        problems.append(f"the aisquare plugin in: {listed} {runner_problem}")
+    # A doubled directory gets no Connect button: connecting keeps both routes.
     broken: list[Path] = []
     for site in sites:
-        if (site in unhooked or site in wrong_binary) and site.config_dir not in broken:
+        if site in doubled or site.config_dir in broken or site.config_dir in refused:
+            continue
+        if site in unhooked or site in wrong_binary:
             broken.append(site.config_dir)
-    return _warn(
-        "claude-code",
-        f"{product} {'; '.join(problems)}",
-        "; ".join(f"aisquare agents connect claude-code --config-dir {p}" for p in broken),
+    fixes.extend(agents_service.config_dir_command("connect", "claude-code", p) for p in broken)
+    if unmade is not None:
+        # Bare: the directory a session from this shell reads, which connect makes. A
+        # --config-dir naming any other it never makes, so that form refuses as not installed.
+        fixes.append(_RECONNECT)
+    fixes.extend(
+        _disconnect_fix(site.config_dir, "remove them, and the plugin runs alone: ")
+        for site in dead
     )
+    fixes.extend(
+        f"{_disconnect_fix(site.config_dir, 'keep the plugin: ')}"
+        f" (or keep the hooks: {_plugin_uninstall(site)})"
+        for site in live
+    )
+    if runner_fix is not None:
+        fixes.append(runner_fix)
+    if coders is not None:
+        problems.append(coders[0])
+        fixes.extend(coders[1])
+    return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(filter(None, fixes)))
+
+
+def _coders_missed(
+    missed: dict[Path, agents_service.Refusal | None],
+) -> tuple[str, list[str]] | None:
+    """What the row says for config dirs whose plugin misses the coders
+    (:func:`_misses_the_coders`), each with connect's refusal or ``None``, and the fixes:
+    the Connect that covers every folder (bare for the directory this shell reads), or
+    where connect refuses, that refusal's remedy. ``None`` when no route misses them."""
+    if not missed:
+        return None
+    ambient = agent_core.ambient_hook_dir("claude-code")
+    here = agent_core.dir_identity(ambient) if ambient is not None else None
+    connects = [
+        "aisquare agents connect claude-code"
+        if agent_core.dir_identity(directory) == here
+        else agents_service.config_dir_command("connect", "claude-code", directory)
+        for directory, refusal in missed.items()
+        if refusal is None
+    ]
+    clause = (
+        "a coder's git worktree loads the aisquare plugin installed for this repository only "
+        "where its own .claude/settings.json enables it, so the fleet's coders may run "
+        "without aisquare"
+    )
+    if connects:
+        clause += f": {' or '.join(connects)} runs it in every folder"
+    refused = {d: refusal for d, refusal in missed.items() if refusal is not None}
+    clause += "".join(
+        f", and connect cannot write the hooks in {directory}: {refusal.why}"
+        for directory, refusal in refused.items()
+    )
+    fixes = [*connects]
+    fixes.extend(_refused_fix(d, refusal) for d, refusal in refused.items())
+    return clause, fixes
+
+
+def _misses_the_coders(config_dir: Path, plugin: agent_core.ClaudePlugin, cwd: Path | None) -> bool:
+    """Whether ``plugin``, enabled for one repository and the route ``config_dir`` takes
+    here, misses the folder the fleet's coders start in: Welcome step 2's rule
+    (``first_run.coder_folder``), asked of the same shared check. Paths only."""
+    if plugin.project is None:
+        return False
+    from aisquare.services import first_run  # lazy: first_run imports this module
+
+    try:
+        here = cwd if cwd is not None else Path.cwd()
+    except OSError:  # the working directory was removed: no coders start there
+        return False
+    coders = first_run.coder_folder(here)
+    return coders != here and not agents_service.claude_code_connected(config_dir, cwd=coders)
+
+
+def _short_timeouts(
+    product: str, short: dict[Path, list[str]], coders: tuple[str, list[str]] | None = None
+) -> DoctorCheck:
+    """The row for hooks that run this install but give a context hook less time than the
+    CI hook may wait: ``short`` maps each directory to those events.
+
+    Connect raises the timeouts, unless it refuses a file of that directory: a read-only
+    settings.json (home-manager's link into the Nix store) kept a button that could never
+    clear the row. Named as the other branches name it, with the timeout to set where
+    that file is generated, and no button (review of #257).
+    """
+    ceiling = agent_core.CONTEXT_HOOK_TIMEOUT_SECONDS
+    listed = ", ".join(f"{path} ({', '.join(events)})" for path, events in short.items())
+    problems = [
+        f"connected, but the context hooks allow less than {ceiling} s in: {listed} — a CI "
+        "hook still inside the run's ceiling would be cut off and its row never written"
+    ]
+    fixes: list[str] = []
+    for directory, events in short.items():
+        refusal = agents_service.access("claude-code", directory).connect
+        if refusal is None:
+            fixes.append(agents_service.config_dir_command("connect", "claude-code", directory))
+            continue
+        problems.append(f"hooks cannot be written in {directory}: {refusal.why}")
+        timeout = f"give its {' and '.join(events)} hooks a timeout of at least {ceiling}"
+        fixes.append(_refused_fix(directory, refusal, also=timeout))
+    if coders is not None:  # the coders' gap, said on this branch too (_coders_missed)
+        problems.append(coders[0])
+        fixes.extend(coders[1])
+    return _warn("claude-code", f"{product} {'; '.join(problems)}", "; ".join(filter(None, fixes)))
+
+
+def _refused_fix(
+    directory: Path, refusal: agents_service.Refusal, *, also: str | None = None
+) -> str:
+    """The remedies for ``refusal``, as every surface gives them (``agents_service.remedies``)."""
+    return "; or ".join(agents_service.remedies("claude-code", directory, refusal, also=also))
+
+
+def _disconnect_fix(directory: Path, lead: str) -> str:
+    """``lead`` and the disconnect that takes aisquare's hooks out of ``directory``, or,
+    where disconnect would refuse it (``agents_service.access``), that refusal and its
+    remedy: a fix never names a command that would refuse (review of #257)."""
+    refusal = agents_service.access("claude-code", directory).disconnect
+    if refusal is None:
+        return f"{lead}{agents_service.config_dir_command('disconnect', 'claude-code', directory)}"
+    return f"{lead}{refusal.why}"
+
+
+def _plugin_uninstall(site: agent_core.HookSiteHealth) -> str:
+    """The command that removes the plugin ``site`` loads, at the scope it was installed:
+    without its ``--scope``, run in its repository, a project- or local-scope install
+    is not found."""
+    plugin = site.plugin
+    if plugin is None:
+        return agent_core.claude_plugin_command("uninstall", site.config_dir)
+    return agent_core.claude_plugin_command(
+        "uninstall", site.config_dir, scope=plugin.scope, project=plugin.project
+    )
+
+
+def _planned_agent_checks() -> list[DoctorCheck]:
+    """A row for each agent in the registry that aisquare detects but cannot connect yet.
+
+    Codex and Cursor today (``core.agents``; Claude Code is the row above). One
+    row per registry entry, so an agent added there gets its row here, and one
+    that gains hooks moves to a check of its own. Always ``ok``, detected or
+    not: there is nothing to fix, and a warning would sit among the first not-ok
+    lines the Doctor page lists, above a row an operator can act on. No
+    ``fix``, so no button: ``agents connect`` refuses these agents rather than
+    record a connection that installs nothing. A release is named only where
+    the registry plans one.
+
+    Reads paths only (``agent_core.detected``), and each sentence names the
+    path it checked. "Not detected on this machine" was not true of a Codex
+    kept elsewhere through ``CODEX_HOME``, which this check does not follow.
+    """
+    rows: list[DoctorCheck] = []
+    for spec in agent_core.specs():
+        if spec.connectable:
+            continue
+        if agent_core.detected(spec):
+            later = f" (planned for {spec.planned})" if spec.planned else ""
+            detail = (
+                f"{spec.label} detected at {spec.home}, but aisquare can't connect it yet{later}"
+            )
+        else:
+            later = f" (aisquare support is planned for {spec.planned})" if spec.planned else ""
+            detail = f"{spec.label} not detected at {spec.home}{later}"
+        rows.append(_ok(spec.name, detail))
+    return rows
 
 
 def _claude_accounts_checks() -> list[DoctorCheck]:
@@ -962,7 +1411,6 @@ def _check_resumable_agents() -> list[DoctorCheck]:
         resumable: list[str] = []
         with store_session() as store:
             for project in store.list_projects(all=True):
-                name = project.codename or project.root.name or project.id
                 # The NEWEST row under each label only, the one `fleet restart
                 # <label>` acts on: a resumed restart keeps the session id, so the
                 # row it replaced still has its transcript on disk, and counting it
@@ -977,7 +1425,10 @@ def _check_resumable_agents() -> list[DoctorCheck]:
                     if session is None or not session.transcript_path:
                         continue
                     if Path(session.transcript_path).is_file():
-                        resumable.append(f"{agent.label} ({name})")
+                        # Its own restart, naming its project: alone, `fleet restart <label>`
+                        # restarted the active project's (review of #259, round 21).
+                        restart = project_service.fleet_command("restart", project, agent.label)
+                        resumable.append(f"`{restart}`")
     except Exception:  # the database line reports a broken store
         return []
     if not resumable:
@@ -990,8 +1441,7 @@ def _check_resumable_agents() -> list[DoctorCheck]:
         _ok(
             "fleet-resume",
             f"{len(resumable)} exited {noun} can be resumed — the transcript is on disk, so "
-            f"Restart continues the session instead of starting over: {shown} "
-            "(aisquare fleet restart <label>)",
+            f"Restart continues the session instead of starting over: {shown}",
         )
     ]
 
@@ -1000,26 +1450,196 @@ def _check_captured_projects() -> list[DoctorCheck]:
     """How many directories are registered but hidden (#139) — and how to see or drop them.
 
     Silent when there are none; gated on the store existing (doctor creates
-    nothing). ``ok``: a hidden capture is the design working, not a fault.
+    nothing). ``ok``: a hidden capture is the design working, not a fault. With
+    ``[projects] capture`` off, every one is left from before it was: nothing lists
+    them, nothing captures more, and the prune that drops them is named, with
+    ``--older-than 0`` since none of them is going to be touched again — for the rows
+    it drops (:func:`~aisquare.services.project.prune_candidates`). A captured row that
+    holds saved context, or a live agent, it keeps whatever ``--older-than`` says: counted
+    under it, they made the line say "drop them" again after every prune, of rows it
+    would never drop (review of #259, round 17). They are named apart, with ``project
+    forget``, which drops one — and the rows with a live agent apart again, since
+    ``forget`` refuses those until their agents are stopped (round 18).
+
+    What holds a row is the hold prune and forget ask (the plan's own, for its rows, and
+    :func:`~aisquare.services.project.forget_refusals` of the other captured rows, with the rows
+    that prune drops gone, as prune decides it; asked so of the plan's rows alone, a row
+    holding context was told to forget a stopped reader the prune it names drops, which then
+    matched nothing: review of #259, round 36, 3/9): the board of another project's agents,
+    live or a restart away, as a hub's, is one. Asked of the row's own live agents alone, a
+    hub prune keeps was counted under "drop them" after every prune, as the live agents' rows
+    were before round 17, and the rows apart were told to stop their own agents, which they
+    had none of; they are named apart again, with the projects that read each and the way
+    out ``forget`` names (review of #259, round 34, 3/10): every project, each with its stop
+    when its agents run, and its onboard when it is forgotten (round 35, 2/8).
     """
     if _uncreated_home("projects") is not None:
         return []
     try:
+        # One store session and one read of the setting: three sessions and two reads were
+        # opened for one line (review of #259, round 19).
+        capture = project_service.capture_on()
+        plan: list[PruneCandidate] = []
+        holds: dict[str, list[project_service.BoardReader]] = {}
         with store_session() as store:
-            captured = len(store.captured_projects())
+            captured = store.captured_projects()
+            if captured and not capture:
+                # The rows that hold a board, read once for the plan and the refusals: read
+                # by each, every project's label heads were read twice a run, and doctor
+                # runs at every `asq` start (review of #259, round 35, 6/8).
+                rows = project_service.reading_rows(store)
+                # The plan's held rows with what holds each, as prune decided it: asked again,
+                # each one's hold was worked out twice a run (review of #259, round 36, 8/9).
+                refused: dict[str, project_service.ProjectBusyError] = {}
+                plan = project_service.prune_candidates(
+                    missing=False,
+                    worktrees=False,
+                    captured_older_than=0,
+                    store=store,
+                    readers=rows,
+                    refused=refused,
+                )
+                planned = {c.project.id for c in plan}
+                dropped = {c.project.id for c in plan if not c.held}
+                refused |= project_service.forget_refusals(
+                    store,
+                    [p for p in captured if p.id not in planned],
+                    dropping=dropped,
+                    readers=rows,
+                )
+                holds = {project_id: busy.readers for project_id, busy in refused.items()}
     except Exception:  # the database line reports a broken store
         return []
     if not captured:
         return []
-    noun = "directory" if captured == 1 else "directories"
+    if not capture:
+        return [_ok("projects", _left_from_before_capture(captured, plan, holds))]
+    noun = _directories(len(captured))
     return [
         _ok(
             "projects",
-            f"{captured} captured {noun} hidden from the sidebar and `project list` (a hooked "
-            "session ran there; nothing added it on purpose) — see them: aisquare project "
-            "list --all; drop the stale ones: aisquare project prune --captured-only",
+            f"{len(captured)} captured {noun} hidden from the sidebar and `project list` (a "
+            "hooked session ran there; nothing added it on purpose) — see them: aisquare "
+            "project list --all; drop the stale ones: aisquare project prune --captured-only",
         )
     ]
+
+
+def _left_from_before_capture(
+    captured: list[ProjectInfo],
+    plan: list[PruneCandidate],
+    holds: Mapping[str, Sequence[project_service.BoardReader]],
+) -> str:
+    """The capture-off line: the rows ``prune --captured-only --older-than 0`` drops (``plan``
+    is what it would do), with that command, and apart from them the rows it keeps, by name:
+    those holding saved context with ``project forget``, and those ``forget`` refuses
+    (``holds``, by id: the projects whose fleet agents read the row's board, or none for its
+    own live ones), with what frees each first.
+
+    Each part put together once from its noun, verb and pronoun: the kept part was written
+    out twice, in near-identical branches, and a wording fix had to be made in each (review
+    of #259, round 18)."""
+    dropped = {c.project.id for c in plan if c.reason == "captured" and c.project.id not in holds}
+    held = [p for p in captured if p.id not in dropped and p.id not in holds]
+    working = [p for p in captured if p.id in holds and not holds[p.id]]
+    read = [p for p in captured if holds.get(p.id)]
+    left = "left from before project capture was turned off"
+    listed = "listed only by aisquare project list --all"
+    parts: list[str] = []
+    if dropped:
+        parts.append(
+            f"{len(dropped)} captured {_directories(len(dropped))} {left} (a hooked session "
+            f"ran there; nothing added it on purpose) — {listed}; drop them: aisquare project "
+            "prune --captured-only --older-than 0"
+        )
+    prune = "that prune" if dropped else "aisquare project prune"
+    for kept, why in ((held, "context"), (working, "agents"), (read, "hub")):
+        if not kept:
+            continue
+        one = len(kept) == 1
+        names = ", ".join(project_service.display_name(p) for p in kept[:3])
+        if len(kept) > 3:
+            names += f", +{len(kept) - 3} more"
+        # Each row's own, every row, as the stop below (review of #259, round 22): "aisquare
+        # project forget <directory>, for each" beside names shown by directory gave two rows
+        # called scratch no directory to pass, and a fourth row none at all.
+        forgets = [project_service.forget_command(p.root) for p in kept]
+        drop = f"drop it with {forgets[0]}" if one else f"drop them ({'; '.join(forgets)})"
+        which = (
+            f"{len(kept)} more"
+            if parts
+            else f"{len(kept)} captured {_directories(len(kept))} {left}"
+        )
+        then = "" if parts else f"{listed}; "
+        if why == "hub":
+            # Every project whose agents read each, and what frees it, from the steps
+            # `ProjectBusyError` words too: a restart of a stopped one starts it under the hub.
+            agents, frees = _what_frees(kept, holds)
+            what = (
+                f"{'is the board' if one else 'are the boards'} {agents}, running or stopped, "
+                f"which {prune} keeps and aisquare project forget refuses: {names} — "
+                f"{then}{frees}, then {drop}"
+            )
+        elif why == "agents":
+            # With the project named, as `ProjectBusyError` names it (review of #259, round 19):
+            # each row's own, every row. Said once "--project <name>, for each" beside names
+            # shown by directory, two rows called scratch had no name to pass, and a fourth
+            # row none at all, past "+1 more" (round 20).
+            stop = "; ".join(project_service.fleet_command("stop", p) + " <label>" for p in kept)
+            what = (
+                f"{'has a fleet agent' if one else 'have fleet agents'} still running, which "
+                f"{prune} keeps and aisquare project forget refuses: {names} — {then}stop "
+                f"{'its' if one else 'their'} agents first ({stop}), then {drop}"
+            )
+        else:
+            what = (
+                f"{'holds' if one else 'hold'} saved context, which {prune} keeps: {names} — "
+                f"{then}{drop}"
+            )
+        parts.append(f"{which} {what}")
+    return "; ".join(parts)
+
+
+def _what_frees(
+    kept: Sequence[ProjectInfo], holds: Mapping[str, Sequence[project_service.BoardReader]]
+) -> tuple[str, str]:
+    """``<whose> fleet agents read (<projects>)`` of the boards ``kept`` (``holds``), every
+    project named, and what frees them: each one's steps (:meth:`BoardReader.frees`, which
+    ``ProjectBusyError`` words too), its onboard when it is forgotten, its stop when its
+    agents run, then its forget.
+
+    The first reader of a row alone, with its forget alone, a row two projects read was
+    refused again after it, naming the other; a reader whose agents ran was refused its
+    forget, with no stop given; and a forgotten one's forget matched nothing (review of #259,
+    round 35, 2/8). The steps were written out here a second time, with rules of their own
+    (round 36, 7/9)."""
+    readers: dict[str, tuple[ProjectInfo, project_service.Frees]] = {}
+    for reader in (reader for p in kept for reader in holds[p.id]):
+        frees = reader.frees()
+        known = readers.get(reader.project.id)
+        if known is None or known[1].stop is None:  # running under any row it holds
+            readers[reader.project.id] = (reader.project, frees)
+    them = len(readers) == 1
+    steps: list[str] = []
+    adds = [frees.onboard for _, frees in readers.values() if frees.onboard is not None]
+    if adds:
+        ones = "it" if them else "the forgotten " + ("one" if len(adds) == 1 else "ones")
+        steps.append(f"add {ones} back ({'; '.join(adds)})")
+    stops = [frees.stop for _, frees in readers.values() if frees.stop is not None]
+    if stops:
+        steps.append(f"stop the running ones ({'; '.join(stops)})")
+    forgets = "; ".join(frees.forget for _, frees in readers.values())
+    steps.append(f"forget {'it' if them else 'them'} ({forgets})")
+    whose = ", ".join(project_service.display_name(project) for project, _ in readers.values())
+    agents = "another project's" if them else "other projects'"
+    return f"{agents} fleet agents read ({whose})", (
+        f"once you are done with {'its' if them else 'their'} agents, "
+        f"{', '.join(steps[:-1])}{' and ' if len(steps) > 1 else ''}{steps[-1]}"
+    )
+
+
+def _directories(count: int) -> str:
+    return "directory" if count == 1 else "directories"
 
 
 def _check_dead_managers() -> list[DoctorCheck]:
@@ -1037,6 +1657,7 @@ def _check_dead_managers() -> list[DoctorCheck]:
         with store_session() as store:
             projects = store.list_projects(all=True)
             headless = []
+            restarts = []
             for project in projects:
                 live = store.fleet_agents(project.id, live_only=True)
                 if not live or any(agent.role == "manager" for agent in live):
@@ -1047,6 +1668,7 @@ def _check_dead_managers() -> list[DoctorCheck]:
                         f"{project.codename or project.root.name or project.id} "
                         f"({len(live)} agent(s) still running)"
                     )
+                    restarts.append(project_service.fleet_command("restart", project, "manager"))
     except Exception:  # the database line reports a broken store
         return []
     if not headless:
@@ -1055,8 +1677,7 @@ def _check_dead_managers() -> list[DoctorCheck]:
         _warn(
             "fleet-manager",
             "the manager exited while agents are still running in: " + "; ".join(headless),
-            "Bring it back with its session: aisquare fleet restart manager --project <name> "
-            "(or Restart on its row in asq)",
+            f"Bring it back with its session: {'; '.join(restarts)} (or Restart on its row in asq)",
         )
     ]
 
@@ -1082,9 +1703,16 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
                 if session.ended_at is None and session.state == "limited"
             ]
             labels = {}
+            switches = []
+            by_id = {p.id: p for p in projects}
             for session, _project_name in limited:
-                agent = store.fleet_agent_for_session(session.project_id, session.id)
+                agent = store.fleet_agent_for_session(session.id)
                 labels[session.id] = agent.label if agent is not None else session.id[:8]
+                # Only a fleet agent is switched, by its row's project and label: under a hub
+                # the session's is the hub's board (review of #259, round 23).
+                project = by_id.get(agent.project_id) if agent is not None else None
+                if agent is not None and project is not None:
+                    switches.append(project_service.fleet_command("switch", project, agent.label))
     except Exception:  # the database line reports a broken store
         return []
     if not limited:
@@ -1102,8 +1730,12 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
         _warn(
             "claude-account-limits",
             f"{len(limited)} agent(s) parked on a Claude usage limit: " + " · ".join(parts),
-            "Move one to an account with headroom: aisquare fleet switch <label>; or wait — "
-            "Claude Code continues by itself at the reset",
+            (
+                f"Move one to an account with headroom: {'; '.join(switches)}; or wait — "
+                if switches
+                else "Wait — "
+            )
+            + "Claude Code continues by itself at the reset",
         )
     ]
 
@@ -1156,7 +1788,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     if measured and all(pct >= settings.switch_at for _, pct in measured):
         return _warn(
             "claude-account-headroom",
-            f"every account is at or over {settings.switch_at}% of its five-hour or weekly "
+            f"every account has used {settings.switch_at}% or more of its five-hour or weekly "
             f"window: {summary}",
             "Add or sign in another account (aisquare accounts add), or wait for a reset — "
             "a fleet spawned now has nowhere to switch to",
@@ -1169,7 +1801,8 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
         )
     return _ok(
         "claude-account-headroom",
-        f"five-hour and weekly windows ({settings.switch_at}% is the line): {summary}",
+        f"five-hour and weekly windows, percent USED ({settings.switch_at}% used is the line): "
+        f"{summary}",
     )
 
 
@@ -1451,44 +2084,6 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
         return _ok(name, f"not evaluated ({exc}) — the fleet checks again on its first spawn")
 
 
-#: How the outer terminal is recognised, from its environment: (variable, value
-#: prefix or ``None`` for "any"), the name, and whether it speaks the kitty
-#: keyboard protocol — which is what decides whether shift+enter and the other
-#: shifted chords reach an agent at all (docs/fleet.md, Keys). First match wins;
-#: ``TERM_PROGRAM`` is checked after the terminal-specific variables because a
-#: multiplexer or an IDE can leave an outer one behind.
-_TERMINAL_SIGNS: tuple[tuple[str, str | None, str, bool], ...] = (
-    ("KITTY_WINDOW_ID", None, "kitty", True),
-    ("GHOSTTY_RESOURCES_DIR", None, "ghostty", True),
-    ("WEZTERM_EXECUTABLE", None, "wezterm", True),
-    ("WT_SESSION", None, "Windows Terminal", False),
-    ("TERM_PROGRAM", "iTerm", "iTerm2", False),
-    ("TERM_PROGRAM", "WezTerm", "wezterm", True),
-    ("TERM_PROGRAM", "ghostty", "ghostty", True),
-    ("TERM_PROGRAM", "vscode", "the VS Code terminal", False),
-    ("TERM_PROGRAM", "Apple_Terminal", "Terminal.app", False),
-    ("VTE_VERSION", None, "a VTE terminal (GNOME Terminal, Tilix, …)", False),
-    ("TERM", "xterm-kitty", "kitty", True),
-    ("TERM", "foot", "foot", True),
-    ("TERM", "alacritty", "alacritty", True),
-)
-
-
-def outer_terminal(environ: Mapping[str, str] | None = None) -> tuple[str, bool | None]:
-    """``(name, speaks the kitty keyboard protocol)`` for the terminal this shell runs in.
-
-    ``None`` for the protocol when the terminal is not recognised — a guess in
-    either direction would send the operator chasing the wrong fix.
-    """
-    env = os.environ if environ is None else environ
-    for variable, prefix, name, kitty in _TERMINAL_SIGNS:
-        value = env.get(variable, "")
-        if value and (prefix is None or value.startswith(prefix)):
-            return name, kitty
-    term = env.get("TERM", "").strip()
-    return (f"unknown (TERM={term})" if term else "unknown"), None
-
-
 def _check_fleet_terminal(
     server: tmux_core.TmuxServer | None = None, environ: Mapping[str, str] | None = None
 ) -> DoctorCheck:
@@ -1624,11 +2219,11 @@ def _check_fleet_server_env(
     clean now (fix 3, ``core.spawn.TEAM_ENV_VARS``), but a server started by anything
     else keeps what it got: the owner's asqui launcher exported the launch folder's git
     root as AISQUARE_TEAM_HUB (fix 4 of the fleet-board card, tsk_01m3k89bkhpj). A fleet
-    spawn sets each window's own hub (#230), so a pinned hub reaches only a window opened
-    there by hand, and the row warns when it is unlike the board of a fleet on the
-    server. A seat's row id, role or persona on a server is foreign to every window, so
-    it always warns. ``boards`` are the fleets' board roots; ``None`` reads them from the
-    store. Never starts a server.
+    spawn sets each window's own hub (``orchestrator.window_team_hub``, a replacement's the
+    one its row recorded), so a pinned hub reaches only a window opened there by hand, and
+    the row warns when it is unlike the board a fleet on the server reads. A seat's row id,
+    role or persona on a server is foreign to every window, so it always warns. ``boards``
+    are the fleets' board roots; ``None`` reads them from the store. Never starts a server.
     """
     name = "fleet server env"
     try:
@@ -1672,7 +2267,9 @@ def _check_fleet_server_env(
 
 
 def _fleet_boards(socket: str, cwd: Path | None) -> list[Path]:
-    """The board roots of the fleets on ``socket``: each project with a live row there.
+    """The board roots of the fleets on ``socket``: the board each live row there reads, as
+    its spawn recorded it (``FleetAgent.board``: the hub's under one, else its project's
+    checkout's), by the root the store has for it, else its project's root.
 
     With none, the checkout ``cwd`` is in, read without the hub: the hub a shell exports
     is the value being checked, so it cannot also be the answer.
@@ -1681,8 +2278,13 @@ def _fleet_boards(socket: str, cwd: Path | None) -> list[Path]:
     with store_session() as store:
         for project in store.list_projects(all=True):
             rows = store.fleet_agents(project.id, live_only=True)
-            if any(row.tmux_socket in (None, socket) for row in rows):
-                roots.append(project.root)
+            for row in rows:
+                if row.tmux_socket not in (None, socket):
+                    continue
+                board = store.get_project(row.board, include_forgotten=True) if row.board else None
+                root = board.root if board is not None else project.root
+                if root not in roots:
+                    roots.append(root)
     if roots:
         return roots
     here = cwd if cwd is not None else Path.cwd()
@@ -1907,17 +2509,14 @@ def _browser_tools_in(config_dir: Path, parsed: Mapping[Path, dict[str, object]]
     ``doctor`` run was the row's whole cost (review of #203).
     """
     found: list[str] = []
-    settings = agent_core.read_json(config_dir / "settings.json")
-    plugins = settings.get("enabledPlugins")
-    if isinstance(plugins, dict):
-        for key, enabled in plugins.items():
-            # The plugin, not the marketplace it came from: `<plugin>@<market>`,
-            # and matching the whole key credited `my-linter@chrome-plugins-market`
-            # to the market's name while labelling only `my-linter`. Match and
-            # label the same string.
-            plugin = str(key).rsplit("@", 1)[0]
-            if enabled and _names_browser_tool(plugin):
-                found.append(f"plugin {plugin}")
+    for key in agent_core.enabled_plugins(config_dir):
+        # The plugin, not the marketplace it came from: `<plugin>@<market>`,
+        # and matching the whole key credited `my-linter@chrome-plugins-market`
+        # to the market's name while labelling only `my-linter`. Match and
+        # label the same string.
+        plugin = key.rsplit("@", 1)[0]
+        if _names_browser_tool(plugin):
+            found.append(f"plugin {plugin}")
     for path in agent_core.claude_json_paths(config_dir):
         claude_json = parsed.get(path, {})
         found.extend(_browser_servers(_mcp_servers(claude_json)))
@@ -2096,15 +2695,33 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         return _warn(
             "snapshot", f"could not check the snapshot: {exc}", "Try: aisquare project onboard"
         )
+    # A stored pack is what agents get even where nothing can pack any more (Node
+    # gone, or on PATH only for the installer's own run): it says so, rather than
+    # "ready" beside a repomix row that reads off.
     if snap is not None and snap.status == "ready":
         return _ok(
-            "snapshot", f"snapshot ready ({snap.file_count} files, {snap.token_count} tokens)"
+            "snapshot",
+            f"snapshot ready ({snap.file_count} files, {snap.token_count} tokens)"
+            + snapshot_core.unrefreshable_note(snap),
         )
     if snap is not None and snap.status == "skeleton_only":
         # Usable: the session-start directive points agents at the skeleton and
         # its index. No fix, deliberately — re-packing would not change it, and a
         # fix here is the button that was pressed forever with a green tick.
-        return _ok("snapshot", snapshot_core.skeleton_only_detail(snap))
+        return _ok(
+            "snapshot",
+            snapshot_core.skeleton_only_detail(snap) + snapshot_core.unrefreshable_note(snap),
+        )
+    if not snapshot_core.can_pack():
+        # No fix, deliberately: `Pack one: aisquare project onboard` is a one-click
+        # button in the UI (services/onboarding.KNOWN_FIXES), and with nothing to
+        # run repomix it can never turn green. When something of the toolchain IS
+        # here, the repomix row warns and names what is missing. A Node that is
+        # there but too old still packs-and-fails, so it keeps this row's warning:
+        # can_pack() reads PATH only (snapshot_core.can_pack). Asked before a
+        # `too_large` verdict too: it stores nothing agents get, and its Re-pack
+        # button could no more turn green here (review of #257).
+        return _ok("snapshot", snapshot_core.off_detail())
     if snap is not None and snap.status == "too_large":
         # Not "no snapshot": there IS a verdict, and it names its numbers (#82).
         # The fix is `--refresh` because a plain `onboard` only reloads this
@@ -2571,8 +3188,11 @@ def _check_fleet(
     Machine-wide on purpose: a stale row in ANY project is this machine's, and
     ``fleet reap`` with no project reaps them all. Each row is checked on the
     socket IT was spawned on — the socket is a default the user may change
-    (§3.10), and a row must not read as lost because the config moved after it.
-    ``server_for`` builds the server for a socket; tests hand in fakes.
+    (§3.10), and a row must not read as lost because the config moved after it —
+    at the path its spawn recorded, where the fleet asks it (``fleet._address``):
+    ``tmux -L`` by the name, from a shell under another ``TMUX_TMPDIR``, reaches
+    another server, whose ``%N`` is another agent (round 28 of #257). ``server_for``
+    builds the server for a socket; tests hand in fakes.
 
     A pane that answers is the row's only on a server that was already running
     when the row was written (``fleet._outlived``): after a reboot the next
@@ -2580,7 +3200,7 @@ def _check_fleet(
     counted as a healthy pane — another agent's — while ``fleet ls`` read it
     ``✗ lost`` and this check never prescribed the ``reap`` that records it
     (review of the #203 final-round fixes, F4). The server is asked when it
-    started once per socket, and only once a pane there has answered.
+    started once per server, and only once a pane there has answered.
     """
     absent = _uncreated_home("fleet")
     if absent is not None:
@@ -2588,9 +3208,12 @@ def _check_fleet(
     name = "fleet"
     server_for = server_for or _fleet_server
     try:
-        socket = fleet_service.settings().tmux_socket
-        servers: dict[str, tmux_core.TmuxServer] = {socket: server_for(socket)}
-        if not servers[socket].available():
+        config = fleet_service.settings()
+        today = fleet_service._Address(config.tmux_socket)
+        servers: dict[fleet_service._Address, tmux_core.TmuxServer] = {
+            today: server_for(today.name)
+        }
+        if not servers[today].available():
             # Failing open costs this line: nothing here can be stale in a way
             # that matters when nothing can run, and the tmux check has the verdict.
             return _ok(name, "not evaluated — tmux is not installed (see the tmux check)")
@@ -2600,48 +3223,108 @@ def _check_fleet(
             live = [a for p in projects for a in store.fleet_agents(p.id, live_only=True)]
         gone: list[FleetAgent] = []
         exited: list[FleetAgent] = []
-        started: dict[str, datetime | None] = {}
+        started: dict[fleet_service._Address, datetime] = {}
         for agent in live:
-            server = servers.setdefault(agent.tmux_socket, server_for(agent.tmux_socket))
+            address = fleet_service._address(agent, config)
+            if address not in servers:
+                servers[address] = server_for(address.name).at(address.path)
+            server = servers[address]
             try:
                 facts = server.pane_facts(agent.pane_id)
             except tmux_core.TmuxError:
                 facts = None
-            if facts is not None and agent.tmux_socket not in started:
-                try:
-                    started[agent.tmux_socket] = server.started_at()
-                except tmux_core.TmuxError:
-                    started[agent.tmux_socket] = None  # judges nothing, as in the fleet
+            if facts is not None and facts.server_started is not None:
+                # One server, one start, said in the answer that named the pane
+                # (`#{start_time}`), not asked in a display-message of its own (review of
+                # #259, round 5, as `_observe` reads it since round 4). None judges nothing.
+                started.setdefault(address, facts.server_started)
             # tmux 3.7c answers a vanished target with exit 0 and every field
             # empty, so "gone" is "no facts OR facts about no pane", not only None.
             if (
                 facts is None
                 or facts.pane_id != agent.pane_id
-                or fleet_service._outlived(agent, started[agent.tmux_socket])
+                or fleet_service._outlived(agent, started.get(address))
             ):
                 gone.append(agent)
             elif facts.dead:
                 exited.append(agent)
         problems: list[str] = []
         server_down = False
-        by_socket: dict[str, list[FleetAgent]] = {}
+        unreached: list[FleetAgent] = []
+        by_socket: dict[fleet_service._Address, list[FleetAgent]] = {}
         for agent in gone:
-            by_socket.setdefault(agent.tmux_socket, []).append(agent)
+            by_socket.setdefault(fleet_service._address(agent, config), []).append(agent)
+        reads = tmux_core.SocketReads()  # one per server, and the boot once, not per row
         for sock, agents in by_socket.items():
             listed = _fleet_labels(agents, names)
             if servers[sock].list_sessions():
-                problems.append(f"{len(agents)} recorded live but the tmux pane is gone: {listed}")
+                # The server that answers may be another than a row's: one that took the
+                # socket path from a server that lost its file and runs on, which the one
+                # rule says from the start the row recorded (follow-up of #257). Such a
+                # row is held, not a pane that is gone, and `reap` leaves it.
+                taken: list[FleetAgent] = []
+                vanished: list[FleetAgent] = []
+                for agent in agents:
+                    if sock in started:  # said already: the server is asked once at most
+                        reads.heard_started(servers[sock], agent.socket_path, started[sock])
+                    answer = tmux_core.server_may_run(
+                        servers[sock],
+                        agent.socket_path,
+                        agent.boot_id,
+                        agent.created_at,
+                        agent.server_started_at,
+                        reads=reads,
+                    )
+                    (taken if answer == "another" else vanished).append(agent)
+                if vanished:
+                    problems.append(
+                        f"{len(vanished)} recorded live but the tmux pane is gone: "
+                        f"{_fleet_labels(vanished, names)}"
+                    )
+                if taken:
+                    unreached.extend(taken)
+                    problems.append(
+                        f"{len(taken)} recorded live but another tmux server answers on the "
+                        f"socket of the private tmux server '{sock}', not the one "
+                        f"{'it was' if len(taken) == 1 else 'they were'} started on, which may "
+                        f"still be running: {_fleet_labels(taken, names)}"
+                    )
             elif servers[sock].server_absent():
                 # tmux itself says there is no server — the one case reap's
                 # --server-down acts on, decided by the SAME predicate reap uses.
                 # A plain `reap` refuses a silent server (it may be alive under
                 # another TMUX_TMPDIR), so the fix prescribed here used to do
                 # nothing — measured: 10 rows reported, 0 reconciled.
-                server_down = True
-                problems.append(
-                    f"{len(agents)} recorded live but the private tmux server "
-                    f"'{sock}' is not running: {listed}"
-                )
+                # But tmux says it for a socket FILE that is gone too, which a
+                # server outlives (systemd-tmpfiles, a logout): graded by the rule
+                # `uninstall` and `fleet shutdown` ask, a row that may still run is
+                # not "not running", and `--server-down` would end it under its
+                # agent (round 29 of #257).
+                down: list[FleetAgent] = []
+                held: list[FleetAgent] = []
+                for agent in agents:
+                    answer = tmux_core.server_may_run(
+                        servers[sock],
+                        agent.socket_path,
+                        agent.boot_id,
+                        agent.created_at,
+                        agent.server_started_at,
+                        reads=reads,
+                    )
+                    (down if answer is None else held).append(agent)
+                if down:
+                    server_down = True
+                    problems.append(
+                        f"{len(down)} recorded live but the private tmux server "
+                        f"'{sock}' is not running: {_fleet_labels(down, names)}"
+                    )
+                if held:
+                    unreached.extend(held)
+                    problems.append(
+                        f"{len(held)} recorded live but no tmux client reaches the private "
+                        f"tmux server '{sock}', as its socket file is gone or could not be "
+                        f"asked, and it may still be running: {_fleet_labels(held, names)}"
+                    )
             else:
                 # Silent but not absent: a protocol mismatch after a tmux upgrade,
                 # a wedged server, a socket under another TMUX_TMPDIR. The agents
@@ -2661,6 +3344,17 @@ def _check_fleet(
                 "Reconcile the rows with tmux (ended, lost, merged worktrees): "
                 "aisquare fleet reap --all"
             )
+            if unreached:
+                # Its server may run on, and the way back to it comes first. `reap
+                # --server-down` holds such a row (the one rule, follow-up of #257);
+                # `shutdown --forget` is the word that ends it.
+                fix += (
+                    "; if a server still runs behind a socket file that is gone, or behind a "
+                    "socket another server took, send it SIGUSR1 (once the socket is free), "
+                    "which makes tmux create its socket again; reap --server-down leaves "
+                    "such rows live, and if that server is not running, end them on your "
+                    "word: aisquare fleet shutdown --all --forget"
+                )
             if server_down:
                 # tmux says no server is there — but doctor runs in this shell and
                 # cannot see a fleet alive under another TMUX_TMPDIR, so the flag
@@ -2671,20 +3365,20 @@ def _check_fleet(
                     "aisquare fleet reap --all --server-down"
                 )
             return _warn(name, "; ".join(problems), fix)
-        sessions = servers[socket].list_sessions()
+        sessions = servers[today].list_sessions()
         if live:
             return _ok(
                 name,
                 f"{len(live)} live agent(s) across {len(sessions)} session(s) on the private "
-                f"tmux server '{socket}'",
+                f"tmux server '{today}'",
             )
         if sessions:
             return _ok(
                 name,
-                f"private tmux server '{socket}' running with {len(sessions)} session(s); "
+                f"private tmux server '{today}' running with {len(sessions)} session(s); "
                 "no agents recorded live",
             )
-        return _ok(name, f"no fleet agents; the private tmux server '{socket}' is not running")
+        return _ok(name, f"no fleet agents; the private tmux server '{today}' is not running")
     except Exception as exc:  # diagnostics must never crash
         # A store that will not open is the database check's verdict. Failing
         # open here costs the stale-row report — a label can stay taken and a

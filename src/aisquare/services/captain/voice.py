@@ -1237,12 +1237,15 @@ def build_app(*, token: str, hooks: Hooks | None = None, mode: Mode = "focus") -
             headers={"cache-control": "no-cache"},
         )
 
-    async def socket(websocket: WebSocket) -> None:
+    # Not `socket`: the hook-path guards follow calls by bare name, and `socket` is what
+    # `core.tmux` asks of the socket module, so this route's `serve` read as reachable from
+    # every hook (tests/test_config_writes_stay_in_the_cli.py).
+    async def voice_socket(websocket: WebSocket) -> None:
         await _Connection(
             websocket, token=token, hooks=app.state.hooks, mode=app.state.mode
         ).serve()
 
-    app = Starlette(routes=[Route("/", index), WebSocketRoute("/ws", socket)])
+    app = Starlette(routes=[Route("/", index), WebSocketRoute("/ws", voice_socket)])
     app.state.hooks = hooks if hooks is not None else Hooks()
     app.state.mode = mode
     return app

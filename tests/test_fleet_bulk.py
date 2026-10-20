@@ -393,6 +393,30 @@ def test_a_restart_skips_a_coder_whose_task_is_done_and_a_stop_stops_it(fleet: F
     assert _by_key(fleet, stopped.receipts)[f"beta/{coder.label}"].outcome == "done"
 
 
+def test_managers_only_asks_the_board_about_no_coder_s_task(
+    fleet: Fleet, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #266, round 2: each coder's task was looked up on its board for a restart
+    of the managers alone, and then the coders were left out of the plan."""
+    from aisquare.services import team as team_service
+
+    task = _add_task(fleet.beta, "Ship the router")
+    fleet_service.spawn(fleet.beta, "coder", worktree=False, task_id=task.id)
+    asked: list[str] = []
+    real = team_service.find_task
+
+    def finding(store: Any, task_id: str, *args: Any, **kwargs: Any) -> object:
+        asked.append(task_id)
+        return real(store, task_id, *args, **kwargs)
+
+    monkeypatch.setattr(team_service, "find_task", finding)
+
+    fleet_service.bulk_plan("restart", managers_only=True)
+    assert asked == []
+    fleet_service.bulk_plan("restart")
+    assert asked == [task.id]
+
+
 def test_a_project_whose_agents_cannot_be_read_is_named_and_the_rest_go_on(
     fleet: Fleet, monkeypatch: pytest.MonkeyPatch
 ) -> None:

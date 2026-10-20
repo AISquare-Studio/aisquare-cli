@@ -7303,12 +7303,12 @@ def bulk_plan(
     for project in projects:
         try:
             statuses = list_agents(project)
+            if managers_only:  # before the board is asked about any coder's task
+                statuses = [status for status in statuses if status.agent.role == "manager"]
             closed = _closed_tasks(statuses) if action == "restart" else {}
         except Exception as exc:  # one project's listing is its line, never the others'
             unread.append((project, str(exc) or type(exc).__name__))
             continue
-        if managers_only:
-            statuses = [status for status in statuses if status.agent.role == "manager"]
         # The manager first, as `shutdown` takes it down first: the one agent that spawns
         # others, so a stop of its coders before it has nobody to wake (`_manager_first`).
         statuses.sort(key=lambda status: status.agent.label != MANAGER_LABEL)

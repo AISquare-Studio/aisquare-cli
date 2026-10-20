@@ -557,6 +557,9 @@ class StopReceipt:
     prompt, where the exit command's Enter would have answered it; or the row has no
     launch record to place its pane (spawned before this version), and nothing is typed
     into a pane the fleet has no record of."""
+    dismissed: str | None = None
+    """What was pressed before the exit command, when something was: the agent's
+    ``dismiss_key`` at a dialog of its own, under ``dismiss_dialog`` (:func:`_dismissed`)."""
     withheld: bool = False
     """A hand-over's stop ended the row itself, releasing and announcing nothing:
     the claims wait for the replacement, and if it never starts
@@ -916,6 +919,11 @@ class PlacedPane:
 
     def kill(self) -> None:
         self.server().kill_window(self.pane_id)
+
+    def press(self, key: str) -> None:
+        """Send the one tmux ``key`` (``Escape``), no text: a dialog's own key
+        (:func:`_dismissed`). Raises ``TmuxError`` as the tmux call does."""
+        self.server().send_keys(self.pane_id, key)
 
     def holding_session(self) -> PlacedSession | None:
         """The session tmux says holds this pane, on this pane's server while that server
@@ -6541,11 +6549,13 @@ def stop(
     handover: bool = False,
     agent_id: str | None = None,
     nudge: bool = True,
+    dismiss_dialog: bool = False,
 ) -> StopReceipt:
     """``/exit`` the agent named ``label``, wait ``grace`` seconds, then kill its window.
 
     Resolves the LIVE row by label and hands it to :func:`_stop_row`; the
-    documentation of what a stop is — and of ``handover`` — lives there.
+    documentation of what a stop is — and of ``handover`` and ``dismiss_dialog`` — lives
+    there.
 
     With no live row, an ENDED agent's window may still be on the server
     (``remain-on-exit``), which is what the UI's 💤 row and its Stop button
@@ -6595,7 +6605,15 @@ def stop(
                         ) from None
                     raise  # no such row, or no window of its own left (gone, a reused id)
                 return StopReceipt(ended, [])
-    return _stop_row(project, agent, force=force, grace=grace, handover=handover, nudge=nudge)
+    return _stop_row(
+        project,
+        agent,
+        force=force,
+        grace=grace,
+        handover=handover,
+        nudge=nudge,
+        dismiss_dialog=dismiss_dialog,
+    )
 
 
 def _end_store_ended(
@@ -6629,6 +6647,7 @@ def _stop_row(
     nudge: bool = True,
     placement: Placement | None = None,
     beside: Sequence[Placement] | None = None,
+    dismiss_dialog: bool = False,
 ) -> StopReceipt:
     """``/exit`` the agent in ``agent``'s pane, wait ``grace`` seconds, then kill its window.
 
@@ -6651,6 +6670,17 @@ def _stop_row(
     that was on its way back (review of #205, finding 6; the fresh start, fourth
     round). Its receipt's ``released`` is therefore empty and ``withheld`` set:
     the claims are PARKED for the replacement, not returned.
+
+    ``dismiss_dialog`` is the AUTOMATIC hand-over's (:func:`switch` with ``automatic``),
+    which nobody watches: an agent whose screen shows a dialog of its own, where no exit
+    command is typed (:func:`_exit_withheld`), gets its ``dismiss_key`` once, and the exit
+    command once its empty prompt is back (:func:`_dismissed`), as Remote's Switch with
+    ``dismiss_dialog`` presses Esc (No) first. Killed there instead, a Codex at the
+    ``Switch to gpt-6-luna?`` offer it opens at its limit fired no ``SessionEnd``, and
+    the session it left stayed parked on its limit on the board, and in the doctor's
+    warning, until the reset (SMOKE7 of #113). A screen whose prompt does not come back
+    is killed as before, nothing else typed. A stop by hand, or a ``switch`` or
+    ``restart`` by hand, still kills at a dialog: answering one is the human's to ask.
 
     The agent's own ``SessionEnd`` hook releases its claims when it exits
     cleanly; ``force`` skips the ``/exit`` and goes straight to the kill — and
@@ -6799,6 +6829,7 @@ def _stop_row(
 
     exited_here = False  # this stop's `/exit` reached a pane that was running
     killed: str | None = None  # why no `/exit` was typed, when one was not
+    dismissed: str | None = None  # the key pressed at a dialog before the `/exit`
     try:
         window = _window()
         if unrecorded is not None and window is not None and not window.dead:
@@ -6808,6 +6839,10 @@ def _stop_row(
             )
         if not force and killed is None and window is not None and not window.dead:
             killed = _exit_withheld(pane, place) if place is not None else None
+            if killed is not None and dismiss_dialog and place is not None:
+                dismissed, killed = _dismissed(pane, place, killed)
+                if dismissed is not None:
+                    window = _window()  # a dialog whose key quits the agent left it dead
         if (
             not force
             and killed is None
@@ -6893,7 +6928,11 @@ def _stop_row(
                 # is asked for again, though: a listing has no report to carry one
                 # the store refused, and this stop has (review of #163, round 1;
                 # after the listing's went through it finds nothing).
-                return StopReceipt(current, *_release_or_say(store, current, why="agent stopped"))
+                return StopReceipt(
+                    current,
+                    *_release_or_say(store, current, why="agent stopped"),
+                    dismissed=dismissed,
+                )
             if current is not None and exited_here and handover:
                 # A hand-over's row is one no listing ends while its mark holds
                 # (`_handed_over`), so with the mark holding, whoever ended it meanwhile
@@ -6908,7 +6947,7 @@ def _stop_row(
                 # session is the replacement's to inherit.
                 marked = store.get_session(current.session_id) if current.session_id else None
                 if not _handed_over(current, marked, _now()):
-                    return StopReceipt(current, [])
+                    return StopReceipt(current, [], dismissed=dismissed)
             raise NoSuchAgent(f"{agent.label} ({agent.id}) is no longer live")
         # The process is dead or gone by here, so whatever its session still
         # holds is nobody's: a clean ``/exit`` released through the agent's own
@@ -6927,7 +6966,9 @@ def _stop_row(
     # and must not hold the write lock the woken manager's own hooks will want.
     if not handover and nudge:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended))
-    return StopReceipt(ended, released, release_failed, killed=killed, withheld=handover)
+    return StopReceipt(
+        ended, released, release_failed, killed=killed, dismissed=dismissed, withheld=handover
+    )
 
 
 def _end_unreachable(project: ProjectInfo, agent: FleetAgent, why: str, nudge: bool) -> StopReceipt:
@@ -6974,6 +7015,50 @@ def _exit_withheld(pane: PlacedPane, agent: FleetAgent) -> str | None:
         f"its pane showed {adapter.label} at a dialog or a draft, not its empty prompt, "
         f"where {adapter.exit_command} and its Enter would have answered it: its window "
         "was killed without one"
+    )
+
+
+_DISMISS_WAIT = 3.0
+"""How long :func:`_dismissed` waits for the agent's empty prompt after its dismiss key:
+Codex 0.162.1 redraws it within a poll (measured under tmux 3.7c)."""
+
+
+def _dismissed(pane: PlacedPane, agent: FleetAgent, withheld: str) -> tuple[str | None, str | None]:
+    """Press ``agent``'s ``dismiss_key`` once at the dialog :func:`_exit_withheld` withheld
+    the exit command from (``withheld``, why), and read its screen until its empty prompt
+    is back (:func:`_idle_screen`), for up to :data:`_DISMISS_WAIT`.
+
+    Returns ``(what was pressed, why the window is killed)``: ``(pressed, None)`` with the
+    prompt back, where :func:`_stop_row` types the exit command and the agent's
+    ``SessionEnd`` runs; ``(pressed, why)`` for a screen still not at that prompt (a
+    draft, which the key leaves, or a dialog it does not close), killed as before with
+    nothing else typed; ``(None, withheld)`` when tmux took no key. One key, never two: a
+    second Esc at Codex's empty prompt opens its transcript, where Enter rewinds. Never
+    raises.
+    """
+    adapter = recorded_adapter(agent.agent)
+    if adapter is None:
+        return None, withheld
+    key = adapter.dismiss_key
+    try:
+        pane.press(key)
+    except TmuxError:
+        return None, withheld
+    pressed = f"{key} at a dialog of its own, then {adapter.exit_command}"
+    deadline = _monotonic() + _DISMISS_WAIT
+    while True:
+        _sleep(_POLL_INTERVAL)
+        try:
+            if _idle_screen(adapter, pane.screen()):
+                return pressed, None
+        except TmuxError:
+            break
+        if _monotonic() >= deadline:
+            break
+    return f"{key} at a dialog of its own", (
+        f"its pane showed {adapter.label} at a dialog or a draft, not its empty prompt, and "
+        f"still did after {key}: its window was killed without {adapter.exit_command}, "
+        "whose Enter would have answered it"
     )
 
 
@@ -8867,7 +8952,13 @@ def switch(
     if session is not None:
         _mark_handing_over(project, agent, session, "switch", label)
     try:
-        handed_over = stop(project, label, handover=True, agent_id=agent.id)
+        # Nobody watches the automatic one, so a dialog on the agent's screen is answered
+        # with its least answer and the agent exits through its own `SessionEnd`, as
+        # Remote's Switch with `dismiss_dialog` does: killed, a Codex left its session
+        # parked on its limit until the reset (`_stop_row`).
+        handed_over = stop(
+            project, label, handover=True, agent_id=agent.id, dismiss_dialog=automatic
+        )
     finally:
         # Taken back however `stop` ends. The mark has one reader, the old process's
         # own SessionEnd, and by here that has run or never will: returned, the pane
@@ -8887,6 +8978,8 @@ def switch(
     # `spawn` refused the snapshot's closed task with the agent already stopped
     # (review of #203, final round, FLEET-3).
     stopped = handed_over.agent
+    if handed_over.dismissed is not None:
+        notes.append(f"it was stopped with {handed_over.dismissed}")
     whose = (
         "Claude" if kind == claude_accounts_core.AGENT else claude_accounts_core.agent_label(kind)
     )

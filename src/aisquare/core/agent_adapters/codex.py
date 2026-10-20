@@ -397,6 +397,9 @@ class CodexAdapter:
     hooks_off_setting = "`features.hooks = false`"
     #: Typed, then its Enter 0.2 s later: the paste-burst guard ate an Enter sent with it.
     exit_command = "/exit"
+    #: Its dialogs' ``esc back``: Esc leaves the ``Switch to gpt-6-luna?`` offer on the
+    #: current model and answers an approval No, back at the prompt (0.162.1).
+    dismiss_key = "Escape"
     #: Measured on 0.162.1 under tmux 3.7c: shift+enter submits the prompt (it arrives
     #: as Enter), ctrl+J inserts the newline. Esc interrupts a turn and shift+tab cycles
     #: Default/Plan mode, as their names are sent.

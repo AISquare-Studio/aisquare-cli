@@ -295,6 +295,7 @@ class FakeAgentAdapter:
     version_args: tuple[str, ...] = ("version",)
     hooks_off_setting = '"hooks_off": true'
     exit_command = "/quit"
+    dismiss_key = "C-g"
     key_spellings: Mapping[str, str] = {"M-Enter": "C-o"}
     accounts = FakeAccounts()
     plugin = None

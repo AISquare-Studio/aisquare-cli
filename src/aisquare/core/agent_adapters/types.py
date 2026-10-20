@@ -581,7 +581,7 @@ class AgentAdapter(Protocol):
     :meth:`encode_reply`. Launch: :meth:`model_args`, :meth:`permission_args`,
     :meth:`store_access`, :meth:`sandbox_writes`, :meth:`broker_access`, :meth:`fleet_args`,
     :meth:`label_args`, :meth:`resume_args`,
-    ``exit_command``, :meth:`queue_args`,
+    ``exit_command``, ``dismiss_key``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`context_files`, :meth:`disable_native_teams`,
     :meth:`telemetry_args`. Accounts: ``accounts``. Remote: ``transcript_reader``.
     ``capabilities`` says the rest.
@@ -602,6 +602,15 @@ class AgentAdapter(Protocol):
     exit_command: str
     """What the fleet types into the agent's prompt to end the session gracefully, so its
     ``SessionEnd`` hook runs (``/exit``)."""
+    dismiss_key: str
+    """The tmux key that closes a dialog of the agent's own with its least answer (No to a
+    permission prompt, back out of Codex's ``Switch to gpt-6-luna?`` offer) and leaves it
+    at its prompt (``Escape``). The automatic usage-limit hand-over presses it once where
+    the agent's screen shows anything but its empty prompt, then types
+    :attr:`exit_command` once that prompt is back, as Remote's ``dismiss_dialog`` does
+    (``services.fleet._dismissed``): a window killed instead fires no ``SessionEnd``, and
+    the session it leaves stays on the board, parked on its limit. Never ``Enter``, which
+    answers a dialog with its highlighted choice."""
     key_spellings: Mapping[str, str]
     """tmux key names this agent reads under another spelling, which the fleet UI's pane and
     Remote's key pad send instead (``core.keys.translate``, ``services.remote_server.

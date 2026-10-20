@@ -85,6 +85,8 @@ class ClaudeCodeAdapter:
     version_args: tuple[str, ...] = ("--version",)
     hooks_off_setting = '"disableAllHooks": true'
     exit_command = "/exit"
+    #: Esc answers its permission prompt No and closes its selectors.
+    dismiss_key = "Escape"
     #: Every key means what tmux names it: shift+tab cycles the permission mode, alt+p
     #: switches the model, shift+enter is a newline (``C-j`` on a tmux too old for it).
     key_spellings: Mapping[str, str] = MappingProxyType({})

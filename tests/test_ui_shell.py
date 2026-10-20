@@ -91,7 +91,7 @@ from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStat
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
-from tests import guard_clock
+from tests import guard_clock, toast_log
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
 from tests.ui_workers import settle_page
 
@@ -3925,6 +3925,7 @@ def test_a_restart_that_ends_after_the_user_moved_on_leaves_them_where_they_are(
         pilot: Pilot[None],
     ) -> tuple[str | None, str | None, str | None, bool, list[str], list[str]]:
         app = fleet_app(pilot)
+        told = toast_log.record(app)
         await pilot.click(row_for(app, "agt_a_manager"))
         await settle(app)
         view = app.current_view()
@@ -3936,7 +3937,8 @@ def test_a_restart_that_ends_after_the_user_moved_on_leaves_them_where_they_are(
         mine = app.current_view()
         assert isinstance(mine, AgentView) and app.focused is mine.pane
         release.set()
-        toasts = await _toast_list(app)
+        await settle(app)
+        toasts = list(told)
         await pilot.pause()
         current = app.current_view()
         rows = [row.status.agent.id for row in card_for(app, "prj_a").query(AgentRow)]
@@ -4064,6 +4066,7 @@ def test_a_click_on_stop_or_restart_as_the_view_switches_in_acts_on_nothing(
 
     async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], list[str]]:
         app = fleet_app(pilot)
+        told = toast_log.record(app)
         await pilot.click(row_for(app, "agt_a_manager"))
         await settle(app)
         clock.step()  # a while on manager 0's pane
@@ -4073,7 +4076,8 @@ def test_a_click_on_stop_or_restart_as_the_view_switches_in_acts_on_nothing(
         assert isinstance(view, AgentView) and view.status.agent.id == "agt_b_manager"
         await pilot.click(view.query_one("#agent-restart", Button))
         await pilot.click(view.query_one("#agent-stop", Button))
-        toasts = await _toast_list(app)
+        await settle(app)
+        toasts = list(told)
         ignored = list(acted)
         clock.step()
         await pilot.click(view.query_one("#agent-restart", Button))

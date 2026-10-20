@@ -23,7 +23,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, ContentSwitcher, Static
 
 from aisquare.cli.ui.click_guard import GuardedButton
-from tests import guard_clock
+from tests import guard_clock, toast_log
 from tests.guard_clock import GuardClock
 from tests.ui_workers import settle_page
 
@@ -42,6 +42,7 @@ class Host(App[None]):
     def __init__(self) -> None:
         super().__init__()
         self.pressed: list[str] = []
+        self.told = toast_log.record(self)
 
     def compose(self) -> ComposeResult:
         with ContentSwitcher(initial="one", id="switcher"):
@@ -55,7 +56,7 @@ class Host(App[None]):
         self.pressed.append(event.button.id or "")
 
     def notices(self) -> list[str]:
-        return [str(note.message) for note in self._notifications]
+        return list(self.told)
 
 
 @pytest.fixture

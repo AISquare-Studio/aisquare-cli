@@ -48,6 +48,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_page, remote_server
 from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, build_public_url
 from aisquare.services.remote_server import UNLOCK_GLOBAL_FAILURES, Runtime, UnlockBudget
+from tests import toast_log
 from tests.fake_clipboard import NEEDS_POSIX, TEXT, install
 from tests.test_remote_control import FakeServer, FakeTunnel, SlowServer, fake_tunnel_factory
 from tests.ui_workers import settle_page
@@ -474,14 +475,14 @@ def test_copy_puts_the_link_on_the_native_clipboard_beside_osc52_and_says_so_onc
         writes: list[str] = []
         assert app._driver is not None
         monkeypatch.setattr(app._driver, "write", writes.append)
-        before = len(toasts(app))
+        told = toast_log.record(app)
         modal.query_one("#remote-copy", Button).press()
         for _ in range(100):
-            if len(toasts(app)) > before:
+            if told:
                 break
             await pilot.pause(0.05)
         await pilot.pause(0.2)
-        return app.remote.link_url(), toasts(app)[before:], [w for w in writes if "\x1b]52;" in w]
+        return app.remote.link_url(), list(told), [w for w in writes if "\x1b]52;" in w]
 
     link, told, osc52 = drive(go, tunnel=fake_tunnel_factory(url=f"https://{TEXT}.ngrok-free.dev"))
     assert link is not None and TEXT in link, f"the premise: {link!r}"

@@ -20,7 +20,6 @@ from typing import Any, TypeVar
 import pytest
 from textual.pilot import Pilot
 from textual.widgets import Button, Static, Switch
-from textual.widgets._toast import Toast
 
 from aisquare.cli.ui import sidebar
 from aisquare.cli.ui.app import FleetApp
@@ -33,7 +32,8 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
-from tests.test_ui_shell import _toast_list, seed, settle, shown, status
+from tests import toast_log
+from tests.test_ui_shell import seed, settle, shown, status
 from tests.ui_workers import settle_page
 
 T = TypeVar("T")
@@ -365,6 +365,7 @@ def test_confirming_runs_the_worker_with_the_buttons_greyed_until_the_summary(
 
     async def go(pilot: Pilot[None]) -> tuple[list[bool], list[bool], list[str]]:
         app = _app(pilot)
+        told = toast_log.record(app)
         hub = app.query_one(SettingsHubView)
         dialog = await _open(pilot, "stop")
         _confirm(dialog).press()
@@ -375,7 +376,7 @@ def test_confirming_runs_the_worker_with_the_buttons_greyed_until_the_summary(
         acted.gate.set()  # type: ignore[union-attr]
         await settle(app)
         after = [hub.query_one(f"#fleet-{a}-all", Button).disabled for a in ("restart", "stop")]
-        return greyed, after, await _toast_list(app)
+        return greyed, after, told
 
     greyed, after, toasts = drive(go)
     assert greyed == [True, True] and after == [False, False]
@@ -399,6 +400,7 @@ def test_a_quit_is_refused_while_the_run_goes_on_and_quits_once_it_ended(acted: 
 
     async def go(pilot: Pilot[None]) -> tuple[int | None, list[str], int | None]:
         app = _app(pilot)
+        told = toast_log.record(app)
         dialog = await _open(pilot, "stop")
         _confirm(dialog).press()
         await settle_page(app, group="nothing-runs-here")  # the bulk worker is held
@@ -406,7 +408,7 @@ def test_a_quit_is_refused_while_the_run_goes_on_and_quits_once_it_ended(acted: 
         await pilot.press("q")
         await settle_page(app, group="nothing-runs-here")
         refused = app.return_code
-        toasts = [t for t in await _toasts_held(app) if "still running" in t]
+        toasts = [t for t in told if "still running" in t]
         acted.gate.set()  # type: ignore[union-attr]
         await settle(app)
         await pilot.press("q")
@@ -421,22 +423,16 @@ def test_a_quit_is_refused_while_the_run_goes_on_and_quits_once_it_ended(acted: 
     assert quit_after == 0
 
 
-async def _toasts_held(app: FleetApp) -> list[str]:
-    """The toasts on screen while a worker is held on purpose (``_toast_list`` settles every
-    worker, and would wait for it)."""
-    await settle_page(app, group="nothing-runs-here")
-    return [toast.render().plain for toast in app.screen.query(Toast)]
-
-
 def test_a_restart_of_all_is_told_per_agent_and_never_moves_the_view(acted: Acted) -> None:
     async def go(pilot: Pilot[None]) -> tuple[str | None, list[str]]:
         app = _app(pilot)
+        told = toast_log.record(app)
         dialog = await _open(pilot, "restart")
         dialog.query_one("#bulk-managers", Switch).value = True
         await settle(app)
         _confirm(dialog).press()
         await settle(app)
-        return app.content.current, await _toast_list(app)
+        return app.content.current, told
 
     current, toasts = drive(go)
     assert current == "settings-hub", "the user's view stays where they put it"
@@ -458,12 +454,13 @@ def test_confirm_acts_on_the_agents_shown_and_skips_one_that_ended_since(
 
     async def go(pilot: Pilot[None]) -> list[str]:
         app = _app(pilot)
+        told = toast_log.record(app)
         dialog = await _open(pilot, "stop")
         two_projects["prj_a"][1] = status("prj_a", "coder-1", "coder", "exited", exit_status=0)
         two_projects["prj_b"].append(status("prj_b", "coder-2", "coder", "working", minute=3))
         _confirm(dialog).press()
         await settle(app)
-        return await _toast_list(app)
+        return told
 
     toasts = drive(go)
     assert [agent_id for _, _, agent_id in acted.calls] == [
@@ -492,10 +489,11 @@ def test_a_failing_agent_is_toasted_and_named_in_the_summary_and_the_rest_go_on(
 
     async def go(pilot: Pilot[None]) -> list[str]:
         app = _app(pilot)
+        told = toast_log.record(app)
         dialog = await _open(pilot, "stop")
         _confirm(dialog).press()
         await settle(app)
-        return await _toast_list(app)
+        return told
 
     toasts = drive(go)
     assert "could not stop coder-1 (alpha): tmux refused the kill" in toasts

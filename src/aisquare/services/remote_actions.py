@@ -1161,6 +1161,9 @@ def action_type_now(
     ``interrupt`` sends one Escape and waits for the prompt to come back. If it does
     not, nothing is typed. By then the Escape has cut the agent's turn short, so a
     refusal after it is audited: ``trail`` words the tell's line from how it ended.
+    An agent whose own screen shows its empty prompt with no turn on it
+    (:func:`remote_needs.needs_screen_at_rest`) has no turn to stop: its line is typed
+    with no Escape, which there could be the second one, into Codex's transcript.
 
     A limited agent sits quiet at its prompt, Claude Code's limit message its newest
     words, and ``needs_at_input_prompt`` reads that as a prompt to type at. Both
@@ -1184,6 +1187,9 @@ def action_type_now(
     if not interrupt:
         if not remote_needs.needs_at_input_prompt(snap):
             raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
+        return action_paste(snap, label, text, interrupted=False, trail=trail)
+    if remote_needs.needs_screen_at_rest(snap):
+        # No turn to stop, and its Escape may be the second (review r16 of #113, 2/8).
         return action_paste(snap, label, text, interrupted=False, trail=trail)
     action_press_escape(
         snap, label, audit=lambda error: trail(f"delivered=no escape=maybe refused={error}")

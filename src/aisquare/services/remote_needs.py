@@ -3541,6 +3541,28 @@ def _needs_screen_drawn(snap: AgentNow) -> bool | None:
     return None if working is not None and working(snap.screen) else True
 
 
+def needs_screen_at_rest(snap: AgentNow) -> bool:
+    """Whether the agent's screen shows its empty prompt with no turn on it, its pane quiet or
+    not: an adapter that reads both off its screen (``capabilities.idle_on_screen`` or
+    ``idle_prompt_mark``, and ``working_on_screen``: Codex's), and a screen read.
+
+    Interrupt & tell sends its Escape for a turn to stop, and there is none here. Sent
+    anyway, after one Esc already in (a pad Esc at Codex's idle prompt, whose redraw left
+    the pane busy for :data:`fleet.ACTIVITY_WINDOW`), it was the second: Codex opened its
+    transcript, where Enter rewinds, the tell ended 409 ``still_busy`` and left it there
+    (review r16 of #113, 2/8)."""
+    from aisquare.services import fleet as fleet_service
+
+    status = snap.status
+    if snap.screen is None or status is None or not snap.pane_is_agent:
+        return False
+    adapter = _needs_screen_reader(status)
+    working = None if adapter is None else adapter.capabilities.working_on_screen
+    if adapter is None or working is None:
+        return False
+    return fleet_service._idle_screen(adapter, snap.screen) and not working(snap.screen)
+
+
 def needs_item_current(snap: AgentNow, item_id: str) -> bool:
     """Whether ``item_id`` is still one of the agent's items right now."""
     return any(item.id == item_id for item in snap.items)

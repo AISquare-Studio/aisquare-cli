@@ -97,12 +97,14 @@ ROLLOUT_UNREAD = TranscriptTail(
 class CodexPane(FakePane):
     """The agent's tmux, its pane showing ``screen`` (``screen_text``), printing nothing for a
     minute unless ``busy`` (``pane_facts``), on a server of ``version``. An Escape shows
-    ``after_escape``, as Codex redraws on one."""
+    ``after_escape``, as Codex redraws on one, and with ``rests_on_escape`` stops the pane
+    printing (a turn it stopped)."""
 
     def __init__(self, trail: list[str]) -> None:
         super().__init__(trail)
         self.screen: list[str] = IDLE
         self.after_escape: list[str] | None = None
+        self.rests_on_escape = False
         self.busy = False
         self.unreadable = False
         self.version: tuple[int, int] | None = (3, 7)
@@ -126,6 +128,7 @@ class CodexPane(FakePane):
         super().send_keys(pane_id, *keys)
         if "Escape" in keys and self.after_escape is not None:
             self.screen = self.after_escape
+            self.busy = self.busy and not self.rests_on_escape
 
     def server_version(self) -> tuple[int, int] | None:
         return self.version
@@ -245,18 +248,53 @@ def test_a_fresh_codex_at_its_empty_prompt_takes_a_prompt_tell(
     ]
 
 
-def test_a_codex_after_one_esc_is_still_at_its_prompt_for_interrupt_and_tell(
+@pytest.mark.parametrize(
+    ("screen", "busy"),
+    [
+        pytest.param(IDLE, False, id="at-its-empty-prompt"),
+        pytest.param(ESC_AGAIN, True, id="after-a-pad-esc"),
+    ],
+)
+def test_interrupt_and_tell_at_a_codex_with_no_turn_to_stop_sends_no_escape(
+    phone: Phone,  # noqa: F811
+    scan: OneRowScan,
+    pane: CodexPane,
+    project: ProjectInfo,  # noqa: F811
+    screen: list[str],
+    busy: bool,
+) -> None:
+    """Review r16 of #113, 2/8: Interrupt & tell sent its Escape whatever Codex's screen
+    showed. After a pad Esc at its idle prompt (``esc again to edit previous message`` in its
+    footer, the pane busy with that redraw), it was the second, which opens Codex's
+    transcript, where Enter rewinds (measured on 0.162.1): the tell ended 409 ``still_busy``
+    and left Codex there. At its empty prompt with no turn on screen there is nothing to
+    stop, and a typed line and its Enter land there, the Esc footer's too (measured): the
+    line is typed with no Escape."""
+    _row(project, session="ses_codex")
+    scan.session, scan.tail = _stopped_turn(project), ROLLOUT_UNREAD
+    pane.screen, pane.busy, pane.after_escape = screen, busy, BROWSING
+    response = phone.post("agent/tell", agent=LABEL, text="use the test DB", mode="interrupt")
+    assert response.status_code == 200, response.text
+    assert response.json()["delivered"] is True
+    assert [(kind, what) for _pane, kind, what in pane.sent] == [
+        ("paste", "use the test DB"),
+        ("key", "Enter"),
+    ]
+    assert pane.screen == screen, "no transcript browser opened"
+
+
+def test_interrupt_and_tell_mid_turn_still_stops_a_codex_turn_with_one_escape(
     phone: Phone,  # noqa: F811
     scan: OneRowScan,
     pane: CodexPane,
     project: ProjectInfo,  # noqa: F811
 ) -> None:
-    """Interrupt & tell's Escape at Codex's idle prompt leaves ``esc again to edit previous
-    message`` in its footer until the next key, where a typed line and its Enter still land
-    as a prompt (measured): its line is typed there, and the one Escape is all it sends."""
+    """The control: a turn on screen (its status line above the empty prompt it keeps) is
+    what the Escape is for. One goes, and the line is typed once the prompt is back."""
     _row(project, session="ses_codex")
-    scan.session, scan.tail = _stopped_turn(project), ROLLOUT_UNREAD
-    pane.after_escape = ESC_AGAIN
+    scan.session = _stopped_turn(project).model_copy(update={"state": "working"})
+    scan.state, scan.tail, pane.screen, pane.busy = "working", ROLLOUT_UNREAD, WORKING, True
+    pane.after_escape, pane.rests_on_escape = IDLE, True
     response = phone.post("agent/tell", agent=LABEL, text="use the test DB", mode="interrupt")
     assert response.status_code == 200, response.text
     assert [(kind, what) for _pane, kind, what in pane.sent] == [

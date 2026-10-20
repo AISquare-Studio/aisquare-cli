@@ -3221,3 +3221,140 @@ def test_real_codex_dialogs_no_hook_reports_are_cards_on_the_phone(
             provider.shutdown()
             thread.join(timeout=2)
             _stop_app_servers(native_home)
+
+
+class _HeardOk(_SaysOk):
+    """:class:`_SaysOk`, remembering the newest user line of every turn in ``heard``."""
+
+    def do_POST(self) -> None:
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        if self.path.endswith("/responses"):
+            self.server.heard.extend(_user_texts(json.loads(raw))[-1:])  # type: ignore[attr-defined]
+        self.rfile = io.BytesIO(raw)
+        super().do_POST()
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_after_a_pad_esc_takes_interrupt_and_tell_and_opens_no_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r16 of #113, 2/8, through Remote served on loopback as a phone reaches it. One
+    Esc from the pad at Codex 0.162.1's idle prompt after a turn leaves ``esc again to edit
+    previous message`` in its footer. Interrupt & tell then sent its own Escape, the second,
+    and Codex opened its transcript (``Browsing transcript … ↵ rewind``): the tell was 409
+    ``still_busy`` and left Codex there, where a pad Enter rewinds the conversation. With no
+    turn on its screen there is none to stop: the line is typed with no Escape, reaches the
+    provider as a prompt, and no transcript opens. No command runs in Codex's sandbox."""
+    from aisquare.services import remote_needs, remote_server
+    from tests.remote_kit_helpers import PASSWORD, make_runtime
+
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    native_home = tmp_path / "codex"
+    native_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with ThreadingHTTPServer(("127.0.0.1", 0), _HeardOk) as provider:
+        heard: list[str] = []
+        provider.heard = heard  # type: ignore[attr-defined]
+        thread = threading.Thread(target=provider.serve_forever, daemon=True)
+        thread.start()
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{provider.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-padesc-{os.getpid()}"
+        save_config(config)
+        project = team.activate(workspace)
+        srv = fleet.server(config.fleet)
+        runtime = make_runtime()
+        runtime.set_allow_write(True)
+        app = remote_server.build_app(runtime, dist_dir=tmp_path / "dist")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        served = remote_server._Server(app, port)
+        origin = f"http://127.0.0.1:{port}"
+
+        def screen(pane: str) -> str:
+            return srv.run("capture-pane", "-p", "-t", pane)
+
+        def until(check: Any, seconds: float, what: str, pane: str) -> None:
+            deadline = time.monotonic() + seconds
+            while not check():
+                if time.monotonic() >= deadline:
+                    raise AssertionError(f"{what}:\n{screen(pane)}")
+                time.sleep(0.2)
+
+        def board(agent: Any) -> Any:
+            with store_session() as store:
+                row = store.get_fleet_agent(agent.id)
+                return store.get_session(row.session_id) if row and row.session_id else None
+
+        try:
+            coder = fleet.spawn(
+                project,
+                "coder",
+                agent="codex",
+                worktree=False,
+                agent_args=["--dangerously-bypass-hook-trust"],
+            ).agent
+            pane = coder.pane_id
+            served.start_serving()
+            with httpx.Client(base_url=origin, headers={"origin": origin}, timeout=60) as phone:
+                at = f"/r/{runtime.token}/api"
+                assert phone.post(f"{at}/unlock", json={"password": PASSWORD}).status_code == 200
+
+                def tell(text: str, mode: str) -> httpx.Response:
+                    body = {"agent": coder.label, "project": project.id, "text": text, "mode": mode}
+                    return phone.post(f"{at}/agent/tell", json=body)
+
+                until(lambda: "? for shortcuts" in screen(pane), 30, "its empty prompt", pane)
+                deadline = time.monotonic() + 30
+                told = tell("reply ok", "prompt")
+                while told.status_code == 409 and told.json()["error"] == "agent_busy":
+                    assert time.monotonic() < deadline, f"{told.text}\n{screen(pane)}"
+                    time.sleep(0.5)
+                    told = tell("reply ok", "prompt")
+                assert told.status_code == 200, f"{told.text}\n{screen(pane)}"
+                until(lambda: "reply ok" in heard, 30, "its first prompt", pane)
+                until(
+                    lambda: (session := board(coder)) is not None and session.state == "waiting",
+                    30,
+                    "the turn's Stop",
+                    pane,
+                )
+                until(lambda: "? for shortcuts" in screen(pane), 20, "its idle prompt", pane)
+
+                body = {"agent": coder.label, "project": project.id, "keys": ["Escape"]}
+                pressed = phone.post(f"{at}/send-keys", json=body)
+                assert pressed.status_code == 200, f"{pressed.text}\n{screen(pane)}"
+                footer = "esc again to edit previous message"
+                until(lambda: footer in screen(pane), 10, "the pad Esc's footer", pane)
+
+                told = tell("after the pad esc", "interrupt")
+                assert told.status_code == 200, f"{told.text}\n{screen(pane)}"
+                assert told.json()["delivered"] is True, told.text
+                until(lambda: "after the pad esc" in heard, 30, "the told line, heard", pane)
+                assert "Browsing transcript" not in screen(pane)
+        finally:
+            served.stop_serving()
+            remote_needs._needs_watcher(app.kit).stop_watching()
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            provider.shutdown()
+            thread.join(timeout=2)
+            _stop_app_servers(native_home)

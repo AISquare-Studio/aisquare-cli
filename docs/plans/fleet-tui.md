@@ -131,11 +131,46 @@ Phase 0) before anything is built on top.
 `capture-pane -p -e -N -t %pane -S <s> -E <e>` and
 `display-message -p -t %pane '#{cursor_x} #{cursor_y} #{cursor_flag} #{pane_width} #{pane_height} #{alternate_on} #{history_size} #{pane_dead} #{pane_dead_status} #{pane_in_mode}'`.
 Each captured line → `rich.text.Text.from_ansi` → a Textual `Strip`; lines are
-diffed against the previous frame so only changed rows repaint. Budget: ≤ 20 fps
-while output changes, ~2 fps idle. Phase 2 of the pane may move to a control-mode
-client (`tmux -C`) for `%output`-driven refresh, `refresh-client -C WxH` sizing
-and `refresh-client -A %pane:off` to mute non-visible panes; polling comes first
-because it is fifty lines and measurable.
+diffed against the previous frame so only changed rows repaint.
+
+**Phase 2, built (2026-10-20): one control-mode client per server.** Polling came
+first because it was fifty lines and measurable, and the measurement brought this
+in: each polled call is a ~5 ms fork+exec on the UI thread, one per key and one
+per frame, so a key reached the screen 60 ms later at best. Now the pane on screen
+talks to tmux through ONE `tmux -C` client per server (`core/tmux_control.py`),
+started when a pane first goes on screen with a live frame:
+
+- *Rendering is unchanged.* The frame is still `capture-pane` + `display-message`,
+  sent down the client's pipe and read back from its `%begin`/`%end` answer.
+  `%output` is only the signal that a frame is due; its bytes are never read into
+  a screen (that would be option A).
+- *It follows the pane on screen.* tmux sends `%output` only for the session a
+  client is attached to, so the client moves there (`switch-client -t %pane`).
+  Every other pane of that session is muted with `refresh-client -A %N:pause`.
+  `:off`, the mute this paragraph first named, **freezes** the pane when every
+  attached client is a control client that turned it off: tmux stops reading it,
+  so the agent blocks and `#{window_activity}` stops. Measured on 3.2a, 3.4 and
+  3.8: a ticker's history went 1 → 1 with `:off` and 25 → 213 with `:pause`.
+- *No sizing.* The client attaches with `-f ignore-size,no-output` and is never
+  given a size (`refresh-client -C` is not sent), so it changes no window's size,
+  pinned or not. The `no-output` flag is turned off in the same write that sets
+  the first pauses, because changing it clears every pause.
+- *Cadence.* At most one frame in flight, about 60 a second. Input gets one at
+  once, and the echo's frame skips the gap. A 500 ms idle tick asks too, as a net
+  for a pane that dies silently. Keys, text, mouse reports and paste
+  (`set-buffer` + `paste-buffer`) go down the same pipe.
+- *Results on 3.8.* Key to frame went from 35 ms polled to 1.0 ms median; 50
+  wheel notches over 500 ms got 32 frames while they lasted; no tmux process is
+  started per key or per frame. The cost is CPU while an agent streams. A 200×60
+  pane that rewrites every row draws 59 frames/s for 21 % of one core, where
+  polling drew 17 for 10 %. Each frame is cheaper (3.6 ms against 5.9 ms), but
+  there are three times as many, so it is over the old 15 % go/no-go; the frame
+  gap (`TerminalPane.CONTROL_FRAME_GAP`) is the knob.
+- *Polling stays as the fallback.* It is used below 3.2, for a client that cannot
+  start, ends, is killed or stops answering for a second, and, for the rest of an
+  attach, for a pane whose control command fails. It is fixed too: input throttles
+  the frame timer instead of postponing it, and after input it stays at 50 ms for
+  300 ms. Budget, polled: ≤ 20 fps while output changes, ~2 fps idle.
 
 **A private server, never the user's.** `tmux -L asq -f <bundled conf>`. We do
 not read `~/.tmux.conf`, touch the user's sessions, or change their prefix key.
@@ -620,9 +655,13 @@ codename `amber-otter`, session `asq-amber-otter`, branches
 
 ## 6. The `TerminalPane`, in detail — the risky core
 
-**Render loop.** A Textual timer at 50 ms while the pane is visible *and* tmux
-reports activity or a cursor/history change; backing off to 500 ms when idle.
-Per frame: one tmux process, two commands (§3.1). `Text.from_ansi(line)` results
+**Render loop.** Over the control client (§3.1, Phase 2): a frame per `%output`
+from the visible pane, at most one in flight and about 60 a second, one right
+after input, and a 500 ms net. Polled, the fallback: a Textual timer at 50 ms
+while the pane is visible *and* the last frame changed (or input arrived within
+300 ms), backing off to 500 ms when idle, and input never postpones a frame
+already due. Per frame: two commands (§3.1), down the pipe or in one tmux
+process. `Text.from_ansi(line)` results
 are cached by line string, so an unchanged line costs a dict lookup; the widget
 uses Textual's Line API (`render_line(y)`) and only refreshes rows whose Strip
 changed. The cursor is a reverse-video cell when `cursor_flag` is 1.
@@ -923,7 +962,7 @@ driven headless with `App.run_test()` / `Pilot`, as `test_watch.py` already does
 | --- | --- | --- | --- |
 | The rendering hop loses fidelity (emoji widths, cursor shapes, OSC 8 links, synchronized-output mode) | medium | UX | spike matrix; "open in tmux" is always one keystroke away |
 | Key chords the outer terminal cannot express (shift+enter, ctrl+shift+…) | high on VTE / Windows Terminal | UX | document per terminal; recommend kitty-protocol terminals; `\`+Enter fallback |
-| Frame cost with several streaming agents | low — only the visible pane is captured | perf | activity-gated polling; control-mode client if measured |
+| Frame cost with several streaming agents | low — only the visible pane is captured | perf | the control-mode client (§3.1, Phase 2): the visible pane only, hidden panes paused; polling as the fallback |
 | tmux missing or old (macOS ships none; Debian stable has 3.3) | medium | feature unavailable | doctor with install hints; everything else keeps working |
 | A nudge typed into the wrong UI state | low–medium | agent confusion | gate on `waiting` + pane liveness; fixed harmless text; never during `attention` |
 | Stop-hook continuation loops, token burn | medium | cost | new-events-only; `stop_hook_active`; hourly cap; `fleet pause`; agent cap |
@@ -990,3 +1029,4 @@ matrix is filled in Phase 0.
 | 2026-08-28 | CI (ubuntu-24.04, tmux 3.4) found three integration truths: `window-size manual` CRASHES tmux 3.4 (fatal in the startup conf, and a live set kills the server on the next window op — measured in a container), so the bundled conf drops it and `resize-window` pins windows to manual per-window; `init` with AISQUARE_HOME pointing at a file now fails cleanly (`home_not_creatable`) instead of a traceback under `--json`; the pane scroll test scrolls through known history instead of racing the clamp; and tmux < 3.5 TYPES extended-only chords (`S-Enter`, `S-Escape`, `C-S-<letter>`, `C-M-Enter`…) literally into a pane — measured across 3.3a / 3.4 / 3.5a — so `translate` version-gates them (`EXTENDED_MINIMUM = (3, 5)`) and the doctor recommends 3.5. | PR #71 |
 | 2026-08-28 | Implementation landed on this branch: scaffold f0a818c (contracts), then ten siloed work packages (tmux, fleet-service, fleet-cli, terminal, shell, onboard, doctor, manager, board, docs) built in parallel worktrees and merged without a conflict, plus an integration pass. Deviations, all recorded in code: the `auto`→`acceptEdits` permission fallback (§3.6) is documented, not automated; drag-select/copy inside an agent pane (§6) is not implemented (Line-API widget); a dead/vanished pane is read BEFORE the board row when deriving state (§5.1) because a killed agent fires no SessionEnd; `window_activity_flag` is not a signal on a headless server (§3.1), the frame diff is; the Settings tab omits model/effort/binary (one home per concept); the Onboard view is built on the first `+`; `ExplainabilitySettings.roles` now lists all seven roles. The §6 per-terminal key matrix still needs a human at each terminal. | PR #71 |
 | 2026-08-28 | Implementation started from the scaffold (`f0a818c`: store v11, `[fleet]` config, the roles, `core/tmux.py`, `cli/fleet.py`, the UI skeleton) with the work packages in parallel. User documentation written from the scaffolded CLI: `docs/fleet.md` (listed in `DOCUMENTED`), the README fleet section and command-tree lines, the CHANGELOG entry — saying plainly where a piece lands in a later phase. | WP docs |
+| 2026-10-20 | §3.1 Phase 2 built: the visible pane renders and takes input over ONE `tmux -C` client per server (`core/tmux_control.py`); `%output` is only the dirty signal, the frame is still `capture-pane` + `display-message` down the pipe. The plan's `refresh-client -A %pane:off` mute was MEASURED to freeze the pane (tmux stops reading it when every attached client is a control client that turned it off) on 3.2a, 3.4 and 3.8, so the mute is `:pause`. `-f ignore-size,no-output` and no `refresh-client -C`: no window changes size. Key to frame 35 ms polled → 1.0 ms median on 3.8; polling kept as the fallback and fixed to throttle, not debounce. | task #2 |

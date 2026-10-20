@@ -414,6 +414,33 @@ def test_a_project_whose_agents_cannot_be_read_is_named_and_the_rest_go_on(
     assert not report.ok and report.summary().endswith("· 1 project(s) not read")
 
 
+def test_a_forgotten_project_s_running_agents_are_stopped_and_not_restarted_back(
+    fleet: Fleet, tmux: FakeTmux, tmp_path: Path
+) -> None:
+    """Review of #266, round 2: a ``project forget`` that races a spawn leaves a tombstone
+    over a running agent. ``shutdown`` reads past it, and ``stop --all`` left that agent
+    running on a project nobody lists. A restart would add the project back (a spawn is a
+    deliberate add), so it leaves the agent and says why."""
+    with store_session() as store:
+        store.forget_project(fleet.beta.id)
+    gone = _project(tmp_path, "gone")
+    with store_session() as store:
+        store.forget_project(gone.id)  # a tombstone with no agent: nothing to list
+
+    restarted = fleet_service.bulk("restart")
+    outcomes = _outcomes(fleet, restarted.receipts)
+    assert outcomes.pop("beta/manager") == ("skipped", fleet_service.PROJECT_FORGOTTEN)
+    assert outcomes.pop("beta/coder-1") == ("skipped", fleet_service.PROJECT_FORGOTTEN)
+    assert outcomes == {"alpha/manager": ("done", None), "alpha/coder-1": ("done", None)}
+    with store_session() as store:
+        assert fleet.beta.id not in {p.id for p in store.list_projects(all=True)}
+    assert {r.project.id for r in restarted.receipts} == {fleet.alpha.id, fleet.beta.id}
+
+    stopped = fleet_service.bulk("stop")
+    assert _outcomes(fleet, stopped.receipts) == {key: ("done", None) for key in ALL}
+    assert _live_ids(fleet.beta) == set()
+
+
 def test_a_shown_project_the_second_read_cannot_list_is_named_not_called_exited(
     fleet: Fleet, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -361,6 +361,10 @@ stopped. Some agents are left alone, and each is named with the reason:
 - a row held as another tmux server's (`held: …`), whose pane id names another agent;
 - for a restart, an agent whose task is done or dropped (`task is done`), which
   `fleet restart` would refuse;
+- for a restart, an agent of a project you forgot (`its project was forgotten`).
+  A `project forget` that races a spawn can leave a running agent on it. Its
+  replacement would add the project back, so the restart leaves it, and
+  `stop --all` stops it, as `fleet shutdown --all` does;
 - an agent that ended after the list was read and before its turn: `already
   exited`. Each agent is looked at again just before it is acted on, so one that
   exited or was stopped meanwhile is not started again, and its 💤 window stays.

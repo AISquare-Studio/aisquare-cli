@@ -7168,6 +7168,9 @@ THIS_SESSION = "this session"
 the manager, and the command with it, half-way through."""
 ALREADY_EXITED = "already exited"
 """Why :func:`bulk` leaves a row the caller was shown that has no process by the time it acts."""
+PROJECT_FORGOTTEN = "its project was forgotten"
+"""Why a restart by :func:`bulk` leaves a running agent of a forgotten project: the spawn of
+its replacement is a deliberate add, and would bring the project back to every listing."""
 
 
 @dataclass(frozen=True)
@@ -7276,12 +7279,24 @@ def bulk_plan(
     - an exited or lost row, by its state: 💤 agents are left as they are;
     - a row the listing holds as another server's (``FleetAgentStatus.held``): its pane id
       is that server's, and a ``/exit`` typed there is typed into another agent;
-    - for a restart, a row whose task is done or dropped, which :func:`restart` refuses.
+    - for a restart, a row whose task is done or dropped, which :func:`restart` refuses;
+    - for a restart, a row of a forgotten project (:data:`PROJECT_FORGOTTEN`).
+
+    Every directory is read, captured ones too, and a forgotten registration that holds a
+    live row, as ``shutdown`` reads them (:func:`_shutdown_targets`): a ``project forget``
+    that races a spawn leaves a tombstone over a running agent, which ``stop --all`` left
+    running on a project nobody lists (review of #266, round 2).
     """
     if action not in ("restart", "stop"):
         raise ValueError(f"bulk action {action!r} is neither restart nor stop")
     with store_session() as store:
-        projects = store.list_projects(all=True)  # a captured directory can hold agents
+        every = store.list_projects(include_forgotten=True)
+        forgotten = store.forgotten_among([project.id for project in every])
+        projects = [
+            project
+            for project in every
+            if project.id not in forgotten or store.fleet_agents(project.id, live_only=True)
+        ]
         own, own_session = _own_rows(store, acting_session)
     rows: list[BulkRow] = []
     unread: list[tuple[ProjectInfo, str]] = []
@@ -7306,6 +7321,8 @@ def bulk_plan(
                 skip = status.state
             elif status.held:
                 skip = f"held: {status.detail or ANOTHER_SERVER}"
+            elif action == "restart" and project.id in forgotten:
+                skip = PROJECT_FORGOTTEN
             else:
                 skip = closed.get(agent.id)
             rows.append(BulkRow(project, status, skip))

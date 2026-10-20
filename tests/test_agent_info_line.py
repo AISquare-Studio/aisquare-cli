@@ -197,9 +197,24 @@ def test_an_exited_row_says_its_exit_once() -> None:
     line = info_line(_status(state="exited", exit_status=1, detail="exit 1"), LABELS).plain
     assert "💤 exited(1)" in line
     assert "exit 1" not in line and "exited 1" not in line  # not a second time
-    # Another detail on an exited row still shows.
+    # Another detail on an exited row still shows, in the detail's place.
     gone = info_line(_status(state="exited", exit_status=None, detail="exit 3"), LABELS).plain
-    assert "💤 exited  exit 3" in gone
+    assert gone == "🔨 coder-auth  💤 exited  claude-opus-5-5 high  dev  exit 3  %4"
+
+
+def test_the_detail_comes_after_the_account_and_its_use_before_the_pane() -> None:
+    """The owner's ruling on #267: a detail has no bound, and a line too long for its row is
+    cut at its end, so the detail goes after ``account · pct%`` — what gives way first."""
+    status = _status(state="attention", detail="Claude needs your permission", slot=2)
+    assert info_line(status, LABELS, {2: 42.0}).plain == (
+        "🔨 coder-auth  🔔 attention  claude-opus-5-5 high  work · 42%  "
+        "Claude needs your permission  %4"
+    )
+    # Without an account, the detail follows the effort; without a session, the state.
+    alone = _status(state="unknown", detail="tmux unavailable", session=False, slot=None)
+    assert info_line(alone, LABELS).plain == "🔨 coder-auth  · unknown  tmux unavailable  %4"
+    bare = _status(state="lost", detail="pane gone", slot=None)
+    assert info_line(bare, LABELS).plain.endswith("claude-opus-5-5 high  pane gone  %4")
 
 
 def test_no_two_neighbouring_fields_share_a_style() -> None:

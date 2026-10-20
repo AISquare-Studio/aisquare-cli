@@ -4168,6 +4168,61 @@ def test_agent_view_reads_the_account_labels_off_the_ui_thread_and_repaints(
     assert reads == 1 and asked[0] != "MainThread"  # once, off the event loop
 
 
+def test_a_long_detail_is_what_the_agent_view_cuts_never_the_account_or_its_use(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's ruling on #267: the detail comes after ``account · pct%``, and the header
+    cuts a line too long for its one-row bar at its end, with an ellipsis. The folder-trust
+    prompt's detail names a command and a path; at 90 columns the bar shows the account and
+    its use whole, then the detail's start and ``…``. Before, the header word-wrapped onto a
+    second row its height clipped: what did not fit vanished, with no ``…`` to say so."""
+    from aisquare.cli.ui.views import agent as agent_view
+    from aisquare.models import TeamSession
+    from aisquare.services import fleet as fleet_service
+
+    monkeypatch.setattr("aisquare.services.claude_accounts.slot_labels", lambda: {3: "dev"})
+    server = fake.server(tmp_path)
+    base = _status(state="attention")
+    status = base.model_copy(
+        update={
+            "agent": base.agent.model_copy(update={"account_slot": 3}),
+            "detail": fleet_service.trust_prompt_detail(_CWD),
+            "session": TeamSession(
+                id="s-1",
+                project_id="prj_1",
+                role="coder",
+                started_at=base.agent.created_at,
+                last_seen_at=base.agent.created_at,
+                model="claude-opus-5-5",
+                effort="high",
+            ),
+        }
+    )
+
+    class ViewHost(App[None]):
+        def compose(self) -> ComposeResult:
+            yield agent_view.AgentView(
+                status, server=server, escape_key="f12", usage={3: 87.0}, id="view"
+            )
+
+    async def drive() -> tuple[str, str]:
+        host = ViewHost()
+        async with host.run_test(size=(90, 8)) as pilot:
+            header = host.query_one("#agent-header", Static)
+            await wait_until(pilot, lambda: "dev" in str(header.content))
+            await pilot.pause()
+            (strip,) = header.render_lines(Region(0, 0, header.outer_size.width, 1))
+            return strip.text, str(header.content)
+
+    shown, whole = run(drive())
+    assert whole.endswith("  %1") and "folder trust" in whole  # the line itself is all there
+    assert "claude-opus-5-5 high  dev · 87%  " in shown, shown  # account and use, whole
+    assert shown.rstrip().endswith("…"), shown  # the cut is said, and it falls in the detail
+    detail_start = shown.index("dev · 87%") + len("dev · 87%  ")
+    assert shown[detail_start:].startswith("waiting"), shown
+    assert "%1" not in shown and "trust <" not in shown
+
+
 def test_agent_view_refreshes_its_header_and_reattaches_on_a_new_pane(
     fake: FakeTmux, tmp_path: Path
 ) -> None:

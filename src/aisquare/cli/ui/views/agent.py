@@ -65,7 +65,7 @@ def account_text(status: FleetAgentStatus, labels: Mapping[int, str] | None = No
 
 LABEL_STYLE = "bold"
 DETAIL_STYLE = "italic"
-"""Not dim: the ``💤`` and ``·`` chips are, and the detail follows them."""
+"""Not dim: the pane id after it is, and so are the ``💤`` and ``·`` chips it can follow."""
 MODEL_STYLE = "dim cyan"
 EFFORT_STYLE = "cyan"
 ACCOUNT_STYLE = "blue"
@@ -80,13 +80,19 @@ def info_line(
 ) -> Text:
     """``🔨 coder-auth  ▶ working  claude-opus-5-5 high  dev · 87%  %4`` — one agent at a glance.
 
-    The Agent view's header and the Manager tab's first line, both: the role icon and the
-    label, the state chip (``💤 exited(N)`` once it ended), the state's detail, the model
-    and the effort the session reported (``TeamSession.effort``, left out while unknown),
-    the account (:func:`account_text`, its NAME alone — no ``#slot``) with its five-hour
-    window percent USED from ``usage`` (slot → percent, the slow headroom read's
-    ``session_by_slot``), and the pane id. No role word, task, working directory or tmux
-    command: the sidebar row says the role, and the attach command is the Settings tab's.
+    The Agent view's header and the Manager tab's first line, both:
+    ``<icon> <label>  <chip> <state>[(exit)]  <model> <effort>  <account> · <pct>%  [detail]
+    <pane id>``. The role icon and the label; the state chip (``💤 exited(N)`` once it
+    ended); the model and the effort the session reported (``TeamSession.effort``, left
+    out while unknown); the account (:func:`account_text`, its NAME alone — no ``#slot``)
+    with its five-hour window percent USED from ``usage`` (slot → percent, the slow
+    headroom read's ``session_by_slot``); the state's detail; and the pane id. No role
+    word, task, working directory or tmux command: the sidebar row says the role, and the
+    attach command is the Settings tab's.
+
+    The detail comes after the account, as the owner ruled on #267: it has no bound (the
+    folder-trust prompt's names a command and a path), and a line too long for its row is
+    cut at its end — so a long detail is what gives way, never the account or its use.
 
     Each field is a style of its own and no two neighbours share one, so each reads apart
     at a glance; every one is appended as data.
@@ -101,10 +107,6 @@ def info_line(
     exited = status.state == "exited" and agent.exit_status is not None
     code = f"({agent.exit_status})" if exited else ""
     text.append(f"{chip} {status.state}{code}", style=chip_style)
-    # An exited row's detail is its exit code, which the chip has just said.
-    if status.detail and not (exited and status.detail == f"exit {agent.exit_status}"):
-        text.append(SEPARATOR)
-        text.append(status.detail, style=DETAIL_STYLE)
     if session is not None and session.model:
         text.append(SEPARATOR)
         text.append(session.model, style=MODEL_STYLE)
@@ -120,6 +122,10 @@ def info_line(
         if percent is not None:
             text.append(" · ", style="dim")
             text.append_text(session_percent_text(percent))
+    # An exited row's detail is its exit code, which the chip has already said.
+    if status.detail and not (exited and status.detail == f"exit {agent.exit_status}"):
+        text.append(SEPARATOR)
+        text.append(status.detail, style=DETAIL_STYLE)
     text.append(SEPARATOR)
     text.append(agent.pane_id, style=PANE_STYLE)
     return text
@@ -217,9 +223,15 @@ class AgentView(Vertical):
     (:class:`~aisquare.cli.ui.click_guard.GuardedButton`).
     """
 
+    # ``text-wrap`` / ``text-overflow`` on the header, not on its ``Text``: Textual drops the
+    # Text's own ``no_wrap`` and ellipsis (see ``sidebar.Activatable``), and a line wider
+    # than the bar word-wrapped onto a second row its height clipped — the account and its
+    # use vanished with no ``…``. Cut at the end, the info line gives way from its detail.
     DEFAULT_CSS = """
     AgentView #agent-bar { height: 1; }
-    AgentView #agent-header { width: 1fr; height: 1; padding: 0 1; }
+    AgentView #agent-header {
+        width: 1fr; height: 1; padding: 0 1; text-wrap: nowrap; text-overflow: ellipsis;
+    }
     AgentView #agent-bar Button { min-width: 9; margin: 0 1 0 0; }
     AgentView #agent-pane { height: 1fr; }
     """

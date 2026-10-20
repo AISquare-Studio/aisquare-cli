@@ -1149,10 +1149,14 @@ def test_real_tmux_a_stamp_that_keeps_failing_fast_ends_the_wait_and_says_so(
             for char in "late":
                 pane.post_message(events.Key(char, char))
             await wait_until(pilot, lambda: pane._held is None, 3.0)  # the wait has ended
-            notice = pane.notice
             monkeypatch.setattr(TmuxServer, "run", run_tmux)
-            await pilot.pause(0.5)
-            return record.read_text(), notice, not pane._inflight, list(host.notices)
+            frames = pane.frames
+            await wait_until(pilot, lambda: pane.frames > frames + 2, 3.0)  # good frames since
+            notice = pane.notice  # still there: a frame alone does not clear it
+            typed = record.read_text()
+            await pilot.press("x")  # the next input has read it
+            await wait_until(pilot, lambda: pane.notice is None, 2.0)
+            return typed, notice, not pane._inflight, list(host.notices)
 
     typed, notice, settled, notices = run(drive())
     assert typed == "", typed  # neither sent twice nor sent out of order

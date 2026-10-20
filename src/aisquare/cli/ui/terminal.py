@@ -1253,6 +1253,9 @@ class TerminalPane(Widget, can_focus=True):
         """Input sent down the pipe that tmux has not answered yet, oldest first."""
         self._recovery_failures = 0
         """Stamp reads of the recovery waiting now that failed without timing out."""
+        self._unconfirmed = False
+        """A recovery ended unconfirmed (:meth:`_give_up_recovery`): the pane says so until
+        the next input or attach, not only until the next frame."""
         self._held: list[_Input] | None = None
         """Input typed while :meth:`_recover_input` waits to run, in order; ``None`` when
         no recovery is waiting."""
@@ -1397,6 +1400,7 @@ class TerminalPane(Widget, can_focus=True):
         self._unwatch()
         self._generation += 1
         self._polling = False
+        self._unconfirmed = False
         self._urgent = 0
         self.pane_id = pane_id
         self.scrollback = 0
@@ -1631,6 +1635,8 @@ class TerminalPane(Widget, can_focus=True):
         notice: str | None = None
         if facts.dead:
             notice = "(exited)" if facts.dead_status is None else f"(exited {facts.dead_status})"
+        elif self._unconfirmed:
+            notice = INPUT_UNCONFIRMED  # until the next input: a frame alone does not clear it
 
         previous = self._lines
         changed = {y for y, line in enumerate(lines) if y >= len(previous) or previous[y] != line}
@@ -2572,6 +2578,7 @@ class TerminalPane(Widget, can_focus=True):
         pane_id, server = self.pane_id, self.server
         if pane_id is None or server is None:
             return False
+        self._unconfirmed = False  # new input: the notice of the last recovery has been read
         link = self._control_link()  # first: finding the client ended begins a recovery
         if self._held is not None:
             self._held.append(_Input(0, server, pane_id, kind, value))
@@ -2670,12 +2677,14 @@ class TerminalPane(Widget, can_focus=True):
         itself), and twice is the worse failure for an agent — a second Enter submits
         twice — where a key missing is seen and typed again. What was typed since is not
         sent either: sent now, it would go ahead of input tmux may still run, to a server
-        that is not answering. Both are counted in a warning and the pane's notice says
-        :data:`INPUT_UNCONFIRMED`, so neither is dropped without a word; input typed after
-        this goes the usual way.
+        that is not answering. Both are counted in a warning naming the agent, and the
+        pane's notice says :data:`INPUT_UNCONFIRMED` until the next input — the next good
+        frame cleared it within ~50 ms — so neither is dropped without a word; input typed
+        after this goes the usual way.
         """
         unconfirmed, self._inflight = len(self._inflight), []
         unsent, self._held = len(self._held or []), None
+        self._unconfirmed = True
         self.log.warning(f"input recovery gave up: {error}")
         self.notify(
             f"tmux did not say whether {unconfirmed} inputs sent to {self.label or self.pane_id} "

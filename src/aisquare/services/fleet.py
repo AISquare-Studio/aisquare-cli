@@ -189,6 +189,18 @@ class FleetInterrupted(FleetError):
         self.report = report
 
 
+class BulkInterrupted(FleetError):
+    """The operator interrupted :func:`bulk` part-way; ``report`` says how far it got.
+
+    A ``FleetError`` for the same reason as :class:`FleetInterrupted`, whose way it goes:
+    the CLI catches it first, prints the report and exits 130.
+    """
+
+    def __init__(self, report: BulkReport) -> None:
+        super().__init__(report.interrupted or "interrupted")
+        self.report = report
+
+
 @dataclass(frozen=True)
 class ResumeSpec:
     """Start the window on an EXISTING Claude session rather than a fresh one (#146).
@@ -7240,16 +7252,21 @@ class BulkReport:
     managers_only: bool
     receipts: tuple[BulkReceipt, ...]
     unread: tuple[tuple[ProjectInfo, str], ...] = ()
+    interrupted: str | None = None
+    """Set when the operator interrupted the run (:class:`BulkInterrupted`): the agent it was
+    on, and that the rest were left as they were. The receipts are the ones made before."""
 
     def of(self, outcome: BulkOutcome) -> list[BulkReceipt]:
         return [receipt for receipt in self.receipts if receipt.outcome == outcome]
 
     @property
     def ok(self) -> bool:
-        """Nothing failed: no agent, no project's listing, no stop's release. Exit 0."""
+        """Nothing failed: no agent, no project's listing, no stop's release, and the run was
+        not interrupted. Exit 0."""
         return not (
             self.of("failed")
             or self.unread
+            or self.interrupted
             or any(receipt.release_failed for receipt in self.receipts)
         )
 
@@ -7392,21 +7409,39 @@ def bulk(
 
     ``acting_session`` is the caller's ``--as``: its row is left (:data:`THIS_SESSION`),
     and a restart records it as the one that asked (``spawned_by``).
+
+    The operator's interrupt (Ctrl-C) is theirs to have, but the agents before it were
+    restarted or stopped, so it goes up as :class:`BulkInterrupted` with the report of
+    how far it got. As a bare ``KeyboardInterrupt``, ``--json`` printed nothing at all,
+    and a script had no record of which agents it had already acted on (review of #266,
+    round 2).
     """
     if shown is not None and (shown.action, shown.managers_only) != (action, managers_only):
         raise ValueError("the plan shown is for another action or scope than the one asked")
-    now = bulk_plan(action, managers_only=managers_only, acting_session=acting_session)
-    rows = now.rows if shown is None else _as_shown(shown, now)
     receipts: list[BulkReceipt] = []
-    for row in rows:
-        if row.skip is not None:
-            receipt = BulkReceipt(row.project, row.agent, "skipped", row.skip)
-        else:
-            receipt = _bulk_one(action, row, spawned_by=acting_session or "user")
-        receipts.append(receipt)
-        if on_receipt is not None:
-            on_receipt(receipt)
-    return BulkReport(action, managers_only, tuple(receipts), now.unread)
+    unread: tuple[tuple[ProjectInfo, str], ...] = ()
+    doing = "restarting" if action == "restart" else "stopping"
+    where = "before anything was done"
+    try:
+        now = bulk_plan(action, managers_only=managers_only, acting_session=acting_session)
+        unread = now.unread
+        rows = now.rows if shown is None else _as_shown(shown, now)
+        for row in rows:
+            named = f"{row.agent.label} ({_name(row.project)})"
+            if row.skip is not None:
+                receipt = BulkReceipt(row.project, row.agent, "skipped", row.skip)
+            else:
+                where = f"while {doing} {named}"
+                receipt = _bulk_one(action, row, spawned_by=acting_session or "user")
+            receipts.append(receipt)
+            where = f"after {named}"
+            if on_receipt is not None:
+                on_receipt(receipt)
+    except KeyboardInterrupt:
+        said = f"interrupted {where}; the rest were left as they were"
+        report = BulkReport(action, managers_only, tuple(receipts), unread, interrupted=said)
+        raise BulkInterrupted(report) from None
+    return BulkReport(action, managers_only, tuple(receipts), unread)
 
 
 def _as_shown(shown: BulkPlan, now: BulkPlan) -> list[BulkRow]:

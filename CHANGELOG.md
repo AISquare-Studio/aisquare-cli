@@ -17,7 +17,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *Managers only* switch. Its confirm button names the count, and *Cancel* has the
   focus. On the command line it is `aisquare fleet restart --all [--managers]` and
   `aisquare fleet stop --all [--managers]`. Both print one line per agent, then
-  the count, and exit 1 if any agent failed. With four managers running, a restart
+  the count, and exit 1 if any agent failed. Interrupted with Ctrl-C, they still
+  say how far they got (`--json` too) and exit 130. With four managers running, a restart
   of all of them used to mean clicking into each one. Exited (💤) agents are left
   as they are, and so is one that exits or is stopped while the run goes on. So
   is the agent that runs the command, so a manager's

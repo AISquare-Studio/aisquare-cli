@@ -337,7 +337,8 @@ def restart(
 
     With --all, every running agent in every project is restarted so, one line
     each by project, then a count; --managers restarts the managers alone. It
-    exits 1 when any of them failed.
+    exits 1 when any of them failed, and 130 when interrupted, after saying how
+    far it got.
     """
     label = _one_or_every(
         ctx,
@@ -513,7 +514,8 @@ def stop(
 
     With --all, every running agent in every project is stopped so, one line
     each by project, then a count; --managers stops the managers alone. It exits
-    1 when any of them failed.
+    1 when any of them failed, and 130 when interrupted, after saying how far it
+    got.
     """
     label = _one_or_every(ctx, label, every, managers, project, {"--force": force})
     if label is None:
@@ -603,7 +605,8 @@ def _bulk(
 
     Each agent's line is printed when it is done with, under its project's name, so a long
     restart shows how far it got; the count follows. Exits 1 when anything failed
-    (``BulkReport.ok``), as ``stop`` and ``reap`` do.
+    (``BulkReport.ok``), as ``stop`` and ``reap`` do, and 130 when interrupted, with the
+    report of how far it got (``--json`` included), as ``shutdown`` does.
     """
     as_json = get_state().json_output
     console = stdout_console()
@@ -623,28 +626,41 @@ def _bulk(
             acting_session=acting_session,
             on_receipt=None if as_json else said,
         )
+    except fleet_service.BulkInterrupted as exc:
+        # The operator's Ctrl-C: the agents before it were restarted or stopped, so they
+        # are told how far it got, and the code says it was not every agent.
+        _emit_bulk(exc.report, console, as_json=as_json)
+        raise typer.Exit(code=130) from None
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
-    if as_json:
-        typer.echo(json.dumps(_bulk_json(report)))
-    else:
-        for unread, why in report.unread:
-            console.print(
-                f"⚠ {_display_name(unread)}: its agents could not be read — {why}", markup=False
-            )
-        if report.receipts or report.unread:
-            console.print(report.summary())
-        else:
-            who = "manager" if managers_only else "agent"
-            console.print(f"nothing to {action}: no {who} is running in any project")
-        released = sum(
-            len(receipt.result.released)
-            for receipt in report.receipts
-            if isinstance(receipt.result, fleet_service.StopReceipt)
-        )
-        _say_released(console, released)
+    _emit_bulk(report, console, as_json=as_json)
     if not report.ok:
         raise typer.Exit(code=1)
+
+
+def _emit_bulk(report: fleet_service.BulkReport, console: Console, *, as_json: bool) -> None:
+    """What ``--all`` says once its agents are done with, or once it was interrupted: the
+    whole report under ``--json``, else what the agents' own lines have not said."""
+    if as_json:
+        typer.echo(json.dumps(_bulk_json(report)))
+        return
+    for unread, why in report.unread:
+        console.print(
+            f"⚠ {_display_name(unread)}: its agents could not be read — {why}", markup=False
+        )
+    if report.receipts or report.unread or report.interrupted:
+        console.print(report.summary())
+    else:
+        who = "manager" if report.managers_only else "agent"
+        console.print(f"nothing to {report.action}: no {who} is running in any project")
+    if report.interrupted:
+        console.print(f"⚠ {report.interrupted}", markup=False)
+    released = sum(
+        len(receipt.result.released)
+        for receipt in report.receipts
+        if isinstance(receipt.result, fleet_service.StopReceipt)
+    )
+    _say_released(console, released)
 
 
 def _bulk_lines(receipt: fleet_service.BulkReceipt) -> list[str]:
@@ -707,6 +723,7 @@ def _bulk_json(report: fleet_service.BulkReport) -> dict[str, object]:
         ],
         "summary": {outcome: len(report.of(outcome)) for outcome in ("done", "skipped", "failed")},
         "ok": report.ok,
+        "interrupted": report.interrupted,
     }
 
 

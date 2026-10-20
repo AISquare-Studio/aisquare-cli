@@ -502,6 +502,34 @@ def test_each_receipt_is_handed_over_as_it_is_made(fleet: Fleet) -> None:
     assert seen == [r.agent.id for r in report.receipts] and len(seen) == 4
 
 
+def test_an_interrupt_carries_the_receipts_made_so_far(
+    fleet: Fleet, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #266, round 2: a Ctrl-C part-way through went up through ``bulk`` with the
+    receipts of the agents already restarted, and ``--json`` printed nothing. As
+    ``shutdown``'s does, the interrupt carries the report of how far it got."""
+    real = fleet_service.stop
+    coder = fleet.agents["alpha/coder-1"]
+
+    def interrupted(project: ProjectInfo, label: str, **kwargs: Any) -> object:
+        if kwargs.get("agent_id") == coder.id:
+            raise KeyboardInterrupt
+        return real(project, label, **kwargs)
+
+    monkeypatch.setattr(fleet_service, "stop", interrupted)
+
+    with pytest.raises(fleet_service.BulkInterrupted) as caught:
+        fleet_service.bulk("stop")
+
+    report = caught.value.report
+    assert _outcomes(fleet, report.receipts) == {"alpha/manager": ("done", None)}
+    assert report.interrupted == (
+        "interrupted while stopping coder-1 (alpha); the rest were left as they were"
+    )
+    assert not report.ok
+    assert fleet.agents["beta/manager"].id in _live_ids(fleet.beta)
+
+
 def test_nothing_running_is_an_empty_plan_and_a_clean_report(
     tmux: FakeTmux, tmp_path: Path
 ) -> None:

@@ -1086,7 +1086,10 @@ def test_all_json_gives_every_receipt_and_the_same_exit_status(
     assert result.exit_code == 1
     assert bulk.kwargs["on_receipt"] is None, "JSON is one object at the end, nothing before"
     payload = json.loads(result.stdout)
-    assert set(payload) == {"action", "managers_only", "receipts", "unread", "summary", "ok"}
+    assert set(payload) == {
+        "action", "managers_only", "receipts", "unread", "summary", "ok", "interrupted"
+    }  # fmt: skip
+    assert payload["interrupted"] is None
     assert payload["action"] == "restart" and payload["managers_only"] is False
     assert payload["summary"] == {"done": 1, "skipped": 1, "failed": 1} and not payload["ok"]
     done, skipped, failed = payload["receipts"]
@@ -1097,6 +1100,54 @@ def test_all_json_gives_every_receipt_and_the_same_exit_status(
     assert (skipped["outcome"], skipped["why"]) == ("skipped", "task is done")
     assert failed["project"]["name"] == "web" and failed["outcome"] == "failed"
     assert failed["why"] == "cannot restart 'coder-web': tmux said no"
+
+
+def _interrupted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``fleet_service.bulk`` interrupted on its second agent, the first restarted and told."""
+    done = _restarted(_agent("manager", "manager"))
+    said = "interrupted while restarting coder-auth (api); the rest were left as they were"
+    report = BulkReport("restart", False, (done,), interrupted=said)
+
+    def fake(*args: Any, **kwargs: Any) -> BulkReport:
+        if kwargs.get("on_receipt") is not None:
+            kwargs["on_receipt"](done)
+        raise fleet_service.BulkInterrupted(report)
+
+    monkeypatch.setattr("aisquare.cli.fleet.fleet_service.bulk", fake)
+
+
+def test_an_interrupted_all_in_json_prints_how_far_it_got_and_exits_130(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #266, round 2: a Ctrl-C part-way through printed nothing under --json, so
+    a script had no record of the agents already restarted."""
+    _interrupted(monkeypatch)
+
+    result = runner.invoke(app, ["--json", "fleet", "restart", "--all"])
+
+    assert result.exit_code == 130
+    payload = json.loads(result.stdout)
+    assert [(r["agent"]["label"], r["outcome"]) for r in payload["receipts"]] == [
+        ("manager", "done")
+    ]
+    assert payload["interrupted"].startswith("interrupted while restarting coder-auth (api)")
+    assert payload["ok"] is False
+
+
+def test_an_interrupted_all_says_so_under_the_count_and_exits_130(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _interrupted(monkeypatch)
+
+    result = runner.invoke(app, ["fleet", "restart", "--all"])
+
+    assert result.exit_code == 130
+    assert _lines(result.stdout)[1:] == [
+        f"  ✓ {'manager':<24} {'manager':<10} stopped and restarted — resumed its session",
+        "      · launch replayed",
+        "restarted 1 · skipped 0 · failed 0",
+        "⚠ interrupted while restarting coder-auth (api); the rest were left as they were",
+    ]
 
 
 def test_a_project_whose_agents_could_not_be_read_is_named_and_exits_1(

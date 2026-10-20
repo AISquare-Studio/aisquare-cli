@@ -389,7 +389,10 @@ or a stop left claims behind (the same as `fleet stop`). `--json` prints one
 object: `receipts`, each with `project`, `agent`, `outcome` (`done`, `skipped` or
 `failed`) and `why`, plus a restart's `started`, `how`, `resumed`, `was_running`,
 `failures` and `notes`, or a stop's `claims_released` and `release_failed`. The
-object also has `unread`, `summary` and `ok`.
+object also has `unread`, `summary`, `ok` and `interrupted`. Interrupted with
+Ctrl-C, it **exits 130**, and it still says how far it got: the agents done so far
+(the JSON object under `--json`), the count, and the agent it was on, as `fleet
+shutdown` does. The agents after it are left as they were.
 
 `--all` means every project's fleet, so it is refused with `--project` (as
 `reap --all` is) and with a label. `--managers` is refused without `--all`. With

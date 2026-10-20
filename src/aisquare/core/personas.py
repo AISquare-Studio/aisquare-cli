@@ -16,9 +16,9 @@ must not pay for a YAML parser it never runs
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError

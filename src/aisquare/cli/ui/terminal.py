@@ -3,9 +3,15 @@
 The risky core of docs/plans/fleet-tui.md (§6, §4.3, §3.1): tmux is the
 terminal emulator, this widget is a viewport onto one of its panes.
 
-Rendering. A frame is one ``server.capture`` (one tmux process:
-``capture-pane -e -F`` + ``display-message``; ``-F`` only on a server that
-knows it). Each captured row is a string with SGR escapes; rows are diffed
+Rendering. A frame is ``capture-pane -e -F`` + ``display-message`` (``-F`` only
+on a server that knows it), and it reaches the server one of two ways. With the
+pane on screen and a control client up on its server (``core.tmux_control``, one
+``tmux -C`` per server), the two commands go down that client's pipe and their
+answer is the frame (:meth:`TerminalPane._request_frame`). Otherwise — polling,
+the fallback — a frame is one ``server.capture``, one tmux process
+(:meth:`TerminalPane.refresh_frame`). The client's ``%output`` is only ever the
+signal that a frame is due: its bytes are never read into a screen (§3.1,
+option A, rejected). Each captured row is a string with SGR escapes; rows are diffed
 against the previous frame as STRINGS, and only the rows that changed — plus
 the old and new cursor rows — are marked dirty, so Textual's Line API
 (:meth:`render_line`) is asked for exactly those. A row string becomes a
@@ -29,19 +35,47 @@ when it resolves a press or a drag; painting goes through :meth:`render_lines`,
 so that one call is the only one stamped — in CELLS, one segment per grapheme
 whose character count and cell count differ (see :class:`DisplayedRow`).
 
-Cadence. A one-shot timer re-arms itself after every frame: :attr:`FAST_INTERVAL`
-(50 ms) while the last frame changed something, :attr:`IDLE_INTERVAL` (500 ms)
-once nothing moves. The frame diff IS the activity signal: tmux's own
+Cadence, over the control client. The client follows the pane on screen —
+attached to its session, every other pane of the session paused — so its
+``%output`` names this pane exactly when it printed, and each one asks for a
+frame: at most one in flight (one asked meanwhile is asked again on its answer),
+at most one per :attr:`CONTROL_FRAME_GAP` (~60 fps). Input asks for one at once,
+and the frame its echo brings skips the gap too (:attr:`CONTROL_URGENT`). An
+idle tick every :attr:`IDLE_INTERVAL` asks for one as well, down the same pipe:
+the net under ``%output``, since a pane that dies prints nothing. Measured on
+tmux 3.8, 2026-10-20 (``tests/test_terminal_control.py``, ``pytest -s``): a key
+into ``cat`` reaches the screen in 1.0 ms median (p95 1.2 ms, 60 keys) against
+35 ms polled, and 50 wheel notches over 500 ms got 32 frames while they lasted.
+No tmux process is started per key or per frame. What the frame rate costs: a
+200x60 pane that rewrites every row (colour, ~500 lines a second) is drawn at 59
+frames a second for 21 % of one core, where polling drew 17 for 10 % — a frame
+is cheaper without the fork (3.6 ms of CPU against 5.9 ms), and there are three
+times as many. :attr:`CONTROL_FRAME_GAP` is the knob.
+
+Cadence, polled. A one-shot timer re-arms itself after every frame:
+:attr:`FAST_INTERVAL` (50 ms) while the last frame changed something or input
+arrived in the last :attr:`INPUT_FAST` (300 ms), :attr:`IDLE_INTERVAL` (500 ms)
+once nothing moves — an 80 ms echo used to wait out the idle interval behind the
+one tick that missed it, and shows at ~110 ms now. Input THROTTLES the timer and
+never postpones it (:meth:`TerminalPane._schedule`): it used to re-arm the frame
+timer at every key and mouse flush, so key repeat and a wheel gesture had no
+frame until they stopped. The frame diff IS the activity signal: tmux's own
 ``window_activity_flag`` only clears when an attached client looks at the
-window, and no client ever attaches to a fleet window, so it would read "active"
-forever. A pane that is not on screen (a hidden tab) is not captured at all.
-Nothing here runs off the event loop. Measured against tmux 3.7c on
-2026-08-28 while a process streamed coloured text (median of 150 frames):
-80x24 — capture 1.75 ms + Strips 0.17 ms = 1.94 ms; 200x60 — 2.31 + 0.48 =
-2.85 ms (p95 3.6 ms); an idle frame with the Strip cache warm costs the tmux
-fork alone, ~1.7-2.1 ms. At the 20 fps ceiling that is 3.9 % and 5.7 % of one
-core against the plan's 15 % go/no-go, so a fork per tick stays the design
-until the control-mode client (§3.1) replaces polling.
+window, and only the UI's control client ever attaches — to the session of the
+pane on screen, which says nothing about the rest. A pane that is not on screen
+(a hidden tab) is not captured at all. Measured against tmux 3.7c on 2026-08-28
+while a process streamed coloured text (median of 150 frames): 80x24 — capture
+1.75 ms + Strips 0.17 ms = 1.94 ms; 200x60 — 2.31 + 0.48 = 2.85 ms (p95 3.6 ms);
+an idle frame with the Strip cache warm costs the tmux fork alone, ~1.7-2.1 ms.
+At the 20 fps ceiling that is 3.9 % and 5.7 % of one core against the plan's
+15 % go/no-go.
+
+Falling back. A server below 3.2, a fake runner, a client that cannot start,
+one that ends or is killed, and one that answers nothing for
+:attr:`CONTROL_TIMEOUT` send its panes to polling, at once; a control command
+that fails sends that pane to polling until its next attach. Logged, never
+toasted. A server whose client ended is offered a new one after
+:data:`CONTROL_RESTART` (one that never answered: :data:`CONTROL_RETRY`).
 
 Scrollback (§6). The wheel moves our own offset ``k`` over the pane's history,
 and the last-seen pane height goes with every capture: tmux is asked for
@@ -67,8 +101,11 @@ whole key a kitty-protocol terminal reports only because Textual asked for
 every key — nothing at all (#151). ``Paste`` goes through the paste buffer so
 the agent sees one bracketed paste. The wheel scrolls our own offset over the
 pane's history (clamped to ``history_size``); any key returns to live.
-``Resize`` is forwarded as ``resize-window`` after a 100 ms debounce. Forwarded
-input re-arms the fast cadence, so an echo never waits for the idle tick.
+``Resize`` is forwarded as ``resize-window`` after a 100 ms debounce. Keys, typed
+text, mouse reports and pastes go down the control client's pipe while it serves
+the pane — a paste as ``set-buffer`` + ``paste-buffer``, since ``load-buffer -``
+would read the pipe — and as tmux processes when polling. Forwarded input asks
+for the frame that shows its echo at once, so an echo never waits for the idle tick.
 
 Selection (§4.3). The pane owns its highlight; :class:`TerminalPane`'s docstring
 states the rules — who sees a gesture, when a highlight is dropped, and which
@@ -148,11 +185,13 @@ from aisquare.core.keys import (
 from aisquare.core.tmux import (
     PASTE_BUFFER,
     WRAP_FLAGS_MINIMUM,
+    Capture,
     PaneFacts,
     TmuxError,
     TmuxServer,
     TmuxUnavailable,
 )
+from aisquare.core.tmux_control import CONTROL_MINIMUM, ControlClient, Reply
 from aisquare.services import fleet as fleet_service
 
 CURSOR = Style(reverse=True)
@@ -345,8 +384,102 @@ _SERVER_VERSIONS: dict[_ServerKey, tuple[int, int]] = {}
 
 
 def forget_server_versions() -> None:
-    """Drop every cached server version — a new server is a new machine (tests)."""
+    """Drop every cached server version — a new server is a new machine (tests) — and
+    every server's control-client backoff with them."""
     _SERVER_VERSIONS.clear()
+    _CONTROL_RETRY_AT.clear()
+
+
+CONTROL_MODE = True
+"""Whether panes on a server that can run one use its control client (``core.tmux_control``)."""
+CONTROL_RETRY = 60.0
+"""Seconds before a server whose control client never answered is offered another."""
+CONTROL_RESTART = 5.0
+"""Seconds before a server whose control client ran and then ended is offered another."""
+
+_CONTROLS: dict[_ServerKey, _Control] = {}
+"""The live control client of each server, with the panes it serves."""
+_CONTROL_RETRY_AT: dict[_ServerKey, float] = {}
+"""When a server whose control client ended may be offered a new one."""
+
+
+class _Control:
+    """One server's control client and the panes that joined it: their go-between.
+
+    Started by the first pane that goes on screen with a live frame on a server
+    (:meth:`join`), and closed when the last pane that joined leaves it
+    (:meth:`release`) — the app's views stay mounted, so in the shell that is when
+    the app ends. What it hears goes to its panes: a pane that printed is captured
+    again (:meth:`TerminalPane._control_output`), and the client's end sends every
+    pane back to polling (:meth:`TerminalPane._control_lost`).
+    """
+
+    def __init__(self, key: _ServerKey, app: App[Any], server: TmuxServer) -> None:
+        self.key = key
+        self.app = app
+        self.panes: weakref.WeakSet[TerminalPane] = weakref.WeakSet()
+        self.client = ControlClient(
+            server, deliver=app.call_later, on_output=self._output, on_exit=self._exited
+        )
+
+    @classmethod
+    def join(cls, pane: TerminalPane) -> _Control | None:
+        """``pane``'s server's control client, started for it when there is none yet.
+
+        A new client is started only for a pane that has shown a live frame:
+        ``attach-session`` starts a server when none is running, and a frame is what
+        says this one is. And not again for a while after one ended
+        (:data:`CONTROL_RETRY`, :data:`CONTROL_RESTART`): a server that refuses the
+        client must not cost a process at every attach.
+        """
+        server, pane_id = pane.server, pane.pane_id
+        if server is None or pane_id is None:
+            return None
+        key = _server_key(server)
+        link = _CONTROLS.get(key)
+        if link is not None and (link.app is not pane.app or not link.client.alive):
+            link.close()
+            link = None
+        if link is None:
+            if pane.facts is None or time.monotonic() < _CONTROL_RETRY_AT.get(key, 0.0):
+                return None
+            link = cls(key, pane.app, server)
+            try:
+                link.client.start(pane_id)
+            except TmuxError as error:
+                pane.log.warning(f"tmux control mode unavailable on {key[0]}: {error}")
+                _CONTROL_RETRY_AT[key] = time.monotonic() + CONTROL_RETRY
+                return None
+            _CONTROLS[key] = link
+        link.panes.add(pane)
+        return link
+
+    def release(self, pane: TerminalPane) -> None:
+        """``pane`` no longer uses the client; the last pane to leave closes it."""
+        self.panes.discard(pane)
+        if not self.panes:
+            self.close()
+
+    def close(self) -> None:
+        if _CONTROLS.get(self.key) is self:
+            del _CONTROLS[self.key]
+        self.client.close()
+
+    def _output(self, pane_ids: set[str]) -> None:
+        for pane in list(self.panes):
+            if pane.pane_id in pane_ids:
+                pane._control_output()
+
+    def _exited(self, reason: str) -> None:
+        """The client ended by itself: every pane polls again, and the server rests."""
+        if _CONTROLS.get(self.key) is self:
+            del _CONTROLS[self.key]
+        wait = CONTROL_RESTART if self.client.answered else CONTROL_RETRY
+        _CONTROL_RETRY_AT[self.key] = time.monotonic() + wait
+        self.app.log.warning(f"tmux control client on {self.key[0]} ended: {reason}")
+        panes, self.panes = list(self.panes), weakref.WeakSet()
+        for pane in panes:
+            pane._control_lost(self)
 
 
 DUPLICATE_PRESS_WINDOW = 0.5
@@ -890,6 +1023,17 @@ class TerminalPane(Widget, can_focus=True):
     """Seconds between frames while the screen is changing (~20 fps)."""
     IDLE_INTERVAL: float = 0.5
     """Seconds between frames once nothing changed (~2 fps)."""
+    INPUT_FAST: float = 0.3
+    """Seconds after input during which polling stays at :attr:`FAST_INTERVAL` even
+    when a frame changed nothing — an echo slower than one tick is still on its way."""
+    CONTROL_FRAME_GAP: float = 1 / 60
+    """Least seconds between two frames the control client's ``%output`` asks for (~60 fps)."""
+    CONTROL_URGENT: int = 2
+    """Frames after input that skip :attr:`CONTROL_FRAME_GAP`: the one asked right after
+    the input, and the one its echo's ``%output`` asks for."""
+    CONTROL_TIMEOUT: float = 1.0
+    """Seconds a command may wait for the control client's answer before the client is
+    killed and every pane on it polls."""
     RESIZE_DEBOUNCE: float = 0.1
     """Seconds to wait after the last ``Resize`` before telling tmux."""
     RESIZE_RETRY: float = 0.25
@@ -900,6 +1044,10 @@ class TerminalPane(Widget, can_focus=True):
     """History lines one wheel notch moves."""
     WHEEL_COALESCE: float = 0.02
     """Seconds mouse events are gathered before one tmux call carries them all."""
+    CONTROL_COALESCE: float = 0.001
+    """The same, down the control client's pipe, where a flush is a write and not a
+    process: long enough for the events already queued to join it, and no longer (a
+    Textual timer refuses zero)."""
     BUFFER_MIRROR_DELAY: float = 0.15
     """Seconds after a forwarded left-button release before tmux's paste buffer is
     read: the program's copy-on-select has to run first (Claude Code writes it
@@ -968,6 +1116,28 @@ class TerminalPane(Widget, can_focus=True):
         self._row_cache: dict[tuple[str, int], DisplayedRow] = {}
         """The text model of a frame line shown in a row of N cells, beside its Strip."""
         self._timer: Timer | None = None
+        self._deadline = 0.0
+        """When ``_timer`` fires (``time.monotonic``): a later request leaves it be."""
+        self._input_at = float("-inf")
+        """When input last reached the agent — what keeps polling fast for an echo."""
+        self._link: _Control | None = None
+        """The control client serving this pane, while one does."""
+        self._watched: str | None = None
+        """The pane id that client was told is on screen, for this widget."""
+        self._polling = False
+        """A control command failed for this attach: it polls until the next attach."""
+        self._capturing = False
+        """A frame was asked of the control client and is not answered yet."""
+        self._recapture = False
+        """Something asked for a frame while one was in flight: ask again on its answer."""
+        self._urgent = 0
+        """Frames still owed to the latest input without waiting out the frame gap."""
+        self._captured_at = float("-inf")
+        """When the last control frame was asked for (``time.monotonic``)."""
+        self._frame_timer: Timer | None = None
+        """The wait out of :attr:`CONTROL_FRAME_GAP` before the next control frame."""
+        self._generation = 0
+        """Counts attaches: a control frame asked before the latest one is dropped."""
         self._resize_timer: Timer | None = None
         self._resize_retry: float = self.RESIZE_RETRY
         self._synced: tuple[str, int, int] | None = None
@@ -1106,6 +1276,10 @@ class TerminalPane(Widget, can_focus=True):
 
     def attach(self, pane_id: str | None) -> None:
         """Show ``pane_id`` (``None`` clears the pane) and restart the render loop."""
+        self._unwatch()
+        self._generation += 1
+        self._polling = False
+        self._urgent = 0
         self.pane_id = pane_id
         self.scrollback = 0
         self.facts = None
@@ -1152,15 +1326,19 @@ class TerminalPane(Widget, can_focus=True):
         if pane_id is not None and self.server is None:
             # The fleet's server from config — a default like any other (§3.10).
             self.server = fleet_service.server()
+        if self._link is not None and (
+            self.server is None or _server_key(self.server) != self._link.key
+        ):
+            self._drop_link()  # ``ManagerTab`` moved this pane to another server
         if self.is_mounted:
             self._sync_size()
-            self.refresh_frame()
+            self._frame_now()
             self._schedule(self.FAST_INTERVAL)
         self.refresh()
 
     def on_mount(self) -> None:
         _MOUNTED_PANES.add(self)
-        self.refresh_frame()
+        self._frame_now()
         self._schedule(self.FAST_INTERVAL)
 
     def on_unmount(self) -> None:
@@ -1177,16 +1355,15 @@ class TerminalPane(Widget, can_focus=True):
         _MOUNTED_PANES.discard(self)
         if self.text_selection is not None:
             self._clear_own_selection()
-        if self._timer is not None:
-            self._timer.stop()
-        if self._mouse_timer is not None:
-            self._mouse_timer.stop()
-        if self._resize_timer is not None:
-            self._resize_timer.stop()
+        self._drop_link()
+        for timer in (self._timer, self._mouse_timer, self._resize_timer, self._frame_timer):
+            if timer is not None:
+                timer.stop()
 
     def on_show(self) -> None:
-        """A hidden tab came back: pick the pane up at the fast cadence."""
-        self.refresh_frame()
+        """A hidden tab came back: pick the pane up at the fast cadence (and the control
+        client follows it, :meth:`_control_link`)."""
+        self._frame_now()
         self._schedule(self.FAST_INTERVAL)
 
     def on_hide(self) -> None:
@@ -1206,10 +1383,14 @@ class TerminalPane(Widget, can_focus=True):
         program's press open, and every bare move went to it as a drag or
         dragged the shift+drag's highlight (#207 follow-up). The gesture ends
         at the hide (:meth:`_interrupt_gesture`).
+
+        A hidden pane is not captured, so the control client is told it left the
+        screen: it is paused there, and sends nothing.
         """
         self._interrupt_gesture()
         if self.text_selection is not None:
             self._clear_own_selection()
+        self._unwatch()
 
     def on_focus(self) -> None:
         self._refresh_cursor_row()
@@ -1220,20 +1401,58 @@ class TerminalPane(Widget, can_focus=True):
     # --- the render loop ---------------------------------------------------------------
 
     def _schedule(self, delay: float) -> None:
+        """Have the next frame ``delay`` from now — or sooner, when one is already due sooner.
+
+        A THROTTLE, not a debounce. Every key and every mouse flush asks for the
+        fast cadence, and this used to stop the pending timer and arm a new one:
+        key repeat, or a wheel flushed every 20 ms, pushed the 50 ms frame back at
+        each event, and no frame came until the gesture stopped — "scroll is not
+        instant". The earlier deadline stands; a later request changes nothing.
+        """
+        deadline = time.monotonic() + delay
         if self._timer is not None:
+            if self._deadline <= deadline:
+                return
             self._timer.stop()
         self.interval = delay
+        self._deadline = deadline
         self._timer = self.set_timer(delay, self._tick, name="terminal-frame")
 
     def _tick(self) -> None:
         self._timer = None
         if self.pane_id is None or self.server is None:
             return  # attach() restarts the loop
-        changed = self.refresh_frame() if self.is_on_screen else False
-        self._schedule(self.FAST_INTERVAL if changed else self.IDLE_INTERVAL)
+        if not self.is_on_screen:
+            self._schedule(self.IDLE_INTERVAL)
+            return
+        link = self._control_link()
+        if link is not None and link.client.stalled(self.CONTROL_TIMEOUT):
+            # Wedged rather than ended: no answer, no end of file. Killed, it ends
+            # through ``_Control._exited`` like any other, and this tick polls.
+            self.log.warning(f"tmux control client on {link.key[0]} stopped answering")
+            link.client.kill()
+            self._drop_link()
+            link = None
+        if link is not None:
+            # ``%output`` brings the frames; this is the net under it — a pane
+            # that died prints nothing, and neither does a cleared history.
+            self._request_frame()
+            self._schedule(self.IDLE_INTERVAL)
+            return
+        changed = self.refresh_frame()
+        # After input the cadence stays fast for a while even when the frame
+        # changed nothing: an echo that took longer than one tick waited the whole
+        # idle interval behind it (an 80 ms echo showed at ~550 ms).
+        fast = changed or time.monotonic() - self._input_at < self.INPUT_FAST
+        self._schedule(self.FAST_INTERVAL if fast else self.IDLE_INTERVAL)
 
     def refresh_frame(self) -> bool:
-        """Capture one frame now. Returns whether anything on screen changed."""
+        """Capture one frame now, in a tmux process. Returns whether anything on screen changed.
+
+        The polling path, and the one every caller that must have the frame before it
+        returns takes; with a control client up, frames come through
+        :meth:`_request_frame` instead.
+        """
         if self.pane_id is None or self.server is None:
             return False
         width, height = self.content_size
@@ -1257,6 +1476,13 @@ class TerminalPane(Widget, can_focus=True):
         except Exception as error:  # the loop must outlive a surprise
             self.log.error("terminal frame failed", error)
             return self._fail(f"(capture failed: {type(error).__name__})")
+        return self._show_capture(capture)
+
+    def _show_capture(self, capture: Capture) -> bool:
+        """Put ``capture`` on screen, repainting only the rows it changed; whether any did."""
+        width, height = self.content_size
+        if width <= 0 or height <= 0:
+            return False
         self.frames += 1
         facts = capture.facts
         if self.scrollback > facts.history_size:
@@ -1314,6 +1540,194 @@ class TerminalPane(Widget, can_focus=True):
             self._clear_own_selection()
         self._repaint_rows(dirty)
         return bool(dirty)
+
+    # --- the control client ------------------------------------------------------------
+
+    def _control_link(self) -> _Control | None:
+        """The control client serving this pane now — joined, and told the pane is on
+        screen, when it should be; ``None`` while this pane polls.
+
+        A pane polls when it is off screen, when control mode is off or the server
+        cannot run a client (a fake runner, a server older than
+        :data:`~aisquare.core.tmux_control.CONTROL_MINIMUM`, or one whose version is
+        unknown), and for the rest of an attach once a control command failed.
+        """
+        link = self._link
+        if link is not None and not link.client.alive:
+            self._drop_link()
+            link = None
+        if link is None:
+            if (
+                not CONTROL_MODE
+                or self._polling
+                or self.pane_id is None
+                or self.server is None
+                or not self.server.control_capable
+                or not self.is_on_screen
+            ):
+                return None
+            version = self._server_version()
+            if version is None or version < CONTROL_MINIMUM:
+                return None
+            link = _Control.join(self)
+            if link is None:
+                return None
+            self._link = link
+        if self._watched != self.pane_id and self.pane_id is not None and self.is_on_screen:
+            try:
+                link.client.watch(self.pane_id)
+            except TmuxError:
+                self._drop_link()
+                return None
+            self._watched = self.pane_id
+        return link if self._watched is not None else None
+
+    def _serving(self) -> _Control | None:
+        """The control client, when it is serving the pane on screen right now."""
+        link = self._link
+        if link is None or not link.client.alive or self._watched != self.pane_id:
+            return None
+        return link
+
+    def _unwatch(self) -> None:
+        """Tell the control client this pane's pane left the screen (it is paused there)."""
+        watched, self._watched = self._watched, None
+        link = self._link
+        if link is not None and watched is not None and link.client.alive:
+            link.client.unwatch(watched)
+
+    def _drop_link(self) -> None:
+        """Stop using the control client: unwatched, and released."""
+        self._unwatch()
+        link, self._link = self._link, None
+        self._capturing = False
+        if link is not None:
+            link.release(self)
+
+    def _frame_now(self) -> None:
+        """A frame as soon as one can come: asked of the control client, or captured here."""
+        if self._control_link() is not None:
+            self._request_frame(urgent=True)
+        else:
+            self.refresh_frame()
+
+    def _input_arrived(self, *, urgent: bool = True) -> None:
+        """Input reached the agent: the frame that shows its echo must not wait.
+
+        Over the control client that frame is asked for NOW, and for a key or a
+        paste (``urgent``) the next one too — the one the echo's ``%output`` asks
+        for — without the frame gap between them (:attr:`CONTROL_URGENT`). Mouse
+        input is not urgent: a wheel flushed every 10 ms would owe two frames per
+        flush, a capture after every other one, and its frames come at the gap's
+        ~60 a second anyway. Polling, the fast cadence starts, and lasts
+        :attr:`INPUT_FAST` whatever the frames say.
+        """
+        self._input_at = time.monotonic()
+        if self._serving() is not None:
+            self._request_frame(urgent=urgent)
+        else:
+            self._schedule(self.FAST_INTERVAL)
+
+    def _request_frame(self, *, urgent: bool = False) -> None:
+        """Ask the control client for a frame: one in flight at most, ~60 a second at most.
+
+        A frame asked while one is in flight is asked again when that one is
+        answered, so a burst of ``%output`` costs one capture after the current
+        one, not one each. A frame within :attr:`CONTROL_FRAME_GAP` of the last
+        waits out the gap — unless input is owed one.
+        """
+        if urgent:
+            self._urgent = self.CONTROL_URGENT
+        link = self._serving()
+        if link is None or self.pane_id is None or not self.is_on_screen:
+            return
+        if self._capturing:
+            self._recapture = True
+            return
+        wait = self._captured_at + self.CONTROL_FRAME_GAP - time.monotonic()
+        if wait > 0 and not self._urgent:
+            if self._frame_timer is None:
+                self._frame_timer = self.set_timer(
+                    wait, self._gap_waited, name="terminal-frame-gap"
+                )
+            return
+        width, height = self.content_size
+        if width <= 0 or height <= 0:
+            return
+        if self._urgent:
+            self._urgent -= 1
+        scrollback = self.scrollback
+        self._capturing = True
+        self._captured_at = time.monotonic()
+        try:
+            link.client.capture(
+                self.pane_id,
+                scrollback=scrollback,
+                height=self.facts.height if self.facts is not None else None,
+                flags=self._wrap_flags(),
+                done=partial(self._captured, link, self._generation, scrollback),
+            )
+        except TmuxError:
+            self._capturing = False  # the client ended as it was asked: polling takes over
+
+    def _gap_waited(self) -> None:
+        self._frame_timer = None
+        self._request_frame()
+
+    def _captured(
+        self, link: _Control, generation: int, scrollback: int, result: Capture | TmuxError
+    ) -> None:
+        """A control frame's answer: shown, unless the pane moved on while it was coming."""
+        if not self._capturing or link is not self._link:
+            return  # answered after this pane stopped using that client
+        self._capturing = False
+        again, self._recapture = self._recapture, False
+        if not self.is_mounted:
+            return
+        if isinstance(result, TmuxError):
+            if link.client.alive:
+                self._control_failed(f"capture: {result}")
+            return  # an ended client sends every pane back to polling itself
+        if generation != self._generation or scrollback != self.scrollback:
+            # Asked for another pane, or another offset: ask again for this one.
+            self._request_frame(urgent=True)
+            return
+        self._show_capture(result)
+        if again:
+            self._request_frame()
+
+    def _sent(self, link: _Control, reply: Reply) -> None:
+        """A command of this pane's input was answered: a refusal ends control for this attach."""
+        if not reply.ok and link is self._link and link.client.alive:
+            self._control_failed(str(reply.error()))
+
+    def _control_output(self) -> None:
+        """The control client heard this pane print: a frame, at most ~60 a second."""
+        if self.is_on_screen:
+            self._request_frame()
+
+    def _control_failed(self, why: str) -> None:
+        """A control command failed: this pane polls until it is attached again.
+
+        Logged, never toasted: the frames go on, by the polled path. A pane that
+        is gone fails there as well, and that path says so in the pane, as ever.
+        """
+        self.log.warning(f"{self.pane_id}: tmux control mode off for this pane — {why}")
+        self._polling = True
+        self._drop_link()
+        self.refresh_frame()
+        self._schedule(self.FAST_INTERVAL)
+
+    def _control_lost(self, link: _Control) -> None:
+        """The control client ended: this pane polls, starting now."""
+        if self._link is not link:
+            return
+        self._watched = None
+        self._link = None
+        self._capturing = False
+        if self.is_mounted and self.pane_id is not None:
+            self.refresh_frame()
+            self._schedule(self.FAST_INTERVAL)
 
     def _shown(self) -> Shown:
         """What the pane displays now — the state every reader of a row starts from."""
@@ -2005,13 +2419,29 @@ class TerminalPane(Widget, can_focus=True):
         self._send(translation)
         if self.scrollback:
             self.scrollback = 0
-            self.refresh_frame()
+            self._frame_now()
         # A key is activity: the echo must not wait for the idle tick.
-        self._schedule(self.FAST_INTERVAL)
+        self._input_arrived()
 
     def _send(self, translation: Translation) -> None:
         if self.pane_id is None or self.server is None:
             return
+        link = self._control_link()
+        if link is not None:
+            try:
+                done = partial(self._sent, link)
+                if translation.kind == "key":
+                    link.client.send_keys(self.pane_id, translation.value, done=done)
+                else:
+                    link.client.send_literal(self.pane_id, translation.value, done=done)
+                return
+            except TmuxError:
+                if link.client.alive:
+                    # A key no tmux name spells — refused before anything was sent,
+                    # and said as the polled path says it.
+                    self._fail(PANE_GONE)
+                    return
+                # The client ended as the key was sent: the key goes the polled way.
         try:
             if translation.kind == "key":
                 self.server.send_keys(self.pane_id, translation.value)
@@ -2120,13 +2550,25 @@ class TerminalPane(Widget, can_focus=True):
         self.scrollback = 0
         if self.text_selection is not None:
             self._clear_own_selection()  # input into the agent: the highlight is stale (rule 3)
+        link = self._control_link()
         try:
-            self.server.paste(self.pane_id, event.text)
+            if link is None or not self._paste_over(link, event.text):
+                self.server.paste(self.pane_id, event.text)
         except TmuxUnavailable:
             self._fail(TMUX_UNAVAILABLE)
         except TmuxError:
             self._fail(PANE_GONE)
-        self._schedule(self.FAST_INTERVAL)
+        self._input_arrived()
+
+    def _paste_over(self, link: _Control, text: str) -> bool:
+        """Paste ``text`` through the control client; False when it went nowhere that way —
+        text the pipe cannot carry, or a client that ended — for the polled paste to take."""
+        if self.pane_id is None:
+            return False
+        try:
+            return link.client.paste(self.pane_id, text, done=partial(self._sent, link))
+        except TmuxError:
+            return False
 
     async def _on_click(self, event: events.Click) -> None:
         """Focus the pane; a double click selects the word under the pointer.
@@ -2855,7 +3297,10 @@ class TerminalPane(Widget, can_focus=True):
         if self._mouse_timer is None:
             # One tmux client per FLUSH, not per event: a trackpad flick is 20-50
             # notches a second, a drag as many moves, each its own fork+exec before.
-            self._mouse_timer = self.set_timer(self.WHEEL_COALESCE, self._flush_mouse, name="mouse")
+            # Down the control client's pipe a flush costs a write, so it waits only
+            # for the events already queued behind this one.
+            delay = self.CONTROL_COALESCE if self._serving() is not None else self.WHEEL_COALESCE
+            self._mouse_timer = self.set_timer(delay, self._flush_mouse, name="mouse")
 
     def _flush_mouse(self) -> None:
         """Send every mouse event queued since the last flush as one tmux call."""
@@ -2864,6 +3309,21 @@ class TerminalPane(Widget, can_focus=True):
         facts = self.facts
         if not queue or self.pane_id is None or self.server is None or facts is None:
             return
+        link = self._control_link()
+        if link is not None:
+            done = partial(self._sent, link)
+            try:
+                if facts.mouse_sgr:
+                    text = "".join(_sgr(*event) for event in queue)
+                    link.client.send_literal(self.pane_id, text, done=done)
+                else:
+                    data = b"".join(_x10(*event) for event in queue)
+                    link.client.send_bytes(self.pane_id, data, done=done)
+            except TmuxError:
+                pass  # the client ended as the flush was sent: the polled way, below
+            else:
+                self._input_arrived(urgent=False)
+                return
         try:
             if facts.mouse_sgr:
                 self.server.send_literal(self.pane_id, "".join(_sgr(*event) for event in queue))
@@ -2875,7 +3335,7 @@ class TerminalPane(Widget, can_focus=True):
         except TmuxError:
             self._fail(PANE_GONE)
             return
-        self._schedule(self.FAST_INTERVAL)
+        self._input_arrived(urgent=False)
 
     def scroll_history(self, delta: int) -> None:
         """Move the view ``delta`` lines up (positive) into history, clamped; 0 is live."""
@@ -2883,7 +3343,7 @@ class TerminalPane(Widget, can_focus=True):
         if target == self.scrollback:
             return
         self.scrollback = target
-        self.refresh_frame()
+        self._frame_now()
         self._schedule(self.FAST_INTERVAL)
 
     # --- size ----------------------------------------------------------------------------
@@ -2919,7 +3379,7 @@ class TerminalPane(Widget, can_focus=True):
             return
         self._resize_retry = self.RESIZE_RETRY
         self._synced = wanted
-        self.refresh_frame()
+        self._frame_now()
         self._schedule(self.FAST_INTERVAL)
 
     def _retry_size(self) -> None:

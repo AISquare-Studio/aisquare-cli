@@ -59,6 +59,7 @@ from aisquare.cli.ui.groups import (
 )
 from aisquare.cli.ui.terminal import InPlaceField
 from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, ProjectInfo
+from aisquare.services import fleet as fleet_service
 from aisquare.services.project import NICKNAME_MAX, display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
 
@@ -85,9 +86,11 @@ STATE_CHIP: dict[str, tuple[str, str]] = {
 CUSTOM_ROLE_ICON = "🤖"
 """The icon for a role the table above does not know (a `team bind` role, say)."""
 
-ALIVE_STATES: frozenset[str] = frozenset({"working", "waiting", "attention", "limited", "unknown"})
+ALIVE_STATES: frozenset[str] = fleet_service.PROCESS_STATES
 """States that count toward the card's "agents alive" chip — a limited agent is
-alive and parked (#146), not gone."""
+alive and parked (#146), not gone. The fleet's own set, which Stop and ``--all`` act on:
+a third copy of it could count as alive what they leave, or the reverse (review of #266,
+round 3)."""
 
 
 class AddProject(Message):

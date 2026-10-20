@@ -20,6 +20,7 @@ from textual.pilot import Pilot
 from textual.widgets import Button, Static, Switch
 from textual.widgets._toast import Toast
 
+from aisquare.cli.ui import sidebar
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.sidebar import SettingsRow
@@ -160,6 +161,13 @@ def _listed(dialog: ConfirmBulk) -> list[str]:
 
 def _confirm(dialog: ConfirmBulk) -> Button:
     return dialog.query_one("#bulk-confirm", Button)
+
+
+def test_the_sidebar_counts_alive_the_agents_stop_and_all_act_on() -> None:
+    """Review of #266, round 3: the sidebar's "agents alive" roll-up kept a third copy of the
+    set ``PROCESS_STATES`` and the agent view's Stop share. A state added to one and not
+    the other, the sidebar and the dialog disagreed on how many agents run."""
+    assert sidebar.ALIVE_STATES is fleet_service.PROCESS_STATES
 
 
 def test_settings_has_a_fleet_section_with_the_two_guarded_buttons(two_projects: Script) -> None:

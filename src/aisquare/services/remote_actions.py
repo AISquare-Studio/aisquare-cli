@@ -1230,7 +1230,10 @@ def action_tell_auto(
     ``fleet tell`` took for one waiting at its prompt, whatever it showed. The board
     reaches an agent through aisquare's hooks, so of one started without them (``no
     hooks``) ``how`` says the note is not shown to it, and that Interrupt & tell, whose
-    Escape goes first, types the text. ``fleet tell`` pastes before it presses Enter
+    Escape goes first, types the text: once its prompt is answered, while it shows one.
+    Interrupt & tell refuses a dialog before its Escape (:func:`action_type_now`), and the
+    receipt sent the human to it at a fresh Codex's folder-trust dialog, where it was a 409
+    (SMOKE7 of #113). ``fleet tell`` pastes before it presses Enter
     (``fleet.type_then_enter``): a paste refused or not answered in time is filed as a
     note, the second of them perhaps typed as well (``delivered=maybe``); an Enter that
     did not go through files nothing, the text left at the agent's prompt
@@ -1241,7 +1244,8 @@ def action_tell_auto(
     snap = snap if snap is not None else action_snapshot(target, label, pin)
     if action_may_answer(snap):
         state = action_state(snap)
-        if remote_needs.needs_dialog_open(snap):
+        dialog = remote_needs.needs_dialog_open(snap)
+        if dialog:
             why = "it is showing a prompt, which typing would answer"
         elif state != "waiting":
             why = f"it is {state}"
@@ -1258,7 +1262,11 @@ def action_tell_auto(
         )
         if snap.status is not None and snap.status.agent.session_id is None:
             # The board reaches an agent through its hooks: `no hooks`, and the note waits unread.
-            filed += ", which it is not shown without aisquare's hooks: Interrupt & tell types it"
+            # Interrupt & tell refuses a dialog as this does, so it types once that is answered.
+            then = "once its prompt is answered, " if dialog else ""
+            filed += (
+                f", which it is not shown without aisquare's hooks: {then}Interrupt & tell types it"
+            )
         return fleet_service.TellResult("no", f"{why} — {filed}")
     with action_audited(lambda error: trail(f"delivered=no failed={error}")):
         return action_pinned_call(

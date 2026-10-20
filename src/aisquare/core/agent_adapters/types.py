@@ -215,6 +215,18 @@ class AgentCapabilities:
     (``services.remote_server.remote_one_press_exit``), as it refuses every agent a second
     ``C-c`` or ``C-d`` within 3 s. Empty for an agent that asks for a second press first:
     Claude Code says ``Press Ctrl-C again to exit``, and the same of Ctrl-D (2.1.304)."""
+    dialog_on_screen: Callable[[Sequence[str]], str | None] | None = None
+    """What a dialog of the agent's own on its screen (its visible rows, as plain text) asks:
+    the words right above its options, ``""`` when none are on screen, and ``None`` for a
+    screen with no such dialog on it: its empty prompt, a turn running, a draft in its
+    composer, its transcript browser. Codex's folder-trust and hook-review dialogs before its
+    first prompt, its ``Switch to gpt-6-luna for lower credit usage?`` after a turn's
+    ``Stop`` and ``Implement this plan?`` after a Plan-mode turn's, fire no hook (measured
+    on 0.162.1), so the board never hears of them: Remote's needs-you scan reads the screen
+    of such an agent with no call pending and no bell, and makes a card of the dialog it
+    shows (``services.remote_needs._needs_screen_dialog_item``). ``None`` here for an agent
+    whose dialogs each reach the board through a hook (Claude Code's ``Notification``): its
+    screen is not read for one."""
     legacy_fleet_args: bool = False
     """``fleet.roles.<role>.extra_args`` and ``permission_mode`` are in this agent's
     vocabulary (they predate adapters and are Claude Code's); another agent takes only

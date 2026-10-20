@@ -481,7 +481,9 @@ class NeedsSources:
     to show. One tmux could not show raises, a failed read of that agent's alone
     (:func:`_needs_screen_read`).
     Asked only of an agent with more than one call pending, whose prompt on screen may be
-    any of them (:func:`_needs_on_screen`)."""
+    any of them (:func:`_needs_on_screen`), and of one whose adapter reads its own dialogs off
+    its screen (``capabilities.dialog_on_screen``: Codex's) with no call pending and no bell:
+    every scan, since none of those dialogs fires a hook (:func:`_needs_screen_dialog`)."""
     hands_over: Callable[[int | None, str | None], bool] = _needs_hands_over_anywhere
     """Whether ``on_limit = "switch"`` hands an agent leaving the given slot over: an
     account of the given agent's to go to (``claude_accounts.somewhere_to_hand_over``),
@@ -905,6 +907,64 @@ def _needs_trust_item(
     )
 
 
+_SCREEN_DIALOG_PUSH_DELAY = _TRUST_PUSH_DELAY
+"""How long after a scan first saw it a dialog only the agent's screen shows waits for its
+push (:func:`_needs_screen_dialog_item`), as the folder-trust question does: one drawn at a
+start is often answered by the human who spawned the agent from the UI, at its window."""
+
+
+def _needs_screen_dialog(
+    agent: FleetAgent, screen: Callable[[], Sequence[str] | None] | None
+) -> str | None:
+    """What a dialog of the agent's own on its screen asks (``capabilities.dialog_on_screen``),
+    read without the escapes the scan's capture keeps (:data:`_ESCAPES`); ``None`` for an
+    agent whose adapter reads no dialog off its screen, which is then not read, and for a
+    screen this derivation was not given, could not read, or shows no dialog on."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent.agent)
+    read = None if adapter is None else adapter.capabilities.dialog_on_screen
+    rows = None if read is None or screen is None else screen()
+    if read is None or rows is None:
+        return None
+    return read([_ESCAPES.sub("", row) for row in rows])
+
+
+def _needs_screen_dialog_item(
+    status: FleetAgentStatus, words: str, *, project: ProjectInfo, name: str, now: datetime
+) -> NeedsItem:
+    """The card of a dialog the agent's screen shows (:func:`_needs_screen_dialog`), which no
+    hook reported: Codex's folder trust and hook review before its first prompt, its
+    ``Switch to gpt-6-luna for lower credit usage?`` after a turn's ``Stop`` and ``Implement
+    this plan?`` after a Plan-mode turn's (measured on 0.162.1). The row read ``waiting``
+    with no bell, so nothing needed the human: no card, no push, while the guard refused
+    every tell as a dialog (SMOKE7 of #113).
+
+    Its words are the excerpt; the reason and the push say only who, as of every dialog's
+    card. No quick answers: what a key picks differs from one dialog to the next (Enter
+    trusts the folder and Esc quits Codex, a digit on its hook review moves the highlight
+    and picks nothing), so the key pad beside the live pane answers what it shows. One card
+    per dialog while it is up, whatever its highlight: named by the row, the session's last
+    hook (the ``Stop`` before the dialog; none before the first prompt) and the dialog's
+    words as squashed (:func:`_needs_squashed`), which a resize that rewraps them leaves as
+    they were. The next dialog, or the same one after another turn, is a card of its own.
+    Dated by the scan that first saw it, and pushed :data:`_SCREEN_DIALOG_PUSH_DELAY` after.
+    """
+    session, agent = status.session, status.agent
+    hook = "-" if session is None else session.last_seen_at.isoformat()
+    return _needs_item(
+        "permission",
+        f"screen:{agent.id}:{hook}:{_needs_squashed(words)}",
+        project=project,
+        agent=agent,
+        reason=f"{name} shows a dialog that needs you",
+        excerpt=words,
+        detail=_needs_fit({"text": words}, _DETAIL_TEXT_MAX),
+        since=now,
+        push_after=now + _SCREEN_DIALOG_PUSH_DELAY,
+    )
+
+
 def _needs_is_manager(role: str | None) -> bool:
     """Whether ``role`` is the manager's, a numbered seat of it included."""
     from aisquare.core import harness
@@ -994,6 +1054,14 @@ def needs_from_agent(
        which is rule 8's, and with a question or a plan among them is rule 8's before any
        notice too, once a dialog is drawn (:func:`_needs_drawn_dialog`), named after the
        question or the plan and what the dialog shows, before its notice and after alike;
+    5a. no pending tool and no attention, and the agent's screen shows a dialog of its own,
+       read by its adapter (``capabilities.dialog_on_screen``) → ``permission``, the
+       dialog's card (:func:`_needs_screen_dialog_item`): one that fires no hook, which the
+       board never hears of, as Codex's folder trust, hook review, ``Switch to
+       gpt-6-luna for lower credit usage?`` after a turn's ``Stop`` and ``Implement this
+       plan?`` after a Plan-mode turn's (measured on 0.162.1).
+       Before rules 6, 9 and 10, whose answers are words and an Enter typed at the prompt,
+       into the dialog while it is up. An agent whose adapter reads none is never asked;
     6. no pending tool, and the newest record an interruption later than the session's last
        hook, or one only Claude Code's own records follow (a local or ``!`` command run at
        the prompt since, which fires no hook either) → ``interrupted``, whatever the row
@@ -1027,7 +1095,7 @@ def needs_from_agent(
     a limited agent (:attr:`NeedsSources.hands_over`, whose default it shares: one default,
     never ``None`` read as yes). ``pane_output`` says when the agent's pane last printed,
     asked only of a sub-agent's prompt; ``pane_screen`` is what it shows, asked only with
-    more than one call pending.
+    more than one call pending, and for rule 5a.
 
     A held row got rules 3 to 10 from its board while that was fresh: permission and
     question cards, pushed, whose every answer was a 409 ``not_agent`` (its pane id is
@@ -1111,6 +1179,10 @@ def needs_from_agent(
     # the notices around it: one card before its notice and after (round 10, 2/9).
     asked = asking if call is None else None
     drawn = None if asked is None else _needs_drawn_dialog(screen)
+    # Rule 5a: a dialog no hook reported, which words typed by rules 6, 9 and 10 would answer.
+    shown = None if pending or attention else _needs_screen_dialog(agent, screen)
+    if shown is not None:
+        return [_needs_screen_dialog_item(status, shown, project=project, name=name, now=now)]
     if pending:
         if not attention:
             if drawn is not None:

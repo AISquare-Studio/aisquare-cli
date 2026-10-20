@@ -3158,8 +3158,10 @@ def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None
         return False
     adapter = recorded_adapter(agent.agent) if agent.agent is not None else None
     if adapter is not None and adapter.capabilities.start_dialog_mark is None:
-        # An agent that puts up no dialog before its start (Codex) is never at it: the
-        # row its launch binding gave a session is not captured on every listing for it.
+        # This is Claude Code's question (`claude_sharing.shows_trust_prompt`), and an agent
+        # with no mark under such a dialog is not captured on every listing for it. Codex
+        # does ask in a git checkout no trust covers (0.162.1), with no hook, and Remote's
+        # scan reads that off its screen (`capabilities.dialog_on_screen`).
         return False
     if session is None:
         return agent.session_id is not None or harness.is_default_agent(agent.binary)

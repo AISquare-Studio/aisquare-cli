@@ -304,6 +304,66 @@ def working_on_screen(rows: Sequence[str]) -> bool:
     return above >= 0 and _STATUS_LINE.fullmatch(lines[above]) is not None
 
 
+#: The key hint every dialog of Codex's own ends its screen with: ``enter continue · esc
+#: quit`` (folder trust), ``enter confirm · esc skip`` (hook review), ``enter select · esc
+#: back`` (``Switch to gpt-6-luna``, ``Implement this plan?``), ``Press enter to confirm or
+#: esc to cancel`` (an approval), ``… | enter to submit answer | esc to interrupt`` (a
+#: question). The footer under a draft names neither key, and the transcript browser's has
+#: ``↵ rewind · esc back`` (0.162.1, measured under tmux).
+_DIALOG_KEYS = re.compile(r"\benter\b.*\besc\b", re.IGNORECASE)
+#: The option a dialog has chosen, U+203A and a space before it (``1. Trust and continue``
+#: after them), at the margin or, in a question's view, indented.
+_CHOSEN = re.compile(r"\s*\u203a \d{1,2}\. ")
+#: A dialog's first option, chosen or not.
+_FIRST_OPTION = re.compile(r"\s*(?:\u203a )?1\. ")
+
+
+def dialog_on_screen(rows: Sequence[str]) -> str | None:
+    """What a dialog of Codex's own on ``rows``, its visible screen, asks: the words right
+    above its options (``AgentCapabilities.dialog_on_screen``); ``None`` when no dialog is up.
+
+    Measured on 0.162.1 under tmux: each of its dialogs ends the screen with its key hint
+    (:data:`_DIALOG_KEYS`), and its last chevron row (U+203A) is then the option it has
+    chosen, not the composer: the folder-trust question Codex asks in a git checkout no
+    trust covers, its hook review, the ``Switch to gpt-6-luna for lower credit usage?``
+    it opens after a turn's ``Stop`` near the limit, ``Implement this plan?`` after a
+    Plan-mode turn's, and its approval and question views.
+    A draft in the composer holds the last chevron row with the footer under it (a draft
+    that starts ``1. `` too), a turn draws its status line above the composer, and the
+    transcript after a second Esc ends on ``↵ rewind · esc back``: none of them is one.
+    The words are the rows above the first option, past the blank rows between, up to the
+    next blank row or a row at the margin (a prompt or the agent's words in the transcript
+    above): ``Trust this folder? Codex can read, edit, and run files here, …``, ``Hooks need
+    review 8 hooks are new or changed. …``, ``Approaching rate limits Switch to gpt-6-luna
+    for lower credit usage?``, ``Implement this plan?``."""
+    lines = [row.rstrip() for row in rows]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines or _DIALOG_KEYS.search(lines[-1]) is None:
+        return None
+    chosen = next(
+        (
+            index
+            for index in range(len(lines) - 1, -1, -1)
+            if lines[index].lstrip().startswith(_CHEVRON)
+        ),
+        None,
+    )
+    if chosen is None or _CHOSEN.match(lines[chosen]) is None:
+        return None
+    first = next(
+        (index for index in range(chosen, -1, -1) if _FIRST_OPTION.match(lines[index])), chosen
+    )
+    top = first - 1
+    while top >= 0 and not lines[top].strip():
+        top -= 1
+    words: list[str] = []
+    while top >= 0 and lines[top].strip() and lines[top].startswith(" "):
+        words.insert(0, lines[top].strip())
+        top -= 1
+    return " ".join(words)
+
+
 def _past(
     lines: list[str],
     index: int,
@@ -365,6 +425,7 @@ class CodexAdapter:
         idle_prompt_mark=IDLE_PROMPT_MARK,
         idle_on_screen=idle_on_screen,
         one_press_exits=frozenset({"C-c", "C-d"}),
+        dialog_on_screen=dialog_on_screen,
         fleet_settings=(
             "notice.hide_rate_limit_model_nudge=true",
             "check_for_update_on_startup=false",

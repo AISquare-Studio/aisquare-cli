@@ -216,6 +216,7 @@ def import_source(
         return _import_with_llm(
             src,
             text,
+            original=probe,
             where=where,
             base=base,
             layer=layer,
@@ -292,6 +293,7 @@ def _import_with_llm(
     src: _Source,
     text: str,
     *,
+    original: Persona | None,
     where: Path | str,
     base: Path,
     layer: Layer,
@@ -304,7 +306,13 @@ def _import_with_llm(
     progress: Callable[[str], None] | None,
 ) -> ImportResult:
     """§3.9's LLM path: draft → render → the recognised path's validator (one retry
-    with its rule) → keep the draft → confirm → save with provenance."""
+    with its rule) → keep the draft → confirm → save with provenance.
+
+    ``original`` is the source when it already was a recognised skill (``--condense``,
+    ``--llm``): the engine rewrites its description and body, and the rest of it is
+    kept — every other frontmatter key (``core.render``'s ``keep``) and, from a skill
+    directory, its supporting files, copied without links as the recognised path copies
+    them. Both were dropped (review of #240, "also confirmed")."""
     from aisquare.services import persona_import
 
     if name is not None and _occupied(base / name) and not force:
@@ -346,7 +354,11 @@ def _import_with_llm(
             raise PersonaError(exc.message, path=where, code=exc.code) from None
         skill_name = name or drafted.name.strip()
         rendered = core.render(
-            skill_name, drafted.description, drafted.body, metadata={"persona-source": src.origin}
+            skill_name,
+            drafted.description,
+            drafted.body,
+            metadata={"persona-source": src.origin},
+            keep=None if original is None else original.frontmatter,
         )
         kept = _keep_draft(
             skill_name, rendered, src=src, engine=ran, model=ran_model, condensed=condense
@@ -388,7 +400,15 @@ def _import_with_llm(
             code="not_confirmed",
         )
 
+    skipped: list[str] = []
+
     def fill(staged: Path) -> None:
+        if original is not None and src.directory is not None:
+            skipped.extend(
+                _copy_without_links(
+                    src.directory, staged, leave_out=(core.SKILL_FILE, core.PROVENANCE_FILE)
+                )
+            )
         (staged / core.SKILL_FILE).write_text(rendered, encoding="utf-8")
         _write_provenance(
             staged,
@@ -409,6 +429,7 @@ def _import_with_llm(
         source=src.origin,
         replaced=replaced,
         warnings=core.warnings(persona),
+        skipped_links=skipped,
     )
 
 

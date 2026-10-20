@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
@@ -444,14 +445,33 @@ def briefing(persona: Persona) -> list[str]:
     return lines
 
 
-def render(name: str, description: str, body: str, *, metadata: dict[str, str]) -> str:
+def render(
+    name: str,
+    description: str,
+    body: str,
+    *,
+    metadata: dict[str, str],
+    keep: Mapping[str, Any] | None = None,
+) -> str:
     """A canonical SKILL.md — for a scaffold or an LLM draft, never for a file
-    someone else wrote (those are copied, not re-rendered)."""
+    someone else wrote (those are copied, not re-rendered).
+
+    ``keep`` is the frontmatter of the skill an LLM rewrote (``--condense``, ``--llm``
+    on a recognised skill): every key but ``name`` and ``description`` is written back
+    as it was, its ``metadata`` under the draft's own. Rendered from the draft alone,
+    the import dropped ``allowed-tools``, ``metadata`` and every other key the source
+    had (review of #240, "also confirmed")."""
     import yaml
 
     header: dict[str, Any] = {"name": name, "description": description.strip()}
-    if metadata:
-        header["metadata"] = dict(metadata)
+    kept = dict(keep or {})
+    kept_metadata = kept.pop("metadata", None)
+    kept.pop("name", None)
+    kept.pop("description", None)
+    header.update(kept)
+    merged = {**(kept_metadata if isinstance(kept_metadata, dict) else {}), **metadata}
+    if merged:
+        header["metadata"] = merged
     front = yaml.safe_dump(header, sort_keys=False, allow_unicode=True, width=1_000_000)
     return f"---\n{front}---\n{body.strip()}\n"
 

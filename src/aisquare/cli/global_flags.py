@@ -29,6 +29,7 @@ machine-readable error.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sqlite3
@@ -38,7 +39,7 @@ from typing import Any
 import typer
 from typer.core import TyperGroup, TyperOption
 
-from aisquare.cli.common import expected_home_creation_errors, fail
+from aisquare.cli.common import USAGE_ERROR, expected_home_creation_errors, fail
 from aisquare.core.state import get_state
 from aisquare.core.store import (
     StoreUnopenable,
@@ -73,11 +74,6 @@ VERB_SYNONYMS: dict[str, tuple[str, ...]] = {
 really has are ever suggested."""
 
 _NO_SUCH_COMMAND = re.compile(r"No such command '([^']+)'")
-
-# click is vendored (``typer._click``); like tests/cli_tree.py we stay on the
-# public typer surface and duck-type instead — UsageError is the direct base
-# of the public ``typer.BadParameter``.
-_USAGE_ERROR: type[Exception] = typer.BadParameter.__bases__[0]
 
 _JSON_HELP = (
     "Emit machine-readable JSON on stdout. Put --json before the subcommand "
@@ -212,14 +208,30 @@ def _handle_usage_error(error: Any) -> None:
     source :func:`aisquare.cli.common.fail` reads), or returns so the caller
     re-raises for typer's normal stderr rendering — appending a did-you-mean
     when typer's built-in matcher found nothing (synonym-only typos).
-    Anything that is neither an unknown command nor an unknown option passes
-    through untouched.
+    Every other usage error — an unknown option, a bad or missing parameter,
+    two options that conflict — is the same object under ``--json``: a caller
+    that asked for JSON gets JSON or nothing. This rendered ``NoSuchOption``
+    alone and let ``BadParameter`` fall through to typer's stderr prose, so
+    ``--json fleet shutdown --project x --all`` printed nothing on stdout
+    (round 7 of #203). Without ``--json`` it returns so the caller re-raises
+    for typer's normal rendering.
     """
     message = str(getattr(error, "message", error))
     unknown = _NO_SUCH_COMMAND.search(message)
     if unknown is None:
-        if get_state().json_output and type(error).__name__ == "NoSuchOption":
-            typer.echo(json.dumps({"error": "usage", "message": message}))
+        if get_state().json_output:
+            # `message` is EMPTY on click's `MissingParameter` (its text lives in
+            # `format_message()`) and lacks the `Invalid value for --all:` prefix
+            # on `BadParameter`, so `--json fleet stop` printed
+            # `{"error": "usage", "message": ""}` — the information lost for
+            # both audiences at once (round 8 of #203). `format_message()` is
+            # what typer would have rendered on stderr, so JSON says the same.
+            rendered = message
+            formatter = getattr(error, "format_message", None)
+            if callable(formatter):
+                with contextlib.suppress(Exception):
+                    rendered = str(formatter())
+            typer.echo(json.dumps({"error": "usage", "message": rendered or message or str(error)}))
             raise typer.Exit(code=2)
         return
     given = unknown.group(1)
@@ -307,6 +319,6 @@ class GlobalFlagsGroup(TyperGroup):
                 hint=damaged_store_recovery(),
                 detail=str(damaged),
             )
-        except _USAGE_ERROR as error:
+        except USAGE_ERROR as error:
             _handle_usage_error(error)
             raise

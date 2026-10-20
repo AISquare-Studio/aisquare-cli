@@ -375,15 +375,17 @@ def test_a_bracketed_config_dir_survives_into_the_button(tmp_path: Path) -> None
             button = view.query_one("#fix-0", Button)
             return str(button.label), str(button.tooltip)
 
+    from aisquare.services import install_route
+
     label, tooltip = asyncio.run(drive())
-    expected = "aisquare agents connect claude-code --config-dir /home/me/[archive]/.claude"
+    # The label names the command as a shell would read it, quoted where its path needs it.
+    argv = ["aisquare", "agents", "connect", "claude-code", "--config-dir"]
+    expected = install_route.command_line([*argv, "/home/me/[archive]/.claude"])
     assert label == expected
-    assert "[archive]" in tooltip
+    assert "[archive]" in label and "[archive]" in tooltip
     # Control: the same string handed to Textual AS A STR loses the segment — this
     # is the failure the assertion above exists to catch, and it is real.
-    assert Content.from_text(expected).plain == (
-        "aisquare agents connect claude-code --config-dir /home/me//.claude"
-    )
+    assert Content.from_text(expected).plain == expected.replace("[archive]", "")
 
 
 def test_doctor_view_without_a_cwd_disables_project_scoped_fixes() -> None:

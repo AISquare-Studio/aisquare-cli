@@ -27,7 +27,9 @@ TEAMMATE = "22222222-3333-4444-5555-666666666666"
 NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 
 #: SessionStart for a coder with NO persona, captured from the base this change
-#: started on (feat/persona-core @ 4f7367e) before a line of it was written:
+#: started on (feat/persona-core @ 4f7367e) before a line of it was written, and
+#: brought to main 0.8.2's text when main was merged in (#201) — ``{project}`` is the
+#: repository's project id:
 #: AISQUARE_ROLE=coder, a fresh home, the clock pinned to NOW. Byte-identical is
 #: the contract — a session without a persona sees nothing new.
 PINNED = "\n".join(
@@ -51,6 +53,11 @@ PINNED = "\n".join(
         'criteria, then `aisquare task review <id> --note "how to verify + evidence" '
         "--as 11111111`,",
         "and pick up the next one.",
+        # Since 0.8.1, every coder is told to clean up after itself; main's own text.
+        "Before you finish or go idle, remove every scratch worktree you added",
+        "(`git worktree remove <path>`, then `git worktree prune`) and every temp dir you",
+        "made — never the worktree you were spawned in: `aisquare fleet reap --project "
+        "{project}` removes that.",
         "Stay in your lane (coder). When you are asked to verify, review or plan your own "
         "work, do not do it here.",
         "Instead: do your task; verification is the runner's (`aisquare task review <id> "
@@ -65,13 +72,22 @@ PINNED = "\n".join(
 
 
 @pytest.fixture
-def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_capture: None) -> Path:
+    """A repository a coder session starts in. ``[projects] capture`` on (#139): the pinned
+    briefing is a hooked session's in a directory nobody added, as when it was captured."""
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     monkeypatch.setattr(team_service, "_now", lambda: NOW)
     path = tmp_path / "repo"
     path.mkdir()
     monkeypatch.chdir(path)
     return path
+
+
+def _pinned(work: Path) -> str:
+    """:data:`PINNED` for the repository at ``work``."""
+    from aisquare.core import orchestrator
+
+    return PINNED.replace("{project}", orchestrator.team_project(work).id)
 
 
 def _start(work: Path, session_id: str = SID) -> str:
@@ -88,7 +104,7 @@ def _recorded(session_id: str = SID) -> str | None:
 def test_a_session_without_a_persona_is_byte_identical_to_the_base(work: Path) -> None:
     board = _start(work)
 
-    assert board == PINNED
+    assert board == _pinned(work)
     assert _recorded() is None
 
 
@@ -107,7 +123,7 @@ def test_a_persona_is_one_block_after_the_lane_rule_with_the_guard_last(
     assert lines[start + len(block) - 1] == personas.guard_sentence("skeptic")
     assert lines[start + len(block) :] == ["</aisquare-team>"]
     rest = "\n".join(lines[:start] + lines[start + len(block) :])
-    assert rest == PINNED.replace(
+    assert rest == _pinned(work).replace(
         "  - 11111111 coder (you) — 0m ago", "  - 11111111 coder (you) persona:skeptic — 0m ago"
     )
     assert _recorded() == "skeptic"
@@ -296,17 +312,17 @@ def test_a_row_that_cannot_be_read_is_logged_and_the_variable_still_applies(
     monkeypatch.setenv("AISQUARE_PERSONA", "mentor")
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_01unreadable")
 
-    def unreadable(store: object, project_id: str) -> None:
+    def unreadable(store: object) -> None:
         raise RuntimeError("database is locked")
 
-    monkeypatch.setattr(team_service, "_fleet_row_named", unreadable)
+    monkeypatch.setattr(team_service, "_named_fleet_row", unreadable)
     with (
         caplog.at_level(logging.WARNING, logger="aisquare.services.team"),
         store_session() as store,
     ):
-        asked, note = team_service._asked_persona(store, "prj_row_unreadable")
+        asked, note, named = team_service._asked_persona(store, "prj_row_unreadable")
 
-    assert asked == "mentor"
+    assert asked == "mentor" and named is None
     assert note == (
         "persona: the fleet row could not be read (RuntimeError) "
         "— started without an attached persona"
@@ -323,16 +339,16 @@ def test_a_start_whose_row_cannot_be_read_says_so_in_one_line_and_still_briefs(
     """P20's amendment: the attached persona must not vanish silently from the briefing."""
     monkeypatch.setenv("AISQUARE_PERSONA", "mentor")
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, "skeptic"))
-    real = team_service._fleet_row_named
+    real = team_service._named_fleet_row
     calls: list[str] = []
 
-    def locked_once(store: ContextStore, project_id: str) -> FleetAgent | None:
-        calls.append(project_id)
+    def locked_once(store: ContextStore) -> FleetAgent | None:
+        calls.append("read")
         if len(calls) == 1:
             raise sqlite3.OperationalError("database is locked")
-        return real(store, project_id)
+        return real(store)
 
-    monkeypatch.setattr(team_service, "_fleet_row_named", locked_once)
+    monkeypatch.setattr(team_service, "_named_fleet_row", locked_once)
     with caplog.at_level(logging.WARNING, logger="aisquare.services.team"):
         lines = _start(work).split("\n")
 
@@ -351,5 +367,5 @@ def test_a_fleet_row_without_a_persona_leaves_the_start_byte_identical(
 ) -> None:
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, None))
 
-    assert _start(work) == PINNED
+    assert _start(work) == _pinned(work)
     assert _recorded() is None

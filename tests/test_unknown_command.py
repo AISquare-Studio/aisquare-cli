@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -21,13 +20,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core.paths import HOME_ENV_VAR
-
-_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
-
-def _plain(text: str) -> str:
-    """Rendered output flattened for content asserts: no ANSI, no wrapping."""
-    return " ".join(_ANSI.sub("", text).split())
+from tests.rendered import plain as _plain
 
 
 @pytest.fixture(autouse=True)

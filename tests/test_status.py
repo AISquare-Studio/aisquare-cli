@@ -67,7 +67,13 @@ def test_doctor_warns_when_repomix_missing(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runner.invoke(app, ["init", "--no-onboard"])
-    monkeypatch.setattr("aisquare.services.diagnostics.shutil.which", lambda _name: None)
+    # A Node with no repomix and no npx: someone started on the toolchain, so the
+    # row says what is missing. With no Node at all it reads off instead
+    # (tests/test_repomix_check_gates_on_node.py, TestNoNodeAtAllIsOffNotBroken).
+    monkeypatch.setattr(
+        "aisquare.services.diagnostics.shutil.which",
+        lambda name: "/usr/bin/node" if name == "node" else None,
+    )
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0  # missing optional dep is a warning, not a failure
     assert "⚠ repomix" in result.stdout

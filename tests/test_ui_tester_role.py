@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import pytest
@@ -44,10 +44,11 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.models import CheckStatus
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, install_route
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops as ops
 from aisquare.services.fleet import FLEET_ROLES
+from tests.cycles import unscoped
 
 ROLE = "ui-tester"
 
@@ -74,7 +75,7 @@ def test_the_ladder_is_the_verifiers_ladder() -> None:
 
 def test_a_seat_is_briefed_as_the_role() -> None:
     assert harness.base_role("ui-tester3") == ROLE
-    text = " ".join(harness.role_cycle("ui-tester3", "abcd1234"))
+    text = " ".join(harness.role_cycle("ui-tester3", "abcd1234", fleet=unscoped))
     assert text.startswith("Your standing cycle (ui-tester)")
     assert "Stay in your lane (ui-tester)" in text
 
@@ -83,7 +84,7 @@ def test_a_seat_is_briefed_as_the_role() -> None:
 
 
 def test_the_briefing_verifies_in_a_real_browser_and_measures() -> None:
-    text = " ".join(harness.role_cycle(ROLE, "abcd1234"))
+    text = " ".join(harness.role_cycle(ROLE, "abcd1234", fleet=unscoped))
     assert "task next --status review" in text
     assert '"UI: …"' in text, "it takes the tasks the planner marked for it"
     assert "REAL browser" in text
@@ -95,14 +96,14 @@ def test_the_briefing_verifies_in_a_real_browser_and_measures() -> None:
 
 
 def test_the_briefing_degrades_honestly_without_a_browser() -> None:
-    text = " ".join(harness.role_cycle(ROLE, "abcd1234"))
+    text = " ".join(harness.role_cycle(ROLE, "abcd1234", fleet=unscoped))
     assert "No browser tool answers?" in text
     assert "UI not browser-verified in this window" in text
     assert "never done" in text, "a UI task without a browser is reopened, not passed"
 
 
 def test_the_briefing_is_read_only_and_pre_fills_the_session_id() -> None:
-    text = " ".join(harness.role_cycle(ROLE, "abcd1234"))
+    text = " ".join(harness.role_cycle(ROLE, "abcd1234", fleet=unscoped))
     assert "never edit" in text and "never push" in text
     assert "--as abcd1234" in text
 
@@ -113,7 +114,7 @@ def test_the_briefing_says_which_build_it_verified() -> None:
     it into the coder's tree, and it opens a URL, sees a working page, measures
     it honestly and `task done`s with genuine evidence of the PRE-change build.
     """
-    text = " ".join(harness.role_cycle(ROLE, "abcd1234"))
+    text = " ".join(harness.role_cycle(ROLE, "abcd1234", fleet=unscoped))
     assert "no worktree" in text
     assert "SAY WHICH BUILD" in text and "branch or commit" in text
     assert "<url>" in text, "the note carries the URL it verified"
@@ -125,7 +126,7 @@ def test_the_briefing_can_reach_past_the_head_of_the_review_pool() -> None:
     offset) and `--claim` is refused for review tasks, so a non-UI task at the
     head made this cycle stop — with the `UI:` task it owns sitting behind it.
     """
-    text = " ".join(harness.role_cycle(ROLE, "abcd1234"))
+    text = " ".join(harness.role_cycle(ROLE, "abcd1234", fleet=unscoped))
     assert "HEAD of the review pool" in text
     assert "aisquare board" in text and "by id" in text
 
@@ -135,7 +136,7 @@ def test_the_briefing_does_not_claim_an_enforcement_it_does_not_have() -> None:
     "Read-only" was claimed and enforced nowhere. `--restricted` is not the fix:
     it removes the Bash this role's own verdict commands need.
     """
-    text = " ".join(harness.role_cycle(ROLE, "abcd1234"))
+    text = " ".join(harness.role_cycle(ROLE, "abcd1234", fleet=unscoped))
     assert "ASKED to be read-only" in text
     assert "nothing here enforces it" in text
     assert "--restricted" not in text
@@ -147,10 +148,10 @@ def test_the_runner_names_a_verdict_for_a_ui_task_it_cannot_verify() -> None:
     the sentence that forbids rubber-stamping. The ui-tester's identical
     situation is explicit ("never done"), and one fact must not resolve two ways.
     """
-    text = " ".join(harness.role_cycle("runner", "abcd1234"))
+    text = " ".join(harness.role_cycle("runner", "abcd1234", fleet=unscoped))
     assert 'task reopen <id> --reason "UI not browser-verified"' in text
     assert "never done" in text
-    tester = " ".join(harness.role_cycle("tester", "abcd1234"))
+    tester = " ".join(harness.role_cycle("tester", "abcd1234", fleet=unscoped))
     assert 'task reopen <id> --reason "UI not browser-verified"' in tester, (
         "`tester` is the fleet's name for `runner` and shares the rule"
     )
@@ -162,7 +163,7 @@ def test_the_runner_does_not_defer_ui_tasks_to_a_stale_ui_tester() -> None:
     routed `UI:` work to a verifier that no longer exists. Presence is not
     availability: a stale row means the runner reopens the task itself."""
     for role in ("runner", "tester"):
-        text = " ".join(harness.role_cycle(role, "abcd1234"))
+        text = " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
         assert "NOT marked (stale)" in text, role
         assert "not an available one" in text, role
         # the board is where staleness is visible — the briefing names the marker it prints
@@ -173,20 +174,20 @@ def test_the_manager_names_the_build_when_it_spawns_a_ui_tester() -> None:
     """The tester's documented workaround, which the ui-tester needs more: it
     measures a page instead of running a suite, so it fails SILENTLY against the
     wrong tree."""
-    text = " ".join(harness.role_cycle("manager", "abcd1234"))
+    text = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
     assert "fleet spawn ui-tester --prompt" in text
     assert "branch or worktree" in text and "URL" in text
 
 
 def test_the_other_roles_know_the_ui_tester_exists() -> None:
-    planner = " ".join(harness.role_cycle("planner", "abcd1234"))
+    planner = " ".join(harness.role_cycle("planner", "abcd1234", fleet=unscoped))
     assert '"UI: …"' in planner and "browser steps" in planner, "the planner marks UI work"
-    runner = " ".join(harness.role_cycle("runner", "abcd1234"))
+    runner = " ".join(harness.role_cycle("runner", "abcd1234", fleet=unscoped))
     assert "belongs to the ui-tester" in runner
     assert "not browser-verified" in runner, "a runner alone says what it did not check"
-    manager = " ".join(harness.role_cycle("manager", "abcd1234"))
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
     assert "fleet spawn ui-tester" in manager
-    reviewer = " ".join(harness.role_cycle("reviewer", "abcd1234"))
+    reviewer = " ".join(harness.role_cycle("reviewer", "abcd1234", fleet=unscoped))
     assert "no ui-tester evidence" in reviewer and "request-changes" in reviewer
 
 
@@ -453,8 +454,26 @@ def test_doctor_names_the_directory_beside_each_tool(
     (b / ".claude.json").write_text(json.dumps({"mcpServers": {"cdp": {"args": ["puppeteer"]}}}))
     config_dirs(a, b)
     check = diagnostics._check_browser_tools(tmp_path)
-    assert f"mcp pw ({a})" in check.detail
-    assert f"mcp cdp ({b})" in check.detail
+    # Through `_short_path`, which is what builds the detail: it renders a path
+    # under the user's home as `~/…`. On Windows `tmp_path` IS under the home
+    # (`%USERPROFILE%\AppData\Local\Temp`), so the raw path is not in the string
+    # and never could be; on POSIX `/tmp` is outside it and the two spellings
+    # coincide, which is why a literal survived there. The question this test
+    # asks — is each tool named with ITS OWN directory — is unchanged.
+    assert f"mcp pw ({diagnostics._short_path(a)})" in check.detail
+    assert f"mcp cdp ({diagnostics._short_path(b)})" in check.detail
+
+
+def test_a_path_under_the_home_is_shown_with_forward_slashes_on_every_platform() -> None:
+    """`~/` is a POSIX spelling, and the rest of the path came out in the platform's own: on
+    Windows every config dir under the profile read `~/AppData\\Local\\…` in doctor's line."""
+    home = PureWindowsPath(r"C:\Users\me")
+    claude = home / "AppData" / "Local" / "claude"
+    assert diagnostics._short_path(claude, home) == "~/AppData/Local/claude"
+    outside = PureWindowsPath(r"D:\work\claude")
+    assert diagnostics._short_path(outside, home) == str(outside)  # not under home: untouched
+    posix_home = PurePosixPath("/home/me")
+    assert diagnostics._short_path(posix_home / ".claude", posix_home) == "~/.claude"
 
 
 def test_doctor_reads_the_default_installs_claude_json_beside_the_directory(
@@ -540,6 +559,25 @@ def test_doctor_declines_to_guess_from_a_name_alone(
                     "db-browser": {},
                     "browserslist-mcp": {},
                     "chrome-history-reader": {},
+                    # The declared table's OWN names with a hyphenated tail: a
+                    # boundary that let `-` end the identifier read each as the
+                    # tool it merely names (review of #203).
+                    "playwright-report": {},
+                    "playwright_report": {},
+                    "playwright-reporter": {},
+                    # A TEST TREE is about the tool too (round 8): a filesystem
+                    # server whose args point into `playwright-tests`, and the
+                    # e2e / spec / fixtures spellings.
+                    "files": {"command": "node", "args": ["/home/me/playwright-tests/server.js"]},
+                    "selenium-e2e": {},
+                    "puppeteer-fixtures": {},
+                    "specs": {"args": ["--dir=/srv/playwright-spec"]},
+                    "selenium-grid-docs": {},
+                    "selenium-docs-site": {},
+                    "puppeteer-recorder": {"args": ["puppeteer-recorder"]},
+                    "puppeteer-examples-repo": {},
+                    "browser-use-examples": {},
+                    "chrome-devtools-mcp-docs": {},
                 }
             }
         )
@@ -553,9 +591,118 @@ def test_doctor_declines_to_guess_from_a_name_alone(
         "db-browser",
         "browserslist-mcp",
         "chrome-history-reader",
+        "playwright-report",
+        "playwright_report",
+        "playwright-reporter",
+        "mcp files",
+        "selenium-e2e",
+        "puppeteer-fixtures",
+        "mcp specs",
+        "selenium-grid-docs",
+        "selenium-docs-site",
+        "puppeteer-recorder",
+        "puppeteer-examples-repo",
+        "browser-use-examples",
+        "chrome-devtools-mcp-docs",
     ):
         assert guess not in check.detail, guess
     assert "no browser MCP/plugin declared" in check.detail
+
+
+def test_doctor_recognises_the_real_package_ids(
+    tmp_path: Path, config_dirs: Callable[..., None]
+) -> None:
+    """Review of the fold. A boundary that kept `-` inside the identifier, meant
+    to stop `playwright-report` reading as playwright, also stopped every real
+    package id: the providers are joined to `server`, `mcp` and a scope with
+    hyphens. The hyphen is a boundary again and the benign tails are a declared
+    table, so both halves hold."""
+    home = tmp_path / "claude"
+    home.mkdir()
+    (home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "pup": {"command": "npx", "args": ["@modelcontextprotocol/server-puppeteer"]},
+                    "pw1": {"command": "mcp-server-playwright"},
+                    "pw2": {"args": ["@executeautomation/playwright-mcp-server"]},
+                    "sh": {"args": ["@browserbasehq/mcp-stagehand"]},
+                    "bu": {"command": "browser-use-mcp"},
+                    "sel": {"command": "selenium-webdriver"},
+                    "grid": {"command": "selenium-grid"},
+                    "v2": {"args": ["mcp-server-puppeteer-v2"]},
+                    "one": {"command": "playwright-mcp-1"},
+                    # The real ids `main` found and a closed token table rejected
+                    # (round 6): tails an npm registry has and no list can.
+                    "core": {"command": "npx", "args": ["-y", "puppeteer-core", "--headless"]},
+                    "pwcore": {"args": ["playwright-core"]},
+                    "chromium": {"command": "npx", "args": ["-y", "playwright-chromium"]},
+                    "extra": {"args": ["puppeteer-extra-plugin-stealth"]},
+                    "standalone": {
+                        "command": "java",
+                        "args": ["-jar", "selenium-server-standalone.jar"],
+                    },
+                    "manager": {"command": "webdriver-manager"},
+                    "side": {"args": ["selenium-side-runner"]},
+                    "playwright-report": {},
+                }
+            }
+        )
+    )
+    config_dirs(home)
+    check = diagnostics._check_browser_tools(tmp_path)
+    for real in (
+        "mcp pup",
+        "mcp pw1",
+        "mcp pw2",
+        "mcp sh",
+        "mcp bu",
+        "mcp sel",
+        "mcp grid",
+        "mcp v2",
+        "mcp one",
+        "mcp core",
+        "mcp pwcore",
+        "mcp chromium",
+        "mcp extra",
+        "mcp standalone",
+        "mcp manager",
+        "mcp side",
+    ):
+        assert real in check.detail, real
+    assert "playwright-report" not in check.detail
+
+
+def test_doctor_parses_each_claude_json_once(
+    tmp_path: Path, config_dirs: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #203. The server scan and the declined-server scan each read
+    every ``.claude.json`` of every config dir, so a file Claude Code grows
+    without bound (``~/.claude.json``'s ``projects`` fan-out) was parsed twice
+    per directory per ``doctor`` run — and ``doctor`` re-runs on every project
+    switch. Read once, handed to both."""
+    a, b = tmp_path / "claude-a", tmp_path / "claude-b"
+    a.mkdir()
+    b.mkdir()
+    (a / ".claude.json").write_text(json.dumps({"mcpServers": {"pw": {"command": "playwright"}}}))
+    (b / ".claude.json").write_text(json.dumps({"projects": {str(tmp_path): {}}}))
+    config_dirs(a, b)
+    reads: list[Path] = []
+    real = Path.read_text
+
+    def counting(self: Path, *args: Any, **kwargs: Any) -> str:
+        # Counted at the file, not at any helper: the whole finding is that two
+        # helpers each read the same file through their own call.
+        if self.name == ".claude.json":
+            reads.append(self)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counting)
+
+    check = diagnostics._check_browser_tools(tmp_path)
+
+    assert "mcp pw" in check.detail, "the premise: the files were read"
+    assert len(reads) == len(set(reads)) == 2, f"a .claude.json read twice: {reads}"
 
 
 def test_doctor_credits_the_plugin_and_not_its_marketplace(
@@ -644,7 +791,7 @@ def test_doctor_scans_the_hook_sites_exactly_once(
     """
     calls: list[str] = []
 
-    def counting(name: str) -> list[Any]:
+    def counting(name: str, *, cwd: Path | None = None) -> list[Any]:
         calls.append(name)
         return []
 
@@ -841,7 +988,7 @@ def test_the_register_hint_shell_quotes_the_target_name(
     explainability_service.store_api_key("wk-test")
     result = runner.invoke(app, ["explainability", "register", "--target", "prod west"])
     assert result.exit_code == 0, result.output
-    assert "register --target 'prod west' --role" in result.output
+    assert f"register --target {install_route.command_line(['prod west'])} --role" in result.output
     # and the printed command actually selects that target when followed
     followed = runner.invoke(
         app, ["explainability", "register", "--target", "prod west", "--role", "tester"]

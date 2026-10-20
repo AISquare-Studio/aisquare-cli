@@ -235,7 +235,13 @@ def test_an_unreachable_server_is_reported(runner: CliRunner) -> None:
     assert result.exit_code == 1
     payload = json.loads(result.stdout)
     assert payload["error"] == "unreachable"
-    assert "127.0.0.1:9" in payload["detail"] or "Connection refused" in payload["detail"]
+    # The reason has to name the address or say it was refused. `Connection
+    # refused` is the POSIX wording; Windows says `[WinError 10061] No
+    # connection could be made because the target machine actively refused it`
+    # and does not repeat the address — so matching either spelling exactly
+    # asserted one platform's strerror rather than the property.
+    detail = payload["detail"]
+    assert "127.0.0.1:9" in detail or "refused" in detail.lower(), detail
 
 
 def test_plain_http_to_a_remote_host_is_refused(runner: CliRunner) -> None:
@@ -360,6 +366,24 @@ def test_auth_token_prints_only_the_token(runner: CliRunner, idp: IdentityProvid
     }
 
 
+@pytest.mark.parametrize("restricted", [False, True])
+def test_a_stored_session_carries_whether_its_file_could_be_restricted(
+    isolated_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    restricted: bool,
+) -> None:
+    """The warning on stderr reaches a terminal and nothing else. The session carries it, so
+    the fleet UI, whose stderr Textual captures, can say it too (review of #65, R7)."""
+    monkeypatch.setattr(paths, "restrict_to_owner", lambda _path: restricted)
+    session = iam.store_session(
+        api_url="https://api.example", token="t", expires_in=None, scope="s", claims={}
+    )
+    assert session.unrestricted is not restricted
+    warned = "may be able to read your session token" in capsys.readouterr().err
+    assert warned is not restricted
+
+
 def test_logout_revokes_and_forgets_but_keeps_other_credentials(
     runner: CliRunner, idp: IdentityProviderStub
 ) -> None:
@@ -378,6 +402,8 @@ def test_logout_revokes_and_forgets_but_keeps_other_credentials(
         "signed_out": False,
         "server_revoked": False,
         "env_token_still_set": False,
+        "minted_keys_cleared": 0,  # the signed-in branch's shape (#142)
+        "minted_keys_still_live": [],
     }
 
 
@@ -392,6 +418,8 @@ def test_logout_offline_forgets_locally_and_says_so(runner: CliRunner) -> None:
         "signed_out": True,
         "server_revoked": False,
         "env_token_still_set": False,
+        "minted_keys_cleared": 0,  # #142: no project had a CLI-minted ingest key
+        "minted_keys_still_live": [],
     }
     assert "iam_token" not in _stored()
 
@@ -471,7 +499,9 @@ def test_login_with_token_clears_the_previous_sessions_optional_fields(
     assert reloaded.scope == ""
     whoami = runner.invoke(app, ["--json", "whoami"])
     assert whoami.exit_code == 0, whoami.output
-    assert json.loads(whoami.stdout) == payload
+    # whoami carries one field login does not: where the active project's traces
+    # land (#142) — none chosen here.
+    assert json.loads(whoami.stdout) == {**payload, "destination": None, "credits": None}
     assert _stored()["api_key"] == "keep-me"
     assert _stored()["serve_token"] == "keep-this-too"
 
@@ -543,6 +573,90 @@ def test_request_without_a_session(monkeypatch: pytest.MonkeyPatch) -> None:
     assert caught.value.code == "not_authenticated"
 
 
+def test_an_answer_http_client_cannot_read_is_unreachable_and_an_error_keeps_its_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``http.client`` raises its own exceptions, not ``OSError``s — ``LineTooLong`` for a
+    header past its limit, ``IncompleteRead`` for a body cut short — and they escaped
+    ``_http`` past every caller that tolerates an unreachable server by catching
+    ``IamError`` (review of the accounts stack's fold, round 1, F2). An error status
+    whose body is cut short is read inside the ``except HTTPError`` branch, where no
+    sibling clause catches anything: it keeps its status, with what arrived."""
+    import urllib.request
+    from email.message import Message
+    from http.client import IncompleteRead, LineTooLong
+    from urllib.error import HTTPError
+
+    def too_long(request: urllib.request.Request, timeout: float) -> object:
+        raise LineTooLong("header line")
+
+    monkeypatch.setattr(urllib.request, "urlopen", too_long)
+    with pytest.raises(iam.IamError) as caught:
+        iam._http("GET", "https://api.example.com/api/v1/ping/")
+    assert caught.value.code == "unreachable"
+
+    class CutShort:
+        def read(self, *args: object) -> bytes:
+            raise IncompleteRead(b'{"detail": "unava', expected=40)
+
+        def close(self) -> None:  # HTTPError closes its body when collected
+            return None
+
+    def unavailable(request: urllib.request.Request, timeout: float) -> object:
+        raise HTTPError(request.full_url, 503, "unavailable", Message(), CutShort())  # type: ignore[arg-type]
+
+    monkeypatch.setattr(urllib.request, "urlopen", unavailable)
+    result = iam._http("GET", "https://api.example.com/api/v1/ping/")
+    assert result.status == 503 and result.body == '{"detail": "unava'
+
+
+def test_a_success_whose_answer_is_cut_short_says_the_server_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 2xx whose body will not read is ``unreachable`` still — every caller that
+    tolerates one stays as it was — but it was SAID as "Could not reach", for a server
+    that answered and may have done what was asked: a mint's key exists with its uid
+    never read, and the message invited a retry that mints another (review of the
+    accounts stack's fold, round 2, F3). A read that times out mid-body is the same."""
+    import urllib.request
+    from http.client import IncompleteRead
+
+    failure: BaseException = IncompleteRead(b'{"uid": "k-', expected=30)
+
+    class Answered:
+        status = 201
+
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+        def __enter__(self) -> Answered:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def read(self, *args: object) -> bytes:
+            raise failure
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda request, timeout: Answered())
+    url = "https://api.example.com/api/v2/iam/workspace-api-key/"
+    with pytest.raises(iam.IamError) as caught:
+        iam._http("POST", url, json_body={"workspace_id": 7})
+    assert caught.value.code == "unreachable"
+    assert caught.value.message == (
+        f"{url} answered HTTP 201, but the answer was cut short "
+        "(IncompleteRead(11 bytes read, 30 more expected)); the request may have been "
+        "carried out."
+    )
+    failure = TimeoutError("timed out")
+    with pytest.raises(iam.IamError) as caught:
+        iam._http("GET", url)
+    assert caught.value.code == "unreachable"
+    assert caught.value.message == (
+        f"{url} answered HTTP 201, but the answer was cut short (TimeoutError('timed out'))."
+    )
+
+
 # ------------------------------------------------------ the token never leaves in the clear
 
 
@@ -555,7 +669,7 @@ def test_the_redaction_rules_know_our_token_shape() -> None:
 
 def test_drop_removes_only_the_named_keys(isolated_home: Path) -> None:
     credentials.store(api_key="k", iam_token="t", iam_api_url="u")
-    remaining = credentials.drop("iam_token", "iam_api_url", "never_there")
+    remaining, _ = credentials.drop("iam_token", "iam_api_url", "never_there")
     assert remaining == {"api_key": "k"}
     assert credentials.load_all() == {"api_key": "k"}
-    assert credentials.drop("api_key") == {}
+    assert credentials.drop("api_key") == ({}, True)

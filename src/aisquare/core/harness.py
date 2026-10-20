@@ -53,15 +53,15 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from aisquare.core import spawn
-from aisquare.core.paths import aisquare_home
+from aisquare.core.paths import aisquare_home, expand_user
 
 if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
     from aisquare.core.config import TeamSettings
@@ -396,7 +396,7 @@ def account_scope() -> str:
     raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if not raw:
         return "default"
-    resolved = str(Path(raw).expanduser())
+    resolved = str(expand_user(Path(raw)))  # a `~olduser/…` keys as written (#257)
     return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
 
 
@@ -767,22 +767,30 @@ def clean_effort(value: str | None) -> str | None:
     return candidate if candidate in {*EFFORT_SCALE, ULTRACODE} else None
 
 
+#: Env vars that override model selection behind the harness's back. Module-level
+#: rather than local to ``interfering_env`` because the suite has to clear exactly
+#: these to be hermetic, and a copy retyped in ``tests/conftest.py`` is what
+#: drifted: three of them went unwatched there, so ``interfering_env() == []`` —
+#: which ``tests/test_harness.py`` asserts — silently depended on who ran pytest.
+#: ``tests/test_conftest_is_hermetic.py`` now pins the two against each other.
+INTERFERING_ENV_VARS = (
+    "ANTHROPIC_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    # A redirected endpoint can answer a probe with any modelUsage it likes,
+    # so it undermines availability evidence just as much as a model pin.
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+)
+
+
 def interfering_env() -> list[str]:
     """Env vars set right now that override model selection behind the harness's back."""
-    suspects = (
-        "ANTHROPIC_MODEL",
-        "CLAUDE_CODE_SUBAGENT_MODEL",
-        "ANTHROPIC_DEFAULT_FABLE_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        # A redirected endpoint can answer a probe with any modelUsage it likes,
-        # so it undermines availability evidence just as much as a model pin.
-        "ANTHROPIC_BASE_URL",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-    )
-    return [name for name in suspects if os.environ.get(name, "").strip()]
+    return [name for name in INTERFERING_ENV_VARS if os.environ.get(name, "").strip()]
 
 
 # --- role work cycles -----------------------------------------------------------
@@ -828,7 +836,7 @@ _LANE: dict[str, tuple[str, str]] = {
     ),
     "manager": (
         "asked to write code or fix something yourself",
-        "spawn a coder for it (`aisquare fleet spawn coder --task <id> --as {sid}`)",
+        "spawn a coder for it (`{spawn} coder --task <id> --as {sid}`)",
     ),
     "ui-tester": (
         "asked to edit or fix the code",
@@ -839,7 +847,7 @@ _LANE: dict[str, tuple[str, str]] = {
 _LANE["tester"] = _LANE["runner"]
 
 
-def _lane_rule(role: str, sid: str, *, merge_said: bool) -> list[str]:
+def _lane_rule(role: str, sid: str, *, merge_said: bool, fleet: FleetCommand) -> list[str]:
     """The closing paragraph of a first-class role's cycle: stay in the role.
 
     A standing note that only says what a role does loses to a direct
@@ -870,28 +878,76 @@ def _lane_rule(role: str, sid: str, *, merge_said: bool) -> list[str]:
         closing += " Never merge."
     return [
         f"Stay in your lane ({role}). When you are {trigger}, do not do it here.",
-        f"Instead: {instead.format(sid=sid)}.",
+        f"Instead: {instead.format(sid=sid, spawn=fleet('spawn'))}.",
         closing,
     ]
 
 
-def role_cycle(role: str, session_short_id: str) -> list[str]:
+#: Said to every role that works in a checkout: what it made, it removes. Agents add
+#: scratch trees (``git worktree add --detach``) to test or review a branch, and left
+#: them, with their temp dirs, for the human to find. Its own fleet worktree is
+#: ``fleet reap``'s, which knows when nothing in it is only there.
+_CLEANUP = (
+    "Before you finish or go idle, remove every scratch worktree you added",
+    "(`git worktree remove <path>`, then `git worktree prune`) and every temp dir you",
+    "made — never the worktree you were spawned in: `{reap}` removes that.",
+)
+_CLEANS_UP = frozenset({"coder", "runner", "tester", "reviewer", "validator", "ui-tester"})
+
+
+FleetCommand = Callable[[str], str]
+"""``aisquare fleet <verb> --project <the project>`` for a verb: what a cycle tells an agent
+to run names its own project (``services.project.fleet_command``). Alone, a fleet command
+acts on the active project, the machine-wide pin before the working directory, so a manager
+whose human pinned another project in some shell spawned, stopped and reaped there (review
+of #259, round 21). A callable, because the command's quoting is the services' to make."""
+
+
+PAUSE_SIGNAL = "fleet-paused"
+"""The board signal ``fleet pause`` sets: while it is on, the manager spawns nothing."""
+
+
+def pause_signal(project_id: str, board: str) -> str:
+    """The name of fleet project ``project_id``'s pause on ``board``, a board its agents read:
+    :data:`PAUSE_SIGNAL` on the project's own board, else ``fleet-paused.<project id>``.
+
+    A signal is its board's, and several projects can read one board: under
+    ``AISQUARE_TEAM_HUB`` every fleet project's agents read the hub's, and a project rooted in
+    a sub-folder of its repository reads the checkout's. One name there was one pause for
+    every manager on it: ``fleet pause -P a`` paused ``b`` too, and ``fleet shutdown -P a``
+    cleared the pause ``b``'s manager was still obeying (review of #259, round 26, 1/11).
+    Each manager is told its own project's name (:func:`role_cycle`).
+    """
+    if board == project_id:
+        return PAUSE_SIGNAL
+    return f"{PAUSE_SIGNAL}.{project_id.lower().replace('_', '-')}"
+
+
+def role_cycle(
+    role: str, session_short_id: str, *, fleet: FleetCommand, paused: str = PAUSE_SIGNAL
+) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
 
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
     the role it is a seat of — the number is an identity, not a new role. Every
     first-class cycle ends with :func:`_lane_rule`; an unknown role has no
     cycle and therefore no lane either. The role is normalised once, here.
+    ``paused`` is the name of the session's project's pause on its board
+    (:func:`pause_signal`), which a manager obeys.
     """
     role = base_role(role)
-    core = _role_cycle_core(role, session_short_id)
+    core = _role_cycle_core(role, session_short_id, fleet=fleet, paused=paused)
     if not core:
         return []
+    if role in _CLEANS_UP:
+        core = [*core, *(line.format(reap=fleet("reap")) for line in _CLEANUP)]
     merge_said = any("merge" in line.lower() for line in core)
-    return [*core, *_lane_rule(role, session_short_id, merge_said=merge_said)]
+    return [*core, *_lane_rule(role, session_short_id, merge_said=merge_said, fleet=fleet)]
 
 
-def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
+def _role_cycle_core(
+    role: str, session_short_id: str, *, fleet: FleetCommand, paused: str = PAUSE_SIGNAL
+) -> list[str]:
     """The role-specific half of the cycle for an already-normalised ``role``;
     see :func:`role_cycle`."""
     sid = session_short_id
@@ -920,9 +976,13 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
         ]
     if role in ("runner", "tester"):
         # `tester` is the fleet's name for `runner` (docs/plans/fleet-tui.md §3.3):
-        # one cycle, two labels, so the two can never drift apart.
+        # one cycle, two labels, so the two can never drift apart. `--as` because
+        # `task next` puts the task a fleet agent was SPAWNED FOR first only for a
+        # session it can join to its fleet row; without it two testers spawned
+        # for two review tasks were both handed the older one (review of #135).
         return [
-            f"Your standing cycle ({role}): `aisquare task next --status review`; if nothing,",
+            f"Your standing cycle ({role}): `aisquare task next --status review --as {sid}`;",
+            "if nothing,",
             "tell the user and stop. You are the adversarial verifier: run the FULL check the",
             "acceptance criteria name — not a smoke test — and try to make the change fail",
             "(edge inputs, a counterexample) before you trust it. Verdicts cite evidence you",
@@ -948,6 +1008,7 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
             "with findings severity-ordered (critical|major|minor|nit) and evidence per finding.",
         ]
     if role == "manager":
+        spawn = fleet("spawn")
         # docs/plans/fleet-tui.md §7.1 — the planner's contract cycle plus the fleet
         # verbs and the loop protocol. Sub-agents are reached ONLY through the board
         # and `fleet spawn|tell` (§3.3, §7.6): native agent teams are off in fleet
@@ -957,15 +1018,23 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
             "work. Intake: ask until the acceptance criteria are executable. Contracts:",
             '`aisquare task add "<title>" --role coder --detail "<objective · why · known ·',
             'acceptance · boundaries>"`, `--needs` for ordering. Help comes only from',
-            f"`aisquare fleet spawn coder --label coder-<purpose> --task <id> --as {sid}` —",
-            "one per parallelisable task, within the agent cap; `fleet spawn tester` once work",
-            'reaches review — `fleet spawn ui-tester --prompt "<branch or worktree to check +',
+            f"`{spawn} coder --label coder-<purpose> --task <id> --as {sid}` —",
+            f"one per parallelisable task, within the agent cap; `{spawn} tester` once work",
+            f'reaches review — `{spawn} ui-tester --prompt "<branch or worktree to check +',
             'the URL to open>"` for tasks titled "UI: …", which it verifies in a real browser',
             "and cannot otherwise place, since nothing moves it into the coder's tree —",
-            "`fleet spawn reviewer` once a PR exists, `fleet spawn validator`",
+            f"`{spawn} reviewer` once a PR exists, `{spawn} validator`",
             "once every task is done. Board updates reach you every turn: reopen with reasons,",
-            '`aisquare fleet tell <label> "…"` to steer, re-spec or split what bounces. Spawn',
-            "nothing while the `fleet-paused` signal is set. When the validator's gate is PASS:",
+            f'`{fleet("tell")} <label> "…"` to steer, re-spec or split what bounces. Spawn',
+            f"nothing while the `{paused}` signal is set. An agent that hits its Claude usage",
+            f"limit shows `limited` on the board and wakes you: `{fleet('switch')} <label>",
+            f"--as {sid}` moves it to the account with the most headroom and resumes its session;",
+            "if nothing has headroom, leave it — it continues by itself at the reset the event",
+            "names. Usage figures are the share USED (40% used = 60% left); headroom is what",
+            "is left. An agent whose task is done, with no queued task that fits it:",
+            f"`{fleet('stop')} <label>`, then `{fleet('reap')}` — it records the exit",
+            "and removes the agent's worktree once its work is pushed. When the validator's",
+            f"gate is PASS: `{fleet('reap')}` again, then",
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
             "Never write code. Never merge. Blocked twice on one task? Ask the human:",
             f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',
@@ -995,9 +1064,14 @@ def _role_cycle_core(role: str, session_short_id: str) -> list[str]:
         ]
     if role == "reviewer":
         # §3.3 — reads the PR as the stranger who will maintain it; findings on the
-        # PR through `gh pr review`; read-only (the fleet launches it --restricted).
+        # PR through `gh pr review`. `--restricted` would remove the Bash every step
+        # below needs, so the fleet launches it denied Edit, Write and NotebookEdit
+        # instead (`config.REVIEWER_ARGS`); never push and never merge are this
+        # briefing's, and the credentials its shell runs with
+        # (`config._default_fleet_roles` says why no allowlist holds it).
         return [
-            "Your standing cycle (reviewer): `aisquare task next --status review`; if nothing,",
+            f"Your standing cycle (reviewer): `aisquare task next --status review --as {sid}`;",
+            "if nothing,",
             "tell the user and stop. Read the PR as the stranger who will maintain it —",
             "`gh pr diff`, the task's contract, the tests. You are READ-ONLY: never edit, never",
             "push, never merge. Findings go on the PR (`gh pr review --comment` or",
@@ -1157,10 +1231,21 @@ class LaunchProfile(BaseModel):
 
     env: dict[str, str] = {}
     args: list[str] = []
-    #: Per-env-key provenance — ``flag`` or ``config``. Carried for the same
+    #: Per-env-key provenance — ``flag``, ``config`` or ``file``. Carried for the same
     #: reason the other two axes carry it: an answer without its source sends
     #: the reader hunting for who won.
     env_sources: dict[str, str] = {}
+    #: The binding's ``env_files`` this launch reads, each key to its file, expanded:
+    #: what may be shown of them, one that cannot be read included (:attr:`refusal`).
+    #: Their values are :attr:`file_env`.
+    env_files: dict[str, str] = {}
+    #: The values read from :attr:`env_files`, for the launch's environment alone: never
+    #: dumped, never in a repr, so nothing that prints a profile can print a secret.
+    file_env: dict[str, str] = Field(default_factory=dict, exclude=True, repr=False)
+    #: Why this launch may not start, when it may not: a variable the binding reads from a
+    #: file that cannot be read or holds nothing (:func:`read_env_file`). The callers
+    #: refuse it, and the fleet asks it before a window opens.
+    refusal: str | None = None
     #: Why the configured bindings could not be read, when they could not be.
     #: A launch still proceeds unbound — but silently proceeding would put a
     #: seat on the DEFAULT install while reporting success, so the caller MUST
@@ -1169,7 +1254,7 @@ class LaunchProfile(BaseModel):
 
     @property
     def is_empty(self) -> bool:
-        return not self.env and not self.args
+        return not self.env and not self.env_files and not self.args
 
 
 def expand_value(value: str) -> str:
@@ -1182,6 +1267,41 @@ def expand_value(value: str) -> str:
     profile, which is exactly the failure this whole area exists to avoid.
     """
     return os.path.expanduser(os.path.expandvars(value))
+
+
+def read_env_file(path: str) -> str:
+    """The value a binding's ``env_files`` reads from ``path``: its text, trailing newlines
+    dropped, as ``$(cat path)`` gives it. ``ValueError`` saying what is wrong with the file
+    when it cannot be read or holds nothing: an empty value would launch the role without
+    the secret it was bound to carry, as a blank ``CLAUDE_CONFIG_DIR`` would start another
+    login (:func:`expand_value`).
+
+    Decoded by the byte-order mark it opens with (``config.decode_by_bom``): a token saved by
+    Windows PowerShell 5.1's ``Set-Content -Encoding UTF8`` or an older Notepad opens with
+    U+FEFF, which ``strip()`` keeps, and the role launched with ``GH_TOKEN='\\ufeffghp_…'``,
+    every ``gh`` and ``git`` call then failing to authenticate with nothing to say why
+    (review of #259, round 3). One saved as UTF-16 (PowerShell 5.1's ``>``) reads too."""
+    from aisquare.core.config import decode_by_bom  # lazy: config imports harness back
+
+    try:
+        value = decode_by_bom(Path(path).read_bytes()).rstrip("\r\n")
+    except (OSError, UnicodeDecodeError) as exc:
+        reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+        raise ValueError(f"cannot be read ({reason})") from exc
+    if not value.strip():
+        raise ValueError("is empty")
+    return value
+
+
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def is_env_name(key: str) -> bool:
+    """Whether ``key`` is a variable name a POSIX shell can set and export: letters, digits
+    and ``_``, not starting with a digit. ``team spawn``'s printed line sets a binding's
+    variables as shell words, where ``GH-TOKEN=…`` is a command name and a ``;`` in a key
+    runs whatever follows it (review of #259, round 3)."""
+    return _ENV_NAME.match(key) is not None
 
 
 def parse_env_pairs(pairs: Sequence[str]) -> dict[str, str]:
@@ -1212,19 +1332,65 @@ def resolve_profile(
     the rest of the role's profile, which is what makes a one-off tweak cheap.
     Args APPEND rather than replace, because the configured ones are the role's
     standing shape and the caller's are additions to it.
+
+    A variable bound to a file (``env_files``) is read here, at every launch, into
+    :attr:`LaunchProfile.file_env`; it wins over the same key in the binding's ``env``,
+    and a flag wins over it, as a flag does over every binding. One that cannot be read
+    is the profile's :attr:`LaunchProfile.refusal`.
     """
     env: dict[str, str] = {}
     sources: dict[str, str] = {}
     args: list[str] = []
+    files: dict[str, str] = {}
     team, unreadable = _team_settings()
     profile = (team.profiles or {}).get(role) if team is not None else None
     if profile is not None:
         for key, value in (profile.env or {}).items():
             env[key] = expand_value(value)
             sources[key] = "config"
+        files = {key: expand_value(value) for key, value in (profile.env_files or {}).items()}
         args.extend(profile.args or [])
     for key, value in (env_overrides or {}).items():
         env[key] = expand_value(value)
         sources[key] = "flag"
     args.extend(extra_args or [])
-    return LaunchProfile(env=env, args=args, env_sources=sources, notice=unreadable)
+    shown: dict[str, str] = {}
+    file_env: dict[str, str] = {}
+    refusal: str | None = None
+    for key, path in files.items():
+        if sources.get(key) == "flag":
+            continue
+        # Shown whether or not it can be read: a binding that cannot be is what keeps the
+        # role from launching, and `team harness` showed the role as bound to nothing
+        # (review of #259, round 3).
+        env.pop(key, None)
+        sources[key] = "file"
+        shown[key] = path
+        if refusal is not None:
+            continue  # the first refusal decides; no other secret is read for it
+        if not Path(path).is_absolute():
+            # Read against whatever directory each launch runs in: the bind's shell read it,
+            # the fleet's pre-check read asq's, and the window's `launch` its worktree's, where
+            # it was refused (review of #259, round 3). `team bind` stores a full path now.
+            refusal = (
+                f"{role} reads {key} from {path}, a relative path, which each launch would "
+                f"look for in its own working directory — not launching {role} without it. "
+                f"Bind it by its full path: aisquare team bind {role} --env-file {key}=<path>"
+            )
+            continue
+        try:
+            file_env[key] = read_env_file(path)
+        except ValueError as exc:
+            refusal = (
+                f"{role} reads {key} from {path}, which {exc} — not launching {role} without it. "
+                f"Fix the file, or unbind it: aisquare team bind {role} --unset {key}"
+            )
+    return LaunchProfile(
+        env=env,
+        args=args,
+        env_sources=sources,
+        env_files=shown,
+        file_env=file_env if refusal is None else {},
+        refusal=refusal,
+        notice=unreadable,
+    )

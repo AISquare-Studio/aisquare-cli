@@ -9,6 +9,10 @@ status line with the dialog still open and the agent untouched — the rule the
 Spawn dialog follows for its own service (``spawn.py``, "a FleetError is an
 answer to show").
 
+On a 💤 exited row — offered since the release train's `remain-on-exit` keeps
+a dead window for its last screen (#138) — the same command removes the window
+and the row leaves the listing; the question says so and offers no *Force*.
+
 That matters more here than it does for a spawn. ``stop`` refuses on purpose
 when tmux cannot CONFIRM the pane died: the row is left live and the operator is
 told, rather than being shown "✓ stopped" over an agent that is still running
@@ -38,6 +42,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.sidebar import ALIVE_STATES
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 
@@ -111,9 +116,29 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         """The project's manager: ``spawn`` reserves this label for it (``MANAGER_LABEL``)."""
         return self.label == fleet_service.MANAGER_LABEL
 
+    def has_process(self) -> bool:
+        """Whether there is a process to ``/exit`` — ``ALIVE_STATES``, the button's own rule.
+
+        On a 💤 exited row the window is dead and kept only for its last screen
+        (`remain-on-exit`, #138): the stop removes it and the row leaves the
+        listing, with no ``/exit`` and no grace, so the question says that and
+        *Force* — which only skips the ``/exit`` — has nothing to offer.
+        """
+        return self.status.state in ALIVE_STATES
+
     def question(self) -> Text:
         """The whole question as data — the label is the user's, brackets and all."""
         text = Text()
+        if not self.has_process():
+            text.append("Remove ")
+            text.append(self.label, style="bold")
+            text.append("'s dead window?\n")
+            text.append(
+                "The agent has exited; tmux kept its window for the last screen. "
+                "Stop removes it and the row leaves the listing.",
+                style="dim",
+            )
+            return text
         text.append("Stop ")
         text.append(self.label, style="bold")
         text.append("?\n")
@@ -132,7 +157,9 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
             yield Static(id="stop-status", classes="picker-note")
             with Horizontal(classes="picker-buttons"):
                 yield Button("Stop", id="stop-confirm", variant="primary")
-                yield Button("Force", id="stop-force", variant="warning")
+                force = Button("Force", id="stop-force", variant="warning")
+                force.display = self.has_process()
+                yield force
                 yield Button("Cancel", id="stop-cancel")
 
     @on(Button.Pressed, "#stop-confirm")
@@ -149,8 +176,12 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
             return
         self._set_stopping(True)
         label = self.label
+        # Pinned to THIS row (``agent_id``), never to whoever holds the label now: the
+        # view outlives its row, and a 💤 view's Stop by label stopped the replacement
+        # (review of #138).
+        agent_id = self.status.agent.id
         self.run_worker(
-            lambda: fleet_service.stop(self.project, label, force=force),
+            lambda: fleet_service.stop(self.project, label, force=force, agent_id=agent_id),
             name=STOP_WORKER,
             group=STOP_WORKER,
             thread=True,
@@ -181,11 +212,20 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         if event.worker.name != STOP_WORKER:
             return
         if event.state is WorkerState.SUCCESS:
-            agent = event.worker.result
-            if isinstance(agent, FleetAgent):
-                self.dismiss(agent)
+            receipt = event.worker.result
+            if isinstance(receipt, fleet_service.StopReceipt):
+                if receipt.release_failed:
+                    # `fleet stop` prints this and exits 1: a claim left with the ended
+                    # session is not a clean stop, and the dialog must not read as one.
+                    self.app.notify(
+                        f"claims: {receipt.release_failed}",
+                        severity="warning",
+                        timeout=8,
+                        markup=False,
+                    )
+                self.dismiss(receipt.agent)
                 return
-            self._refused(f"the stop answered without an agent ({type(agent).__name__})")
+            self._refused(f"the stop answered without a receipt ({type(receipt).__name__})")
         elif event.state is WorkerState.ERROR:
             error = event.worker.error
             self._refused(

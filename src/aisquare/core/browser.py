@@ -32,8 +32,12 @@ import sys
 import threading
 from collections.abc import Mapping
 
+#: Any of these set means the user sits at another machine than this one: SSH's two, and
+#: a Codespace. ``core.clipboard`` reads them too — the native clipboard is the wrong one.
+REMOTE_MARKERS = ("SSH_CONNECTION", "SSH_TTY", "CODESPACES")
+
 #: Any of these set means the terminal is not on a machine with a browser.
-HEADLESS_MARKERS = ("SSH_CONNECTION", "SSH_TTY", "CI", "CODESPACES")
+HEADLESS_MARKERS = (*REMOTE_MARKERS, "CI")
 
 #: Browsers that run INSIDE the terminal and would hide the code being shown.
 TEXT_BROWSERS = frozenset({"lynx", "w3m", "links", "elinks", "www-browser"})

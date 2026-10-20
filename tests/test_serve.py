@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from mcp.types import CallToolResult, TextContent
 from aisquare.services import mcp_server
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError
+from tests import winacl
 
 
 @pytest.fixture(autouse=True)
@@ -73,7 +75,26 @@ def test_serve_token_is_created_once_with_tight_permissions(isolated_home: Path)
     second = mcp_server.serve_token()
     assert first == second and len(first) > 30
     creds = isolated_home / "credentials"
-    assert stat.S_IMODE(creds.stat().st_mode) == 0o600
+    if sys.platform == "win32":
+        # Mode bits are advisory on NTFS -- S_IMODE reports 0o666 however the
+        # file is really protected -- so assert the ACL that was actually
+        # applied. Compare SIDs, not the names icacls prints: those contain
+        # spaces ("OWNER RIGHTS", "NT AUTHORITY\\SYSTEM") so they do not parse
+        # on whitespace, and they are localized, so an English-only assertion
+        # would fail on a German runner for no real reason.
+        granted = winacl.dacl_trustees(creds)
+        assert granted, "no ACEs read back from the credentials file"
+        # The invariant is "no ORDINARY account other than me" -- not "nobody
+        # else". The privileged SIDs below are the machine's own plumbing, and
+        # an admin can take ownership regardless; that is the same deal POSIX
+        # offers, where 0600 never excluded root. What must not appear is
+        # Users, Everyone or Authenticated Users.
+        me = winacl.current_user_sid()
+        mine = winacl.user_trustees(granted, me)
+        assert mine, (granted, me)
+        assert not (granted - winacl.PRIVILEGED_TRUSTEES - mine), granted
+    else:
+        assert stat.S_IMODE(creds.stat().st_mode) == 0o600
 
 
 def test_remote_tools_act_as_an_attributed_virtual_session(
@@ -237,6 +258,31 @@ def test_remote_calls_never_activate_an_unopted_project(work_dir: Path) -> None:
         assert not store.team_active(team_project(work_dir).id)
 
 
+def test_with_capture_off_a_board_on_a_captured_row_is_refused_not_written(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A board 0.8.0 left on a captured row is active, and the project was never added:
+    with ``[projects] capture`` off the remote is told to add it, and no session row is
+    written there. ``serve`` adds its own at start (``team on``)."""
+    from aisquare.core.orchestrator import team_project
+    from aisquare.core.store import store_session
+    from aisquare.services import project as project_service
+
+    monkeypatch.setattr(project_service, "capture_on", lambda: True)
+    team_service.add_note("left by 0.8.0")  # captures the row and activates its board
+    monkeypatch.setattr(project_service, "capture_on", lambda: False)
+
+    text = error_text(call_remote("team_board"))
+
+    assert text.startswith("error:") and "add it first: aisquare project onboard" in text
+    project = team_project(work_dir)
+    with store_session() as store:
+        assert store.list_projects() == [], "the refusal adds nothing"
+        assert store.get_session(mcp_server.client_session_id(project.id)) is None
+    team_service.activate()  # what `serve` does at start
+    assert "left by 0.8.0" in mcp_server.team_board()
+
+
 def test_remote_calls_respect_master_switch(
     work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -267,7 +313,7 @@ def test_remote_success_results_stay_plain_tool_results(work_dir: Path) -> None:
     assert not result.is_error
     block = result.content[0]
     assert isinstance(block, TextContent)
-    assert block.text.startswith("created: tsk_")
+    assert block.text.startswith("created: #1 tsk_")  # the board number, then the id
 
 
 def test_virtual_session_is_scoped_per_project(

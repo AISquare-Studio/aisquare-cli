@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
-from datetime import UTC, datetime
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 
 import pytest
 
+from aisquare.core import store as store_module
 from aisquare.core.ids import new_entry_id
 from aisquare.core.store import (
     SCHEMA_VERSION,
     AmbiguousIdError,
     ContextStore,
+    is_corrupt_error,
     open_store,
     store_session,
 )
-from aisquare.models import ContextEntry, Pool, ProjectInfo
+from aisquare.models import CheckStatus, ContextEntry, Pool, ProjectInfo
 
 PROJECT = ProjectInfo(id="prj_test", root=Path("/tmp/example-project"), linked_repos=[])
 
@@ -184,16 +186,182 @@ def test_schema_rejects_inconsistent_pool(store: ContextStore) -> None:
 def test_list_and_get_projects(store: ContextStore) -> None:
     other = ProjectInfo(id="prj_other", root=Path("/tmp/another-app"), linked_repos=[])
     store.ensure_project(other)  # PROJECT is already registered by the fixture
-    ids = {project.id for project in store.list_projects()}
-    assert ids == {PROJECT.id, "prj_other"}
-    assert store.get_project("prj_other") == other
+    # A captured registration is reachable by id and in the full list, but not LISTED
+    # until something adds it on purpose (#139).
+    assert {project.id for project in store.list_projects(all=True)} == {PROJECT.id, "prj_other"}
+    assert "prj_other" not in {project.id for project in store.list_projects()}
+    stored = store.get_project("prj_other")
+    assert stored is not None and stored.model_copy(update={"onboarded_at": None}) == other
     assert store.get_project("prj_missing") is None
+    store.onboard_project(other)
+    ids = {project.id for project in store.list_projects()}
+    assert ids >= {"prj_other"}
+
+
+def test_list_projects_hides_a_forgotten_registration_unless_asked(store: ContextStore) -> None:
+    """``include_forgotten`` is for the one question a tombstone must not hide: a
+    forgotten registration can still hold LIVE ``fleet_agent`` rows, whose panes are
+    real processes. ``fleet shutdown`` asks this way so it cannot take a pane down
+    while leaving its row live with nothing able to reconcile it.
+
+    It is not ``all`` (#139), which adds the captured rows and still hides a
+    tombstone. A forget clears ``onboarded_at``, so ``include_forgotten`` alone
+    reads past the onboarded filter too — kept, that filter would drop the very
+    tombstone the flag exists to find."""
+    store.onboard_project(PROJECT)  # the fixture only captured it
+    captured = ProjectInfo(id="prj_captured", root=Path("/tmp/captured-app"), linked_repos=[])
+    store.ensure_project(captured)
+    gone = ProjectInfo(id="prj_gone", root=Path("/tmp/gone-app"), linked_repos=[])
+    store.onboard_project(gone)
+    store.forget_project("prj_gone")
+
+    assert [p.id for p in store.list_projects()] == [PROJECT.id], "the default still hides it"
+    assert {p.id for p in store.list_projects(all=True)} == {PROJECT.id, "prj_captured"}, (
+        "so does all"
+    )
+    everything = {PROJECT.id, "prj_captured", "prj_gone"}
+    assert {p.id for p in store.list_projects(include_forgotten=True)} == everything
+    assert {p.id for p in store.list_projects(all=True, include_forgotten=True)} == everything
+    assert store.get_project("prj_gone") is None, "every OTHER read keeps the promise"
 
 
 def test_find_projects_by_name_and_id_prefix(store: ContextStore) -> None:
     assert [p.id for p in store.find_projects("example-project")] == [PROJECT.id]  # by name
     assert [p.id for p in store.find_projects(PROJECT.id[:8])] == [PROJECT.id]  # by id prefix
     assert store.find_projects("nope") == []
+
+
+def test_a_project_nickname_is_set_read_back_and_cleared(store: ContextStore) -> None:
+    named = store.set_project_nickname(PROJECT.id, "Auth rewrite — día 2 🚀")
+    assert named.nickname == "Auth rewrite — día 2 🚀"
+    assert named.codename is None, "the codename is not touched"
+    fetched = store.get_project(PROJECT.id)
+    assert fetched is not None and fetched.nickname == "Auth rewrite — día 2 🚀"
+    assert [p.nickname for p in store.list_projects(all=True)] == ["Auth rewrite — día 2 🚀"]
+    assert store.set_project_nickname(PROJECT.id, None).nickname is None
+
+
+def test_a_nickname_is_refused_for_a_forgotten_or_unknown_project(store: ContextStore) -> None:
+    """As ``update_project_layout`` refuses one: a rename from a stale frame would land
+    on the tombstone and come back with the revival."""
+    store.ensure_project(ProjectInfo(id="prj_gone", root=Path("/tmp/gone")))
+    store.forget_project("prj_gone")
+    with pytest.raises(KeyError):
+        store.set_project_nickname("prj_gone", "ghost")
+    with pytest.raises(KeyError):
+        store.set_project_nickname("prj_never", "ghost")
+    store.ensure_project(ProjectInfo(id="prj_gone", root=Path("/tmp/gone")))
+    revived = store.get_project("prj_gone")
+    assert revived is not None and revived.nickname is None
+
+
+def test_find_projects_matches_a_nickname_only_when_nothing_else_does(
+    store: ContextStore,
+) -> None:
+    """Exactly and case and all, after the id prefix, the folder name and the codename:
+    a nickname spelled like another project's codename leaves that project found."""
+    store.ensure_project(ProjectInfo(id="prj_other", root=Path("/tmp/other")))
+    store.set_codename(PROJECT.id, "amber-otter")
+    store.set_project_nickname("prj_other", "amber-otter")
+    assert [p.id for p in store.find_projects("amber-otter")] == [PROJECT.id]
+
+    store.set_project_nickname("prj_other", "billing: v2 [wip]")
+    assert [p.id for p in store.find_projects("billing: v2 [wip]")] == ["prj_other"]
+    assert store.find_projects("Billing: v2 [wip]") == []
+    assert store.find_projects("billing") == []
+
+    store.set_project_nickname(PROJECT.id, "billing: v2 [wip]")
+    both = store.find_projects("billing: v2 [wip]")
+    assert sorted(p.id for p in both) == sorted([PROJECT.id, "prj_other"]), "ambiguous"
+
+    store.forget_project("prj_other")
+    assert [p.id for p in store.find_projects("billing: v2 [wip]")] == [PROJECT.id]
+
+
+def test_a_key_pattern_holds_its_glob_characters_as_themselves(store: ContextStore) -> None:
+    """``_glob_escape`` took ``*``, ``?`` and ``[`` out of what it was given, where its
+    callers read it as standing for itself: ``x[1`` listed the keys under ``x1``, and a
+    purge of an id holding one would have taken the keys of the id without it (review of
+    #243, round 11, 8/9). Each stands for itself."""
+    for key in ("x[1/a", "x1/b", "x*/c", "xy/d", "signal/prj_a*/1", "signal/prj_ab/1"):
+        store.set_meta(key, "v")
+    assert list(store.list_meta("x[1")) == ["x[1/a"]
+    assert list(store.list_meta("x*")) == ["x*/c"]
+    assert list(store.list_meta("x?")) == []
+    for project_id in ("prj_a*", "prj_ab"):
+        store.ensure_project(ProjectInfo(id=project_id, root=Path(f"/tmp/{project_id}")))
+    assert store.purge_project("prj_a*")["team_meta"] == 1
+    assert list(store.list_meta("signal/")) == ["signal/prj_ab/1"]
+
+
+@pytest.mark.parametrize("ref", ["*", "?", "[", "*?[", ""])
+def test_a_ref_with_nothing_left_once_its_glob_characters_go_names_nothing(
+    store: ContextStore, ref: str
+) -> None:
+    """``*`` was an id prefix of every id: it named the one project, task or session a
+    store had, and was ambiguous with two, a refusal that listed every one of them, the
+    directories the hooks only captured included (review of #243, round 10, 7/7)."""
+    from aisquare.models import TeamSession, TeamTask
+
+    now = datetime.now(tz=UTC)
+    store.ensure_project(ProjectInfo(id="prj_captured", root=Path("/tmp/captured")))
+    for n in (1, 2):
+        store.upsert_task(
+            TeamTask(
+                id=f"tsk_{n}", project_id=PROJECT.id, key=f"k{n}", title=f"task {n}",
+                created_at=now, updated_at=now,
+            )
+        )  # fmt: skip
+        store.upsert_session(
+            TeamSession(
+                id=f"ses_{n}", project_id=PROJECT.id, role="coder",
+                started_at=now, last_seen_at=now,
+            )
+        )  # fmt: skip
+        store.add(_entry(f"entry {n}"))
+    assert store.find_projects(ref) == []
+    assert store.get_task(ref) is None, "nor any task by its tail"
+    assert store.get_session(ref) is None
+    assert store.get(ref) is None
+    assert store.get_task("tsk_1") is not None and store.get_task("1") is not None
+    assert [p.id for p in store.find_projects("prj_c*")] == ["prj_captured"]
+
+
+def test_a_task_or_session_lookup_kept_to_some_boards_finds_and_doubts_only_there(
+    store: ContextStore,
+) -> None:
+    """``project_ids`` keeps a lookup to those boards' rows, by id, prefix and tail alike,
+    and a prefix is ambiguous only among them: the remote's phone may reach only some boards
+    (review of #243, round 10, 5/7)."""
+    from aisquare.models import TeamSession, TeamTask
+
+    now = datetime.now(tz=UTC)
+    for task_id, board in (("tsk_shared_a1", PROJECT.id), ("tsk_shared_b2", "prj_captured")):
+        store.upsert_task(
+            TeamTask(
+                id=task_id, project_id=board, key=task_id, title=task_id,
+                created_at=now, updated_at=now,
+            )
+        )  # fmt: skip
+        store.upsert_session(
+            TeamSession(
+                id=task_id.replace("tsk", "ses"), project_id=board, role="coder",
+                started_at=now, last_seen_at=now,
+            )
+        )  # fmt: skip
+    mine = [PROJECT.id]
+    with pytest.raises(AmbiguousIdError):
+        store.get_task("tsk_shared")
+    task = store.get_task("tsk_shared", project_ids=mine)
+    assert task is not None and task.id == "tsk_shared_a1"
+    assert store.get_task("tsk_shared_b2", project_ids=mine) is None
+    assert store.get_task("b2", project_ids=mine) is None, "nor by its tail"
+    assert store.get_task("tsk_shared_b2", project_ids=[]) is None
+    with pytest.raises(AmbiguousIdError):
+        store.get_session("ses_shared")
+    session = store.get_session("ses_shared", project_ids=mine)
+    assert session is not None and session.id == "ses_shared_a1"
+    assert store.get_session("ses_shared_b2", project_ids=mine) is None
 
 
 def test_add_linked_repo_is_idempotent(store: ContextStore) -> None:
@@ -208,10 +376,34 @@ def test_add_linked_repo_unknown_project_raises(store: ContextStore) -> None:
         store.add_linked_repo("prj_missing", "repo")
 
 
-def test_add_and_list_prompts(store: ContextStore) -> None:
-    store.add_prompt("first prompt", PROJECT.id)
-    store.add_prompt("second prompt", PROJECT.id)
+def test_add_and_list_prompts(store: ContextStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    # NO SLEEP. Both prompts are written inside one clock tick on purpose —
+    # which is the case that used to sort by coin flip, because the tie-break
+    # was an id whose tail is 128 random bits. `recent_prompts` breaks ties on
+    # `rowid` now, so "written second" is what "sorts first" means, and this
+    # asserts that rather than sleeping until the clock disambiguates it.
+    #
+    # The tick and the coin are both FIXED here rather than hoped for. On Linux
+    # `created_at` has microsecond resolution and two inserts almost never
+    # share it, so the tie never happened, and an `id DESC` tie-break passed
+    # too. The clock is frozen, and the ids come out in the REVERSE of
+    # insertion order, so only `rowid` puts the second prompt first (review of
+    # #65, R5).
+    frozen = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> _Frozen:
+            return cls.fromtimestamp(frozen.timestamp(), tz)
+
+    ids = iter(["prm_zzz_written_first", "prm_aaa_written_second"])
+    monkeypatch.setattr(store_module, "datetime", _Frozen)
+    monkeypatch.setattr(store_module, "new_prompt_id", lambda: next(ids))
+    first = store.add_prompt("first prompt", PROJECT.id)
+    second = store.add_prompt("second prompt", PROJECT.id)
+    assert second.id < first.id, "the ids agree with insertion order; `id DESC` would pass too"
     prompts = store.recent_prompts(PROJECT.id)
+    assert [p.created_at for p in prompts] == [frozen, frozen], "the tick was not shared"
     assert [p.text for p in prompts] == ["second prompt", "first prompt"]  # newest first
 
 
@@ -231,60 +423,19 @@ def test_migrations_reach_the_current_schema_version() -> None:
         version = raw.execute("PRAGMA user_version").fetchone()[0]
     finally:
         raw.close()
-    # v11 fleet, v12 metric, v13 converges, v14 forgotten_at, v15 persona
-    assert version == SCHEMA_VERSION == 15
-
-
-def test_a_v14_store_upgrades_to_v15_with_nullable_persona_columns() -> None:
-    """P2's step (docs/plans/spawn-personas.md §7): rows that existed at v14 survive,
-    both tables gain a ``persona`` that reads NULL, and a start that names no
-    persona keeps the one a row already records."""
-    from datetime import UTC, datetime
-
-    from aisquare.models import TeamSession
-
-    db = _at_version(14)
-    raw = sqlite3.connect(str(db))
-    try:
-        raw.execute(
-            "INSERT INTO team_session (id, project_id, started_at, last_seen_at) "
-            "VALUES ('sess-old', 'prj_old', '2026-01-01T00:00:00+00:00', "
-            "'2026-01-01T00:00:00+00:00')"
-        )
-        raw.execute(
-            "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at) "
-            "VALUES ('agt_old', 'prj_old', 'coder-1', 'coder', '%1', '/tmp', "
-            "'2026-01-01T00:00:00+00:00')"
-        )
-        raw.commit()
-    finally:
-        raw.close()
-
-    store = open_store()
-    try:
-        old_session = store.get_session("sess-old")
-        old_agent = store.get_fleet_agent("agt_old")
-        now = datetime(2026, 9, 15, tzinfo=UTC)
-        fresh = TeamSession(id="sess-new", project_id="prj_old", started_at=now, last_seen_at=now)
-        store.upsert_session(fresh.model_copy(update={"persona": "skeptic"}))
-        restarted = store.upsert_session(fresh)
-    finally:
-        store.close()
-
-    raw = sqlite3.connect(str(db))
-    try:
-        version = raw.execute("PRAGMA user_version").fetchone()[0]
-        nullable = {
-            table: {row[1]: row[3] for row in raw.execute(f"PRAGMA table_info({table})")}
-            for table in ("team_session", "fleet_agent")
-        }
-    finally:
-        raw.close()
-    assert version == SCHEMA_VERSION
-    assert nullable["team_session"]["persona"] == 0 and nullable["fleet_agent"]["persona"] == 0
-    assert old_session is not None and old_session.persona is None
-    assert old_agent is not None and old_agent.persona is None
-    assert restarted.persona == "skeptic"
+    # v11 fleet, v12 metric, v13 converges, v14 forgotten_at, v15 the account registry
+    # (#145), v16 usage readings and the limited state (#146), v17 onboarded_at (#139),
+    # v18 the launch spec and ui_state (#144), v19 the project explainability key (#141),
+    # v20 project groups, pins and manual order (#140), v21 project destinations (#142),
+    # v22 the revocations owed for keys the CLI minted (#142), v23 the one-time repair of
+    # old tombstones (#139, #140), v24 the destination a project's key was attached for (#142),
+    # v25 where a fleet agent's server listened and in which boot (round 25 of #257),
+    # v26 when that server started, the identity of the server its pane id names (follow-up),
+    # v27 a project's nickname, v28 which token took a usage reading (its fingerprint),
+    # v29 a task's number on its board, v30 its unique index, v31 the branch of a fleet
+    # agent's worktree (review of #259, round 15), v32 the board a fleet agent reads (round 25),
+    # v33 the persona a session and a fleet agent run as (#201)
+    assert version == SCHEMA_VERSION == 33
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -392,15 +543,16 @@ def test_a_populated_v10_database_migrates_to_the_current_version_with_its_rows_
 
 def _at_version(version: int, *, after: str = "", stamp: int | None = None) -> Path:
     """A database migrated by hand to ``version``, with ``after`` run last and
-    ``user_version`` stamped ``stamp`` (default: ``version``)."""
-    from aisquare.core.store import _MIGRATIONS
+    ``user_version`` stamped ``stamp`` (default: ``version``). Each step as the
+    ladder runs it, so a step from v15 on brings its columns too."""
+    from aisquare.core.store import _run_step
 
     db = _db_path()
     db.parent.mkdir(parents=True, exist_ok=True)
     raw = sqlite3.connect(str(db))
     try:
-        for migration in _MIGRATIONS[:version]:
-            raw.executescript(migration)
+        for step in range(version):
+            _run_step(raw, step)
         if after:
             raw.executescript(after)
         raw.execute(f"PRAGMA user_version = {stamp if stamp is not None else version}")
@@ -792,3 +944,1883 @@ def test_every_shape_of_user_version_11_converges_on_one_schema(
         assert any(t.startswith("metric_v1_orphaned") for t in tables), label
     if shape == "V1ORPHAN":
         assert "metric_v1_orphaned_2" in tables, "a taken orphan name must not wedge the rename"
+
+
+# --- stores another line stamped 15 or 17 (the note above _SCHEMA_V15) ----------------------
+#
+# v15-v17 were claimed by other lines of development while the accounts stack held
+# them. What each line's own steps above v14 left in its stores, verbatim from its
+# branch: #136 (codex/native-personas-workflow), #201 (rc/hackathon-v1) and #113
+# (feat/coding-agent-adapters), with a row in what each added.
+WORK_BRIEF_AT_15 = """
+CREATE TABLE IF NOT EXISTS work_brief (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS work_brief_project ON work_brief(project_id);
+INSERT INTO work_brief (id, project_id, revision, data) VALUES ('wb_1', 'prj_used', 3, '{}');
+"""
+PERSONAS_AT_15 = """
+ALTER TABLE team_session ADD COLUMN persona TEXT;
+ALTER TABLE fleet_agent ADD COLUMN persona TEXT;
+INSERT INTO team_session (id, project_id, started_at, last_seen_at, persona)
+    VALUES ('ses_1', 'prj_used', '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00',
+            'architect');
+"""
+CODING_AGENTS_AT_17 = """
+ALTER TABLE team_session ADD COLUMN agent TEXT;
+ALTER TABLE team_session ADD COLUMN native_session_id TEXT;
+ALTER TABLE fleet_agent ADD COLUMN agent TEXT;
+UPDATE team_session SET agent = 'claude-code', native_session_id = id
+ WHERE account IS NOT NULL AND transcript_path LIKE '%/projects/%.jsonl';
+UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude';
+ALTER TABLE team_meta ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER);
+CREATE TRIGGER team_meta_insert_time AFTER INSERT ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+CREATE TRIGGER team_meta_update_time AFTER UPDATE OF value ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+ WHERE updated_at = 0;
+INSERT INTO team_session (id, project_id, started_at, last_seen_at, agent, native_session_id)
+    VALUES ('ses_1', 'prj_used', '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00',
+            'codex', 'nat_1');
+"""
+
+# Two projects every cohort's store holds: one used on purpose (a context entry), which
+# the v17 backfill adopts, and one only ever captured (a prompt), which it leaves hidden.
+# The used one has a live fleet agent: a fleet read of it is what raised "no such
+# column: account_slot" on a store that skipped v15 (review of #203).
+_TWO_PROJECTS = """
+INSERT INTO project (id, root, name, linked_repos, created_at) VALUES
+    ('prj_used', '/w/used', 'used', '[]', '2026-09-01T00:00:00+00:00'),
+    ('prj_seen', '/w/seen', 'seen', '[]', '2026-09-01T00:00:00+00:00');
+INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at)
+    VALUES ('ent_1', 'project', 'prj_used', 'a fact', '[]', 'cli',
+            '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
+INSERT INTO prompt (id, project_id, text, source, created_at)
+    VALUES ('prm_1', 'prj_seen', 'hello', 'claude-code', '2026-09-01T00:00:00+00:00');
+INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at)
+    VALUES ('agt_1', 'prj_used', 'manager', 'manager', '%0', '/w/used',
+            '2026-09-01T00:00:00+00:00');
+"""
+
+# (label, what the line's steps left, the stamp, a query over it, what it must still read)
+_FOREIGN_COHORTS: tuple[tuple[str, str, int, str, list[tuple[object, ...]]], ...] = (
+    (
+        "#136 at 15: work_brief",
+        WORK_BRIEF_AT_15,
+        15,
+        "SELECT id, revision FROM work_brief",
+        [("wb_1", 3)],
+    ),
+    (
+        "#201 at 15: persona columns",
+        PERSONAS_AT_15,
+        15,
+        "SELECT persona FROM team_session",
+        [("architect",)],
+    ),
+    # The maintainer's own store is this cohort: a backup of it (31 projects) holds
+    # exactly these tables, indexes, triggers and columns, object for object.
+    (
+        "#113 at 17: coding-agent columns",
+        CODING_AGENTS_AT_17,
+        17,
+        "SELECT session.agent, session.native_session_id, agent.agent"
+        " FROM team_session AS session, fleet_agent AS agent",
+        [("codex", "nat_1", "claude-code")],
+    ),
+)
+
+
+def _shape(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Every table, index and trigger by name, and every column as ``table.column``.
+
+    SQLite's automatic indexes are left out: they come and go with their table."""
+    shape: set[tuple[str, str]] = set()
+    for kind, name in conn.execute(
+        "SELECT type, name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'"
+    ).fetchall():
+        shape.add((kind, name))
+        if kind == "table":
+            columns = conn.execute(f"PRAGMA table_info({name})").fetchall()
+            shape |= {("column", f"{name}.{column[1]}") for column in columns}
+    return shape
+
+
+def _built(steps: int, after: str = "") -> set[tuple[str, str]]:
+    """The shape of a database built in memory by the first ``steps`` steps, then ``after``."""
+    from aisquare.core.store import _run_step
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(steps):
+            _run_step(conn, step)
+        if after:
+            conn.executescript(after)
+        return _shape(conn)
+    finally:
+        conn.close()
+
+
+def _contents(db: Path) -> tuple[list[tuple[object, ...]], dict[str, list[tuple[object, ...]]]]:
+    """``db``'s whole schema, SQL included, and every row of every table, with its version."""
+    raw = sqlite3.connect(str(db))
+    try:
+        schema = raw.execute("SELECT type, name, tbl_name, sql FROM sqlite_master").fetchall()
+        rows = {
+            name: sorted(raw.execute(f"SELECT * FROM {name}").fetchall(), key=repr)
+            for kind, name, _, _ in schema
+            if kind == "table"
+        }
+        rows["PRAGMA user_version"] = raw.execute("PRAGMA user_version").fetchall()
+        return sorted(schema, key=repr), rows
+    finally:
+        raw.close()
+
+
+def _open_a_foreign_cohort(db: Path, query: str) -> dict[str, object]:
+    """Open ``db`` with this build, write through the store to the tables whose absence
+    was "no such table", read from the ones a fleet read and ``accounts list`` failed
+    on, open it once more, and read back what :func:`_converged` says it must hold."""
+    store = open_store()  # a wedge raises out of here
+    try:
+        store.upsert_claude_account(1, Path("/h/.claude"))
+        store.set_project_setting("prj_used", "claude_account", "1")
+        read: dict[str, object] = {
+            "listed": [p.id for p in store.list_projects()],
+            "listed with --all": sorted(p.id for p in store.list_projects(all=True)),
+            "account setting": store.project_setting("prj_used", "claude_account"),
+            "accounts": [(r.slot, r.config_dir) for r in store.claude_accounts()],
+            "fleet": [(a.id, a.account_slot) for a in store.fleet_agents("prj_used")],
+            "live fleet": [a.id for a in store.fleet_agents("prj_used", live_only=True)],
+            "missing": store.missing_schema(),
+        }
+    finally:
+        store.close()
+    schema, rows = _contents(db)
+    open_store().close()
+    schema_again, rows_again = _contents(db)
+    read["a second open changed"] = sorted(
+        name for name in rows.keys() | rows_again.keys() if rows.get(name) != rows_again.get(name)
+    ) + (["the schema"] if schema_again != schema else [])
+    raw = sqlite3.connect(str(db))
+    try:
+        read["version"] = raw.execute("PRAGMA user_version").fetchone()[0]
+        read["shape"] = _shape(raw)
+        read["their rows"] = raw.execute(query).fetchall()
+    finally:
+        raw.close()
+    return read
+
+
+def _converged(ddl: str, their_rows: list[tuple[object, ...]]) -> dict[str, object]:
+    """What a foreign store reads once this build has opened it: the project used on
+    purpose listed (the v17 backfill ran) and the captured one not, the account and the
+    fleet agent read back, nothing ``doctor`` would report missing, a second open that
+    changes no row and no schema, every table, index and column of this build and of
+    the other line and nothing else, and the other line's rows as it left them."""
+    theirs = _built(14, _TWO_PROJECTS + ddl) - _built(14, _TWO_PROJECTS)
+    return {
+        "listed": ["prj_used"],
+        "listed with --all": ["prj_seen", "prj_used"],
+        "account setting": "1",
+        "accounts": [(1, Path("/h/.claude"))],
+        "fleet": [("agt_1", None)],
+        "live fleet": ["agt_1"],
+        "missing": [],
+        "a second open changed": [],
+        "version": SCHEMA_VERSION,
+        "shape": _built(SCHEMA_VERSION) | theirs,
+        "their rows": their_rows,
+    }
+
+
+@pytest.mark.parametrize(
+    ("label", "ddl", "stamp", "query", "expected"),
+    _FOREIGN_COHORTS,
+    ids=[c[0] for c in _FOREIGN_COHORTS],
+)
+def test_a_store_another_line_stamped_converges_on_this_schema_and_keeps_its_own(
+    label: str, ddl: str, stamp: int, query: str, expected: list[tuple[object, ...]]
+) -> None:
+    """A store stamped 15 or 17 by another line never ran this line's steps below its
+    stamp. Counted positionally, it had no ``claude_account``, so every accounts
+    command failed with "no such table". Stamped 17, it had no ``onboarded_at`` either:
+    v23 failed on that column and the store stopped opening. It converges instead:
+    every table and column this build makes, the v17 backfill (so its projects stay
+    listed), and the other line's tables, columns, triggers and rows left alone."""
+    db = _at_version(14, after=_TWO_PROJECTS + ddl, stamp=stamp)
+
+    assert _open_a_foreign_cohort(db, query) == _converged(ddl, expected), label
+
+
+@pytest.mark.parametrize(
+    ("label", "ddl", "stamp", "query", "expected"),
+    _FOREIGN_COHORTS,
+    ids=[c[0] for c in _FOREIGN_COHORTS],
+)
+def test_a_foreign_store_a_build_without_the_pass_carried_on_converges_too(
+    label: str, ddl: str, stamp: int, query: str, expected: list[tuple[object, ...]]
+) -> None:
+    """A foreign store that a build without the presence pass has already opened ran
+    this line's steps from its stamp on and none below it. Stamped 15, it reached the
+    current version without v15's tables, and the ladder never runs for it again, so
+    only the pass after the ladder can give them back. Stamped 17, it stopped at 22:
+    v23 failed on the missing ``onboarded_at``, and the pass before v23 adds it."""
+    from aisquare.core.store import _run_step
+
+    carried_to = SCHEMA_VERSION if stamp == 15 else 22  # v23 is the step it failed on
+    db = _at_version(14, after=_TWO_PROJECTS + ddl, stamp=stamp)
+    raw = sqlite3.connect(str(db))
+    try:
+        for step in range(stamp, carried_to):
+            _run_step(raw, step)
+        raw.execute(f"PRAGMA user_version = {carried_to}")
+        raw.commit()
+        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    finally:
+        raw.close()
+    assert "claude_account" not in tables, "the fixture is the store that build left"
+
+    assert _open_a_foreign_cohort(db, query) == _converged(ddl, expected), label
+
+
+# --- the persona step (v33, #201): every store in the wild reaches it --------------------
+#
+# The persona line stamped its two columns as its own v15 (PERSONAS_AT_15); the captain
+# RC carried them as products of main's v15 up to its v24 (#240, "The store"); main's own
+# stores are at v32 without them; and a fresh store has nothing. Each opens with this
+# build to the same shape at the same version, with the rows it held. Take v33 out
+# (its empty script and its ``_PRODUCTS[32]`` entry) and every case goes red: the
+# version, and where no line put them, the columns the store reads.
+PERSONA_COLUMNS = """
+ALTER TABLE team_session ADD COLUMN persona TEXT;
+ALTER TABLE fleet_agent ADD COLUMN persona TEXT;
+"""
+_A_SESSION_AND_AN_AGENT = """
+INSERT INTO team_session (id, project_id, started_at, last_seen_at)
+    VALUES ('ses_old', 'prj_used', '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
+INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at)
+    VALUES ('agt_old', 'prj_used', 'coder-1', 'coder', '%1', '/w/used',
+            '2026-09-01T00:00:00+00:00');
+"""
+_PERSONA_COHORTS: tuple[tuple[str, int, str, int, str | None], ...] = (
+    # (label, steps run, what ran after them, the stamp, the persona the old row reads)
+    ("main v32", 32, _A_SESSION_AND_AN_AGENT, 32, None),
+    (
+        "persona-15",
+        14,
+        _A_SESSION_AND_AN_AGENT
+        + PERSONA_COLUMNS
+        + "UPDATE team_session SET persona = 'architect';"
+        + "UPDATE fleet_agent SET persona = 'architect';",
+        15,
+        "architect",
+    ),
+    (
+        "captain RC v24",
+        24,
+        _A_SESSION_AND_AN_AGENT
+        + PERSONA_COLUMNS
+        + "UPDATE team_session SET persona = 'skeptic';"
+        + "UPDATE fleet_agent SET persona = 'skeptic';",
+        24,
+        "skeptic",
+    ),
+)
+
+
+def _persona_shape(db: Path) -> tuple[int, set[tuple[str, str]], dict[str, int]]:
+    """``db``'s version, its shape, and whether each persona column is NOT NULL."""
+    raw = sqlite3.connect(str(db))
+    try:
+        notnull = {
+            table: {row[1]: row[3] for row in raw.execute(f"PRAGMA table_info({table})")}["persona"]
+            for table in ("team_session", "fleet_agent")
+        }
+        return raw.execute("PRAGMA user_version").fetchone()[0], _shape(raw), notnull
+    finally:
+        raw.close()
+
+
+@pytest.mark.parametrize(
+    ("label", "steps", "after", "stamp", "persona"),
+    _PERSONA_COHORTS,
+    ids=[c[0] for c in _PERSONA_COHORTS],
+)
+def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
+    label: str, steps: int, after: str, stamp: int, persona: str | None
+) -> None:
+    """Opened with this build: every table, index and column of the current schema and
+    nothing else, ``user_version == SCHEMA_VERSION``, both persona columns nullable, the
+    old rows read back with the persona their line gave them (NULL where none did), and
+    the store writes and reads a persona on each table. A second open changes nothing."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import TeamSession
+
+    db = _at_version(steps, after=_TWO_PROJECTS + after, stamp=stamp)
+
+    store = open_store()
+    try:
+        old_session = store.get_session("ses_old")
+        old_agent = store.get_fleet_agent("agt_old")
+        attached = store.set_fleet_agent_persona("agt_old", "mentor")
+        now = datetime(2026, 10, 20, tzinfo=UTC)
+        fresh = TeamSession(id="ses_new", project_id="prj_used", started_at=now, last_seen_at=now)
+        store.upsert_session(fresh.model_copy(update={"persona": "careful"}))
+        restarted = store.upsert_session(fresh)  # a start naming none keeps the recorded one
+    finally:
+        store.close()
+    _schema, rows = _contents(db)
+    open_store().close()
+    _schema_again, rows_again = _contents(db)
+    version, shape, notnull = _persona_shape(db)
+
+    assert version == SCHEMA_VERSION == 33, label
+    assert shape == _built(SCHEMA_VERSION), label
+    assert notnull == {"team_session": 0, "fleet_agent": 0}, label
+    assert old_session is not None and old_session.persona == persona, label
+    assert old_agent is not None and old_agent.persona == persona, label
+    assert attached.persona == "mentor", label
+    assert restarted.persona == "careful", label
+    assert rows_again == rows, f"{label}: a second open changed a row"
+
+
+def test_a_fresh_store_is_built_with_the_persona_step() -> None:
+    """No file at all: v1 to v33, the same shape as every cohort above reaches."""
+    open_store().close()
+    version, shape, notnull = _persona_shape(_db_path())
+
+    assert version == SCHEMA_VERSION == 33
+    assert shape == _built(SCHEMA_VERSION)
+    assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
+    assert notnull == {"team_session": 0, "fleet_agent": 0}
+
+
+def test_the_persona_step_is_the_columns_alone_on_top_of_main_s_ladder() -> None:
+    """v33 is one step with an empty script, its two columns in ``_PRODUCTS[32]`` — the
+    v29/v31/v32 pattern — so the presence pass gives them to any store that lacks them,
+    whatever ``user_version`` says, and #208's ``_PREPARE[15]`` converge is not needed."""
+    from aisquare.core.store import _MIGRATIONS, _PREPARE, _PRODUCTS, _Products
+
+    assert _MIGRATIONS[32] == ""
+    assert _PRODUCTS[32] == _Products(
+        columns=(("team_session", "persona", "TEXT"), ("fleet_agent", "persona", "TEXT"))
+    )
+    assert 15 not in _PREPARE and 32 not in _PREPARE
+    assert not any(
+        column == "persona" for step, products in _PRODUCTS.items() if step != 32
+        for _table, column, _ in products.columns
+    )  # fmt: skip
+
+
+# --- doctor's database row reads the schema, not only the file (review of #203) ---------------
+
+
+def test_doctor_names_what_a_store_lacks_instead_of_calling_it_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured on #203 by the crew: a store #201 stamped 15, opened by a build that
+    trusted the stamp, reached the current version with no ``claude_account`` and no
+    ``fleet_agent.account_slot``. Every fleet read failed on the column, and doctor's
+    database row said "context.db is readable". That build is this one with the
+    presence pass taken out. The row fails and names each thing missing once (the
+    table, not its indexes as well). Its remedy is not the corrupt-store move: the
+    history in the file is intact."""
+    from aisquare.services import diagnostics
+
+    _at_version(14, after=_TWO_PROJECTS + PERSONAS_AT_15, stamp=15)
+    monkeypatch.setattr(store_module, "_converge_by_presence", lambda connection, below: None)
+    with store_session() as store, pytest.raises(sqlite3.OperationalError, match="account_slot"):
+        store.fleet_agents("prj_used")
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert (
+        "schema: column fleet_agent.account_slot, table claude_account, table project_setting;"
+        in row.detail
+    ), row.detail
+    assert "claude_account_alias" not in row.detail, "an index of a missing table is noise"
+    assert "persona" not in row.detail, "another line's columns are not this build's to report"
+    assert row.fix is not None and f"cp {_db_path()}" in row.fix, row.fix
+    assert "mv " not in row.fix, "the corrupt-store move would drop an intact history"
+    assert "github.com/AISquare-Studio/aisquare-cli/issues" in row.fix, "report it where?"
+
+
+def test_doctor_fails_on_what_no_step_of_this_build_puts_back() -> None:
+    """The open restores only what a step from v15 on makes. A table or an index from
+    before that, gone from a store another build or a hand edit changed, stays gone
+    whatever the open does, and doctor's database row is where it shows. It names six
+    and counts the rest, so the row stays one line an operator can read. It says what
+    each kind the store lacks costs, and it still counts the notes, whose table is
+    whole."""
+    from aisquare.services import diagnostics
+
+    indexes = (
+        "entry_pool_project",
+        "metric_open_session",
+        "metric_project_started",
+        "team_event_project_seq",
+        "team_session_project",
+        "team_task_project_status",
+    )
+    with store_session() as store:
+        store.add(_entry())
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript("DROP TABLE prompt;" + "".join(f"DROP INDEX {i};" for i in indexes))
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+    row = diagnostics._check_database()
+
+    assert missing[0] == "table prompt", "a missing table is named before any index"
+    assert sorted(missing[1:]) == [f"index {i}" for i in indexes], missing
+    assert row.status is CheckStatus.fail, row
+    assert f"schema: {', '.join(missing[:6])} and 1 more;" in row.detail, row.detail
+    assert row.detail.startswith("context.db opens (1 user entries) but"), row.detail
+    assert row.detail.endswith(
+        "; a command that reads a missing table or column fails with 'no such table' or "
+        "'no such column'; a missing index that is not unique only slows the reads it served"
+    ), row.detail
+
+
+def test_a_store_without_its_full_text_index_lacks_one_table_not_five() -> None:
+    """``entry_fts`` is an FTS5 table, and SQLite keeps what it indexes in shadow tables
+    the module makes and drops with it (``entry_fts_data``, ``entry_fts_idx`` …). Read as
+    this build's tables, a store without ``entry_fts`` lacked five, and they took five of
+    the six names doctor's database row shows, crowding out what else the store lacked
+    (review of the #203 side merges, F7). It lacks one table."""
+    from aisquare.services import diagnostics
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript("DROP TABLE entry_fts; DROP INDEX team_session_project;")
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+    row = diagnostics._check_database()
+
+    assert missing == ["table entry_fts", "index team_session_project"], missing
+    assert row.status is CheckStatus.fail, row
+    assert f"schema: {', '.join(missing)};" in row.detail, row.detail
+
+
+@pytest.mark.parametrize(
+    "shadow", ["entry_fts_data", "entry_fts_idx", "entry_fts_docsize", "entry_fts_config"]
+)
+def test_doctor_fails_on_a_full_text_index_that_lost_a_shadow_table(shadow: str) -> None:
+    """A shadow table gone with ``entry_fts`` is that table's absence, named once. Gone
+    alone, the index is damaged: no note can be added, and SQLite's answer reads as a
+    damaged store, or without ``_config`` ends in a traceback. Left out of this build's
+    schema whatever else was there, a store without ``entry_fts_data`` lacked nothing and
+    doctor's row said "context.db is readable"; without ``entry_fts_config`` the row's
+    own column read raised and called the store unreadable, with the corrupt-store move
+    (review of the #203 side merges, R2-F1). The row fails naming the shadow table, says
+    what it costs, and still counts the notes, which are intact."""
+    from aisquare.services import diagnostics
+
+    with store_session() as store:
+        store.add(_entry())
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(f"DROP TABLE {shadow};")
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+        with pytest.raises(sqlite3.DatabaseError) as raised:
+            store.add(_entry())
+    row = diagnostics._check_database()
+
+    if shadow == "entry_fts_config":
+        # Not damage to the CLI, so a traceback: the row's sentence says so, where it
+        # said every shadow table's error reads as a damaged store (review of #203,
+        # round 3, F9).
+        assert "vtable constructor failed" in str(raised.value), raised.value
+        assert not is_corrupt_error(raised.value), raised.value
+    assert missing == [f"shadow table {shadow}"], missing
+    assert row.status is CheckStatus.fail, row
+    assert row.detail == (
+        "context.db opens (1 user entries) but lacks part of this build's schema: shadow "
+        f"table {shadow}; without a shadow table the notes' full-text index can be neither "
+        "written nor searched: adding a note and `aisquare context search` fail, with an "
+        "error that reads as a damaged store or, without entry_fts_config, a traceback "
+        "ending 'vtable constructor failed', though the notes are intact"
+    ), row.detail
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["DELETE FROM entry_fts_config;", "UPDATE entry_fts_config SET v = 99 WHERE k = 'version';"],
+)
+def test_doctor_names_a_full_text_index_fts5_cannot_open_instead_of_calling_the_store_unreadable(
+    script: str,
+) -> None:
+    """With every shadow table there, FTS5 still cannot open ``entry_fts`` when its
+    ``_config`` lost the version row or holds one the module does not read. The row's
+    own column read opened it and raised "invalid fts5 file format", and the row called
+    the store unreadable, with the corrupt-store move for its remedy, while every note
+    still read (review of #203, round 3, F1). It names the index, says what that costs,
+    counts the notes and keeps the file."""
+    from aisquare.services import diagnostics
+
+    with store_session() as store:
+        store.add(_entry())
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(script)
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+        with pytest.raises(sqlite3.OperationalError, match="invalid fts5 file format") as raised:
+            store.add(_entry())
+    row = diagnostics._check_database()
+
+    assert not is_corrupt_error(raised.value), raised.value
+    assert missing == ["unreadable table entry_fts"], missing
+    assert row.status is CheckStatus.fail, row
+    assert row.detail == (
+        "context.db opens (1 user entries) but lacks part of this build's schema: "
+        "unreadable table entry_fts; FTS5 cannot open an unreadable table, the notes' "
+        "full-text index, so it can be neither written nor searched: adding a note and "
+        "`aisquare context search` fail with a traceback ending in SQLite's error, though "
+        "the notes are intact"
+    ), row.detail
+    assert row.fix is not None and "mv " not in row.fix, row.fix
+
+
+def test_the_copy_to_keep_of_a_store_short_of_schema_is_quoted_for_a_home_with_a_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The database row's "keep a copy (cp <db> <db>.bak)" embedded the store's path bare:
+    under an AISQUARE_HOME with a space, pasted, cp got four arguments (review of #257).
+    Quoted for this shell, it reads back as the two paths."""
+    from aisquare.services import diagnostics, install_route
+
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "aisquare home"))
+    with store_session() as store:
+        store.add(_entry())
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript("DROP TABLE entry_fts_data;")
+    finally:
+        raw.close()
+    row = diagnostics._check_database()
+
+    database = _db_path()
+    keep = install_route.command_line(["cp", str(database), f"{database}.bak"])
+    assert " " in str(database) and f"keep a copy ({keep})" in str(row.fix), row.fix
+    assert install_route.split_line(keep)[1:] == [str(database), f"{database}.bak"]
+
+
+def test_the_acknowledgement_of_a_truncated_store_is_quoted_for_a_home_with_a_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The database row's "Acknowledge it with: rm <marker>" embedded the marker's path
+    bare: under an AISQUARE_HOME with a space, pasted, rm got two arguments and the marker
+    stayed (review of #257). Quoted for this shell, it reads back as the one path."""
+    from aisquare.core import paths
+    from aisquare.services import diagnostics, install_route
+
+    monkeypatch.setenv("AISQUARE_HOME", str(tmp_path / "aisquare home"))
+    with store_session() as store:
+        store.add(_entry())
+    marker = paths.truncation_marker_path()
+    marker.write_text("2026-10-10T00:00:00Z\n", encoding="utf-8")
+    row = diagnostics._check_database()
+
+    remove = install_route.command_line(["rm", str(marker)])
+    assert " " in str(marker) and f"Acknowledge it with: {remove}" in str(row.fix), row.fix
+    assert install_route.split_line(remove) == ["rm", str(marker)]
+
+
+def test_a_lock_on_the_full_text_index_is_not_taken_for_an_unreadable_one() -> None:
+    """Only a read the module refuses names ``entry_fts`` unreadable. "database is
+    locked" says nothing about the file, so it raises as it did before the read was
+    guarded, and is not reported as a gap in the schema."""
+    from typing import cast
+
+    class LockedIndex:
+        """A connection whose read of ``entry_fts``'s columns meets a writer's lock."""
+
+        def __init__(self, real: sqlite3.Connection) -> None:
+            self._real = real
+
+        def execute(self, sql: str) -> sqlite3.Cursor:
+            if sql == "PRAGMA table_info(entry_fts)":
+                raise sqlite3.OperationalError("database is locked")
+            return self._real.execute(sql)
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            store_module._missing_from(
+                cast(sqlite3.Connection, LockedIndex(raw)), store_module._ladder_schema()
+            )
+    finally:
+        raw.close()
+
+
+def test_a_table_named_after_the_full_text_index_is_not_taken_for_its_shadow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shadow tables are told apart by FTS5's suffixes (``_data``, ``_idx`` …). Told apart
+    by the prefix ``entry_fts_`` alone, a table of this build's named that way was left
+    out of its schema and never reported missing (review of the #203 side merges,
+    R2-F3). A step that makes ``entry_fts_meta`` stands in for one."""
+    ladder = store_module._MIGRATIONS
+    monkeypatch.setattr(
+        store_module,
+        "_MIGRATIONS",
+        (*ladder[:-1], ladder[-1] + "CREATE TABLE entry_fts_meta (note TEXT);"),
+    )
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript("DROP TABLE entry_fts; DROP TABLE entry_fts_meta;")
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        missing = store.missing_schema()
+
+    assert missing == ["table entry_fts", "table entry_fts_meta"], missing
+
+
+def test_doctor_says_what_a_trigger_it_only_counts_costs() -> None:
+    """The row names six missing objects and counts the rest, but says what each kind
+    the store lacks costs, a counted one too: what it costs is what the operator will
+    meet. A trigger's sentence names the trigger, so a note trigger that falls into
+    "and 1 more" still comes with its warning, and says which it is."""
+    from aisquare.services import diagnostics
+
+    tables = ("prompt", "team_event", "team_task", "team_meta", "metric")
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(
+            "ALTER TABLE project DROP COLUMN linked_repos;"
+            + "".join(f"DROP TABLE {table};" for table in tables)
+            + "DROP TRIGGER entry_ai;"
+        )
+    finally:
+        raw.close()
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert row.detail.startswith(
+        "context.db opens (0 user entries) but lacks part of this build's schema: column "
+        f"project.linked_repos, {', '.join(f'table {table}' for table in tables)} and 1 "
+        "more; a command that reads a missing table or column fails"
+    ), row.detail
+    assert row.detail.endswith(f"; {diagnostics._TRIGGER_COSTS['entry_ai']}"), row.detail
+
+
+@pytest.mark.parametrize(
+    ("named", "script"),
+    [
+        ("table entry", "DROP TABLE entry;"),
+        (
+            "column entry.deleted_at",
+            "DROP INDEX entry_pool_project; ALTER TABLE entry DROP COLUMN deleted_at;",
+        ),
+    ],
+)
+def test_doctor_names_a_store_without_its_notes_table_instead_of_calling_it_unreadable(
+    named: str, script: str
+) -> None:
+    """The row counted the notes before it read the schema, and the count reads
+    ``entry``. A store without that table, or a column of it, raised "no such table:
+    entry" there and read as unreadable, with the corrupt-store move for its remedy: an
+    intact history moved aside over a table the file merely lacks. The schema is read
+    first, the count is left out when ``entry`` is what is missing, and the row names
+    the gap like any other."""
+    from aisquare.services import diagnostics
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(script)
+    finally:
+        raw.close()
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert row.detail.startswith(
+        f"context.db opens but lacks part of this build's schema: {named}"
+    ), row.detail
+    assert row.fix is not None and "mv " not in row.fix, row.fix
+
+
+@pytest.mark.parametrize(
+    ("script", "said", "not_said"),
+    [
+        (
+            "DROP TRIGGER entry_ai;",
+            "schema: trigger entry_ai; without trigger entry_ai a new note is not indexed: "
+            "`aisquare context search` misses it, and editing or removing it, or purging its "
+            "project, fails as 'database disk image is malformed', which the CLI calls a "
+            "damaged store though the notes are intact",
+            ("stays indexed", "duplicates", "slows"),
+        ),
+        (
+            "DROP TRIGGER entry_ad;",
+            "schema: trigger entry_ad; without trigger entry_ad a note purged with its "
+            "project stays indexed, and `aisquare context search` can match a later note on "
+            "the purged one's words",
+            ("malformed", "old text", "duplicates", "slows"),
+        ),
+        (
+            "DROP TRIGGER entry_au;",
+            "schema: trigger entry_au; without trigger entry_au an edited note stays indexed "
+            "under its old text, so `aisquare context search` matches what it said, not what "
+            "it says",
+            ("malformed", "purged", "duplicates", "slows"),
+        ),
+        (
+            "DROP INDEX fleet_agent_live_label;",
+            "schema: unique index fleet_agent_live_label; a missing unique index raises "
+            "nothing and lets in the duplicates it refused",
+            ("context search", "slows"),
+        ),
+        (
+            "DROP INDEX prompt_project;",
+            "schema: index prompt_project; a missing index that is not unique only slows the "
+            "reads it served",
+            ("context search", "duplicates"),
+        ),
+    ],
+    ids=["entry_ai", "entry_ad", "entry_au", "unique index", "index"],
+)
+def test_doctor_says_what_a_missing_index_or_trigger_costs(
+    script: str, said: str, not_said: tuple[str, ...]
+) -> None:
+    """A missing table or column fails its readers with "no such table" or "no such
+    column"; nothing raises on a missing index or trigger, so the row says what each
+    costs, and only of the kinds the store lacks. It once said a missing index or
+    trigger "fails nothing", and then gave every trigger the cost of `entry_ai`: a note
+    it did not index hands FTS5 a 'delete' for text it never held when that note is
+    edited, removed or purged, and SQLite answers "database disk image is malformed",
+    which the CLI calls a damaged store and answers with the corrupt-store move. Without
+    `entry_ad` or `entry_au` nothing fails, and search goes stale in a way of its own,
+    so each trigger gets its own sentence (the tests after this one measure each)."""
+    from aisquare.services import diagnostics
+
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.executescript(script)
+    finally:
+        raw.close()
+
+    row = diagnostics._check_database()
+
+    assert row.status is CheckStatus.fail, row
+    assert row.detail.endswith(said), row.detail
+    assert "fails nothing" not in row.detail and "no such" not in row.detail, row.detail
+    assert not [cost for cost in not_said if cost in row.detail], row.detail
+
+
+def test_doctor_reports_a_schema_gap_where_the_package_says_issues_go() -> None:
+    """The database row's remedy says where to report a gap it cannot close. The address
+    is a copy of pyproject's ``[project.urls] Issues``, so a tracker that moves there
+    must move here too."""
+    import tomllib
+
+    from aisquare.services import diagnostics
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    urls = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["urls"]
+
+    assert urls["Issues"] == diagnostics._ISSUES_URL
+
+
+def _drop_trigger(name: str) -> None:
+    """A store whose ``name`` trigger a hand edit or another build dropped."""
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.execute(f"DROP TRIGGER {name}")
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_without_entry_ai_a_new_note_is_unsearchable_and_changing_it_is_malformed() -> None:
+    """What doctor's row says of a missing `entry_ai`, measured: the new note never
+    reaches the search index, and each later change hands FTS5 a 'delete' for text it
+    never held, which SQLite answers as a corrupt file though nothing in it is."""
+    _drop_trigger("entry_ai")
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        note = store.add(_entry("alpha beta", pool="project", project_id=PROJECT.id))
+
+        assert store.search("alpha", project_id=PROJECT.id) == []
+        for change in (
+            lambda: store.update(note.id, text="gamma delta"),
+            lambda: store.delete(note.id),
+            lambda: store.purge_project(PROJECT.id),
+        ):
+            with pytest.raises(sqlite3.DatabaseError, match="database disk image is malformed"):
+                change()
+
+
+def test_without_entry_ad_a_later_note_matches_a_purged_notes_words() -> None:
+    """What doctor's row says of a missing `entry_ad`, measured: a purge deletes the
+    project's notes for real, their text stays in the search index, and a note that
+    takes the freed rowid is found by words it does not hold. Nothing fails."""
+    _drop_trigger("entry_ad")
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        store.add(_entry("alpha beta", pool="project", project_id=PROJECT.id))
+        store.purge_project(PROJECT.id)
+        later = store.add(_entry("gamma delta"))
+
+        assert [entry.id for entry in store.search("alpha")] == [later.id]
+
+
+def test_without_entry_au_an_edited_note_is_found_by_its_old_text() -> None:
+    """What doctor's row says of a missing `entry_au`, measured: an edit leaves the
+    search index on the text the note had. Nothing fails, a removal included."""
+    _drop_trigger("entry_au")
+    with store_session() as store:
+        note = store.add(_entry("alpha beta"))
+        store.update(note.id, text="gamma delta")
+
+        assert [entry.text for entry in store.search("alpha")] == ["gamma delta"]
+        assert store.search("gamma") == []
+        store.delete(note.id)
+
+
+def test_doctor_has_a_cost_for_every_trigger_of_this_build() -> None:
+    """Doctor's database row says what a missing trigger costs from a sentence per
+    trigger, in the ladder's order. A trigger the ladder makes without one would be
+    named in the row with no word of what its absence does, so a new trigger fails
+    here until it has its sentence."""
+    from aisquare.services import diagnostics
+
+    connection = sqlite3.connect(":memory:")
+    try:
+        store_module._migrate(connection)
+        triggers = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY rowid"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert [name for (name,) in triggers] == list(diagnostics._TRIGGER_COSTS)
+
+
+def test_each_step_from_v15_on_declares_what_it_builds_and_builds_nothing_twice() -> None:
+    """``_PRODUCTS`` is what the presence pass looks for: a step whose entry drifts from
+    its script is a table the pass never restores, or one it restores on every open.
+    Checked by building: each step's new tables, indexes and columns are exactly its
+    entry, and applying the step again, as the pass does, changes nothing."""
+    from aisquare.core.store import _PRODUCTS, _Products, _run_step
+
+    assert all(14 <= step < SCHEMA_VERSION for step in _PRODUCTS)
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(SCHEMA_VERSION):
+            before = _shape(conn)
+            _run_step(conn, step)
+            after = _shape(conn)
+            if step < 14:
+                continue  # v1-v14 run once, below every stamp another line made
+            new = after - before
+            objects = {name for kind, name in new if kind != "column"}
+            columns = {
+                column
+                for kind, column in new
+                if kind == "column" and column.split(".")[0] not in objects
+            }
+            declared = _PRODUCTS.get(step, _Products())
+            assert objects == set(declared.objects), f"v{step + 1}"
+            assert columns == {f"{t}.{c}" for t, c, _ in declared.columns}, f"v{step + 1}"
+            _run_step(conn, step)
+            assert _shape(conn) == after, f"v{step + 1} applied twice"
+    finally:
+        conn.close()
+
+
+def test_the_ladder_from_v15_run_again_over_a_current_store_changes_nothing() -> None:
+    """Every step from v15 on is idempotent, so a store that meets them twice (stamped
+    back to 14 here) opens with the same schema and the same rows. That includes the
+    rows the v17 backfill reads: a captured project with a context entry stays
+    captured, because the backfill runs only when it adds the column."""
+    with store_session() as store:
+        store.onboard_project(PROJECT)
+        store.ensure_project(ProjectInfo(id="prj_captured", root=Path("/w/captured")))
+        store.add(_entry("a fact", pool="project", project_id="prj_captured"))
+        store.upsert_claude_account(1, Path("/h/.claude"))
+        store.set_project_setting(PROJECT.id, "claude_account", "1")
+        assert [p.id for p in store.list_projects()] == [PROJECT.id]
+
+    def dump() -> tuple[list[tuple[object, ...]], dict[str, list[tuple[object, ...]]]]:
+        raw = sqlite3.connect(str(_db_path()))
+        try:
+            schema = raw.execute("SELECT type, name, tbl_name, sql FROM sqlite_master").fetchall()
+            rows = {
+                name: sorted(raw.execute(f"SELECT * FROM {name}").fetchall(), key=repr)
+                for kind, name, _, _ in schema
+                if kind == "table"
+            }
+            return sorted(schema, key=repr), rows
+        finally:
+            raw.close()
+
+    before = dump()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.execute("PRAGMA user_version = 14")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        assert [p.id for p in store.list_projects()] == [PROJECT.id]
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        raw.close()
+    assert dump() == before
+
+
+# --- the Claude account registry and per-project settings (v15, #145) ----------------------
+
+
+def test_claude_account_registry_keeps_one_default_unique_aliases_and_a_dense_order(
+    store: ContextStore,
+) -> None:
+    """The two invariants are the schema's: a second default and a reused alias are refused
+    by an index, not by a caller remembering to check."""
+    first = store.upsert_claude_account(1, Path("/h/.claude"))
+    second = store.upsert_claude_account(2, Path("/h/.aisquare/claude-accounts/2"))
+    assert (first.position, second.position) == (1, 2)  # queued at the end, in order
+    assert not first.is_default and not second.is_default and first.alias is None
+
+    store.set_claude_account_default(2)
+    store.set_claude_account_default(1)
+    assert [r.slot for r in store.claude_accounts() if r.is_default] == [1]  # moved, never two
+    with pytest.raises(KeyError):
+        store.set_claude_account_default(9)
+    assert [r.slot for r in store.claude_accounts() if r.is_default] == [1]  # refused, unchanged
+    store.set_claude_account_default(None)
+    assert not any(r.is_default for r in store.claude_accounts())
+
+    store.set_claude_account_alias(2, "work")
+    with pytest.raises(sqlite3.IntegrityError):
+        store.set_claude_account_alias(1, "work")
+    assert [r.alias for r in store.claude_accounts()] == [None, "work"]
+    store.set_claude_account_alias(2, None)
+    store.set_claude_account_alias(1, "work")  # free again once released
+    assert [r.alias for r in store.claude_accounts()] == ["work", None]
+
+    store.set_claude_account_disabled(2, True)
+    assert [r.disabled for r in store.claude_accounts()] == [False, True]
+
+    # An upsert of a known slot refreshes the directory and touches nothing else.
+    refreshed = store.upsert_claude_account(1, Path("/elsewhere/.claude"))
+    assert refreshed.config_dir == Path("/elsewhere/.claude")
+    assert refreshed.alias == "work" and refreshed.position == 1
+
+    store.upsert_claude_account(3, Path("/h/.aisquare/claude-accounts/3"))
+    store.order_claude_accounts([3, 9])  # 9 does not exist and is ignored
+    assert [(r.slot, r.position) for r in store.claude_accounts()] == [(3, 1), (1, 2), (2, 3)]
+    store.order_claude_accounts([2, 2, 3])  # a repeated reference left position 1 unused
+    assert [(r.slot, r.position) for r in store.claude_accounts()] == [(2, 1), (3, 2), (1, 3)]
+    store.order_claude_accounts([3, 1, 2])  # back to the order the rest of the test reads
+    assert store.delete_claude_account(1) is True
+    assert store.delete_claude_account(1) is False
+    assert [(r.slot, r.position) for r in store.claude_accounts()] == [(3, 1), (2, 2)]  # dense
+
+
+def test_project_settings_round_trip_per_project_and_clear(store: ContextStore) -> None:
+    other = ProjectInfo(id="prj_other", root=Path("/tmp/other"), linked_repos=[])
+    store.ensure_project(other)
+
+    assert store.project_setting(PROJECT.id, "claude_account") is None
+    store.set_project_setting(PROJECT.id, "claude_account", "2")
+    store.set_project_setting(other.id, "claude_account", "3")
+    store.set_project_setting(PROJECT.id, "claude_account", "4")  # an update, not a second row
+    assert store.project_setting(PROJECT.id, "claude_account") == "4"
+    assert store.project_setting(other.id, "claude_account") == "3"
+    assert store.project_settings("claude_account") == {PROJECT.id: "4", other.id: "3"}
+    assert store.project_setting(PROJECT.id, "something_else") is None
+
+    assert store.clear_project_setting(PROJECT.id, "claude_account") is True
+    assert store.clear_project_setting(PROJECT.id, "claude_account") is False
+    assert store.project_settings("claude_account") == {other.id: "3"}
+    with pytest.raises(sqlite3.IntegrityError):  # a foreign key: no setting for a ghost project
+        store.set_project_setting("prj_ghost", "claude_account", "1")
+
+
+# --- captured versus onboarded (#139) ------------------------------------------------------
+
+
+def test_ensure_project_captures_and_only_onboard_project_shows() -> None:
+    from aisquare.models import ProjectInfo
+
+    store = open_store()
+    try:
+        quiet = ProjectInfo(id="prj_quiet", root=Path("/w/quiet"))
+        store.ensure_project(quiet)  # what a hook does
+        assert store.list_projects() == []  # captured, not shown
+        [captured] = store.list_projects(all=True)
+        assert captured.id == "prj_quiet" and captured.onboarded_at is None
+        assert [p.id for p in store.captured_projects()] == ["prj_quiet"]
+        assert store.get_project("prj_quiet") is not None  # reachable by id, as before
+        store.ensure_project(quiet)  # again: still nothing changes
+        assert store.list_projects() == []
+
+        shown = store.onboard_project(quiet)  # what init / onboard / link / + / team on do
+        assert shown.onboarded_at is not None
+        assert [p.id for p in store.list_projects()] == ["prj_quiet"]
+        assert store.captured_projects() == []
+        first = shown.onboarded_at
+        assert store.onboard_project(quiet).onboarded_at == first  # set once, kept
+
+        # forget clears the mark and hides; a hook's capture afterwards brings the row
+        # back CAPTURED — reachable, with its history, but not listed…
+        store.forget_project("prj_quiet")
+        assert store.list_projects(all=True) == [] and store.get_project("prj_quiet") is None
+        store.ensure_project(quiet)
+        assert store.list_projects() == [], "forget sticks against a capture"
+        [back] = store.list_projects(all=True)
+        assert back.id == "prj_quiet" and back.onboarded_at is None
+        assert store.get_project("prj_quiet") is not None, "not a tombstone prompts vanish into"
+        # …and a deliberate add lists it again, with a fresh mark.
+        again = store.onboard_project(quiet)
+        assert again.onboarded_at is not None and again.onboarded_at >= first
+        assert [p.id for p in store.list_projects()] == ["prj_quiet"]
+    finally:
+        store.close()
+
+
+def test_v23_repairs_the_tombstones_older_cuts_left_holding_a_mark_or_a_place() -> None:
+    """The first cut of the v17 backfill (c716094) had no ``forgotten_at`` guard, so a
+    store migrated by it holds forgotten rows stamped onboarded, and a forget written
+    before #171's first round left the group, the position and the pin on its tombstone.
+    Revived as they were, the next prompt there put the project back on the list, pinned
+    and grouped (the bug #139 is about), and an onboarding kept the stale mark. Both were
+    answered by a CASE on every capture; v23 clears them once, as a forget does now (review
+    of #168 at the fold). A live row keeps its mark and its place."""
+    legacy = "'2026-09-01T00:00:00+00:00'"
+    _at_version(
+        22,
+        after=f"""
+        INSERT INTO project_group (id, name, position, created_at)
+            VALUES ('grp_1', 'tools', 0, {legacy});
+        INSERT INTO project (id, root, name, linked_repos, created_at, onboarded_at,
+                             forgotten_at, group_id, position, pinned_at)
+        VALUES
+            ('prj_old', '/w/old', 'old', '[]', {legacy}, {legacy},
+             '2026-09-02T00:00:00+00:00', 'grp_1', 0, {legacy}),
+            ('prj_gone', '/w/gone', 'gone', '[]', {legacy}, {legacy},
+             '2026-09-02T00:00:00+00:00', NULL, NULL, {legacy}),
+            ('prj_live', '/w/live', 'live', '[]', {legacy}, {legacy}, NULL, 'grp_1', 1, {legacy});
+    """,
+    )
+
+    store = open_store()
+    try:
+        raw = sqlite3.connect(str(_db_path()))
+        try:
+            tombstones = raw.execute(
+                "SELECT onboarded_at, group_id, position, pinned_at FROM project "
+                "WHERE forgotten_at IS NOT NULL"
+            ).fetchall()
+        finally:
+            raw.close()
+        assert tombstones == [(None, None, None, None)] * 2, "repaired as a forget clears them"
+
+        store.ensure_project(ProjectInfo(id="prj_old", root=Path("/w/old")))  # a prompt there
+        store.ensure_project(ProjectInfo(id="prj_live", root=Path("/w/live")))  # one here
+        onboarded = store.onboard_project(ProjectInfo(id="prj_gone", root=Path("/w/gone")))
+
+        assert {p.id for p in store.list_projects()} == {"prj_live", "prj_gone"}
+        revived = store.get_project("prj_old")
+        assert revived is not None, "captured, not a tombstone"
+        assert (revived.onboarded_at, revived.group_id, revived.position) == (None, None, None)
+        assert revived.pinned_at is None
+        assert onboarded.onboarded_at is not None
+        assert onboarded.onboarded_at.isoformat() > "2026-09-02", "marked now, not the old mark"
+        kept = store.get_project("prj_live")
+        assert kept is not None and kept.onboarded_at is not None
+        assert (kept.group_id, kept.position) == ("grp_1", 1) and kept.pinned_at is not None
+    finally:
+        store.close()
+
+
+def test_v27_gives_a_project_from_before_it_no_nickname_and_room_for_one() -> None:
+    _at_version(
+        26,
+        after="""
+        INSERT INTO project (id, root, name, linked_repos, created_at, codename)
+        VALUES ('prj_old', '/w/old', 'old', '[]', '2026-09-01T00:00:00+00:00', 'amber-otter');
+    """,
+    )
+
+    with store_session() as store:
+        before = store.get_project("prj_old")
+        assert before is not None
+        assert (before.nickname, before.codename) == (None, "amber-otter")
+        assert store.set_project_nickname("prj_old", "the old one").nickname == "the old one"
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        raw.close()
+
+
+def test_v24_marks_the_keys_bound_to_their_destinations_deployment() -> None:
+    """A binding named its deployment by target name alone, and the destination's ``stg``
+    and the machine's ``stg`` can be two deployments (review of #203). v24 records the
+    destination's API on a key bound to the deployment its destination names, as ``use``
+    and ``key set`` bind it; a key bound to another target stays one of the machine's."""
+    legacy = "'2026-09-01T00:00:00+00:00'"
+    _at_version(
+        23,
+        after=f"""
+        INSERT INTO project (id, root, name, linked_repos, created_at) VALUES
+            ('prj_dest', '/w/dest', 'dest', '[]', {legacy}),
+            ('prj_elsewhere', '/w/elsewhere', 'elsewhere', '[]', {legacy}),
+            ('prj_machine', '/w/machine', 'machine', '[]', {legacy});
+        INSERT INTO project_destination (project_id, api_url, environment, workspace_id,
+                                         workspace_name, set_at)
+        VALUES
+            ('prj_dest', 'https://stg-api.aisquare.studio', 'stg', 42, 'acme', {legacy}),
+            ('prj_elsewhere', 'https://api.aisquare.studio', 'prod', 42, 'acme', {legacy});
+        INSERT INTO project_explainability (project_id, target, key_path, set_at) VALUES
+            ('prj_dest', 'stg', '/k/dest', {legacy}),
+            ('prj_elsewhere', 'stg', '/k/elsewhere', {legacy}),
+            ('prj_machine', 'stg', '/k/machine', {legacy});
+    """,
+    )
+
+    with store_session() as store:
+        marked = {row.project_id: row.api_url for row in store.project_explainability_all()}
+    assert marked == {
+        "prj_dest": "https://stg-api.aisquare.studio",
+        "prj_elsewhere": None,
+        "prj_machine": None,
+    }
+
+
+def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows with context entries, a codename, linked repos, board activity, a fleet
+    agent or a snapshot on disk become onboarded; captured-only rows stay hidden."""
+    from aisquare.core import snapshot as snapshot_core
+
+    rows = [
+        ("prj_entries", "/w/entries"),
+        ("prj_named", "/w/named"),
+        ("prj_linked", "/w/linked"),
+        ("prj_board", "/w/board"),
+        ("prj_agent", "/w/agent"),
+        ("prj_snap", "/w/snap"),
+        ("prj_quiet", "/w/quiet"),
+        ("prj_gone", "/w/gone"),
+        ("prj_gone_used", "/w/gone-used"),
+    ]
+
+    def insert(pid: str, root: str) -> str:
+        repos = '["git@x:y.git"]' if pid == "prj_linked" else "[]"
+        name = root.rsplit("/", 1)[1]
+        return (
+            "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
+            f"('{pid}', '{root}', '{name}', '{repos}', '2026-09-01T00:00:00+00:00');\n"
+        )
+
+    inserts = "".join(insert(pid, root) for pid, root in rows)
+    after = (
+        inserts
+        + """
+        UPDATE project SET codename = 'amber-otter' WHERE id = 'prj_named';
+        UPDATE project SET forgotten_at = '2026-09-02T00:00:00+00:00'
+            WHERE id IN ('prj_gone', 'prj_gone_used');
+        INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at)
+            VALUES ('ent_1', 'project', 'prj_entries', 'a fact', '[]', 'cli',
+                    '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
+        INSERT INTO entry (id, pool, project_id, text, tags, source, created_at, updated_at)
+            VALUES ('ent_2', 'project', 'prj_gone_used', 'kept by forget', '[]', 'cli',
+                    '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
+        INSERT INTO team_event (id, project_id, session_id, kind, text, created_at)
+            VALUES ('evt_1', 'prj_board', NULL, 'activate', 'on', '2026-09-01T00:00:00+00:00');
+        INSERT INTO fleet_agent (id, project_id, label, role, tmux_socket, pane_id, cwd,
+                                 worktree, created_at)
+            VALUES ('agt_1', 'prj_agent', 'coder-1', 'coder', 'asq', '%1', '/w/agent', 0,
+                    '2026-09-01T00:00:00+00:00');
+        INSERT INTO prompt (id, project_id, text, source, created_at)
+            VALUES ('prm_1', 'prj_quiet', 'hello', 'claude-code', '2026-09-01T00:00:00+00:00');
+    """
+    )
+    _at_version(16, after=after)
+    for with_snapshot in ("prj_snap", "prj_gone_used"):  # forget keeps the snapshot
+        snapshot_core.meta_path(with_snapshot).parent.mkdir(parents=True, exist_ok=True)
+        snapshot_core.meta_path(with_snapshot).write_text("{}", encoding="utf-8")
+
+    store = open_store()
+    try:
+        shown = {p.id for p in store.list_projects()}
+        everything = {p.id for p in store.list_projects(all=True)}
+        # The next prompt in a directory forgotten before v17 captures it; it must
+        # not be re-listed by the entries and snapshot its forget left behind.
+        store.ensure_project(ProjectInfo(id="prj_gone_used", root=Path("/w/gone-used")))
+        revived = store.get_project("prj_gone_used")
+        listed_after_prompt = {p.id for p in store.list_projects()}
+    finally:
+        store.close()
+    assert shown == {"prj_entries", "prj_named", "prj_linked", "prj_board", "prj_agent", "prj_snap"}
+    assert everything == shown | {"prj_quiet"}, "the prompt-only row is captured, not shown"
+    assert "prj_gone" not in everything, "forgotten stays forgotten"
+    assert "prj_gone_used" not in everything
+    assert revived is not None and revived.onboarded_at is None, "a forgotten row is not adopted"
+    assert "prj_gone_used" not in listed_after_prompt
+
+
+def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
+    isolated_home: Path,
+) -> None:
+    """The v17 backfill looks for each captured row's snapshot on disk, and ``Path.exists``
+    raises for a directory this user cannot search. The ``PermissionError`` escaped the
+    migration, which rolls back only on ``sqlite3.Error``, so the open failed with a raw
+    traceback and the write transaction left open, on every command until the directory
+    was readable again (review of #203). It is no evidence: the row stays captured."""
+    from aisquare.core import snapshot as snapshot_core
+
+    after = "".join(
+        "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
+        f"('{pid}', '/w/{pid}', '{pid}', '[]', '2026-09-01T00:00:00+00:00');\n"
+        for pid in ("prj_locked", "prj_snap")
+    )
+    _at_version(16, after=after)
+    for pid in ("prj_locked", "prj_snap"):
+        snapshot_core.meta_path(pid).parent.mkdir(parents=True, exist_ok=True)
+        snapshot_core.meta_path(pid).write_text("{}", encoding="utf-8")
+    locked = snapshot_core.snapshot_dir("prj_locked")
+    locked.chmod(0o000)
+    try:
+        try:
+            snapshot_core.exists("prj_locked")
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("this user can search a directory with no permissions (root, or no modes)")
+        store = open_store()
+        try:
+            shown = {p.id for p in store.list_projects()}
+            everything = {p.id for p in store.list_projects(all=True)}
+        finally:
+            store.close()
+    finally:
+        locked.chmod(0o700)
+    assert shown == {"prj_snap"}, "a readable snapshot still adopts its row"
+    assert everything == {"prj_snap", "prj_locked"}, "the unreadable one stays captured"
+
+
+# --- the reads a poller makes every few seconds (remote's needs scan) -------------------------
+
+
+def test_the_rows_that_ended_since_are_chosen_by_the_query(store: ContextStore) -> None:
+    """Every spawn, restart and switch leaves a row that is never deleted, so a reader that
+    wants the last day's endings must not build all of them to keep a few."""
+    from datetime import timedelta, timezone
+
+    from aisquare.models import FleetAgent
+
+    now = datetime.now(tz=UTC)
+    for n, ended in ((1, now - timedelta(days=2)), (2, now - timedelta(hours=1)), (3, None)):
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=f"agt_{n}", project_id=PROJECT.id, label=f"coder-{n}", role="coder",
+                pane_id=f"%{n}", cwd=Path("/w"), created_at=now - timedelta(days=3),
+                ended_at=ended, exit_status=None if ended is None else 1,
+            )
+        )  # fmt: skip
+    since = now - timedelta(days=1)
+    assert [row.id for row in store.fleet_agents_ended_since(PROJECT.id, since)] == ["agt_2"]
+    toronto = since.astimezone(timezone(timedelta(hours=-4)))
+    assert [row.id for row in store.fleet_agents_ended_since(PROJECT.id, toronto)] == ["agt_2"]
+    assert store.fleet_agents_ended_since("prj_other", since) == []
+
+
+def test_the_sessions_seen_since_and_the_ones_named_are_chosen_by_the_query(
+    store: ContextStore,
+) -> None:
+    """Every Claude Code start leaves a session that is never deleted: the reader names the
+    old ones it needs (the authors of open board questions) and gets the recent ones."""
+    from datetime import timedelta
+
+    from aisquare.models import TeamSession
+
+    now = datetime.now(tz=UTC)
+    for n, seen in ((1, now - timedelta(days=2)), (2, now - timedelta(minutes=5)), (3, now)):
+        store.upsert_session(
+            TeamSession(
+                id=f"ses_{n}", project_id=PROJECT.id, role="coder",
+                started_at=seen, last_seen_at=seen,
+            )
+        )  # fmt: skip
+    recent = now - timedelta(minutes=30)
+    assert [s.id for s in store.team_sessions_seen_since(PROJECT.id, recent)] == ["ses_3", "ses_2"]
+    named = store.team_sessions_seen_since(PROJECT.id, recent, ids=["ses_1", "ses_2", "ses_9"])
+    assert [s.id for s in named] == ["ses_3", "ses_2", "ses_1"], "newest seen first, once each"
+    assert store.team_sessions_seen_since("prj_other", recent, ids=["ses_1"]) == []
+    alone = store.team_sessions_seen_since(PROJECT.id, None, ids=["ses_1", "ses_3", "ses_9"])
+    assert [s.id for s in alone] == ["ses_3", "ses_1"], "no window: the ones named, and only them"
+    assert store.team_sessions_seen_since(PROJECT.id, None) == []
+
+
+def _board(store: ContextStore, project_id: str, *events: tuple[str, str | None, datetime]) -> None:
+    """``(kind, session id, written at)`` events on ``project_id``'s board, in that order."""
+    from aisquare.core.ids import new_event_id
+    from aisquare.models import TeamEvent
+
+    for kind, session_id, at in events:
+        store.add_team_event(
+            TeamEvent(
+                id=new_event_id(), project_id=project_id, session_id=session_id, kind=kind,
+                text=kind, created_at=at,
+            )
+        )  # fmt: skip
+
+
+def test_the_events_since_a_time_are_the_kinds_asked_for_from_that_time_on(
+    store: ContextStore,
+) -> None:
+    """A board's last day, for a reader that asks every few seconds (remote's needs scan):
+    the agents' events of ``kinds``, the human's (no session) of ``human_kinds`` too, and
+    nothing written before ``since`` or on another board."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    store.ensure_project(ProjectInfo(id="prj_other", root=Path("/tmp/other")))
+    _board(
+        store,
+        PROJECT.id,
+        ("question", "ses_1", now - timedelta(days=2)),
+        ("question", "ses_1", now - timedelta(hours=3)),
+        ("note", "ses_1", now - timedelta(hours=2)),
+        ("note", None, now - timedelta(hours=2)),
+        ("decision", None, now - timedelta(hours=1)),
+        ("attention", None, now - timedelta(hours=1)),
+        ("result", "ses_2", now),
+    )
+    _board(store, "prj_other", ("question", "ses_9", now))
+    since = now - timedelta(days=1)
+    read = store.team_events_since(
+        PROJECT.id, since, kinds=["question", "result"], human_kinds=["note", "decision"]
+    )
+    assert [(e.kind, e.session_id) for e in read] == [
+        ("question", "ses_1"),
+        ("note", None),
+        ("decision", None),
+        ("result", "ses_2"),
+    ], "oldest first; an agent's note is not the human's"
+    assert all(event.created_at >= since for event in read)
+    assert store.team_events_since(PROJECT.id, now + timedelta(seconds=1), kinds=["result"]) == []
+    assert store.team_events_since(PROJECT.id, since, kinds=[]) == []
+
+
+def test_the_events_since_a_time_can_be_one_sessions_kinds_alone(store: ContextStore) -> None:
+    """Review of #259, round 28, 8/10: of a board remote's needs scan does not read whole, it
+    takes the posts of its own rows' sessions, the human's replies and the fleet's kinds. It
+    read the board's whole day for them and dropped the rest itself; the store reads only
+    those (``session_kinds`` of ``sessions``)."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    _board(
+        store,
+        PROJECT.id,
+        ("question", "ses_1", now - timedelta(hours=3)),
+        ("question", "ses_2", now - timedelta(hours=3)),
+        ("note", "ses_1", now - timedelta(hours=2)),
+        ("note", None, now - timedelta(hours=2)),
+        ("agent_exited", "ses_3", now - timedelta(hours=1)),
+        ("result", "ses_1", now),
+    )
+    since = now - timedelta(days=1)
+
+    read = store.team_events_since(
+        PROJECT.id,
+        since,
+        kinds=["agent_exited"],
+        human_kinds=["note"],
+        session_kinds=["question", "result"],
+        sessions=["ses_1"],
+    )
+
+    assert [(e.kind, e.session_id) for e in read] == [
+        ("question", "ses_1"),
+        ("note", None),
+        ("agent_exited", "ses_3"),
+        ("result", "ses_1"),
+    ], "ses_2's question and ses_1's own note are not asked for"
+    no_session = store.team_events_since(
+        PROJECT.id, since, kinds=[], session_kinds=["question"], sessions=[]
+    )
+    assert no_session == []
+
+
+def test_the_events_since_a_time_do_not_take_seq_order_for_stamp_order(
+    store: ContextStore,
+) -> None:
+    """Review of #259, round 6, 6/10: both reads started from, or stopped at, the newest event
+    stamped before ``since``, as if ``seq`` order were stamp order. A clock stepped back an
+    hour (NTP, a VM's snapshot) writes seq 11 at 11:00 after seq 10 at 12:00, and asked from
+    11:30 the read began past seq 11 and never saw seq 10, a question for the human and an
+    agent's last attention among them, for as long as the window asked held it."""
+    from datetime import timedelta
+
+    noon = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+    _board(
+        store,
+        PROJECT.id,
+        ("question", "ses_1", noon - timedelta(hours=3)),
+        ("question", "ses_1", noon),  # seq 2, stamped before the clock stepped back
+        ("attention", "ses_2", noon + timedelta(minutes=1)),
+        ("note", "ses_1", noon - timedelta(hours=1)),  # the clock stepped back an hour
+    )
+    since = noon - timedelta(minutes=30)
+    read = store.team_events_since(PROJECT.id, since, kinds=["question", "attention"])
+    assert [(e.kind, e.created_at) for e in read] == [
+        ("question", noon),
+        ("attention", noon + timedelta(minutes=1)),
+    ]
+    found = store.newest_session_event(PROJECT.id, "ses_2", "attention", since=since)
+    assert found is not None and found.created_at == noon + timedelta(minutes=1)
+
+
+def test_a_store_already_at_v26_without_the_board_stamps_index_gets_it_at_its_next_open() -> None:
+    """An earlier 0.8.1 candidate stamped v26 without ``team_event_project_created``: the
+    presence pass adds it, and the reads since a time are narrowed by it from then on."""
+    open_store().close()
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        raw.execute("DROP INDEX team_event_project_created")
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        raw.close()
+    with store_session() as store:
+        assert store.missing_schema() == []
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        plan = raw.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM team_event WHERE project_id = 'p' "
+            "AND created_at >= 'x' ORDER BY seq"
+        ).fetchall()
+    finally:
+        raw.close()
+    assert "team_event_project_created" in str(plan), plan
+
+
+def _short_and_long_boards(store: ContextStore, now: datetime) -> int:
+    """``prj_short`` and ``prj_long``: the same last half hour, a question a minute, over 20
+    and 2 000 older notes. Returns how many questions that half hour holds."""
+    from datetime import timedelta
+
+    day = [("question", "ses_1", now - timedelta(minutes=n)) for n in range(30, 0, -1)]
+    for project_id, history in (("prj_short", 20), ("prj_long", 2_000)):
+        store.ensure_project(ProjectInfo(id=project_id, root=Path(f"/tmp/{project_id}")))
+        old = now - timedelta(days=30)
+        _board(
+            store,
+            project_id,
+            *[("note", "ses_1", old + timedelta(seconds=n)) for n in range(history)],
+        )
+        _board(store, project_id, *day)
+    return len(day)
+
+
+def _steps(store: ContextStore, read: Callable[[], object]) -> int:
+    """How many SQLite VM steps ``read`` took: what its queries cost, on any machine."""
+    connection = store._conn  # type: ignore[attr-defined]
+    counted = [0]
+
+    def step() -> int:
+        counted[0] += 1
+        return 0
+
+    connection.set_progress_handler(step, 1)
+    try:
+        read()
+    finally:
+        connection.set_progress_handler(None, 1)
+    return counted[0]
+
+
+def test_the_events_since_a_time_cost_that_time_not_the_boards_history(
+    store: ContextStore,
+) -> None:
+    """Filtered on ``created_at`` with no index on it, a read walks every event a board ever
+    had, which is never pruned. The ``(project_id, created_at)`` index narrows it to the
+    events since ``since``: a board with a hundred times the history costs the same."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    asked = _short_and_long_boards(store, now)
+    since = now - timedelta(days=1)
+    for project_id in ("prj_short", "prj_long"):
+        assert len(store.team_events_since(project_id, since, kinds=["question"])) == asked
+    short = _steps(store, lambda: store.team_events_since("prj_short", since, kinds=["question"]))
+    long = _steps(store, lambda: store.team_events_since("prj_long", since, kinds=["question"]))
+    assert long < short + 500, (short, long)
+
+
+def test_a_sessions_newest_event_of_a_kind_is_the_one_since_a_time(store: ContextStore) -> None:
+    """The session's newest event of the kind, when it was written at or after ``since``."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    _board(
+        store,
+        PROJECT.id,
+        ("attention", "ses_1", now - timedelta(hours=3)),
+        ("attention", "ses_1", now - timedelta(hours=1)),
+        ("attention", "ses_2", now - timedelta(minutes=30)),
+        ("limited", "ses_1", now - timedelta(minutes=20)),
+        ("note", None, now - timedelta(minutes=10)),
+    )
+    found = store.newest_session_event(
+        PROJECT.id, "ses_1", "attention", since=now - timedelta(hours=2)
+    )
+    assert found is not None and found.created_at == now - timedelta(hours=1)
+    later = now - timedelta(minutes=50)
+    assert store.newest_session_event(PROJECT.id, "ses_1", "attention", since=later) is None
+    assert store.newest_session_event(PROJECT.id, "ses_3", "attention", since=later) is None
+    assert store.newest_session_event("prj_other", "ses_1", "limited", since=later) is None
+
+
+def test_a_session_with_no_such_event_costs_the_time_asked_not_the_boards_history(
+    store: ContextStore,
+) -> None:
+    """Asked by the session and the kind alone, a session that has no such event walked
+    every event its board ever had to say so, every few seconds. The ``(project_id,
+    created_at)`` index narrows it to the events since ``since``: a hundred times the
+    history costs the same."""
+    from datetime import timedelta
+
+    now = datetime.now(tz=UTC)
+    _short_and_long_boards(store, now)
+    since = now - timedelta(days=1)
+    short = _steps(
+        store, lambda: store.newest_session_event("prj_short", "ses_9", "x", since=since)
+    )
+    long = _steps(store, lambda: store.newest_session_event("prj_long", "ses_9", "x", since=since))
+    assert long < short + 500, (short, long)
+
+
+# --- the launch spec and ui_state (#144) ----------------------------------------------------
+
+
+def test_a_fleet_agents_launch_spec_round_trips_and_an_old_row_has_none(
+    store: ContextStore,
+) -> None:
+    from aisquare.models import FleetAgent, LaunchSpec
+
+    spec = LaunchSpec(
+        binary="claude",
+        permission_mode="auto",
+        extra_args=["--chrome", "--effort", "high"],
+        account_slot=2,
+        worktree=True,
+        command=["python", "-P", "-m", "aisquare", "launch", "coder"],
+    )
+    row = FleetAgent(
+        id="agt_spec", project_id=PROJECT.id, label="coder-1", role="coder", pane_id="%1",
+        cwd=Path("/w"), created_at=datetime.now(tz=UTC), launch_spec=spec,
+    )  # fmt: skip
+    stored = store.upsert_fleet_agent(row)
+    assert stored.launch_spec == spec
+    bare = store.upsert_fleet_agent(
+        row.model_copy(update={"id": "agt_old", "label": "coder-2", "launch_spec": None})
+    )
+    assert bare.launch_spec is None
+    # A spec that no longer parses (a future field renamed) costs the replay, not the row.
+    with sqlite3.connect(str(_db_path())) as raw:
+        raw.execute("UPDATE fleet_agent SET launch_spec = '{not json' WHERE id = 'agt_spec'")
+    broken = store.get_fleet_agent("agt_spec")
+    assert broken is not None and broken.launch_spec is None
+
+
+def _fleet_history(store: ContextStore, rows: int, *, projects: int = 1, labels: int = 7) -> None:
+    """``rows`` fleet rows over ``projects`` projects and ``labels`` labels each, a minute
+    apart, the newest of each label live: a fleet's spawns, restarts and switches, which
+    are never deleted."""
+    from datetime import timedelta
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    newest = {(f"prj_{i % projects}", f"coder-{i % labels}"): i for i in range(rows)}
+    store._conn.executemany(  # type: ignore[attr-defined]
+        "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+        "ended_at) VALUES (?, ?, ?, 'coder', '%1', '/w', ?, ?)",
+        [
+            (
+                f"agt_{i:06d}",
+                f"prj_{i % projects}",
+                f"coder-{i % labels}",
+                (start + timedelta(minutes=i)).isoformat(),
+                None
+                if newest[(f"prj_{i % projects}", f"coder-{i % labels}")] == i
+                else (start + timedelta(minutes=i, seconds=30)).isoformat(),
+            )
+            for i in range(rows)
+        ],
+    )
+
+
+def test_the_label_heads_are_every_live_row_and_each_labels_newest(store: ContextStore) -> None:
+    """``fleet_label_heads``: every live row, and the newest of each label, live or ended,
+    in every project, oldest first. A live row with a newer ended one of its label (a spawn
+    that failed after it) is both's, and so is a label all of whose rows ended."""
+    from datetime import timedelta
+
+    _fleet_history(store, 60, projects=3)
+    late = datetime(2026, 2, 1, tzinfo=UTC)
+    store._conn.executemany(  # type: ignore[attr-defined]
+        "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+        "ended_at) VALUES (?, ?, ?, 'coder', '%1', '/w', ?, ?)",
+        [
+            ("agt_failed", "prj_0", "coder-0", late.isoformat(), late.isoformat()),
+            ("agt_gone_1", "prj_1", "stopped", late.isoformat(), late.isoformat()),
+            ("agt_gone_2", "prj_1", "stopped", (late + timedelta(1)).isoformat(), late.isoformat()),
+        ],
+    )
+    every = store._conn.execute(  # type: ignore[attr-defined]
+        "SELECT id, project_id, label, created_at, ended_at FROM fleet_agent"
+    ).fetchall()
+    newest: dict[tuple[str, str], tuple[str, str]] = {}
+    for agent_id, project_id, label, created_at, _ended in every:
+        newest[(project_id, label)] = max(
+            newest.get((project_id, label), ("", "")), (created_at, agent_id)
+        )
+    expected = sorted(
+        (created_at, agent_id)
+        for agent_id, project_id, label, created_at, ended_at in every
+        if ended_at is None or newest[(project_id, label)] == (created_at, agent_id)
+    )
+
+    heads = store.fleet_label_heads()
+
+    assert [head.id for head in heads] == [agent_id for _created, agent_id in expected]
+    assert {"agt_failed", "agt_gone_2"} <= {head.id for head in heads}
+    assert "agt_gone_1" not in {head.id for head in heads}
+
+
+def test_forgotten_among_answers_for_ids_read_or_not(store: ContextStore) -> None:
+    """Review of #259, round 42, 11/11: a plain prune asks ``forgotten_among`` of candidates it
+    could not read at all (a read that leaves tombstones out), to tell a forgotten row from a
+    purged one. It answers for any ids: the tombstones among them, and neither a live row
+    nor one the store no longer holds."""
+    for project_id in ("prj_forgotten", "prj_purged"):
+        store.onboard_project(ProjectInfo(id=project_id, root=Path(f"/tmp/{project_id}")))
+        store.forget_project(project_id)
+    store.purge_project("prj_purged")
+    asked = [PROJECT.id, "prj_forgotten", "prj_purged", "prj_never"]
+
+    assert all(store.get_project(project_id) is None for project_id in asked[1:]), "unread"
+    assert store.forgotten_among(asked) == {"prj_forgotten"}
+
+
+def test_a_label_lookup_and_the_label_heads_pick_one_row_of_two_stamped_alike(
+    store: ContextStore,
+) -> None:
+    """Review of #259, round 41, 4/6: the heads break a tie on ``created_at`` with the greater
+    id, and ``fleet_agent_by_label``, the row a ``fleet stop`` or a ``restart`` by label acts
+    on, broke none: SQLite gave whichever row its plan reached first, and the holds could
+    judge one row while a restart acted on the other. Both give the greater id, whichever
+    was written first."""
+    stamped = datetime(2026, 2, 1, tzinfo=UTC).isoformat()
+    store._conn.executemany(  # type: ignore[attr-defined]
+        "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+        "ended_at) VALUES (?, 'prj_0', 'coder-1', 'coder', '%1', '/w', ?, ?)",
+        [("agt_b", stamped, stamped), ("agt_a", stamped, stamped)],
+    )
+
+    [head] = store.fleet_label_heads()
+    found = store.fleet_agent_by_label("prj_0", "coder-1", live_only=False)
+
+    assert found is not None
+    assert (head.id, found.id) == ("agt_b", "agt_b")
+
+
+def test_a_session_lookup_picks_the_greater_id_of_two_live_rows_stamped_alike(
+    store: ContextStore,
+) -> None:
+    """Review of #259, round 42, 7/11: ``fleet_agent_for_session``, which the session-start
+    hook, ``task next`` and the limit hand-over read, broke no tie on ``created_at``: for two
+    live rows on one session stamped alike, SQLite gave whichever its plan reached first. It
+    gives the greater id, as the label lookup and the label heads do, whichever was first."""
+    stamped = datetime(2026, 2, 1, tzinfo=UTC).isoformat()
+    store._conn.executemany(  # type: ignore[attr-defined]
+        "INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at, "
+        "session_id) VALUES (?, 'prj_0', ?, 'coder', '%1', '/w', ?, 'ses_1')",
+        [("agt_b", "coder-2", stamped), ("agt_a", "coder-1", stamped)],
+    )
+
+    found = store.fleet_agent_for_session("ses_1")
+
+    assert found is not None and found.id == "agt_b"
+
+
+def test_the_label_heads_cost_grows_with_the_rows_not_their_square(store: ContextStore) -> None:
+    """Review of #259, round 37, 4/7: each label's newest was a correlated ``NOT EXISTS`` per
+    row, over the ``(project_id, created_at)`` index, which has no ``label``: quadratic in a
+    project's rows, 4.6 s at 20 000, on every ``project forget`` and ``prune`` and doctor's
+    capture-off line at each ``asq`` start. A window over the table is one pass and a
+    sort: four times the rows, a label for every five, cost about four times the steps,
+    not sixteen."""
+    _fleet_history(store, 500, labels=100)
+    small = _steps(store, store.fleet_label_heads)
+    store._conn.execute("DELETE FROM fleet_agent")  # type: ignore[attr-defined]
+    _fleet_history(store, 2000, labels=400)
+    large = _steps(store, store.fleet_label_heads)
+    assert large < small * 6, (small, large)
+
+
+def test_ui_state_is_a_key_value_memory(store: ContextStore) -> None:
+    assert store.ui_state("fleet.selected") is None
+    store.set_ui_state("fleet.selected", "project:prj_test")
+    assert store.ui_state("fleet.selected") == "project:prj_test"
+    store.set_ui_state("fleet.selected", "agent:prj_test/agt_1")  # every change is the save
+    assert store.ui_state("fleet.selected") == "agent:prj_test/agt_1"
+    store.set_ui_state("fleet.selected", None)
+    assert store.ui_state("fleet.selected") is None
+
+
+def test_a_fleet_row_is_read_as_the_columns_it_is_written_with_whatever_follows_board(
+    store: ContextStore,
+) -> None:
+    """Review of #259, round 27, 7/7: the read list was the written one's text with
+    ``board`` cut off its end, so a column appended after it made every fleet read invalid
+    SQL. Both lists come from one tuple, and a read names each column as it is written."""
+    later = (*store_module._FLEET_AGENT_FIELDS, "later")
+    read = store_module._read_list(later, {"board": "COALESCE(board, project_id)"})
+    # `persona` (v33) is the column that came after it, and is read as written.
+    assert read.endswith(", COALESCE(board, project_id) AS board, persona, later"), read
+
+    cursor = store._conn.execute(  # type: ignore[attr-defined]
+        f"SELECT {store_module._FLEET_AGENT_READ} FROM fleet_agent LIMIT 0"
+    )
+    named = tuple(column[0] for column in cursor.description)
+    assert named == store_module._FLEET_AGENT_FIELDS, named
+    assert ", ".join(named) == store_module._FLEET_AGENT_COLUMNS
+
+
+def test_a_store_without_team_session_still_reads_its_fleet_rows() -> None:
+    """Review of #259, round 27, 5/7: a row that recorded no board reads its session's, a
+    subquery on ``team_session``, and it was in every fleet read. On a store without that
+    table (doctor's damaged-store case, which the v32 backfill tolerates) every fleet read
+    failed, the live-only ones doctor's own checks make included. Such a store reads a row
+    with no board as its project's, as the backfill gives it there."""
+    from aisquare.models import FleetAgent
+
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        for n, board in ((1, None), (2, "prj_hub")):
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=f"agt_{n}", project_id=PROJECT.id, label=f"coder-{n}", role="coder",
+                    pane_id=f"%{n}", cwd=Path("/w"), created_at=datetime.now(tz=UTC),
+                    board=board,
+                )
+            )  # fmt: skip
+    with sqlite3.connect(str(_db_path())) as raw:
+        raw.execute("UPDATE fleet_agent SET board = NULL WHERE id = 'agt_1'")  # 0.8.0's
+    raw.close()
+    with sqlite3.connect(str(_db_path())) as raw:
+        raw.execute("DROP TABLE team_session")
+    raw.close()
+
+    with store_session() as store:
+        assert "table team_session" in store.missing_schema()
+        live = {row.id: row.board for row in store.fleet_agents(PROJECT.id, live_only=True)}
+        assert live == {"agt_1": PROJECT.id, "agt_2": "prj_hub"}, live
+        assert [row.id for row in store.live_fleet_agents()] == ["agt_1", "agt_2"]
+        one = store.get_fleet_agent("agt_1")
+        assert one is not None and one.board == PROJECT.id
+        assert store.fleet_agent_boards(PROJECT.id) == sorted([PROJECT.id, "prj_hub"])
+        assert store.fleet_agent_by_label(PROJECT.id, "coder-2") is not None
+
+
+def test_fleet_board_is_a_live_rows_a_live_managers_first() -> None:
+    """Review of #259, round 30, 1/8: an ended row's board was the answer once no row was
+    live, so Remote kept a project's tabs on its last spawn's hub for as long as it ran no
+    agent. Only a live row's board is."""
+    from datetime import timedelta
+
+    from aisquare.models import FleetAgent
+
+    start = datetime.now(tz=UTC)
+
+    def row(n: int, role: str, board: str, *, ended: bool = False) -> FleetAgent:
+        return FleetAgent(
+            id=f"agt_{n}", project_id=PROJECT.id, label=f"{role}-{n}", role=role,
+            pane_id=f"%{n}", cwd=Path("/w"), created_at=start + timedelta(minutes=n),
+            board=board, ended_at=start + timedelta(hours=1) if ended else None,
+        )  # fmt: skip
+
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        assert store.fleet_board(PROJECT.id) is None, "before its first spawn"
+        store.upsert_fleet_agent(row(1, "manager", "prj_hub", ended=True))
+        assert store.fleet_board(PROJECT.id) is None, "an ended manager's hub is not it"
+        store.upsert_fleet_agent(row(2, "coder", PROJECT.id))
+        store.upsert_fleet_agent(row(3, "coder", "prj_b"))
+        store.upsert_fleet_agent(row(4, "coder", "prj_c", ended=True))
+        assert store.fleet_board(PROJECT.id) == "prj_b", "the newest live row's"
+        store.upsert_fleet_agent(row(0, "manager", "prj_m"))
+        assert store.fleet_board(PROJECT.id) == "prj_m", "a live manager's first"
+
+
+def test_fleet_manager_board_is_the_newest_manager_rows_a_live_one_first() -> None:
+    """Review of #259, round 32, 2/9: the board a pause is set on besides its homes is the one
+    a manager of the project reads, or the one a restart of its last one hands on. Only a
+    manager's: a coder never reads the pause."""
+    from datetime import timedelta
+
+    from aisquare.models import FleetAgent
+
+    start = datetime.now(tz=UTC)
+
+    def row(n: int, role: str, board: str, *, ended: bool = False) -> FleetAgent:
+        return FleetAgent(
+            id=f"agt_{n}", project_id=PROJECT.id, label=f"{role}-{n}", role=role,
+            pane_id=f"%{n}", cwd=Path("/w"), created_at=start + timedelta(minutes=n),
+            board=board, ended_at=start + timedelta(hours=1) if ended else None,
+        )  # fmt: skip
+
+    with store_session() as store:
+        store.ensure_project(PROJECT)
+        store.upsert_fleet_agent(row(9, "coder", "prj_c"))
+        assert store.fleet_manager_board(PROJECT.id) is None, "before its first manager"
+        store.upsert_fleet_agent(row(1, "manager", "prj_old", ended=True))
+        store.upsert_fleet_agent(row(2, "manager", "prj_hub", ended=True))
+        assert store.fleet_manager_board(PROJECT.id) == "prj_hub", "the newest, stopped"
+        store.upsert_fleet_agent(row(0, "manager", "prj_m"))
+        assert store.fleet_manager_board(PROJECT.id) == "prj_m", "a live one first"

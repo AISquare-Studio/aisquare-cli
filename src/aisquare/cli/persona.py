@@ -87,7 +87,7 @@ def _editor_available() -> bool:
     return bool(os.environ.get("VISUAL") or os.environ.get("EDITOR")) or sys.stdin.isatty()
 
 
-def _one_line(text: str) -> str:
+def _flattened(text: str) -> str:
     return " ".join(text.split())
 
 
@@ -130,7 +130,7 @@ def list_(
         shadowed = persona_service.shadows(persona, root)
         mark = f"  (shadows {', '.join(shadowed)})" if shadowed else ""
         typer.echo(
-            f"{persona.name:<{width}}  {persona.layer:<7}  {_one_line(persona.description)}{mark}"
+            f"{persona.name:<{width}}  {persona.layer:<7}  {_flattened(persona.description)}{mark}"
         )
     for path, reason in invalid:
         typer.echo(f"✗ {path}: {reason}")
@@ -409,7 +409,7 @@ def _emit_skills(skills: list[persona_service.SkillRef]) -> None:
     for skill in skills:
         mark = "imported" if skill.imported else " " * len("imported")
         about = (
-            _one_line(skill.description) if skill.recognised else f"✗ {skill.reason or 'invalid'}"
+            _flattened(skill.description) if skill.recognised else f"✗ {skill.reason or 'invalid'}"
         )
         taken = f"  (name taken by {skill.taken_by} {skill.name})" if skill.taken_by else ""
         typer.echo(f"{skill.name:<{width}}  {skill.scope:<7}  {mark}  {about}{taken}")
@@ -461,7 +461,7 @@ def attach(
     to: Annotated[
         str,
         typer.Option(
-            "--to", help="The running agent's label (see `aisquare fleet ls`).", metavar="LABEL"
+            "--to", help="The running agent's label, as the fleet lists it.", metavar="LABEL"
         ),
     ],
     project: ProjectRef = None,

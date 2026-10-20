@@ -28,6 +28,7 @@ from aisquare.cli import (
     persona,
     policy,
     project,
+    remote,
     root,
     serve,
     task,
@@ -41,7 +42,6 @@ from aisquare.core.version import __version__
 
 app = typer.Typer(
     cls=GlobalFlagsGroup,
-    help="Portable memory layer for coding agents.",
     no_args_is_help=False,
     context_settings={"help_option_names": ["-h", "--help"]},
     pretty_exceptions_show_locals=False,
@@ -87,10 +87,11 @@ def main_callback(
     ] = "default",
     no_color: Annotated[bool, typer.Option("--no-color", help="Disable coloured output.")] = False,
 ) -> None:
-    """Portable memory layer for coding agents.
+    """One terminal over your projects and your coding agents: task a manager in
+    plain words, and it runs the coders, testers and reviewers for you.
 
-    Keeps user preferences and per-project conventions persistent across
-    agent sessions.
+    Underneath, a memory keeps your preferences and each project's conventions
+    across sessions.
     """
     state = RuntimeState(
         verbose=verbose,
@@ -154,6 +155,7 @@ app.command("board")(team.board)
 app.command("recall")(team.recall)
 launch.register(app)  # needs context_settings to forward agent args
 app.command("serve")(serve.serve)
+app.add_typer(remote.app, name="remote")
 app.add_typer(fleet.app, name="fleet")
 app.add_typer(persona.app, name="persona")
 app.command("ui")(fleet.ui)

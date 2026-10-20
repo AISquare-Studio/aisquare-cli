@@ -621,6 +621,53 @@ def test_a_fail_open_launchs_insights_still_open_their_own_run(
     assert sdk.segments == []
 
 
+@pytest.mark.parametrize(
+    "raises", ["set_status", "end", "both"], ids=["status-raises", "end-raises", "both-raise"]
+)
+def test_the_segments_close_owes_each_step_whatever_the_span_refuses(
+    monkeypatch: pytest.MonkeyPatch, raises: str
+) -> None:
+    """The INVARIANT of ``_ClientLaneSegment.__exit__`` (reviews of #203, round
+    1 finding 7 and round 5 finding 2, on the same function): the status, the
+    span's end and the context's detach are each owed independently of the one
+    before. A shut-down tracer provider raises on ``set_status`` FIRST — the
+    round-1 fix put ``end()`` after it inside one ``try``, so the span was held
+    by its processor for the life of the process and the group never exported;
+    a processor that throws on ``end`` used to leave the segment attached as the
+    current context. Whatever raises, ``end`` is attempted and the detach runs."""
+
+    class _Refusing(_FakeSpan):
+        def set_status(self, code: Any, description: str | None = None) -> None:
+            if raises in ("set_status", "both"):
+                raise RuntimeError("tracer provider is shut down")
+            super().set_status(code, description)
+
+        def end(self) -> None:
+            self.end_called = True
+            if raises in ("end", "both"):
+                raise RuntimeError("processor threw on end")
+            super().end()
+
+    class _Tracer:
+        def start_span(self, name: str, *, context: Any, attributes: dict[str, Any]) -> _FakeSpan:
+            return _Refusing(name, context, attributes)
+
+    class _Sdk:
+        def get_tracer(self, name: str) -> _Tracer:
+            return _Tracer()
+
+    otel_context = _FakeOtelContext()
+    monkeypatch.setattr(service, "_otel", lambda: (_FakeOtelTrace, otel_context))
+
+    with (
+        pytest.raises(RuntimeError),
+        service._ClientLaneSegment(_Sdk(), "coder", "run-1") as segment,
+    ):
+        span = segment._span
+    assert getattr(span, "end_called", False), "end() was attempted"
+    assert len(otel_context.attached) == 1 == len(otel_context.detached), "and detached"
+
+
 def test_a_segment_that_fails_is_closed_and_the_records_stay_queued(
     isolated_home: Path,
     ship_sdk: tuple[_ShipSdk, _FakeOtelContext],
@@ -1216,10 +1263,22 @@ def _paste(command: str, tmp_path: Path) -> tuple[int, str, dict[str, str]]:
     The child env carries none of the identity — this suite runs inside traced
     sessions, and the point is what the paste exports, not what it inherited.
     """
+    import shutil
     import subprocess
-    import sys
+    import sysconfig
 
     from aisquare.core import spawn
+
+    # A POSIX SHELL, not a POSIX PLATFORM: the printed command is an `sh`
+    # construct (`unset`, `${VAR:+…}`, a `VAR=value cmd` prefix), and Git Bash
+    # ships one that windows-latest carries on PATH. `/bin/sh` as a literal path
+    # does not exist there, so `CreateProcess` failed with WinError 2 before
+    # anything under test ran. Skipping on `which` keeps the assertion wherever
+    # it can mean anything — the same treatment test_harness.py's sibling paste
+    # test already carries.
+    shell = shutil.which("sh")
+    if shell is None:  # pragma: no cover - platform-dependent
+        pytest.skip("no POSIX shell on PATH; the printed spawn command is an sh construct")
 
     stub = tmp_path / "claude"
     stub.write_text(
@@ -1229,11 +1288,18 @@ def _paste(command: str, tmp_path: Path) -> tuple[int, str, dict[str, str]]:
         encoding="utf-8",
     )
     stub.chmod(0o755)
-    venv_bin = Path(sys.executable).parent
+    # sysconfig, not `Path(sys.executable).parent`: the two coincide inside a
+    # venv and diverge wherever pip installs outside one — on a Windows runner
+    # python.exe sits in `x64\` while the console scripts land in `x64\Scripts\`.
+    # And `os.pathsep` with the inherited PATH rather than a hardcoded
+    # "/usr/bin:/bin", which names nothing on Windows.
+    scripts_dir = Path(sysconfig.get_path("scripts"))
     child_env = {k: v for k, v in os.environ.items() if k not in spawn.IDENTITY_ENV_VARS}
-    child_env["PATH"] = f"{tmp_path}:{venv_bin}:/usr/bin:/bin"
+    child_env["PATH"] = os.pathsep.join(
+        [str(tmp_path), str(scripts_dir), os.environ.get("PATH", "")]
+    )
     proc = subprocess.run(
-        ["/bin/sh", "-c", command], capture_output=True, text=True, timeout=120, env=child_env
+        [shell, "-c", command], capture_output=True, text=True, timeout=120, env=child_env
     )
     seen = {
         key: match.group(1)

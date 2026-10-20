@@ -19,10 +19,11 @@ Transports:
 - ``stdio`` — for Claude Desktop launching the server itself (on Windows:
   ``wsl -e … aisquare serve --stdio``). No network, no token.
 - ``streamable HTTP`` — bound to 127.0.0.1 by default and always guarded by
-  the static bearer token stored in ``~/.aisquare/credentials`` (0600). A
-  bind outside ``LOOPBACK_BINDS`` also drops the SDK's Host/Origin
-  validation, leaving that token — long-lived, and sent in clear over plain
-  HTTP — as the only gate; ``aisquare serve`` says so on stderr when it does.
+  the static bearer token stored in ``~/.aisquare/credentials``, restricted to
+  the current user (0600 on POSIX, an equivalent ACL on Windows). A bind
+  outside ``LOOPBACK_BINDS`` also drops the SDK's Host/Origin validation,
+  leaving that token — long-lived, and sent in clear over plain HTTP — as the
+  only gate; ``aisquare serve`` says so on stderr when it does.
 
 This module needs the optional ``mcp`` dependency (``pip install
 aisquare-cli[serve]``); the CLI imports it lazily and explains if missing.
@@ -40,8 +41,10 @@ import time
 from typing import TYPE_CHECKING, Any, cast
 
 from aisquare.core import credentials as credentials_store
+from aisquare.core import paths
 from aisquare.core.store import is_locked_error
 from aisquare.models import TaskStatus, TeamSession
+from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 from aisquare.services.team import ClaimLostError, DeliveryUnconfirmedError, TeamDisabledError
 
@@ -101,7 +104,9 @@ def _ensure_virtual_session() -> str:
     Gated like every other orchestrator entry point: the master switch must be on and
     the project must already be activated (``aisquare serve`` activates its
     project explicitly at startup). Without the gate, one read-only MCP call
-    against a never-opted-in directory would permanently activate it.
+    against a never-opted-in directory would permanently activate it. With
+    ``[projects] capture`` off it must be added too, which both of those do: a board
+    left from before on a captured row is refused, not written to.
     """
     from datetime import UTC, datetime
 
@@ -117,8 +122,10 @@ def _ensure_virtual_session() -> str:
                 f"the agent orchestrator is not active for {project.root} — start `aisquare serve` "
                 "from the project (it activates it), or run `aisquare team on` there"
             )
+        if not project_service.tracked(store, project):
+            raise project_service.NotAdded(project)  # capture off, and nobody added it
+        project_service.capture(store, project)  # on: the session row needs one
         session_id = client_session_id(project.id)
-        store.ensure_project(project)
         now = datetime.now(tz=UTC)
         store.upsert_session(
             TeamSession(
@@ -153,7 +160,7 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         raise _tool_error(
             "error: the agent orchestrator is disabled on the host (AISQUARE_TEAM=0)"
         ) from exc
-    except ClaimLostError as exc:
+    except (ClaimLostError, project_service.NotAdded) as exc:
         raise _tool_error(f"error: {exc}") from exc
     except DeliveryUnconfirmedError as exc:
         # The #20 contract crosses the remote surface too: an unconfirmed
@@ -171,6 +178,8 @@ def _guard(fn: Any, *args: Any, **kwargs: Any) -> str:
         # subclass LookupError; remote callers get the error contract, not
         # a raw tool exception. Keep the "nothing matches …" wording so a
         # remote agent can self-correct rather than getting a naked ref.
+        if isinstance(exc, team_service.NoSuchTaskNumber):
+            raise _tool_error(f"error: {exc}") from exc  # "no task #12 on this board (…)"
         if isinstance(exc, KeyError):
             raise _tool_error(
                 f"error: nothing matches {(exc.args[0] if exc.args else exc)!r}"
@@ -199,8 +208,8 @@ def task_add(
 ) -> str:
     """Add a shared task (idempotent: re-adding the same title returns the original).
 
-    ``needs``: comma-separated task ids this task depends on — it stays
-    unavailable to `task_next` until they are done.
+    ``needs``: comma-separated tasks this task depends on — numbers (``12``, ``#12``)
+    or ids — it stays unavailable to `task_next` until they are done.
     """
 
     def run() -> str:
@@ -210,7 +219,7 @@ def task_add(
             title, detail=detail, role=role, needs=needed or None, session_ref=me
         )
         state = "created" if created else "already existed (idempotent)"
-        return f"{state}: {task.id} [{task.status}] {task.title}"
+        return f"{state}: {team_service.task_label(task)} [{task.status}] {task.title}"
 
     return _guard(run)
 
@@ -235,6 +244,7 @@ def task_next(role: str | None = None, status: str = "todo", claim: bool = False
 def task_update(ref: str, action: str, note: str | None = None) -> str:
     """Move a task: action is done, review, block, reopen, release or drop.
 
+    ``ref`` is the task's number on the board (``12`` or ``#12``) or its id.
     ``block`` and ``reopen`` require a note (the reason / the feedback).
     """
 
@@ -258,7 +268,7 @@ def task_update(ref: str, action: str, note: str | None = None) -> str:
             task = team_service.drop_task(ref, session_ref=me)
         else:
             raise _tool_error("error: action must be done, review, block, reopen, release or drop")
-        return f"{task.id} is now {task.status}"
+        return f"{team_service.task_label(task)} is now {task.status}"
 
     return _guard(run)
 
@@ -367,14 +377,22 @@ def recall(query: str) -> str:
 
 
 def serve_token() -> str:
-    """The static bearer token for HTTP serving (created on first use, 0600)."""
+    """The static bearer token for HTTP serving, created on first use, owner-only."""
     # Read-merge-write through the shared helper: this file also holds the API
     # key that `init --api-key` stores, and reading a non-JSON file as "no data"
     # is what silently discarded it.
     token = credentials_store.load_all().get(_TOKEN_KEY)
     if not isinstance(token, str) or not token:
         token = secrets.token_urlsafe(32)
-        credentials_store.store(**{_TOKEN_KEY: token})
+        _, restricted = credentials_store.store(**{_TOKEN_KEY: token})
+        if not restricted:
+            # The token is the only thing standing in front of the HTTP
+            # server, so an unrestricted file is worth a word on stderr.
+            print(
+                f"warning: could not restrict {paths.credentials_path()} to your account — "
+                "other users on this machine may be able to read the serve token.",
+                file=sys.stderr,
+            )
     return token
 
 

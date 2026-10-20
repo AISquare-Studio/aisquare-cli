@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import sysconfig
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,6 +14,8 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.core import harness
+from tests.cycles import unscoped
+from tests.projects import add_project
 
 # --- profiles & resolution ------------------------------------------------------
 
@@ -33,7 +37,7 @@ def test_top_tier_roles_lead_with_fable_and_fall_back_to_opus() -> None:
 
 def test_unknown_role_is_untiered() -> None:
     assert harness.resolve_model("stenographer") is None
-    assert harness.role_cycle("stenographer", "abc12345") == []
+    assert harness.role_cycle("stenographer", "abc12345", fleet=unscoped) == []
 
 
 def test_probe_disabled_resolves_optimistically_at_the_head() -> None:
@@ -186,13 +190,13 @@ def test_interfering_env_lists_only_set_vars(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_cycles_exist_for_all_first_class_roles() -> None:
     for role in ("planner", "coder", "runner", "validator"):
-        lines = harness.role_cycle(role, "abcd1234")
+        lines = harness.role_cycle(role, "abcd1234", fleet=unscoped)
         assert lines, role
         assert any("abcd1234" in line for line in lines), role
 
 
 def test_planner_cycle_demands_a_dispatch_contract() -> None:
-    text = " ".join(harness.role_cycle("planner", "abcd1234"))
+    text = " ".join(harness.role_cycle("planner", "abcd1234", fleet=unscoped))
     assert "acceptance criteria" in text
     assert "reopened twice" in text
 
@@ -204,24 +208,89 @@ def test_every_first_class_cycle_ends_with_its_own_lane_rule() -> None:
     it names the trigger and the substitute action. Every role now closes with
     that paragraph, addressed to itself, naming what to do instead."""
     for role in harness.ROLE_PROFILES:
-        lines = harness.role_cycle(role, "abcd1234")
+        lines = harness.role_cycle(role, "abcd1234", fleet=unscoped)
         text = " ".join(lines)
         trigger, _instead = harness._LANE[role]
         assert f"Stay in your lane ({role}). When you are {trigger}" in text, role
         assert "Instead:" in text, role
         assert "if the human insists" in text, role
-        # the paragraph is three lines and reads only the reader's own trigger
-        assert len(lines) - len(harness._role_cycle_core(role, "abcd1234")) == 3, role
+        # the paragraph is three lines and reads only the reader's own trigger; a role
+        # that works in a checkout is told to clean up first (``_CLEANUP``)
+        cleanup = len(harness._CLEANUP) if role in harness._CLEANS_UP else 0
+        core = harness._role_cycle_core(role, "abcd1234", fleet=unscoped)
+        assert len(lines) - len(core) == cleanup + 3, role
         for other, (other_trigger, _) in harness._LANE.items():
             if other_trigger != trigger:
                 assert other_trigger not in text, (role, other)
     # a seat is briefed as its role, lane included
-    assert "Stay in your lane (coder)" in " ".join(harness.role_cycle("coder2", "abcd1234"))
+    assert "Stay in your lane (coder)" in " ".join(
+        harness.role_cycle("coder2", "abcd1234", fleet=unscoped)
+    )
     # an unknown role has no cycle, so no lane is invented for it
-    assert harness.role_cycle("stenographer", "abcd1234") == []
+    assert harness.role_cycle("stenographer", "abcd1234", fleet=unscoped) == []
     # and a role with a cycle but no lane entry gets no paragraph — never a KeyError,
     # which the session-start hook would swallow together with the whole team block
-    assert harness._lane_rule("stenographer", "abcd1234", merge_said=False) == []
+    assert harness._lane_rule("stenographer", "abcd1234", merge_said=False, fleet=unscoped) == []
+
+
+def test_the_manager_stops_and_reaps_finished_agents_and_everyone_else_cleans_up() -> None:
+    """The human: the manager "can do it but I had to ask it first time … it did not clean up
+    the coder agents and its worktrees once they were done". Said from the first turn: the
+    manager stops an agent whose task is done and reaps, and reaps again before READY; every
+    role that works in a checkout removes the scratch trees and temp dirs it made, never the
+    worktree it was spawned in. Before the lane rule, which stays last."""
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
+    assert (
+        "An agent whose task is done, with no queued task that fits it: "
+        "`aisquare fleet stop <label>`, then `aisquare fleet reap`"
+    ) in manager
+    assert "removes the agent's worktree once its work is pushed" in manager
+    assert manager.index("`aisquare fleet reap` again") < manager.index('"READY:')
+    for role in ("coder", "runner", "tester", "reviewer", "validator", "ui-tester"):
+        lines = harness.role_cycle(role, "abcd1234", fleet=unscoped)
+        core = harness._role_cycle_core(role, "abcd1234", fleet=unscoped)
+        assert lines[len(core) : len(core) + 3] == [
+            line.format(reap=unscoped("reap")) for line in harness._CLEANUP
+        ], role
+        text = " ".join(lines)
+        assert "`git worktree remove <path>`, then `git worktree prune`" in text, role
+        assert "never the worktree you were spawned in" in text, role
+    for role in ("manager", "planner"):  # they work in no checkout of their own
+        assert harness._CLEANUP[0] not in harness.role_cycle(role, "abcd1234", fleet=unscoped), role
+
+
+def test_the_boards_cycles_name_their_project_in_every_fleet_command() -> None:
+    """Review of #259, round 21: the manager's cycle said `aisquare fleet stop <label>`, then
+    `aisquare fleet reap`, and spawn, tell and switch, each without ``--project``. Alone, a
+    fleet command acts on the active project, the machine-wide pin before the working
+    directory, so once the human pinned another project in some shell, the manager spawned,
+    stopped and reaped there. The board builds each with its own project."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import ProjectInfo, TeamSession
+    from aisquare.services import team as team_service
+
+    project = ProjectInfo(id="prj_board", root=Path("/work/board"), codename="calm-otter")
+    now = datetime.now(tz=UTC)
+
+    def cycle(role: str) -> str:
+        me = TeamSession(
+            id="abcd1234-0000", project_id=project.id, role=role, started_at=now, last_seen_at=now
+        )
+        return " ".join(team_service._role_cycle(me, project))
+
+    manager = cycle("manager")
+    assert (
+        "`aisquare fleet stop --project calm-otter <label>`, then "
+        "`aisquare fleet reap --project calm-otter`"
+    ) in manager
+    verbs = re.findall(r"aisquare fleet (\S+)( --project calm-otter)?", manager)
+    assert {verb for verb, _named in verbs} == {"spawn", "tell", "switch", "stop", "reap"}
+    assert all(named for _verb, named in verbs), verbs
+    assert "`aisquare fleet spawn --project calm-otter tester`" in manager
+    assert "`fleet spawn " not in manager, "the short forms name it too"
+    coder = cycle("coder")
+    assert "`aisquare fleet reap --project calm-otter` removes that." in coder
 
 
 def test_the_lane_rules_substitute_commands_run_as_written() -> None:
@@ -230,15 +299,15 @@ def test_the_lane_rules_substitute_commands_run_as_written() -> None:
     its required task id. Every substitute is now a command that runs and is
     attributed, pre-filled the way the core cycle pre-fills its own."""
     for role in harness.ROLE_PROFILES:
-        text = " ".join(harness.role_cycle(role, "abcd1234"))
+        text = " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
         assert "{sid}" not in text, role
         assert "`aisquare " not in text or "--as abcd1234" in text, role
-    coder = " ".join(harness.role_cycle("coder", "abcd1234"))
+    coder = " ".join(harness.role_cycle("coder", "abcd1234", fleet=unscoped))
     assert "aisquare task review <id> --as abcd1234" in coder
     assert 'aisquare note "…" --to planner --as abcd1234' in coder
-    planner = " ".join(harness.role_cycle("planner", "abcd1234"))
+    planner = " ".join(harness.role_cycle("planner", "abcd1234", fleet=unscoped))
     assert '--detail "<contract>" --as abcd1234' in planner
-    manager = " ".join(harness.role_cycle("manager", "abcd1234"))
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
     assert "aisquare fleet spawn coder --task <id> --as abcd1234" in manager
 
 
@@ -247,37 +316,37 @@ def test_no_role_reads_never_merge_twice() -> None:
     adds the prohibition only where the core does not say it, so no briefing
     repeats the same rule two paragraphs apart."""
     for role in harness.ROLE_PROFILES:
-        text = " ".join(harness.role_cycle(role, "abcd1234")).lower()
+        text = " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped)).lower()
         assert text.count("never merge") == 1, (role, text.count("never merge"))
 
 
 def test_the_planner_lane_routes_a_fix_to_tasks_and_names_the_hand_off() -> None:
-    text = " ".join(harness.role_cycle("planner", "abcd1234"))
+    text = " ".join(harness.role_cycle("planner", "abcd1234", fleet=unscoped))
     assert "aisquare task add" in text
     assert "check the board" in text, "the human is told how the hand-off completes"
 
 
 def test_the_verifier_lanes_route_a_fix_back_to_the_coder() -> None:
     for role in ("runner", "tester", "reviewer", "validator", "ui-tester"):
-        text = " ".join(harness.role_cycle(role, "abcd1234"))
+        text = " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
         assert "the coder fixes, not you" in text, role
 
 
 def test_coder_cycle_forbids_guessing() -> None:
-    text = " ".join(harness.role_cycle("coder", "abcd1234"))
+    text = " ".join(harness.role_cycle("coder", "abcd1234", fleet=unscoped))
     assert "don't" in text and "guess" in text
     assert "task block" in text
 
 
 def test_runner_cycle_is_adversarial_and_evidence_grounded() -> None:
-    text = " ".join(harness.role_cycle("runner", "abcd1234"))
+    text = " ".join(harness.role_cycle("runner", "abcd1234", fleet=unscoped))
     assert "FULL check" in text
     assert "evidence" in text
     assert "rubber-stamp" in text
 
 
 def test_validator_cycle_gates_once_with_severities() -> None:
-    text = " ".join(harness.role_cycle("validator", "abcd1234"))
+    text = " ".join(harness.role_cycle("validator", "abcd1234", fleet=unscoped))
     assert "ONCE" in text
     assert "critical|major|minor|nit" in text
 
@@ -332,6 +401,7 @@ def test_session_start_captures_model_and_effort(
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     work = tmp_path / "repo"
     work.mkdir()
+    add_project(work)  # a role session joins a board only where it was added
     from aisquare.services import team as team_service
 
     board = team_service.hook_session_start(
@@ -347,6 +417,7 @@ def test_board_flags_an_off_ladder_session(
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     work = tmp_path / "repo"
     work.mkdir()
+    add_project(work)  # a role session joins a board only where it was added
     from aisquare.services import team as team_service
 
     board = team_service.hook_session_start(
@@ -697,6 +768,7 @@ def test_doctor_harness_check_warns_on_live_mismatch(
 
     work = tmp_path / "repo-doctor"
     work.mkdir()
+    add_project(work)  # a role session joins a board only where it was added
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
     monkeypatch.chdir(work)
     team_service.hook_session_start("sess-doc-1", work, "startup", model="claude-haiku-4-5")
@@ -711,6 +783,7 @@ def test_hook_cli_captures_model_and_effort(
     """The real `hook session-start` entrypoint parses model + effort.level."""
     work = tmp_path / "repo-hookcli"
     work.mkdir()
+    add_project(work)  # a role session joins a board only where it was added
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     runner, app = _cli()
     payload = json.dumps(
@@ -740,6 +813,7 @@ def test_reconnect_without_model_keeps_the_stored_one(
     """COALESCE upsert: a payload lacking model must not erase a known one."""
     work = tmp_path / "repo-coalesce"
     work.mkdir()
+    add_project(work)  # a role session joins a board only where it was added
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     from aisquare.services import team as team_service
 
@@ -759,6 +833,7 @@ def test_prompt_join_path_captures_model(
     """A session that joins on prompt-submit still gets a model chip."""
     work = tmp_path / "repo-join"
     work.mkdir()
+    add_project(work)  # a role session joins a board only where it was added
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     from aisquare.services import team as team_service
 
@@ -798,6 +873,36 @@ def test_tui_session_line_renders_model_and_mismatch() -> None:
     assert "off-ladder" in rendered
     assert "claude-sonnet-5" in rendered
     assert rendered.count("off-ladder") == 1  # only the runner is off its ladder
+
+
+def test_watch_names_a_parked_session_and_its_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one surface an operator leaves running printed a bare dim ``limited`` (review of
+    #205, second round): now the chip, the reset and the command that moves it."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.cli.watch import _session_lines
+    from aisquare.models import TeamSession
+
+    now = datetime.now(tz=UTC)
+    parked = TeamSession(
+        id="sess-limited-1",
+        project_id="prj_watch",
+        role="coder",
+        started_at=now,
+        last_seen_at=now,
+        state="limited",
+        limit_resets_at=now + timedelta(hours=2, minutes=10),
+    )
+    moving = parked.model_copy(update={"id": "sess-switching-1", "state": "switching"})
+    switch = "aisquare fleet switch --project calm-otter coder-1"
+    rendered = _session_lines([parked, moving], switches={parked.id: switch}).plain
+    # Its own row's project and label: alone, it switched the active project's (#259, round
+    # 21), and named by the board's project, the hub's (round 22).
+    assert f"⏳ limited — `{switch}`" in rendered
+    assert "(resets in 2h" in rendered
+    assert "⇄ switching accounts" in rendered
+    bare = _session_lines([parked]).plain
+    assert "⏳ limited (resets in 2h" in bare, "no fleet row: the chip alone"
 
 
 def test_spawn_exec_requires_claude_on_path(
@@ -1392,6 +1497,7 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     the eval), so the discriminating assert is env's empty stdout, not the
     launch itself.
     """
+    import os
     import subprocess
     import sys
 
@@ -1401,12 +1507,25 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     command = json.loads(printed.output)["command"]
     assert 'eval "$(aisquare explainability env coder --post-root)"; ' in command
 
-    venv_bin = Path(sys.executable).parent
-    child_env = {**__import__("os").environ, "PATH": f"{tmp_path}:{venv_bin}:/usr/bin:/bin"}
+    # sysconfig, not `Path(sys.executable).parent`: the two coincide inside a
+    # venv (which is why the parent form survived for so long) but diverge
+    # wherever pip installs outside one — on a Windows CI runner python.exe
+    # sits in `x64\` while the console scripts land in `x64\Scripts\`, so the
+    # parent form pointed at a directory holding no `aisquare` at all.
+    scripts_dir = Path(sysconfig.get_path("scripts"))
+    aisquare_bin = scripts_dir / ("aisquare.exe" if sys.platform == "win32" else "aisquare")
+    child_env = {
+        **os.environ,
+        "PATH": os.pathsep.join([str(tmp_path), str(scripts_dir), os.environ.get("PATH", "")]),
+    }
 
-    # Premise: refusal → stderr only, stdout EMPTY, nonzero exit.
+    # Premise: refusal → stderr only, stdout EMPTY, nonzero exit. This is the
+    # discriminating half and it is pure CLI, so it runs on every platform.
     refusal = subprocess.run(
-        [str(venv_bin / "aisquare"), "explainability", "env", "coder", "--post-root"],
+        # `aisquare_bin` (this branch: sysconfig's scripts dir, `.exe` on
+        # Windows) with `--post-root` (main's): the two sides changed different
+        # halves of the same argv.
+        [str(aisquare_bin), "explainability", "env", "coder", "--post-root"],
         capture_output=True,
         text=True,
         timeout=60,
@@ -1417,13 +1536,20 @@ def test_spawn_printed_eval_fails_open_through_a_real_shell(
     assert "untraced" in refusal.stderr
 
     # End to end: the printed command runs the agent untraced via a real shell.
+    # `eval "$(...)"` is a POSIX-shell construct, so this half needs a POSIX
+    # shell rather than a POSIX *platform* — Git Bash ships one on Windows, and
+    # windows-latest has it on PATH. Skipping on `which` keeps the assertion
+    # wherever it can actually mean something.
+    shell = shutil.which("sh")
+    if shell is None:  # pragma: no cover - platform-dependent
+        pytest.skip("no POSIX shell on PATH; the eval printable is a sh construct")
     stub = tmp_path / "claude"
     stub.write_text(
         '#!/bin/sh\necho "ran base=[$ANTHROPIC_BASE_URL] argv=[$*]"\n', encoding="utf-8"
     )
     stub.chmod(0o755)
     proc = subprocess.run(
-        ["/bin/sh", "-c", command],
+        [shell, "-c", command],
         capture_output=True,
         text=True,
         timeout=60,
@@ -1448,13 +1574,25 @@ def test_spawn_printed_command_joins_each_paste_to_its_own_run(
     the same property: the agent starts on the id its Run is keyed by, and a
     second paste in the same terminal gets a DIFFERENT one.
     """
+    import os
     import re as _re
     import subprocess
-    import sys
 
     from tests.proxy_stub import healthy_proxy
 
-    venv_bin = Path(sys.executable).parent
+    # The printed command IS a POSIX-shell line — `unset`, `${VAR:+…}` and a
+    # `VAR=value cmd` prefix — so it needs a POSIX shell, not a POSIX
+    # PLATFORM. Git Bash ships one and windows-latest carries it on PATH;
+    # skipping on `which` keeps the assertion wherever it can mean anything.
+    shell = shutil.which("sh")
+    if shell is None:  # pragma: no cover - platform-dependent
+        pytest.skip("no POSIX shell on PATH; the printed spawn command is a sh construct")
+
+    # sysconfig, not `Path(sys.executable).parent`: the two coincide inside a
+    # venv and diverge wherever pip installs outside one, where the console
+    # scripts land in a sibling `Scripts/` directory — which is where the
+    # `aisquare` the pasted command resolves actually lives.
+    scripts_dir = Path(sysconfig.get_path("scripts"))
     stub = tmp_path / "claude"
     stub.write_text(
         '#!/bin/sh\necho "ARGV $*"\nprintf "HEADERS %s\\n" "$ANTHROPIC_CUSTOM_HEADERS"\n',
@@ -1467,10 +1605,13 @@ def test_spawn_printed_command_joins_each_paste_to_its_own_run(
         runner, app = _cli()
         printed = runner.invoke(app, ["--json", "team", "spawn", "coder"])  # type: ignore[arg-type]
         command = json.loads(printed.output)["command"]
-        child_env = {**__import__("os").environ, "PATH": f"{tmp_path}:{venv_bin}:/usr/bin:/bin"}
+        child_env = {
+            **os.environ,
+            "PATH": os.pathsep.join([str(tmp_path), str(scripts_dir), os.environ.get("PATH", "")]),
+        }
         # Both pastes in ONE shell — the case the leading `unset` exists for.
         proc = subprocess.run(
-            ["/bin/sh", "-c", f"{command}\n{command}"],
+            [shell, "-c", f"{command}\n{command}"],
             capture_output=True,
             text=True,
             timeout=120,

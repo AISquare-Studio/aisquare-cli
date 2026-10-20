@@ -68,7 +68,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, Target
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
-from aisquare.cli.ui.views.settings import permission_options
+from aisquare.cli.ui.views.app_settings import permission_options
 from aisquare.core import codenames, harness, personas
 from aisquare.core.config import FleetRoleSettings, load_config
 from aisquare.core.personas import Persona

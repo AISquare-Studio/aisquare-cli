@@ -21,7 +21,8 @@ import os
 import re
 import shutil
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -36,13 +37,16 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetSettings
 from aisquare.core.ids import new_agent_id
 from aisquare.core.store import store_session
-from aisquare.core.tmux import PaneFacts, TmuxError, TmuxServer, TmuxUnavailable
+from aisquare.core.terminal import outer_terminal
+from aisquare.core.tmux import PaneFacts, SocketAnswer, TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.core.workspace import project_id_for
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo, Snapshot
 from aisquare.services import diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from aisquare.services.onboarding import fix_commands
+from tests.fsperms import can_symlink
+from tests.projects import add_project
 
 # --- fakes and seeds -------------------------------------------------------------------
 
@@ -77,22 +81,37 @@ class FakeServer(TmuxServer):
         *,
         present: bool = True,
         version: tuple[int, int] | None = (3, 7),
+        running: tuple[int, int] | None = None,
         sessions: tuple[str, ...] = (),
         panes: dict[str, PaneFacts | None] | None = None,
         socket: str = "asq",
         version_raises: bool = False,
         facts_raise: bool = False,
         absent: bool = False,
+        started: datetime | None = None,
+        listened: SocketAnswer | None = None,
     ) -> None:
         super().__init__(socket, conf=Path("/nonexistent/fleet-tmux.conf"))
         self._present = present
+        self._listened = listened
+        """What the socket FILE says (:meth:`listener`): ``None`` is a file nobody listens on,
+        what tmux leaves when its server exits; ``"gone"`` no file, which a server outlives."""
+        self._started = started
+        """What ``#{start_time}`` answers; ``None`` — tmux did not say — judges nothing."""
         self._absent = absent
         self._version = version
+        self._running = running
+        """The running server's own version; ``None``: the binary's (no upgrade under it)."""
         self._sessions = sessions
         self._panes = panes or {}
         self._version_raises = version_raises
         self._facts_raise = facts_raise
         self.asked: list[str] = []
+        self.per_path: dict[Path, TmuxServer] = {}
+        """Servers asked for at a path (``tmux -S``, :meth:`at`) that is not where ``-L``
+        reaches this one: a server started under another ``TMUX_TMPDIR``."""
+        self.scripted: dict[tuple[str, ...], str] = {}
+        """Scripted ``run`` output by argv — the fleet-terminal row's server questions (#147)."""
 
     def binary(self) -> str:
         if not self._present:
@@ -108,6 +127,10 @@ class FakeServer(TmuxServer):
             raise RuntimeError("tmux -V hung")
         return self._version
 
+    def server_version(self) -> tuple[int, int] | None:
+        self.asked.append("server_version")
+        return self._running if self._running is not None else self._version
+
     def list_sessions(self) -> list[str]:
         self.asked.append("list_sessions")
         return list(self._sessions)
@@ -116,11 +139,31 @@ class FakeServer(TmuxServer):
         self.asked.append("server_absent")
         return self._present and self._absent
 
+    def listener(self, recorded: Path | None = None) -> SocketAnswer | None:
+        self.asked.append("listener")
+        return self._listened
+
     def pane_facts(self, pane_id: str) -> PaneFacts | None:
+        """As the real one, which asks ``#{start_time}`` in the same ``display-message``."""
         self.asked.append(f"pane_facts:{pane_id}")
         if self._facts_raise:
             raise TmuxError("unexpected display-message output")
-        return self._panes.get(pane_id)
+        facts = self._panes.get(pane_id)
+        return None if facts is None else replace(facts, server_started=self._started)
+
+    def started_at(self) -> datetime | None:
+        self.asked.append("started_at")
+        return self._started
+
+    def at(self, path: Path | None) -> TmuxServer:
+        """The server listening at ``path`` (:attr:`per_path`), else this one."""
+        return self.per_path.get(path, self) if path is not None else self
+
+    def run(self, *args: str, stdin: bytes | None = None) -> str:
+        self.asked.append(" ".join(args))
+        if args in self.scripted:
+            return self.scripted[args]
+        raise TmuxError(f"unscripted: {' '.join(args)}")
 
 
 def _agent(
@@ -256,11 +299,16 @@ def test_tmux_too_old_warns_with_the_minimum_and_an_install_hint() -> None:
 
 
 def test_tmux_below_the_recommended_version_is_ok_but_says_what_is_missing() -> None:
+    """What is missing below 3.5 is the shifted chords, not shift+enter: that one
+    travels as ctrl+j there (#147). The row said "3.5+ adds Shift+Enter", beside
+    the fleet terminal row saying the opposite (review of #203, round 1 of the
+    terminal-ux fold)."""
     older = diagnostics._check_tmux(FakeServer(version=(3, 3)))
     current = diagnostics._check_tmux(FakeServer(version=(3, 7)))
 
-    assert older.status is CheckStatus.ok and "Shift+Enter" in older.detail
-    assert current.status is CheckStatus.ok and "Shift+Enter" not in current.detail
+    assert older.status is CheckStatus.ok and "3.5+ carries the shifted chords" in older.detail
+    assert "shift+enter travels as ctrl+j" in older.detail, older.detail
+    assert current.status is CheckStatus.ok and "ctrl+j" not in current.detail
 
 
 def test_tmux_with_an_unreadable_version_fails_open_and_says_so() -> None:
@@ -492,6 +540,34 @@ def test_fleet_check_warns_when_a_live_row_has_no_pane(home: Path, tmp_path: Pat
     assert check.fix and "aisquare fleet reap" in check.fix
 
 
+def test_fleet_check_counts_a_row_older_than_its_server_as_gone(home: Path, tmp_path: Path) -> None:
+    """Review of the #203 final-round fixes, F4: the check asked tmux about a row's pane
+    by id alone. After a reboot the next server hands the same ids out again, so a row
+    that outlived its server counted as a healthy pane (another agent's) while
+    ``fleet ls`` read it ``✗ lost``, and the ``reap`` that records it was never
+    prescribed. A row written after the server started is the control."""
+    project = _seed(tmp_path / "repo")
+    now = datetime.now(tz=UTC)
+    stale = _agent(project.id, "manager", "%1").model_copy(
+        update={"created_at": now - timedelta(hours=1)}
+    )
+    _seed(tmp_path / "repo", stale, _agent(project.id, "coder-1", "%2"))
+    server = FakeServer(
+        sessions=("asq-amber-otter",),
+        panes={"%1": _facts("%1"), "%2": _facts("%2")},
+        started=now - timedelta(minutes=10),
+    )
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert check.status is CheckStatus.warn
+    assert "1 recorded live but the tmux pane is gone" in check.detail
+    assert "manager" in check.detail and "coder-1" not in check.detail
+    assert check.fix and "aisquare fleet reap --all" in check.fix
+    # Said with each pane (`#{start_time}`): not asked on its own, per row or per socket.
+    assert server.asked.count("started_at") == 0
+
+
 def test_fleet_check_reads_empty_facts_as_a_gone_pane(home: Path, tmp_path: Path) -> None:
     """tmux 3.7c answers a vanished target with exit 0 and every field empty (measured)."""
     project = _seed(tmp_path / "repo")
@@ -538,6 +614,115 @@ def test_fleet_check_warns_when_the_private_server_is_not_running(
     assert check.fix and "aisquare fleet reap --all;" in check.fix
     assert "genuinely gone" in check.fix and "TMUX_TMPDIR" in check.fix
     assert check.fix.endswith("aisquare fleet reap --all --server-down")
+
+
+def test_fleet_check_does_not_call_a_server_whose_socket_file_is_gone_not_running(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 29 of #257: tmux says "No such file or directory" for a socket file taken from
+    under a running server (systemd-tmpfiles, a logout), and `server_absent` reads that as
+    no server. The check said "is not running" and offered `reap --server-down`, which ends
+    the rows under their agents. Graded by the rule `uninstall` and `fleet shutdown` ask, a
+    row that may still run is said to, and the way back to its server comes first."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "this-boot")
+    project = _seed(tmp_path / "repo")
+    coder = _agent(project.id, "coder-1", "%2").model_copy(update={"boot_id": "this-boot"})
+    _seed(tmp_path / "repo", coder)
+    server = FakeServer(sessions=(), panes={}, absent=True, listened="gone")
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert check.status is CheckStatus.warn
+    assert "is not running" not in check.detail
+    assert "no tmux client reaches the private tmux server 'asq'" in check.detail
+    assert "may still be running: coder-1" in check.detail
+    assert check.fix and "SIGUSR1" in check.fix
+    assert check.fix.index("SIGUSR1") < check.fix.index("--server-down"), "the way back first"
+    assert "listener" in server.asked
+    # Negative control: a row from another boot cannot be running, socket file or not.
+    with store_session() as store:
+        store.upsert_fleet_agent(coder.model_copy(update={"boot_id": "an-earlier-boot"}))
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert "private tmux server 'asq' is not running: coder-1" in check.detail
+    assert "may still be running" not in check.detail
+    assert check.fix and "SIGUSR1" not in check.fix
+    assert check.fix.endswith("aisquare fleet reap --all --server-down")
+
+
+def test_fleet_check_tells_another_server_on_a_rows_socket_from_a_pane_that_is_gone(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-up of #257: a server answers on the row's socket, holds no pane of the row's,
+    and started at another time than the row recorded: it took the path from the row's
+    server, which lost its socket file and may run on. Said so, with the way back first,
+    not as a pane that is gone for `reap --all` to record. A row that recorded no start
+    is judged by its own time, as before."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "this-boot")
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    project = _seed(tmp_path / "repo")
+    coder = _agent(project.id, "coder-1", "%2").model_copy(
+        update={"boot_id": "this-boot", "server_started_at": then}
+    )
+    _seed(tmp_path / "repo", coder)
+    server = FakeServer(
+        sessions=("asq-other",),
+        panes={},
+        started=then + timedelta(minutes=5),
+        listened="answers",
+    )
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert check.status is CheckStatus.warn
+    assert "the tmux pane is gone" not in check.detail
+    assert "another tmux server answers on the socket of the private tmux server 'asq'" in (
+        check.detail
+    )
+    assert "may still be running: coder-1" in check.detail
+    assert check.fix and "SIGUSR1" in check.fix and "another server took" in check.fix
+    assert check.fix.index("SIGUSR1") < check.fix.index("--server-down"), "the way back first"
+    # Negative control: a row from before the start was recorded, on a server younger
+    # than it, is a pane that is gone, and the plain sweep records it.
+    with store_session() as store:
+        store.upsert_fleet_agent(coder.model_copy(update={"server_started_at": None}))
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert "1 recorded live but the tmux pane is gone: coder-1" in check.detail
+    assert "another tmux server" not in check.detail
+    assert check.fix and "SIGUSR1" not in check.fix
+
+
+def test_fleet_check_asks_a_servers_start_only_where_no_pane_of_its_said_it(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #259, round 5: the check asked `started_at()` per address once a pane's facts
+    answered, though the facts carry the start (`PaneFacts.server_started`), and then the
+    one rule asked it again for each pane that was gone (`server_may_run`), through a
+    `SocketReads` of its own. Read where a pane said it, each server is asked at most once,
+    and here not at all, and a row another server answers for is still told apart."""
+    monkeypatch.setattr(tmux_core, "boot_id", lambda: "this-boot")
+    then = datetime(2026, 10, 13, 9, 0, 7, tzinfo=UTC)
+    project = _seed(tmp_path / "repo")
+    alive = _agent(project.id, "coder-1", "%1")
+    taken = _agent(project.id, "coder-2", "%2").model_copy(
+        update={"boot_id": "this-boot", "server_started_at": then}
+    )
+    _seed(tmp_path / "repo", alive, taken)
+    server = FakeServer(
+        sessions=("asq-amber-otter",),
+        panes={"%1": _facts("%1")},
+        started=then + timedelta(minutes=5),
+        listened="answers",
+    )
+
+    check = diagnostics._check_fleet(lambda socket: server)
+
+    assert "another tmux server answers on the socket" in check.detail
+    assert "may still be running: coder-2" in check.detail and "coder-1" not in check.detail
+    assert server.asked.count("started_at") == 0, server.asked
 
 
 def test_fleet_check_does_not_vouch_for_a_server_that_is_silent_but_not_absent(
@@ -607,6 +792,27 @@ def test_fleet_check_looks_on_the_socket_each_row_was_spawned_on(
     assert "pane_facts:%5" not in servers["asq"].asked
 
 
+def test_fleet_check_asks_a_row_of_the_server_at_the_path_it_recorded(
+    home: Path, tmp_path: Path
+) -> None:
+    """Round 29 of #257: a row is asked of the server at the path its spawn recorded, as the
+    fleet asks it, not what ``tmux -L`` reaches from this shell: without the spawning shell's
+    ``TMUX_TMPDIR`` that is another server on the same name, whose dead ``%1`` read as the
+    row's agent exited and prescribed a ``reap``."""
+    project = _seed(tmp_path / "repo")
+    elsewhere = tmp_path / "elsewhere" / "tmux-1000" / "asq"  # never where `-L` looks here
+    coder = _agent(project.id, "coder-1", "%1").model_copy(update={"socket_path": elsewhere})
+    _seed(tmp_path / "repo", coder)
+    own = FakeServer(sessions=("asq-amber-otter",), panes={"%1": _facts("%1")})
+    stranger = FakeServer(sessions=("asq-someone",), panes={"%1": _facts("%1", dead=True)})
+    stranger.per_path[elsewhere] = own
+
+    check = diagnostics._check_fleet(lambda socket: stranger)
+
+    assert check.status is CheckStatus.ok, check.detail
+    assert "pane_facts:%1" in own.asked and "pane_facts:%1" not in stranger.asked
+
+
 def test_fleet_check_caps_the_labels_it_lists(home: Path, tmp_path: Path) -> None:
     project = _seed(tmp_path / "repo")
     rows = [_agent(project.id, f"coder-{n}", f"%{n}") for n in range(1, 10)]
@@ -618,7 +824,15 @@ def test_fleet_check_caps_the_labels_it_lists(home: Path, tmp_path: Path) -> Non
     assert check.status is CheckStatus.warn
     assert "9 recorded live" in check.detail
     assert "+3 more" in check.detail
-    assert "coder-9" not in check.detail
+    # HOW MANY are listed, not WHICH. All nine rows are written inside the same
+    # millisecond, and an id is a millisecond stamp plus random bits, so the
+    # order among them is undefined — `coder-9` lands inside the cap about as
+    # often as any other, and Windows shows it most because its clock is
+    # coarsest. Naming one label asserted the tie-break, not the cap; the cap is
+    # what this test is about, and `+3 more` above already pins the remainder.
+    listed = re.findall(r"coder-\d+", check.detail)
+    assert len(listed) == 6, check.detail
+    assert len(set(listed)) == 6, f"a label was listed twice: {check.detail}"
 
 
 def test_fleet_check_fails_open_on_a_damaged_store(home: Path) -> None:
@@ -762,6 +976,9 @@ def test_doctor_treats_a_skeleton_only_snapshot_as_usable_and_offers_no_fix(
     monkeypatch.chdir(root)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    # A machine that can pack. Where nothing can, the row also says the skeleton cannot
+    # be refreshed there (test_snapshot_optional_without_node.py), whatever is on PATH.
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     verdict = _skeleton_only_snapshot(_seed(root).id)
 
     check = _by_name(diagnostics.doctor())["snapshot"]
@@ -792,6 +1009,9 @@ def test_doctor_reports_an_over_budget_snapshot_with_its_numbers_and_a_re_pack(
     monkeypatch.chdir(root)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    # A machine that can pack. Where nothing can, the verdict reads off with no fix
+    # (test_snapshot_optional_without_node.py), whatever is on PATH.
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     verdict = _too_large_snapshot(_seed(root).id)
 
     check = _by_name(diagnostics.doctor())["snapshot"]
@@ -814,8 +1034,12 @@ def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
     monkeypatch.chdir(here)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
+    # A machine that can pack, so `here`'s missing snapshot warns rather than reading
+    # off -- without a Node it is off on purpose, whatever this machine has on PATH.
+    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     # Activate the orchestrator in `there` only, with an off-ladder live session.
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
+    add_project(there)  # a role session joins a board only where the project was added
     team_service.hook_session_start("sess-there-1", there, "startup", model="claude-haiku-4-5")
     _ready_snapshot(_seed(there).id)
 
@@ -842,6 +1066,7 @@ def test_doctor_without_cwd_means_the_process_cwd(
     work.mkdir()
     monkeypatch.chdir(work)
     monkeypatch.setenv("AISQUARE_ROLE", "runner")
+    add_project(work)
     team_service.hook_session_start("sess-work-1", work, "startup", model="claude-haiku-4-5")
 
     implicit = _by_name(diagnostics.doctor())["agent harness"]
@@ -857,6 +1082,8 @@ def test_doctor_without_cwd_means_the_process_cwd(
 
 
 def test_claude_version_from_the_native_installer_layout(tmp_path: Path) -> None:
+    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     target = tmp_path / "share" / "claude" / "versions" / "2.1.250"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"\x7fELF")
@@ -868,6 +1095,8 @@ def test_claude_version_from_the_native_installer_layout(tmp_path: Path) -> None
 
 
 def test_claude_version_from_an_npm_layout(tmp_path: Path) -> None:
+    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     package = tmp_path / "lib" / "node_modules" / "@anthropic-ai" / "claude-code"
     package.mkdir(parents=True)
     (package / "cli.js").write_text("#!/usr/bin/env node\n", encoding="utf-8")
@@ -1066,6 +1295,8 @@ def test_a_symlinked_home_is_a_directory_home(
 ) -> None:
     """The shape the ``is_dir()`` test must NOT accuse: ``ensure_home`` follows a
     link to a directory and everything works, so the check has to agree."""
+    if not can_symlink():  # pragma: no cover - a privilege CI holds, a laptop does not
+        pytest.skip("this machine cannot create symlinks (needs privilege on Windows)")
     target = tmp_path / "real-home"
     target.mkdir()
     link = tmp_path / "linked-home"
@@ -1076,3 +1307,313 @@ def test_a_symlinked_home_is_a_directory_home(
 
     assert rows["home"].status is CheckStatus.ok, rows["home"]
     assert rows["database"].status is CheckStatus.ok, rows["database"]
+
+
+# --- the fleet terminal row (#147) -------------------------------------------------------------
+
+
+def _terminal_row(server: FakeServer, env: dict[str, str]) -> DoctorCheck:
+    return diagnostics._check_fleet_terminal(server, env)
+
+
+def test_the_fleet_terminal_row_names_the_outer_terminal_tmux_and_the_server() -> None:
+    server = FakeServer(version=(3, 7), absent=False)
+    server.scripted = {
+        ("show-options", "-gv", "prefix"): "None\n",
+        ("show-environment", "-g"): "DISPLAY=:1\nWAYLAND_DISPLAY=wayland-0\n-SSH_AUTH_SOCK\n",
+    }
+    env = {"KITTY_WINDOW_ID": "3", "DISPLAY": ":1", "WAYLAND_DISPLAY": "wayland-0"}
+
+    check = _terminal_row(server, env)
+
+    assert check.name == "fleet terminal" and check.status is CheckStatus.ok
+    assert "outer terminal kitty (kitty keyboard protocol" in check.detail
+    assert "tmux 3.7 carries extended keys" in check.detail
+    assert "server prefix None" in check.detail and "stale" not in check.detail
+
+
+def test_the_fleet_terminal_row_names_the_running_servers_tmux_not_the_binary_on_path() -> None:
+    """Final review of #203, F2. The keys cross the running server, which parses them,
+    and after an in-place upgrade it still runs the binary it started with. The row
+    read ``tmux -V`` and said "tmux 3.7 carries extended keys" over a 3.4 server,
+    which types ``S-Enter`` out and to which the pane now sends ctrl+j."""
+    server = FakeServer(version=(3, 7), running=(3, 4), absent=False)
+    server.scripted = {
+        ("show-options", "-gv", "prefix"): "None\n",
+        ("show-environment", "-g"): "",
+    }
+
+    check = _terminal_row(server, {"KITTY_WINDOW_ID": "3"})
+
+    assert check.status is CheckStatus.ok
+    assert "tmux 3.4 has no extended keys" in check.detail and "ctrl+j" in check.detail
+    assert "carries extended keys" not in check.detail
+    assert "this shell's tmux is 3.7; the running server keeps 3.4 until it restarts" in (
+        check.detail
+    )
+
+
+def test_the_fleet_terminal_row_warns_about_a_kept_prefix_and_lists_stale_vars() -> None:
+    server = FakeServer(version=(3, 4), absent=False)
+    server.scripted = {
+        ("show-options", "-gv", "prefix"): "C-b\n",
+        ("show-environment", "-g"): "DISPLAY=:0\n-WAYLAND_DISPLAY\nSSH_AUTH_SOCK=/old\n",
+    }
+    env = {
+        "VTE_VERSION": "7800",
+        "DISPLAY": ":1",
+        "WAYLAND_DISPLAY": "wayland-1",
+        "SSH_AUTH_SOCK": "/old",
+        "COLORTERM": "truecolor",
+    }
+
+    check = _terminal_row(server, env)
+
+    assert check.status is CheckStatus.warn
+    assert "a VTE terminal" in check.detail and "no kitty keyboard protocol" in check.detail
+    assert "tmux 3.4 has no extended keys" in check.detail and "ctrl+j" in check.detail
+    assert "stale on the running server: DISPLAY, WAYLAND_DISPLAY, COLORTERM" in check.detail
+    assert "SSH_AUTH_SOCK" not in check.detail.split("stale on the running server:")[1]
+    assert "still has prefix C-b" in check.detail
+    assert check.fix and "kill-server" in check.fix and "background-tasks" in check.fix
+
+
+def test_the_fleet_terminal_row_never_starts_a_server_and_survives_an_unknown_terminal() -> None:
+    server = FakeServer(version=(3, 7), absent=True)  # no server: nothing is asked of one
+
+    check = _terminal_row(server, {"TERM": "xterm-256color"})
+
+    assert check.status is CheckStatus.ok
+    assert "outer terminal unknown (TERM=xterm-256color) (protocol unknown" in check.detail
+    assert "fleet server not running" in check.detail
+    assert not any(q.startswith("show-") for q in server.asked), server.asked
+
+    missing = FakeServer(present=False)
+    assert "tmux not installed" in _terminal_row(missing, {}).detail
+    broken = FakeServer(version_raises=True, absent=False)
+    assert _terminal_row(broken, {}).status is CheckStatus.ok  # fails open, named
+    assert "not evaluated" in _terminal_row(broken, {}).detail
+    inside = _terminal_row(FakeServer(absent=True), {"TMUX": "/tmp/tmux-1000/default,1,0"})
+    assert "inside tmux" in inside.detail
+    assert "fleet terminal" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+
+
+def test_the_fleet_terminal_row_comes_after_the_actionable_checks() -> None:
+    """It can warn (a server's kept prefix), and the not-ok rows are read in doctor
+    order (the fleet sidebar showed only the first three): inserted beside
+    tmux, as #147 had it, that warning evicted one of brain / snapshot / a
+    logged-out gh — the rows an operator can act on — from the one doctor
+    surface visible without a click. So it waits with browser tools."""
+    names = [check.name for check in diagnostics.doctor()]
+    terminal = names.index("fleet terminal")
+    for actionable in ("gh", "snapshot", "brain", "fleet"):
+        assert names.index(actionable) < terminal, (actionable, names)
+    assert names.index("browser tools") < terminal, names
+
+
+@pytest.mark.parametrize(
+    ("env", "name", "kitty"),
+    [
+        ({"KITTY_WINDOW_ID": "1"}, "kitty", True),
+        ({"GHOSTTY_RESOURCES_DIR": "/x"}, "ghostty", True),
+        ({"WEZTERM_EXECUTABLE": "/x"}, "wezterm", True),
+        ({"WT_SESSION": "x"}, "Windows Terminal", False),
+        ({"TERM_PROGRAM": "iTerm.app"}, "iTerm2", False),
+        ({"TERM_PROGRAM": "vscode"}, "the VS Code terminal", False),
+        ({"TERM_PROGRAM": "Apple_Terminal"}, "Terminal.app", False),
+        ({"VTE_VERSION": "7800"}, "a VTE terminal (GNOME Terminal, Tilix, …)", False),
+        ({"TERM": "xterm-kitty"}, "kitty", True),
+        ({"TERM": "foot"}, "foot", True),
+        ({"TERM": "alacritty"}, "alacritty", True),
+        ({}, "unknown", None),
+    ],
+)
+def test_outer_terminal_recognition(env: dict[str, str], name: str, kitty: bool | None) -> None:
+    assert outer_terminal(env) == (name, kitty)
+
+
+def test_behind_a_multiplexer_the_terminal_ssh_named_is_nobody_s() -> None:
+    """Review of #266, round 3: the ``LC_TERMINAL`` ssh sends is kept by a tmux for as long
+    as it runs. Started over SSH from iTerm2 and reattached from kitty, the row said
+    iTerm2 with no kitty keyboard protocol, and sent the user after a shift+enter fix for
+    a terminal they were not using. The row said "unknown" there before that sign."""
+    iterm = {"LC_TERMINAL": "iTerm2", "LC_TERMINAL_VERSION": "3.5.4"}
+    assert outer_terminal(iterm) == ("iTerm2", False), "over SSH, with nothing between"
+    behind_tmux = {**iterm, "TMUX": "/tmp/tmux-1/default,1,0", "TERM": "tmux-256color"}
+    assert outer_terminal(behind_tmux) == ("unknown (TERM=tmux-256color)", None)
+    behind_screen = {**iterm, "STY": "1234.pts-0.host", "TERM": "screen", "VTE_VERSION": "7800"}
+    assert outer_terminal(behind_screen) == ("a VTE terminal (GNOME Terminal, Tilix, …)", False)
+
+    check = _terminal_row(FakeServer(version=(3, 7), absent=True), behind_tmux)
+    assert "outer terminal unknown (TERM=tmux-256color) (protocol unknown" in check.detail
+
+
+# --- the dead-manager line (#138) --------------------------------------------------------
+
+
+def test_doctor_names_a_project_whose_manager_exited_while_its_agents_run(
+    home: Path, tmp_path: Path
+) -> None:
+    """The wake-ups coders send target that manager and land nowhere; one warning
+    names the project and the command that brings it back with its session."""
+    project = _seed(tmp_path / "repo")
+    manager = _agent(project.id, "manager", "%1", ended=True).model_copy(update={"role": "manager"})
+    _seed(tmp_path / "repo", manager, _agent(project.id, "coder-1", "%2"))
+
+    [check] = diagnostics._check_dead_managers()
+
+    assert check.name == "fleet-manager" and check.status is CheckStatus.warn
+    assert "the manager exited while agents are still running in: repo" in check.detail
+    assert "1 agent(s) still running" in check.detail
+    # Its own project named, not a placeholder to fill (review of #259, round 21).
+    ref = project.codename or project.id
+    assert check.fix and f"aisquare fleet restart --project {ref} manager" in check.fix
+    assert "Restart on its row" in check.fix
+    assert "fleet-manager" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+
+
+def test_the_dead_manager_line_is_silent_for_every_other_shape(home: Path, tmp_path: Path) -> None:
+    """Negative controls: a live manager, a whole fleet that ended, a project that never
+    had a manager, and no fleet at all. Only "manager gone, agents left" is the shape."""
+    alive = _seed(tmp_path / "alive")
+    _seed(
+        tmp_path / "alive",
+        _agent(alive.id, "manager", "%1").model_copy(update={"role": "manager"}),
+        _agent(alive.id, "coder-1", "%2"),
+    )
+    finished = _seed(tmp_path / "finished")
+    _seed(
+        tmp_path / "finished",
+        _agent(finished.id, "manager", "%3", ended=True).model_copy(update={"role": "manager"}),
+        _agent(finished.id, "coder-1", "%4", ended=True),
+    )
+    headless_by_design = _seed(tmp_path / "solo")
+    _seed(tmp_path / "solo", _agent(headless_by_design.id, "coder-1", "%5"))
+    _seed(tmp_path / "empty")
+
+    assert diagnostics._check_dead_managers() == []
+
+
+def test_the_dead_manager_line_never_creates_the_home(isolated_home: Path) -> None:
+    assert not isolated_home.exists()
+    assert diagnostics._check_dead_managers() == []
+    assert not isolated_home.exists(), "doctor must not create the home it reports on"
+
+
+# --- the projects line (#139) -------------------------------------------------------------------
+
+
+def test_doctor_counts_the_captured_directories_it_hides(
+    home: Path, tmp_path: Path, project_capture: None
+) -> None:
+    from aisquare.models import ProjectInfo
+
+    assert diagnostics._check_captured_projects() == []  # nothing captured: silent
+    with store_session() as store:
+        store.onboard_project(ProjectInfo(id="prj_shown", root=tmp_path / "shown"))
+        store.ensure_project(ProjectInfo(id="prj_one", root=tmp_path / "one"))
+        store.ensure_project(ProjectInfo(id="prj_two", root=tmp_path / "two"))
+
+    [check] = diagnostics._check_captured_projects()
+
+    assert check.name == "projects" and check.status is CheckStatus.ok
+    assert check.detail.startswith("2 captured directories hidden")
+    assert "project list --all" in check.detail and "prune --captured-only" in check.detail
+    assert "projects" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+
+
+def test_the_projects_line_never_creates_the_home(isolated_home: Path) -> None:
+    assert not isolated_home.exists()
+    assert diagnostics._check_captured_projects() == []
+    assert not isolated_home.exists()
+
+
+# --- resumable exited agents (#144) -------------------------------------------------------------
+
+
+def test_doctor_counts_the_exited_agents_a_restart_would_resume(home: Path, tmp_path: Path) -> None:
+    from aisquare.models import TeamSession
+
+    project = _seed(tmp_path / "repo")
+    now = datetime.now(tz=UTC)
+    on_disk = tmp_path / "t1.jsonl"
+    on_disk.write_text("{}\n", encoding="utf-8")
+    resumable = _agent(project.id, "coder-1", "%1", ended=True).model_copy(
+        update={"session_id": "ses_resumable"}
+    )
+    no_transcript = _agent(project.id, "coder-2", "%2", ended=True).model_copy(
+        update={"session_id": "ses_bare"}
+    )
+    still_live = _agent(project.id, "coder-3", "%3").model_copy(update={"session_id": "ses_live"})
+    _seed(tmp_path / "repo", resumable, no_transcript, still_live)
+    transcripts = {"ses_resumable": str(on_disk), "ses_bare": None, "ses_live": str(on_disk)}
+    with store_session() as store:
+        for sid, path in transcripts.items():
+            session = TeamSession(
+                id=sid,
+                project_id=project.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now,
+                transcript_path=path,
+            )
+            store.upsert_session(session)
+
+    [check] = diagnostics._check_resumable_agents()
+
+    assert check.name == "fleet-resume" and check.status is CheckStatus.ok
+    assert check.detail.startswith("1 exited agent can be resumed")
+    # Each with its own restart, naming its project (review of #259, round 21).
+    restart = f"`aisquare fleet restart --project {project.codename or project.id} coder-1`"
+    assert check.detail.endswith(f"starting over: {restart}"), check.detail
+    assert "coder-2" not in check.detail and "coder-3" not in check.detail
+    assert "fleet-resume" in _by_name(diagnostics.doctor()), "it reaches the real doctor"
+    on_disk.unlink()
+    assert diagnostics._check_resumable_agents() == [], "no transcript, nothing to resume"
+
+
+def test_the_resume_line_reads_only_the_newest_row_under_each_label(
+    home: Path, tmp_path: Path
+) -> None:
+    """Review of #169: a resumed restart keeps the session id, so the row it
+    replaced still has a transcript on disk. Counting every row listed a label that
+    was live again — whose `fleet restart <label>` stops the live agent — and
+    listed a label once per restart."""
+    from aisquare.models import TeamSession
+
+    project = _seed(tmp_path / "repo")
+    now = datetime.now(tz=UTC)
+    on_disk = tmp_path / "t.jsonl"
+    on_disk.write_text("{}\n", encoding="utf-8")
+
+    def row(label: str, pane: str, session_id: str, *, ended: bool, age: int) -> FleetAgent:
+        return _agent(project.id, label, pane, ended=ended).model_copy(
+            update={"session_id": session_id, "created_at": now - timedelta(minutes=age)}
+        )
+
+    _seed(
+        tmp_path / "repo",
+        row("coder-1", "%1", "ses_back", ended=True, age=10),
+        row("coder-1", "%2", "ses_back", ended=False, age=5),  # restarted, resumed, live
+        row("coder-2", "%3", "ses_twice", ended=True, age=10),
+        row("coder-2", "%4", "ses_twice", ended=True, age=5),  # restarted, exited again
+    )
+    with store_session() as store:
+        for sid in ("ses_back", "ses_twice"):
+            store.upsert_session(
+                TeamSession(
+                    id=sid,
+                    project_id=project.id,
+                    role="coder",
+                    started_at=now,
+                    last_seen_at=now,
+                    transcript_path=str(on_disk),
+                )
+            )
+
+    [check] = diagnostics._check_resumable_agents()
+
+    assert check.detail.startswith("1 exited agent can be resumed"), check.detail
+    assert f"--project {project.codename or project.id} coder-2`" in check.detail
+    assert check.detail.count("coder-2") == 1
+    assert "coder-1" not in check.detail, "live again: nothing to resume"

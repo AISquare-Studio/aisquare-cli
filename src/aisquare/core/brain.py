@@ -26,48 +26,12 @@ import json
 import os
 import shutil
 import subprocess
-import sys
-import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import IO
 
 from aisquare.core import paths, spawn
-
-# The exclusive-lock primitive, per platform. ``fcntl`` is POSIX-only and
-# ``msvcrt`` is Windows-only, so the import is branched on ``sys.platform``
-# rather than wrapped in ``try``/``except ImportError``: mypy narrows on
-# ``sys.platform`` and type-checks only the branch that is real for the
-# platform it runs on, which a ``try`` block would not do.
-if sys.platform == "win32":
-    import msvcrt
-
-    def _lock_exclusive(handle: IO[str]) -> None:
-        """Take the lock without blocking; raise ``OSError`` if held."""
-        # Windows byte-range locks are per handle and mandatory, so locking
-        # one byte at offset 0 is exclusive across processes just like flock.
-        # The region may sit past EOF, which is what keeps this working on the
-        # empty lock file.
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-
-    def _unlock(handle: IO[str]) -> None:
-        """Release the lock taken by :func:`_lock_exclusive`."""
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-
-else:
-    import fcntl
-
-    def _lock_exclusive(handle: IO[str]) -> None:
-        """Take the lock without blocking; raise ``OSError`` if held."""
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-    def _unlock(handle: IO[str]) -> None:
-        """Release the lock taken by :func:`_lock_exclusive`."""
-        fcntl.flock(handle, fcntl.LOCK_UN)
-
+from aisquare.core.locking import holding
 
 _OFF_VALUES = {"0", "false", "no", "off"}
 _ON_VALUES = {"1", "true", "yes", "on"}
@@ -174,27 +138,20 @@ def _lock(home: Path, *, wait_s: float) -> Iterator[bool]:
     """aisquare's own exclusive lock around a brain; yields whether it was won.
 
     ``wait_s == 0`` is a try-lock (drains skip when another drain runs);
-    otherwise the lock is polled for up to ``wait_s`` seconds.
+    otherwise the lock is polled for up to ``wait_s`` seconds, by
+    :func:`~aisquare.core.locking.holding`, the one copy of the loop. Any refusal —
+    held past ``wait_s``, or a lock file or a lock the platform refuses — is a lock not
+    won, as it always was: a brain is a cache, and its callers skip.
     """
     home.mkdir(parents=True, exist_ok=True)
-    handle = (home / ".aisquare.lock").open("w")
-    deadline = time.monotonic() + wait_s
-    try:
-        while True:
-            try:
-                _lock_exclusive(handle)
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    yield False
-                    return
-                time.sleep(0.1)
+    with ExitStack() as stack:
         try:
-            yield True
-        finally:
-            _unlock(handle)
-    finally:
-        handle.close()
+            stack.enter_context(holding(home / ".aisquare.lock", wait_s=wait_s))
+        except OSError:
+            won = False
+        else:
+            won = True
+        yield won
 
 
 def _run(home: Path, argv: list[str], *, stdin: str | None = None, timeout: int) -> str | None:

@@ -154,6 +154,14 @@ head1 "installed: $(aisquare --version)"
 # names which one.
 aisquare --version >/dev/null || fail "aisquare --version does not run"
 
+# Node, which run 1 asked for: this cell never passes --no-system-deps. With no
+# Node at all `aisquare doctor` reads codebase snapshots as off, which is ok, and
+# so is the tiktoken row that only snapshots use. A failed Node install would
+# therefore pass the tiktoken guard below whatever `--with` did, and run 2's
+# "exactly [brain]" gate could not see it either. Checked first, by name.
+command -v node >/dev/null 2>&1 ||
+    fail "node absent after run 1 — the installer's Node step failed (doctor reads no Node as snapshots off)"
+
 # tiktoken in the CLI's OWN environment (§1.2) — the whole reason for `--with`.
 case "$(amber_checks)" in
     *tiktoken*) fail "tiktoken is amber: --with tiktoken did not take" ;;

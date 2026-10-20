@@ -30,7 +30,7 @@ import os
 import sys
 from pathlib import Path
 
-from aisquare.core.workspace import find_project_root, git_common_root, project_id_for
+from aisquare.core.workspace import _resolved_or_spelled, find_project_root, project_id_for
 from aisquare.models import ProjectInfo
 
 _OFF_VALUES = {"0", "false", "no", "off"}
@@ -64,6 +64,11 @@ def env_persona() -> str | None:
     return persona or None
 
 
+FLEET_AGENT_ENV_VAR = "AISQUARE_FLEET_AGENT"
+"""The variable that carries a fleet row's id into its window — an IDENTITY,
+which is why ``fleet spawn`` keeps it out of the tmux session environment."""
+
+
 def env_fleet_agent() -> str | None:
     """The ``fleet_agent`` row this session runs as (``AISQUARE_FLEET_AGENT``).
 
@@ -72,8 +77,27 @@ def env_fleet_agent() -> str | None:
     spawned for. Nothing read it before: the task was recorded on the row and
     named the label and branch, and the agent itself was never told.
     """
-    agent_id = os.environ.get("AISQUARE_FLEET_AGENT", "").strip()
+    agent_id = os.environ.get(FLEET_AGENT_ENV_VAR, "").strip()
     return agent_id or None
+
+
+def env_claude_pid() -> int | None:
+    """The pid of the Claude Code process running this hook (``CLAUDE_PID``), if any.
+
+    Claude Code exports it to every process it starts — hooks included — and
+    writes ITS OWN pid each time, so a hook always reads the process that fired
+    it: a nested ``claude -p`` inherits the parent's value into its environment
+    and still hands its hooks its own. Measured on Claude Code 2.1.272: a hook
+    under a fleet pane read the pane's ``#{pane_pid}`` on startup, on the
+    ``SessionEnd(clear)`` and on the ``SessionStart(clear)`` that follows it,
+    while the session id changed underneath. That is the PROCESS identity a
+    session id is not — ``/clear`` mints a new id in the same process, a nested
+    child is a new process under the same ``AISQUARE_FLEET_AGENT`` — and it is
+    what ``services.team`` binds a fleet row to. ``None`` for a binary that does
+    not export it, and for a value that is not a number.
+    """
+    raw = os.environ.get("CLAUDE_PID", "").strip()
+    return int(raw) if raw.isdigit() else None
 
 
 def delta_enabled() -> bool:
@@ -91,6 +115,57 @@ def lease_minutes() -> int:
     return value if value > 0 else DEFAULT_LEASE_MINUTES
 
 
+TEAM_HUB_ENV_VAR = "AISQUARE_TEAM_HUB"
+"""The hub that pins every session to one board (:func:`team_project`). ``fleet
+spawn`` sets it on every window it starts, as :func:`window_team_hub` says."""
+
+
+def window_team_hub() -> str:
+    """``AISQUARE_TEAM_HUB`` for a window this process spawns: the hub it honours, else blank.
+
+    A window inherits the tmux SERVER's environment, which was frozen when the
+    private server first started, and ``launch`` inside the window joins
+    ``team_project`` from there. The fleet UI's Explainability tab resolves the
+    same question in THIS process (``key_project``). With the hub exported in
+    one and not the other, the tab showed and attached one project's key while
+    the window's launches took another's: a 409 ``agent_not_registered`` on
+    every span, or traces in the other project's workspace (review of #170,
+    D1b round 2, B1). Set on the window, the window resolves as its spawner
+    does. The value is the hub's absolute path when this process honours one,
+    else blank. ``team_project`` reads blank as unset, and a relative value,
+    which this process ignores, becomes blank too. Blank, not absent, because
+    ``tmux -e`` can only set, and the server's retained value must not leak in
+    as ours.
+    """
+    hub = team_hub()
+    return str(hub) if hub is not None else ""
+
+
+def team_hub() -> Path | None:
+    """The hub this process honours: ``AISQUARE_TEAM_HUB`` as an absolute path, else ``None``.
+
+    :func:`team_project`'s rule without its warning: a relative value is
+    ignored. For a surface that has to say it is under a hub, such as the fleet
+    UI's Explainability tab, whose key then belongs to the hub project.
+    """
+    hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
+    if not hub or not Path(hub).expanduser().is_absolute():
+        return None
+    return _hub_root(hub)
+
+
+def _hub_root(hub: str) -> Path:
+    """The board root an absolute ``hub`` names, resolved as every project root is, and
+    through a symlink loop as it is spelled, made absolute, as ``project.resolve`` reads a
+    root that became one (``workspace._resolved_or_spelled``): resolved raw, the loop raised
+    ``RuntimeError`` on 3.11 and 3.12, which the readers that skip a root they cannot ask
+    (``suppress(OSError)``) let through, and every phone board write that works out its
+    reach was a 500; from 3.13 ``resolve`` handed back the path as far as it got. A hub is a
+    board's name, and one that does not exist names it too: like a relative one, a bad hub
+    costs no command (review of #259, round 42, 6/11)."""
+    return _resolved_or_spelled(Path(hub).expanduser())
+
+
 #: Relative hub values already reported, so a command that resolves the board
 #: from several call sites says it once rather than three times. Per process:
 #: the variable does not change under a running command.
@@ -106,7 +181,7 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
     worktrees resolve to their principal checkout, so the team shares one board
     regardless of which worktree a session sits in.
     """
-    hub = os.environ.get("AISQUARE_TEAM_HUB", "").strip()
+    hub = os.environ.get(TEAM_HUB_ENV_VAR, "").strip()
     if hub and not Path(hub).expanduser().is_absolute():
         # A RELATIVE hub inverts the feature. `Path('./').resolve()` is the
         # process cwd, so "one board for sessions in several repositories"
@@ -132,8 +207,23 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
             )
         hub = ""
     if hub:
-        root = Path(hub).expanduser().resolve()
+        root = _hub_root(hub)
         return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
-    start = (cwd or Path.cwd()).resolve()
-    root = git_common_root(start) or find_project_root(start)
+    return directory_project(cwd)
+
+
+def directory_project(cwd: Path | None = None) -> ProjectInfo:
+    """The project of the directory itself, whatever ``AISQUARE_TEAM_HUB`` says: its
+    principal checkout's, so every worktree of one repository answers alike.
+
+    :func:`team_project`'s answer when no hub is set. Under one, it is still where a
+    session's own work is: a session the human launched in ``/work/app`` is on the hub's
+    board, and its fleet commands are about ``app`` (review of #259, round 23).
+
+    One ``git`` call: ``find_project_root`` asks ``git_common_root`` first. Asked here
+    first too, it ran twice for a directory that is not a git checkout (review of #259,
+    round 30, 7/8). A symlink loop on the way to ``cwd`` raises ``OSError``, as
+    ``find_project_root`` resolves it (round 40, 3/6).
+    """
+    root = find_project_root(cwd or Path.cwd())
     return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])

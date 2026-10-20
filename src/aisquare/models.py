@@ -13,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 _SIGNAL_TEXT = re.compile(r"^([a-z0-9][a-z0-9._-]*): (\S+)(?: \(was (\S+)\))?$")
 """The anchored serialization of a signal event's text: ``name: value`` with
@@ -75,6 +75,18 @@ class AgentHookSite(BaseModel):
 
     config_dir: Path
     hooks_installed: bool = False
+    hooks_off: Path | None = None
+    """The directory's settings file, when it switches every hook off (``"disableAllHooks":
+    true``): Claude Code runs none of them however complete they are, so ``hooks_installed``
+    is False, and ``agents connect`` cannot change that. ``None`` otherwise."""
+    refused: str | None = None
+    """Why ``agents connect`` would refuse the directory, in its words, when its hooks are
+    not installed and it would: a settings.json that is not a JSON object or that this
+    user may not write, a CLAUDE.md it cannot read, or a recorded directory that no
+    longer exists and that connect would not make ("<dir> does not exist"). Connect can
+    only fail there, as the doctor and Welcome say. ``None`` otherwise."""
+    remedies: list[str] = Field(default_factory=list)
+    """What changes ``refused``, as Welcome and the doctor give it (``agents.remedies``)."""
 
 
 class AgentInfo(BaseModel):
@@ -97,6 +109,23 @@ class ProjectInfo(BaseModel):
     codename: str | None = None
     """The fleet codename (``amber-otter``) — assigned the first time the project
     enters the fleet, never at ``init``; see ``core.codenames``."""
+    onboarded_at: datetime | None = None
+    """When the project was added ON PURPOSE (``init``, ``project onboard`` /
+    ``link``, the sidebar's ``+``, ``team on``, a fleet spawn) — #139. ``None``
+    is a directory a hooked session merely ran in: captured (prompt history and
+    injection keep working there) but not shown in the sidebar or ``project
+    list`` until something deliberate adds it."""
+    group_id: str | None = None
+    """The one :class:`ProjectGroup` this project sits in, like a browser tab (#140)."""
+    position: int | None = None
+    """Manual order inside its scope (its group, or the top level); ``None`` = never
+    arranged, which sorts after every arranged project, by name."""
+    pinned_at: datetime | None = None
+    """Set when the project is pinned: it renders in the Pinned section, in pin order."""
+    nickname: str | None = None
+    """What a person calls the project, free text like a browser tab's name; ``None``
+    shows the directory's name. Unlike the codename it names nothing else, so it can
+    hold any text — see ``services.project.set_nickname``."""
 
 
 class InjectionRecord(BaseModel):
@@ -150,6 +179,10 @@ class StatusReport(BaseModel):
     project_entries: int
     active_project: ProjectInfo
     project_count: int
+    """The projects ``project list`` shows — added on purpose (#139)."""
+    captured_count: int = 0
+    """The directories hooked sessions captured that nothing added on purpose:
+    registered but hidden, listed by ``project list --all`` (#139)."""
     agents_detected: list[str] = Field(default_factory=list)
     agents_connected: list[str] = Field(default_factory=list)
     shipping: ShippingStatus | None = None
@@ -204,6 +237,41 @@ class ClaudeAccount(BaseModel):
     """The account's own ``CLAUDE_CODE_TMPDIR``; ``None`` for the default slot."""
     managed: bool = False
     """True when the CLI created ``config_dir`` (every slot but the default)."""
+    # --- what the REGISTRY says about the slot (``claude_account`` in the store) ---
+    #
+    # The directories stay the record of WHICH accounts exist and who is signed in
+    # (core.claude_accounts). These four fields are the operator's ARRANGEMENT of
+    # them — a name, an order, a choice — which no directory can carry, so they
+    # live in SQLite and are folded onto the account by
+    # ``services.claude_accounts.list_accounts``. A ``ClaudeAccount`` built by the
+    # core alone has the defaults below, which read as "no arrangement": that is
+    # deliberate, so nothing in the core has to open the store.
+    alias: str | None = None
+    """The operator's name for the slot (``work``, ``personal``), unique; ``None`` when unnamed."""
+    position: int | None = None
+    """Its rank in the priority order, 1 first; ``None`` before the registry has seen it."""
+    is_default: bool = False
+    """The machine default — what a launch runs under when nothing more specific says."""
+    disabled: bool = False
+    """Never chosen automatically (default, priority, headroom); still usable by name."""
+
+
+class ClaudeAccountRecord(BaseModel):
+    """One row of the ``claude_account`` registry: the arrangement of a slot, not the slot.
+
+    ``slot`` is the join to the directory; ``config_dir`` is recorded for the
+    launch record's benefit and never used to decide anything — the directory
+    is re-read from disk every time, so a row whose directory has gone is a
+    row to drop, not a directory to trust.
+    """
+
+    slot: int
+    config_dir: Path
+    alias: str | None = None
+    position: int
+    is_default: bool = False
+    disabled: bool = False
+    created_at: datetime
 
 
 class ClaudeIdentity(BaseModel):
@@ -214,19 +282,121 @@ class ClaudeIdentity(BaseModel):
     account_uuid: str | None = None
 
 
+def _left(used: float | None) -> float | None:
+    return None if used is None else min(100.0, max(0.0, 100.0 - used))
+
+
 class ClaudeUsage(BaseModel):
-    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them."""
+    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them.
+
+    Every percentage here is percent USED (0-100), never the share left: 40
+    means 40 % used and 60 % left. An agent on a fresh install read the bare
+    ``session_percent`` as what remained and rationed an account that was
+    nearly empty, so the JSON carries both sides under names that say which:
+    ``*_used_percent`` and ``*_left_percent`` (``session_percent`` and
+    ``week_percent`` stay, for the readers that already know them).
+    """
 
     available: bool
     reason: str | None = None
     """Why nothing could be read, when ``available`` is False."""
+    needs_login: bool = False
+    """Signed in, but the stored token has expired or was rejected: a session on the
+    account refreshes it. False for every other reason nothing could be read."""
     session_percent: float | None = None
-    """The rolling five-hour window, 0-100."""
+    """The rolling five-hour window: percent USED (0-100)."""
     session_resets_at: datetime | None = None
     week_percent: float | None = None
-    """The rolling seven-day window, 0-100."""
+    """The rolling seven-day window: percent USED (0-100)."""
     week_resets_at: datetime | None = None
     fetched_at: datetime | None = None
+    """When the reading was taken — or, when nothing could be read, when that was found out."""
+    last_failed_at: datetime | None = None
+    """When a later try to read failed without replacing this reading: an unreachable
+    endpoint or an HTTP error after it, while it is still within the five-minute cache.
+    The figure stands; the line that says how old it is says the try failed too."""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def session_used_percent(self) -> float | None:
+        """The five-hour window: percent USED (0-100) — ``session_percent``, named for it."""
+        return self.session_percent
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def week_used_percent(self) -> float | None:
+        """The seven-day window: percent USED (0-100) — ``week_percent``, named for it."""
+        return self.week_percent
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def session_left_percent(self) -> float | None:
+        """The five-hour window: percent LEFT (0-100), ``100 - session_used_percent``."""
+        return _left(self.session_percent)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def week_left_percent(self) -> float | None:
+        """The seven-day window: percent LEFT (0-100), ``100 - week_used_percent``."""
+        return _left(self.week_percent)
+
+
+class UsageSample(BaseModel):
+    """One reading of an account's two windows, kept so a rate can be computed (#146).
+
+    Written by ``services.claude_accounts``' recording readers whenever usage
+    is fetched — the Accounts page's minute tick, ``accounts usage``, a headroom
+    pick — and read back to say how fast the window is filling. Samples are
+    pruned after a week; they are a derived convenience, never the record.
+    """
+
+    slot: int
+    fetched_at: datetime
+    session_percent: float | None = None
+    session_resets_at: datetime | None = None
+    week_percent: float | None = None
+    week_resets_at: datetime | None = None
+    token_fingerprint: str | None = None
+    """Which token took the reading: a fingerprint of it (never the token), so the
+    five-minute cache serves a reading only to the login that took it. ``None`` on a
+    reading recorded before it was kept (schema v28)."""
+
+
+class UsageTrend(BaseModel):
+    """Where an account's five-hour window is heading, from the samples of this window."""
+
+    percent: float
+    resets_at: datetime | None = None
+    per_hour: float | None = None
+    """Percentage points per hour over the sampled span; ``None`` when the span is too short."""
+    minutes_to_limit: float | None = None
+    """At the current rate, how long until 100 %; ``None`` when flat, falling or unknown."""
+    span_minutes: float = 0.0
+    """How long the samples behind the rate cover — the reader's measure of how much to trust it."""
+
+
+HeadroomLevel = Literal["good", "fair", "low", "critical", "empty", "unknown"]
+"""How much room the fleet's accounts have left, in one word (see ``HeadroomSummary``)."""
+
+
+class HeadroomSummary(BaseModel):
+    """What is LEFT across the fleet's accounts, in one figure and one word.
+
+    Built by ``services.claude_accounts.fleet_headroom``, whose docstring states
+    the formula; the sidebar's dot and ``n x claude`` are drawn from it.
+    """
+
+    level: HeadroomLevel
+    percent_left: float | None = None
+    """The mean share LEFT over the usable accounts (0-100); ``None`` when none is usable."""
+    usable: int = 0
+    """Enabled accounts with a readable reading — what a spawn could run on."""
+    needs_login: int = 0
+    """Signed-in accounts whose token has expired or was rejected: a session on each fixes it."""
+    left_by_slot: dict[int, float] = Field(default_factory=dict)
+    """Each usable account's share LEFT, ``100 - max(session used, week used)``."""
+    fetched_at: datetime | None = None
+    """The OLDEST reading behind the figure: the summary is no staler than this."""
 
 
 class ClaudeAccountStatus(BaseModel):
@@ -238,7 +408,10 @@ class ClaudeAccountStatus(BaseModel):
     identity: ClaudeIdentity | None = None
     signed_in: bool = False
     token_state: str = "missing"
-    """``ok``, ``expired`` or ``missing`` — the state of the stored OAuth token."""
+    """``ok``, ``expired``, ``missing`` or ``unreadable`` — the state of the stored OAuth token.
+
+    ``unreadable``: on macOS, a Keychain that would not show it (locked, an unlock cancelled,
+    access refused, no answer); the account still counts as signed in."""
     subscription: str | None = None
     """The plan the credentials file names (``max``, ``team``, …), when it does."""
     hooks_installed: bool = False
@@ -466,6 +639,21 @@ class MetricsSummary(BaseModel):
 TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]
 """Lifecycle of a shared team task: todo → doing → review → done (or parked)."""
 
+CLOSED_STATUSES: frozenset[TaskStatus] = frozenset({"done", "dropped"})
+"""The statuses after which a task needs nobody: a need it satisfies, a claim it
+cannot carry, a fleet assignment that is over. One constant because the pair was
+spelled out in five places (the store's readiness rule and its claim clearing,
+the fleet's spawn refusal, the briefing, the board's archive split), and a sixth
+status would have had to find them all."""
+
+CLAIM_KEEPING_STATUSES: frozenset[TaskStatus] = frozenset({"doing", "review", "blocked"})
+"""The statuses in which a task keeps its ``claimed_by``: the one being worked,
+the one with a verifier (its author is who rework goes back to), the one parked
+with a reason. ``set_task_status`` clears the claim for :data:`CLOSED_STATUSES`
+alone. Only ``doing`` carries a LEASE — the ``claim_expires_at`` that
+``renew_leases`` extends and ``claim_task`` reclaims when it lapses; the other
+two hold their claim indefinitely (review of #203)."""
+
 
 class TeamSession(BaseModel):
     """One live agent session on the orchestrator (id = the agent's session id)."""
@@ -482,7 +670,11 @@ class TeamSession(BaseModel):
     cursor: int = 0
     """Highest team-event ``seq`` already shown to this session (delta position)."""
     state: str = "working"
-    """Live activity: working (mid-turn), waiting (wants input) or attention."""
+    """Live activity: working (mid-turn), waiting (wants input), attention, or limited
+    (its turn ended on a usage limit — #146)."""
+    limit_resets_at: datetime | None = None
+    """When the limit that stopped it lifts, as the error named it; meaningful while
+    ``state`` is ``limited``, and ``None`` when the message named no time."""
     transcript_path: str | None = None
     """The session's Claude Code transcript (JSONL), from hook payloads."""
     account: str | None = None
@@ -501,6 +693,12 @@ class TeamTask(BaseModel):
 
     id: str
     project_id: str
+    number: int | None = None
+    """The task's number on its board (``#12``): 1, 2, … in the order tasks were added to
+    the project, given by the store at insert and never reused. ``None`` on a task that
+    has not been stored yet, and on one a build from before numbers inserted until the
+    store is next opened, which numbers it after the board's highest. An id for people to
+    say, not an order of work."""
     key: str
     """Idempotency key: re-adding the same key returns the existing task."""
     title: str
@@ -601,6 +799,11 @@ class OnboardReport(BaseModel):
 
     seeded: list[ContextEntry] = Field(default_factory=list)
     snapshot: Snapshot | None = None
+    snapshot_note: str | None = None
+    """Why this run packed nothing, as ``init`` and ``onboard`` say it: off, or the
+    pack failed and why. ``None`` when a pack was made or reused. Set beside a
+    ``snapshot``, it is a ``--refresh`` that failed: that is the last pack, kept,
+    and agents still get it."""
 
 
 class ProjectForgetReport(BaseModel):
@@ -619,11 +822,20 @@ class ProjectForgetReport(BaseModel):
     more and the active project again follows the working directory."""
     active_changed: bool = False
     """Whether the forgotten project WAS the active one, so the pin moved."""
+    pin_error: str | None = None
+    """Why the pin could not be moved after the forget, when it could not — the
+    forget itself is complete; the active project follows the working directory
+    until ``project switch`` succeeds."""
+    keys_still_live: list[PendingRevocation] = Field(default_factory=list)
+    """Keys the CLI minted for the purged project that could not be revoked yet
+    (#142): still live on the server, and still owed — ``use``, ``doctor --live``
+    and ``logout`` try again. Empty unless ``purged``."""
 
 
-PruneReason = Literal["missing", "worktree"]
-"""Why ``project prune`` selected a registration: its root is gone from disk, or
-its root is a linked git worktree of another registered project."""
+PruneReason = Literal["missing", "worktree", "captured"]
+"""Why ``project prune`` selected a registration: its root is gone from disk, its
+root is a linked git worktree of another registered project, or it is a stale
+capture — a directory a session merely ran in, with no context entries (#139)."""
 
 
 class PruneCandidate(BaseModel):
@@ -635,20 +847,52 @@ class PruneCandidate(BaseModel):
     """For a ``worktree`` candidate, the registered project it is a worktree of."""
     live_agents: int = 0
     """Live fleet agents on the registration. Non-zero means prune keeps it."""
+    read_by: list[ProjectInfo] = Field(default_factory=list)
+    """The other projects whose fleet agents read this registration's board, as a hub's
+    (``project forget`` refuses it too), every one. Any means prune keeps it."""
+
+    @property
+    def held(self) -> bool:
+        """Whether prune keeps it: live agents of its own, or another project's on its board."""
+        return bool(self.live_agents) or bool(self.read_by)
 
 
 class ProjectPruneReport(BaseModel):
     """Outcome of ``project prune``: the plan, and what was actually dropped."""
 
     candidates: list[PruneCandidate] = Field(default_factory=list)
+    """The plan's candidates. After a run, each one it found a candidate still is as the run
+    read it: its reason now (a worktree whose tree went is ``missing``) and what holds it.
+    Each other one, no longer a candidate (:attr:`changed`, :attr:`forgotten`) or gone since
+    the plan, is the plan's with no hold: the run did not read its hold again, and nothing
+    held it (review of #259, round 40, 5/6)."""
     dropped: list[str] = Field(default_factory=list)
     """Ids dropped. Empty on a dry run."""
     kept: list[PruneCandidate] = Field(default_factory=list)
-    """Candidates NOT dropped because they have live fleet agents."""
+    """Candidates NOT dropped because fleet agents hold them (:attr:`PruneCandidate.held`)."""
+    changed: list[str] = Field(default_factory=list)
+    """Ids NOT dropped because why each was a candidate no longer held when the run re-read
+    it: added on purpose or given an entry since the plan, a root back on disk. Empty on a
+    dry run."""
+    forgotten: list[str] = Field(default_factory=list)
+    """Ids the run found forgotten elsewhere since the plan, and left as it found them: not
+    dropped, and not kept either (review of #259, round 39, 4/9). A ``--purge`` run purges
+    one a candidate still is, and lists the others; a plain run passes over, and lists,
+    each. A candidate in none of :attr:`dropped`, :attr:`kept`, :attr:`changed` and this is
+    gone: purged since the plan (round 41, 6/6). Empty on a dry run."""
+    root_gone: list[str] = Field(default_factory=list)
+    """Of :attr:`changed`, the worktrees whose tree went since the plan: none now, they are
+    kept by a run not asked for missing roots, and ``prune --missing`` drops them (review of
+    #259, round 39, 5/9). Empty on a dry run."""
     dry_run: bool = True
     purged: bool = False
     active: ProjectInfo | None = None
     active_changed: bool = False
+    pin_error: str | None = None
+    """Why the pin could not be moved after the sweep, when it could not — the
+    registrations are dropped (and purged) regardless."""
+    keys_still_live: list[PendingRevocation] = Field(default_factory=list)
+    """As for ``ProjectForgetReport``: minted keys of purged projects still live."""
 
 
 class AgentConnection(BaseModel):
@@ -657,13 +901,164 @@ class AgentConnection(BaseModel):
     name: str
     hooks_installed: bool = False
     imported: int = 0
+    hooks_off: Path | None = None
+    """The settings file the hooks went into, when it switches every hook off
+    (``"disableAllHooks": true``): they are installed, and Claude Code runs none of them
+    until that key goes. ``agents connect`` leaves the key alone. ``None`` otherwise."""
 
 
-FleetAgentState = Literal["working", "waiting", "attention", "exited", "lost", "unknown"]
+FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]
 """What a fleet agent is doing, DERIVED at read time and never stored: a fresh
 ``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
 pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
 when neither source can answer."""
+
+
+class ProjectGroup(BaseModel):
+    """A named, collapsible container of projects — a management layer only (#140).
+
+    A group shares NOTHING: context entries, prompt history, snapshots, boards
+    and explainability settings stay per project, and no other table carries a
+    group id. Deleting a group ungroups its members and deletes no project.
+    """
+
+    id: str
+    name: str
+    position: int = 0
+    """Manual order among the top-level groups."""
+    pinned_at: datetime | None = None
+    collapsed: bool = False
+    created_at: datetime
+
+
+class ProjectExplainability(BaseModel):
+    """A project's own explainability key (#141): WHICH deployment it is for, and where it is.
+
+    The key VALUE never sits in the store — ``context.db`` is mode 644 on a
+    typical machine — only its path (a mode-600 file under the project's data
+    directory). ``target`` pins the deployment: a key attached for ``stg`` is
+    never handed to a ``prod`` gateway, the same rule the machine key file
+    follows (``tests/test_key_never_crosses_deployments.py``).
+    """
+
+    project_id: str
+    target: str
+    key_path: Path
+    set_at: datetime
+    set_by: str | None = None
+    """Who attached it — the signed-in email when there is one, else the OS user."""
+    api_url: str | None = None
+    """The API of the project's destination (#142) when the key was attached for THAT
+    deployment, minted or by hand; ``None`` for a key bound to one of the machine's
+    targets. The name alone cannot say which: the destination's ``stg`` is the staging
+    deployment, while on the machine ``init --explainability`` writes the machine's
+    ``stg`` is the top-level prod gateway. So a key attached for a destination's
+    deployment answers only while a destination names that deployment, never for the
+    machine's target of the same name (review of #203)."""
+
+
+class TraceDestination(BaseModel):
+    """Where a project's traces land (#142): a workspace and a studio, chosen while signed in.
+
+    Recorded per project from the API the sign-in session belongs to, so the
+    CLI never handles a key to know WHERE traces go. ``environment`` is the
+    deployment the API host maps to (``prod``, ``stg``, ``dev`` — or the host
+    itself when the mapping does not know it) and doubles as the explainability
+    TARGET name: the gateway and proxy of that deployment apply to this project
+    without anyone typing a URL. ``key_uid`` is set only when the CLI minted an
+    ingest key for this destination — the derived credential ``logout`` clears;
+    a key attached by hand (#141) is the operator's and is left alone.
+    """
+
+    project_id: str
+    api_url: str
+    environment: str
+    workspace_id: int
+    workspace_uid: str | None = None
+    workspace_name: str
+    studio_id: int | None = None
+    studio_uid: str | None = None
+    studio_name: str | None = None
+    key_uid: str | None = None
+    set_at: datetime
+    set_by: str | None = None
+    """Who chose it — the signed-in email."""
+
+    @property
+    def label(self) -> str:
+        """``workspace / studio`` as every surface prints it."""
+        if self.studio_name:
+            return f"{self.workspace_name} / {self.studio_name}"
+        return self.workspace_name
+
+
+UNKNOWN_KEY_UID = "minted"
+"""``TraceDestination.key_uid`` for a minted key whose uid never arrived (#142).
+
+The key exists and the project's file holds it, so the row still says minted;
+but there is no uid to revoke it by, so detaching it owes nothing — it is found
+in the dashboard's key list by its name, ``aisquare-cli <host> <project>``.
+"""
+
+
+class PendingRevocation(BaseModel):
+    """A key the CLI minted, taken off its project and not yet revoked on the server (#142).
+
+    Written in the transaction that detaches the key from its project — a move
+    into another workspace, ``use --clear``, ``key set`` or ``key clear`` over
+    it, a new mint, a purge, a sign-out — and deleted only once the server has
+    confirmed the revocation (a 2xx, or a 404 for a key it no longer has). In
+    between it is this machine's one record that the key exists: a revoke that
+    could not be made (signed out, signed in to another host, offline, refused)
+    leaves it here for ``explainability use``, ``doctor`` and ``logout`` to try
+    again and report. It names no project row, so a purge does not take it along.
+    """
+
+    key_uid: str
+    api_url: str
+    """The API the key was minted on — the only one a revoke of it can go to."""
+    workspace_id: int
+    workspace_name: str
+    project_id: str
+    project_name: str
+    detached_at: datetime
+    last_error: str | None = None
+    """Why the last attempt did not revoke it; ``None`` until one was made."""
+
+
+class LaunchSpec(BaseModel):
+    """What an agent was launched WITH, recorded at spawn and replayed by a restart (#144).
+
+    A restart that re-read today's config would silently change what "the same
+    agent" means: a role's permission mode edited between runs, a binary
+    rebound, an extra argument added. The spec is the resolved answer at spawn
+    time — binary, permission mode, the arguments after the role's own, the
+    account slot, the worktree choice — so ``fleet restart`` and ``fleet
+    switch`` start the agent the way it was started, and only the things a
+    restart is FOR (the account, on a switch; a fresh session, on ``--fresh``)
+    change. ``command`` is the whole window argv as spawned, for the record.
+    """
+
+    binary: str
+    permission_mode: str | None = None
+    """The ``--permission-mode`` passed; ``None`` or ``""`` means no flag was passed —
+    and a replay passes none, whatever the role's config says today."""
+    extra_args: list[str] = Field(default_factory=list)
+    """The role's ``extra_args`` followed by the caller's, as they went after the flags,
+    less the ones that chose a session (``--session-id``, ``--resume``, ``--continue``):
+    those are per launch, like a restart's own ``--resume``."""
+    account_slot: int | None = None
+    worktree: bool = False
+    command: list[str] = Field(default_factory=list)
+    recorded_by: str | None = None
+    """The aisquare version that recorded the spec; ``None`` on one recorded before 0.8.0,
+    whose reviewer may hold that release's built-in ``--restricted``, which nobody chose
+    and a replay replaces (``services.fleet``)."""
+    hub: str | None = None
+    """The ``AISQUARE_TEAM_HUB`` its window was given: the hub's absolute path, ``""`` for none
+    (``core.orchestrator.window_team_hub``). A restart or switch gives the replacement's
+    window the same, whoever runs it (``services.fleet._board_and_hub``). ``None`` on a spec
+    recorded before 0.8.1 kept it."""
 
 
 class FleetAgent(BaseModel):
@@ -690,6 +1085,36 @@ class FleetAgent(BaseModel):
     task_id: str | None = None
     spawned_by: str | None = None
     """``"user"``, or the id of the session (a manager) that asked for it."""
+    account_slot: int | None = None
+    """The Claude account slot the launch was resolved to (flag, binding or default);
+    ``None`` when nothing chose one and the window ran on whatever its shell had."""
+    launch_spec: LaunchSpec | None = None
+    """How it was launched (#144); ``None`` on rows spawned before the spec existed."""
+    socket_path: Path | None = None
+    """The socket its server listened on at spawn, as tmux said (``#{socket_path}``):
+    where uninstall and upgrade ask whether it may still run, whatever shell asks.
+    ``None`` on rows spawned before 0.8.0, or when tmux did not say."""
+    boot_id: str | None = None
+    """The boot it was spawned in (``core.tmux.boot_id``): a row from another boot is
+    no running agent. ``None`` on rows spawned before 0.8.0, or where none is kept."""
+    server_started_at: datetime | None = None
+    """When its server started, as it said at spawn (``#{start_time}``, whole seconds):
+    the identity of the server its ``pane_id`` names, since every server numbers its
+    panes from ``%0``. A server at its socket that started at another time is not the
+    one it runs on, which lost its socket file and may run on (``core.tmux.server_may_run``,
+    ``services.fleet._outlived``). ``None`` on rows spawned before 0.8.1, or when tmux did
+    not say."""
+    branch: str | None = None
+    """The branch its worktree was on, as git said at spawn, at stop, and at reap before
+    the tree went: where a restart or switch makes a gone tree again
+    (``services.fleet._remake_worktree``). ``None`` for an agent with no worktree, one on
+    a detached HEAD, or a row spawned before 0.8.1."""
+    board: str | None = None
+    """The id of the board its sessions read, as its spawn gave it: the hub's under
+    ``AISQUARE_TEAM_HUB``, else its project's principal checkout's
+    (``services.fleet._board_for``). A replacement inherits it. Every question of which
+    board an agent reads asks this (``services.fleet._board_of_row``). ``None`` only before
+    the row is stored, which records the row's project then."""
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None
@@ -708,3 +1133,13 @@ class FleetAgentStatus(BaseModel):
     hooks" for a binary without lifecycle hooks, "pane gone"."""
     session: TeamSession | None = None
     tmux_session: str | None = None
+    socket_at: Path | None = None
+    """Where the agent's server is asked (``tmux -S``), worked out once with the listing's
+    config (``services.fleet.socket_at``); ``None`` when it is asked by its socket's name
+    (``tmux -L``). Carried so the UI's panes and attach line read it off the frame."""
+    held: bool = False
+    """The listing held the row as another server's (``services.fleet.ANOTHER_SERVER``): a
+    server answers at its socket, and it is not the one the row was started on, which may
+    run on where no client reaches it. Its state is ``unknown`` whatever its board says, and
+    its pane id is no pane of its own there: that server numbers its panes from ``%0``
+    again."""

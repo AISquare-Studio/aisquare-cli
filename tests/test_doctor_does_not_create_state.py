@@ -53,6 +53,19 @@ def test_a_doctor_run_leaves_a_fresh_home_absent(runner: CliRunner) -> None:
     )
 
 
+def test_a_live_doctor_run_leaves_a_fresh_home_absent_too(runner: CliRunner) -> None:
+    """Runbook §6's ``doctor --live``: the headroom check read the registry through the
+    store before it looked whether there was one (review of #205, second round)."""
+    home = paths.aisquare_home()
+    assert not home.exists()
+
+    result = runner.invoke(app, ["doctor", "--live"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert not home.exists(), f"doctor --live created {home} while reporting on it"
+    assert not paths.db_path().exists()
+
+
 def test_two_doctor_runs_on_the_same_fresh_machine_agree(runner: CliRunner) -> None:
     """A machine's diagnosis must not depend on whether it has been diagnosed.
 

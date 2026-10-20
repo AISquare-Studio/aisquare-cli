@@ -99,17 +99,24 @@ def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ..
 
     monkeypatch.setattr(tmux_core, "_tmux", record)
     yield ran
-    wrong = [argv for argv in ran if _socket_of(argv) != PRIVATE_SOCKET]
+    # `tmux -V` is the version probe (asked once per server, #203 round 9): it names no
+    # socket and reaches no server, so it addresses no fleet — the rule is about the rest.
+    wrong = [argv for argv in ran if "-V" not in argv and _socket_of(argv) != PRIVATE_SOCKET]
     assert not wrong, f"a UI test addressed a tmux socket that is not the test's: {wrong[:2]}"
 
 
 def register(
     root: Path, *, project_id: str = "prj_spawn", codename: str = "amber-otter"
 ) -> ProjectInfo:
-    """A project in the isolated store, with its codename, rooted at ``root``."""
+    """A project in the isolated store, with its codename, rooted at ``root``.
+
+    Onboarded, not merely registered: since #139 a project the hooks captured is
+    kept but not SHOWN, and the spawn row these tests click belongs to a listed
+    project — the same call ``test_ui_shell.seed`` makes.
+    """
     root.mkdir(parents=True, exist_ok=True)
     with store_session() as store:
-        store.ensure_project(ProjectInfo(id=project_id, root=root))
+        store.onboard_project(ProjectInfo(id=project_id, root=root))
         return store.set_codename(project_id, codename)
 
 

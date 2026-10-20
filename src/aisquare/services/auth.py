@@ -9,7 +9,7 @@ through ``services/iam.py``.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 from aisquare.services import iam
 
@@ -76,16 +76,29 @@ def sign_in_with_token(api_url: str, token: str) -> iam.Session:
     return session
 
 
-def sign_out(session: iam.Session) -> bool:
-    """Revoke on the server when it can be reached, then forget locally. Returns ``revoked``."""
+class SignedOut(NamedTuple):
+    """What :func:`sign_out` did.
+
+    ``revoked``: the server revoked the session. ``restricted``: the
+    credentials file left behind is still this account's alone. The service
+    says so on stderr when it is not, which the fleet UI never shows, so the
+    answer comes back with the result, as ``Session.unrestricted`` does for a
+    sign-in.
+    """
+
+    revoked: bool
+    restricted: bool
+
+
+def sign_out(session: iam.Session) -> SignedOut:
+    """Revoke on the server when it can be reached, then forget locally."""
     revoked = False
     try:
         endpoints = iam.discover(session.api_url)
         revoked = iam.revoke(endpoints, session.token)
     except iam.IamError:
         revoked = False
-    iam.clear_session()
-    return revoked
+    return SignedOut(revoked=revoked, restricted=iam.clear_session())
 
 
 def live_check(session: iam.Session) -> dict[str, Any]:

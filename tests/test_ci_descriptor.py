@@ -273,3 +273,20 @@ def test_a_refusal_against_one_endpoint_does_not_silence_another(
 
     assert result.descriptor is not None, "a different endpoint gets its own answer"
     assert not result.from_cache
+
+
+def test_the_descriptor_cache_pays_no_fsync_on_the_hook_path(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_write_cache` runs in the first hook of every session; a cache lost to a crash is a
+    refetch, so it takes the atomic rename without the two fsyncs the preference files pay."""
+    import os
+
+    from aisquare.core import paths
+    from aisquare.services import ci_descriptor
+
+    synced: list[int] = []
+    monkeypatch.setattr(os, "fsync", lambda fd: synced.append(fd))
+    ci_descriptor._write_cache("run-hook", "{}")
+    assert paths.ci_descriptor_path("run-hook").read_text() == "{}"
+    assert synced == []

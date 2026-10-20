@@ -119,6 +119,19 @@ DOCUMENTED = (
     ".github/ISSUE_TEMPLATE/bug_report.md",
     "docs/runbooks/MORNING-HANDOFF.md",
     "docs/signing-in.md",
+    # The Claude Code plugin route: `remember`, `doctor` and the `agents
+    # disconnect` that keeps one route are steps the reader types. The `/plugin`
+    # lines are Claude Code input, fenced `text`, which this guard does not read.
+    "docs/claude-code-plugin.md",
+    # The README's long form, moved out when the README became a front page
+    # (roadmap 9.5). Its fenced commands moved with it and are still steps a
+    # reader types, so each page is listed in its own right; the command tree
+    # lives in docs/reference.md now (TREE_DOCUMENT below).
+    "docs/install.md",
+    "docs/memory.md",
+    "docs/orchestration.md",
+    "docs/reference.md",
+    "docs/platform.md",
     # The fleet's user guide. Its command reference is fenced `sh` on purpose:
     # every `aisquare fleet …` line there is a step the reader types, so a flag
     # that leaves the CLI must fail here (docs/plans/fleet-tui.md §5, §10).
@@ -133,6 +146,8 @@ DOCUMENTED = (
     # The live-wiring handoff: doctor, the hooks by hand, metrics — all meant to
     # be typed against the staging server.
     "docs/ci-live-wiring-handoff.md",
+    # Phone control: serve, allow-write, needs, revoke, regenerate-password.
+    "docs/remote.md",
 )
 
 #: Directories the staleness sweep never enters. Everything else under the repo
@@ -141,9 +156,22 @@ DOCUMENTED = (
 #: asks a user to run a command and sat outside a root-plus-docs sweep.
 #: `.claude` holds Claude Code's own worktrees (`.claude/worktrees/<name>` — full
 #: checkouts of this repo), so without it every document would be swept once per
-#: live worktree and reported as an unlisted copy of itself.
+#: live worktree and reported as an unlisted copy of itself. `.aisquare-worktrees`
+#: is the fleet's own worktree directory (`core.config` `worktree_dir`, which
+#: `fleet spawn` keeps out of git through `.git/info/exclude`, not `.gitignore`):
+#: the same shape, and a developer who runs the fleet on this repo had every page
+#: reported three times over, once per coder, tester and reviewer.
 _SWEEP_EXCLUDES = frozenset(
-    {".venv", ".git", ".claude", "node_modules", "site-packages", "build", "dist"}
+    {
+        ".venv",
+        ".git",
+        ".claude",
+        ".aisquare-worktrees",
+        "node_modules",
+        "site-packages",
+        "build",
+        "dist",
+    }
 )
 
 FENCE = re.compile(r"^\s*(?:>\s*)*```+\s*([A-Za-z0-9_-]*)\s*$")
@@ -785,8 +813,13 @@ def test_the_convention_survives_a_widening_in_both_directions() -> None:
     )
 
 
+#: The page that draws the command tree. It was the README until the README
+#: became a front page (roadmap 9.5); the tree moved, verbatim, to the reference.
+TREE_DOCUMENT = "docs/reference.md"
+
+
 def test_the_command_tree_has_no_deleted_flags() -> None:
-    """The README's reference tree is not copy-pasteable, and was still wrong.
+    """The reference tree is not copy-pasteable, and was still wrong.
 
     `launch <planner|coder|runner> [--account DIR]` named a flag deleted a train
     earlier. The fenced-code guard above cannot see it: tree lines start with a
@@ -796,8 +829,8 @@ def test_the_command_tree_has_no_deleted_flags() -> None:
     once, so a flag counts as valid anywhere under its top-level command. That
     is still enough to catch a flag that exists nowhere, which is the defect.
     """
-    text = (REPO / "README.md").read_text(encoding="utf-8")
-    assert _tree_lines(text), "no command tree in the README — this guard sees nothing"
+    text = (REPO / TREE_DOCUMENT).read_text(encoding="utf-8")
+    assert _tree_lines(text), f"no command tree in {TREE_DOCUMENT} — this guard sees nothing"
 
     stale, checked = _stale_tree_flags(text)
 
@@ -812,7 +845,7 @@ def test_the_tree_guard_bites_on_a_flag_that_does_not_exist() -> None:
     `--account not under launch`. Doing it here means the ability to bite is
     re-earned on every commit rather than resting on one afternoon's check.
     """
-    text = (REPO / "README.md").read_text(encoding="utf-8")
+    text = (REPO / TREE_DOCUMENT).read_text(encoding="utf-8")
     spiked = text.replace("├── serve ", "├── serve [--nosuchflag] ", 1)
     assert spiked != text, "the anchor line moved — this bite-check is not spiking anything"
 
@@ -888,19 +921,50 @@ _NOT_AN_INVOCATION = (
 CENSUS = {
     ".github/ISSUE_TEMPLATE/bug_report.md": (1, 0),
     "docs/runbooks/MORNING-HANDOFF.md": (1, 0),
-    # Re-measured 2026-09-05 when `project forget` / `project prune` (#83) added a
-    # fenced example to the memory section.
-    "README.md": (58, 5),
-    "docs/connecting-your-agents-to-explainability.md": (11, 4),
+    # Re-measured 2026-10-07 when the README became a front page (roadmap 9.5):
+    # the two quickstarts and the plain-command block, with the `uv tool install`
+    # line and the installer URL as the two classified mentions. The 82 commands
+    # it carried before moved, unchanged, into the five pages below.
+    "README.md": (5, 2),
+    # Measured 2026-10-07 on the day the page was written: three fenced commands
+    # and three classified mentions (`aisquare-cli` and `aisquare@aisquare-cli`
+    # in the `claude plugin` and `uv tool install` lines).
+    "docs/claude-code-plugin.md": (3, 3),
+    # Measured 2026-10-07 on the day they were split out of the README; their
+    # commands summed to the README's 82 before the split. Re-measured the same
+    # day at (3, 3) for install.md, when it stopped repeating the first-run
+    # walkthrough and the README's plain-command block (review of #245); those
+    # three commands are the README's now. Re-measure when they grow.
+    "docs/install.md": (3, 3),
+    "docs/memory.md": (23, 0),
+    # Re-measured 2026-10-13 at (52, 3) when rc/0.8.1 moved #243's Phone control
+    # section here from the README, where it sat among this page's sections: its
+    # `remote serve` and `allow-write on`, and the `aisquare-cli[remote]` install.
+    "docs/orchestration.md": (52, 3),
+    # One resolved line, and it is the command tree's root (`aisquare` alone in
+    # the bare fence); the tree itself is checked by the tree tests instead.
+    "docs/reference.md": (1, 1),
+    "docs/platform.md": (2, 1),
+    # Re-measured 2026-09-13 when "Choose where traces land with your sign-in"
+    # (#142) added its fence: 20 commands, the same four classified mentions.
+    # Re-measured 2026-09-24 at 21 when #142 took in #141's review (its key
+    # section gained the `register` step; the parent had grown to 15 unrecorded).
+    "docs/connecting-your-agents-to-explainability.md": (21, 4),
     "docs/explainability-tracing-boundary.md": (2, 0),
     "docs/runbooks/explainability-prod-cutover.md": (18, 37),
     "docs/signing-in.md": (8, 0),
     # Measured 2026-08-28 the same way, on the day the document was written: 29
     # fenced commands (the reference plus troubleshooting) and one classified
-    # mention (the `aisquare-cli[tui]` pip requirement). Re-measure when it grows.
-    # Re-measured 2026-09-15 when `fleet spawn --persona` joined the reference:
-    # 41 — the page had grown to 40 (the Accounts section) without a re-measure.
-    "docs/fleet.md": (41, 1),
+    # mention (the `aisquare-cli[tui]` pip requirement). Re-measured 2026-09-10 at
+    # 33 when `fleet shutdown` added its reference section and replaced the
+    # troubleshooting `tmux kill-server` block with two scoped invocations.
+    # Re-measured 2026-09-13 when the groups / pins / order block (#140) took the
+    # document to 64 — the batch of fleet PRs before it (#138 to #144) had
+    # already left the record under half of reality, which is exactly the drift
+    # this floor exists to catch — and again 2026-09-24 at 69 when #140 took in
+    # what reached it since (`fleet shutdown`, `fleet restart --permission-mode`).
+    # Re-measure when it grows.
+    "docs/fleet.md": (69, 1),
     # Two commands in the smoke block; the export line is upper-case and is not a
     # mention this audit sees.
     "docs/ci-contract.md": (2, 0),
@@ -918,6 +982,9 @@ CENSUS = {
     # command (setup, the persona verbs, the hook, launch, fleet spawn/ls/stop,
     # persona attach, board) and one classified mention (the `/tmp/aisquare-demo` path).
     "docs/plans/hackathon-demo.md": (14, 1),
+    # Measured 2026-10-07, the day it was written: nine commands, and two
+    # mentions (the `aisquare-cli[remote]` requirement, `~/.aisquare/remote-dist`).
+    "docs/remote.md": (9, 2),
 }
 
 
@@ -1269,6 +1336,27 @@ def test_the_staleness_detector_sweeps_where_documents_actually_live(tmp_path: P
     assert ".github/ISSUE_TEMPLATE/bug.md" in _staleness_sweep(tmp_path), (
         "a page under .github showing a command is invisible to the detector"
     )
+
+
+def test_the_staleness_sweep_skips_the_fleet_s_own_worktrees(tmp_path: Path) -> None:
+    """A coder's worktree is a full checkout of this repo inside it, not a new page.
+
+    `fleet spawn coder` makes `.aisquare-worktrees/<label>` beside `.venv` and
+    keeps it out of git through `.git/info/exclude`; the sweep walks the
+    filesystem, so on a developer's machine with a fleet up every documented
+    page came back as an unlisted copy of itself, once per agent. Claude Code's
+    `.claude/worktrees` had the same treatment already.
+    """
+    page = tmp_path / "docs" / "new-page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("```sh\naisquare doctor\n```\n", encoding="utf-8")
+    copy = tmp_path / ".aisquare-worktrees" / "coder-auth" / "docs" / "new-page.md"
+    copy.parent.mkdir(parents=True)
+    copy.write_text(page.read_text(encoding="utf-8"), encoding="utf-8")
+
+    unlisted = _staleness_sweep(tmp_path)
+    assert "docs/new-page.md" in unlisted, unlisted
+    assert not [path for path in unlisted if ".aisquare-worktrees" in path], unlisted
 
 
 def test_the_staleness_detector_uses_the_same_rule_as_the_extractor(tmp_path: Path) -> None:

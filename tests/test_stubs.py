@@ -23,6 +23,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("why",),
     ("status",),
     ("doctor",),
+    ("upgrade",),
+    ("uninstall",),
     ("log",),
     ("note",),
     ("board",),
@@ -43,11 +45,14 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "status",
             "tell",
             "stop",
+            "restart",
+            "shutdown",
             "attach",
             "reap",
             "rename",
             "pause",
             "resume",
+            "switch",
         )
     ),
     ("explainability", "status"),
@@ -56,8 +61,14 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("explainability", "disable"),
     ("explainability", "register"),
     ("explainability", "ship"),
+    ("explainability", "key"),
+    ("explainability", "workspaces"),
+    ("explainability", "studios"),
+    ("explainability", "use"),
     ("hook", "session-start"),
     ("hook", "user-prompt-submit"),
+    ("hook", "stop-failure"),
+    ("hook", "hand-over"),
     ("hook", "session-end"),
     ("hook", "stop"),
     ("hook", "notification"),
@@ -77,6 +88,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "spawn",
             "harness",
             "bind",
+            "read-env-file",
         )
     ),
     *(
@@ -114,11 +126,44 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     *(
         (group, command)
         for group in ("project", "workspace")
-        for command in ("info", "list", "switch", "link", "onboard", "forget", "prune")
+        for command in (
+            "info",
+            "list",
+            "switch",
+            "link",
+            "rename",
+            "onboard",
+            "forget",
+            "prune",
+            "pin",
+            "unpin",
+            "move",
+            "group",
+        )
     ),
-    *(("config", command) for command in ("list", "get", "set", "redaction")),
-    *(("agents", command) for command in ("list", "scan", "status", "connect", "disconnect")),
-    *(("accounts", command) for command in ("list", "usage", "add", "remove", "run")),
+    *(("config", command) for command in ("list", "get", "set", "redaction", "reset")),
+    *(
+        ("agents", command)
+        for command in ("list", "scan", "status", "connect", "disconnect", "refresh-hooks")
+    ),
+    *(
+        ("accounts", command)
+        for command in (
+            "list",
+            "usage",
+            "add",
+            "remove",
+            "run",
+            "default",
+            "alias",
+            "order",
+            "move",
+            "disable",
+            "enable",
+            "trust",
+            "settings",
+        )
+    ),
     *(("metrics", command) for command in ("show", "list")),
     *(
         ("persona", command)
@@ -132,6 +177,18 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "import",
             "export",
             "attach",
+        )
+    ),
+    *(
+        ("remote", command)
+        for command in (
+            "serve",
+            "install-page",
+            "status",
+            "allow-write",
+            "regenerate-password",
+            "revoke",
+            "needs",
         )
     ),
 }

@@ -4,26 +4,46 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aisquare-cli"
-version = "0.6.0"
-description = "Portable memory layer for coding agents — persistent user and project context across sessions."
+version = "0.8.2"
+description = "One terminal over your projects and your coding agents: task a manager in plain words, and it runs the coders, testers and reviewers for you."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "AISquare", email = "anmol@aisquare.studio" }]
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["cli", "ai", "agents", "memory", "context"]
+keywords = [
+  "cli",
+  "tui",
+  "terminal",
+  "coding-agents",
+  "ai-agents",
+  "claude-code",
+  "multi-agent",
+  "agent-orchestration",
+  "agent-memory",
+  "tmux",
+  "developer-tools",
+]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 4 - Beta",
   "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  # The CLI and memory run natively, and CI tests windows-latest. The fleet UI
+  # needs tmux, so on Windows it runs inside WSL2.
+  "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development",
   "Typing :: Typed",
 ]
 dependencies = [
   "typer>=0.26.8",
-  "rich>=13.7",
+  "rich>=14.3",  # rich.cells.split_graphemes (cli/ui/terminal) exists from 14.3.0
   "pydantic>=2.13.4",
   "tomli-w>=1.2.0",
   # Core since the fleet UI became the default surface (bare `asq` opens it —
@@ -38,6 +58,16 @@ dependencies = [
   # capped at 16 KB, imported inside core/personas.py's parser so the hook path
   # and `aisquare status` pay nothing for it.
   "pyyaml>=6.0",
+  # Windows ships no IANA time zone database, and `zoneinfo` falls back to this
+  # package for one. Without it `ZoneInfo("America/Toronto")` raises there, so a
+  # limit message's named zone was dropped for the offset in force NOW, and a
+  # weekly reset across a DST change came out an hour off: the bug round 4 of
+  # #205 fixed, back on one platform (core/claude_accounts._resolve_reset).
+  # Linux and macOS read /usr/share/zoneinfo and do not install it.
+  "tzdata; sys_platform == 'win32'",
+  # The Remote modal's QR (cli/ui/views/remote.py). Pure python, typed, one
+  # module; imported lazily by the QR renderer only.
+  "segno>=1.6",
 ]
 
 [project.optional-dependencies]
@@ -87,6 +117,23 @@ explainability = [
   # join the proxy's Run instead of fragmenting into one Run per drain.
   "aisquare[explainability]>=1.1",
 ]
+remote = [
+  # `asq remote serve` and the fleet UI's Remote modal (services/remote_server.py):
+  # one local HTTP+WebSocket port that ngrok exposes to a phone. starlette and
+  # uvicorn are the SAME two the serve extra already resolves through mcp;
+  # websockets is the ONE addition (uvicorn's WebSocket backend — without it
+  # the /ws stream answers "No supported WebSocket library detected").
+  "starlette>=0.40",
+  "uvicorn>=0.30",
+  "websockets>=12",
+  # Web Push (services/remote_push.py): the RFC 8291 encryption and the RFC 8292
+  # VAPID signature are P-256 ECDH, AES-GCM and ES256, none of which the stdlib
+  # has. Until now it arrived only through mcp -> pyjwt[crypto], declared by
+  # nothing here. Required by this extra; Remote still runs without it, minus
+  # Web Push, and the page says how to get it. A floor, not a pin: every call
+  # used (ECDH, AESGCM, from_encoded_point, decode_dss_signature) is far older.
+  "cryptography>=42",
+]
 tui = [
   # Kept as a no-op alias for one release: `pipx install 'aisquare-cli[tui]'`
   # was the documented way to get the board TUI before textual became core.
@@ -132,13 +179,24 @@ dev = [
   "types-jsonschema>=4.18",
   # PyYAML ships no py.typed; mypy runs strict over src and tests.
   "types-PyYAML>=6.0",
-  # tests/test_packaging.py builds the wheel from this tree to assert the
-  # bundled personas' SKILL.md files ship in it. Same floor as build-system.
-  "hatchling>=1.30.1",
   # The `llm` extra's SDK, so mypy --strict checks the persona import's api engine
   # against the real `messages.parse` signature (the `mcp`/`serve` precedent).
   # Tests never call it: they install a fake `anthropic` module.
   "anthropic>=1",
+  # The remote extra's one addition, so the dev env can run tests/test_remote_server.py
+  # (starlette + uvicorn already arrive through mcp above).
+  "websockets>=12",
+  # starlette's TestClient, which the remote server tests drive; mcp 2.x no
+  # longer brings it.
+  "httpx>=0.27",
+  # The remote extra's Web Push crypto, so tests/test_remote_push.py runs on the
+  # CI's dev-only install rather than on whatever mcp happens to pull in.
+  "cryptography>=42",
+  # tests/test_remote_page.py builds the sdist and the wheel from it, to prove the
+  # bundled page ships; without the backend in the env it skipped in every CI job.
+  # tests/test_packaging.py builds the wheel too, to assert the bundled personas'
+  # SKILL.md files ship in it. Same floor as build-system.
+  "hatchling>=1.30.1",
 ]
 
 [project.scripts]
@@ -149,9 +207,15 @@ asq = "aisquare.cli.app:main"
 Homepage = "https://aisquare.studio"
 Repository = "https://github.com/AISquare-Studio/aisquare-cli"
 Issues = "https://github.com/AISquare-Studio/aisquare-cli/issues"
+Changelog = "https://github.com/AISquare-Studio/aisquare-cli/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aisquare"]
+
+[tool.hatch.build.targets.sdist]
+# The demo's renders (docs/demo.tape) are pictures for the README and the
+# release notes, re-rendered rather than built from; no build reads them.
+exclude = ["/docs/demo.gif", "/docs/demo/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -60,10 +60,16 @@ otherwise inherit a live identity:
   * ``services/distill.py::spawn_drain`` — a detached ``aisquare team distill``
     of our own. A background worker of ours is not an agent session and has no
     business wearing one's identity.
+  * ``services/hooks.py::_detach`` — a detached ``aisquare hook hand-over`` of
+    our own, for the same reason; it also outlives the pane whose hook started
+    it, which is the whole point of detaching it.
 
 Excluded, nothing stripped — these are not model processes at all, and
 narrowing their environment would be change without a reason:
   * ``core/brain.py::gbrain_version`` — ``gbrain --version``, a string.
+  * ``core/claude_accounts.py::_ask_keychain`` — ``/usr/bin/security
+    find-generic-password`` on macOS: the Claude Code login an account's
+    Keychain item holds, read for its usage. No model.
   * ``core/agents.py::hook_binary_version`` — ``<hook's aisquare> --version``,
     a string: doctor asking another install of this CLI what version it is,
     so hooks that name a stale binary stop grading as healthy (#84).
@@ -71,7 +77,7 @@ narrowing their environment would be change without a reason:
     doctor's repomix line, which has to gate on the floor repomix declares
     (``node >= 22``) rather than on whether ``npx`` exists.
   * ``core/snapshot.py::head_sha`` and ``core/workspace.py::git_common_root`` —
-    ``git rev-parse``.
+    ``git rev-parse``; stripped, as every git seam is (:func:`git_env`).
   * ``services/ci_snapshot.py::_git`` — the CI test bed's snapshot plumbing
     (``stash create``, ``update-ref``, ``rev-parse``, ``remote get-url``). No
     model; stripped anyway because it runs inside a traced session's hook and
@@ -79,8 +85,33 @@ narrowing their environment would be change without a reason:
   * ``core/snapshot.py::_run_repomix`` — repomix packs files; no model.
   * ``core/editor.py::edit_text`` — the operator's ``$EDITOR``. It is theirs,
     and it should get their environment.
+  * ``core/clipboard.py::write`` — the platform's clipboard tool (``pbcopy``,
+    ``clip.exe``, ``wl-copy``, ``xclip``, ``xsel``), handed a copy's text on
+    stdin. No model.
+  * ``core/clipboard.py::_ask`` — ``tmux show-environment SSH_CONNECTION`` in the
+    user's own tmux, and ``ps`` for this process's ancestors: whether the session
+    is remote. Strings, no model.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
+  * ``core/paths.py::restrict_to_owner`` — ``icacls``, locking the
+    credentials file to this account on Windows. A permissions tool, not a
+    model process; it is also the seam that guards the API key, so an
+    inherited base URL is irrelevant to it either way.
+  * ``core/paths.py::_whoami_sid`` — ``whoami /user``, reading this
+    account's SID so the ``icacls`` above can name a trustee that cannot be
+    spoofed by a stray ``USER`` in the environment. Same argument as its
+    caller.
   * ``services/explainability_ops.py::install_sdk`` — ``pip install``.
+  * ``services/install_route.py::run_installer`` — ``uv tool install --force``,
+    ``aisquare upgrade`` replacing its own install. A package manager, not a
+    model process.
+  * ``services/install_route.py::run_captured`` — the NEW install after an
+    upgrade, asked ``--version`` and ``agents refresh-hooks``. Our own CLI, like
+    ``core/selfcli.py::run`` below.
+  * ``services/install_route.py::exec_replace`` — ``uv tool uninstall``, the
+    last step of ``aisquare uninstall``, which this process becomes.
+  * ``core/selfcli.py::exec_self`` — asq handing its terminal to ``aisquare
+    upgrade`` or ``uninstall`` (the Doctor view's buttons), and ``upgrade
+    --reopen`` opening asq again. Our own CLI, like ``core/selfcli.py::run``.
   * ``services/explainability_ops.py::sdk_doctor`` — the SDK's own doctor
     script. Not stripped: it needs the ``EXPLAINABILITY_*`` environment to
     diagnose the machine it is running on.
@@ -93,8 +124,11 @@ Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
     same reason ``sdk_doctor`` is not.
   * ``cli/fleet.py::_exec_attach`` — ``tmux attach``, a terminal client.
   * ``services/fleet.py::_git`` — ``git worktree`` (add, remove, list) and the
-    branch queries behind ``fleet reap`` (§3.5); no model, not stripped, like
-    the other git seams.
+    branch queries behind ``fleet reap`` (§3.5); no model, stripped, as every git
+    seam is (:func:`git_env`).
+  * ``services/ngrok_tunnel.py::popen_tied`` — the R panel's ngrok, under the
+    parent that ends it with this process; a tunnel to ``127.0.0.1``, no model,
+    not stripped.
 
 Checked and NOT a seam, recorded so the next reader does not re-derive it:
   * ``services/project.py`` — catches ``subprocess.SubprocessError`` but starts
@@ -203,6 +237,13 @@ SEAMS: dict[str, Seam] = {
         "a detached `aisquare team distill` of ours — a background worker is not an agent session",
         strips_identity=True,
     ),
+    "aisquare/services/hooks.py::_detach": Seam(
+        EXCLUDED,
+        "a detached `aisquare hook hand-over` of ours (#146; review of #205, finding 1) — the "
+        "worker that moves a limited agent is not an agent session, and it outlives the pane "
+        "whose hook started it",
+        strips_identity=True,
+    ),
     "aisquare/cli/accounts.py::_exec": Seam(
         EXCLUDED,
         "`aisquare accounts run` replaces itself with a plain Claude Code session on one "
@@ -217,6 +258,11 @@ SEAMS: dict[str, Seam] = {
         strips_identity=True,
     ),
     "aisquare/core/brain.py::gbrain_version": Seam(EXCLUDED, "`gbrain --version`, a string"),
+    "aisquare/core/claude_accounts.py::_ask_keychain": Seam(
+        EXCLUDED,
+        "`/usr/bin/security find-generic-password` on macOS — reads the login Claude Code keeps "
+        "in an account's Keychain item, for its usage; a string, no model",
+    ),
     "aisquare/core/agents.py::hook_binary_version": Seam(
         EXCLUDED,
         "`<the aisquare a hook names> --version`, a string — doctor asking another "
@@ -224,12 +270,16 @@ SEAMS: dict[str, Seam] = {
         "grading as healthy (#84). An eager callback that exits before any command "
         "runs; no model process",
     ),
-    "aisquare/core/snapshot.py::head_sha": Seam(EXCLUDED, "`git rev-parse HEAD`"),
+    "aisquare/core/snapshot.py::head_sha": Seam(
+        EXCLUDED, "`git rev-parse HEAD`, in `git_env()`", strips_identity=True
+    ),
     "aisquare/core/snapshot.py::node_version": Seam(
         EXCLUDED, "`node --version`, a string — the floor repomix declares"
     ),
     "aisquare/core/snapshot.py::_run_repomix": Seam(EXCLUDED, "repomix packs files; no model"),
-    "aisquare/core/workspace.py::git_common_root": Seam(EXCLUDED, "`git rev-parse`"),
+    "aisquare/core/workspace.py::git_common_root": Seam(
+        EXCLUDED, "`git rev-parse`, in `git_env()`", strips_identity=True
+    ),
     "aisquare/services/ci_snapshot.py::_git": Seam(
         EXCLUDED,
         "git plumbing for the CI turn snapshot — a child of a traced hook is not the agent",
@@ -238,11 +288,46 @@ SEAMS: dict[str, Seam] = {
     "aisquare/core/editor.py::edit_text": Seam(
         EXCLUDED, "the operator's $EDITOR — it is theirs, it gets their environment"
     ),
+    "aisquare/core/clipboard.py::write": Seam(
+        EXCLUDED, "the platform's clipboard tool, handed a copy's text on stdin; no model"
+    ),
+    "aisquare/core/clipboard.py::_ask": Seam(
+        EXCLUDED, "`tmux show-environment` and `ps`, asking whether the session is remote"
+    ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"
     ),
+    "aisquare/core/paths.py::restrict_to_owner": Seam(
+        EXCLUDED, "`icacls` — locks the credentials file to this account; no model"
+    ),
+    "aisquare/core/paths.py::_whoami_sid": Seam(
+        EXCLUDED,
+        "`whoami /user` — reads THIS account's SID for the icacls trustee above. "
+        "An identity question about the operating system, not the model API",
+    ),
     "aisquare/services/explainability_ops.py::install_sdk": Seam(
         EXCLUDED, "`pip install` — reaches PyPI, never the model API"
+    ),
+    "aisquare/services/install_route.py::run_installer": Seam(
+        EXCLUDED,
+        "`uv tool install --force` for `aisquare upgrade` — a package manager reaching an "
+        "index, never the model API; not stripped, like `install_sdk`",
+    ),
+    "aisquare/services/install_route.py::run_captured": Seam(
+        EXCLUDED,
+        "the upgraded install asked `--version` and `agents refresh-hooks`: our own CLI as "
+        "a subprocess, no model process; not stripped, like `core/selfcli.py::run`",
+    ),
+    "aisquare/services/install_route.py::exec_replace": Seam(
+        EXCLUDED,
+        "`uv tool uninstall` replacing this process as the last step of `aisquare "
+        "uninstall` — a package manager, never the model API; not stripped",
+    ),
+    "aisquare/core/selfcli.py::exec_self": Seam(
+        EXCLUDED,
+        "asq handing its terminal to `aisquare upgrade`/`uninstall`, and `upgrade "
+        "--reopen` opening asq again: our own CLI replacing this process (a waited "
+        "child on Windows). Starts no model process; not stripped, like `run`",
     ),
     "aisquare/services/explainability_ops.py::sdk_doctor": Seam(
         EXCLUDED,
@@ -275,8 +360,21 @@ SEAMS: dict[str, Seam] = {
     "aisquare/services/fleet.py::_git": Seam(
         EXCLUDED,
         "`git worktree add/remove/list` and `git branch --merged` for the fleet's "
-        "per-coder worktrees (docs/plans/fleet-tui.md §3.5). No model process; not "
-        "stripped, like the other git seams",
+        "per-coder worktrees (docs/plans/fleet-tui.md §3.5). No model process; "
+        "stripped, as every git seam is (`git_env()`)",
+        strips_identity=True,
+    ),
+    "aisquare/core/tmux.py::_sysctl": Seam(
+        EXCLUDED,
+        "`sysctl -n kern.bootsessionuuid` (macOS) or `kern.boottime` (macOS, the BSDs), at a "
+        "fleet spawn and when uninstall, upgrade and fleet shutdown ask whether an agent may "
+        "still run; an identifier and a time, no model",
+    ),
+    "aisquare/services/ngrok_tunnel.py::popen_tied": Seam(
+        EXCLUDED,
+        "the R panel's ngrok, run by a small Python parent (`-I`) that ends its process "
+        "group once this process is gone. A tunnel to 127.0.0.1, never the model API; not "
+        "stripped, like `tmux attach`",
     ),
 }
 
@@ -293,3 +391,23 @@ def untraced_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     """
     source = os.environ if base is None else base
     return {key: value for key, value in source.items() if key not in IDENTITY_ENV_VARS}
+
+
+def git_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment of every git command aisquare runs: ``base`` (default the current
+    environment) without the tracing identity (:func:`untraced_env`), with
+    ``GIT_OPTIONAL_LOCKS=0`` and ``GIT_TERMINAL_PROMPT=0``.
+
+    No git aisquare runs is a model process, and one started from a traced session's hook is
+    not the agent, so none keeps the identity. ``GIT_OPTIONAL_LOCKS=0``: a command that only
+    reads takes no optional lock, so a ``git status`` never writes the index back under the
+    developer's own git or a fleet agent's ``checkout`` (review of #259, round 20); the
+    variable, not ``--no-optional-locks``, which a git before 2.15 refuses (round 27, 4/7).
+    ``GIT_TERMINAL_PROMPT=0``: git fails rather than wait on a credential prompt no one sees.
+    The one place they are set: the fleet's seam and the CI snapshot's had drifted apart,
+    so a fix to one did not reach the other (round 28, 10/10).
+    """
+    env = untraced_env(base)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env

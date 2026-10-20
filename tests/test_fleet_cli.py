@@ -1000,10 +1000,38 @@ def test_all_prints_one_line_per_agent_by_project_then_the_count_and_exits_1_on_
     assert _lines(result.stdout) == [
         "api",
         f"  ✓ {'manager':<24} {'manager':<10} stopped and restarted — resumed its session",
+        "      · launch replayed",
         f"  · {'coder-auth':<24} {'coder':<10} skipped — task is done",
         "web",
         f"  ✗ {'coder-web':<24} {'coder':<10} failed — cannot restart 'coder-web': tmux said no",
         "restarted 1 · skipped 1 · failed 1",
+    ]
+
+
+def test_all_prints_a_restart_s_notes_as_fleet_restart_does_and_marks_what_failed(
+    runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #266, round 2: ``--all`` printed a restart's failures alone, and dropped
+    the account ladder's note that one ``fleet restart`` prints."""
+    agent = _agent("coder-auth")
+    typed = "the agent exited before the prompt could be typed"
+    receipt = RestartReceipt(
+        replaced=agent,
+        started=agent.model_copy(update={"id": f"{agent.id}2"}),
+        resumed=False,
+        was_running=False,
+        tmux_session=SESSION,
+        notes=["accounts: slot 2 is at its limit; used slot 3", typed],
+        failures=[typed],
+    )
+    report = BulkReport("restart", False, (BulkReceipt(PROJECT, agent, "done", result=receipt),))
+    _bulk(monkeypatch, report)
+
+    result = runner.invoke(app, ["fleet", "restart", "--all"])
+
+    assert _lines(result.stdout)[2:4] == [
+        "      · accounts: slot 2 is at its limit; used slot 3",
+        f"      ⚠ {typed}",
     ]
 
 

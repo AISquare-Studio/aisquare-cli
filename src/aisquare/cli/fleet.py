@@ -648,7 +648,7 @@ def _bulk(
 
 
 def _bulk_lines(receipt: fleet_service.BulkReceipt) -> list[str]:
-    """One agent's line in ``--all``'s output, and what did not happen under it."""
+    """One agent's line in ``--all``'s output, and its notes under it."""
     agent, result = receipt.agent, receipt.result
     if receipt.outcome == "skipped":
         said, mark = f"skipped — {receipt.why}", "·"
@@ -661,7 +661,10 @@ def _bulk_lines(receipt: fleet_service.BulkReceipt) -> list[str]:
         said, mark = "stopped", "✓"
     lines = [f"  {mark} {agent.label:<24} {agent.role:<10} {said}"]
     if isinstance(result, fleet_service.RestartReceipt):
-        lines.extend(f"      ⚠ {failure}" for failure in result.failures)
+        # Every note `fleet restart` prints (the account ladder's, the launch replayed), and
+        # the ones that say what did not happen marked: each failure is among the notes.
+        failures = set(result.failures)
+        lines.extend(f"      {'⚠' if note in failures else '·'} {note}" for note in result.notes)
     if receipt.release_failed:
         lines.append(f"      ⚠ claims: {receipt.release_failed}")
     return lines

@@ -370,7 +370,9 @@ stopped. Some agents are left alone, and each is named with the reason:
   exited or was stopped meanwhile is not started again, and its 💤 window stays.
 
 The agents are taken one at a time, each project's manager first. Each one is printed
-as it is done, under its project's name, and the count comes last:
+as it is done, under its project's name, and the count comes last. A restart's notes
+follow its line, as `fleet restart` prints them, with ⚠ on the ones that say what
+didn't happen:
 
 ```text
 alpha

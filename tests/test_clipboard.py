@@ -391,6 +391,7 @@ def test_a_tmux_created_over_ssh_is_local_once_tmux_says_its_last_attach_was(
     assert clipboard.session_is_remote({**env, "CODESPACES": "true"}), "a Codespace is remote"
 
 
+@NEEDS_POSIX
 def test_inside_the_user_s_tmux_the_writer_is_never_taken_from_the_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

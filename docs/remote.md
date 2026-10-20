@@ -413,7 +413,7 @@ From an agent's **Actions…** menu, or from a card:
 | --- | --- |
 | Tell (from the menu) | typed into the agent's prompt when it is waiting there; otherwise left as a board note it reads at its next prompt |
 | Tell (from a card) | typed now, and refused if the agent is working or showing a dialog of its own |
-| Interrupt & tell | one Esc stops what the agent is doing; the message is typed once it is back at its prompt |
+| Interrupt & tell | one Esc stops what the agent is doing; the message is typed once it is back at its prompt. An agent whose screen shows its empty prompt with no turn running (Codex) gets no Esc: there is nothing to stop, and after an Esc from the pad a second one opens its transcript |
 
 When an agent is working, a card's Tell offers **Interrupt & tell** instead.
 Neither types into an agent parked on its usage limit (`agent_busy`): a message

@@ -367,6 +367,30 @@ adapter.**
 
 ### Fixed
 
+- Remote's Interrupt & tell types its line with no Esc into a Codex agent whose
+  screen shows its empty prompt with no turn running. It always pressed Esc
+  first. After one Esc from the key pad at Codex's idle prompt, that was the
+  second, which opens Codex's transcript, where Enter rewinds the conversation:
+  the tell ended "has not stopped yet" and left Codex there. A turn on screen
+  still gets its one Esc, and Claude Code is unchanged.
+- The Transcript tab shows a Codex prompt that opens with a tag of its own
+  (`<task>…</task> …`) under `> you`. Any tag held closed was taken for Codex's
+  own context, so the prompt was missing, and Remote read the agent's newest
+  record as its own until it answered. Codex's own tags are now the ones it
+  writes (measured on 0.162.1).
+- A fleet agent from before adapters (no agent recorded) at its usage limit is
+  Claude Code's to Remote's push and to the limit's hook, as it is to the
+  hand-over that moves it. A signed-in Codex account counted as somewhere to
+  go: the hook started a hand-over that could only refuse and post "not
+  switched", and Remote held the limit's push 90 s for it.
+- `accounts trust --sync` gives an account every folder its file takes when it
+  refuses one. A Codex `config.toml` holding a `[projects."<dir>"]` table with
+  no `trust_level` failed the whole account. Now the refused folder is
+  reported, and the others are written.
+- Remote's needs-you scan no longer captures a Codex agent's pane while its
+  hooks and its listing both say a turn runs. None of the dialogs it looks for
+  is drawn then, and every such pane was captured on every 3 s scan. A Codex
+  with no hook yet is still read, for its folder-trust and hook-review dialogs.
 - Remote has a needs-you card and a push for a Codex agent at a dialog of its own
   that no hook reports: the folder-trust question Codex asks in a git checkout no
   trust covers and its hook review before its first prompt, *Switch to
@@ -479,10 +503,16 @@ adapter.**
   presses Esc first, which leaves the dialog on the current model, then types
   `/exit` at the prompt that comes back, as Remote's Switch with
   `dismiss_dialog` does. A screen Esc does not bring back to the empty prompt
-  is killed as before, and nothing else is typed into it. A `fleet stop`,
-  `fleet switch` or `fleet restart` you run still kills the window at a
-  dialog. The key is the adapter's (`dismiss_key`), so a new agent names its
-  own.
+  is killed as before, and nothing else is typed into it. The key is the
+  adapter's (`dismiss_key`), so a new agent names its own. Not fixed:
+  - A `fleet stop`, `fleet switch` or `fleet restart` you run still kills a
+    Codex window at that dialog, so the session it leaves stays ⏳ limited and
+    the doctor warns until the reset. Remote's Switch with `dismiss_dialog` is
+    the clean way by hand.
+  - A hand-over whose stop had to kill the window (a draft on screen) leaves
+    the old Codex session unended. For Claude Code the replacement retires it;
+    a Codex replacement's first hook takes over the row and its claims but ends
+    nothing.
 - A usage error under `python -m aisquare` names the program `aisquare`. A
   command a sandboxed Codex agent ran through its broker said *Usage: python -m
   aisquare task …*, which the agent cannot type.

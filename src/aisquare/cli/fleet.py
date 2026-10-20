@@ -541,17 +541,8 @@ def stop(
     else:
         console = stdout_console()
         console.print(f"✓ stopped {agent.label} ({agent.id})")
-        if agent.worktree:
-            reap = project_service.fleet_command("reap", target)
-            console.print(f"  · run `{reap}` to remove its worktree once its work is pushed")
-        _say_released(console, len(released))
-        # The work the stop returned to the pool is the one thing the next agent
-        # inherits from this one; here the receipt carries the tasks, so they are
-        # named under the one line every fleet command uses for the count.
-        for task in receipt.released:
-            console.print(f"     · {task.title} ({task.id})")
-        if receipt.release_failed:
-            console.print(f"  ⚠ claims: {receipt.release_failed}")
+        for line in _stop_notes(receipt, target):
+            console.print(f"  {line}", markup=False)
     if receipt.release_failed:
         # One contract with `shutdown`: a claim left with a session that no
         # longer exists is not a clean stop, whichever command produced it, and
@@ -663,6 +654,27 @@ def _emit_bulk(report: fleet_service.BulkReport, console: Console, *, as_json: b
     _say_released(console, released)
 
 
+def _stop_notes(receipt: fleet_service.StopReceipt, project: ProjectInfo) -> list[str]:
+    """What a stop leaves the operator, under its line: ``fleet stop``'s, and each agent's of
+    ``stop --all``, which said neither until review of #266, round 3.
+
+    The reap that removes the worktree it left on disk, and the work it returned to the
+    pool, which is the one thing the next agent inherits from this one: here the receipt
+    carries the tasks, so they are named under the one line every fleet command uses for
+    the count (:func:`_released_line`). Then the claims it could not give back.
+    """
+    notes: list[str] = []
+    if receipt.agent.worktree:
+        reap = project_service.fleet_command("reap", project)
+        notes.append(f"· run `{reap}` to remove its worktree once its work is pushed")
+    if receipt.released:
+        notes.append(_released_line(len(receipt.released)))
+        notes.extend(f"   · {task.title} ({task.id})" for task in receipt.released)
+    if receipt.release_failed:
+        notes.append(f"⚠ claims: {receipt.release_failed}")
+    return notes
+
+
 def _bulk_lines(receipt: fleet_service.BulkReceipt) -> list[str]:
     """One agent's line in ``--all``'s output, and its notes under it."""
     agent, result = receipt.agent, receipt.result
@@ -681,8 +693,8 @@ def _bulk_lines(receipt: fleet_service.BulkReceipt) -> list[str]:
         # the ones that say what did not happen marked: each failure is among the notes.
         failures = set(result.failures)
         lines.extend(f"      {'⚠' if note in failures else '·'} {note}" for note in result.notes)
-    if receipt.release_failed:
-        lines.append(f"      ⚠ claims: {receipt.release_failed}")
+    elif isinstance(result, fleet_service.StopReceipt):
+        lines.extend(f"      {note}" for note in _stop_notes(result, receipt.project))
     return lines
 
 
@@ -730,7 +742,11 @@ def _bulk_json(report: fleet_service.BulkReport) -> dict[str, object]:
 def _say_released(console: Console, count: int) -> None:
     """The one line for "claims went back to the board", for stop, shutdown and reap alike."""
     if count:
-        console.print(f"  🔓 {count} claimed task(s) released back to the board")
+        console.print(f"  {_released_line(count)}")
+
+
+def _released_line(count: int) -> str:
+    return f"🔓 {count} claimed task(s) released back to the board"
 
 
 def _exec_attach(argv: list[str]) -> None:

@@ -374,7 +374,8 @@ stopped. Some agents are left alone, and each is named with the reason:
 The agents are taken one at a time, each project's manager first. Each one is printed
 as it is done, under its project's name, and the count comes last. A restart's notes
 follow its line, as `fleet restart` prints them, with ⚠ on the ones that say what
-didn't happen:
+didn't happen. A stop's follow it as `fleet stop` prints them: the `fleet reap` that
+removes the worktree it left, and each claim it put back, by title:
 
 ```text
 alpha

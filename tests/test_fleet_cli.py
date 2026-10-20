@@ -1035,10 +1035,14 @@ def test_all_prints_a_restart_s_notes_as_fleet_restart_does_and_marks_what_faile
     ]
 
 
-def test_all_exits_0_when_nothing_failed(
+def test_all_exits_0_when_nothing_failed_and_says_what_each_stop_left(
     runner: CliRunner, resolved: Seen, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    stopped = StopReceipt(_agent("coder-auth", ended=True, exit_status=0), [_released_task()])
+    """Each stop's lines say what ``fleet stop`` says for one agent: the reap that removes
+    the worktree it left, and the claims it put back, by title. ``stop --all`` dropped
+    both, and printed one released count at the end (review of #266, round 3)."""
+    ended = _agent("coder-auth", ended=True, exit_status=0, worktree=True)
+    stopped = StopReceipt(ended, [_released_task()])
     _bulk(
         monkeypatch,
         BulkReport(
@@ -1057,6 +1061,10 @@ def test_all_exits_0_when_nothing_failed(
     assert _lines(result.stdout) == [
         "api",
         f"  ✓ {'coder-auth':<24} {'coder':<10} stopped",
+        "      · run `aisquare fleet reap --project amber-otter` to remove its worktree once"
+        " its work is pushed",
+        "      🔓 1 claimed task(s) released back to the board",
+        "         · the task it held (tsk_01x)",
         f"  · {'manager':<24} {'manager':<10} skipped — this session",
         "stopped 1 · skipped 1 · failed 0",
         "  🔓 1 claimed task(s) released back to the board",

@@ -61,8 +61,9 @@ never postpones it (:meth:`TerminalPane._schedule`): it used to re-arm the frame
 timer at every key and mouse flush, so key repeat and a wheel gesture had no
 frame until they stopped. The frame diff IS the activity signal: tmux's own
 ``window_activity_flag`` only clears when an attached client looks at the
-window, and only the UI's control client ever attaches — to the session of the
-pane on screen, which says nothing about the rest. A pane that is not on screen
+window, and the only clients that attach are the UI's control client, to the
+session of the pane on screen, and a ``fleet attach``, to the session it opened:
+neither says anything about the rest. A pane that is not on screen
 (a hidden tab) is not captured at all. Measured against tmux 3.7c on 2026-08-28
 while a process streamed coloured text (median of 150 frames): 80x24 — capture
 1.75 ms + Strips 0.17 ms = 1.94 ms; 200x60 — 2.31 + 0.48 = 2.85 ms (p95 3.6 ms);
@@ -2686,10 +2687,13 @@ class TerminalPane(Widget, can_focus=True):
         unsent, self._held = len(self._held or []), None
         self._unconfirmed = True
         self.log.warning(f"input recovery gave up: {error}")
+        inputs = f"{unconfirmed} input{'s' if unconfirmed != 1 else ''}"
+        they = "they were" if unconfirmed != 1 else "it was"
+        were = "were" if unsent != 1 else "was"
         self.notify(
-            f"tmux did not say whether {unconfirmed} inputs sent to {self.label or self.pane_id} "
+            f"tmux did not say whether {inputs} sent to {self.label or self.pane_id} "
             "reached it: "
-            f"they were not sent again, and the {unsent} typed since were not sent — "
+            f"{they} not sent again, and the {unsent} typed since {were} not sent — "
             "check the pane and type again what is missing",
             severity="warning",
             markup=False,

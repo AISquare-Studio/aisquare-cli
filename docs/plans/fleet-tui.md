@@ -155,10 +155,13 @@ started when a pane first goes on screen with a live frame:
   attached client is a control client that turned it off: tmux stops reading it,
   so the agent blocks and `#{window_activity}` stops. Measured on 3.2a, 3.4 and
   3.8: a ticker's history went 1 → 1 with `:off` and 25 → 213 with `:pause`.
-- *No sizing.* The client attaches with `-f ignore-size,no-output` and is never
-  given a size (`refresh-client -C` is not sent), so it changes no window's size,
-  pinned or not. The `no-output` flag is turned off in the same write that sets
-  the first pauses, because changing it clears every pause.
+- *No sizing.* The client attaches with
+  `-f ignore-size,no-output,no-detach-on-destroy` and is never given a size
+  (`refresh-client -C` is not sent), so it changes no window's size, pinned or
+  not. The `no-output` flag is turned off in the same write that sets the first
+  pauses, because changing it clears every pause. `no-detach-on-destroy` moves
+  the client to another session, rather than detaching it, when the session it
+  follows is destroyed.
 - *Cadence.* At most one frame in flight, about 60 a second. Input gets one at
   once, and the echo's frame skips the gap. A 500 ms idle tick asks too, as a net
   for a pane that dies silently. Keys, text, mouse reports and paste
@@ -171,7 +174,8 @@ started when a pane first goes on screen with a live frame:
   there are three times as many, so it is over the old 15 % go/no-go; the frame
   gap (`TerminalPane.CONTROL_FRAME_GAP`) is the knob.
 - *Polling stays as the fallback.* It is used below 3.2, for a client that cannot
-  start, ends, is killed or stops answering for a second, and, for the rest of an
+  start, ends, is killed or stops answering for a second (noticed at the next
+  idle tick, so 1.0–1.5 s after the oldest command waiting), and, for the rest of an
   attach, for a pane whose control command fails. It is fixed too: input throttles
   the frame timer instead of postponing it, and after input it stays at 50 ms for
   300 ms. Budget, polled: ≤ 20 fps while output changes, ~2 fps idle.

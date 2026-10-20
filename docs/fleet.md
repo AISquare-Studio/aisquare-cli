@@ -1532,7 +1532,10 @@ current window is told it has focus while `asq` shows that project, and that it
 lost focus when you move to another project or quit `asq`. A key reaches the screen in about a
 millisecond (it was 60 ms or more polled). On tmux older than 3.2, or if that
 client cannot start or ends, the pane polls tmux as before, without a word on
-screen; keys typed as it ended arrive once each, in order. *Escape hatch:* `[fleet] escape_key` (default `f12`) is
+screen; keys typed as it ended arrive once each, in order. If tmux will not say
+which of those keys it ran, none of them is sent again and nothing typed since is
+sent: the pane says `(input not confirmed)` and a warning names the agent, so check
+the pane and type again what is missing. *Escape hatch:* `[fleet] escape_key` (default `f12`) is
 yours to change; keep it out of Claude Code's set.
 
 **The mouse in a Claude Code pane.** A program that tracks the mouse — Claude

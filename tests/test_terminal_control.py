@@ -1167,6 +1167,32 @@ def test_real_tmux_a_stamp_that_keeps_failing_fast_ends_the_wait_and_says_so(
     assert said and "coder-auth" in said[0] and pane_id not in said[0], notices
 
 
+def test_a_give_up_over_one_input_counts_it_in_the_singular(tmp_path: Path) -> None:
+    """One input in flight and one typed since: the warning said "1 inputs … they were …
+    the 1 typed since were" (re-review of #272, nit)."""
+    fake = FakeTmux()
+    fake.panes["%1"] = FakePane(screen=["$ "])
+
+    server = fake.server(tmp_path)
+
+    async def drive() -> list[str]:
+        host = Host(server, "%1")
+        async with host.run_test(size=(40, 6)) as pilot:
+            pane = host.pane
+            pane.label = "coder-auth"
+            await wait_until(pilot, lambda: pane.facts is not None)
+            sent = terminal_module._Input(1, server, "%1", "key", "Enter")
+            pane._inflight, pane._held = [sent], [sent._replace(stamp=2)]
+            pane._give_up_recovery(tmux_control.StampUnknown("refused", timed_out=False))
+            await pilot.pause()
+            return list(host.notices)
+
+    said = [line for line in run(drive()) if "coder-auth" in line]
+    assert said, said
+    assert "whether 1 input sent to coder-auth" in said[0], said
+    assert "it was not sent again" in said[0] and "the 1 typed since was not sent" in said[0]
+
+
 @_needs_tmux
 def test_real_tmux_a_stamp_read_that_times_out_is_waited_out_however_long_the_freeze(
     live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

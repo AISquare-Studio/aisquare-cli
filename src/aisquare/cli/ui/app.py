@@ -760,7 +760,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
         self.captain_on = experimental.captain_enabled()
         """The experimental captain, read once at the start: off, there is no insignia,
-        captain row or captain view, and the ui receiver refuses the captain's actions.
+        captain row or captain view, and no ui receiver is started (:meth:`on_mount`).
         Turned on while asq runs, it shows at asq's next start (``core.experimental``)."""
 
     # --- layout -------------------------------------------------------------------

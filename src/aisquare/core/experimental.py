@@ -9,13 +9,15 @@ tsk_01m3qvghrpgg). ``[experimental] captain = true`` in config.toml turns it on
 set turns it off (``0``, and a typo), and unset or empty defers to the config.
 
 Off: ``aisquare captain`` and every subcommand exit 2 with :data:`CAPTAIN_OFF`, and so
-does the server's lean entry (``python -m aisquare.services.captain``), the fleet UI
-shows no insignia, captain row or captain view and its ui receiver refuses
-the captain's actions, the bundled ``captain`` persona is absent, the voice page does
-not serve (it is a subcommand), ``fleet restart`` and ``fleet switch`` refuse the
-captain's own row with the same line, and doctor says so in one ok row. On, all of it
-is as it was before the switch. Nothing else reads it: every other fleet row, the
-boards and the store are the same either way.
+does the server's lean entry (``python -m aisquare.services.captain``); only the group's
+own ``--help`` prints. The fleet UI shows no insignia, captain row or captain view and
+starts no ui receiver, ``captain`` is an unknown role to ``launch`` and ``fleet spawn``,
+the bundled ``captain`` persona is absent, the voice page does not serve (it is a
+subcommand), ``fleet restart`` and ``fleet switch`` refuse the captain's own row with the
+same line, the home's row is a captured row like any other (``services.project.tracked``),
+and doctor says so in one ok row. On, all of it is as it was before the switch. Nothing
+else reads it: every other role, fleet row and board, and the store, are the same either
+way.
 
 The captain's own window is handed the variable as its starter has it
 (:func:`captain_environment`), so a switch set for one shell holds in the window too.

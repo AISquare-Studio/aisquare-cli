@@ -47,14 +47,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The captain is experimental, and ships off.** Turn it on with
   `aisquare config set experimental.captain true` (`[experimental] captain` in
   `config.toml`), or for one shell with `AISQUARE_EXPERIMENTAL_CAPTAIN=1`. The
-  variable wins over the config either way, and `0` turns it off. Off,
-  `aisquare captain` and every subcommand exit 2 with one line saying how to turn
-  it on. The fleet UI shows no insignia, captain row or captain view, and its ui
-  receiver refuses the captain's actions. The bundled `captain` persona is absent
-  from every picker and the catalogue, and the voice page does not serve.
-  `aisquare doctor` shows one ok row, `captain: off (experimental)`. On, the captain
-  is exactly as above; asq reads the switch when it starts. Nothing else reads it:
-  fleets, boards and the store (schema v33) are the same either way.
+  variable wins over the config either way, and `0` turns it off. Off:
+  - `aisquare captain`, every subcommand (its `--help` included) and the Actions
+    server's own entry (`python -m aisquare.services.captain`) exit 2 with one line
+    saying how to turn it on. Only `aisquare captain --help` still prints, and exits 0.
+  - The fleet UI shows no insignia, captain row or captain view, and starts no ui
+    receiver: no socket, folder or thread.
+  - `captain` is an unknown role to `aisquare launch` and `fleet spawn`, as on main.
+    `fleet restart` and `fleet switch` refuse a captain row left by a run with it on,
+    in the same one line.
+  - The bundled `captain` persona is absent from every picker and the catalogue, and
+    the voice page does not serve.
+  - A session started in the aisquare home is a captured row like any other: with
+    capture off, it registers nothing and is briefed on no board.
+  - `aisquare doctor` shows one ok row, `captain: off (experimental)`.
+
+  On, the captain is exactly as above. asq reads the switch once, when it starts, and
+  each command above reads it when it runs. Whatever it says, the home's own row is
+  never added as a project, and `project prune` and doctor's captured row leave it
+  alone (Fixed, below). Every other role, fleet row and board, and the store
+  (schema v33), are the same either way.
 - **The persona rides the system prompt too, and a replay keeps it.** For Claude
   Code the launch appends the persona block to the default system prompt
   (`--append-system-prompt-file`, a file under `~/.aisquare/cache/persona-prompts/`;

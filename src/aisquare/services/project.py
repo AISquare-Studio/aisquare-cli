@@ -92,16 +92,27 @@ def tracked(store: ContextStore, project: ProjectInfo) -> bool:
     the store's write lock only to ask (a session start) had to say so, while another in
     the same hook took it anyway (review of #259, round 17). The write is :func:`capture`.
 
-    The aisquare home's row is the one captured row that may, whatever capture says: it is
-    the captain's home board (``services.captain.state.home_project``), captured on purpose
-    and never onboarded, so that it never joins the owner's projects. Asked like any other,
-    the captain's session start registered nothing there and briefed it nothing, and its
-    audit and its row's events went nowhere, with capture off (0.8.1's default).
+    While the experimental captain is on, the aisquare home's row is the one captured row
+    that may, whatever capture says: it is the captain's home board
+    (``services.captain.state.home_project``), captured on purpose and never onboarded, so
+    that it never joins the owner's projects. Asked like any other, the captain's session
+    start registered nothing there and briefed it nothing, and its audit and its row's
+    events went nowhere, with capture off (0.8.1's default). Off, it is any other captured
+    row, as on main: a session started in the home was briefed on the home board once a
+    row was left there (review of #240, F7).
     """
     if capture_on():
         return True
     stored = store.get_project(project.id)
-    return stored is not None and (stored.onboarded_at is not None or is_the_home(stored.root))
+    if stored is None:
+        return False
+    if stored.onboarded_at is not None:
+        return True
+    if not is_the_home(stored.root):
+        return False
+    from aisquare.core import experimental  # lazy: only the home's row asks the switch
+
+    return experimental.captain_enabled()
 
 
 def capture(store: ContextStore, project: ProjectInfo) -> None:

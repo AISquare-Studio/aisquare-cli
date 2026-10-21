@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import math
 import sys
 import threading
 import time
@@ -740,9 +739,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """The accounts read in flight, or the last one; only one runs at a time."""
         self._accounts_owed = False
         """A frame was asked for while a read was in flight: read once more after it."""
-        self._accounts_began = -math.inf
-        """When the newest accounts read was started (``time.monotonic``): a fleet frame
-        asks for none when one began after the calls it answers (:meth:`_paint_fleet`)."""
+        self._accounts_began = 0
+        """How many fleet calls (:attr:`_fleet_calls`) had been made when the newest accounts
+        read was started: a fleet frame asks for none when one began after the calls it
+        answers (:meth:`_paint_fleet`)."""
         self._headroom = headroom
         self.headroom_seconds = headroom_seconds
         self._headroom_worker: Worker[tuple[HeadroomSummary, bool]] | None = None
@@ -761,10 +761,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """The fleet read in flight, or the last one; only one runs at a time."""
         self._fleet_owed = False
         """A frame was asked for while a read was in flight: read once more after it."""
-        self._fleet_owed_at = 0.0
-        """When the newest call that owes a read was made (``time.monotonic``)."""
-        self._fleet_asked: dict[Worker[_FleetRead], float] = {}
-        """When the newest call each read answers was made, by read: its accounts' cue."""
+        self._fleet_calls = 0
+        """How many calls have asked for a fleet frame (:meth:`refresh_data`): the newest
+        one's number. It orders a call against an accounts read where a clock cannot:
+        ``time.monotonic`` moves in 15.6 ms steps on Windows before Python 3.13."""
+        self._fleet_owed_at = 0
+        """The newest call that owes a read, by its number (:attr:`_fleet_calls`)."""
+        self._fleet_asked: dict[Worker[_FleetRead], int] = {}
+        """The newest call each read answers, by its number, by read: its accounts' cue."""
         self._fleet_since = 0.0
         """When the fleet read in flight began running (``time.monotonic``)."""
         self._fleet_after: dict[Worker[_FleetRead], list[Callable[[], object]]] = {}
@@ -1079,7 +1083,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         While asq waits to hand its terminal over, the read this starts is held
         (:class:`_WorkerThreads`), and a tick that finds it held asks for nothing more.
         """
-        asked = time.monotonic()
+        self._fleet_calls += 1
+        asked = self._fleet_calls
         reading = self._fleet_worker
         if reading is not None and not reading.is_finished:
             if reading.state is WorkerState.PENDING:
@@ -1095,8 +1100,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         self._start_fleet_read(asked, then)
 
-    def _start_fleet_read(self, asked: float, then: Callable[[], object] | None = None) -> None:
-        """Start the fleet read that answers the calls up to ``asked``, the newest of them."""
+    def _start_fleet_read(self, asked: int, then: Callable[[], object] | None = None) -> None:
+        """Start the fleet read that answers the calls up to number ``asked``, the newest."""
         after = [*self._fleet_owed_after, *([] if then is None else [then])]
         self._fleet_owed, self._fleet_owed_after = False, []
         # `a`'s choice is read as the read begins, so one held for a hand-over and started
@@ -1137,9 +1142,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             if event.state is WorkerState.RUNNING:
                 self._fleet_since = time.monotonic()  # a read held for a hand-over begins now
             return  # still running
-        self._paint_fleet(read, asked=self._fleet_asked.pop(worker, math.inf))
-        if self._fleet_owed:
+        self._paint_fleet(read, asked=self._fleet_asked.pop(worker, None))
+        newer = self._fleet_worker
+        if self._fleet_owed and (newer is None or newer.is_finished):
             # The calls this read outlived: one read, after it, answering the newest of them.
+            # A newer read in flight starts it instead: this one finished, then a tick
+            # started that one before this frame was painted (the app was busy), and the
+            # read owed while it runs is its to start, one read at a time.
             self._start_fleet_read(self._fleet_owed_at)
         for then in self._fleet_after.pop(worker, []):
             self.call_later(then)
@@ -1155,15 +1164,18 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             f"still reading the fleet — showing the frame from {self.snapshot.taken_at:%H:%M:%S}"
         )
 
-    def _paint_fleet(self, read: _FleetRead, *, asked: float = math.inf) -> None:
+    def _paint_fleet(self, read: _FleetRead, *, asked: int | None = None) -> None:
         """Paint one read's frame, or keep (and label) the frame shown when the read found
         the store unreadable. The painting only: nothing here opens the store or asks tmux.
 
         Then the accounts' read, which a tick asked for with its frame as it always has,
-        unless one began after ``asked``, the newest call the frame answers: that read
-        already answers those calls. The frame comes after its calls now, so one painted
-        after a slow accounts read had ended asked again. The ticks the wait outlived
-        cost two reads after it, not one, and a fourth frame on Windows CI (d13455de)."""
+        unless one began after call number ``asked``, the newest call the frame answers:
+        that read already answers those calls. The frame comes after its calls now, so one
+        painted after a slow accounts read had ended asked again. The ticks the wait
+        outlived cost two reads after it, not one, and a fourth frame on Windows CI
+        (d13455de). The order is the calls' count, not a clock: on Windows' 15.6 ms steps
+        a tick and the read just before it read the same time, and the tie lost the read
+        after a wait (738d5594). ``None`` (the first frame, which no call asked for) asks."""
         sidebar = self.sidebar
         self.capturing = read.capturing
         if read.error is not None:  # the store is briefly unavailable — keep what is shown
@@ -1182,7 +1194,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         sidebar.show_notice(None)
         sidebar.show_projects(read.projects, read.agents, notices=read.notices, groups=read.groups)
         self._feed_open_views(self.snapshot)
-        if self._accounts_began < asked:
+        if asked is None or self._accounts_began < asked:
             self.refresh_accounts()
 
     def refresh_accounts(self) -> None:
@@ -1219,7 +1231,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self._accounts_owed = reading.state is not WorkerState.PENDING
             return
         self._accounts_owed = False
-        self._accounts_began = time.monotonic()
+        self._accounts_began = self._fleet_calls
         self._accounts_worker = self.run_worker(
             self._accounts,
             name=ACCOUNTS_WORKER,

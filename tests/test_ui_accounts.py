@@ -649,6 +649,70 @@ def test_tick_frames_that_paint_after_the_accounts_wait_still_cost_one_read_afte
     assert after == 3
 
 
+class _StoppedClock:
+    """The app's ``time``, with ``monotonic`` stopped: every two stamps tie, as two a few ms
+    apart do on Windows before Python 3.13, where it moves in 15.6 ms steps."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+    @staticmethod
+    def monotonic() -> float:
+        return 0.0
+
+
+def test_a_frame_orders_its_calls_and_the_accounts_reads_by_count_not_by_the_clock(
+    no_network: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows CI on 738d5594: the frame's cue for the accounts (a read began after the
+    calls it answers) compared ``time.monotonic`` stamps, and on Windows' 15.6 ms steps a
+    tick a few ms after a read began read the same time. The tie counted as "began
+    after", the tick's frame asked for nothing, and a wait could end with no read after
+    it. The calls are counted instead, so a stopped clock changes nothing: a frame asks
+    when the newest read began before its tick, and not when one began after it."""
+    no_network["session"] = _session()
+    reads = [0]
+    frames = threading.Event()  # the fleet reads wait on it while it is clear
+    frames.set()
+    read_fleet = shell_module._read_fleet
+
+    def slow_fleet(show_captured: bool) -> Any:
+        frames.wait(HOLD_S)
+        return read_fleet(show_captured)
+
+    def reader() -> AccountsOverview:
+        reads[0] += 1  # one read at a time
+        return _overview(_status(1, "me@example.com"))
+
+    monkeypatch.setattr(shell_module, "time", _StoppedClock())
+    monkeypatch.setattr(shell_module, "_read_fleet", slow_fleet)
+
+    async def run() -> tuple[int, int, int]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
+        async with app.run_test(size=SIZE) as pilot:
+            await accounts_read(app)
+            at_start = reads[0]
+            app.refresh_data()  # a tick after that read began: its frame asks
+            await settle_page(app, group=FLEET_WORKER)
+            await accounts_read(app)
+            after_tick = reads[0]
+            frames.clear()
+            try:
+                app.refresh_data()  # a tick whose frame is held…
+                await pilot.pause()
+                app.refresh_accounts()  # …and a read begun after it (AccountsChanged)
+                await accounts_read(app)
+            finally:
+                frames.set()
+            await settle_page(app, group=FLEET_WORKER)
+            await accounts_read(app)
+            return at_start, after_tick, reads[0]
+
+    at_start, after_tick, after = asyncio.run(run())
+    assert after_tick == at_start + 1  # the tick's frame read the accounts
+    assert after == after_tick + 1  # the read begun after the tick answers its frame too
+
+
 def test_a_tick_the_app_handles_before_a_reads_answer_still_lets_that_answer_paint(
     no_network: dict[str, Any],
 ) -> None:

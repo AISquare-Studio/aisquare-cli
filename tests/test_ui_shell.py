@@ -2516,6 +2516,79 @@ def test_ticks_while_a_fleet_read_is_in_flight_start_no_second_read_and_cost_one
     assert "🔔" in after  # …whose frame is the one painted last
 
 
+def test_a_frame_painted_late_leaves_the_owed_read_to_the_read_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of 738d5594: a read that has ended is painted when the app gets to its
+    ``StateChanged``, and a tick can come first. That tick finds no read in flight and
+    starts the next, and a call while that one runs owes one more. The late frame then
+    started the owed read itself, beside the read in flight: two reads at once (10 of 10
+    runs). The read in flight starts it once it has painted, one read at a time, and the
+    calls still cost one read after it."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    asked = {n: threading.Event() for n in range(1, 5)}
+    gates = {n: threading.Event() for n in range(1, 5)}
+    reads: list[int] = []  # the reads the test numbered, in order
+    running, peak = [0], [0]
+    counting = threading.Lock()
+    numbering = threading.Event()
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        with counting:
+            n = 0
+            if numbering.is_set():
+                reads.append(len(reads) + 1)
+                n = reads[-1]
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        try:
+            if n:
+                asked[n].set()
+                gates[n].wait(FLEET_HOLD_S)  # as tmux, or a writer holding the store, would
+            return [status(project.id, "manager", "manager", "working")]
+        finally:
+            with counting:
+                running[0] -= 1
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def go(pilot: Pilot[None]) -> int:
+        app = fleet_app(pilot)
+        painted = asyncio.Event()  # the first read's frame, and what it started after it
+        numbering.set()
+        try:
+            app.refresh_data(then=painted.set)  # a tick: its read waits
+            assert await asyncio.to_thread(asked[1].wait, FLEET_HOLD_S), "the tick read"
+            [first] = [
+                w for w in app.workers if w.name == app_mod.FLEET_WORKER and not w.is_finished
+            ]
+
+            async def tick_ahead_of_the_frame() -> None:
+                # The app handles nothing else while this callback runs, so the first
+                # read's StateChanged queues behind the tick and the call below.
+                gates[1].set()
+                await first.wait()
+                app.refresh_data()  # finds no read in flight, and starts one
+                assert await asyncio.to_thread(asked[2].wait, FLEET_HOLD_S), "the next read"
+                app.refresh_data()  # a call while it runs: one read owed
+
+            app.call_later(tick_ahead_of_the_frame)
+            await asyncio.wait_for(painted.wait(), FLEET_HOLD_S)
+            in_flight = sum(
+                1 for w in app.workers if w.name == app_mod.FLEET_WORKER and not w.is_finished
+            )
+        finally:
+            for gate in gates.values():
+                gate.set()
+        await settle(app)
+        return in_flight
+
+    in_flight = drive(go)
+    assert in_flight == 1, f"{in_flight} fleet reads in flight"
+    assert peak[0] == 1, f"{peak[0]} reads at once"
+    assert reads == [1, 2, 3], reads  # the read, the tick's, and ONE owed read after it
+
+
 def test_a_fleet_read_that_hangs_labels_the_frame_kept_once_it_has_waited_long_enough(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

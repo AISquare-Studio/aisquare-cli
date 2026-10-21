@@ -43,6 +43,7 @@ from tests import test_persona_cli as cli_suite
 from tests import test_ui_personas as ui_suite
 from tests.test_fleet_service import FakeTmux
 from tests.test_ui_personas import Host, drive, rows, shown
+from tests.ui_workers import settle_until_held
 
 # The suites' fixtures, bound here so pytest finds them for this module's tests. The fleet
 # suite's clock is autouse there and so here: it only makes the fleet service's waits instant.
@@ -292,7 +293,11 @@ def test_typing_the_date_into_the_editor_is_a_status_line_and_the_app_stays_up(
         area = dialog.query_one("#edit-text", TextArea)
         area.clear()
         area.insert(f"---\ndescription: Pairs, now.\n{IMPOSSIBLE_DATE}---\nWork.\n")
-        await pilot.pause(PARSE_DEBOUNCE + 0.2)  # the debounced check has run
+        await settle_until_held(  # the debounced check has run
+            pilot.app,
+            lambda: shown(dialog.query_one("#edit-status", Static)).startswith("✗ "),
+            what=f"the debounced check ({PARSE_DEBOUNCE} s) to show the text's ✗ status",
+        )
         return [
             type(host.screen).__name__,
             dialog.query_one("#edit-save", Button).disabled,
@@ -320,7 +325,11 @@ def test_the_editor_opens_on_a_skill_md_that_holds_the_date_which_is_how_it_gets
         opened = [button.disabled, shown(dialog.query_one("#edit-status", Static))]
         area.clear()
         area.insert(mended)
-        await pilot.pause(PARSE_DEBOUNCE + 0.2)
+        await settle_until_held(
+            pilot.app,
+            lambda: not button.disabled,
+            what=f"the debounced check ({PARSE_DEBOUNCE} s) to enable Save on the mended text",
+        )
         return [*opened, button.disabled, shown(dialog.query_one("#edit-status", Static))]
 
     disabled, status, mended_disabled, mended_status = drive(

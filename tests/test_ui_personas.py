@@ -90,7 +90,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until_held
 
 T = TypeVar("T")
 SIZE = (160, 50)
@@ -885,14 +885,22 @@ def test_the_editor_saves_only_text_that_parses_and_only_through_the_service(
         button = dialog.query_one("#edit-save", Button)
         area.clear()
         area.insert("no frontmatter at all\n")
-        await pilot.pause(PARSE_DEBOUNCE + 0.2)
+        await settle_until_held(
+            pilot.app,
+            lambda: shown(dialog.query_one("#edit-status", Static)).startswith("✗ "),
+            what=f"the debounced check ({PARSE_DEBOUNCE} s) to show the text's ✗ status",
+        )
         seen: list[Any] = [button.disabled, shown(dialog.query_one("#edit-status", Static))]
         await pilot.click("#edit-save")  # disabled: nothing may reach the service
         await pilot.pause()
         seen.append(len(save.calls))
         area.clear()
         area.insert(valid)
-        await pilot.pause(PARSE_DEBOUNCE + 0.2)
+        await settle_until_held(
+            pilot.app,
+            lambda: not button.disabled,
+            what=f"the debounced check ({PARSE_DEBOUNCE} s) to enable Save on the valid text",
+        )
         seen += [button.disabled, shown(dialog.query_one("#edit-status", Static))]
         await press(pilot, "#edit-save")
         seen.append(list(host.results))
@@ -1026,7 +1034,11 @@ def test_a_save_the_filesystem_refuses_keeps_the_editor_open_and_names_the_error
         area = dialog.query_one("#edit-text", TextArea)
         area.clear()
         area.insert(skill_text("Pairs, now."))
-        await pilot.pause(PARSE_DEBOUNCE + 0.2)
+        await settle_until_held(
+            pilot.app,
+            lambda: not dialog.query_one("#edit-save", Button).disabled,
+            what=f"the debounced check ({PARSE_DEBOUNCE} s) to enable Save on the new text",
+        )
         await press(pilot, "#edit-save")
         status = shown(dialog.query_one("#edit-status", Static))
         return [type(host.screen).__name__, status, list(host.results)]

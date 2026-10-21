@@ -160,7 +160,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `[fleet.roles.<role>].persona` — start an agent as someone. The name is checked
   before anything starts (an unknown one is refused with the known names; a stale
   config default names its key) and travels as `AISQUARE_PERSONA`, never the body.
-  The SessionStart hook records it on the board row (store v15:
+  The SessionStart hook records it on the board row (store v33:
   `team_session.persona`, `fleet_agent.persona`) and adds the persona's block to
   the team briefing once, after the role cycle and the lane rule. A session
   without a persona gets byte-identical text — pinned against the base in
@@ -243,6 +243,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the way: a private `_running` on a Textual screen shadows the message
   pump's own flag and silently leaves every button of the screen dead; the
   dialog's flag is `_spawning`.
+
+### Changed
+- The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
+  adds the two persona columns, `team_session.persona` (the persona a session was
+  launched as) and `fleet_agent.persona` (the one an agent was spawned with or given
+  since). Both are nullable, and a row from before them reads as no persona. The step
+  is an empty script with the columns in the presence pass's products, so each column
+  is added only where it is absent. A store an earlier persona build stamped v15, or
+  that the captain RC carried to v24, already holds them, and it converges through the
+  presence pass (`_converge_by_presence`), which re-applies any step from v15 on whose
+  products a store lacks. Every such store reaches v33 with its rows, as pinned in
+  `tests/test_store.py`, and 0.8.2 still opens a v33 store.
 
 ### Fixed
 

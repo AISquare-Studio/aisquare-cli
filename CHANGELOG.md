@@ -124,9 +124,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checked first (an unknown one lists the known names before anything is
   touched), one `persona_attached` line goes on the board, the agent's
   `fleet_agent` row — and its board session, once joined — records it, and the
-  briefing is delivered exactly as `fleet tell` delivers: typed into a waiting
-  agent, a board note for a busy one, with the receipt saying `typed` or `noted`
-  (`--json` carries `delivered`). Replacing a persona tells the agent which one it
+  briefing is typed into an agent that is waiting, by `fleet tell`'s readiness
+  test; a busy one is handed it privately with its own next prompt, and the board
+  carries only the `persona_attached` line, never the body. The receipt says
+  `typed` or `noted` (`--json` carries `delivered`). Replacing a persona tells the agent which one it
   replaces. The session-start hook now asks for the persona on the fleet row
   `AISQUARE_FLEET_AGENT` names, else `AISQUARE_PERSONA`, else keeps the session's
   own. So an attached persona is briefed again after a `/clear` or a restart,
@@ -161,11 +162,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applied at compose so the persona-first flow can open it filled in; a preset
   seat such as `coder2` or an account slot not read yet still shows. *Pick…* posts
   `PickTargetRequested`, which the dialog answers by opening the target picker.
-  The Settings tab gains a persona per role, saved through `save_config` and
-  re-read, showing a configured name the project lacks as `<name> (custom)`; and a
+  *⚙ Settings ▸ App settings* gains a persona per role, saved through `save_config`
+  and re-read. It lists the personas every project can resolve (the user's and the
+  bundled ones, never one project's own, since the default is machine-wide), and
+  shows a configured name the list lacks as `<name> (custom)`. A
   sidebar agent row carries a dim `· <persona>` from its fleet row or, failing that,
   its session. Measured in `tests/test_ui_spawn.py` (the recorder's `persona`,
-  `role`, `account` and `binary`) and `tests/test_ui_project.py` (the bytes of
+  `role`, `account` and `binary`) and `tests/test_ui_app_settings.py` (the bytes of
   `[fleet.roles.coder] persona = "skeptic"` in `config.toml`).
 - **Run an agent as a persona.** `aisquare launch <role> --persona NAME` and
   `aisquare fleet spawn <role> --persona NAME` — default: the role's new

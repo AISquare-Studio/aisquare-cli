@@ -978,6 +978,7 @@ def test_quit_does_not_wait_out_a_client_that_says_nothing(
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux blocks a connect to a full backlog")
+@pytest.mark.needs_captain
 def test_a_socket_that_cannot_say_whether_it_is_live_is_left_alone(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:

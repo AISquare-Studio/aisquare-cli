@@ -43,7 +43,7 @@ from rich.text import Text
 
 from aisquare.cli.common import fail
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import harness, orchestrator, paths, personas
+from aisquare.core import experimental, harness, orchestrator, paths, personas
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
@@ -123,8 +123,18 @@ def _role_ok(role: str) -> bool:
     check rather than becoming free-form. It just stops rejecting the two
     shapes real crews use: numbered seats, and roles the operator has already
     written down.
+
+    The captain (:data:`UNSEATED`) is a role only while the experimental captain is on.
+    Off, it is the unknown role main calls it: ``launch captain`` in a fleet window
+    started an agent under a role that does not exist, and ``fleet spawn captain`` named
+    the off feature in its refusal (review of #240, F2).
     """
-    return role in ROLES or role in UNSEATED or bool(_SEAT.match(role)) or role in _declared_roles()
+    return (
+        role in ROLES
+        or (role in UNSEATED and experimental.captain_enabled())
+        or bool(_SEAT.match(role))
+        or role in _declared_roles()
+    )
 
 
 def _persona_root(project: ProjectInfo | None) -> Path | None:

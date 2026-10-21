@@ -6923,8 +6923,10 @@ def switch(
             if agent.session_id is not None
             else []
         )
-    _require_role(agent.role)  # `spawn`'s first refusal, before the stop as the task's
+    # The captain's row first: off, its role is unknown (``launch._role_ok``), and the one
+    # line every captain refusal says is the answer, not "unknown role" (review of #240, F2).
     _refuse_the_captain_while_off(agent)
+    _require_role(agent.role)  # `spawn`'s first refusal, before the stop as the task's
     current = _account_slot_of(agent, session)
     notes: list[str] = []
     failures: list[str] = []  # the notes that say what did not happen (`SwitchReceipt`)

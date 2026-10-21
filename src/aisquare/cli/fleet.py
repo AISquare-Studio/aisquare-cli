@@ -218,7 +218,7 @@ def spawn(
         typer.Option(
             "--persona",
             help="Persona the agent runs as (see `aisquare persona list`); default: the "
-            "role's \\[fleet.roles.<role>].persona, else none.",
+            "role's fleet.roles.<role>.persona setting, else none.",
             metavar="NAME",
         ),
     ] = None,

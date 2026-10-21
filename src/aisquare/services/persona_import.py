@@ -17,6 +17,8 @@ nothing for it.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 from collections.abc import Callable
 from typing import Literal
@@ -108,10 +110,28 @@ def manager_model() -> str | None:
 
 def _manager_env() -> dict[str, str]:
     """The probe's environment — no role, no team, no model overrides, no tracing
-    identity — plus the manager profile's own variables, so the manager's account
-    pays; the team switch is forced off again after the merge."""
+    identity — plus the manager profile's own variables and the account the manager
+    launches under, so the manager's account pays; the team switch is forced off again
+    after the merge.
+
+    The account is ``services.claude_accounts.choose``'s answer for the manager role,
+    the one resolver ``launch`` and ``fleet spawn`` ask (``team bind manager --account``,
+    else the project's or the machine's default), applied the way ``launch`` applies it:
+    an account wins over the binding's env. With the binding's env alone, a manager bound
+    with ``--account 2`` imported on whatever login this shell had (review of #240, "also
+    confirmed": the manager engine ignores the account binding). A binding to an account
+    that does not exist is a reason for the ladder, as it stops a launch."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import claude_accounts as accounts_service
+
     env = harness._probe_env()
     env.update(harness.resolve_profile("manager").env)
+    try:
+        choice = accounts_service.choose(role="manager")
+    except accounts_service.NoSuchAccount as exc:
+        raise EngineUnavailable(f"manager engine: {exc}") from None
+    if choice.account is not None:
+        accounts_core.apply_launch_env(env, choice.account, shell=os.environ)
     env["AISQUARE_TEAM"] = "0"
     return env
 
@@ -140,7 +160,11 @@ def draft_with_manager(
     model = manager_model()
     schema = json.dumps(PersonaDraft.model_json_schema(), separators=(",", ":"))
     argv = [
-        binary,
+        # The path PATH gives it, which on Windows is ``claude.cmd`` (PATHEXT): handed the
+        # bare name, CreateProcess looks for ``claude.exe`` alone, and the engine reported a
+        # Claude Code that `claude` in a shell runs as not on PATH (review of #240, "also
+        # confirmed").
+        shutil.which(binary) or binary,
         "-p",
         *(["--model", model] if model else []),
         *_MANAGER_FLAGS_HEAD,
@@ -243,6 +267,15 @@ def draft_with_api(
         raise EngineUnavailable(
             "api engine: no usable credentials — set ANTHROPIC_API_KEY or run `ant auth login`"
         ) from None
+    except TypeError as exc:
+        # With no credentials anywhere, the SDK raises a bare TypeError ("Could not
+        # resolve authentication method…") from the request, not an AnthropicError: it
+        # escaped the ladder as a traceback (review of #240, "also confirmed").
+        if "authentication" in str(exc).lower():
+            raise EngineUnavailable(
+                "api engine: no usable credentials — set ANTHROPIC_API_KEY or run `ant auth login`"
+            ) from None
+        raise EngineUnavailable(f"api engine: TypeError: {_first_line(str(exc))}") from None
     except anthropic.AnthropicError as exc:
         raise EngineUnavailable(
             f"api engine: {type(exc).__name__}: {_first_line(str(exc))}"

@@ -216,6 +216,7 @@ def import_source(
         return _import_with_llm(
             src,
             text,
+            original=probe or _over_the_cap(text, refusal, base=base, layer=layer),
             where=where,
             base=base,
             layer=layer,
@@ -278,6 +279,29 @@ def import_source(
     )
 
 
+def _over_the_cap(
+    text: str, refusal: PersonaError | None, *, base: Path, layer: Layer
+) -> Persona | None:
+    """A skill refused ONLY for its body's size, read with a stand-in body; else ``None``.
+
+    The size is what ``--condense`` exists for, and such a skill is a skill in every other
+    respect: its frontmatter and its supporting files are kept like a parsed one's
+    (``_import_with_llm``'s ``original``). Without it, the keep applied only between the
+    soft and the hard cap, and a body over the hard cap lost everything else again
+    (review of #201, F5). The frontmatter is parsed by the same rules; one they refuse
+    keeps nothing.
+    """
+    if refusal is None or refusal.code != "too_large":
+        return None
+    try:
+        raw, _body = core.split_frontmatter(text.replace("\r\n", "\n"))
+        return core.parse_skill(
+            f"---\n{raw}---\nstand-in\n", name=_PROBE_NAME, path=base / _PROBE_NAME, layer=layer
+        )
+    except PersonaError:
+        return None
+
+
 def _not_recognised(where: Path | str, rule: str, line: int | None) -> PersonaError:
     return PersonaError(
         f"not a recognised skill: {rule}; converting it takes the LLM import path, and "
@@ -292,6 +316,7 @@ def _import_with_llm(
     src: _Source,
     text: str,
     *,
+    original: Persona | None,
     where: Path | str,
     base: Path,
     layer: Layer,
@@ -304,7 +329,13 @@ def _import_with_llm(
     progress: Callable[[str], None] | None,
 ) -> ImportResult:
     """§3.9's LLM path: draft → render → the recognised path's validator (one retry
-    with its rule) → keep the draft → confirm → save with provenance."""
+    with its rule) → keep the draft → confirm → save with provenance.
+
+    ``original`` is the source when it already was a recognised skill (``--condense``,
+    ``--llm``): the engine rewrites its description and body, and the rest of it is
+    kept — every other frontmatter key (``core.render``'s ``keep``) and, from a skill
+    directory, its supporting files, copied without links as the recognised path copies
+    them. Both were dropped (review of #240, "also confirmed")."""
     from aisquare.services import persona_import
 
     if name is not None and _occupied(base / name) and not force:
@@ -346,7 +377,11 @@ def _import_with_llm(
             raise PersonaError(exc.message, path=where, code=exc.code) from None
         skill_name = name or drafted.name.strip()
         rendered = core.render(
-            skill_name, drafted.description, drafted.body, metadata={"persona-source": src.origin}
+            skill_name,
+            drafted.description,
+            drafted.body,
+            metadata={"persona-source": src.origin},
+            keep=None if original is None else original.frontmatter,
         )
         kept = _keep_draft(
             skill_name, rendered, src=src, engine=ran, model=ran_model, condensed=condense
@@ -388,7 +423,15 @@ def _import_with_llm(
             code="not_confirmed",
         )
 
+    skipped: list[str] = []
+
     def fill(staged: Path) -> None:
+        if original is not None and src.directory is not None:
+            skipped.extend(
+                _copy_without_links(
+                    src.directory, staged, leave_out=(core.SKILL_FILE, core.PROVENANCE_FILE)
+                )
+            )
         (staged / core.SKILL_FILE).write_text(rendered, encoding="utf-8")
         _write_provenance(
             staged,
@@ -409,6 +452,7 @@ def _import_with_llm(
         source=src.origin,
         replaced=replaced,
         warnings=core.warnings(persona),
+        skipped_links=skipped,
     )
 
 

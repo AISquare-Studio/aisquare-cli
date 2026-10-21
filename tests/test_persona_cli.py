@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -78,10 +79,15 @@ def _json(runner: CliRunner, *argv: str, input: str | None = None) -> tuple[int,
 
 
 def _editor(tmp_path: Path, name: str, script: str) -> str:
+    """``$EDITOR`` running ``script``, Python with the file to edit as ``path``.
+
+    Python, not ``sh``: Windows runs no ``#!/bin/sh`` script, and its CI leg failed both
+    editor tests on "The system cannot find the file specified". Forward slashes and
+    quotes, because ``core.editor`` splits the variable as a POSIX shell would, where a
+    backslash escapes."""
     path = tmp_path / name
-    path.write_text(f"#!/bin/sh\n{script}\n", encoding="utf-8")
-    path.chmod(0o755)
-    return str(path)
+    path.write_text(f"import sys\npath = sys.argv[1]\n{script}\n", encoding="utf-8")
+    return f'"{Path(sys.executable).as_posix()}" "{path.as_posix()}"'
 
 
 def test_list_prints_the_bundled_personas_with_layer_and_description(runner: CliRunner) -> None:
@@ -385,7 +391,14 @@ def test_new_in_a_repository_scaffolds_the_project_layer_and_opens_the_editor(
     runner: CliRunner, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     log = tmp_path / "opened.log"
-    monkeypatch.setenv("EDITOR", _editor(tmp_path, "log.sh", f'echo "$1" >> "{log}"'))
+    monkeypatch.setenv(
+        "EDITOR",
+        _editor(
+            tmp_path,
+            "log.py",
+            f"with open({str(log)!r}, 'a', encoding='utf-8') as out:\n    out.write(path + '\\n')",
+        ),
+    )
 
     result = runner.invoke(app, ["persona", "new", "pair", "--project"])
 
@@ -436,7 +449,10 @@ def test_edit_that_writes_invalid_text_leaves_the_old_file_and_exits_1(
 ) -> None:
     skill = _skill(_user_layer(), "mine") / "SKILL.md"
     before = skill.read_bytes()
-    monkeypatch.setenv("EDITOR", _editor(tmp_path, "break.sh", "printf 'plain words\\n' > \"$1\""))
+    monkeypatch.setenv(
+        "EDITOR",
+        _editor(tmp_path, "break.py", "open(path, 'w', encoding='utf-8').write('plain words\\n')"),
+    )
 
     result = runner.invoke(app, ["persona", "edit", "mine"])
 

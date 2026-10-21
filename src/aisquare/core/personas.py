@@ -16,6 +16,7 @@ must not pay for a YAML parser it never runs
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -172,11 +173,17 @@ def parse_skill(text: str, *, name: str, path: Path, layer: Layer) -> Persona:
     """The recognised test (§3.5, §3.9): a YAML map with a non-empty
     ``description``, a non-empty body, and a directory name Claude Code accepts.
 
+    Line endings are read as ``\n`` whatever the file holds: a SKILL.md saved on Windows,
+    or checked out there with ``core.autocrlf``, kept a ``\r`` on every line of the body,
+    so the persona it parsed to was not the one the same file is on Linux (the Windows
+    CI leg, ``test_the_per_prompt_delta_and_the_board_carry_no_persona_text``).
+
     Whatever the frontmatter makes PyYAML raise is a :class:`PersonaError` here, the
     bare exceptions of :data:`_LOADER_ERRORS` included: one class is what ``catalogue``,
     ``resolve`` and every surface that shows a refusal catch. So is a frontmatter that
     loads and holds an integer Python will not print (:func:`_print_integers`).
     """
+    text = text.replace("\r\n", "\n")
     where = path / SKILL_FILE
     try:
         raw, body_text = split_frontmatter(text)
@@ -450,14 +457,33 @@ def briefing(persona: Persona) -> list[str]:
     return lines
 
 
-def render(name: str, description: str, body: str, *, metadata: dict[str, str]) -> str:
+def render(
+    name: str,
+    description: str,
+    body: str,
+    *,
+    metadata: dict[str, str],
+    keep: Mapping[str, Any] | None = None,
+) -> str:
     """A canonical SKILL.md — for a scaffold or an LLM draft, never for a file
-    someone else wrote (those are copied, not re-rendered)."""
+    someone else wrote (those are copied, not re-rendered).
+
+    ``keep`` is the frontmatter of the skill an LLM rewrote (``--condense``, ``--llm``
+    on a recognised skill): every key but ``name`` and ``description`` is written back
+    as it was, its ``metadata`` under the draft's own. Rendered from the draft alone,
+    the import dropped ``allowed-tools``, ``metadata`` and every other key the source
+    had (review of #240, "also confirmed")."""
     import yaml
 
     header: dict[str, Any] = {"name": name, "description": description.strip()}
-    if metadata:
-        header["metadata"] = dict(metadata)
+    kept = dict(keep or {})
+    kept_metadata = kept.pop("metadata", None)
+    kept.pop("name", None)
+    kept.pop("description", None)
+    header.update(kept)
+    merged = {**(kept_metadata if isinstance(kept_metadata, dict) else {}), **metadata}
+    if merged:
+        header["metadata"] = merged
     front = yaml.safe_dump(header, sort_keys=False, allow_unicode=True, width=1_000_000)
     return f"---\n{front}---\n{body.strip()}\n"
 

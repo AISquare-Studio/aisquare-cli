@@ -1192,8 +1192,7 @@ class Sidebar(Vertical):
         ("down", "cursor_down", "next"),
         ("up", "cursor_up", "previous"),
         ("enter", "activate", "open"),
-        # Out of the footer, which at 80 columns has no room for it beside main's keys
-        # (tests/test_ui_remote.py); the help screen (?) and the palette list it.
+        # Out of the footer, which is full at 80 columns; the help screen (?) lists it.
         Binding("x", "stop_agent", "stop", show=False),
         # The partition, for terminals without mouse reporting (#137): live only
         # while the sidebar has focus, so a pane still receives < > = as text.

@@ -130,11 +130,17 @@ def _role_ok(role: str) -> bool:
 def _check_persona(name: str, project: ProjectInfo | None) -> None:
     """Refuse a persona this project cannot resolve, before anything starts (§3.7).
 
-    The project's root is the board's; with no board row (an unreadable store) it
-    is the git repository around the working directory, as ``aisquare persona``
-    reads it.
+    The project layer is the working directory's own project
+    (``orchestrator.directory_project``), the one ``fleet spawn`` checked the name
+    against, never the board's: under ``AISQUARE_TEAM_HUB`` the board is the hub's,
+    and a seat spawned with a persona from its own repository's layer died at launch
+    on "no persona named …" (review of #201, F1). With no answer from the directory
+    (a symlink loop) it is the board's, else the git repository around it.
     """
-    root = project.root if project is not None else git_common_root(Path.cwd())
+    try:
+        root: Path | None = orchestrator.directory_project(Path.cwd()).root
+    except OSError:
+        root = project.root if project is not None else git_common_root(Path.cwd())
     try:
         personas.resolve(name, root)
     except personas.PersonaError as exc:

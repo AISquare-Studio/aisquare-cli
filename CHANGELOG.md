@@ -54,7 +54,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from every picker and the catalogue, and the voice page does not serve.
   `aisquare doctor` shows one ok row, `captain: off (experimental)`. On, the captain
   is exactly as above; asq reads the switch when it starts. Nothing else reads it:
-  fleets, boards and the store (schema v32) are the same either way.
+  fleets, boards and the store (schema v33) are the same either way.
 - **The persona rides the system prompt too, and a replay keeps it.** For Claude
   Code the launch appends the persona block to the default system prompt
   (`--append-system-prompt-file`, a file under `~/.aisquare/cache/persona-prompts/`;

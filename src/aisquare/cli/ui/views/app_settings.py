@@ -1,7 +1,7 @@
 """App settings: the machine-wide settings, whatever project is open.
 
 Everything ``~/.aisquare/config.toml`` holds that is not about one project:
-permission mode, worktree, account and persona per role, the fleet's escape key, agent
+permission mode, worktree, persona and account per role, the fleet's escape key, agent
 cap, worktree root and native-teams switch, how launches pick an account,
 what a usage limit does and what the accounts share. The project's own
 Settings tab keeps what IS the project's (its nickname). Written through
@@ -10,12 +10,6 @@ from the system defaults — and re-read
 after every save so the form shows what the file holds. Precedence: a per-spawn
 flag beats this file beats the system default; no value here is read from the
 environment.
-
-The persona per role (docs/plans/spawn-personas.md §3.8, P4) lists the personas every
-project has — ``core.personas.catalogue()``, the user and bundled layers, since this
-file is machine-wide — plus a configured name they lack, shown as ``<name> (custom)``
-so saving the form never silently drops it (a spawn then refuses a name its project
-lacks, naming the key).
 
 Reset all settings to default asks first, then moves the file aside
 (``services.settings.reset_settings``) and names the backup it kept; moving it
@@ -28,6 +22,13 @@ value here is the ACCOUNT per role (#145): the select beside each role writes
 ``team.profiles.<role>.account`` — exactly what ``aisquare team bind <role>
 --account`` writes — the middle rung of the account ladder a launch walks
 (``--account`` > role binding > project default > machine default).
+
+The persona per role (docs/plans/spawn-personas.md §3.8, P4) writes
+``[fleet.roles.<role>].persona``, a machine-wide default, so the select lists the
+personas every project can resolve: the user layer and the bundled ones
+(``core.personas.catalogue(None)``), never one project's own. A configured name the
+list lacks is shown as ``<name> (custom)``, so saving the form never silently drops
+it; ``fleet spawn`` refuses it where it does not resolve, naming the key.
 
 Save writes only the fields changed on the form since it was read: the file as it is
 then holds the rest, a ``config set`` or ``config reset`` made from a shell meanwhile
@@ -74,9 +75,6 @@ PERMISSION_MODES: tuple[tuple[str, str], ...] = (
     ("(no flag)", ""),
 )
 """Claude Code's ``--permission-mode`` choices (``core.config``), plus "pass no flag"."""
-
-NO_PERSONA = ""
-"""A role's ``(none)``: no ``persona`` key is written for it."""
 
 DEFAULT_ESCAPE_KEY = FleetSettings().escape_key
 DEFAULT_WORKTREE_DIR = FleetSettings().worktree_dir
@@ -185,12 +183,18 @@ def account_options(accounts: list[ClaudeAccount], current: str | None) -> list[
     return [(Text(label), value) for label, value in options]
 
 
-def persona_options(current: str | None, names: Iterable[str]) -> list[tuple[str, str]]:
-    """``(none)`` and the persona names, with a configured name they lack appended so it shows."""
+NO_PERSONA = ""
+"""A role's ``(none)``: no ``persona`` key is written for it."""
+
+
+def persona_options(current: str | None, names: Iterable[str]) -> list[tuple[Text, str]]:
+    """``(none)`` and the persona names, with a configured name they lack appended so it
+    shows. Prompts are :class:`Text`, as :func:`permission_options`' are: a name written
+    by hand is free text."""
     options = [("(none)", NO_PERSONA), *((name, name) for name in names)]
     if current and current not in {value for _, value in options}:
         options.append((f"{current} (custom)", current))
-    return options
+    return [(Text(label), value) for label, value in options]
 
 
 class RoleRow(NamedTuple):
@@ -256,13 +260,14 @@ class AppSettingsView(VerticalScroll):
     AppSettingsView .row Switch { margin-left: 1; }
     AppSettingsView .row .worktree-label { width: 10; margin-left: 2; }
     AppSettingsView .row .persona-label { width: 9; margin-left: 2; }
+    AppSettingsView .row .persona-select { width: 20; }
+    AppSettingsView #settings-personas-unavailable { display: none; color: $warning; height: auto; }
+    AppSettingsView #settings-personas-unavailable.shown { display: block; }
     AppSettingsView .section { text-style: bold; margin-top: 1; }
     AppSettingsView #settings-buttons Button { margin-right: 1; }
     AppSettingsView #settings-note { color: $text-muted; margin-top: 1; height: auto; }
-    AppSettingsView #settings-personas-unavailable { display: none; color: $warning; height: auto; }
-    AppSettingsView #settings-personas-unavailable.shown { display: block; }
     """
-    ROLE_SECTION: ClassVar[str] = "roles — permission mode, worktree, account and persona per role"
+    ROLE_SECTION: ClassVar[str] = "roles — permission mode, worktree, persona and account per role"
     ACCOUNTS_SECTION: ClassVar[str] = (
         "accounts — how launches pick one; what a usage limit does; what they share"
     )
@@ -281,6 +286,21 @@ class AppSettingsView(VerticalScroll):
         self._persona_names, self._personas_unavailable = self._read_persona_names()
 
     @staticmethod
+    def _read_persona_names() -> tuple[list[str], str | None]:
+        """The machine-wide persona names — or none, and the reason, which the form shows.
+
+        No project: a role's default is machine-wide, so a persona only one project holds
+        would refuse every other project's spawn of that role. ``catalogue`` never raises
+        for one bad directory, so whatever reaches the ``except`` is a real failure (an
+        unreadable layer, a bug). It costs the list, never the form.
+        """
+        try:
+            found, _invalid = personas.catalogue(None)
+        except Exception as exc:
+            return [], f"personas unavailable — {type(exc).__name__}: {exc}"
+        return [persona.name for persona in found], None
+
+    @staticmethod
     def _read_config() -> AppConfig:
         """The file, read ONCE for every section on the form; unreadable reads as the defaults.
 
@@ -293,21 +313,6 @@ class AppSettingsView(VerticalScroll):
             return load_config()
         except Exception:
             return AppConfig()
-
-    @staticmethod
-    def _read_persona_names() -> tuple[list[str], str | None]:
-        """The personas every project has — or none, and the reason, which the form shows.
-
-        ``catalogue`` never raises for one bad directory, so whatever reaches the
-        ``except`` is a real failure (an unreadable layer, a bug). It costs the list,
-        never the form, and it is said under the roles, the way the Spawn dialog says
-        it under its Persona field.
-        """
-        try:
-            found, _invalid = personas.catalogue()
-        except Exception as exc:
-            return [], f"personas unavailable — {type(exc).__name__}: {exc}"
-        return [persona.name for persona in found], None
 
     @staticmethod
     def _read_accounts() -> list[ClaudeAccount]:
@@ -411,6 +416,7 @@ class AppSettingsView(VerticalScroll):
                     value=settings.persona or NO_PERSONA,
                     allow_blank=False,
                     id=role_widget_id("persona", role),
+                    classes="persona-select",
                 )
                 bound = self._account_bindings.get(role)
                 yield Select(
@@ -528,11 +534,11 @@ class AppSettingsView(VerticalScroll):
         config = self._read_config()
         self.fleet = config.fleet
         self._roles = role_order(self.fleet)
+        self._account_bindings = settings_service.role_account_bindings(config)
         self._persona_names, self._personas_unavailable = self._read_persona_names()
         unavailable = self.query_one("#settings-personas-unavailable", Static)
         unavailable.update(Text(self._personas_unavailable or ""))
         unavailable.set_class(bool(self._personas_unavailable), "shown")
-        self._account_bindings = settings_service.role_account_bindings(config)
         self.query_one("#escape-key", Input).value = self.fleet.escape_key
         self.query_one("#max-agents", Input).value = str(self.fleet.max_agents_per_project)
         self.query_one("#worktree-dir", Input).value = self.fleet.worktree_dir

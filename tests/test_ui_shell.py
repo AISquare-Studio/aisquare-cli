@@ -2723,23 +2723,71 @@ async def open_stop_dialog(pilot: Pilot[None], app: FleetApp, agent_id: str) -> 
     ``#agent-stop`` selector: the ``ContentSwitcher`` keeps every agent view it
     has ever mounted, so a test that opens a second agent would otherwise click
     the first view's button, which is not on screen and opens nothing.
+
+    The click lands as a person's would, a moment after the view came up: past the click
+    guard's window (``click_guard``), which the guard's own clock is moved on for.
     """
+    from aisquare.cli.ui import click_guard
+
     await pilot.click(row_for(app, agent_id))
     await pilot.pause()
     await settle(app)
     view = app.current_view()
     assert isinstance(view, AgentView), f"the row opened {type(view).__name__}"
-    # Pressed, as Enter on it would: a mouse press this soon after the view came up is the
-    # one the click guard drops (``click_guard``, 0.8.2), and the guard is not what is tested.
-    # A press posts its ``Pressed`` and returns, where a pilot click paused after each mouse
-    # event, so the dialog is settled in before a test clicks its buttons: after one pause
-    # windows-latest had it pushed and not yet composed (``NoMatches('#stop-confirm')``).
-    view.query_one("#agent-stop", Button).press()
-    await pilot.pause()
-    await settle(app)
+    real = click_guard.clock
+    click_guard.clock = lambda: real() + click_guard.CLICK_GUARD + 1
+    try:
+        await pilot.click(view.query_one("#agent-stop", Button))
+        await pilot.pause()
+    finally:
+        click_guard.clock = real
     screen = app.screen
     assert isinstance(screen, StopAgentScreen), f"Stop opened {type(screen).__name__}"
     return screen
+
+
+def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #240, "also confirmed": a refresh whose read of the project failed lists
+    none of its agents (``refresh_data`` fails open, the cost on the card), and Stop on
+    the agent's still-open view was then refused as "no longer listed" while the agent
+    ran. The dialog opens on the row the view shows; the service decides."""
+    from aisquare.cli.ui import click_guard
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = [status("prj_a", "coder-auth", "coder", "working")]
+    failing: list[Exception] = []
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        if failing:
+            raise failing[0]
+        return list(live)
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[str]]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_coder-auth"))
+        await pilot.pause()
+        view = app.current_view()
+        assert isinstance(view, AgentView)
+        failing.append(fleet_service.FleetUnavailable("database is locked"))
+        app.refresh_data()
+        await pilot.pause()
+        real = click_guard.clock
+        click_guard.clock = lambda: real() + click_guard.CLICK_GUARD + 1
+        try:
+            await pilot.click(view.query_one("#agent-stop", Button))
+            await pilot.pause()
+        finally:
+            click_guard.clock = real
+        said = [str(n.message) for n in app._notifications]
+        return type(app.screen).__name__, said
+
+    screen, said = drive(go)
+    assert screen == "StopAgentScreen", said
+    assert not any("no longer listed" in line for line in said)
 
 
 def test_the_agent_view_offers_stop_exactly_while_there_is_a_process(

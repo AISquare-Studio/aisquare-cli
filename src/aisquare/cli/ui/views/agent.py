@@ -18,9 +18,6 @@ row, whose dead window `remain-on-exit` kept for the last screen (#138) — Stop
 there removes it and the row leaves the listing. A ✗ lost row offers no Stop:
 it is ``fleet reap``'s business. **Restart** (#138) runs the service off the
 UI thread; the shell's next frame is what repaints, never an optimistic guess.
-A restart resumes the agent's own session when its transcript is on disk, so
-the manager comes back knowing its intake and its coders; the view then
-selects the new row.
 """
 
 from __future__ import annotations
@@ -38,7 +35,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.ui.click_guard import GuardedButton
-from aisquare.cli.ui.sidebar import ALIVE_STATES, ROLE_ICON, STATE_CHIP, STOP_STATES, StopAgent
+from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP, STOP_STATES, StopAgent
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
@@ -126,15 +123,24 @@ def shown_pane(status: FleetAgentStatus) -> str | None:
 
 
 RESTART_WORKER = "agent-restart"
+#: States in which there is a process to stop; anything else is a row to restart. The
+#: service's own set, which `fleet restart|stop --all` acts on.
+_STOPPABLE: frozenset[str] = fleet_service.PROCESS_STATES
 
 
 class AgentView(Vertical):
     """One agent: who it is, the two actions that change it, then the live session.
 
-    Stop asks the shell for its dialog (:class:`StopAgent`); the dialog runs the
-    stop and owns its answer, including a refusal. Restart runs the service off
-    the UI thread here, and the shell then shows the new row if this view is still
-    the one on screen (:class:`AgentRestarted`, #138). Both buttons ignore a mouse
+    **Stop** and **Restart** (#138) are the actions §4.2 promised and this view
+    never had: a manager ended with ctrl+c inside its window showed 💤 forever
+    with nothing to click, and ``fleet spawn manager`` refused until a hand-run
+    ``reap``. Stop asks the shell for its dialog (:class:`StopAgent`); the dialog
+    runs the stop and owns its answer, including a refusal. Restart runs the
+    service off the UI thread; the shell's next frame is what repaints, never an
+    optimistic guess. A restart resumes the agent's own
+    session when its transcript is on disk, so the manager comes back knowing
+    its intake and its coders; the shell then shows the new row if this view is
+    still the one on screen (:class:`AgentRestarted`). Both buttons ignore a mouse
     press that lands just as the view came up or moved under the pointer
     (:class:`~aisquare.cli.ui.click_guard.GuardedButton`).
     """
@@ -245,12 +251,12 @@ class AgentView(Vertical):
         """Stop where ``STOP_STATES`` says — a process, or a dead window; Restart always (an
         exited row is exactly its case).
 
-        Greyed while THIS view's own restart runs, and only then: ``self.workers``
+        Greyed while THIS view's own restart runs, and only then (a stop runs inside its
+        own modal dialog): ``self.workers``
         is the app's whole list, and a finished worker is still in it when its
         ``StateChanged`` arrives — nothing else repaints the buttons afterwards (the shell
         feeds a view only when its status changed), so a failed restart would otherwise
-        stay greyed with no way to retry it. A stop runs inside its dialog, which is
-        modal: neither button can be pressed until it has answered.
+        stay greyed with no way to retry it.
         """
         busy = any(
             worker.node is self and worker.name == RESTART_WORKER and not worker.is_finished
@@ -261,23 +267,25 @@ class AgentView(Vertical):
         stop.disabled = busy
         stop.tooltip = (
             "/exit, a grace period, then the window is killed (as `fleet stop` does)"
-            if self.status.state in ALIVE_STATES
+            if self.status.state in _STOPPABLE
             else "Remove the dead window tmux kept for the last screen; the row leaves the "
             "listing (as `fleet stop` does)"
         )
         restart = self.query_one("#agent-restart", Button)
         restart.disabled = busy
-        restart.label = "Restart" if self.status.state in ALIVE_STATES else "Restart (resume)"
+        restart.label = "Restart" if self.status.state in _STOPPABLE else "Restart (resume)"
         restart.tooltip = (
             "Start it again under this label — same role, task, worktree, account and "
-            "persona; its session is resumed from the transcript when that is on disk "
-            "(as `fleet restart` does)"
+            "persona; its session is resumed from the transcript when that is on disk (as "
+            "`fleet restart` does)"
         )
 
     @on(Button.Pressed, "#agent-stop")
     def _stop(self, event: Button.Pressed) -> None:
         event.stop()
         agent = self.status.agent
+        # THIS row's id: the dialog pins the stop to it (``agent_id``), never to whoever
+        # holds the label now — the view outlives its row.
         self.post_message(StopAgent(agent.project_id, agent.id))
 
     @on(Button.Pressed, "#agent-restart")

@@ -122,8 +122,9 @@ tmux can see and its row says so (`no hooks`).
    toasts `✓ stopped <label> (<id>)`, the list re-reads and the view returns to
    the project. Beside it, **Restart** starts the agent again under its label —
    same role, task, worktree, account and persona; its session is resumed from
-   the transcript when that is on disk (`fleet restart` below) — and the view
-   then selects the new row.
+   the transcript when that is on disk (`fleet restart` below) — and the new row
+   is shown if this view is still the one on screen. Both ignore a click in the
+   second after they appear or move.
    **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
    project, headed with its name and codename. It reads in two steps. First who
    runs it: role (the fleet's roles plus any role bound with `team bind`;

@@ -441,6 +441,8 @@ def tmux_client_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
 
     The client that finds no server starts one, and the server keeps that client's
     environment as its global one, so a server the fleet starts holds no team
-    variable. The home (``AISQUARE_HOME``) stays: the windows need it.
+    variable: ``AISQUARE_PERSONA`` among them, so a window opened in it by hand is briefed
+    as no one's persona (review of #201, F7). The home (``AISQUARE_HOME``) stays: the
+    windows need it.
     """
     return {k: v for k, v in untraced_env(base).items() if k not in TEAM_ENV_VARS}

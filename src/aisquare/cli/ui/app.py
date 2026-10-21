@@ -326,6 +326,7 @@ class HelpScreen(ModalScreen[None]):
             *(self.MAC_COPY_KEYS if mac_keyboard() else ()),
             ("divider", "drag the line beside the sidebar to resize it; double-click puts it back"),
             ("> < =", "from the sidebar: widen, narrow, reset the divider"),
+            ("x", "from the sidebar: stop the selected agent (asks first)"),
             ("t", "themes (applied live, autosaved)"),
             ("R", "remote control — the fleet on your phone: link, QR, password, devices"),
             ("r", "refresh now"),
@@ -1899,9 +1900,23 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
         ``board``, not ``project``: the captain's row stops against the home board,
         which is no listed project (T2).
+
+        A frame whose read of the agent's project failed lists none of its agents
+        (``refresh_data`` fails open with the cost shown), and Stop was then refused as
+        "no longer listed" for an agent that still ran (review of #240, "also confirmed":
+        Stop after a failed refresh). Its open view still holds the status it last
+        showed, and the dialog asks the service about that row, which decides.
         """
         project = self.snapshot.board(event.project_id) if self.snapshot else None
         status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
+        if (
+            status is None
+            and self.snapshot is not None
+            and event.project_id in self.snapshot.notices
+        ):
+            view = self.current_view()
+            if isinstance(view, AgentView) and view.status.agent.id == event.agent_id:
+                status = view.status
         if project is None or status is None:
             self.notify("that agent is no longer listed", severity="warning", timeout=4)
             return
@@ -2270,9 +2285,9 @@ def _writing_workers() -> dict[str, str]:
         project.SPAWN_WORKER: "a manager start",
         settings.NICKNAME_WORKER: "a project's rename",
         stop.STOP_WORKER: "an agent's stop",
-        spawn.SPAWN_WORKER: "a spawn from the Spawn dialog",
-        personas_tab.ATTACH_WORKER: "a persona's attach",
+        spawn.SPAWN_WORKER: "an agent's spawn",
         persona_dialogs.IMPORT_WORKER: "a persona's import",
+        personas_tab.ATTACH_WORKER: "a persona's attachment",
         captain.TELL_WORKER: "a line to the captain",
         captain.VOICE_WORKER: "the captain's speaker switch",
         agent.RESTART_WORKER: "an agent's restart",
@@ -2328,8 +2343,8 @@ def _waited_reads() -> dict[str, str]:
         welcome.worker_name("candidates"): "Welcome's folder list",
         welcome.worker_name("validate"): "Welcome's folder check",
         spawn.ACCOUNTS_WORKER: "the Spawn dialog's accounts",
-        attach.TARGETS_WORKER: "the attach dialog's teammates",
-        persona_dialogs.SKILLS_WORKER: "the import dialog's skills",
+        attach.TARGETS_WORKER: "the persona target picker's list",
+        persona_dialogs.SKILLS_WORKER: "the Import dialog's skill list",
         captain.BAR_WORKER: "the captain's bar",
         captain.MIC_WORKER: "the captain's microphone check",
     }

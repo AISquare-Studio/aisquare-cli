@@ -679,3 +679,101 @@ def test_the_cli_pulls_in_neither_the_sdk_nor_the_engines() -> None:
     assert "yaml" not in cli
     assert "aisquare.services.persona_import" not in cli
     assert "aisquare.services.persona_import" in branch
+
+
+# --- the review of #240's "also confirmed" items on the import engines ---------------------
+
+
+def test_an_sdk_with_no_credentials_at_all_is_a_reason_for_the_ladder_not_a_traceback(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no key, token or profile anywhere, the SDK raises a bare ``TypeError`` from
+    the request ("Could not resolve authentication method…"), which is no
+    ``AnthropicError``: it escaped the engine ladder and the import ended in a traceback."""
+    _fake_sdk(monkeypatch, None)
+
+    def no_credentials(self: object, **kwargs: Any) -> object:
+        raise TypeError(
+            "Could not resolve authentication method. Expected either api_key or "
+            "auth_token to be set."
+        )
+
+    anthropic = sys.modules["anthropic"]
+    monkeypatch.setattr(type(anthropic.Anthropic().messages), "parse", no_credentials)
+
+    with pytest.raises(PersonaError) as caught:
+        _import(str(_notes(tmp_path)), engine="api")
+
+    assert caught.value.code == "no_import_engine"
+    assert "api engine: no usable credentials" in str(caught.value)
+
+
+def test_the_manager_engine_runs_under_the_account_the_manager_is_bound_to(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``team bind manager --account 2`` is the manager's account, the one ``launch``
+    and ``fleet spawn`` run it under (``services.claude_accounts.choose``). The engine
+    read the binding's env alone and imported on this shell's login."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import settings as settings_service
+
+    second = accounts_core.create_account()
+    settings_service.bind_role("manager", account=str(second.slot))
+    runs = _runs(monkeypatch, _envelope())
+
+    _import(str(_notes(tmp_path)))
+
+    [(_argv, kwargs)] = runs.calls
+    assert kwargs["env"]["CLAUDE_CONFIG_DIR"] == str(second.config_dir)
+    assert kwargs["env"]["AISQUARE_TEAM"] == "0"
+
+
+def test_the_manager_engine_runs_the_path_path_gives_its_binary(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows ``claude`` is ``claude.cmd``, found through PATHEXT, which
+    ``CreateProcess`` does not consult for a bare name: the engine reported a Claude Code
+    that a shell runs as "not on PATH". It runs what ``shutil.which`` finds."""
+    found = str(tmp_path / "bin" / "claude.cmd")
+    monkeypatch.setattr(
+        "aisquare.services.persona_import.shutil.which",
+        lambda name: found if name == "claude" else None,
+    )
+    runs = _runs(monkeypatch, _envelope())
+
+    _import(str(_notes(tmp_path)))
+
+    [(argv, _kwargs)] = runs.calls
+    assert argv[:2] == [found, "-p"]
+
+
+def test_condensing_a_skill_keeps_its_other_frontmatter_and_its_supporting_files(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--condense`` (and ``--llm`` on a recognised skill) rewrites the description and
+    the body. The import re-rendered the SKILL.md from the draft alone and wrote nothing
+    else: ``allowed-tools``, the source's ``metadata`` and its reference files were gone."""
+    source = tmp_path / "long-skill"
+    (source / "reference").mkdir(parents=True)
+    (source / "SKILL.md").write_text(
+        "---\nname: long-skill\ndescription: Long.\nallowed-tools: Read, Grep\n"
+        "metadata:\n  owner: platform\n---\n" + "w" * 9_000 + "\n",
+        encoding="utf-8",
+    )
+    (source / "reference" / "checklist.md").write_text("- one\n", encoding="utf-8")
+    (source / "notes.txt").write_text("kept\n", encoding="utf-8")
+    _runs(monkeypatch, _envelope(name="long-skill", body="Short and complete."))
+
+    result = _import(str(source), condense=True)
+
+    front = result.persona.frontmatter
+    assert front["allowed-tools"] == "Read, Grep"
+    assert front["metadata"] == {"owner": "platform", "persona-source": str(source.resolve())}
+    assert front["description"] == DRAFT["description"] and result.persona.body == (
+        "Short and complete."
+    )
+    assert (result.persona.path / "reference" / "checklist.md").read_text(encoding="utf-8") == (
+        "- one\n"
+    )
+    assert (result.persona.path / "notes.txt").is_file()
+    assert sorted(result.persona.files) == ["notes.txt", "reference/checklist.md"]

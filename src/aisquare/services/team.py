@@ -1904,8 +1904,6 @@ def hook_session_start(
         # other session's injected context.
         model = harness.clean_model_id(model)
         effort = harness.clean_effort(effort)
-        # The row the window names, read once: for the persona, the assignment and the
-        # cycle's project.
         asked_persona, persona_note, named = _asked_persona(store, project.id)
         session = store.upsert_session(
             TeamSession(
@@ -1948,9 +1946,10 @@ def hook_session_start(
         # Before the board is read below: the assignment may move this agent's
         # claims onto its new id, and a board read first still named the old one.
         # ``source`` plays no part — see rule 1 of the fleet-row section. The row the window
-        # names was read once, above, for the assignment and the cycle's project.
+        # names was read once, above, for the persona, the assignment and the cycle's project.
         assigned = _assignment(store, session.id, project.id, named=named)
         _settle_owed_persona(store, session)  # this start briefs the persona itself
+        fleet = _cycle_project(store, project, cwd, session.id, named=named)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
         return collision + _render_board(
@@ -1962,8 +1961,11 @@ def hook_session_start(
             assigned=assigned,
             briefing=True,
             persona_note=persona_note,
+            # Asked only when the briefing needs it: one git call, which a session with no
+            # persona, or one whose cycle names its project, never pays.
+            persona_root=_directory_root(cwd) if session.persona and fleet is None else None,
             labels=lambda: slot_labels_via(store),
-            fleet=_cycle_project(store, project, cwd, session.id, named=named),
+            fleet=fleet,
         )
 
 
@@ -2846,6 +2848,7 @@ def _render_board(
     persona_note: str | None = None,
     labels: Mapping[int, str] | Callable[[], Mapping[int, str]] | None = None,
     fleet: ProjectInfo | None = None,
+    persona_root: Path | None = None,
 ) -> str:
     """The board, and for ``me`` the protocol and its role's cycle, whose fleet commands
     name ``fleet`` (:func:`_cycle_project`). ``briefing`` is SessionStart's alone: it adds
@@ -2934,7 +2937,12 @@ def _render_board(
             *_role_cycle(me, fleet),
         ]
         if briefing and me.persona:
-            lines += _persona_briefing(me.persona, project.root)
+            # The session's own project, whose layer the persona was checked against
+            # at spawn and launch: the cycle's (its fleet row's, else its directory's
+            # when registered), else ``persona_root``, the directory's own. The
+            # board's is the hub's under one (review of #201, F1 and F6).
+            root = fleet.root if fleet is not None else (persona_root or project.root)
+            lines += _persona_briefing(me.persona, root)
         if briefing and persona_note:
             lines.append(persona_note)
     lines.append("</aisquare-team>")
@@ -3610,6 +3618,18 @@ def _persona_briefing(name: str, root: Path, *, without: str = "launched without
         return [f'persona "{name}": {reason} — {without}']
 
 
+def _directory_root(cwd: Path | None) -> Path | None:
+    """The root of ``cwd``'s own project, the hub aside (``orchestrator.directory_project``):
+    the persona layer ``launch --persona`` checked (``cli.launch._check_persona``). For a
+    session with no fleet row in a directory nobody added, the briefing had only the board's
+    root, the hub's under one, and said a persona the launch had found was missing (review
+    of #201, F6). ``None`` when the directory cannot be read (a symlink loop)."""
+    try:
+        return orchestrator.directory_project(cwd).root
+    except OSError:
+        return None
+
+
 def _asked_persona(
     store: ContextStore, project_id: str
 ) -> tuple[str | None, str | None, FleetAgent | None]:
@@ -3624,17 +3644,17 @@ def _asked_persona(
     launch with no fleet row has. ``None`` asks for nothing, and the session row
     keeps whatever it recorded before.
 
-    Returns ``(persona, note, row)``. Fail-open, but never silently: a row that cannot be
+    Returns ``(persona, note, named)``: ``named`` is the row the window names, in whichever
+    project (:func:`_named_fleet_row`), read here once for the persona, the assignment and
+    the cycle's project alike (review of #259, round 23), ``None`` when it could not be read
+    (as :func:`_hook_named_row` gives it). Only a row of THIS project gives its persona.
+    Fail-open, but never silently: a row that cannot be
     read costs only the row, never the team block. It is logged with its traceback,
     and ``note`` is the one briefing line that tells the agent it started without
     an attached persona. The note names the exception class, never a value.
-
-    ``row`` is the fleet row it read, ``None`` for none or for one it could not read: the
-    start hands it on to the assignment and the cycle's project, so a session start reads
-    the row the window names once (:func:`_hook_named_row`'s rule, review of #259, round 23).
     """
     try:
-        row = _named_fleet_row(store)
+        named = _named_fleet_row(store)
     except Exception as exc:
         _log.warning(
             "session start: fleet row %s for project %s could not be read; "
@@ -3648,9 +3668,13 @@ def _asked_persona(
             "— started without an attached persona"
         )
         return orchestrator.env_persona(), note, None
-    if row is not None and row.persona:
-        return row.persona, None, row
-    return orchestrator.env_persona(), None, row
+    # The row is this board's when its project is, or when its spawn recorded this board
+    # (``fleet_agent.board``): under ``AISQUARE_TEAM_HUB`` every seat is in its own
+    # project and on the hub's board, and comparing the project alone dropped every
+    # attached persona at the next start (review of #201, F2).
+    if named is not None and project_id in (named.project_id, named.board) and named.persona:
+        return named.persona, None, named
+    return orchestrator.env_persona(), None, named
 
 
 # --- a persona attached to a BUSY agent: owed, then handed over by its own prompt --------
@@ -3738,7 +3762,7 @@ def _owed_persona(store: ContextStore, session: TeamSession) -> _OwedPersona | N
     value = store.get_meta(key)
     if not value:
         return None
-    row = _fleet_row(store, session.id, named=_named_fleet_row(store), allow_unbound=False)
+    row = _fleet_row(store, session.id, named=None, allow_unbound=False)
     if row is None or row.id != agent_id:
         return None
     return _OwedPersona(key, row, value.partition(":")[2] or None)
@@ -3764,7 +3788,9 @@ def _owed_persona_briefing(store: ContextStore, session: TeamSession) -> str:
         lines: list[str] = []
         name = owed.row.persona
         if name:
-            root = _project_root(store, session.project_id) or owed.row.cwd
+            # The row's own project, as attach resolved it; the session's is the board's,
+            # the hub's under one (review of #201, F1).
+            root = _project_root(store, owed.row.project_id) or owed.row.cwd
             lines = _persona_briefing(name, root, without=_ATTACHED_WITHOUT)
             if len(lines) > 1:  # the block; a single line is why it could not be loaded
                 replaced = owed.replaced if owed.replaced != name else None

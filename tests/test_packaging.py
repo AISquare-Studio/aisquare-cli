@@ -41,13 +41,13 @@ def test_the_base_install_gains_no_dependencies() -> None:
 
     ``textual`` is in the set because the fleet UI made it core in 0.6.0, not
     because the experiment wants it: the CI transport is stdlib ``urllib`` so
-    that the hook path works in a base install.
+    that the hook path works in a base install. ``tzdata`` is Windows' zone
+    database, and only Windows installs it (the test below).
 
     ``pyyaml`` is in the set because a persona is a Claude Code skill directory
     and a skill's frontmatter is full YAML (docs/plans/spawn-personas.md §3.3,
     accepted by the owner for interchange fidelity); it is imported inside the
-    parser only. ``tzdata`` is Windows' zone database, and only Windows installs
-    it (the test below).
+    parser only.
 
     ``segno`` (pure python, typed, one module) is the Remote modal's QR. It is
     imported lazily by the QR renderer alone (``cli/ui/views/remote.py``), so the
@@ -62,15 +62,8 @@ def test_the_base_install_gains_no_dependencies() -> None:
     # as `foo` rather than failing with a confusing diff.
     required = {re.split(r"[<>=!~\[; ]", dep)[0].strip() for dep in data["project"]["dependencies"]}
     assert required == {
-        "typer",
-        "rich",
-        "pydantic",
-        "tomli-w",
-        "textual",
-        "pyyaml",
-        "tzdata",
-        "segno",
-    }
+        "typer", "rich", "pydantic", "tomli-w", "textual", "pyyaml", "tzdata", "segno"
+    }  # fmt: skip
 
 
 def test_windows_installs_a_time_zone_database_and_nothing_else_does() -> None:

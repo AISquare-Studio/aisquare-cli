@@ -433,17 +433,16 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v26 when that server started, the identity of the server its pane id names (follow-up),
     # v27 a project's nickname, v28 which token took a usage reading (its fingerprint),
     # v29 a task's number on its board, v30 its unique index, v31 the branch of a fleet
-    # agent's worktree (review of #259, round 15), v32 the board a fleet agent reads (round 25).
-    # The persona columns (#201) are no step of their own: they are v15's products beside
-    # `account_slot` (`_PRODUCTS[14]`), which the presence pass adds to any store that lacks them.
-    assert version == SCHEMA_VERSION == 32
+    # agent's worktree (review of #259, round 15), v32 the board a fleet agent reads (round 25),
+    # v33 the persona a session and a fleet agent run as (#201)
+    assert version == SCHEMA_VERSION == 33
 
 
-def test_a_v14_store_gains_nullable_persona_columns_through_the_v15_converge() -> None:
-    """P2's step (docs/plans/spawn-personas.md §7) as it lands after the v15 fork: rows
-    that existed at v14 survive, both tables gain a ``persona`` that reads NULL — v15's
-    products beside ``account_slot`` (``_PRODUCTS[14]``), not a numbered step of their
-    own — and a start that names no persona keeps the one a row already records."""
+def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -> None:
+    """A store from before the v15 fork (0.6.0's v14) climbs the whole ladder: rows that
+    existed at v14 survive, both tables gain a ``persona`` that reads NULL — v33's products
+    (``_PRODUCTS[32]``, #201's step) — and a start that names no persona keeps the one a
+    row already records."""
     from datetime import UTC, datetime
 
     from aisquare.models import TeamSession
@@ -1250,10 +1249,11 @@ def test_a_foreign_store_a_build_without_the_pass_carried_on_converges_too(
 # rc/captain-v1 stamped 21 with the v15 fork converged in place: the account registry AND the
 # persona columns. Main's 0.7.0 stamps 24, with the presence pass and no persona column, and
 # the RC took it whole (#233): its own v24 is main's with the persona columns. Main's 0.8.2
-# stamps 32. A fresh store runs this ladder. Each starting shape is replayed from a FROZEN dump
-# of its schema (tests/fixtures/store_schemas), never built by this ladder, so no pin over it
-# can pass by construction. The owner's two stores were the RC's v21, by two histories, and
-# are its v24 since #233 was installed on them.
+# stamps 32. #201's v33 adds the two persona columns where they are absent, so the RC's
+# stores keep theirs and main's gain them. A fresh store runs this ladder. Each starting shape
+# is replayed from a FROZEN dump of its schema (tests/fixtures/store_schemas), never built by
+# this ladder, so no pin over it can pass by construction. The owner's two stores were the
+# RC's v21, by two histories, and are its v24 since #233 was installed on them.
 
 _SCHEMAS = Path(__file__).parent / "fixtures" / "store_schemas"
 _RC_V21_SCHEMAS = ("rc_v21_owner_home.sql", "rc_v21_owner_asqui.sql", "rc_v21_fresh.sql")
@@ -1393,9 +1393,9 @@ def test_the_rcs_v21_store_reaches_this_schema_with_every_row_it_held(schema: st
     columns in place, none of main's v22 to v32. This build runs v22
     (``pending_revocation``), v23 (a repair no row here needs), v24
     (``project_explainability.api_url``, whose backfill binds the key to its destination's
-    deployment) and main's v25 to v32. The store ends in exactly the schema a fresh store
-    has, every row it held reads back unchanged on every column it had, and a second open
-    changes nothing."""
+    deployment), main's v25 to v32 and #201's v33, whose persona columns it holds already.
+    The store ends in exactly the schema a fresh store has, every row it held reads back
+    unchanged on every column it had, and a second open changes nothing."""
     db = _replay(schema, _EVERY_TABLE + _THE_RCS_OWN_ROWS)
     before, columns = _rows(db)
 
@@ -1425,10 +1425,10 @@ def test_the_rcs_v21_store_reaches_this_schema_with_every_row_it_held(schema: st
 
 def test_mains_v24_store_gains_the_persona_columns_and_keeps_every_row() -> None:
     """A store main's 0.7.0 made: stamped 24, with no persona column. The ladder runs main's
-    v25 to v32, and the presence pass after it finds v15's products incomplete and adds
-    ``team_session.persona`` and ``fleet_agent.persona``, which read NULL (no persona).
-    It ends in main's v32 and the two persona columns, no row changes on a column it had,
-    and a second open changes nothing."""
+    v25 to v32 and #201's v33, which adds ``team_session.persona`` and
+    ``fleet_agent.persona``; they read NULL (no persona). It ends in main's v32 and the two
+    persona columns, no row changes on a column it had, and a second open changes
+    nothing."""
     db = _replay("main_v24_fresh.sql", _EVERY_TABLE + _MAINS_OWN_ROWS)
     before, columns = _rows(db)
 
@@ -1474,12 +1474,11 @@ def test_a_v24_rc_store_and_a_v32_main_store_reach_this_schema_with_every_row(
     schema: str, rows: str, persona: str | None
 ) -> None:
     """The two shapes the 0.8.x merge adds. The RC's own v24, which both of the owner's
-    stores are since #233: it runs main's v25 to v32 and keeps its persona columns and what
-    they hold. Main 0.8.2's v32: the ladder is not entered, and the presence pass adds the
-    two persona columns, which read NULL. Each ends in the schema a fresh store has, every
-    row it held reads back unchanged on every column it had, and a second open changes
-    nothing. The persona columns stay v15's products here until the persona train's own
-    step (#201) is taken."""
+    stores are since #233: it runs main's v25 to v32 and #201's v33, and keeps its persona
+    columns and what they hold. Main 0.8.2's v32: the ladder runs v33 alone, which adds the
+    two persona columns, and they read NULL. Each ends in the schema a fresh store has,
+    every row it held reads back unchanged on every column it had, and a second open
+    changes nothing."""
     db = _replay(schema, rows)
     before, columns = _rows(db)
 
@@ -1511,12 +1510,12 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     """The schema every shape reaches, by name. A fresh store holds main's v32 and the two
     persona columns, and nothing else. That is also the RC's v21 (each of the three dumps)
     plus main's v22 to v32, and the RC's v24 plus main's v25 to v32, and nothing else. The
-    persona columns take no number of their own: they are v15's products beside
-    ``account_slot``, so the version stays main's 32, and main's next step cannot collide
-    with one of this line's."""
+    persona columns are #201's v33, one step on main's v32 with an empty script and the two
+    columns as its products, so a store that holds them already (the RC's) is not changed
+    by it."""
     fresh = _built(SCHEMA_VERSION)
 
-    assert SCHEMA_VERSION == 32
+    assert SCHEMA_VERSION == 33
     assert fresh == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS
     for schema in _RC_V21_SCHEMAS:
         assert fresh == _replayed_shape(schema) | _MAINS_STEPS_PAST_21 | _mains_steps_past_24()
@@ -1527,6 +1526,136 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
         assert _shape(raw) == fresh, "a store opened fresh is not the ladder's schema"
     finally:
         raw.close()
+
+
+# --- the persona step (v33, #201): every store in the wild reaches it --------------------
+#
+# The persona line stamped its two columns as its own v15 (PERSONAS_AT_15); the captain
+# RC carried them as products of main's v15 up to its v24 (#240, "The store"); main's own
+# stores are at v32 without them; and a fresh store has nothing. Each opens with this
+# build to the same shape at the same version, with the rows it held. Take v33 out
+# (its empty script and its ``_PRODUCTS[32]`` entry) and every case goes red: the
+# version, and where no line put them, the columns the store reads.
+PERSONA_COLUMNS = """
+ALTER TABLE team_session ADD COLUMN persona TEXT;
+ALTER TABLE fleet_agent ADD COLUMN persona TEXT;
+"""
+_A_SESSION_AND_AN_AGENT = """
+INSERT INTO team_session (id, project_id, started_at, last_seen_at)
+    VALUES ('ses_old', 'prj_used', '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00');
+INSERT INTO fleet_agent (id, project_id, label, role, pane_id, cwd, created_at)
+    VALUES ('agt_old', 'prj_used', 'coder-1', 'coder', '%1', '/w/used',
+            '2026-09-01T00:00:00+00:00');
+"""
+_PERSONA_COHORTS: tuple[tuple[str, int, str, int, str | None], ...] = (
+    # (label, steps run, what ran after them, the stamp, the persona the old row reads)
+    ("main v32", 32, _A_SESSION_AND_AN_AGENT, 32, None),
+    (
+        "persona-15",
+        14,
+        _A_SESSION_AND_AN_AGENT
+        + PERSONA_COLUMNS
+        + "UPDATE team_session SET persona = 'architect';"
+        + "UPDATE fleet_agent SET persona = 'architect';",
+        15,
+        "architect",
+    ),
+    (
+        "captain RC v24",
+        24,
+        _A_SESSION_AND_AN_AGENT
+        + PERSONA_COLUMNS
+        + "UPDATE team_session SET persona = 'skeptic';"
+        + "UPDATE fleet_agent SET persona = 'skeptic';",
+        24,
+        "skeptic",
+    ),
+)
+
+
+def _persona_shape(db: Path) -> tuple[int, set[tuple[str, str]], dict[str, int]]:
+    """``db``'s version, its shape, and whether each persona column is NOT NULL."""
+    raw = sqlite3.connect(str(db))
+    try:
+        notnull = {
+            table: {row[1]: row[3] for row in raw.execute(f"PRAGMA table_info({table})")}["persona"]
+            for table in ("team_session", "fleet_agent")
+        }
+        return raw.execute("PRAGMA user_version").fetchone()[0], _shape(raw), notnull
+    finally:
+        raw.close()
+
+
+@pytest.mark.parametrize(
+    ("label", "steps", "after", "stamp", "persona"),
+    _PERSONA_COHORTS,
+    ids=[c[0] for c in _PERSONA_COHORTS],
+)
+def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
+    label: str, steps: int, after: str, stamp: int, persona: str | None
+) -> None:
+    """Opened with this build: every table, index and column of the current schema and
+    nothing else, ``user_version == SCHEMA_VERSION``, both persona columns nullable, the
+    old rows read back with the persona their line gave them (NULL where none did), and
+    the store writes and reads a persona on each table. A second open changes nothing."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import TeamSession
+
+    db = _at_version(steps, after=_TWO_PROJECTS + after, stamp=stamp)
+
+    store = open_store()
+    try:
+        old_session = store.get_session("ses_old")
+        old_agent = store.get_fleet_agent("agt_old")
+        attached = store.set_fleet_agent_persona("agt_old", "mentor")
+        now = datetime(2026, 10, 20, tzinfo=UTC)
+        fresh = TeamSession(id="ses_new", project_id="prj_used", started_at=now, last_seen_at=now)
+        store.upsert_session(fresh.model_copy(update={"persona": "careful"}))
+        restarted = store.upsert_session(fresh)  # a start naming none keeps the recorded one
+    finally:
+        store.close()
+    _schema, rows = _contents(db)
+    open_store().close()
+    _schema_again, rows_again = _contents(db)
+    version, shape, notnull = _persona_shape(db)
+
+    assert version == SCHEMA_VERSION == 33, label
+    assert shape == _built(SCHEMA_VERSION), label
+    assert notnull == {"team_session": 0, "fleet_agent": 0}, label
+    assert old_session is not None and old_session.persona == persona, label
+    assert old_agent is not None and old_agent.persona == persona, label
+    assert attached.persona == "mentor", label
+    assert restarted.persona == "careful", label
+    assert rows_again == rows, f"{label}: a second open changed a row"
+
+
+def test_a_fresh_store_is_built_with_the_persona_step() -> None:
+    """No file at all: v1 to v33, the same shape as every cohort above reaches."""
+    open_store().close()
+    version, shape, notnull = _persona_shape(_db_path())
+
+    assert version == SCHEMA_VERSION == 33
+    assert shape == _built(SCHEMA_VERSION)
+    assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
+    assert notnull == {"team_session": 0, "fleet_agent": 0}
+
+
+def test_the_persona_step_is_the_columns_alone_on_top_of_main_s_ladder() -> None:
+    """v33 is one step with an empty script, its two columns in ``_PRODUCTS[32]`` — the
+    v29/v31/v32 pattern — so the presence pass gives them to any store that lacks them,
+    whatever ``user_version`` says, and #208's ``_PREPARE[15]`` converge is not needed."""
+    from aisquare.core.store import _MIGRATIONS, _PREPARE, _PRODUCTS, _Products
+
+    assert _MIGRATIONS[32] == ""
+    assert _PRODUCTS[32] == _Products(
+        columns=(("team_session", "persona", "TEXT"), ("fleet_agent", "persona", "TEXT"))
+    )
+    assert 15 not in _PREPARE and 32 not in _PREPARE
+    assert not any(
+        column == "persona" for step, products in _PRODUCTS.items() if step != 32
+        for _table, column, _ in products.columns
+    )  # fmt: skip
 
 
 # --- doctor's database row reads the schema, not only the file (review of #203) ---------------
@@ -3019,7 +3148,8 @@ def test_a_fleet_row_is_read_as_the_columns_it_is_written_with_whatever_follows_
     SQL. Both lists come from one tuple, and a read names each column as it is written."""
     later = (*store_module._FLEET_AGENT_FIELDS, "later")
     read = store_module._read_list(later, {"board": "COALESCE(board, project_id)"})
-    assert read.endswith(", COALESCE(board, project_id) AS board, later"), read
+    # `persona` (v33) is the column that came after it, and is read as written.
+    assert read.endswith(", COALESCE(board, project_id) AS board, persona, later"), read
 
     cursor = store._conn.execute(  # type: ignore[attr-defined]
         f"SELECT {store_module._FLEET_AGENT_READ} FROM fleet_agent LIMIT 0"

@@ -185,12 +185,6 @@ dev = [
   # Same bounds as the core dependency: the dev env must resolve the major the
   # UI code actually targets, not merely "some textual".
   "textual>=8.2,<9",
-  # The captain's voice page and the remote server under test
-  # (tests/test_remote_server.py): starlette and uvicorn ride in with mcp
-  # already; websockets is what lets starlette's TestClient open the websocket,
-  # and segno what draws the QR the CLI prints (tests pin its absence too).
-  "websockets>=12",
-  "segno>=1.6",
   # The CI test bed validates what it EMITS against the server's vendored JSON
   # Schemas (tests/fixtures/ci_contract/v2/schemas), not against a mirror it
   # wrote itself — a scorer with its own predicate can only ever agree with
@@ -201,22 +195,24 @@ dev = [
   "types-jsonschema>=4.18",
   # PyYAML ships no py.typed; mypy runs strict over src and tests.
   "types-PyYAML>=6.0",
-  # tests/test_packaging.py builds the wheel from this tree to assert the
-  # bundled personas' SKILL.md files ship in it, and tests/test_remote_page.py
-  # builds the sdist and the wheel from it, to prove the bundled page ships;
-  # without the backend in the env both skipped in every CI job. Same floor as
-  # build-system.
-  "hatchling>=1.30.1",
   # The `llm` extra's SDK, so mypy --strict checks the persona import's api engine
   # against the real `messages.parse` signature (the `mcp`/`serve` precedent).
   # Tests never call it: they install a fake `anthropic` module.
   "anthropic>=1",
+  # The remote extra's one addition, so the dev env can run tests/test_remote_server.py
+  # (starlette + uvicorn already arrive through mcp above).
+  "websockets>=12",
   # starlette's TestClient, which the remote server tests drive; mcp 2.x no
   # longer brings it.
   "httpx>=0.27",
   # The remote extra's Web Push crypto, so tests/test_remote_push.py runs on the
   # CI's dev-only install rather than on whatever mcp happens to pull in.
   "cryptography>=42",
+  # tests/test_remote_page.py builds the sdist and the wheel from it, to prove the
+  # bundled page ships; without the backend in the env it skipped in every CI job.
+  # tests/test_packaging.py builds the wheel too, to assert the bundled personas'
+  # SKILL.md files ship in it. Same floor as build-system.
+  "hatchling>=1.30.1",
 ]
 
 [project.scripts]

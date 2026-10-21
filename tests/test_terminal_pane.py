@@ -5469,6 +5469,7 @@ def test_agent_view_stop_says_a_release_the_store_refused(
 
     monkeypatch.setattr(fleet_service, "project_of", lambda agent: project)
     monkeypatch.setattr(fleet_service, "stop", fake_stop)
+    guard_clock.install(monkeypatch)
     closed: list[FleetAgent | None] = []
 
     class ViewHost(App[None]):

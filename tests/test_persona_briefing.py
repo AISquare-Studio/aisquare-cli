@@ -17,7 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import orchestrator, personas
+from aisquare.core import personas
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import FleetAgent
 from aisquare.services import team as team_service
@@ -32,7 +32,9 @@ TEAMMATE = "22222222-3333-4444-5555-666666666666"
 NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 
 #: SessionStart for a coder with NO persona, captured from the base this change
-#: started on (feat/persona-core @ 4f7367e) before a line of it was written:
+#: started on (feat/persona-core @ 4f7367e) before a line of it was written, and
+#: brought to main 0.8.2's text when main was merged in (#201) — ``{project}`` is the
+#: repository's project id:
 #: AISQUARE_ROLE=coder, a fresh home, the clock pinned to NOW. Byte-identical is
 #: the contract — a session without a persona sees nothing new. Re-captured from main
 #: 0.8.2 (5a1bac44) when the RC took it: the same input, run on main's own source, printed
@@ -59,6 +61,7 @@ PINNED = "\n".join(
         'criteria, then `aisquare task review <id> --note "how to verify + evidence" '
         "--as 11111111`,",
         "and pick up the next one.",
+        # Since 0.8.1, every coder is told to clean up after itself; main's own text.
         "Before you finish or go idle, remove every scratch worktree you added",
         "(`git worktree remove <path>`, then `git worktree prune`) and every temp dir you",
         "made — never the worktree you were spawned in: `aisquare fleet reap --project "
@@ -77,7 +80,9 @@ PINNED = "\n".join(
 
 
 @pytest.fixture
-def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, project_capture: None) -> Path:
+    """A repository a coder session starts in. ``[projects] capture`` on (#139): the pinned
+    briefing is a hooked session's in a directory nobody added, as when it was captured."""
     monkeypatch.setenv("AISQUARE_ROLE", "coder")
     monkeypatch.setattr(team_service, "_now", lambda: NOW)
     path = tmp_path / "repo"
@@ -87,8 +92,10 @@ def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _pinned(work: Path) -> str:
-    """:data:`PINNED` for the session ``work`` gives: its project named by id."""
-    return PINNED.replace("{project}", orchestrator.directory_project(work).id)
+    """:data:`PINNED` for the repository at ``work``."""
+    from aisquare.core import orchestrator
+
+    return PINNED.replace("{project}", orchestrator.team_project(work).id)
 
 
 def _start(work: Path, session_id: str = SID) -> str:
@@ -321,9 +328,9 @@ def test_a_row_that_cannot_be_read_is_logged_and_the_variable_still_applies(
         caplog.at_level(logging.WARNING, logger="aisquare.services.team"),
         store_session() as store,
     ):
-        asked, note, row = team_service._asked_persona(store, "prj_row_unreadable")
+        asked, note, named = team_service._asked_persona(store, "prj_row_unreadable")
 
-    assert asked == "mentor" and row is None
+    assert asked == "mentor" and named is None
     assert note == (
         "persona: the fleet row could not be read (RuntimeError) "
         "— started without an attached persona"
@@ -341,10 +348,10 @@ def test_a_start_whose_row_cannot_be_read_says_so_in_one_line_and_still_briefs(
     monkeypatch.setenv("AISQUARE_PERSONA", "mentor")
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row(work, "skeptic"))
     real = team_service._named_fleet_row
-    calls: list[ContextStore] = []
+    calls: list[str] = []
 
     def locked_once(store: ContextStore) -> FleetAgent | None:
-        calls.append(store)
+        calls.append("read")
         if len(calls) == 1:
             raise sqlite3.OperationalError("database is locked")
         return real(store)

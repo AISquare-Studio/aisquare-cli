@@ -788,13 +788,6 @@ ALTER TABLE project ADD COLUMN forgotten_at TEXT;
 # (v8) carries the config DIRECTORY once the session's first hook reports a
 # transcript path; this is the slot, known before the agent has said a word,
 # which is what a restart (#144) or a hand-over (#146) needs.
-#
-# ``team_session.persona`` and ``fleet_agent.persona`` (#201, in :data:`_PRODUCTS`
-# beside it) name the persona a session or a fleet agent runs as, NULL for none.
-# #201 stamped 15 for them alone; this line takes them as v15's products rather
-# than a number of their own, so a store #201 stamped holds them already, the
-# presence pass gives them to a store that never met #201 (main's 0.7.0 among
-# them), and a later step of main's cannot collide with one of this line's.
 _SCHEMA_V15 = """
 CREATE TABLE IF NOT EXISTS claude_account (
     slot        INTEGER PRIMARY KEY,
@@ -1020,6 +1013,15 @@ _SCHEMA_V31 = ""
 # script is empty: it is in :data:`_PRODUCTS`, and its backfill
 # (:func:`_board_existing_agents`) gives a row from before it its session's board.
 _SCHEMA_V32 = ""
+# v33 (#201, docs/plans/spawn-personas.md §5): the persona a session was launched as and
+# the one a fleet agent was spawned with. Nullable: no persona is the default and the
+# common case, and a row records what was ASKED even when the persona could not be
+# loaded. The persona line stamped these columns as its own v15 (#208 converged that
+# number); stamped here, a store of that line holds them already, and so does the
+# captain RC's v24, so the columns are the whole step and the script is empty: they are
+# in :data:`_PRODUCTS`, added only where absent, and a row from before them keeps NULL,
+# which reads as no persona.
+_SCHEMA_V33 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1054,6 +1056,7 @@ _MIGRATIONS = (
     _SCHEMA_V30,
     _SCHEMA_V31,
     _SCHEMA_V32,
+    _SCHEMA_V33,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1078,11 +1081,7 @@ class _Products(NamedTuple):
 _PRODUCTS: dict[int, _Products] = {
     14: _Products(
         ("claude_account", "claude_account_alias", "claude_account_default", "project_setting"),
-        (
-            ("fleet_agent", "account_slot", "INTEGER"),
-            ("team_session", "persona", "TEXT"),
-            ("fleet_agent", "persona", "TEXT"),
-        ),
+        (("fleet_agent", "account_slot", "INTEGER"),),
     ),
     15: _Products(
         ("claude_usage", "claude_usage_slot_time"),
@@ -1112,6 +1111,9 @@ _PRODUCTS: dict[int, _Products] = {
     29: _Products(("team_task_number", "team_task_unnumbered")),
     30: _Products(columns=(("fleet_agent", "branch", "TEXT"),)),
     31: _Products(columns=(("fleet_agent", "board", "TEXT"),)),
+    32: _Products(
+        columns=(("team_session", "persona", "TEXT"), ("fleet_agent", "persona", "TEXT"))
+    ),
 }
 
 _PROJECT_COLUMNS = (
@@ -1193,7 +1195,7 @@ _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
     "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
-    "persona", "board",
+    "board", "persona",
 )  # fmt: skip
 _FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
 
@@ -3443,8 +3445,8 @@ class SqliteStore:
                 agent.boot_id,
                 agent.server_started_at.isoformat() if agent.server_started_at else None,
                 agent.branch,
-                agent.persona,
                 agent.board if agent.board is not None else agent.project_id,
+                agent.persona,
             ),
         )
         self._conn.commit()
@@ -4201,6 +4203,28 @@ class SqliteStore:
             raise KeyError(agent_id)
         return agent
 
+    def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent:
+        """The persona a running agent was given (``fleet.attach_persona``, plan §4.7)."""
+        self._conn.execute("UPDATE fleet_agent SET persona = ? WHERE id = ?", (persona, agent_id))
+        self._conn.commit()
+        agent = self.get_fleet_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        return agent
+
+    def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession:
+        """The persona a joined session now runs as — beside ``set_fleet_agent_persona``."""
+        session = self.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        self._conn.execute(
+            "UPDATE team_session SET persona = ? WHERE id = ?", (persona, session.id)
+        )
+        self._conn.commit()
+        updated = self.get_session(session.id)
+        assert updated is not None  # just updated
+        return updated
+
     def end_fleet_agent_if_live(
         self, agent_id: str, *, exit_status: int | None = None
     ) -> FleetAgent | None:
@@ -4438,28 +4462,6 @@ class SqliteStore:
             (key,),
         ).fetchall()
         return {str(row["project_id"]): str(row["value"]) for row in rows}
-
-    def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent:
-        """The persona a running agent was given (``fleet.attach_persona``, plan §4.7)."""
-        self._conn.execute("UPDATE fleet_agent SET persona = ? WHERE id = ?", (persona, agent_id))
-        self._conn.commit()
-        agent = self.get_fleet_agent(agent_id)
-        if agent is None:
-            raise KeyError(agent_id)
-        return agent
-
-    def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession:
-        """The persona a joined session now runs as — beside ``set_fleet_agent_persona``."""
-        session = self.get_session(session_id)
-        if session is None:
-            raise KeyError(session_id)
-        self._conn.execute(
-            "UPDATE team_session SET persona = ? WHERE id = ?", (persona, session.id)
-        )
-        self._conn.commit()
-        updated = self.get_session(session.id)
-        assert updated is not None  # just updated
-        return updated
 
     def terminal_events(self, project_id: str) -> dict[str, TeamEvent]:
         """The latest done/dropped event per task — archive attribution.

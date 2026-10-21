@@ -309,7 +309,7 @@ async def settle(pilot: Pilot[Any]) -> None:
 
     Not ``workers.wait_for_complete()``: a scripted refusal ends its worker in an error,
     which that call raised as ``WorkerFailed`` whenever the worker was still registered
-    when the wait began, as it sometimes was on windows-latest (card tsk_01m3pt9eme0h).
+    when the wait began (as on rc/captain-v1, #238, card tsk_01m3pt9eme0h).
     """
     await settle_page(pilot.app)
 

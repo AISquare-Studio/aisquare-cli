@@ -260,7 +260,7 @@ async def settle(pilot: Pilot[Any]) -> None:
 
     Not ``workers.wait_for_complete()``: a scripted refusal ends its worker in an error,
     which that call raised as ``WorkerFailed`` whenever the worker was still registered
-    when the wait began, as it sometimes was on windows-latest (card tsk_01m3pt9eme0h).
+    when the wait began (as on rc/captain-v1, #238, card tsk_01m3pt9eme0h).
     """
     await settle_page(pilot.app)
 
@@ -565,7 +565,7 @@ def test_the_import_dialog_browses_skills_and_guards_the_layer_and_the_name(
         project_radio = dialog.query_one("#import-project", RadioButton)
         browse: Select[str] = dialog.query_one("#import-browse", Select)
         prompts = [str(option[0]) for option in browse._options]
-        browse.value = "/claude/skills/code-review"
+        browse.value = str(Path("/claude/skills/code-review"))  # the platform's separators
         await pilot.pause()
         source = dialog.query_one("#import-source", Input).value
         submit = dialog.query_one("#import-submit", Button)
@@ -581,7 +581,7 @@ def test_the_import_dialog_browses_skills_and_guards_the_layer_and_the_name(
     )
     assert disabled is True  # no git repository: no project layer
     assert any("code-review" in p and "imported" in p for p in prompts)
-    assert source == "/claude/skills/code-review"  # Browse fills the Source field
+    assert source == str(Path("/claude/skills/code-review"))  # Browse fills the Source field
     assert bad == (True, NAME_RULE)
     assert good_disabled is False
     assert skills.calls == [{"args": [None]}]

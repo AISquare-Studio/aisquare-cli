@@ -13,7 +13,8 @@ at every Stop, with the coder's result behind them.
 Now each reader leaves the kinds out IN its query, before the LIMIT: the agent-facing ones
 (both briefings, the MCP board, the delta, the wake-up) every human-board kind; the human
 board (``aisquare board``, its watch) the audit alone, the bell and the notices being its
-own. The audit is read with ``aisquare captain log``.
+own. The phone's Board tab (Remote) leaves the audit alone out, as ``aisquare board`` does.
+The audit is read with ``aisquare captain log``.
 """
 
 from __future__ import annotations
@@ -254,6 +255,24 @@ def test_aisquare_board_lists_the_bell_and_the_notice_and_not_the_captains_audit
     kinds = [event["kind"] for event in as_json["events"]]
     assert kinds[-4:] == ["team.decision", "team.result", "team.attention", "team.notice"], kinds
     assert f"team.{AUDIT}" not in kinds
+
+
+def test_the_phones_board_tab_leaves_the_audit_out_before_its_window_is_counted(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
+) -> None:
+    """Remote's Board tab (``remote_board_payload``, ``GET api/board``) reads the newest
+    ``BOARD_EVENTS``: a busy captain's audit filled all of them, and the phone showed no
+    decision, result, bell or notice (review of #240, F3)."""
+    from aisquare.services import remote_server
+
+    project = _a_board_the_owner_asked_the_captain_about(runner, monkeypatch, work_dir)
+    _audit_lines(project, remote_server.BOARD_EVENTS + 10)
+
+    events = remote_server.remote_board_payload(project.id)["events"]
+    assert isinstance(events, list)
+    kinds = [event["kind"] for event in events]
+    assert f"team.{AUDIT}" not in kinds
+    assert kinds[-4:] == ["team.decision", "team.result", "team.attention", "team.notice"], kinds
 
 
 def test_the_watch_fallback_frame_leaves_the_audit_out_too(

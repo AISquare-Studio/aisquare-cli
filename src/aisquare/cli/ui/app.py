@@ -805,7 +805,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.set_interval(30.0, self._remote_auto_off)
         self.set_interval(30.0, self.remote.revive_tunnel_if_dead)
         # The captain's ui actions (T4): after the first frame, which they resolve against.
-        listen_for_ui(self)
+        # Only with the captain on, read once at start as the rest of the shell reads it: off,
+        # asq bound a socket, made its folder and ran a thread that main 0.8.2 has none of,
+        # for actions the receiver then refused one by one (review of #240, F6).
+        if self.captain_on:
+            listen_for_ui(self)
 
     # --- what was open (#144) ---------------------------------------------------------
 

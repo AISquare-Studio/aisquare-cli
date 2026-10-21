@@ -12,6 +12,7 @@ each surface here is also driven on, as the control.
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from typer.testing import CliRunner
 from aisquare.cli import captain as captain_cli
 from aisquare.cli import captain_voice
 from aisquare.cli.app import app
+from aisquare.cli.ui.receiver import listen_for_ui, ui_receiver
 from aisquare.cli.ui.views.captain import CaptainView
 from aisquare.core import personas as core_personas
 from aisquare.core.config import load_config
@@ -278,13 +280,37 @@ def test_a_remembered_captain_opens_no_captain_view_when_off(
 
 
 @receiver_suite.UNIX_SOCKETS
-def test_the_ui_receiver_refuses_every_captain_action_when_off(
+def test_the_fleet_ui_starts_no_ui_receiver_when_off(
     off: None, tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
+    """Off, asq starts none of the captain's ui machinery: no receiver, no socket and no
+    thread, as main 0.8.2 has none (review of #240, F6). It bound the socket, made its
+    folder and ran ``asq-ui-receiver`` for actions it then refused one by one."""
+    receiver_suite.fleet(tmp_path, script)
+
+    async def body(pilot: Pilot[None]) -> tuple[object, bool, list[str]]:
+        app = fleet_app(pilot)
+        await pilot.pause()
+        threads = [thread.name for thread in threading.enumerate()]
+        return ui_receiver(app), ui_path.exists(), threads
+
+    receiving, bound, threads = drive(body)
+    assert receiving is None
+    assert not bound, "no socket was bound"
+    assert "asq-ui-receiver" not in threads
+
+
+@receiver_suite.UNIX_SOCKETS
+def test_a_ui_receiver_refuses_every_captain_action_when_off(
+    off: None, tmp_path: Path, script: Script, ui_path: Path
+) -> None:
+    """The second guard: a receiver started anyway (asq starts none while off) refuses
+    each action in the one line, and nothing it was asked for runs."""
     receiver_suite.fleet(tmp_path, script)
 
     async def body(pilot: Pilot[None]) -> tuple[list[dict[str, Any]], str | None]:
         app = fleet_app(pilot)
+        listen_for_ui(app)
         replies = [
             await receiver_suite.send(pilot, ui_path, "select_project", "alpha"),
             await receiver_suite.send(pilot, ui_path, "open_spawn", "alpha"),

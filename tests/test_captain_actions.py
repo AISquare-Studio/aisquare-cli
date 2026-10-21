@@ -360,6 +360,27 @@ def alpha(projects: dict[str, ProjectInfo]) -> ProjectInfo:
 
 
 @pytest.fixture
+def short_home(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A home short enough for its own ``captain/ui.sock`` (review of #240, F8).
+
+    A test whose ``aisquare captain serve --stdio`` subprocess dials the receiver it binds
+    needs both sides on one path. Under a long temp dir (macOS's ``/var/folders/…``) the
+    test's home falls back to the private short root, which conftest maps beneath a folder
+    of the test's own, and the subprocess never sees that patch: it dialled the real
+    ``/tmp/aisquare-<uid>`` and answered "asq is not running". In a short home both sides
+    take ``$AISQUARE_HOME/captain/ui.sock``, and the subprocess inherits the variable.
+    Requested before ``projects``, so the store is this home's too.
+    """
+    folder = Path(tempfile.mkdtemp(prefix="asqh", dir="/tmp"))
+    home = folder / "home"
+    monkeypatch.setenv(paths.HOME_ENV_VAR, str(home))
+    try:
+        yield home
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+@pytest.fixture
 def fleet_rec(monkeypatch: pytest.MonkeyPatch) -> Fleet:
     return Fleet(monkeypatch)
 
@@ -718,7 +739,7 @@ def test_the_stdio_runner_counts_a_tool_call_in_flight_for_its_whole_run(
 
 @UNIX_SOCKETS
 def test_a_tool_call_longer_than_the_idle_deadline_still_returns(
-    projects: dict[str, ProjectInfo],
+    short_home: Path, projects: dict[str, ProjectInfo]
 ) -> None:
     """The real process: a 1 s deadline, a ui call that takes 2 s (a receiver that never
     answers). Counting inbound lines only, the server exited mid-call at 1 s."""
@@ -726,6 +747,7 @@ def test_a_tool_call_longer_than_the_idle_deadline_still_returns(
     from mcp.client.stdio import StdioServerParameters, stdio_client
 
     path = captain_state.ui_socket_path(create=True)
+    assert path == short_home.resolve() / "captain" / "ui.sock", "both sides dial the home's own"
     receiver = _unix_socket()
     receiver.bind(str(path))
     receiver.listen(1)
@@ -756,12 +778,13 @@ def test_a_tool_call_longer_than_the_idle_deadline_still_returns(
 
 @UNIX_SOCKETS
 def test_a_client_that_hangs_up_mid_call_still_gets_the_call_audited(
-    projects: dict[str, ProjectInfo],
+    short_home: Path, projects: dict[str, ProjectInfo]
 ) -> None:
     """13043/13044: the audit lands even when a call is cut short. The client sends a 2 s
     call and closes stdin at once: the server finishes the call, writes its one event,
     then exits on the EOF."""
     path = captain_state.ui_socket_path(create=True)
+    assert path == short_home.resolve() / "captain" / "ui.sock", "both sides dial the home's own"
     receiver = _unix_socket()
     receiver.bind(str(path))
     receiver.listen(1)  # accepts at the kernel, never answers

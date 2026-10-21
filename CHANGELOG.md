@@ -164,7 +164,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PickTargetRequested`, which the dialog answers by opening the target picker.
   *⚙ Settings ▸ App settings* gains a persona per role, saved through `save_config`
   and re-read. It lists the personas every project can resolve (the user's and the
-  bundled ones, never one project's own, since the default is machine-wide), and
+  bundled ones, never one project's own, since the default is machine-wide; the
+  bundled `captain` is among them only while the experimental captain is on), and
   shows a configured name the list lacks as `<name> (custom)`. A
   sidebar agent row carries a dim `· <persona>` from its fleet row or, failing that,
   its session. Measured in `tests/test_ui_spawn.py` (the recorder's `persona`,

@@ -17,6 +17,7 @@ The fleet is the real one, over the fleet suite's fake tmux, in a real checkout.
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -67,3 +68,58 @@ def test_the_captain_reads_a_pane_on_the_server_its_row_recorded(
     )
 
     assert said["lines"] == ["the row's own agent, on its own server"]
+
+
+# --- every door, by its source (review of #240: the pin above drives read_pane alone) ------
+
+SRC = Path(__file__).resolve().parents[1] / "src" / "aisquare"
+CAPTAIN_SOURCES = (
+    *sorted((SRC / "services" / "captain").glob("*.py")),
+    *sorted((SRC / "cli").glob("captain*.py")),
+    SRC / "cli" / "ui" / "views" / "captain.py",
+)
+DOORS = (
+    ("services/captain/actions.py", "_pane_tail"),  # reading a pane (the pin above)
+    ("services/captain/actions.py", "_ready"),  # the screen check before it types
+    ("services/captain/actions.py", "_before_telling"),  # the prompt check before a tell
+    ("services/captain/actions.py", "_wololo"),  # the prompt check before a conversion
+    ("services/captain/brain.py", "_wait_until_ready"),  # its own first prompt
+    ("services/captain/queue.py", "StoreSources"),  # the queue's prompt scan
+)
+"""50f1dc43's six doors: each asks ``fleet.server_of(agent)``."""
+
+
+def _calls(node: ast.AST, name: str) -> list[int]:
+    """The lines where ``node`` calls something by the attribute or the bare name ``name``."""
+    return [
+        call.lineno
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and (
+            (isinstance(call.func, ast.Attribute) and call.func.attr == name)
+            or (isinstance(call.func, ast.Name) and call.func.id == name)
+        )
+    ]
+
+
+def test_no_captain_module_asks_a_server_by_its_name_alone() -> None:
+    """``fleet.server_for`` asks ``tmux -L <name>`` from this shell: under another
+    ``TMUX_TMPDIR`` that is another server, whose pane under the row's id is another
+    agent's. Not one call to it anywhere in the captain's code."""
+    found = {
+        str(path.relative_to(SRC)): lines
+        for path in CAPTAIN_SOURCES
+        if (lines := _calls(ast.parse(path.read_text(encoding="utf-8")), "server_for"))
+    }
+    assert found == {}
+
+
+@pytest.mark.parametrize(("module", "door"), DOORS, ids=[door for _, door in DOORS])
+def test_each_door_asks_the_server_its_row_recorded(module: str, door: str) -> None:
+    tree = ast.parse((SRC / module).read_text(encoding="utf-8"))
+    (node,) = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef | ast.ClassDef) and n.name == door
+    ]
+    assert _calls(node, "server_of"), f"{module}:{door} no longer asks fleet.server_of(agent)"

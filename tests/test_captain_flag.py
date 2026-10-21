@@ -3,11 +3,11 @@
 The owner, 2026-09-29: "feature flag off captain for now, allow experimentally".
 ``core.experimental.captain_enabled`` is the one reader: ``AISQUARE_EXPERIMENTAL_CAPTAIN``
 wins over ``[experimental] captain`` in config.toml either way. OFF, every surface refuses
-or hides: the CLI, the fleet UI's insignia, captain row and view, its ui receiver, the
-bundled persona, the voice page; doctor says so in one ok row. ON is the captain as it
-was: the rest of the suite runs with it on (``tests/conftest.py``, ``captain_on``; its
-captain-OFF run skips what is marked ``needs_captain``), and each surface here is also
-driven on, as the control.
+or hides: the CLI and the server's lean entry, the fleet UI's insignia, captain row and
+view, its ui receiver, the bundled persona, the voice page; doctor says so in one ok row.
+ON is the captain as it was: the rest of the suite runs with it on (``tests/conftest.py``,
+``captain_on``; its captain-OFF run skips what is marked ``needs_captain``), and each
+surface here is also driven on, as the control.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from aisquare.models import CheckStatus, ProjectInfo
 from aisquare.services import diagnostics
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
+from aisquare.services.captain import __main__ as lean_entry
 from aisquare.services.captain import actions, brain, voice
 from aisquare.services.captain import state as captain_state
 from tests import test_ui_receiver as receiver_suite
@@ -193,6 +194,25 @@ def test_under_json_the_refusal_is_one_object(off: None, runner: CliRunner) -> N
     result = runner.invoke(app, ["--json", "captain", "attention"])
     assert result.exit_code == 2
     assert json.loads(result.stdout) == {"error": "captain_off", "hint": OFF_LINE}
+
+
+def test_the_lean_server_entry_exits_2_with_the_one_line_when_off(
+    off: None, reached: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``python -m aisquare.services.captain --stdio`` skips the CLI tree and its callback,
+    so it holds the switch itself. It served every captain action with the captain off,
+    found by the suite's captain-OFF run (review of #240)."""
+    assert lean_entry.main(["--stdio"]) == 2
+    captured = capsys.readouterr()
+    assert (captured.out, captured.err) == ("", f"{OFF_LINE}\n")
+    assert reached == [], "off, the lean entry starts no server"
+
+
+@pytest.mark.needs_captain
+def test_on_the_lean_server_entry_reaches_the_server(reached: list[str]) -> None:
+    with pytest.raises(Reached):
+        lean_entry.main(["--stdio"])
+    assert reached == ["actions.run_stdio"]
 
 
 @pytest.mark.parametrize(

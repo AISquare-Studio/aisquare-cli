@@ -8,8 +8,9 @@ tsk_01m3qvghrpgg). ``[experimental] captain = true`` in config.toml turns it on
 ``AISQUARE_CI`` does over ``[experiment]``: an on-value turns it on, anything else
 set turns it off (``0``, and a typo), and unset or empty defers to the config.
 
-Off: ``aisquare captain`` and every subcommand exit 2 with :data:`CAPTAIN_OFF`, the
-fleet UI shows no insignia, captain row or captain view and its ui receiver refuses
+Off: ``aisquare captain`` and every subcommand exit 2 with :data:`CAPTAIN_OFF`, and so
+does the server's lean entry (``python -m aisquare.services.captain``), the fleet UI
+shows no insignia, captain row or captain view and its ui receiver refuses
 the captain's actions, the bundled ``captain`` persona is absent, the voice page does
 not serve (it is a subcommand), ``fleet restart`` and ``fleet switch`` refuse the
 captain's own row with the same line, and doctor says so in one ok row. On, all of it
@@ -32,7 +33,8 @@ CAPTAIN_OFF = (
     "the captain is experimental; turn it on with aisquare config set experimental.captain "
     f"true, or {CAPTAIN_ENV}=1"
 )
-"""The one line every refusal says: the CLI's, the ui receiver's and doctor's."""
+"""The one line every refusal says: the CLI's, the lean server entry's, the ui receiver's
+and doctor's."""
 
 _ON_VALUES = frozenset({"1", "true", "yes", "on"})
 

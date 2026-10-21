@@ -27,6 +27,13 @@ def main(argv: list[str] | None = None) -> int:
         "(0 = run forever)",
     )
     args = parser.parse_args(argv)
+    from aisquare.core import experimental
+
+    # The CLI's callback holds the switch for `aisquare captain serve`; this entry skips the
+    # CLI tree, so it holds it itself: off, the same exit 2 and the same one line.
+    if not experimental.captain_enabled():
+        print(experimental.CAPTAIN_OFF, file=sys.stderr)
+        return 2
     if not args.stdio:
         parser.error("the captain's server speaks stdio only — pass --stdio")
     if args.close_after < 0:

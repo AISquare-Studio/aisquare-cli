@@ -675,6 +675,7 @@ def test_the_stdio_server_closes_itself_after_the_idle_deadline(
     assert time.perf_counter() - started < 30
 
 
+@pytest.mark.needs_captain
 def test_the_lean_entry_speaks_stdio_only() -> None:
     from aisquare.services.captain import __main__ as lean
 

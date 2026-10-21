@@ -1020,6 +1020,7 @@ def test_the_fields_read_who_runs_it_then_as_whom(git_project: ProjectInfo) -> N
     assert labels[:7] == ["Hand off from", "How", "Role", "Account", "Binary", "Persona", "Label"]
 
 
+@pytest.mark.needs_captain
 def test_the_persona_select_lists_none_and_the_catalogue_with_the_description_below(
     git_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:

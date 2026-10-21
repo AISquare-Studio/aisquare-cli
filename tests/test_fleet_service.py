@@ -860,6 +860,7 @@ def test_spawn_without_a_persona_passes_no_flag_and_records_none(
     assert receipt.agent.persona is None
 
 
+@pytest.mark.needs_captain
 def test_spawn_refuses_an_unknown_persona_before_any_window_worktree_or_row(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
@@ -889,6 +890,7 @@ def test_spawn_uses_the_roles_default_persona_and_a_flag_beats_it(
     assert by_flag.agent.persona == "careful" and by_flag.notes == []
 
 
+@pytest.mark.needs_captain
 def test_a_stale_default_persona_refuses_naming_the_config_key(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3217,6 +3219,7 @@ def test_attaching_to_a_busy_agent_records_it_and_files_no_briefing_on_the_board
     assert row is not None and row.persona == "skeptic"
 
 
+@pytest.mark.needs_captain
 def test_attaching_an_unknown_persona_refuses_before_the_store_or_tmux(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

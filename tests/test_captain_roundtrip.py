@@ -113,6 +113,7 @@ def _wait_for(path: Path, seconds: float) -> dict[str, Any]:
     raise AssertionError(f"the stand-in claude never answered: no {path}")
 
 
+@pytest.mark.needs_captain
 def test_a_stand_in_claude_mounts_the_captain_server_and_its_call_lands(
     private_fleet: str, stand_in_claude: Path
 ) -> None:

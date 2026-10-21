@@ -957,14 +957,55 @@ def no_model_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AISQUARE_HARNESS_PROBE", "0")
 
 
+SUITE_CAPTAIN_ENV = "AISQUARE_SUITE_CAPTAIN"
+"""The run's captain: ``off`` runs the whole suite with the experimental captain OFF, as it
+ships; anything else (the default) with it ON. Read once, when the suite starts, never per
+test: ``isolated_home`` clears the environment a test sees, and a run is one or the other.
+CI runs both (``.github/workflows/ci.yml``, the ``captain off`` leg)."""
+
+SUITE_CAPTAIN_OFF = os.environ.get(SUITE_CAPTAIN_ENV, "").strip().lower() == "off"
+
+NEEDS_CAPTAIN = "needs_captain"
+"""The marker of a test that needs the captain ON: one of the captain's own, or one that
+pins what its being on adds. A captain-OFF run skips it, and says why. Nothing else may
+carry it: a test that fails with the captain off and is not about the captain is a defect
+of the off path, to be fixed in the code (review of #240)."""
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        f"{NEEDS_CAPTAIN}: needs the experimental captain on; skipped when "
+        f"{SUITE_CAPTAIN_ENV}=off runs the suite with it off, as it ships",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """In a captain-OFF run, skip what needs the captain on, with the reason."""
+    if not SUITE_CAPTAIN_OFF:
+        return
+    skip = pytest.mark.skip(
+        reason=f"needs the experimental captain on; {SUITE_CAPTAIN_ENV}=off runs it off"
+    )
+    for item in items:
+        if item.get_closest_marker(NEEDS_CAPTAIN) is not None:
+            item.add_marker(skip)
+
+
 @pytest.fixture(autouse=True)
 def captain_on(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The suite runs with the experimental captain ON (``AISQUARE_EXPERIMENTAL_CAPTAIN=1``).
+    """The suite runs with the experimental captain ON (``AISQUARE_EXPERIMENTAL_CAPTAIN=1``),
+    unless the run is the captain-OFF one (:data:`SUITE_CAPTAIN_OFF`).
 
     It ships off (``core.experimental``), and on must be the captain exactly as it was
     before the switch: every Phase 1 pin runs with it on, unchanged. The switch's own
-    pins (``tests/test_captain_flag.py``) unset it or set it themselves.
+    pins (``tests/test_captain_flag.py``) unset it or set it themselves. Off, the variable
+    is unset and the config's default stands, as for every user who never turns it on;
+    the tests marked :data:`NEEDS_CAPTAIN` are skipped.
     """
+    if SUITE_CAPTAIN_OFF:
+        monkeypatch.delenv(experimental.CAPTAIN_ENV, raising=False)
+        return
     monkeypatch.setenv(experimental.CAPTAIN_ENV, "1")
 
 

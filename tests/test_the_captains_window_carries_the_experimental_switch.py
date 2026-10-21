@@ -98,6 +98,7 @@ def test_the_captains_window_is_started_with_the_switch_its_starter_has(
     assert _window_env(tmux)[ENV] == value
 
 
+@pytest.mark.needs_captain
 def test_nothing_is_passed_when_the_starter_has_no_variable(
     tmux: FakeTmux, claude_on_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -117,6 +118,7 @@ def test_no_other_agents_window_is_handed_the_switch(
     assert not any(ENV in word for word in _window_command(tmux))
 
 
+@pytest.mark.needs_captain
 def test_tmux_is_asked_for_the_captains_window_with_the_switch_among_its_e_pairs(
     claude_on_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -155,6 +157,7 @@ def test_tmux_is_asked_for_the_captains_window_with_the_switch_among_its_e_pairs
 # --- the finding's repro ----------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_the_window_finds_the_captain_persona_on_a_server_started_without_the_switch(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -201,6 +204,7 @@ def test_a_restart_hands_the_window_the_switch_the_restarting_process_has(
     assert receipt.started.persona == "captain"
 
 
+@pytest.mark.needs_captain
 def test_a_restart_from_a_process_without_the_variable_passes_none(
     tmux: FakeTmux, claude_on_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -221,6 +225,7 @@ def test_a_restart_from_a_process_without_the_variable_passes_none(
 
 
 @pytest.mark.parametrize("pane", ["running", "exited"])
+@pytest.mark.needs_captain
 def test_a_restart_of_the_captains_row_is_refused_while_the_switch_is_off(
     tmux: FakeTmux, claude_on_path: Path, monkeypatch: pytest.MonkeyPatch, pane: str
 ) -> None:
@@ -241,6 +246,7 @@ def test_a_restart_of_the_captains_row_is_refused_while_the_switch_is_off(
     assert row is not None and row.ended_at is None, "the row stands as it was"
 
 
+@pytest.mark.needs_captain
 def test_a_switch_of_the_captains_row_is_refused_while_the_switch_is_off(
     tmux: FakeTmux, claude_on_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -258,6 +264,7 @@ def test_a_switch_of_the_captains_row_is_refused_while_the_switch_is_off(
     assert row is not None and row.ended_at is None
 
 
+@pytest.mark.needs_captain
 def test_the_fleet_cli_says_the_one_line_for_a_refused_captain_restart(
     tmux: FakeTmux, claude_on_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
@@ -269,6 +276,7 @@ def test_the_fleet_cli_says_the_one_line_for_a_refused_captain_restart(
     assert experimental.CAPTAIN_OFF in " ".join(result.output.split())
 
 
+@pytest.mark.needs_captain
 def test_another_agents_restart_is_not_refused_while_the_switch_is_off(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

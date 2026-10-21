@@ -128,6 +128,7 @@ def last_audit(project: str | None = None) -> dict[str, Any]:
 # --- the queue verbs ---------------------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_attention_lists_what_needs_you_and_audits_the_call(
     runner: CliRunner, alpha: ProjectInfo
 ) -> None:
@@ -147,12 +148,14 @@ def test_attention_lists_what_needs_you_and_audits_the_call(
     assert audit["board"] == captain_state.home_project().root.name
 
 
+@pytest.mark.needs_captain
 def test_attention_says_when_nothing_needs_you(runner: CliRunner) -> None:
     code, out = run(runner, "attention")
     assert code == 0 and "nothing needs you" in out
     assert run_json(runner, "attention")[1]["items"] == []
 
 
+@pytest.mark.needs_captain
 def test_next_is_item_one_and_nothing_when_the_queue_is_empty(
     runner: CliRunner, alpha: ProjectInfo
 ) -> None:
@@ -167,6 +170,7 @@ def test_next_is_item_one_and_nothing_when_the_queue_is_empty(
     assert "nothing needs you" in run(runner, "next")[1]
 
 
+@pytest.mark.needs_captain
 def test_resolve_records_how_and_the_item_leaves_the_list(
     runner: CliRunner, alpha: ProjectInfo
 ) -> None:
@@ -196,6 +200,7 @@ def test_resolve_records_how_and_the_item_leaves_the_list(
     assert audit["utterance"] == f"aisquare captain resolve {item['id']} again"
 
 
+@pytest.mark.needs_captain
 def test_snooze_hides_an_item_for_the_given_minutes(runner: CliRunner, alpha: ProjectInfo) -> None:
     (item,) = run_json(runner, "attention")[1]["items"]
     code, out = run(runner, "snooze", item["id"], "--for", "5")
@@ -208,6 +213,7 @@ def test_snooze_hides_an_item_for_the_given_minutes(runner: CliRunner, alpha: Pr
     assert set(data) == {"item", "action_seq"} and set(data["item"]) == ITEM_KEYS
 
 
+@pytest.mark.needs_captain
 def test_snooze_defaults_to_fifteen_minutes(runner: CliRunner, alpha: ProjectInfo) -> None:
     (item,) = run_json(runner, "attention")[1]["items"]
     assert run(runner, "snooze", item["id"])[1].count("15 min") == 1
@@ -216,6 +222,7 @@ def test_snooze_defaults_to_fifteen_minutes(runner: CliRunner, alpha: ProjectInf
     assert audit["utterance"] == f"aisquare captain snooze {item['id']}", "no flag it was not given"
 
 
+@pytest.mark.needs_captain
 def test_uav_prints_the_sitrep_header_first_and_carries_the_busy_flag(
     runner: CliRunner, alpha: ProjectInfo
 ) -> None:
@@ -238,6 +245,7 @@ def test_uav_prints_the_sitrep_header_first_and_carries_the_busy_flag(
 # --- since and log ------------------------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_since_reads_a_board_and_advance_moves_the_watermark(
     runner: CliRunner, alpha: ProjectInfo
 ) -> None:
@@ -257,6 +265,7 @@ def test_since_reads_a_board_and_advance_moves_the_watermark(
     assert last_audit("alpha")["utterance"] == "aisquare captain since alpha"
 
 
+@pytest.mark.needs_captain
 def test_since_for_an_unknown_project_or_agent_is_a_refusal(
     runner: CliRunner, alpha: ProjectInfo
 ) -> None:
@@ -266,6 +275,7 @@ def test_since_for_an_unknown_project_or_agent_is_a_refusal(
     assert code == 1 and data["error"] == "refused"
 
 
+@pytest.mark.needs_captain
 def test_log_reads_the_audit_newest_last_and_narrows_to_one_board(
     runner: CliRunner, alpha: ProjectInfo
 ) -> None:
@@ -300,6 +310,7 @@ def test_log_reads_the_audit_newest_last_and_narrows_to_one_board(
     assert code == 1 and "refused" in out
 
 
+@pytest.mark.needs_captain
 def test_log_says_when_nothing_has_been_done(runner: CliRunner) -> None:
     code, out = run(runner, "log")
     assert code == 0 and "no captain actions yet" in out
@@ -308,6 +319,7 @@ def test_log_says_when_nothing_has_been_done(runner: CliRunner) -> None:
 # --- wololo, bt, actions ------------------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_wololo_converts_an_idle_agent_and_refuses_a_missing_one(
     runner: CliRunner, alpha: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -394,6 +406,7 @@ def test_the_since_watermark_never_moves_backwards(alpha: ProjectInfo) -> None:
     assert captain_state.watermark(alpha.id, None) == 12
 
 
+@pytest.mark.needs_captain
 def test_bt_pulls_the_brake_and_says_what_it_did(runner: CliRunner) -> None:
     captain_state.enqueue_speech("on it")
     code, data = run_json(runner, "bt")
@@ -406,6 +419,7 @@ def test_bt_pulls_the_brake_and_says_what_it_did(runner: CliRunner) -> None:
     assert last_audit()["tool"] == "bt"
 
 
+@pytest.mark.needs_captain
 def test_actions_lists_the_owner_action_list(runner: CliRunner) -> None:
     code, data = run_json(runner, "actions")
     assert code == 0 and set(data) == {"actions"}
@@ -422,6 +436,7 @@ def test_actions_lists_the_owner_action_list(runner: CliRunner) -> None:
 # --- the frame around every verb -------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_a_refusal_is_one_line_exit_1_and_an_error_object_under_json(runner: CliRunner) -> None:
     code, out = run(runner, "resolve", "nothing", "x")
     assert code == 1
@@ -435,6 +450,7 @@ def test_a_refusal_is_one_line_exit_1_and_an_error_object_under_json(runner: Cli
     assert audit["tool"] == "resolve" and audit["ok"] is False
 
 
+@pytest.mark.needs_captain
 def test_a_failure_is_error_failed_and_a_refusal_error_refused(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -452,6 +468,7 @@ def test_a_failure_is_error_failed_and_a_refusal_error_refused(
     assert code == 1 and data["error"] == "refused"
 
 
+@pytest.mark.needs_captain
 def test_log_and_actions_are_audited_like_every_verb(runner: CliRunner) -> None:
     """13081: one captain_action per call, reads included — the audit of the audit too."""
     run(runner, "log")
@@ -482,6 +499,7 @@ def test_the_everyday_cli_does_not_load_the_captain(tmp_path: Path) -> None:
     assert out.stdout.strip() == "[]"
 
 
+@pytest.mark.needs_captain
 def test_uav_says_an_unreadable_state_file_rather_than_crashing(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -495,6 +513,7 @@ def test_uav_says_an_unreadable_state_file_rather_than_crashing(
     assert code == 0 and data["busy_since"] is None and "Permission denied" in data["busy_error"]
 
 
+@pytest.mark.needs_captain
 def test_since_for_an_agent_that_never_joined_says_so_in_its_own_words(
     runner: CliRunner, alpha: ProjectInfo
 ) -> None:
@@ -511,6 +530,7 @@ def test_since_for_an_agent_that_never_joined_says_so_in_its_own_words(
     assert "coder-9 has not joined the board" in out and "None" not in out
 
 
+@pytest.mark.needs_captain
 def test_since_says_an_agent_never_joined_even_over_an_old_watermark(
     runner: CliRunner, alpha: ProjectInfo
 ) -> None:
@@ -530,6 +550,7 @@ def test_since_says_an_agent_never_joined_even_over_an_old_watermark(
     assert "coder-9 has not joined the board" in out and "None" not in out
 
 
+@pytest.mark.needs_captain
 def test_log_of_one_board_is_audited_on_that_board(runner: CliRunner, alpha: ProjectInfo) -> None:
     run(runner, "log", "alpha")
     code, data = run_json(runner, "log", "alpha")
@@ -537,6 +558,7 @@ def test_log_of_one_board_is_audited_on_that_board(runner: CliRunner, alpha: Pro
     assert data["events"][-1]["project"] == alpha.id
 
 
+@pytest.mark.needs_captain
 def test_the_utterance_is_the_argv_as_typed(
     runner: CliRunner, alpha: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -552,6 +574,7 @@ def test_the_utterance_is_the_argv_as_typed(
     assert last_audit()["utterance"] == "aisquare captain next --json"
 
 
+@pytest.mark.needs_captain
 def test_the_one_captain_group_records_the_words_before_it_routes_a_message_to_say(
     runner: CliRunner, alpha: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -583,6 +606,7 @@ def test_the_one_captain_group_records_the_words_before_it_routes_a_message_to_s
     assert last_audit()["utterance"] == "aisquare captain attention"
 
 
+@pytest.mark.needs_captain
 def test_a_leading_option_looks_past_itself_and_the_first_word_decides(
     runner: CliRunner, alpha: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -610,6 +634,7 @@ def test_a_leading_option_looks_past_itself_and_the_first_word_decides(
     assert last_audit()["tool"] == "next"
 
 
+@pytest.mark.needs_captain
 def test_voice_among_the_leading_options_opens_the_page_wherever_it_sits(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -642,6 +667,7 @@ def test_voice_among_the_leading_options_opens_the_page_wherever_it_sits(
     assert heard == ["--voice is loud"] and len(served) == 3
 
 
+@pytest.mark.needs_captain
 def test_a_leading_option_alone_is_the_bare_captain_never_an_empty_say(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -664,6 +690,7 @@ def test_a_leading_option_alone_is_the_bare_captain_never_an_empty_say(
     assert json.loads(result.stdout)["agent"]["id"] == "agt_c"
 
 
+@pytest.mark.needs_captain
 def test_the_verbs_need_no_mcp_sdk(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     """A base install (no [serve] extra) drives the captain from the terminal all the same."""
     for name in list(sys.modules):

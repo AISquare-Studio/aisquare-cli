@@ -978,6 +978,7 @@ def said(monkeypatch: pytest.MonkeyPatch) -> Said:
     return record
 
 
+@pytest.mark.needs_captain
 def test_captain_text_is_said_and_the_reply_printed(runner: CliRunner, said: Said) -> None:
     result = runner.invoke(app, ["captain", "what is up"])
     assert result.exit_code == 0, result.output
@@ -985,6 +986,7 @@ def test_captain_text_is_said_and_the_reply_printed(runner: CliRunner, said: Sai
     assert "reply to: what is up" in result.output
 
 
+@pytest.mark.needs_captain
 def test_captain_say_takes_a_message_that_starts_with_a_subcommands_name(
     runner: CliRunner, said: Said
 ) -> None:
@@ -999,6 +1001,7 @@ def test_captain_serve_is_still_a_subcommand(runner: CliRunner, said: Said) -> N
     assert said.texts == []
 
 
+@pytest.mark.needs_captain
 def test_captain_chat_says_each_line_until_eof(runner: CliRunner, said: Said) -> None:
     result = runner.invoke(app, ["captain", "chat"], input="what is up\n\nnext\n")
     assert result.exit_code == 0, result.output
@@ -1006,6 +1009,7 @@ def test_captain_chat_says_each_line_until_eof(runner: CliRunner, said: Said) ->
     assert "reply to: next" in result.output
 
 
+@pytest.mark.needs_captain
 def test_bare_captain_off_a_terminal_starts_it_and_says_where(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1027,6 +1031,7 @@ def test_bare_captain_off_a_terminal_starts_it_and_says_where(
     assert "captain" in result.output and "asq-home-x" in result.output
 
 
+@pytest.mark.needs_captain
 def test_bare_captain_with_a_live_captain_off_a_terminal_says_where_it_is(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1041,6 +1046,7 @@ def test_bare_captain_with_a_live_captain_off_a_terminal_says_where_it_is(
     assert "already running" in result.output
 
 
+@pytest.mark.needs_captain
 def test_captain_text_json_is_one_object_with_the_reply_its_turns_end_and_no_timeout(
     runner: CliRunner, said: Said
 ) -> None:
@@ -1054,6 +1060,7 @@ def test_captain_text_json_is_one_object_with_the_reply_its_turns_end_and_no_tim
     }
 
 
+@pytest.mark.needs_captain
 def test_captain_text_json_says_a_timeout_in_the_same_object(runner: CliRunner, said: Said) -> None:
     result = runner.invoke(app, ["--json", "captain", "silence"])
     assert result.exit_code == 1
@@ -1070,12 +1077,14 @@ def test_the_reply_carries_the_answering_turns_end(captain: tuple[Captain, Clock
     assert reply.ended_at == fake.session.last_seen_at
 
 
+@pytest.mark.needs_captain
 def test_options_before_the_text_still_reach_say(runner: CliRunner, said: Said) -> None:
     result = runner.invoke(app, ["captain", "--timeout", "30", "what", "is", "up"])
     assert result.exit_code == 0, result.output
     assert (said.texts, said.timeouts) == (["what is up"], [30.0])
 
 
+@pytest.mark.needs_captain
 def test_a_message_that_starts_with_a_dash_goes_after_a_double_dash(
     runner: CliRunner, said: Said
 ) -> None:
@@ -1091,6 +1100,7 @@ def test_captain_help_is_the_groups_own(runner: CliRunner, said: Said) -> None:
     assert "chat" in result.output and "serve" in result.output
 
 
+@pytest.mark.needs_captain
 def test_captain_text_json_says_an_unreachable_captain_is_not_a_timeout(
     runner: CliRunner, said: Said
 ) -> None:
@@ -1101,6 +1111,7 @@ def test_captain_text_json_says_an_unreachable_captain_is_not_a_timeout(
     assert body["said"] == "the captain exited before it answered"
 
 
+@pytest.mark.needs_captain
 def test_captain_text_json_keeps_the_reason_the_fleet_refused(
     runner: CliRunner, said: Said
 ) -> None:
@@ -1109,6 +1120,7 @@ def test_captain_text_json_keeps_the_reason_the_fleet_refused(
     assert "already has a captain" in result.stdout
 
 
+@pytest.mark.needs_captain
 def test_bare_captain_under_json_prints_one_object_and_never_attaches(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1130,6 +1142,7 @@ def test_bare_captain_under_json_prints_one_object_and_never_attaches(
     assert body["argv"] == ["tmux", "attach", "-t", "asq-h"]
 
 
+@pytest.mark.needs_captain
 def test_bare_captain_says_a_tmux_it_cannot_run(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1152,6 +1165,7 @@ def test_bare_captain_says_a_tmux_it_cannot_run(
     assert "could not run tmux" in result.output
 
 
+@pytest.mark.needs_captain
 def test_a_reply_without_text_is_null_under_json_and_said_why(
     runner: CliRunner, said: Said
 ) -> None:
@@ -1163,6 +1177,7 @@ def test_a_reply_without_text_is_null_under_json_and_said_why(
     assert body["said"] == "the captain's turn ended without text — its pane shows what it did"
 
 
+@pytest.mark.needs_captain
 def test_a_reply_without_text_prints_nothing_as_the_captains_words(
     runner: CliRunner, said: Said
 ) -> None:

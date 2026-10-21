@@ -168,6 +168,7 @@ def cursor_keys(app: FleetApp) -> list[str]:
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_open_spawn_opens_the_spawn_dialog_for_the_project_it_names(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -186,6 +187,7 @@ def test_open_spawn_opens_the_spawn_dialog_for_the_project_it_names(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_open_spawn_with_no_project_takes_the_one_selected_in_the_sidebar(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -212,6 +214,7 @@ def test_open_spawn_with_no_project_takes_the_one_selected_in_the_sidebar(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_open_stop_opens_the_stop_dialog_for_that_agent_and_stops_nothing(
     tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -234,6 +237,7 @@ def test_open_stop_opens_the_stop_dialog_for_that_agent_and_stops_nothing(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_open_stop_reaches_the_captain_by_its_label_on_the_home_board(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -251,6 +255,7 @@ def test_open_stop_reaches_the_captain_by_its_label_on_the_home_board(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_open_stop_refuses_a_row_there_is_nothing_to_stop_on(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -269,6 +274,7 @@ def test_open_stop_refuses_a_row_there_is_nothing_to_stop_on(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_dialog_is_not_stacked_on_a_dialog_that_is_open(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -288,6 +294,7 @@ def test_a_dialog_is_not_stacked_on_a_dialog_that_is_open(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_chained_calls_see_each_others_effect_with_no_pause_between(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -319,6 +326,7 @@ def test_chained_calls_see_each_others_effect_with_no_pause_between(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_an_action_that_has_not_landed_in_time_is_said_never_answered_ok(
     tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -349,6 +357,7 @@ def test_an_action_that_has_not_landed_in_time_is_said_never_answered_ok(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_select_project_shows_that_project(tmp_path: Path, script: Script, ui_path: Path) -> None:
     fleet(tmp_path, script)
 
@@ -370,6 +379,7 @@ def test_select_project_shows_that_project(tmp_path: Path, script: Script, ui_pa
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_select_agent_shows_that_agent(tmp_path: Path, script: Script, ui_path: Path) -> None:
     fleet(tmp_path, script)
 
@@ -391,6 +401,7 @@ def test_select_agent_shows_that_agent(tmp_path: Path, script: Script, ui_path: 
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_copy_row_copies_an_agents_row_and_a_projects_row(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -413,6 +424,7 @@ def test_copy_row_copies_an_agents_row_and_a_projects_row(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_focus_project_selects_it_and_hands_the_keyboard_to_its_card(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -452,6 +464,7 @@ def test_focus_project_selects_it_and_hands_the_keyboard_to_its_card(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_focus_project_on_a_card_in_a_folded_group_selects_it_and_says_the_cursor_stayed(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -480,6 +493,7 @@ def test_focus_project_on_a_card_in_a_folded_group_selects_it_and_says_the_curso
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_the_captains_ui_tool_reaches_asq_and_the_action_runs(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -499,6 +513,7 @@ def test_the_captains_ui_tool_reaches_asq_and_the_action_runs(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_the_captains_ui_tool_is_told_why_asq_said_no(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -518,6 +533,7 @@ def test_the_captains_ui_tool_is_told_why_asq_said_no(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_under_a_long_home_the_receiver_binds_where_the_ui_tool_dials(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -544,6 +560,7 @@ def test_under_a_long_home_the_receiver_binds_where_the_ui_tool_dials(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_an_unknown_action_is_answered_no_with_the_known_actions(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -559,6 +576,7 @@ def test_an_unknown_action_is_answered_no_with_the_known_actions(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_an_unknown_or_ambiguous_ref_is_answered_no_naming_it(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -596,6 +614,7 @@ def test_an_unknown_or_ambiguous_ref_is_answered_no_naming_it(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_malformed_request_is_answered_and_the_receiver_serves_the_next(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -634,6 +653,7 @@ def test_a_malformed_request_is_answered_and_the_receiver_serves_the_next(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_handler_that_raises_is_an_answer_and_the_receiver_lives_on(
     tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -660,6 +680,7 @@ def test_a_handler_that_raises_is_an_answer_and_the_receiver_lives_on(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_the_socket_is_private_and_quitting_unlinks_it_and_ends_the_thread(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -677,6 +698,7 @@ def test_the_socket_is_private_and_quitting_unlinks_it_and_ends_the_thread(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_socket_a_crashed_asq_left_is_replaced(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -695,6 +717,7 @@ def test_a_socket_a_crashed_asq_left_is_replaced(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_live_listener_is_left_alone_and_survives_the_quit(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -723,6 +746,7 @@ def test_a_live_listener_is_left_alone_and_survives_the_quit(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_second_asqs_socket_survives_the_firsts_quit(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -746,6 +770,7 @@ def test_a_second_asqs_socket_survives_the_firsts_quit(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_something_that_is_not_a_socket_at_the_path_is_left_alone(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -761,6 +786,7 @@ def test_something_that_is_not_a_socket_at_the_path_is_left_alone(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_squatted_socket_folder_means_no_receiver_said_once_and_asq_runs(
     tmp_path: Path,
     script: Script,
@@ -805,6 +831,7 @@ def test_without_unix_sockets_the_receiver_is_a_said_no_op(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_quit_while_an_action_waits_for_the_loop_does_not_wait_for_it(
     tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -850,6 +877,7 @@ def test_a_quit_while_an_action_waits_for_the_loop_does_not_wait_for_it(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_every_action_runs_on_the_apps_thread(
     tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -874,6 +902,7 @@ def test_every_action_runs_on_the_apps_thread(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_long_answer_is_cut_to_fit_the_clients_read(
     tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -894,6 +923,7 @@ def test_a_long_answer_is_cut_to_fit_the_clients_read(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_client_that_says_nothing_is_cut_off_in_time_for_the_next(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -923,6 +953,7 @@ def test_a_client_that_says_nothing_is_cut_off_in_time_for_the_next(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_quit_does_not_wait_out_a_client_that_says_nothing(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -973,6 +1004,7 @@ def test_a_socket_that_cannot_say_whether_it_is_live_is_left_alone(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_stopping_the_receiver_waits_for_its_thread(
     tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1012,6 +1044,7 @@ def test_stopping_the_receiver_waits_for_its_thread(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_an_action_read_just_before_quit_is_told_asq_is_quitting(
     tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

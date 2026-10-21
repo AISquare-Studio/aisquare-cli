@@ -48,6 +48,7 @@ def test_off_a_session_started_in_the_home_registers_and_is_briefed_nothing(
         assert store.get_session(SESSION) is None
 
 
+@pytest.mark.needs_captain
 def test_on_the_home_row_is_the_captains_board_whatever_capture_says(
     home_row_left: object,
 ) -> None:

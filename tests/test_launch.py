@@ -291,6 +291,7 @@ def test_launch_rejects_an_unknown_role(
     assert not spy, "nothing should be exec'd for an invalid role"
 
 
+@pytest.mark.needs_captain
 def test_launch_captain_outside_the_fleet_is_refused(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1051,6 +1052,7 @@ def test_launch_persona_leaves_the_operators_own_system_prompt_flag_alone(
     assert spy["argv"] == ["claude", "--append-system-prompt", "mine"]
 
 
+@pytest.mark.needs_captain
 def test_launch_refuses_an_unknown_persona_listing_the_known_ones(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any]
 ) -> None:

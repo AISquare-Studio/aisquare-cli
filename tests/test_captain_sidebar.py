@@ -71,6 +71,7 @@ def agent_opened(pilot: Pilot[None], agent_id: str) -> Callable[[], bool]:
     return done
 
 
+@pytest.mark.needs_captain
 def test_the_captain_row_sits_under_a_home_heading_not_inside_a_project(
     tmp_path: Path,
     script: Script,
@@ -100,6 +101,7 @@ def test_the_captain_row_sits_under_a_home_heading_not_inside_a_project(
     drive(body)
 
 
+@pytest.mark.needs_captain
 def test_with_no_captain_the_section_says_how_to_start_one(tmp_path: Path, script: Script) -> None:
     seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
 
@@ -128,6 +130,7 @@ def _remembered() -> str | None:
 
 
 @pytest.mark.parametrize("shown_by", ["the a key", "the saved setting"])
+@pytest.mark.needs_captain
 def test_with_the_captured_directories_shown_the_home_is_still_no_card(
     tmp_path: Path, script: Script, shown_by: str, project_capture: None
 ) -> None:
@@ -181,6 +184,7 @@ def test_with_the_captured_directories_shown_the_home_is_still_no_card(
     assert {"project:prj_aaa", "project:prj_scratch", "project:prj_zzz"} <= set(walk), walk
 
 
+@pytest.mark.needs_captain
 def test_stopping_the_captain_goes_back_to_the_welcome_page_not_a_project_of_the_home(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -221,6 +225,7 @@ def test_stopping_the_captain_goes_back_to_the_welcome_page_not_a_project_of_the
     assert _remembered() is None, "nothing to reopen at the next launch either"
 
 
+@pytest.mark.needs_captain
 def test_selecting_the_captain_leaves_the_doctor_global_not_scoped_to_the_home(
     tmp_path: Path, script: Script
 ) -> None:
@@ -254,6 +259,7 @@ def test_selecting_the_captain_leaves_the_doctor_global_not_scoped_to_the_home(
     assert selected == (None, f"agent-{captain.agent.id}"), "the captain's: global"
 
 
+@pytest.mark.needs_captain
 def test_restarting_the_captain_selects_its_new_row_and_keeps_the_doctor_global(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -303,6 +309,7 @@ def test_restarting_the_captain_selects_its_new_row_and_keeps_the_doctor_global(
     assert scope is None
 
 
+@pytest.mark.needs_captain
 def test_a_remembered_selection_never_reopens_the_home_as_a_project(
     tmp_path: Path, script: Script
 ) -> None:
@@ -349,6 +356,7 @@ def test_a_remembered_selection_never_reopens_the_home_as_a_project(
 # --- review of T2: a read that failed is not "no captain" ----------------------------------
 
 
+@pytest.mark.needs_captain
 def test_a_captain_read_that_failed_keeps_the_captain_row_and_says_why(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -5,8 +5,9 @@ The owner, 2026-09-29: "feature flag off captain for now, allow experimentally".
 wins over ``[experimental] captain`` in config.toml either way. OFF, every surface refuses
 or hides: the CLI, the fleet UI's insignia, captain row and view, its ui receiver, the
 bundled persona, the voice page; doctor says so in one ok row. ON is the captain as it
-was: the rest of the suite runs with it on (``tests/conftest.py``, ``captain_on``), and
-each surface here is also driven on, as the control.
+was: the rest of the suite runs with it on (``tests/conftest.py``, ``captain_on``; its
+captain-OFF run skips what is marked ``needs_captain``), and each surface here is also
+driven on, as the control.
 """
 
 from __future__ import annotations
@@ -204,6 +205,7 @@ def test_under_json_the_refusal_is_one_object(off: None, runner: CliRunner) -> N
         (["attention"], "actions.perform"),
     ],
 )
+@pytest.mark.needs_captain
 def test_on_each_command_reaches_its_own_effect(
     runner: CliRunner, reached: list[str], argv: list[str], effect: str
 ) -> None:
@@ -252,6 +254,7 @@ def test_the_fleet_ui_has_no_insignia_captain_row_or_home_when_off(
     assert alpha, "the projects are listed as ever"
 
 
+@pytest.mark.needs_captain
 def test_the_fleet_ui_shows_the_insignia_and_the_captain_when_on(
     tmp_path: Path, script: Script
 ) -> None:
@@ -324,6 +327,7 @@ def test_a_ui_receiver_refuses_every_captain_action_when_off(
 
 
 @receiver_suite.UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_the_ui_receiver_runs_a_captain_action_when_on(
     tmp_path: Path, script: Script, ui_path: Path
 ) -> None:
@@ -351,6 +355,7 @@ def test_the_bundled_captain_persona_is_absent_when_off(off: None, runner: CliRu
     assert listed.exit_code == 0 and "captain" not in listed.output, listed.output
 
 
+@pytest.mark.needs_captain
 def test_the_bundled_captain_persona_is_there_when_on() -> None:
     assert "captain" in [persona.name for persona in core_personas.catalogue(None)[0]]
     assert core_personas.resolve("captain").layer == "bundled"
@@ -382,6 +387,7 @@ def test_the_spawn_dialogs_persona_picker_has_no_captain_when_off(
     assert "captain" not in options and "skeptic" in options, options
 
 
+@pytest.mark.needs_captain
 def test_the_spawn_dialogs_persona_picker_has_the_captain_when_on(
     git_project: ProjectInfo,
 ) -> None:
@@ -400,6 +406,7 @@ def test_doctor_shows_one_ok_captain_row_when_off(off: None) -> None:
     assert "aisquare config set experimental.captain true" in row.detail
 
 
+@pytest.mark.needs_captain
 def test_doctor_has_no_captain_row_when_on() -> None:
     assert [check for check in diagnostics.doctor() if check.name == "captain"] == []
 

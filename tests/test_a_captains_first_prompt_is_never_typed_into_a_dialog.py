@@ -105,6 +105,7 @@ def _about_the_prompt(receipt: fleet_service.SpawnReceipt) -> list[str]:
 # --- the pin: a fresh captain at Claude Code's trust dialog -----------------------------------
 
 
+@pytest.mark.needs_captain
 def test_the_spawn_dialogs_first_prompt_is_never_typed_into_the_trust_dialog(
     tmux: ScreenTmux, claude_on_path: Path, wait: Clock
 ) -> None:
@@ -130,6 +131,7 @@ def test_the_spawn_dialogs_first_prompt_is_never_typed_into_the_trust_dialog(
         pytest.param(shots.RATING_ABOVE_BOX, "the session-rating prompt", id="the survey"),
     ],
 )
+@pytest.mark.needs_captain
 def test_a_first_prompt_is_never_typed_into_a_dialog_and_the_note_names_what_shows(
     screen: list[str], showing: str, tmux: ScreenTmux, claude_on_path: Path, wait: Clock
 ) -> None:
@@ -143,6 +145,7 @@ def test_a_first_prompt_is_never_typed_into_a_dialog_and_the_note_names_what_sho
     assert note in receipt.failures
 
 
+@pytest.mark.needs_captain
 def test_a_first_prompt_is_not_typed_blind_into_a_pane_that_cannot_be_read(
     tmux: ScreenTmux, claude_on_path: Path, wait: Clock
 ) -> None:
@@ -154,6 +157,7 @@ def test_a_first_prompt_is_not_typed_blind_into_a_pane_that_cannot_be_read(
     assert "could not read the captain's pane" in note
 
 
+@pytest.mark.needs_captain
 def test_a_first_prompt_is_not_typed_when_the_box_never_draws(
     tmux: ScreenTmux, claude_on_path: Path, wait: Clock
 ) -> None:
@@ -169,6 +173,7 @@ def test_a_first_prompt_is_not_typed_when_the_box_never_draws(
     assert brain.SEND_TIMEOUT_S <= wait.slept < brain.SEND_TIMEOUT_S + 5
 
 
+@pytest.mark.needs_captain
 def test_a_first_prompt_never_types_while_a_say_waits_for_its_reply(
     tmux: ScreenTmux, claude_on_path: Path, wait: Clock
 ) -> None:
@@ -192,6 +197,7 @@ def test_a_first_prompt_never_types_while_a_say_waits_for_its_reply(
         pytest.param(shots.REAL_IDLE_AFTER_STOP, id="the real idle box, its top rule named"),
     ],
 )
+@pytest.mark.needs_captain
 def test_a_first_prompt_is_still_typed_at_a_drawn_input_box(
     box: list[str], tmux: ScreenTmux, claude_on_path: Path, wait: Clock
 ) -> None:
@@ -203,6 +209,7 @@ def test_a_first_prompt_is_still_typed_at_a_drawn_input_box(
     assert _about_the_prompt(receipt) == [] and receipt.failures == []
 
 
+@pytest.mark.needs_captain
 def test_a_first_prompt_goes_in_after_the_new_boxs_one_settle(
     tmux: ScreenTmux, claude_on_path: Path, wait: Clock
 ) -> None:
@@ -214,6 +221,7 @@ def test_a_first_prompt_goes_in_after_the_new_boxs_one_settle(
     assert wait.slept == brain.TYPE_SETTLE_S
 
 
+@pytest.mark.needs_captain
 def test_a_first_prompt_waits_for_the_box_and_is_typed_once_it_shows(
     tmux: ScreenTmux, claude_on_path: Path, wait: Clock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -234,6 +242,7 @@ def test_a_first_prompt_waits_for_the_box_and_is_typed_once_it_shows(
     assert wait.slept - drawn_at[0] >= brain.TYPE_SETTLE_S, "and after its one settle"
 
 
+@pytest.mark.needs_captain
 def test_a_bare_start_types_nothing_and_reads_no_pane(
     tmux: ScreenTmux, claude_on_path: Path, wait: Clock
 ) -> None:

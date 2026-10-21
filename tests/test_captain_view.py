@@ -80,6 +80,7 @@ def _insignia(pilot: Pilot[None]) -> CaptainButton:
 # --- the insignia ---------------------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_the_insignia_sits_in_the_fleet_header_between_fleet_and_plus(
     tmp_path: Path, script: Script
 ) -> None:
@@ -99,6 +100,7 @@ def test_the_insignia_sits_in_the_fleet_header_between_fleet_and_plus(
     ("state", "lit"),
     [("waiting", True), ("working", True), ("attention", True), ("exited", False), (None, False)],
 )
+@pytest.mark.needs_captain
 def test_the_insignia_is_lit_while_the_captain_row_is_live_and_dim_otherwise(
     tmp_path: Path, script: Script, state: str | None, lit: bool
 ) -> None:
@@ -115,6 +117,7 @@ def test_the_insignia_is_lit_while_the_captain_row_is_live_and_dim_otherwise(
     drive(body)
 
 
+@pytest.mark.needs_captain
 def test_the_insignia_follows_the_row_from_frame_to_frame(tmp_path: Path, script: Script) -> None:
     home = captain_state.home_project()
 
@@ -135,6 +138,7 @@ def test_the_insignia_follows_the_row_from_frame_to_frame(tmp_path: Path, script
     drive(body)
 
 
+@pytest.mark.needs_captain
 def test_the_lit_insignia_opens_the_captain_view_over_its_pane(
     tmp_path: Path, script: Script
 ) -> None:
@@ -155,6 +159,7 @@ def test_the_lit_insignia_opens_the_captain_view_over_its_pane(
     drive(body)
 
 
+@pytest.mark.needs_captain
 def test_the_dim_insignia_opens_the_spawn_dialog_preset_to_the_captain(
     tmp_path: Path, script: Script
 ) -> None:
@@ -176,6 +181,7 @@ def test_the_dim_insignia_opens_the_spawn_dialog_preset_to_the_captain(
     drive(body)
 
 
+@pytest.mark.needs_captain
 def test_a_dim_insignia_over_an_exited_captain_offers_a_start_not_its_dead_pane(
     tmp_path: Path, script: Script
 ) -> None:
@@ -200,6 +206,7 @@ class Started:
     order: list[str] = field(default_factory=list)
 
 
+@pytest.mark.needs_captain
 def test_the_captain_dialog_starts_the_captain_through_its_own_launch(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -248,6 +255,7 @@ def test_the_captain_dialog_starts_the_captain_through_its_own_launch(
 # --- the captain view -------------------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_selecting_the_captain_row_opens_the_captain_view(tmp_path: Path, script: Script) -> None:
     seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
     captain = _captain()
@@ -309,6 +317,7 @@ async def _whats_up(pilot: Pilot[None]) -> list[str]:
         pytest.param(REAL_IDLE_AFTER_STOP, id="a real Claude Code idle box"),
     ],
 )
+@pytest.mark.needs_captain
 def test_the_quick_action_types_through_the_guarded_door_never_fleet_tell(
     tmp_path: Path, script: Script, captain_door: tuple[Captain, Clock], box: list[str]
 ) -> None:
@@ -324,6 +333,7 @@ def test_the_quick_action_types_through_the_guarded_door_never_fleet_tell(
     assert any(f"asked the captain: {WHAT_IS_UP}" in line for line in said), said
 
 
+@pytest.mark.needs_captain
 def test_the_quick_action_types_nothing_into_a_fresh_captains_trust_dialog(
     tmp_path: Path, script: Script, captain_door: tuple[Captain, Clock]
 ) -> None:
@@ -339,6 +349,7 @@ def test_the_quick_action_types_nothing_into_a_fresh_captains_trust_dialog(
     assert any("choose Yes, I trust this folder (once)" in line for line in said), said
 
 
+@pytest.mark.needs_captain
 def test_the_quick_action_is_offered_to_any_live_captain_and_withheld_from_a_dead_one(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -370,6 +381,7 @@ def test_the_quick_action_is_offered_to_any_live_captain_and_withheld_from_a_dea
     assert told.calls == []
 
 
+@pytest.mark.needs_captain
 def test_a_fresh_captain_the_fleet_still_reads_working_takes_what_s_up_through_send(
     tmp_path: Path, script: Script, captain_door: tuple[Captain, Clock]
 ) -> None:
@@ -385,6 +397,7 @@ def test_a_fresh_captain_the_fleet_still_reads_working_takes_what_s_up_through_s
     assert any(f"asked the captain: {WHAT_IS_UP}" in line for line in said), said
 
 
+@pytest.mark.needs_captain
 def test_a_click_on_a_captain_mid_turn_is_said_never_silent(
     tmp_path: Path, script: Script, captain_door: tuple[Captain, Clock]
 ) -> None:
@@ -404,6 +417,7 @@ def _thinking(pilot: Pilot[None]) -> str:
     return shown(fleet_app(pilot).query_one("#captain-thinking", Static))
 
 
+@pytest.mark.needs_captain
 def test_the_thinking_indicator_follows_the_busy_flag(tmp_path: Path, script: Script) -> None:
     """T1's ``thinking on`` sets the flag in state.json, from another process — the view
     reads it on its own tick, not only when the row's state changes."""
@@ -427,6 +441,7 @@ def test_the_thinking_indicator_follows_the_busy_flag(tmp_path: Path, script: Sc
     drive(body)
 
 
+@pytest.mark.needs_captain
 def test_the_thinking_indicator_reads_a_working_pane_as_thinking(
     tmp_path: Path, script: Script
 ) -> None:
@@ -447,6 +462,7 @@ def test_the_thinking_indicator_reads_a_working_pane_as_thinking(
     drive(body)
 
 
+@pytest.mark.needs_captain
 def test_the_view_ticks_the_flag_on_its_own(tmp_path: Path, script: Script) -> None:
     """The row's state does not change while the flag does, and the shell feeds a view
     only on a changed status — so the view keeps its own interval."""
@@ -464,6 +480,7 @@ def test_the_view_ticks_the_flag_on_its_own(tmp_path: Path, script: Script) -> N
     drive(body)
 
 
+@pytest.mark.needs_captain
 def test_the_captain_row_is_still_an_ordinary_agent_row(tmp_path: Path, script: Script) -> None:
     """T2's section is untouched: the insignia is an extra door, not a second row."""
     captain = _captain()
@@ -510,6 +527,7 @@ def _label(pilot: Pilot[None], selector: str) -> str:
     return str(fleet_app(pilot).query_one(selector, Button).label)
 
 
+@pytest.mark.needs_captain
 def test_the_speaker_toggle_flips_the_one_switch_both_ways(tmp_path: Path, script: Script) -> None:
     """T3's ``captain_speaker`` in state.json: the page's toggle, the CLI's --speaker, and this."""
     from aisquare.services.captain import speaker
@@ -528,6 +546,7 @@ def test_the_speaker_toggle_flips_the_one_switch_both_ways(tmp_path: Path, scrip
     drive(body)
 
 
+@pytest.mark.needs_captain
 def test_the_mode_toggle_writes_the_one_mode_key(tmp_path: Path, script: Script) -> None:
     """13178/13179: ``captain_voice_mode`` is the mode's single home; unset reads as focus."""
     from aisquare.services.captain import voice
@@ -545,6 +564,7 @@ def test_the_mode_toggle_writes_the_one_mode_key(tmp_path: Path, script: Script)
     drive(body)
 
 
+@pytest.mark.needs_captain
 def test_the_view_follows_what_the_page_changed(tmp_path: Path, script: Script) -> None:
     """The page writes the same keys from another process; the view's tick reads them."""
     from aisquare.services.captain import speaker, voice
@@ -570,6 +590,7 @@ async def _ticked(pilot: Pilot[None], view: CaptainView) -> None:
     await pilot.pause()
 
 
+@pytest.mark.needs_captain
 def test_the_bar_reads_state_json_off_the_ui_thread(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -603,6 +624,7 @@ def test_the_bar_reads_state_json_off_the_ui_thread(
     assert main not in threads, f"read on the UI thread: {threads}"
 
 
+@pytest.mark.needs_captain
 def test_an_unreadable_state_file_is_said_on_the_bar_never_shown_as_the_defaults(
     tmp_path: Path,
     script: Script,
@@ -643,6 +665,7 @@ def test_an_unreadable_state_file_is_said_on_the_bar_never_shown_as_the_defaults
     assert any("permission denied" in record.getMessage() for record in caplog.records)
 
 
+@pytest.mark.needs_captain
 def test_a_switch_over_an_unreadable_state_writes_nothing_and_says_why(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -688,6 +711,7 @@ async def _press_mic(pilot: Pilot[None]) -> str:
     return _mic_text(pilot)
 
 
+@pytest.mark.needs_captain
 def test_the_mic_prints_the_url_the_qr_and_the_start_command_with_no_page_running(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -711,6 +735,7 @@ def test_the_mic_prints_the_url_the_qr_and_the_start_command_with_no_page_runnin
     assert "not running" in text
 
 
+@pytest.mark.needs_captain
 def test_the_mic_says_a_page_that_is_serving(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:

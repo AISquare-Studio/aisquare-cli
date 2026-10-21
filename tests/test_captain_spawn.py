@@ -87,6 +87,7 @@ def test_onboarding_says_a_row_that_vanished_after_its_write(
 # --- the spawn --------------------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_the_captain_starts_on_the_home_board_from_its_brain_folder(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -109,6 +110,7 @@ def test_the_captain_starts_on_the_home_board_from_its_brain_folder(
         assert home.id not in [p.id for p in store.list_projects()]
 
 
+@pytest.mark.needs_captain
 def test_the_mcp_config_mounts_only_the_captain_server_through_the_module_entry(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -122,6 +124,7 @@ def test_the_mcp_config_mounts_only_the_captain_server_through_the_module_entry(
     assert server["env"] == {"AISQUARE_HOME": str(paths.aisquare_home())}
 
 
+@pytest.mark.needs_captain
 def test_there_is_one_captain_per_home(tmux: FakeTmux, claude_on_path: Path) -> None:
     brain.start()
     home = captain_state.home_project()
@@ -140,6 +143,7 @@ def test_there_is_one_captain_per_home(tmux: FakeTmux, claude_on_path: Path) -> 
     assert [row.label for row in rows] == ["captain"]
 
 
+@pytest.mark.needs_captain
 def test_the_captain_cannot_be_spawned_into_a_project(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -150,6 +154,7 @@ def test_the_captain_cannot_be_spawned_into_a_project(
     assert tmux.spawned == []
 
 
+@pytest.mark.needs_captain
 def test_the_fleet_refuses_a_captain_without_the_captains_launch(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -168,6 +173,7 @@ def test_the_fleet_refuses_a_captain_without_the_captains_launch(
     assert tmux.spawned == []
 
 
+@pytest.mark.needs_captain
 def test_the_captains_window_carries_the_home_and_the_hub(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -183,6 +189,7 @@ def test_the_captains_window_carries_the_home_and_the_hub(
     assert env["AISQUARE_HOME"] == str(paths.aisquare_home().resolve())
 
 
+@pytest.mark.needs_captain
 def test_the_captains_window_turns_claude_codes_rating_survey_off(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -202,6 +209,7 @@ def test_the_captains_window_turns_claude_codes_rating_survey_off(
     assert "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY" not in coder_env, "other roles unchanged"
 
 
+@pytest.mark.needs_captain
 def test_the_captains_launcher_joins_the_home_board_never_a_project(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -220,6 +228,7 @@ def test_the_captains_launcher_joins_the_home_board_never_a_project(
         assert store.list_projects() == [], "neither the brain folder nor the home onboarded"
 
 
+@pytest.mark.needs_captain
 def test_a_relative_home_gives_the_captain_absolute_paths(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -242,6 +251,7 @@ def test_a_relative_home_gives_the_captain_absolute_paths(
 # --- a captain that died --------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_an_exited_captain_is_not_found_and_a_bare_start_replaces_it(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -284,6 +294,7 @@ def _captain_at_its_prompt(
 
 
 @TMUX_SOCKETS
+@pytest.mark.needs_captain
 def test_after_a_reboot_swept_the_socket_a_bare_captain_starts_fresh(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -309,6 +320,7 @@ def test_after_a_reboot_swept_the_socket_a_bare_captain_starts_fresh(
 
 
 @TMUX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_silent_server_with_its_socket_present_is_refused_fast_naming_reap(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -344,6 +356,7 @@ def test_a_silent_server_with_its_socket_present_is_refused_fast_naming_reap(
 
 @TMUX_SOCKETS
 @pytest.mark.parametrize("shape", ["no client", "denied socket"])
+@pytest.mark.needs_captain
 def test_a_tmux_that_cannot_be_asked_is_refused_not_recovered(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -387,6 +400,7 @@ def test_a_dead_captain_the_listing_could_not_end_is_still_not_found(
     assert brain.find() is None
 
 
+@pytest.mark.needs_captain
 def test_a_vanished_captain_is_reaped_so_it_can_be_started_again(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -406,6 +420,7 @@ def test_the_captain_label_is_reserved(
         fleet_service.spawn(project, "coder", label="captain", worktree=False)
 
 
+@pytest.mark.needs_captain
 def test_a_restart_keeps_the_captain_in_its_brain_folder(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -420,6 +435,7 @@ def test_a_restart_keeps_the_captain_in_its_brain_folder(
     assert _after(command, "--mcp-config") == str(brain.mcp_config_path()), "replayed"
 
 
+@pytest.mark.needs_captain
 def test_the_captains_restart_prompt_names_its_tools_not_a_shell(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -443,6 +459,7 @@ def test_the_captain_role_cycle_names_tools_never_shell_verbs() -> None:
     assert "aisquare " not in cycle, "the captain has no shell"
 
 
+@pytest.mark.needs_captain
 def test_the_bundled_captain_persona_carries_the_cards_rules() -> None:
     from aisquare.core import personas
 
@@ -473,6 +490,7 @@ def _captain_window_env(monkeypatch: pytest.MonkeyPatch, agent_id: str) -> None:
     monkeypatch.delenv("CLAUDE_PID", raising=False)
 
 
+@pytest.mark.needs_captain
 def test_a_captains_session_start_binds_its_row_and_waits_for_the_owner(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -496,6 +514,7 @@ def test_a_captains_session_start_binds_its_row_and_waits_for_the_owner(
     assert fleet_service.status_of(row).state == "waiting"
 
 
+@pytest.mark.needs_captain
 def test_a_compaction_mid_turn_leaves_the_captain_working(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -512,6 +531,7 @@ def test_a_compaction_mid_turn_leaves_the_captain_working(
     assert session is not None and session.state == "working"
 
 
+@pytest.mark.needs_captain
 def test_after_a_clear_the_captains_row_follows_the_new_session(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -532,6 +552,7 @@ def test_after_a_clear_the_captains_row_follows_the_new_session(
     assert session is not None and session.state == "waiting"
 
 
+@pytest.mark.needs_captain
 def test_the_captains_session_start_is_the_captains_briefing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

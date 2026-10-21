@@ -42,6 +42,7 @@ def no_real_captain_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fleet_service, "spawn", refuse)
 
 
+@pytest.mark.needs_captain
 def test_show_token_prints_the_url_the_qr_and_the_adb_line_without_serving(
     runner: CliRunner, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -70,6 +71,7 @@ def test_show_token_prints_the_url_the_qr_and_the_adb_line_without_serving(
     assert data["wake_word"] == "captain", "on by default, and the start line says it"
 
 
+@pytest.mark.needs_captain
 def test_serving_hands_the_token_mode_and_model_to_the_server(
     runner: CliRunner, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -94,6 +96,7 @@ def test_serving_hands_the_token_mode_and_model_to_the_server(
     )
 
 
+@pytest.mark.needs_captain
 def test_captain_dash_dash_voice_is_the_plans_spelling_of_the_voice_leaf(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -113,6 +116,7 @@ def test_captain_dash_dash_voice_is_the_plans_spelling_of_the_voice_leaf(
     assert "token=" in result.output and said == [], "never a message to the captain"
 
 
+@pytest.mark.needs_captain
 def test_a_missing_extra_is_the_install_line_and_show_token_still_answers(
     runner: CliRunner, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -126,6 +130,7 @@ def test_a_missing_extra_is_the_install_line_and_show_token_still_answers(
     assert result.exit_code == 0 and "note: the voice extra is not installed" in result.output
 
 
+@pytest.mark.needs_captain
 def test_dash_dash_mode_writes_the_key_and_without_it_the_key_is_the_default(
     runner: CliRunner, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -147,6 +152,7 @@ def test_dash_dash_mode_writes_the_key_and_without_it_the_key_is_the_default(
     assert json.loads(result.stdout)["mode"] == "listen"
 
 
+@pytest.mark.needs_captain
 def test_a_bad_speaker_in_config_is_refused_with_a_line_not_a_traceback(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -158,6 +164,7 @@ def test_a_bad_speaker_in_config_is_refused_with_a_line_not_a_traceback(
     assert "bogus" in result.output and "Traceback" not in result.output
 
 
+@pytest.mark.needs_captain
 def test_a_bad_wake_word_in_config_is_refused_with_a_line_before_anything_is_written(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -176,6 +183,7 @@ def test_a_bad_wake_word_in_config_is_refused_with_a_line_before_anything_is_wri
     assert wrote == [], "refused before the mode or the speaker was written"
 
 
+@pytest.mark.needs_captain
 def test_serving_hands_the_wake_word_to_the_server(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -191,6 +199,7 @@ def test_serving_hands_the_wake_word_to_the_server(
     assert served[0]["hooks"].wake_word == "skipper"
 
 
+@pytest.mark.needs_captain
 def test_dash_dash_model_reaches_the_transcriber_and_json_keeps_stdout_to_the_report(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -224,6 +233,7 @@ def test_dash_dash_model_reaches_the_transcriber_and_json_keeps_stdout_to_the_re
     )
 
 
+@pytest.mark.needs_captain
 def test_a_non_loopback_host_and_a_bad_mode_are_refused(
     runner: CliRunner, isolated_home: Path
 ) -> None:
@@ -235,6 +245,7 @@ def test_a_non_loopback_host_and_a_bad_mode_are_refused(
     assert result.exit_code == 1 and "on or off" in result.output
 
 
+@pytest.mark.needs_captain
 def test_a_test_that_reaches_the_bare_captain_fails_loudly_instead_of_spawning(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

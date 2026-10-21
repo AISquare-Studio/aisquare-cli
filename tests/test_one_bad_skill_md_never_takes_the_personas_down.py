@@ -117,6 +117,7 @@ def test_what_pyyaml_cannot_construct_is_refused_as_frontmatter_that_is_not_vali
 # --- the catalogue and a lookup by name -----------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_a_directory_holding_the_date_is_listed_invalid_and_every_other_persona_still_loads(
     repo: Path,
 ) -> None:
@@ -135,6 +136,7 @@ def test_a_directory_holding_the_date_is_listed_invalid_and_every_other_persona_
     assert core.resolve("skeptic", repo).layer == "bundled"
 
 
+@pytest.mark.needs_captain
 def test_resolving_the_bad_directory_is_a_persona_error_that_lists_the_known_names(
     repo: Path,
 ) -> None:
@@ -162,6 +164,7 @@ def test_a_directory_holding_the_date_never_shadows_the_working_persona_below_it
 # --- the CLI --------------------------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_persona_list_exits_0_and_names_the_directory_that_did_not_load(
     runner: CliRunner, repo: Path
 ) -> None:
@@ -265,6 +268,7 @@ def test_launch_spawn_and_a_restart_step_past_the_directory_holding_the_date(
 # --- the TUI --------------------------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_the_personas_tab_marks_the_directory_invalid_and_keeps_every_other_row(
     repo: Path,
 ) -> None:
@@ -371,6 +375,7 @@ def test_a_frontmatter_that_loads_and_will_not_print_is_refused_the_same_way(
 
 
 @pytest.mark.parametrize("line", UNPRINTABLE)
+@pytest.mark.needs_captain
 def test_a_directory_whose_frontmatter_will_not_print_is_listed_invalid_and_the_rest_load(
     repo: Path, line: str
 ) -> None:
@@ -390,6 +395,7 @@ def test_a_directory_whose_frontmatter_will_not_print_is_listed_invalid_and_the_
         assert core.warnings(persona) is not None
 
 
+@pytest.mark.needs_captain
 def test_show_and_validate_of_a_label_that_will_not_print_answer_in_one_line(
     runner: CliRunner, repo: Path
 ) -> None:

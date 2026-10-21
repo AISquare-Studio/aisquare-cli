@@ -310,6 +310,7 @@ def test_the_watch_board_feed_leaves_the_audit_out_on_its_first_read_and_on_ever
     assert AUDIT not in later
 
 
+@pytest.mark.needs_captain
 def test_the_audit_is_still_read_with_aisquare_captain_log(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path
 ) -> None:

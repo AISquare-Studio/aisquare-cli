@@ -306,6 +306,7 @@ def persona(directory: Path, layer: Layer = "user") -> Persona:
 # --- the catalogue --------------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_the_catalogue_lists_layer_description_roles_and_marks(
     project: ProjectInfo, catalogue: dict[str, Path]
 ) -> None:

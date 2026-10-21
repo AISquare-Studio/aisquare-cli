@@ -645,6 +645,7 @@ SERVE_ENTRIES = {
 
 
 @pytest.mark.parametrize("entry", sorted(SERVE_ENTRIES))
+@pytest.mark.needs_captain
 def test_the_stdio_server_closes_itself_after_the_idle_deadline(
     entry: str, isolated_home: Path
 ) -> None:
@@ -738,6 +739,7 @@ def test_the_stdio_runner_counts_a_tool_call_in_flight_for_its_whole_run(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_tool_call_longer_than_the_idle_deadline_still_returns(
     short_home: Path, projects: dict[str, ProjectInfo]
 ) -> None:
@@ -777,6 +779,7 @@ def test_a_tool_call_longer_than_the_idle_deadline_still_returns(
 
 
 @UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_a_client_that_hangs_up_mid_call_still_gets_the_call_audited(
     short_home: Path, projects: dict[str, ProjectInfo]
 ) -> None:
@@ -832,6 +835,7 @@ def test_a_client_that_hangs_up_mid_call_still_gets_the_call_audited(
     assert uis[0]["said"].startswith("error: asq did not answer within")
 
 
+@pytest.mark.needs_captain
 def test_captain_serve_speaks_stdio_only(runner: CliRunner) -> None:
     result = runner.invoke(app, ["captain", "serve"])
     assert result.exit_code == 2
@@ -2238,6 +2242,7 @@ def test_a_working_pane_that_cannot_be_read_stays_refused(
     assert "coder-1's pane could not be read" in message and pane.typed == []
 
 
+@pytest.mark.needs_captain
 def test_the_captains_persona_says_yes_through_approve_prompt_and_its_result() -> None:
     """13273: the persona line rides with whichever of T2 (the persona's owner) and T1b lands
     second. T2 landed first (e49c5464), so it is T1b's."""

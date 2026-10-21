@@ -90,6 +90,7 @@ def _editor(tmp_path: Path, name: str, script: str) -> str:
     return f'"{Path(sys.executable).as_posix()}" "{path.as_posix()}"'
 
 
+@pytest.mark.needs_captain
 def test_list_prints_the_bundled_personas_with_layer_and_description(runner: CliRunner) -> None:
     result = runner.invoke(app, ["persona", "list"])
 
@@ -99,6 +100,7 @@ def test_list_prints_the_bundled_personas_with_layer_and_description(runner: Cli
     assert rows[4].split(None, 2) == ["skeptic", "bundled", core.resolve("skeptic").description]
 
 
+@pytest.mark.needs_captain
 def test_list_json_carries_each_field_and_the_directories_that_did_not_load(
     runner: CliRunner,
 ) -> None:
@@ -139,6 +141,7 @@ def test_show_json_carries_frontmatter_body_briefing_and_provenance(runner: CliR
     assert payload["provenance"] is None
 
 
+@pytest.mark.needs_captain
 def test_show_of_an_unknown_name_is_one_line_not_a_traceback(runner: CliRunner) -> None:
     human = runner.invoke(app, ["persona", "show", "nope"])
     code, payload = _json(runner, "show", "nope")
@@ -537,6 +540,7 @@ def test_rm_removes_a_user_persona_and_refuses_a_bundled_one(runner: CliRunner) 
     assert (code, payload["error"]) == (1, "unknown_persona")
 
 
+@pytest.mark.needs_captain
 def test_a_project_persona_shadows_bundled_and_a_broken_one_is_listed_not_fatal(
     runner: CliRunner, repo: Path
 ) -> None:

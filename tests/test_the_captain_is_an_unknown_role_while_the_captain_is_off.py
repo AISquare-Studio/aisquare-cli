@@ -81,6 +81,7 @@ def test_launch_captain_is_an_unknown_role_while_off(
     assert not spy, "nothing is exec'd"
 
 
+@pytest.mark.needs_captain
 def test_on_the_captain_is_a_launch_role_in_its_window_and_refused_by_hand(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -105,6 +106,7 @@ def test_the_seat_rule_and_fleet_spawn_say_unknown_role_while_off(
     assert tmux.spawned == []
 
 
+@pytest.mark.needs_captain
 def test_on_the_seat_rule_takes_the_captain(tmux: FakeTmux) -> None:
     """The control: on, ``role_ok`` is what the captain's own start relies on."""
     assert fleet_service.role_ok("captain") is True

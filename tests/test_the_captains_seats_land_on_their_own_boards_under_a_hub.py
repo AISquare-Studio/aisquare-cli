@@ -96,6 +96,7 @@ def test_a_shells_own_hub_still_holds_for_a_spawn_that_is_not_the_captains(
     assert _window_hub(tmux) == str(hub.root)
 
 
+@pytest.mark.needs_captain
 def test_under_an_exported_hub_the_captains_own_row_stays_on_the_home_board(
     tmux: FakeTmux, claude_on_path: Path, hub: ProjectInfo
 ) -> None:
@@ -108,6 +109,7 @@ def test_under_an_exported_hub_the_captains_own_row_stays_on_the_home_board(
     assert captain.launch_spec is not None and captain.launch_spec.hub == str(home.root)
 
 
+@pytest.mark.needs_captain
 def test_a_restart_keeps_the_captain_on_the_home_board_under_any_hub(
     tmux: FakeTmux, claude_on_path: Path, hub: ProjectInfo
 ) -> None:

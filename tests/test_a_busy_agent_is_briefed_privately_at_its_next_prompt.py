@@ -236,6 +236,7 @@ def test_a_clear_before_its_next_prompt_briefs_it_at_the_start_and_the_prompt_ad
     assert prompt == "", "the session start was the briefing: nothing is owed after it"
 
 
+@pytest.mark.needs_captain
 def test_the_captains_session_start_settles_what_it_was_owed_too(
     tmux: FakeTmux, claude_on_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

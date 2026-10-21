@@ -25,10 +25,11 @@ import statistics
 import string
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 from textual import events
@@ -903,11 +904,25 @@ async def _settled(pilot: Any, record: Path, length: int, seconds: float = 3.0) 
     return record.read_text()
 
 
+class _Unread(queue.SimpleQueue["bytes | None"]):
+    """An outbox the writer never takes from: what is put in it stays there, unwritten."""
+
+    def get(self, block: bool = True, timeout: float | None = None) -> NoReturn:
+        threading.Event().wait()  # the writer, come for more, parks here for good
+        raise AssertionError("unreachable")
+
+
 def _unread_from(client: ControlClient) -> None:
     """What ``client`` is sent from now on is written where nothing reads it: unrun, and
     unanswered, however the platform times the kill (tmux reads a control client's
-    stdin itself, so a kill alone does not stop what was written)."""
-    client._outbox = queue.SimpleQueue()
+    stdin itself, so a kill alone does not stop what was written).
+
+    Whichever outbox the writer takes from next. It reads ``_outbox`` afresh for each
+    write, so a plain new queue black-holed only a writer already parked in ``get`` on
+    the old one: one still writing the attach's commands took the next from the new
+    queue, and the keys meant to stay in flight ran and were answered (5 runs of 60
+    beside 4 CPU hogs on 2 CPUs; CI on 8b65a8e2)."""
+    client._outbox = _Unread()
 
 
 @_needs_tmux

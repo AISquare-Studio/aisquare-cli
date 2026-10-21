@@ -127,22 +127,30 @@ def _role_ok(role: str) -> bool:
     return role in ROLES or role in UNSEATED or bool(_SEAT.match(role)) or role in _declared_roles()
 
 
-def _check_persona(name: str, project: ProjectInfo | None) -> None:
-    """Refuse a persona this project cannot resolve, before anything starts (§3.7).
+def _persona_root(project: ProjectInfo | None) -> Path | None:
+    """Where a launch resolves its persona: the working directory's own project
+    (``orchestrator.directory_project``), the one ``fleet spawn`` checked the name against
+    and the session-start hook briefs from, never the board's. Under ``AISQUARE_TEAM_HUB``
+    the board is the hub's, and a seat spawned with a persona from its own repository's
+    layer died at launch on "no persona named …" (review of #201, F1). With no answer from
+    the directory (a symlink loop) it is the board's, else the git repository around it.
 
-    The project layer is the working directory's own project
-    (``orchestrator.directory_project``), the one ``fleet spawn`` checked the name
-    against, never the board's: under ``AISQUARE_TEAM_HUB`` the board is the hub's,
-    and a seat spawned with a persona from its own repository's layer died at launch
-    on "no persona named …" (review of #201, F1). With no answer from the directory
-    (a symlink loop) it is the board's, else the git repository around it.
+    One rule for the check and the system-prompt file both: the file resolved at the
+    board's root, so under a hub the launch the check had passed ended in a traceback, or
+    wrote the HUB's persona of that name into the system prompt while the hook briefed the
+    repository's (review of #240, F1).
     """
     try:
-        root: Path | None = orchestrator.directory_project(Path.cwd()).root
+        return orchestrator.directory_project(Path.cwd()).root
     except OSError:
-        root = project.root if project is not None else git_common_root(Path.cwd())
+        return project.root if project is not None else git_common_root(Path.cwd())
+
+
+def _check_persona(name: str, project: ProjectInfo | None) -> None:
+    """Refuse a persona this project cannot resolve, before anything starts (§3.7), in the
+    layer :func:`_persona_root` names."""
     try:
-        personas.resolve(name, root)
+        personas.resolve(name, _persona_root(project))
     except personas.PersonaError as exc:
         fail(str(exc), error="unknown_persona", ref=name)
 
@@ -196,8 +204,18 @@ def _persona_system_prompt(
             style="dim",
         )
         return []
-    root = project.root if project is not None else git_common_root(Path.cwd())
-    block = "\n".join(personas.briefing(personas.resolve(name, root))) + "\n"
+    try:
+        persona = personas.resolve(name, _persona_root(project))
+    except personas.PersonaError as exc:
+        # Checked a moment ago (``_check_persona``), in the same layer: one removed or broken
+        # since costs the seam, never the launch, and the hook says what it finds.
+        stderr_console().print(
+            f"persona {name}: {exc} — no system-prompt file, the session-start hook alone",
+            style="dim",
+            markup=False,
+        )
+        return []
+    block = "\n".join(personas.briefing(persona)) + "\n"
     digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:12]
     path = paths.aisquare_home() / "cache" / "persona-prompts" / f"{name}-{digest}.md"
     try:

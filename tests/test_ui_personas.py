@@ -71,6 +71,7 @@ from aisquare.cli.ui.views.personas_tab import (
     PersonasTab,
 )
 from aisquare.core import claude_accounts as accounts_core
+from aisquare.core import experimental
 from aisquare.core import personas as core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.personas import Layer, Persona, PersonaError
@@ -306,7 +307,6 @@ def persona(directory: Path, layer: Layer = "user") -> Persona:
 # --- the catalogue --------------------------------------------------------------------
 
 
-@pytest.mark.needs_captain
 def test_the_catalogue_lists_layer_description_roles_and_marks(
     project: ProjectInfo, catalogue: dict[str, Path]
 ) -> None:
@@ -315,7 +315,11 @@ def test_the_catalogue_lists_layer_description_roles_and_marks(
 
     listed = drive(scenario, project=project)
     names = [row[0] for row in listed]
-    assert names == ["broken", "captain", "careful", "mentor", "minimalist", "pair", "skeptic"]
+    assert names == (
+        ["broken", "captain", "careful", "mentor", "minimalist", "pair", "skeptic"]
+        if experimental.captain_enabled()
+        else ["broken", "careful", "mentor", "minimalist", "pair", "skeptic"]
+    )
     by_name = {row[0]: row for row in listed}
     assert by_name["skeptic"] == (
         "skeptic",

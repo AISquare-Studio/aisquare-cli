@@ -37,11 +37,11 @@ from aisquare.core.personas import PersonaError
 from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo
 from aisquare.services import fleet as fleet_service
+from tests import bundled_personas
 from tests import test_fleet_service as fleet_suite
 from tests import test_persona_cli as cli_suite
 from tests import test_ui_personas as ui_suite
 from tests.test_fleet_service import FakeTmux
-from tests.test_persona_cli import BUNDLED
 from tests.test_ui_personas import Host, drive, rows, shown
 
 # The suites' fixtures, bound here so pytest finds them for this module's tests. The fleet
@@ -117,7 +117,6 @@ def test_what_pyyaml_cannot_construct_is_refused_as_frontmatter_that_is_not_vali
 # --- the catalogue and a lookup by name -----------------------------------------------------
 
 
-@pytest.mark.needs_captain
 def test_a_directory_holding_the_date_is_listed_invalid_and_every_other_persona_still_loads(
     repo: Path,
 ) -> None:
@@ -127,7 +126,9 @@ def test_a_directory_holding_the_date_is_listed_invalid_and_every_other_persona_
 
     personas, invalid = core.catalogue(repo)
 
-    assert [persona.name for persona in personas] == sorted([*BUNDLED, "mine", "pair"])
+    assert [persona.name for persona in personas] == sorted(
+        [*bundled_personas.names(), "mine", "pair"]
+    )
     assert [path for path, _reason in invalid] == [bad]
     assert invalid[0][1].startswith(NOT_VALID_YAML)
     # A lookup of another persona: beside the bad one, below it, and at the bottom.
@@ -136,7 +137,6 @@ def test_a_directory_holding_the_date_is_listed_invalid_and_every_other_persona_
     assert core.resolve("skeptic", repo).layer == "bundled"
 
 
-@pytest.mark.needs_captain
 def test_resolving_the_bad_directory_is_a_persona_error_that_lists_the_known_names(
     repo: Path,
 ) -> None:
@@ -149,7 +149,7 @@ def test_resolving_the_bad_directory_is_a_persona_error_that_lists_the_known_nam
 
     for caught in (by_its_name, unknown):
         assert caught.value.code == "unknown_persona"
-        assert "known: captain, careful, mentor, minimalist, skeptic" in str(caught.value)
+        assert bundled_personas.known() in str(caught.value)
 
 
 def test_a_directory_holding_the_date_never_shadows_the_working_persona_below_it(
@@ -164,7 +164,6 @@ def test_a_directory_holding_the_date_never_shadows_the_working_persona_below_it
 # --- the CLI --------------------------------------------------------------------------------
 
 
-@pytest.mark.needs_captain
 def test_persona_list_exits_0_and_names_the_directory_that_did_not_load(
     runner: CliRunner, repo: Path
 ) -> None:
@@ -175,12 +174,12 @@ def test_persona_list_exits_0_and_names_the_directory_that_did_not_load(
 
     assert human.exit_code == 0, repr(human.exception)
     lines = human.stdout.splitlines()
-    assert [row.split()[0] for row in lines if not row.startswith("✗")] == BUNDLED
+    assert [row.split()[0] for row in lines if not row.startswith("✗")] == bundled_personas.names()
     (refused,) = [row for row in lines if row.startswith("✗")]
     assert refused.startswith(f"✗ {bad}: {NOT_VALID_YAML}")
     assert machine.exit_code == 0, repr(machine.exception)
     payload = json.loads(machine.stdout)
-    assert [entry["name"] for entry in payload["personas"]] == BUNDLED
+    assert [entry["name"] for entry in payload["personas"]] == bundled_personas.names()
     assert [entry["path"] for entry in payload["invalid"]] == [str(bad)]
     assert payload["invalid"][0]["reason"].startswith(NOT_VALID_YAML)
 
@@ -268,7 +267,6 @@ def test_launch_spawn_and_a_restart_step_past_the_directory_holding_the_date(
 # --- the TUI --------------------------------------------------------------------------------
 
 
-@pytest.mark.needs_captain
 def test_the_personas_tab_marks_the_directory_invalid_and_keeps_every_other_row(
     repo: Path,
 ) -> None:
@@ -279,7 +277,7 @@ def test_the_personas_tab_marks_the_directory_invalid_and_keeps_every_other_row(
         return rows(host)
 
     by_name = {row[0]: row for row in drive(scenario, project=project)}
-    assert sorted(by_name) == sorted([*BUNDLED, "x"])
+    assert sorted(by_name) == sorted([*bundled_personas.names(), "x"])
     assert (by_name["x"][1], by_name["x"][4]) == ("project", "✗ invalid")
     assert by_name["x"][2].startswith(NOT_VALID_YAML)  # the reason is the row's description
 
@@ -375,7 +373,6 @@ def test_a_frontmatter_that_loads_and_will_not_print_is_refused_the_same_way(
 
 
 @pytest.mark.parametrize("line", UNPRINTABLE)
-@pytest.mark.needs_captain
 def test_a_directory_whose_frontmatter_will_not_print_is_listed_invalid_and_the_rest_load(
     repo: Path, line: str
 ) -> None:
@@ -388,14 +385,13 @@ def test_a_directory_whose_frontmatter_will_not_print_is_listed_invalid_and_the_
 
     personas, invalid = core.catalogue(repo)
 
-    assert [persona.name for persona in personas] == sorted([*BUNDLED, "pair"])
+    assert [persona.name for persona in personas] == sorted([*bundled_personas.names(), "pair"])
     assert [path for path, _reason in invalid] == [bad]
     assert invalid[0][1].startswith(NOT_VALID_YAML)
     for persona in personas:  # nothing downstream is left to raise
         assert core.warnings(persona) is not None
 
 
-@pytest.mark.needs_captain
 def test_show_and_validate_of_a_label_that_will_not_print_answer_in_one_line(
     runner: CliRunner, repo: Path
 ) -> None:
@@ -411,7 +407,9 @@ def test_show_and_validate_of_a_label_that_will_not_print_answer_in_one_line(
     validated = runner.invoke(app, ["persona", "validate", str(bad)])
 
     assert listed.exit_code == 0, repr(listed.exception)
-    assert [row.split()[0] for row in listed.stdout.splitlines() if row[:1] != "✗"] == BUNDLED
+    assert [
+        row.split()[0] for row in listed.stdout.splitlines() if row[:1] != "✗"
+    ] == bundled_personas.names()
     assert isinstance(by_its_name.exception, SystemExit), repr(by_its_name.exception)
     assert json.loads(by_its_name.stdout)["error"] == "unknown_persona"
     assert isinstance(validated.exception, SystemExit), repr(validated.exception)

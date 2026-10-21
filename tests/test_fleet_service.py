@@ -89,7 +89,7 @@ from aisquare.services.fleet import (
     FleetUnavailable,
     NoSuchAgent,
 )
-from tests import fakebin
+from tests import bundled_personas, fakebin
 from tests.cycles import unscoped
 from tests.fsperms import can_deny_reads, can_symlink, remove_tree
 from tests.projects import add_project
@@ -860,14 +860,13 @@ def test_spawn_without_a_persona_passes_no_flag_and_records_none(
     assert receipt.agent.persona is None
 
 
-@pytest.mark.needs_captain
 def test_spawn_refuses_an_unknown_persona_before_any_window_worktree_or_row(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
     with pytest.raises(fleet_service.FleetError) as caught:
         fleet_service.spawn(project, "coder", persona="nope")
 
-    assert "known: captain, careful, mentor, minimalist, skeptic" in str(caught.value)
+    assert bundled_personas.known() in str(caught.value)
     assert tmux.spawned == []
     assert not (project.root / ".aisquare-worktrees").exists()
     with store_session() as store:
@@ -890,7 +889,6 @@ def test_spawn_uses_the_roles_default_persona_and_a_flag_beats_it(
     assert by_flag.agent.persona == "careful" and by_flag.notes == []
 
 
-@pytest.mark.needs_captain
 def test_a_stale_default_persona_refuses_naming_the_config_key(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -902,7 +900,7 @@ def test_a_stale_default_persona_refuses_naming_the_config_key(
         fleet_service.spawn(project, "coder")
 
     assert "[fleet.roles.coder].persona = 'retired'" in str(caught.value)
-    assert "known: captain, careful, mentor, minimalist, skeptic" in str(caught.value)
+    assert bundled_personas.known() in str(caught.value)
     assert tmux.spawned == []
 
 
@@ -3219,14 +3217,13 @@ def test_attaching_to_a_busy_agent_records_it_and_files_no_briefing_on_the_board
     assert row is not None and row.persona == "skeptic"
 
 
-@pytest.mark.needs_captain
 def test_attaching_an_unknown_persona_refuses_before_the_store_or_tmux(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:
     agent = _coder(project)
     tmux.installed = False  # from here on any tmux call would raise TmuxUnavailable instead
 
-    with pytest.raises(FleetError, match="known: captain, careful, mentor, minimalist, skeptic"):
+    with pytest.raises(FleetError, match=bundled_personas.known()):
         fleet_service.attach_persona(project, "coder-1", "nope")
 
     with store_session() as store:

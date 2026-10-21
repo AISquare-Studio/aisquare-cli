@@ -18,8 +18,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import personas as core
-
-BUNDLED = ["captain", "careful", "mentor", "minimalist", "skeptic"]
+from tests import bundled_personas
 
 
 @pytest.fixture(autouse=True)
@@ -90,17 +89,20 @@ def _editor(tmp_path: Path, name: str, script: str) -> str:
     return f'"{Path(sys.executable).as_posix()}" "{path.as_posix()}"'
 
 
-@pytest.mark.needs_captain
 def test_list_prints_the_bundled_personas_with_layer_and_description(runner: CliRunner) -> None:
     result = runner.invoke(app, ["persona", "list"])
 
     assert result.exit_code == 0, result.output
     rows = result.stdout.splitlines()
-    assert [row.split()[0] for row in rows] == BUNDLED
-    assert rows[4].split(None, 2) == ["skeptic", "bundled", core.resolve("skeptic").description]
+    bundled = bundled_personas.names()
+    assert [row.split()[0] for row in rows] == bundled
+    assert rows[bundled.index("skeptic")].split(None, 2) == [
+        "skeptic",
+        "bundled",
+        core.resolve("skeptic").description,
+    ]
 
 
-@pytest.mark.needs_captain
 def test_list_json_carries_each_field_and_the_directories_that_did_not_load(
     runner: CliRunner,
 ) -> None:
@@ -110,8 +112,9 @@ def test_list_json_carries_each_field_and_the_directories_that_did_not_load(
 
     assert code == 0
     assert set(payload) == {"personas", "invalid"}
-    assert [entry["name"] for entry in payload["personas"]] == BUNDLED
-    skeptic = payload["personas"][4]
+    bundled = bundled_personas.names()
+    assert [entry["name"] for entry in payload["personas"]] == bundled
+    skeptic = payload["personas"][bundled.index("skeptic")]
     assert set(skeptic) >= {"name", "description", "roles", "tags", "layer", "path", "files"}
     assert skeptic["layer"] == "bundled"
     assert skeptic["roles"] == ["tester", "reviewer", "runner"]
@@ -141,14 +144,13 @@ def test_show_json_carries_frontmatter_body_briefing_and_provenance(runner: CliR
     assert payload["provenance"] is None
 
 
-@pytest.mark.needs_captain
 def test_show_of_an_unknown_name_is_one_line_not_a_traceback(runner: CliRunner) -> None:
     human = runner.invoke(app, ["persona", "show", "nope"])
     code, payload = _json(runner, "show", "nope")
 
     assert human.exit_code == 1
     assert isinstance(human.exception, SystemExit)
-    assert "known: captain, careful, mentor, minimalist, skeptic" in human.stderr
+    assert bundled_personas.known() in human.stderr
     assert (code, payload["error"]) == (1, "unknown_persona")
     assert "no persona named 'nope'" in payload["detail"]
 
@@ -540,7 +542,6 @@ def test_rm_removes_a_user_persona_and_refuses_a_bundled_one(runner: CliRunner) 
     assert (code, payload["error"]) == (1, "unknown_persona")
 
 
-@pytest.mark.needs_captain
 def test_a_project_persona_shadows_bundled_and_a_broken_one_is_listed_not_fatal(
     runner: CliRunner, repo: Path
 ) -> None:
@@ -551,7 +552,7 @@ def test_a_project_persona_shadows_bundled_and_a_broken_one_is_listed_not_fatal(
 
     assert result.exit_code == 0, result.output
     rows = result.stdout.splitlines()
-    assert [row.split()[0] for row in rows if not row.startswith("✗")] == BUNDLED
+    assert [row.split()[0] for row in rows if not row.startswith("✗")] == bundled_personas.names()
     skeptic = next(row for row in rows if row.startswith("skeptic"))
     assert skeptic.split()[1] == "project"
     assert skeptic.endswith("Our own skeptic.  (shadows bundled)")

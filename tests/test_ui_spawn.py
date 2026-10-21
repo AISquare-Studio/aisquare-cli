@@ -59,7 +59,7 @@ from aisquare.cli.ui.spawn import (
     role_choices,
 )
 from aisquare.cli.ui.views.accounts import AccountsView
-from aisquare.core import codenames, harness, personas
+from aisquare.core import codenames, experimental, harness, personas
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.core.ids import new_task_id
@@ -1020,7 +1020,6 @@ def test_the_fields_read_who_runs_it_then_as_whom(git_project: ProjectInfo) -> N
     assert labels[:7] == ["Hand off from", "How", "Role", "Account", "Binary", "Persona", "Label"]
 
 
-@pytest.mark.needs_captain
 def test_the_persona_select_lists_none_and_the_catalogue_with_the_description_below(
     git_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:
@@ -1037,14 +1036,24 @@ def test_the_persona_select_lists_none_and_the_catalogue_with_the_description_be
         return seen
 
     prompts, before, after = drive(git_project, scenario)
-    assert prompts == [
-        "(none)",
-        "captain · bundled",
-        "careful · bundled",
-        "mentor · bundled",
-        "minimalist · bundled",
-        "skeptic · bundled",
-    ]
+    assert prompts == (
+        [
+            "(none)",
+            "captain · bundled",
+            "careful · bundled",
+            "mentor · bundled",
+            "minimalist · bundled",
+            "skeptic · bundled",
+        ]
+        if experimental.captain_enabled()
+        else [
+            "(none)",
+            "careful · bundled",
+            "mentor · bundled",
+            "minimalist · bundled",
+            "skeptic · bundled",
+        ]
+    )
     assert before is not None and before.startswith("(no persona")
     assert after == personas.resolve("skeptic", git_project.root).description
     assert spawns.calls[0][2]["persona"] == "skeptic"  # the recorder receives the choice

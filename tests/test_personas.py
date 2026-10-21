@@ -21,8 +21,7 @@ from aisquare.core import personas as core
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.personas import PersonaError
 from aisquare.services import personas as service
-
-BUNDLED = ["captain", "careful", "mentor", "minimalist", "skeptic"]
+from tests import bundled_personas
 
 #: A real skill's shapes at once: a folded block scalar, a list, a comma string
 #: under metadata, a key Claude Code reads and aisquare never does.
@@ -108,12 +107,11 @@ def _import(
     )
 
 
-@pytest.mark.needs_captain
 def test_the_bundled_personas_are_clean_skills_inside_the_body_budget() -> None:
     personas, invalid = core.catalogue(None)
 
     assert invalid == []
-    assert [persona.name for persona in personas] == BUNDLED
+    assert [persona.name for persona in personas] == bundled_personas.names()
     for persona in personas:
         assert persona.layer == "bundled"
         assert persona.path == core.BUNDLED_DIR / persona.name
@@ -240,7 +238,6 @@ def test_the_project_layer_wins_and_knows_what_it_shadows(tmp_path: Path) -> Non
     assert core.resolve("skeptic", None).layer == "bundled"
 
 
-@pytest.mark.needs_captain
 def test_a_broken_directory_is_reported_and_never_stops_or_shadows_the_rest() -> None:
     user = _user_layer()
     _write_skill(user, "skeptic", b"not a skill at all\n")
@@ -250,7 +247,7 @@ def test_a_broken_directory_is_reported_and_never_stops_or_shadows_the_rest() ->
 
     personas, invalid = core.catalogue(None)
 
-    assert [persona.name for persona in personas] == BUNDLED
+    assert [persona.name for persona in personas] == bundled_personas.names()
     assert {path.name: reason for path, reason in invalid} == {
         "Bad_Name": invalid[0][1],
         "empty": "no SKILL.md",
@@ -262,7 +259,6 @@ def test_a_broken_directory_is_reported_and_never_stops_or_shadows_the_rest() ->
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads anything")
-@pytest.mark.needs_captain
 def test_an_unreadable_directory_is_listed_as_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
     """Made unreadable by its mode where there are mode bits. On Windows ``chmod(0)`` only
     sets the read-only flag, the file stays readable, and the CI leg listed it as a
@@ -283,19 +279,18 @@ def test_an_unreadable_directory_is_listed_as_invalid(monkeypatch: pytest.Monkey
     finally:
         skill.chmod(0o644)
 
-    assert [persona.name for persona in personas] == BUNDLED
+    assert [persona.name for persona in personas] == bundled_personas.names()
     assert [(path.name, reason.split(" (")[0]) for path, reason in invalid] == [
         ("locked", "unreadable")
     ]
 
 
-@pytest.mark.needs_captain
 def test_an_unknown_name_lists_the_known_ones_and_never_walks_out_of_a_layer() -> None:
     with pytest.raises(PersonaError) as caught:
         core.resolve("nope")
 
     assert caught.value.code == "unknown_persona"
-    assert "known: captain, careful, mentor, minimalist, skeptic" in str(caught.value)
+    assert bundled_personas.known() in str(caught.value)
     with pytest.raises(PersonaError):
         core.resolve("../personas/skeptic")
 

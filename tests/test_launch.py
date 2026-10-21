@@ -22,6 +22,7 @@ from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import FleetAgent
 from aisquare.services.explainability import join_records
+from tests import bundled_personas
 
 
 @pytest.fixture
@@ -1052,7 +1053,6 @@ def test_launch_persona_leaves_the_operators_own_system_prompt_flag_alone(
     assert spy["argv"] == ["claude", "--append-system-prompt", "mine"]
 
 
-@pytest.mark.needs_captain
 def test_launch_refuses_an_unknown_persona_listing_the_known_ones(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any]
 ) -> None:
@@ -1064,7 +1064,7 @@ def test_launch_refuses_an_unknown_persona_listing_the_known_ones(
     assert as_json.exit_code == 1
     assert json.loads(as_json.stdout) == {"error": "unknown_persona", "ref": "nope"}
     assert human.exit_code == 1
-    assert "known: captain, careful, mentor, minimalist, skeptic" in human.output
+    assert bundled_personas.known() in human.output
     assert spy == {}, "nothing may launch with a persona that does not exist"
 
 

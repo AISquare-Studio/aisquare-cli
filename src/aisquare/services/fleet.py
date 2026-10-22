@@ -9054,7 +9054,7 @@ def attach_argv(project: ProjectInfo) -> list[str]:
     nothing here may hand over an attach that has nothing to attach to.
 
     Asked of the servers the project's live agents are on, the manager's first, where their
-    spawns said they listened (:func:`_address`), as the Manager tab's attach line names
+    spawns said they listened (:func:`_address`), as the Settings tab's attach line names
     them. By the socket's name alone (``tmux -L``), a shell under another ``TMUX_TMPDIR``
     asks another server: one with no such session refused with "spawn manager starts
     one", which then refused for the live manager, and one with a session of that name was

@@ -36,6 +36,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import ClassVar
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -232,24 +233,56 @@ def ordered_agents(statuses: Iterable[FleetAgentStatus]) -> list[FleetAgentStatu
     )
 
 
-def agent_row_text(status: FleetAgentStatus) -> Text:
-    """``🧭 manager       ⏸ · skeptic`` — icon, label, state chip, exit status, persona.
+LABEL_WIDTH = 13
+"""The cells an agent row gives its label when there is room, so the chips line up on rows
+that fit. A row that would not fit gives cells back from its label, the ``#N·NN%`` held
+whole at the right: a wide chip (``🔔``, ``💤 exited(N)``) or ``100%`` sits further left."""
+
+
+def agent_row_text(
+    status: FleetAgentStatus, percent: float | None = None, *, width: int | None = None
+) -> Text:
+    """``🧭 manager       ⏸ #1·42% · skeptic`` — icon, label, state chip, the account's slot
+    and the session use on it, exit status when exited, persona.
+
+    ``#<slot>`` is ``FleetAgent.account_slot`` and ``percent`` that account's five-hour
+    window, percent USED (:func:`session_percent_text`); with no percent the slot alone,
+    with no slot neither. An exited row shows ``💤 exited(N)`` instead: it no longer draws
+    on the account, and at the default width the two did not fit beside each other.
+
+    ``width`` is the row's content width once it has one. The label gives way first,
+    ellipsised, so the chip and the ``#N·NN%`` after it are never what is cut.
 
     The persona badge is the row's (what the agent was spawned with) or, for an
     agent the row does not know one for, its session's (what it launched as) —
-    docs/plans/spawn-personas.md §0 item 9.
+    docs/plans/spawn-personas.md §0 item 9. It comes last and is not counted in the
+    label's room: a row too narrow for it cuts the badge at its end, before the label.
     """
     agent = status.agent
     chip, style = STATE_CHIP.get(status.state, STATE_CHIP["unknown"])
-    text = Text(no_wrap=True, overflow="ellipsis")
-    text.append(f"{ROLE_ICON.get(agent.role, CUSTOM_ROLE_ICON)} ")
-    text.append(f"{agent.label:<13} ")
-    text.append(chip, style=style)
+    icon = f"{ROLE_ICON.get(agent.role, CUSTOM_ROLE_ICON)} "
+    tail = Text()
+    tail.append(chip, style=style)
     if status.state == "exited":
         # 💤 alone read as "sleeping" (#138); the word says what happened.
-        text.append(" exited", style="dim")
+        tail.append(" exited", style="dim")
         if agent.exit_status is not None:
-            text.append(f"({agent.exit_status})", style="dim")
+            tail.append(f"({agent.exit_status})", style="dim")
+    elif agent.account_slot is not None:
+        tail.append(f" #{agent.account_slot}" + ("·" if percent is not None else ""), style="dim")
+        if percent is not None:
+            tail.append_text(session_percent_text(percent))
+    label = Text(agent.label)
+    room = LABEL_WIDTH if width is None else max(2, width - cell_len(icon) - 1 - tail.cell_len)
+    if width is None or label.cell_len <= room:
+        label.pad_right(min(LABEL_WIDTH, room) - label.cell_len)
+    else:
+        label.truncate(room, overflow="ellipsis")
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(icon)
+    text.append_text(label)
+    text.append(" ")
+    text.append_text(tail)
     persona = agent.persona or (status.session.persona if status.session is not None else None)
     if persona:
         text.append(f" · {persona}", style="dim")
@@ -307,6 +340,24 @@ HEADROOM_DOT: dict[str, tuple[str, str]] = {
 }
 """The Claude dot per ``HeadroomSummary.level``: over 50 % left green, 25-50 % yellow,
 5-25 % orange-red, under 5 % red, nothing left a skull, not read yet grey."""
+
+SESSION_WARN_FROM = 70
+"""From this share of an account's five-hour window USED, its figure is yellow."""
+SESSION_HIGH_FROM = 90
+"""From this share USED, red: the account is close to its session limit."""
+
+
+def session_percent_text(percent: float) -> Text:
+    """``42%`` — an account's five-hour window, percent USED, in the colour of how close it is.
+
+    Green below :data:`SESSION_WARN_FROM`, yellow up to :data:`SESSION_HIGH_FROM`, red from
+    there: the one format the sidebar's agent rows and the agent info line share. The
+    colour is the shown figure's, so ``70%`` is never green for a 69.6 read. The SESSION
+    window only (``HeadroomSummary.session_by_slot``), never the weekly one.
+    """
+    shown = round(percent)
+    colour = RED if shown >= SESSION_HIGH_FROM else YELLOW if shown >= SESSION_WARN_FROM else GREEN
+    return Text(f"{shown}%", style=colour)
 
 
 TIMES = "\N{MULTIPLICATION SIGN}"
@@ -758,11 +809,30 @@ class AgentRow(Activatable):
         super().__init__(agent_row_text(status), id=f"agent-row-{status.agent.id}")
         self.status = status
         self.selection_key = f"agent:{status.agent.id}"
+        self._painted: tuple[FleetAgentStatus, float | None, int] | None = None
 
     def show(self, status: FleetAgentStatus) -> None:
-        if status != self.status:
-            self.status = status
-            self.update(agent_row_text(status))
+        self.status = status
+        self.paint()
+
+    def paint(self) -> None:
+        """Draw the row for its status, its account's session use and its width.
+
+        The use is the sidebar's (:attr:`Sidebar.session_usage`, from the slow headroom
+        read), so a row mounted between two reads shows the last figure at once.
+        """
+        sidebar = self._sidebar()
+        slot = self.status.agent.account_slot
+        usage = sidebar.session_usage if sidebar is not None else {}
+        percent = usage.get(slot) if slot is not None else None
+        width = self.content_size.width
+        wanted = (self.status, percent, width)
+        if wanted != self._painted:
+            self._painted = wanted
+            self.update(agent_row_text(self.status, percent, width=width or None), layout=False)
+
+    def on_resize(self) -> None:
+        self.paint()
 
     def message(self) -> Message:
         return AgentSelected(self.status.agent.project_id, self.status.agent.id)
@@ -1239,6 +1309,9 @@ class Sidebar(Vertical):
         """The Claude accounts' headroom the status line shows; ``None`` until the first."""
         self.every_needs_login = False
         """Whether every enabled account needs a login: the one case the dot is red for it."""
+        self.session_usage: Mapping[int, float] = {}
+        """Slot → its five-hour window, percent USED, from the last headroom read: the
+        ``#N·NN%`` on the agent rows (``HeadroomSummary.session_by_slot``)."""
         self._prev_states: dict[str, str] = {}
         self._cursor_key: str | None = None
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
@@ -1665,10 +1738,15 @@ class Sidebar(Vertical):
         self._paint_status()
 
     def show_headroom(self, headroom: HeadroomSummary, *, every_needs_login: bool = False) -> None:
-        """The status line's Claude dot, from the usage cache (``FleetApp.refresh_headroom``)."""
+        """The status line's Claude dot, from the usage cache (``FleetApp.refresh_headroom``),
+        and the agent rows' session use from the same read — never from the two-second tick."""
         self.headroom = headroom
         self.every_needs_login = every_needs_login
         self._paint_status()
+        if headroom.session_by_slot != self.session_usage:
+            self.session_usage = headroom.session_by_slot
+            for row in self.query(AgentRow):
+                row.paint()
 
     def _paint_status(self) -> None:
         line = status_line_text(

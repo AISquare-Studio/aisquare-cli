@@ -237,6 +237,9 @@ LABEL_WIDTH = 13
 """The cells an agent row gives its label when there is room, so the chips line up on rows
 that fit. A row that would not fit gives cells back from its label, the ``#N·NN%`` held
 whole at the right: a wide chip (``🔔``, ``💤 exited(N)``) or ``100%`` sits further left."""
+BADGE_KEEP = 5
+"""The fewest cells a cut persona badge keeps — `` · s…``, one letter of the name; with
+fewer left it is dropped rather than shown as a bare ``·``."""
 
 
 def agent_row_text(
@@ -255,8 +258,11 @@ def agent_row_text(
 
     The persona badge is the row's (what the agent was spawned with) or, for an
     agent the row does not know one for, its session's (what it launched as) —
-    docs/plans/spawn-personas.md §0 item 9. It comes last and is not counted in the
-    label's room: a row too narrow for it cuts the badge at its end, before the label.
+    docs/plans/spawn-personas.md §0 item 9. It comes last, and on a row too narrow for
+    everything the owner's order holds (review of #267's merge, M-F1): the label's padding
+    gives way first, then the badge is ellipsised, and dropped once fewer than
+    :data:`BADGE_KEEP` cells are left for it; only then is the label cut. The row is built
+    to its width, so its own ellipsis never reaches the chip or the ``#N·NN%``.
     """
     agent = status.agent
     chip, style = STATE_CHIP.get(status.state, STATE_CHIP["unknown"])
@@ -272,20 +278,29 @@ def agent_row_text(
         tail.append(f" #{agent.account_slot}" + ("·" if percent is not None else ""), style="dim")
         if percent is not None:
             tail.append_text(session_percent_text(percent))
+    persona = agent.persona or (status.session.persona if status.session is not None else None)
+    badge = Text(f" · {persona}", style="dim") if persona else Text()
     label = Text(agent.label)
     room = LABEL_WIDTH if width is None else max(2, width - cell_len(icon) - 1 - tail.cell_len)
     if width is None or label.cell_len <= room:
-        label.pad_right(min(LABEL_WIDTH, room) - label.cell_len)
+        left = room - label.cell_len  # the cells after the label's own, the badge's to take
+        if width is not None and badge.cell_len > left:
+            if left >= BADGE_KEEP:
+                badge.truncate(left, overflow="ellipsis")
+            else:
+                badge = Text()
+        label.pad_right(
+            min(LABEL_WIDTH, room - (0 if width is None else badge.cell_len)) - label.cell_len
+        )
     else:
         label.truncate(room, overflow="ellipsis")
+        badge = Text()
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(icon)
     text.append_text(label)
     text.append(" ")
     text.append_text(tail)
-    persona = agent.persona or (status.session.persona if status.session is not None else None)
-    if persona:
-        text.append(f" · {persona}", style="dim")
+    text.append_text(badge)
     return text
 
 

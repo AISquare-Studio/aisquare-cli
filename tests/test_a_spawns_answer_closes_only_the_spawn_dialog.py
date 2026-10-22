@@ -278,6 +278,7 @@ def test_a_hand_off_locks_import_while_it_runs_and_pick_stays_locked_for_the_tea
     assert after == before and refused == REFUSAL
 
 
+@pytest.mark.needs_captain
 def test_the_captains_start_locks_import_while_it_runs_and_pick_stays_locked_for_the_captain(
     git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

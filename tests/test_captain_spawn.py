@@ -411,6 +411,7 @@ def test_a_vanished_captain_is_reaped_so_it_can_be_started_again(
     assert brain.start().agent.id != first.id
 
 
+@pytest.mark.needs_captain
 def test_the_captain_label_is_reserved(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -449,6 +450,7 @@ def test_the_captains_restart_prompt_names_its_tools_not_a_shell(
 # --- the briefing -----------------------------------------------------------------------
 
 
+@pytest.mark.needs_captain
 def test_the_captain_role_cycle_names_tools_never_shell_verbs() -> None:
     cycle = "\n".join(
         role_cycle("captain", "abcd1234", fleet=lambda verb: f"aisquare fleet {verb}")

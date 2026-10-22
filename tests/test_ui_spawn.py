@@ -1491,6 +1491,7 @@ def test_start_fresh_and_a_changed_role_are_sent(
     assert sent["persona"] is None and sent["mode"] == "fork"
 
 
+@pytest.mark.needs_captain
 def test_the_captains_dialog_has_no_hand_off(
     git_project: ProjectInfo, teammates: list[FleetAgentStatus]
 ) -> None:

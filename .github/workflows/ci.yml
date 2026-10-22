@@ -27,19 +27,29 @@ permissions:
 
 jobs:
   check:
-    name: check (${{ matrix.os }}, py${{ matrix.python-version }})
+    name: check (${{ matrix.os }}, py${{ matrix.python-version }}${{ matrix.captain == 'off' && ', captain off' || '' }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.11", "3.12", "3.13"]
+        # The suite runs with the experimental captain ON (tests/conftest.py's autouse
+        # captain_on), so every leg above tests the captain as it is when turned on. A
+        # user who never turns it on gets it OFF, so one more leg runs the whole suite
+        # that way (AISQUARE_SUITE_CAPTAIN=off): every test must pass, bar those marked
+        # needs_captain, which it skips and says why (review of #240).
+        captain: ["on"]
         include:
           # Windows on one interpreter rather than the full cross-product: the
           # platform-specific branches read sys.platform at call time, so a
           # second Python version re-runs the same branches for ~3x the minutes.
           - os: windows-latest
             python-version: "3.12"
+            captain: "on"
+          - os: ubuntu-latest
+            python-version: "3.12"
+            captain: "off"
     steps:
       - uses: actions/checkout@v7
 
@@ -80,6 +90,8 @@ jobs:
 
       - name: Test (pytest)
         run: pytest -ra
+        env:
+          AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
 
   ambient:
     # WHY THIS JOB EXISTS.

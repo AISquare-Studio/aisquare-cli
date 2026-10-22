@@ -86,7 +86,7 @@ from pathlib import Path
 from typing import Literal
 
 from aisquare.core import paths
-from aisquare.core.spawn import untraced_env
+from aisquare.core.spawn import tmux_client_env
 
 DEFAULT_SOCKET = "asq"
 MIN_VERSION = (3, 2)
@@ -317,28 +317,10 @@ class Completed:
 Runner = Callable[[Sequence[str], bytes | None], Completed]
 """How commands run: the real :func:`_tmux`, or a fake in tests."""
 
-KEPT_FROM_THE_SERVER: frozenset[str] = frozenset({"AISQUARE_PERSONA"})
-"""Variables no tmux invocation is handed, so none reaches a server's global environment.
-
-The server a command starts keeps the starter's environment for good, and every window
-opened in it by hand (``prefix c``, ``fleet attach``) inherits that. ``AISQUARE_PERSONA``
-is one session's persona, as ``AISQUARE_FLEET_AGENT`` is one agent's identity
-(:meth:`TmuxServer._forget_session_environment`): a manager launched ``--persona
-skeptic`` that started the server briefed every hand-opened window as skeptic (review
-of #201, F7). A spawned window gets its own, set by its spawn, blank for none."""
-
-
-def _server_env() -> dict[str, str]:
-    """The environment a tmux command runs with: the tracing identity and
-    :data:`KEPT_FROM_THE_SERVER` left out."""
-    env = untraced_env()
-    for key in KEPT_FROM_THE_SERVER:
-        env.pop(key, None)
-    return env
-
 
 def _tmux(argv: Sequence[str], stdin: bytes | None, *, timeout: float | None = None) -> Completed:
-    """THE seam: run one tmux invocation with the tracing identity stripped.
+    """THE seam: run one tmux invocation with the tracing identity and the team variables
+    stripped (:func:`~aisquare.core.spawn.tmux_client_env`), so a server it starts holds none.
 
     Every way the process can fail to run at all is mapped onto the module's
     own exceptions, so a caller that catches :class:`TmuxError` has caught
@@ -353,7 +335,7 @@ def _tmux(argv: Sequence[str], stdin: bytes | None, *, timeout: float | None = N
             list(argv),
             input=stdin,
             capture_output=True,
-            env=_server_env(),
+            env=tmux_client_env(),
             timeout=timeout,
             check=False,
         )

@@ -210,6 +210,7 @@ class AgentView(Vertical):
             # must not stop or restart the agent it shows instead.
             yield GuardedButton("Stop", id="agent-stop", compact=True)
             yield GuardedButton("Restart", id="agent-restart", compact=True, variant="primary")
+        yield from self.compose_bars()
         yield TerminalPane(
             shown_pane(self.status),
             server=self.server,
@@ -217,6 +218,11 @@ class AgentView(Vertical):
             placeholder=PANE_GONE,
             id="agent-pane",
         )
+
+    def compose_bars(self) -> ComposeResult:
+        """More bars between the header and the pane — the captain's (``views/captain.py``,
+        T4); an ordinary agent has none."""
+        yield from ()
 
     def on_mount(self) -> None:
         self._paint_actions()

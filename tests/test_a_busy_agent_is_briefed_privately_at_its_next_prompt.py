@@ -33,6 +33,8 @@ from aisquare.core.store import SqliteStore, store_session
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
+from aisquare.services.captain import brain
+from aisquare.services.captain import state as captain_state
 from tests import test_fleet_service as fleet_suite
 from tests.rendered import plain
 from tests.test_fleet_service import (
@@ -74,13 +76,12 @@ def _attached(name: str, *, replaces: str | None = None) -> str:
 
 
 def _delta(*updates: str) -> str:
-    """The per-prompt delta of the ``repo`` board carrying exactly ``updates`` (main's
-    delta names no board on its lines; rc/captain-v1's prefixes ``[repo]``, #237)."""
+    """The per-prompt delta of the ``repo`` board carrying exactly ``updates``."""
     return "\n".join(
         [
             "<aisquare-team-delta>",
             f"{len(updates)} teammate update(s) since your last prompt:",
-            *(f"- {update}" for update in updates),
+            *(f"- [repo] {update}" for update in updates),
             "</aisquare-team-delta>",
         ]
     )
@@ -233,6 +234,29 @@ def test_a_clear_before_its_next_prompt_briefs_it_at_the_start_and_the_prompt_ad
     assert started[-len(block) - 1 :] == [*block, "</aisquare-team>"]
     assert sum(line.startswith("<aisquare-persona ") for line in started) == 1
     assert prompt == "", "the session start was the briefing: nothing is owed after it"
+
+
+@pytest.mark.needs_captain
+def test_the_captains_session_start_settles_what_it_was_owed_too(
+    tmux: FakeTmux, claude_on_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The captain's start returns a briefing of its own, on a branch of its own: it reads no
+    board. Its row's persona is in that briefing, so that branch settles the marker as well."""
+    captain = brain.start().agent
+    home = captain_state.home_project()
+    _board_session(captain, "working")
+    assert captain.session_id is not None
+    fleet_service.attach_persona(home, "captain", "skeptic")
+    _become(captain, tmux, monkeypatch, pid=PANE_PID, role="captain")
+
+    started = _clear(captain.session_id, CLEARED, home)
+    prompt = team_service.hook_prompt_heartbeat(CLEARED, captain.cwd)
+
+    assert started.count('<aisquare-persona name="skeptic"') == 1
+    assert "<aisquare-persona" not in prompt and "the operator attached persona" not in prompt
+
+
+# --- what can go wrong costs a line at most ----------------------------------------------------
 
 
 def test_a_persona_removed_before_the_prompt_costs_one_line_and_nothing_else(

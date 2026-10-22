@@ -22,6 +22,11 @@ from aisquare.core.store import ContextStore, store_session
 from aisquare.models import FleetAgent
 from aisquare.services import team as team_service
 
+# These brief sessions in a directory nobody added (``tmp_path``), as they were written to:
+# with ``[projects] capture`` on, the default before 0.8.1. What capture off records —
+# nothing — is tests/test_hooks.py's.
+pytestmark = pytest.mark.usefixtures("project_capture")
+
 SID = "11111111-2222-3333-4444-555555555555"
 TEAMMATE = "22222222-3333-4444-5555-666666666666"
 NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
@@ -31,7 +36,10 @@ NOW = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 #: brought to main 0.8.2's text when main was merged in (#201) — ``{project}`` is the
 #: repository's project id:
 #: AISQUARE_ROLE=coder, a fresh home, the clock pinned to NOW. Byte-identical is
-#: the contract — a session without a persona sees nothing new.
+#: the contract — a session without a persona sees nothing new. Re-captured from main
+#: 0.8.2 (5a1bac44) when the RC took it: the same input, run on main's own source, printed
+#: these bytes, the worktree lines and the cycle's one-line review command included.
+#: ``{project}`` is the session's project id, which names the folder ``tmp_path`` gives.
 PINNED = "\n".join(
     [
         "<aisquare-team>",

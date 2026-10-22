@@ -103,6 +103,10 @@ class AddProject(Message):
     """The + beside Fleet."""
 
 
+class CaptainRequested(Message):
+    """The rank insignia beside Fleet: the captain's view, or a start when there is none (T4)."""
+
+
 class ProjectSelected(Message):
     def __init__(self, project_id: str) -> None:
         self.project_id = project_id
@@ -426,6 +430,43 @@ class AddButton(Activatable):
 
     def message(self) -> Message:
         return AddProject()
+
+
+class CaptainButton(Activatable):
+    """The ``★`` between Fleet and ``+``: the captain, one click away (T4).
+
+    A rank insignia, a single star (plan section 4, the owner's pick): lit in the
+    accent while the captain's row is live — a process that can answer, the
+    ``ALIVE_STATES`` the cards count by — and dim otherwise. The shell decides what a
+    click does from the same frame: the captain view, or the Spawn dialog preset to
+    the captain when there is none to show.
+    """
+
+    DEFAULT_CSS = """
+    CaptainButton { width: 3; color: $text-muted; }
+    CaptainButton.live { color: $accent; text-style: bold; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__(Text(" ★ "), id="captain-button")
+        # No selection key: the keyboard cursor's walk (↑ ↓ from the header, pinned by the
+        # shell's tests) stays as it was, and the captain's own row in the Captain section
+        # is the keyboard's way to it — the star is the mouse's.
+        self.tooltip = CaptainButton.tip(live=False)
+
+    @staticmethod
+    def tip(*, live: bool) -> str:
+        if live:
+            return "The captain — open its view (aisquare captain)"
+        return "No captain running — start one (aisquare captain)"
+
+    def show(self, status: FleetAgentStatus | None) -> None:
+        live = status is not None and status.state in ALIVE_STATES
+        self.set_class(live, "live")
+        self.tooltip = CaptainButton.tip(live=live)
+
+    def message(self) -> Message:
+        return CaptainRequested()
 
 
 class Disclosure(Static):
@@ -1044,6 +1085,57 @@ def doctor_badge(failing: int, warning: int) -> str:
     )
 
 
+class CaptainSection(Vertical):
+    """The home-level heading above the projects: the captain's row (one per home, T2).
+
+    The captain lives on the home board, which is never a project, so it never gets
+    a :class:`ProjectCard`; its row is an ordinary :class:`AgentRow` — selecting it
+    opens the same agent view, with Stop and Restart — under this heading instead.
+    """
+
+    DEFAULT_CSS = """
+    CaptainSection { height: auto; padding: 0 1; }
+    CaptainSection #captain-title { height: 1; }
+    CaptainSection #captain-empty { height: 1; color: $text-muted; }
+    CaptainSection #captain-notice { height: auto; color: $text-muted; }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static(Text("Captain", style="bold"), id="captain-title")
+        yield Static(
+            Text("no captain — `aisquare captain` starts one", style="dim"), id="captain-empty"
+        )
+        yield Static("", id="captain-notice")
+
+    def show(self, status: FleetAgentStatus | None, *, notice: str | None = None) -> None:
+        """Show the captain's row, or the line saying how to start one.
+
+        ``notice`` says the read behind this frame failed; ``status`` is then the
+        last frame's row, or ``None`` when there was none. It takes the place of
+        the "starts one" line, which is true only when the fleet ANSWERED none —
+        the project cards' rule (``Sidebar.show_projects``), for the captain.
+        """
+        empty = self.query_one("#captain-empty", Static)
+        said = self.query_one("#captain-notice", Static)
+        said.update(Text(notice or "", style="dim"))
+        said.display = bool(notice)
+        rows = list(self.query(AgentRow))
+        keep = next(
+            (row for row in rows if status and row.status.agent.id == status.agent.id), None
+        )
+        for row in rows:
+            if row is not keep:
+                row.remove()
+        empty.display = status is None and not notice
+        if status is None:
+            return
+        if keep is None:
+            # Under the heading, above the two lines that stand in for it.
+            self.mount(AgentRow(status), after=self.query_one("#captain-title"))
+        else:
+            keep.show(status)
+
+
 class StatusLine(Static):
     """The dim line under *⚙ Settings* (:func:`status_line_text`). A click opens Accounts.
 
@@ -1134,8 +1226,10 @@ class Sidebar(Vertical):
 
     can_focus = True
 
-    def __init__(self, *, id: str | None = None) -> None:
+    def __init__(self, *, id: str | None = None, captain: bool = True) -> None:
         super().__init__(id=id)
+        self.captain = captain
+        """Whether the experimental captain is on: off, no insignia and no captain section."""
         self.selected_key: str | None = None
         """What is highlighted: ``project:<id>``, ``agent:<id>``, or ``settings`` while the hub
         or a page it opens (App settings, Accounts, Doctor) shows."""
@@ -1159,7 +1253,11 @@ class Sidebar(Vertical):
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
             yield Static(Text("Fleet"), id="fleet-title")
+            if self.captain:
+                yield CaptainButton()
             yield AddButton()
+        if self.captain:
+            yield CaptainSection(id="captain-section")
         yield Static("", id="projects-notice")
         # can_focus=False: the rows are Statics, so a mouse-down on one focuses
         # the nearest focusable ancestor. Left focusable, this scroll would take
@@ -1175,6 +1273,18 @@ class Sidebar(Vertical):
         yield OthersSection(id="others")
 
     # --- data in -----------------------------------------------------------------
+
+    def show_captain(self, status: FleetAgentStatus | None, *, notice: str | None = None) -> None:
+        """The home's captain row, above the projects (``None``: there is none).
+
+        ``notice``: why the read failed — the row is then the last frame's, kept.
+        The insignia in the header follows the same row (T4). With the captain off
+        there is neither, and nothing to show.
+        """
+        if not self.captain:
+            return
+        self.query_one(CaptainSection).show(status, notice=notice)
+        self.query_one(CaptainButton).show(status)
 
     def show_projects(
         self,
@@ -1673,6 +1783,28 @@ class Sidebar(Vertical):
         if step >= 0:
             return ahead[0] if ahead else behind[-1]
         return behind[-1] if behind else ahead[0]
+
+    def put_cursor(self, key: str) -> bool:
+        """Put the keyboard cursor on the row for ``key``; whether that row is on screen.
+
+        For a caller that hands the keyboard to a row on the user's behalf (the ui
+        receiver's ``focus_project``): ↑/↓ and Enter then go on from that row, as
+        they would had the arrows brought the cursor there. A row that is not on
+        screen — a card inside a folded group — is not one to land on (the arrows ask
+        ``_on_screen`` too), so the cursor stays where it was.
+        """
+        rows = [row for row in self.query(Activatable) if row.selection_key]
+        target = next(
+            (row for row in rows if row.selection_key == key and self._on_screen(row)), None
+        )
+        if target is None:
+            return False
+        for row in rows:
+            row.remove_class("cursor")
+        self._cursor_key = key
+        target.add_class("cursor")
+        target.scroll_visible()
+        return True
 
     def action_resize(self, delta: int | None) -> None:
         """Ask for the partition to move ``delta`` columns (``None``: reset); ``Panes`` answers."""

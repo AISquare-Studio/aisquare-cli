@@ -23,6 +23,7 @@ import asyncio
 import os
 import re
 import threading
+import time
 from collections.abc import Callable, Coroutine, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,7 +33,17 @@ import pytest
 from textual.app import App
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
-from textual.widgets import Button, Input, OptionList, Select, Static, Switch, TextArea
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Input,
+    OptionList,
+    RadioButton,
+    Select,
+    Static,
+    Switch,
+    TextArea,
+)
 
 from aisquare.cli.ui import spawn as spawn_module
 from aisquare.cli.ui.app import FleetApp
@@ -48,7 +59,7 @@ from aisquare.cli.ui.spawn import (
     role_choices,
 )
 from aisquare.cli.ui.views.accounts import AccountsView
-from aisquare.core import codenames, harness, personas
+from aisquare.core import codenames, experimental, harness, personas
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.core.ids import new_task_id
@@ -70,11 +81,14 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_workers
 
 T = TypeVar("T")
 SIZE = (120, 50)
 PRIVATE_SOCKET = f"asq-test-{os.getpid()}-ui-spawn"
+LATE = 0.3
+"""How long a scripted refusal holds its worker: past the click's own pause, so it lands
+while ``settle`` already waits, the order windows-latest met by chance."""
 """The socket the spawned agent lives on. NOT ``asq``: the default, and the
 developer's real fleet — see the module docstring."""
 
@@ -815,6 +829,37 @@ def test_a_fleet_error_keeps_the_dialog_open_with_the_message_and_spawn_re_enabl
     assert len(spawns.calls) == 2 and results == []
 
 
+def test_a_fleet_error_that_lands_while_the_test_waits_keeps_the_dialog_open(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """The fleet error above, landing after ``settle`` began: windows-latest's order, every run.
+
+    ``settle`` was ``workers.wait_for_complete()``, which raises ``WorkerFailed`` for a
+    worker that failed on purpose while it is still registered, and a refusal held past
+    the click's pause always is (card tsk_01m3pt9eme0h, #234's Windows leg).
+    """
+
+    def refuse(project: ProjectInfo, role: str) -> fleet_service.SpawnReceipt:
+        time.sleep(LATE)
+        raise fleet_service.FleetError("already runs 8 agents [max_agents_per_project = 8]")
+
+    spawns.answer = refuse
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return [
+            isinstance(host.screen, SpawnDialog),
+            note(dialog, "#spawn-status"),
+            submit(dialog).disabled,
+        ]
+
+    open_, status, disabled = drive(git_project, scenario)
+    assert open_ is True
+    assert status == "already runs 8 agents [max_agents_per_project = 8]"
+    assert disabled is False
+
+
 def test_any_other_exception_lands_in_the_status_line_with_its_class_name(
     git_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:
@@ -922,8 +967,7 @@ def test_a_receipt_dismisses_toasts_it_and_its_notes_refreshes_and_opens_the_new
         await pilot.pause()
         assert isinstance(app.screen, SpawnDialog)
         await pilot.click("#spawn-submit")
-        ours = [worker for worker in app.workers if worker.group != "_loader"]
-        await app.workers.wait_for_complete(ours)
+        await settle_workers(app)
         for _ in range(3):
             await pilot.pause()
         return [type(app.screen).__name__, app.notices, len(refreshes), app.content.current]
@@ -971,7 +1015,9 @@ def test_the_fields_read_who_runs_it_then_as_whom(git_project: ProjectInfo) -> N
         return [str(label.render()) for label in dialog.query(".spawn-row > Label")]
 
     labels = drive(git_project, scenario)
-    assert labels[:5] == ["Role", "Account", "Binary", "Persona", "Label"]
+    # Hand off from, and its How row, come first (HANDOFF, tsk_01m3ns5a736s): who it comes from
+    # decides who runs it.
+    assert labels[:7] == ["Hand off from", "How", "Role", "Account", "Binary", "Persona", "Label"]
 
 
 def test_the_persona_select_lists_none_and_the_catalogue_with_the_description_below(
@@ -990,13 +1036,24 @@ def test_the_persona_select_lists_none_and_the_catalogue_with_the_description_be
         return seen
 
     prompts, before, after = drive(git_project, scenario)
-    assert prompts == [
-        "(none)",
-        "careful · bundled",
-        "mentor · bundled",
-        "minimalist · bundled",
-        "skeptic · bundled",
-    ]
+    assert prompts == (
+        [
+            "(none)",
+            "captain · bundled",
+            "careful · bundled",
+            "mentor · bundled",
+            "minimalist · bundled",
+            "skeptic · bundled",
+        ]
+        if experimental.captain_enabled()
+        else [
+            "(none)",
+            "careful · bundled",
+            "mentor · bundled",
+            "minimalist · bundled",
+            "skeptic · bundled",
+        ]
+    )
     assert before is not None and before.startswith("(no persona")
     assert after == personas.resolve("skeptic", git_project.root).description
     assert spawns.calls[0][2]["persona"] == "skeptic"  # the recorder receives the choice
@@ -1232,3 +1289,248 @@ def test_a_sidebar_agent_row_shows_the_persona_badge_only_when_there_is_one(
     assert row(with_row).endswith(" · skeptic")
     assert row(plain, session).endswith(" · mentor")  # the session's, when the row has none
     assert row(with_row, session).endswith(" · skeptic")  # the row's wins
+
+
+# --- a hand-off from a teammate (HANDOFF, tsk_01m3ns5a736s) --------------------------------
+
+
+@pytest.fixture(autouse=True)
+def teammates(monkeypatch: pytest.MonkeyPatch) -> list[FleetAgentStatus]:
+    """The teammates *Hand off from* offers: none, unless a test lists some."""
+    listed: list[FleetAgentStatus] = []
+    monkeypatch.setattr(fleet_service, "handoff_sources", lambda project: list(listed))
+    return listed
+
+
+class HandOffRecorder:
+    """What ``fleet_service.hand_off`` is replaced by: every call, and a scripted answer."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, Kwargs]] = []
+
+    def __call__(
+        self, project: ProjectInfo, source: str, **kwargs: object
+    ) -> fleet_service.HandoffReceipt:
+        self.calls.append((project.id, source, dict(kwargs)))
+        started = receipt_for(project, label="coder-2", notes=["a spawn note"])
+        return fleet_service.HandoffReceipt(
+            mode="take_over" if kwargs.get("mode") == "take_over" else "fork",
+            source=started.agent,
+            started=started,
+            resumed=True,
+            notes=["a hand-off note", "a spawn note"],
+        )
+
+
+@pytest.fixture
+def hand_offs(monkeypatch: pytest.MonkeyPatch) -> HandOffRecorder:
+    recorder = HandOffRecorder()
+    monkeypatch.setattr(fleet_service, "hand_off", recorder)
+    return recorder
+
+
+def teammate(
+    project: ProjectInfo,
+    *,
+    label: str = "coder-1",
+    role: str = "coder",
+    state: str = "working",
+    task_id: str | None = None,
+    slot: int | None = 2,
+    persona: str | None = "careful",
+) -> FleetAgentStatus:
+    agent = FleetAgent(
+        id=f"agt_{label.replace('-', '')}",
+        project_id=project.id,
+        label=label,
+        role=role,
+        pane_id="%3",
+        cwd=project.root,
+        created_at=datetime.now(tz=UTC),
+        tmux_socket=PRIVATE_SOCKET,
+        task_id=task_id,
+        account_slot=slot,
+        persona=persona,
+    )
+    return FleetAgentStatus(agent=agent, state=state)
+
+
+NO_CHANGE: Kwargs = {
+    "mode": "fork",
+    "fresh": False,
+    "role": None,
+    "account": None,
+    "persona": None,
+    "label": None,
+    "prompt": None,
+}
+"""What a hand-off sends for a form that shows the teammate's own: its role, account and persona.
+Its ``agent_id``, the row the form shows, is sent as well, and is each test's own."""
+
+
+def test_the_hand_off_field_lists_the_open_teammates_and_none_is_todays_spawn(
+    git_project: ProjectInfo,
+    spawns: SpawnRecorder,
+    hand_offs: HandOffRecorder,
+    teammates: list[FleetAgentStatus],
+) -> None:
+    """The picker is ``fleet_service.handoff_sources``, each teammate with its state, role,
+    task and account. ``(none)`` stays chosen until one is picked, the How row stays hidden,
+    and Spawn sends exactly what it sent before the field existed."""
+    teammates.extend(
+        [teammate(git_project), teammate(git_project, label="coder-3", state="exited", slot=None)]
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        field = select(dialog, "from")
+        shown_options = [str(prompt) for prompt, _ in field._options]
+        assert field.value == "" and not dialog.query_one("#spawn-how-row").display
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return shown_options
+
+    options = drive(git_project, scenario)
+    assert options == [
+        "(none)",
+        "coder-1 · working · coder · no task · slot 2",
+        "coder-3 · exited · coder · no task · this shell's",
+    ]
+    assert spawns.calls == [(git_project.id, "coder", UNTOUCHED)] and hand_offs.calls == []
+
+
+def test_a_teammate_prefills_role_account_and_persona_and_forks_by_default(
+    git_project: ProjectInfo,
+    spawns: SpawnRecorder,
+    hand_offs: HandOffRecorder,
+    teammates: list[FleetAgentStatus],
+) -> None:
+    """The owner's decisions: Fork is the default, Start fresh an unchecked box, and Role,
+    Account and Persona prefilled from the teammate and still editable. A fork takes no
+    task, so Task is locked at none; the button says what it does. Untouched, nothing is
+    sent but the mode: the service reads None as the teammate's own."""
+    teammates.append(teammate(git_project, role="tester", label="tester-1"))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        assert dialog.query_one("#spawn-how-row").display
+        assert dialog.query_one("#spawn-fork", RadioButton).value
+        assert not dialog.query_one("#spawn-fresh", Checkbox).value
+        assert (select(dialog, "role").value, select(dialog, "account").value) == ("tester", "2")
+        assert select(dialog, "persona").value == "careful"
+        assert not select(dialog, "role").disabled and not select(dialog, "persona").disabled
+        assert select(dialog, "task").value == NO_TASK and select(dialog, "task").disabled
+        assert not label_input(dialog).disabled  # sent as None untouched: the service picks
+        assert str(submit(dialog).label) == "Fork"
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return list(host.results)
+
+    results = drive(git_project, scenario)
+    sent = {**NO_CHANGE, "agent_id": teammates[0].agent.id}
+    assert hand_offs.calls == [(git_project.id, "tester-1", sent)] and spawns.calls == []
+    [receipt] = results
+    assert isinstance(receipt, fleet_service.SpawnReceipt)
+    assert receipt.notes == ["a hand-off note", "a spawn note"]
+
+
+def test_take_over_locks_the_label_and_task_to_the_teammates_and_asks_first(
+    git_project: ProjectInfo,
+    hand_offs: HandOffRecorder,
+    teammates: list[FleetAgentStatus],
+) -> None:
+    """Take over keeps the teammate's label, task and tree, so those are locked to its own;
+    and it stops the teammate, so one question comes first. Cancel starts nothing."""
+    task = add_task(git_project, "Wire the auth flow")
+    teammates.append(teammate(git_project, task_id=task.id))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        dialog.query_one("#spawn-take-over", RadioButton).value = True
+        await settle(pilot)
+        assert (label_input(dialog).value, label_input(dialog).disabled) == ("coder-1", True)
+        assert (select(dialog, "task").value, select(dialog, "task").disabled) == (task.id, True)
+        assert str(submit(dialog).label) == "Take over"
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        assert isinstance(host.screen, spawn_module.ConfirmTakeOverScreen)
+        await pilot.click("#take-over-no")
+        await settle(pilot)
+        assert isinstance(host.screen, SpawnDialog) and hand_offs.calls == []
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        await pilot.click("#take-over-yes")
+        await settle(pilot)
+        return list(host.results)
+
+    results = drive(git_project, scenario)
+    sent = {**NO_CHANGE, "mode": "take_over", "agent_id": teammates[0].agent.id}
+    assert hand_offs.calls == [(git_project.id, "coder-1", sent)]
+    assert len(results) == 1
+
+
+def test_start_fresh_and_a_changed_role_are_sent(
+    git_project: ProjectInfo, hand_offs: HandOffRecorder, teammates: list[FleetAgentStatus]
+) -> None:
+    teammates.append(teammate(git_project))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> None:
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        dialog.query_one("#spawn-fresh", Checkbox).value = True
+        select(dialog, "role").value = "tester"
+        await settle(pilot)
+        assert select(dialog, "persona").value == "careful", "a chosen persona stays"
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+
+    drive(git_project, scenario)
+    [(_, source, sent)] = hand_offs.calls
+    assert source == "coder-1" and (sent["fresh"], sent["role"]) == (True, "tester")
+    assert sent["persona"] is None and sent["mode"] == "fork"
+
+
+@pytest.mark.needs_captain
+def test_the_captains_dialog_has_no_hand_off(
+    git_project: ProjectInfo, teammates: list[FleetAgentStatus]
+) -> None:
+    teammates.append(teammate(git_project))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> int:
+        return len(dialog.query("#spawn-from"))
+
+    assert drive(git_project, scenario, presets={"role": fleet_service.CAPTAIN_ROLE}) == 0
+
+
+@pytest.mark.parametrize("take_over", [False, True])
+def test_account_set_to_this_shells_is_sent_as_this_shells(
+    git_project: ProjectInfo,
+    hand_offs: HandOffRecorder,
+    teammates: list[FleetAgentStatus],
+    take_over: bool,
+) -> None:
+    """runner2-1's reopen of #234: the teammate runs on slot 2, and Account edited to
+    (this shell's) was sent as None, which the service reads as the teammate's own slot.
+    It is sent as THIS_SHELL_ACCOUNT, on Fork and on Take over."""
+    teammates.append(teammate(git_project))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> None:
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        if take_over:
+            dialog.query_one("#spawn-take-over", RadioButton).value = True
+            await settle(pilot)
+        assert select(dialog, "account").value == "2"
+        select(dialog, "account").value = ""  # (this shell's)
+        await settle(pilot)
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        if take_over:
+            await pilot.click("#take-over-yes")
+            await settle(pilot)
+
+    drive(git_project, scenario)
+    [(_, _, sent)] = hand_offs.calls
+    assert sent["mode"] == ("take_over" if take_over else "fork")
+    assert sent["account"] == fleet_service.THIS_SHELL_ACCOUNT

@@ -22,6 +22,7 @@ and, hub or not:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -254,7 +255,10 @@ def test_no_tmux_command_hands_the_server_this_sessions_persona(
 
     [env] = seen
     assert orchestrator.PERSONA_ENV_VAR not in env
-    assert env["AISQUARE_ROLE"] == "manager"  # main's, and out of this PR (a follow-up)
+    # The captain line keeps every team variable from the server (#237,
+    # ``core.spawn.TEAM_ENV_VARS``), the role among them; what is none still reaches it.
+    assert "AISQUARE_ROLE" not in env
+    assert env["PATH"] == os.environ["PATH"]
 
 
 # --- F8: the owed briefing resolves in the row's own project -----------------------------

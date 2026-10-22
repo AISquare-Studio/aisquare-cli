@@ -180,6 +180,19 @@ class ExperimentSettings(BaseModel):
     run: str = ""
 
 
+class ExperimentalSettings(BaseModel):
+    """``[experimental]`` — features that ship OFF until the owner turns them on.
+
+    ``captain``: the home-level agent (``docs/captain.md``). Off, ``aisquare captain``
+    refuses, the fleet UI shows no insignia or captain view, the bundled ``captain``
+    persona is absent and the voice page does not serve. ``AISQUARE_EXPERIMENTAL_CAPTAIN``
+    wins over this field either way; ``core.experimental.captain_enabled`` is the one
+    reader of both.
+    """
+
+    captain: bool = False
+
+
 class RoleLaunchProfile(BaseModel):
     """One role's launch spec, carried verbatim and never interpreted.
 
@@ -676,6 +689,14 @@ class PersonaSettings(BaseModel):
     )
 
     import_: PersonaImportSettings = Field(default_factory=PersonaImportSettings, alias="import")
+    #: The persona block is appended to the agent's system prompt at launch too (Claude
+    #: Code: ``--append-system-prompt-file``), beside the session-start briefing that
+    #: survives ``/clear``, so it holds over a long session as hook context alone may
+    #: not (docs/plans/spawn-personas.md §9, gh #210). ``false`` keeps the briefing
+    #: alone and appends nothing — for a session whose system prompt must stay exactly
+    #: the binary's own. A binary without a seam this launcher knows (codex, aider) gets
+    #: the briefing alone either way, and the launch says so. Owner decision, 2026-09-24.
+    system_prompt: bool = True
 
 
 class AccountsSettings(BaseModel):
@@ -740,6 +761,7 @@ class AppConfig(BaseModel):
     accounts: AccountsSettings = Field(default_factory=AccountsSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
+    experimental: ExperimentalSettings = Field(default_factory=ExperimentalSettings)
     persona: PersonaSettings = Field(default_factory=PersonaSettings)
 
 

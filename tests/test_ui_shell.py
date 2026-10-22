@@ -2731,6 +2731,7 @@ async def open_stop_dialog(pilot: Pilot[None], app: FleetApp, agent_id: str) -> 
 
     await pilot.click(row_for(app, agent_id))
     await pilot.pause()
+    await settle(app)
     view = app.current_view()
     assert isinstance(view, AgentView), f"the row opened {type(view).__name__}"
     real = click_guard.clock

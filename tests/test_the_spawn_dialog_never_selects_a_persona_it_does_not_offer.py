@@ -41,9 +41,10 @@ from tests.test_ui_spawn import (
 )
 
 # The Spawn dialog suite's fixtures, bound here so pytest finds them for this module's tests
-# (``no_real_tmux`` and ``spawns`` are autouse there).
+# (``no_real_tmux``, ``spawns`` and ``teammates`` are autouse there).
 no_real_tmux = spawn_suite.no_real_tmux
 spawns = spawn_suite.spawns
+teammates = spawn_suite.teammates
 git_project = spawn_suite.git_project
 
 MISSING = "ghost — not one of this project's personas"

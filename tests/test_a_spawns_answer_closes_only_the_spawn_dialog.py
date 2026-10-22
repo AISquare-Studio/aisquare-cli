@@ -12,10 +12,10 @@ and notes were lost.
 What holds now, on the bare host of ``tests/test_ui_spawn.py`` (its recorder in front of
 ``fleet_service.spawn``, its private tmux socket):
 
-- while a spawn runs, the two buttons that open a screen over the dialog are disabled,
-  and they come back with *Cancel* and *Spawn* once it has answered (ported from
-  rc/captain-v1 without the pins of its hand-off and captain start, which this branch
-  does not have);
+- while a spawn, a hand-off or the captain's start runs, the two buttons that open a
+  screen over the dialog are disabled, and they come back with *Cancel* and *Spawn* once
+  it has answered. *Pick…* comes back only as far as the form allows it: not for the
+  captain, not while a teammate is chosen;
 - an answer that finds another screen on top closes nothing. It waits until the dialog is
   the active screen again: then a receipt dismisses the dialog, and a refusal is shown;
 - *+ New account* does not dismiss a dialog whose spawn has not answered yet.
@@ -43,7 +43,7 @@ from aisquare.cli.ui.attach import (
 )
 from aisquare.cli.ui.persona_dialogs import SKILLS_WORKER, ImportPersonaScreen
 from aisquare.cli.ui.spawn import PickTargetRequested, SpawnDialog
-from aisquare.models import ProjectInfo
+from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from tests import test_ui_spawn as spawn_suite
@@ -53,26 +53,20 @@ from tests.test_ui_spawn import (
     drive,
     note,
     receipt_for,
+    select,
     settle,
+    teammate,
+    wait_for_screen,
 )
 from tests.ui_workers import settle_page
 
 # The Spawn dialog suite's fixtures, bound here so pytest finds them for this module's tests
-# (``no_real_tmux`` and ``spawns`` are autouse there: no test reaches tmux, and
-# ``fleet_service.spawn`` is a recorder).
+# (``no_real_tmux``, ``spawns`` and ``teammates`` are autouse there: no test reaches tmux,
+# ``fleet_service.spawn`` is a recorder, and *Hand off from* lists only what a test adds).
 no_real_tmux = spawn_suite.no_real_tmux
 spawns = spawn_suite.spawns
+teammates = spawn_suite.teammates
 git_project = spawn_suite.git_project
-
-
-async def wait_for_screen(pilot: Pilot[Any], kind: type[Any], seconds: float = 5.0) -> Any:
-    """The screen of type ``kind`` once it is on top (rc/captain-v1's suite helper)."""
-    for _ in range(int(seconds / 0.05)):
-        if isinstance(pilot.app.screen, kind):
-            return pilot.app.screen
-        await pilot.pause(0.05)
-    raise AssertionError(f"{kind.__name__} never opened; the screen is {pilot.app.screen!r}")
-
 
 REFUSAL = "already runs 8 agents [max_agents_per_project = 8]"
 NOTES = ["label 'coder-1' is held by a live agent — using 'coder-1-2'"]
@@ -250,6 +244,94 @@ def test_a_click_on_import_or_pick_during_a_spawn_opens_nothing_and_the_receipt_
     assert on_top == "SpawnDialog"  # the click opened nothing over the running spawn
     assert still_open is False
     assert results == [NOTES]  # one receipt, notes and all
+
+
+def test_a_hand_off_locks_import_while_it_runs_and_pick_stays_locked_for_the_teammate(
+    git_project: ProjectInfo,
+    teammates: list[FleetAgentStatus],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hand-off runs in the same worker. *Pick…* was already the teammate's lock, and a
+    refused hand-off must not free it: "come back" means back to what the form allows."""
+    teammates.append(teammate(git_project))
+    held = Held(refuses=True)
+    monkeypatch.setattr(
+        spawn_module, "hand_off", lambda project, source, kwargs: held(project, source)
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        seen: list[Any] = [locked(dialog)]
+        try:
+            await spawn_and_hold(pilot, held)
+            seen.append(locked(dialog))
+        finally:
+            held.release.set()
+        await settle(pilot)
+        seen += [locked(dialog), note(dialog, "#spawn-status")]
+        return seen
+
+    before, during, after, refused = drive(git_project, scenario)
+    assert before == {**ALL_FREE, "pick": True}  # a teammate decides who runs it
+    assert during == ALL_LOCKED
+    assert after == before and refused == REFUSAL
+
+
+@pytest.mark.needs_captain
+def test_the_captains_start_locks_import_while_it_runs_and_pick_stays_locked_for_the_captain(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held = Held(refuses=True)
+    monkeypatch.setattr(
+        spawn_module, "start_captain", lambda kwargs: held(git_project, fleet_service.CAPTAIN_ROLE)
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [locked(dialog)]
+        try:
+            await spawn_and_hold(pilot, held)
+            seen.append(locked(dialog))
+        finally:
+            held.release.set()
+        await settle(pilot)
+        seen += [locked(dialog), note(dialog, "#spawn-status")]
+        return seen
+
+    before, during, after, refused = drive(
+        git_project, scenario, presets={"role": fleet_service.CAPTAIN_ROLE}
+    )
+    assert before == {**ALL_FREE, "pick": True}  # the captain's role is fixed: nothing to pick
+    assert during == ALL_LOCKED
+    assert after == before and refused == REFUSAL
+
+
+def test_unpicking_a_teammate_during_a_spawn_does_not_bring_pick_back_before_the_answer(
+    git_project: ProjectInfo, spawns: SpawnRecorder, teammates: list[FleetAgentStatus]
+) -> None:
+    """The form's fields stay live while a spawn runs, and *Hand off from* locks and frees
+    *Pick…* on its own account. Freed by it mid-spawn, *Pick…* was live again."""
+    teammates.append(teammate(git_project))
+    held = Held(refuses=True)
+    spawns.answer = held
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = []
+        try:
+            await spawn_and_hold(pilot, held)
+            select(dialog, "from").value = teammates[0].agent.id
+            await quiet(pilot)
+            select(dialog, "from").value = ""  # back to (none): the plain form frees Pick…
+            await quiet(pilot)
+            seen.append(locked(dialog))
+        finally:
+            held.release.set()
+        await settle(pilot)
+        return [*seen, locked(dialog)]
+
+    during, after = drive(git_project, scenario)
+    assert during == ALL_LOCKED
+    assert after == ALL_FREE
 
 
 # --- the answer closes only its own dialog ----------------------------------------------

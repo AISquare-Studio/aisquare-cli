@@ -226,8 +226,10 @@ def test_the_persona_import_section_round_trips_under_its_file_key(tmp_path: Pat
     save_config(config, target)
 
     assert config.persona.import_.engine == "off"
+    # The section's own key, at its default, is not written: since 0.8.1 the one writer
+    # keeps only what differs from the system defaults (`core.config.save_config`).
     assert _sections(target)["persona"] == {
-        "import": {"engine": "off", "api_model": "claude-sonnet-5", "retries": 2}
+        "import": {"engine": "off", "api_model": "claude-sonnet-5", "retries": 2},
     }
 
 

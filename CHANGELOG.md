@@ -6,24 +6,84 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-- **The documented-commands guard no longer fails the checkout that runs the
-  fleet.** `test_the_document_list_has_not_gone_stale` walks the whole
-  repository for markdown with commands in a fenced block, and a root checkout
-  that hosts coder worktrees under `.aisquare-worktrees/` holds one full copy of
-  every document per agent — so `make check` from the root failed, reporting
-  each worktree's README.md and docs pages as unlisted copies of themselves,
-  while every real document passed (measured on `rc/hackathon-v1` with two
-  coder worktrees; from a clean checkout or inside a worktree it passed). The
-  sweep now never enters the fleet's `worktree_dir` (the `[fleet]` default) or
-  any directory holding a `.git` *file* — a linked worktree wherever it was put
-  — the way `core/snapshot.py` already ignores `**/.aisquare-worktrees/**`. It
-  prunes as it walks, so it no longer reads every agent's `.venv` to throw the
-  result away. The guard's rules and its document list are unchanged, and the
-  positive control stays: the same fenced page at the repo's own level is still
-  reported.
-
 ### Added
+
+- **The captain** — the home-level voice-and-text agent that runs every
+  project's fleet for you (`docs/captain.md`; the plan as merged in
+  `docs/plans/captain.md`; the acceptance runbook in
+  `docs/runbooks/captain-acceptance.md`). One Claude Code session per home, on
+  the home board, with no tool but its own **Actions server** (`aisquare captain
+  serve --stdio`): 24 fixed tools, one `captain_action` audit event per call
+  carrying the owner's words and the effect's receipt; `stop`, `spawn` and
+  `restart` act only when the owner's words name the agent, its role or its
+  project; otherwise the tool's refusal is its one-sentence question itself
+  ("Stop coder-1 in alpha?", the rule kept in the audit), which a bare yes or
+  roger answers within two minutes and a no, or any other owner line, closes.
+  Every other refusal is said as `refused:` / `error:`, never faked. `aisquare captain` starts or attaches;
+  `aisquare captain "text"` delivers and prints the reply (`--json`: one object);
+  `aisquare captain chat` is line by line. The **attention queue** folds every
+  board into one ranked list of what needs the owner (question, blocked,
+  waiting, review, pull request, stale), deduplicated and resolved one item at a
+  time — `aisquare captain attention | next | resolve | snooze`, with `since`,
+  `log`, `actions`, and the easter eggs `uav`, `wololo`, `bt`. The **voice page**
+  (`aisquare captain --voice`, `[voice]` extra): hold to talk, or always
+  listening behind the wake word — only "Captain, …" reaches the captain, the
+  rest is never delivered, spoken or shown (`[captain] wake_word`, `""` turns it
+  off) — interim transcripts, the thinking signal, the reply spoken back
+  through a Speaker adapter per platform; one spool drainer in the captain's
+  server plays the captain's own `speak()` lines. A fresh captain is started
+  bare and never typed into at Claude Code's trust dialog, and it takes its
+  first message at its idle input box even while the fleet still reads it
+  working. `press yes`/`press no` answer Claude Code's real permission chooser
+  by its Yes digit and Esc (read off the pane), and a key the prompt ignores is
+  said as an error. Nothing the captain types reaches an agent's own trust
+  dialog: `press`, `paste`, `tell`, the manager ask and `wololo` refuse it by
+  name (*trust this folder first*), and a pane that cannot be read is refused.
+  After a reboot a provably gone tmux server means a fresh
+  start, anything less a fast refusal naming
+  `aisquare fleet reap -P <home> --server-down`. The captain is spawned with
+  Claude Code's session-rating survey off (`CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY`),
+  so a survey never blocks the voice path from a phone that cannot answer it.
+- **The captain is experimental, and ships off.** Turn it on with
+  `aisquare config set experimental.captain true` (`[experimental] captain` in
+  `config.toml`), or for one shell with `AISQUARE_EXPERIMENTAL_CAPTAIN=1`. The
+  variable wins over the config either way, and `0` turns it off. Off:
+  - `aisquare captain`, every subcommand (its `--help` included) and the Actions
+    server's own entry (`python -m aisquare.services.captain`) exit 2 with one line
+    saying how to turn it on. Only `aisquare captain --help` still prints, and exits 0.
+  - The fleet UI shows no insignia, captain row or captain view, and starts no ui
+    receiver: no socket, folder or thread.
+  - `captain` is an unknown role to `aisquare launch` and `fleet spawn`, as on main.
+    `fleet restart` and `fleet switch` refuse a captain row left by a run with it on,
+    in the same one line.
+  - The bundled `captain` persona is absent from every picker and the catalogue, and
+    the voice page does not serve.
+  - A session started in the aisquare home is a captured row like any other: with
+    capture off, it registers nothing and is briefed on no board.
+  - `aisquare doctor` shows one ok row, `captain: off (experimental)`.
+
+  On, the captain is exactly as above. asq reads the switch once, when it starts, and
+  each command above reads it when it runs. Whatever it says, the home's own row is
+  never added as a project, and `project prune` and doctor's captured row leave it
+  alone (Fixed, below). Every other role, fleet row and board, and the store
+  (schema v33), are the same either way.
+- **The persona rides the system prompt too, and a replay keeps it.** For Claude
+  Code the launch appends the persona block to the default system prompt
+  (`--append-system-prompt-file`, a file under `~/.aisquare/cache/persona-prompts/`;
+  the name travels as `AISQUARE_PERSONA`, never the body) beside the
+  session-start briefing that survives `/clear`, so a persona holds over a long
+  session as hook context alone may not (plan §9, #210). `[persona]
+  system_prompt = false` keeps the briefing alone; an `--append-system-prompt`
+  of either spelling on the operator's line wins. codex, aider and any wrapper
+  not named `claude` have no seam this launcher knows and get the briefing
+  alone, said in one dim line, as is a cache the launch cannot write. The
+  system prompt is the launch's for the life of the process, `/clear`
+  included: a persona attached since reaches the agent through the briefing
+  until a restart replays the row's. `fleet restart` and `fleet switch` replay the
+  ROW's persona — spawned with, or attached since — never the role's default of
+  the day; one that no longer resolves steps down to the role's current
+  default, then to none, each said on the receipt and never a refusal (owner
+  decision, 2026-09-24; supersedes #209).
 - **Stop an agent from `asq`.** The agent view's header gains a compact **Stop**
   button, and `x` with the sidebar focused stops the selected agent — both open
   one dialog (*Stop* · *Force* · *Cancel*) over `services.fleet.stop`, the same
@@ -104,7 +164,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PickTargetRequested`, which the dialog answers by opening the target picker.
   *⚙ Settings ▸ App settings* gains a persona per role, saved through `save_config`
   and re-read. It lists the personas every project can resolve (the user's and the
-  bundled ones, never one project's own, since the default is machine-wide), and
+  bundled ones, never one project's own, since the default is machine-wide; the
+  bundled `captain` is among them only while the experimental captain is on), and
   shows a configured name the list lacks as `<name> (custom)`. A
   sidebar agent row carries a dim `· <persona>` from its fleet row or, failing that,
   its session. Measured in `tests/test_ui_spawn.py` (the recorder's `persona`,
@@ -210,6 +271,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   presence pass (`_converge_by_presence`), which re-applies any step from v15 on whose
   products a store lacks. Every such store reaches v33 with its rows, as pinned in
   `tests/test_store.py`, and 0.8.2 still opens a v33 store.
+
+### Fixed
+
+- **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
+  and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for
+  every other spawn: a seat reads the board of the hub its spawner honours, and its
+  row records it. The captain's processes carry the home as their hub, which is how
+  the captain itself lands on the home board, so its `spawn` names no hub: the seat
+  reads its own project's board, where its manager and its teammates read. The
+  captain's own window is given the home's root whatever hub started it, and a
+  restart replays the board and the hub its row recorded.
+- **A hand-off runs as the persona the Spawn dialog shows.** *Take over* with
+  Persona `(none)` resumed the teammate's session and went on briefing the persona
+  that session had recorded, at every start after it; the session now runs as
+  none. A *Fork* as another role started without the teammate's persona, which the
+  dialog showed and kept; it now keeps it, as *Take over* does, and a persona the
+  dialog changed is the dialog's.
+- **`aisquare project prune --captured-only` never takes the captain's home board,**
+  and doctor no longer counts it among the captured directories. The home is
+  captured on purpose and never added, so once the captain sat idle the prune took
+  it for a scratch directory, and `--purge` deleted the captain's board and audit.
+- **A tmux server the fleet starts holds no team variable,** so a window opened on
+  it by hand inherits no hub, seat, role or persona from the shell that first
+  started it. `aisquare doctor`'s `fleet server env` row warns when a running server
+  pins one, naming a hub unlike the board a fleet on it reads, and each delta and
+  wake-up line names the board it came from.
+- **`aisquare serve --stdio` no longer exits in the middle of a tool call.** Its
+  idle deadline (`--close-after`, `AISQUARE_SERVE_CLOSE_AFTER`) counted inbound
+  client messages only, while a tool runs on a worker thread and the client sends
+  nothing, so a call longer than the deadline was killed mid-flight and its answer
+  lost. The clock now stands still while a call runs and counts from the end of
+  the last one; an abandoned server still closes itself. Found gating the captain's
+  Actions server (#217), which shares the runner.
+- **The documented-commands guard no longer fails the checkout that runs the
+  fleet.** `test_the_document_list_has_not_gone_stale` walks the whole
+  repository for markdown with commands in a fenced block, and a root checkout
+  that hosts coder worktrees under `.aisquare-worktrees/` holds one full copy of
+  every document per agent — so `make check` from the root failed, reporting
+  each worktree's README.md and docs pages as unlisted copies of themselves,
+  while every real document passed (measured on `rc/hackathon-v1` with two
+  coder worktrees; from a clean checkout or inside a worktree it passed). The
+  sweep now never enters the fleet's `worktree_dir` (the `[fleet]` default) or
+  any directory holding a `.git` *file* — a linked worktree wherever it was put
+  — the way `core/snapshot.py` already ignores `**/.aisquare-worktrees/**`. It
+  prunes as it walks, so it no longer reads every agent's `.venv` to throw the
+  result away. The guard's rules and its document list are unchanged, and the
+  positive control stays: the same fenced page at the repo's own level is still
+  reported.
 
 ## [0.8.2] - 2026-10-19
 

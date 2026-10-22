@@ -18,8 +18,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import personas as core
-
-BUNDLED = ["careful", "mentor", "minimalist", "skeptic"]
+from tests import bundled_personas
 
 
 @pytest.fixture(autouse=True)
@@ -95,8 +94,13 @@ def test_list_prints_the_bundled_personas_with_layer_and_description(runner: Cli
 
     assert result.exit_code == 0, result.output
     rows = result.stdout.splitlines()
-    assert [row.split()[0] for row in rows] == BUNDLED
-    assert rows[3].split(None, 2) == ["skeptic", "bundled", core.resolve("skeptic").description]
+    bundled = bundled_personas.names()
+    assert [row.split()[0] for row in rows] == bundled
+    assert rows[bundled.index("skeptic")].split(None, 2) == [
+        "skeptic",
+        "bundled",
+        core.resolve("skeptic").description,
+    ]
 
 
 def test_list_json_carries_each_field_and_the_directories_that_did_not_load(
@@ -108,8 +112,9 @@ def test_list_json_carries_each_field_and_the_directories_that_did_not_load(
 
     assert code == 0
     assert set(payload) == {"personas", "invalid"}
-    assert [entry["name"] for entry in payload["personas"]] == BUNDLED
-    skeptic = payload["personas"][3]
+    bundled = bundled_personas.names()
+    assert [entry["name"] for entry in payload["personas"]] == bundled
+    skeptic = payload["personas"][bundled.index("skeptic")]
     assert set(skeptic) >= {"name", "description", "roles", "tags", "layer", "path", "files"}
     assert skeptic["layer"] == "bundled"
     assert skeptic["roles"] == ["tester", "reviewer", "runner"]
@@ -145,7 +150,7 @@ def test_show_of_an_unknown_name_is_one_line_not_a_traceback(runner: CliRunner) 
 
     assert human.exit_code == 1
     assert isinstance(human.exception, SystemExit)
-    assert "known: careful, mentor, minimalist, skeptic" in human.stderr
+    assert bundled_personas.known() in human.stderr
     assert (code, payload["error"]) == (1, "unknown_persona")
     assert "no persona named 'nope'" in payload["detail"]
 
@@ -547,7 +552,7 @@ def test_a_project_persona_shadows_bundled_and_a_broken_one_is_listed_not_fatal(
 
     assert result.exit_code == 0, result.output
     rows = result.stdout.splitlines()
-    assert [row.split()[0] for row in rows if not row.startswith("✗")] == BUNDLED
+    assert [row.split()[0] for row in rows if not row.startswith("✗")] == bundled_personas.names()
     skeptic = next(row for row in rows if row.startswith("skeptic"))
     assert skeptic.split()[1] == "project"
     assert skeptic.endswith("Our own skeptic.  (shadows bundled)")

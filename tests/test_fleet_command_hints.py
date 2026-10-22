@@ -127,6 +127,13 @@ _ROW_OF_SESSION = (
     "(``fleet_agent_for_session``): under a hub, not the session's board's"
 )
 PROJECT_OF: dict[tuple[str, str], str] = {
+    ("services/captain/actions.py", "_no_trust_dialog"): (
+        "the project of the row the captain would type into (``fleet.project_of``)"
+    ),
+    ("services/captain/brain.py", "find"): (
+        "the home board, the captain's own row's project (``captain.state.home_project``)"
+    ),
+    ("services/fleet.py", "_handoff_row"): _TARGET,
     ("cli/fleet.py", "_emit_agents"): _TARGET,
     ("cli/fleet.py", "_stop_notes"): (
         _TARGET + ", or under ``--all`` each receipt's own, the project its row was read in"

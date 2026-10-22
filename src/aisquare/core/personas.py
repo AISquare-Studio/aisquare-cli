@@ -23,7 +23,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
 
-from aisquare.core import paths
+from aisquare.core import experimental, paths
 from aisquare.core.injection import sanitise_text
 
 SKILL_NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
@@ -38,6 +38,8 @@ FRONTMATTER_MAX_BYTES = 16_384
 SKILL_FILE = "SKILL.md"
 PROVENANCE_FILE = ".persona.json"
 BUNDLED_DIR = Path(__file__).resolve().parent.parent / "personas"
+CAPTAIN = "captain"
+"""The bundled persona the captain runs as: hidden while the captain is off (:func:`hidden`)."""
 
 Layer = Literal["project", "user", "bundled"]
 
@@ -378,6 +380,14 @@ def layer_dirs(root: Path | None) -> list[tuple[Layer, Path]]:
     return dirs
 
 
+def hidden(layer: Layer, name: str) -> bool:
+    """Whether ``layer``'s persona directory ``name`` is kept out of every picker, the
+    catalogue and a lookup by name: the bundled ``captain``, while the experimental
+    captain is off (``core.experimental``). A persona of the user's or the project's own
+    by that name is never hidden. The switch is read only for that one directory."""
+    return layer == "bundled" and name == CAPTAIN and not experimental.captain_enabled()
+
+
 def _candidates(base: Path) -> list[Path]:
     """Persona directories in a layer. Dot-directories are aisquare's own
     (``.drafts``, a staging copy) and never personas."""
@@ -396,6 +406,8 @@ def catalogue(root: Path | None = None) -> tuple[list[Persona], list[tuple[Path,
     invalid: list[tuple[Path, str]] = []
     for layer, base in layer_dirs(root):
         for directory in _candidates(base):
+            if hidden(layer, directory.name):
+                continue
             try:
                 persona = load(directory, layer=layer)
             except PersonaError as exc:
@@ -412,7 +424,7 @@ def resolve(name: str, root: Path | None = None) -> Persona:
     if len(name) <= SKILL_NAME_MAX and SKILL_NAME.fullmatch(name):
         for layer, base in layer_dirs(root):
             directory = base / name
-            if not directory.is_dir():
+            if not directory.is_dir() or hidden(layer, name):
                 continue
             try:
                 return load(directory, layer=layer)

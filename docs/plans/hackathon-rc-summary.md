@@ -10,6 +10,8 @@
 > 0 failed, ruff and mypy --strict clean, demo path replayed on that head. The
 > PR this describes: #201. Decisions, timeline and evidence:
 > `docs/plans/hackathon-overnight-log.md`. Demo: `docs/plans/hackathon-demo.md`.
+>
+> **2026-09-24:** the release train (#203, with #208's v15 converge) is folded into this branch on `merge/rc-fixes-into-hackathon` (`2dbc560`, `e6a1ba2`), per the owner's decision on #201; gate on that head: 5239 passed, 4 skipped, 0 failed, ruff and mypy --strict clean. The log's entry of that evening has the account; the store migration note below tells the converge story.
 
 ## Features
 

@@ -20,7 +20,7 @@ import os
 import re
 import sqlite3
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -28,7 +28,7 @@ from pathlib import Path
 from types import EllipsisType
 from typing import Any, Final, NamedTuple
 
-from aisquare.core import brain, harness, insights, orchestrator, workspace
+from aisquare.core import brain, experimental, harness, insights, orchestrator, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
@@ -77,6 +77,12 @@ _CLAIM_ORPHAN_AFTER = timedelta(hours=4)
 
 MANAGER_ROLE = "manager"
 """The one role whose ``Stop`` hook may keep it going (docs/plans/fleet-tui.md §7.3)."""
+
+CAPTAIN_ROLE = "captain"
+"""The home-level captain's role (services.captain): briefed by :func:`_captain_briefing`."""
+
+_COMPACT_SOURCE = "compact"
+"""The ``SessionStart`` source of a compaction — the one start that can come mid-turn."""
 
 CLEAR_REASON = "clear"
 """Claude Code's ``SessionEnd`` reason for ``/clear``: the session id ends, the process
@@ -144,7 +150,24 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
 #: Code notification's feed line (#153). They never reach a teammate's prompt
 #: delta or a manager's wake-up reason — no agent can answer another's permission
 #: prompt, and each one would take a ``_DELTA_LIMIT`` slot from the real news.
-HUMAN_BOARD_KINDS: frozenset[str] = frozenset({"attention", "notice"})
+#: ``captain_action`` is the captain's audit line (``services.captain.actions``):
+#: one per tool call, reads included, for the owner — the effects it records
+#: (a note, a claim, a tell) reach teammates as their own events.
+#:
+#: No agent-facing reader shows any of them: not the delta or the wake-up, and not
+#: the recent updates of a briefing (:func:`_briefing_events`) or of the MCP
+#: ``team_board``. Each leaves them out IN its query, before the LIMIT (the store's
+#: ``exclude_kinds``). Dropped after it, or not at all, a few questions to the
+#: captain briefed the next coder with five audit lines and no decision, and a run
+#: of 62 of them hid a coder's result from a waiting manager's wake-up (review of
+#: #240, finding 11).
+HUMAN_BOARD_KINDS: frozenset[str] = frozenset({"attention", "notice", "captain_action"})
+
+#: The one of them the human board's own recent list leaves out too (``aisquare
+#: board``, its watch): the audit is one line per captain tool call, with the tool's
+#: arguments and the owner's words, and it filled that list. The bell and the notices
+#: stay, they are that board's own; ``aisquare captain log`` reads the audit.
+CAPTAIN_AUDIT_KINDS: frozenset[str] = frozenset({"captain_action"})
 
 #: The last sentence of every wake-up reason. Claude Code continues the turn with
 #: the reason as its instruction, so the instruction must license stopping — a
@@ -758,6 +781,7 @@ def board_data(
     since_seq: int | None = None,
     project: ProjectInfo | None = None,
     glance: bool = False,
+    exclude_kinds: Collection[str] = (),
 ) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
     """Everything the board shows: sessions, tasks and recent events.
 
@@ -770,11 +794,21 @@ def board_data(
     rest is every session and task the project ever had, and the remote's
     ``board`` frame, read every second while a phone shows its Board tab, read
     all of it to drop it.
+    ``exclude_kinds`` leaves those event kinds out of either fetch, inside the
+    query, so ``events`` counts what is shown: the human board passes
+    :data:`CAPTAIN_AUDIT_KINDS`, an agent's (the MCP ``team_board``)
+    :data:`HUMAN_BOARD_KINDS`. By default nothing is left out.
     """
     _require_enabled()
     with store_session() as store:
         return board_data_in(
-            store, cwd, events=events, since_seq=since_seq, project=project, glance=glance
+            store,
+            cwd,
+            events=events,
+            since_seq=since_seq,
+            project=project,
+            glance=glance,
+            exclude_kinds=exclude_kinds,
         )
 
 
@@ -786,13 +820,20 @@ def board_data_in(
     since_seq: int | None = None,
     project: ProjectInfo | None = None,
     glance: bool = False,
+    exclude_kinds: Collection[str] = (),
 ) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
     """:func:`board_data` through a store the CALLER holds open: Remote's ``board`` frame,
     which finds the board it shows in that store first (``remote_server``'s
     ``remote_board_payload``), read every second while a phone shows its Board tab."""
     _require_enabled()
     return _read_board(
-        store, cwd, events=events, since_seq=since_seq, project=project, glance=glance
+        store,
+        cwd,
+        events=events,
+        since_seq=since_seq,
+        project=project,
+        glance=glance,
+        exclude_kinds=exclude_kinds,
     )
 
 
@@ -813,6 +854,7 @@ def board_read(
     events: int = _BOARD_EVENTS,
     since_seq: int | None = None,
     project: ProjectInfo | None = None,
+    exclude_kinds: Collection[str] = (),
 ) -> BoardRead:
     """:func:`board_data` for a board that paints its sessions, with their chips' switches,
     in its one store session.
@@ -821,11 +863,18 @@ def board_read(
     after :func:`board_data` had closed its session, and that opened another: a new
     connection, the migration check and the presence pass, on the event loop, at every 2 s
     tick of every visible board for as long as a session stayed limited, which is hours
-    (review of #259, round 23).
+    (review of #259, round 23). ``exclude_kinds`` as in :func:`board_data`.
     """
     _require_enabled()
     with store_session() as store:
-        read = _read_board(store, cwd, events=events, since_seq=since_seq, project=project)
+        read = _read_board(
+            store,
+            cwd,
+            events=events,
+            since_seq=since_seq,
+            project=project,
+            exclude_kinds=exclude_kinds,
+        )
         return BoardRead(*read, fleet_switches(store, read[1]))
 
 
@@ -837,13 +886,16 @@ def _read_board(
     since_seq: int | None,
     project: ProjectInfo | None,
     glance: bool = False,
+    exclude_kinds: Collection[str] = (),
 ) -> tuple[ProjectInfo, list[TeamSession], list[TeamTask], list[TeamEvent]]:
     """The body of :func:`board_data`, through the caller's store."""
     resolved = project if project is not None else _project(store, cwd)
     if since_seq is None:
-        fetched = store.recent_events(resolved.id, limit=events)
+        fetched = store.recent_events(resolved.id, exclude_kinds=exclude_kinds, limit=events)
     else:
-        fetched = store.events_since(resolved.id, since_seq, limit=events)
+        fetched = store.events_since(
+            resolved.id, since_seq, exclude_kinds=exclude_kinds, limit=events
+        )
     if glance:
         named = sorted({event.session_id for event in fetched if event.session_id})
         sessions = store.team_sessions_seen_since(resolved.id, None, ids=named)
@@ -1272,20 +1324,26 @@ def add_note(
     kind: str = "note",
     cwd: Path | None = None,
     board_id: str | None = None,
+    project_id: str | None = None,
 ) -> TeamEvent:
     """Put a note/decision/question/result on the team pipe.
 
     ``board_id`` names the board outright, whoever writes and from wherever: ``fleet tell``'s
     note to an agent goes to the board the agent reads (``fleet._board_of_row``), not the
-    teller's.
+    teller's. ``project_id`` is the same, by the project whose board it is (review of #240,
+    finding 8: a busy agent's note lands on its own board); ``board_id`` wins when both are
+    given. Everything else that can pick a board can pick another one, so with either the
+    session still says who filed the note, and no longer where; ``_board_of`` as in
+    :func:`set_signal`.
     """
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
+        named = board_id if board_id is not None else project_id
         board = (
-            _board_of(store, board_id)
-            if board_id is not None
+            _board_of(store, named)
+            if named is not None
             else _board(store, session, cwd, write=True)
         )
         task_id: str | None = None
@@ -1798,6 +1856,17 @@ def _shared_row_banner(
     )
 
 
+def _briefing_events(store: ContextStore, project_id: str) -> list[TeamEvent]:
+    """The recent updates an agent is briefed with: the board's last :data:`_BOARD_EVENTS`
+    that are an agent's to read, :data:`HUMAN_BOARD_KINDS` left out in the query.
+
+    Read unfiltered, the five were whatever came last — and after the owner had asked
+    the captain about the board a few times, that was five audit lines carrying the
+    owner's words, with the decisions and results pushed out (review of #240, finding 11).
+    """
+    return store.recent_events(project_id, exclude_kinds=HUMAN_BOARD_KINDS, limit=_BOARD_EVENTS)
+
+
 def hook_session_start(
     session_id: str,
     cwd: Path | None,
@@ -1856,6 +1925,24 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
+        if experimental.captain_role(base_role(session.role)):
+            # Bound like every fleet row (rule 1 of the fleet-row section), or a
+            # `/clear` left the row on the ended id and `say` waited on a session that
+            # would never answer. The captain has no task, so there is nothing to brief.
+            _assignment(store, session.id, project.id, named=named)
+            _settle_owed_persona(store, session)  # this start briefs the persona itself
+            if source != _COMPACT_SOURCE:
+                # A captain that just started, cleared or resumed sits at its prompt
+                # until something is typed — whose own hook says `working`. Left at
+                # the upsert's `working`, the row read busy for its whole fresh window
+                # and `say` refused to type into it (T2 fix round). A compaction can
+                # come mid-turn, so it keeps what the turn said.
+                store.touch_session(session.id, state="waiting")
+                session = store.get_session(session.id) or session
+            # The captain's own briefing (T2, 13121): it has no shell, so no `aisquare
+            # task …` protocol lines, and the home board's captain_action lines are the
+            # OWNER's audit, not the captain's context.
+            return collision + _captain_briefing(project, session, persona_note)
         # Before the board is read below: the assignment may move this agent's
         # claims onto its new id, and a board read first still named the old one.
         # ``source`` plays no part — see rule 1 of the fleet-row section. The row the window
@@ -1869,7 +1956,7 @@ def hook_session_start(
             project,
             store.team_sessions(project.id),
             store.team_tasks(project.id),
-            store.recent_events(project.id, limit=_BOARD_EVENTS),
+            _briefing_events(store, project.id),
             me=session,
             assigned=assigned,
             briefing=True,
@@ -1936,7 +2023,7 @@ def hook_prompt_heartbeat(
                 project,
                 store.team_sessions(project.id),
                 store.team_tasks(project.id),
-                store.recent_events(project.id, limit=_BOARD_EVENTS),
+                _briefing_events(store, project.id),
                 me=session,
                 assigned=assigned,
                 labels=lambda: slot_labels_via(store),
@@ -1956,26 +2043,40 @@ def hook_prompt_heartbeat(
         briefing += _owed_persona_briefing(store, session)
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         store.renew_leases(session.id, lease)
-        raw = store.events_since(
+        # The board's newest seq, read BEFORE the delta: with nothing to deliver the
+        # cursor moves there, past the rows the query left out. Read first, it cannot
+        # pass an event the delta did not see — whatever is written after has a later seq.
+        newest = store.latest_seq(session.project_id)
+        # Bells, notification lines and the captain's audit are for the human, not
+        # teammate context — left out IN the query, so the limit counts what is
+        # delivered: dropped after it, a run of audit lines was the whole page, prompt
+        # after prompt, with a coder's result behind it (review of #240, finding 11).
+        events = store.events_since(
             session.project_id,
             session.cursor,
             exclude_session=session.id,
+            exclude_kinds=HUMAN_BOARD_KINDS,
             limit=_DELTA_LIMIT * 3 + 1,
         )
-        # Bells and notification lines are for the human board, not teammate context.
-        events = [event for event in raw if event.kind not in HUMAN_BOARD_KINDS]
         if not events or not orchestrator.delta_enabled():
-            cursor = raw[-1].seq if raw else None
+            # Nothing delivered is still something read: the cursor moves past it, the
+            # left-out rows included, rather than stay in front of them for every later
+            # prompt to scan again.
+            read_to = events[-1].seq if events else newest
+            cursor = read_to if read_to > session.cursor else None
             store.touch_session(session.id, cursor=cursor, state="working")
             return collision + briefing
         truncated = len(events) > _DELTA_LIMIT
         shown = events[:_DELTA_LIMIT]
         store.touch_session(session.id, cursor=shown[-1].seq, state="working")
         roles = {s.id: s.role for s in store.team_sessions(session.project_id)}
+        board = _board_of(store, session.project_id).name
         # One read, and only when a line names a task: this runs on every prompt.
         numbers = store.task_numbers(session.project_id) if any(e.task_id for e in shown) else {}
         return (
-            collision + briefing + _render_delta(shown, roles, truncated=truncated, numbers=numbers)
+            collision
+            + briefing
+            + _render_delta(shown, roles, truncated=truncated, board=board, numbers=numbers)
         )
 
 
@@ -2091,13 +2192,19 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
 
     One function so the wake-up and the deferral below can never disagree about
     the window they are judging — same source, same exclusions, same limit as
-    :func:`hook_prompt_heartbeat`. Bells and notification lines
-    (:data:`HUMAN_BOARD_KINDS`) are for the human board, not teammate context.
+    :func:`hook_prompt_heartbeat`. Bells, notification lines and the captain's audit
+    (:data:`HUMAN_BOARD_KINDS`) are for the human, not teammate context, and are left
+    out IN the query: a Stop that wakes nobody moves no cursor, so dropped after the
+    LIMIT, a run of audit lines was the whole page at every Stop, and the result behind
+    it woke nobody until something else was written (review of #240, finding 11).
     """
-    raw = store.events_since(
-        me.project_id, me.cursor, exclude_session=me.id, limit=_DELTA_LIMIT * 3 + 1
+    return store.events_since(
+        me.project_id,
+        me.cursor,
+        exclude_session=me.id,
+        exclude_kinds=HUMAN_BOARD_KINDS,
+        limit=_DELTA_LIMIT * 3 + 1,
     )
-    return [event for event in raw if event.kind not in HUMAN_BOARD_KINDS]
 
 
 def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
@@ -2156,11 +2263,12 @@ def _manager_wakeup(
     truncated = len(events) > _DELTA_LIMIT
     shown = events[:_DELTA_LIMIT]
     roles = {s.id: s.role for s in store.team_sessions(me.project_id)}
+    board = _board_of(store, me.project_id).name
     numbers = store.task_numbers(me.project_id) if any(e.task_id for e in shown) else {}
     store.set_meta(key, str(used + 1))
     store.touch_session(me.id, cursor=shown[-1].seq, state="working")
     return StopDecision(
-        reason=_render_wakeup(shown, roles, truncated=truncated, numbers=numbers),
+        reason=_render_wakeup(shown, roles, truncated=truncated, board=board, numbers=numbers),
         cursor=shown[-1].seq,
     )
 
@@ -3473,6 +3581,24 @@ def _cycle_project(
         return None if hub else board
 
 
+def _captain_briefing(project: ProjectInfo, me: TeamSession, persona_note: str | None) -> str:
+    """The captain's session-start block: who it is, its only hands, its cycle, its persona."""
+    lines = [
+        "<aisquare-team>",
+        f"You are the captain (team session {short_id(me.id)}): the owner's agent across every "
+        "project, working from the home board.",
+        "Your only hands are the captain tools (mcp__captain__*) — no shell and no files; "
+        "what you cannot do through them, you ask the owner or a project's manager to do.",
+        *_role_cycle(me, project),
+    ]
+    if me.persona:
+        lines += _persona_briefing(me.persona, project.root)
+    if persona_note:
+        lines.append(persona_note)
+    lines.append("</aisquare-team>")
+    return "\n".join(lines)
+
+
 def _persona_briefing(name: str, root: Path, *, without: str = "launched without it") -> list[str]:
     """The persona block for a session start (docs/plans/spawn-personas.md §3.2).
 
@@ -3729,13 +3855,17 @@ def _render_delta(
     roles: dict[str, str],
     *,
     truncated: bool,
+    board: str,
     numbers: Mapping[str, int] | None = None,
 ) -> str:
+    """The per-prompt delta. Each line names its board (fix 5 of the fleet-board card,
+    tsk_01m3k89bkhpj): two fleets' updates once mixed in one delta, because the seats of
+    both registered on a third board, and no line said which board it came from."""
     count = f"{len(events)}{'+' if truncated else ''}"
     lines = [
         "<aisquare-team-delta>",
         f"{count} teammate update(s) since your last prompt:",
-        *(f"- {event_line(event, roles, numbers)}" for event in events),
+        *(f"- [{board}] {event_line(event, roles, numbers)}" for event in events),
     ]
     if truncated:
         lines.append("… more waiting — run `aisquare board` for the full picture.")
@@ -3807,6 +3937,7 @@ def _render_wakeup(
     roles: dict[str, str],
     *,
     truncated: bool,
+    board: str,
     numbers: Mapping[str, int] | None = None,
 ) -> str:
     """The Stop reason: the delta in the same lines the prompt hook would have used,
@@ -3836,9 +3967,13 @@ def _render_wakeup(
     spent = _output_cost(head) + sum(_output_cost(line) + 2 for line in frame)
     share = max((_WAKEUP_REASON_BUDGET - spent) // max(len(events), 1) - 4, _ELLIPSIS_COST)
     per_line = min(_WAKEUP_LINE_BUDGET, share)
+    # The board label is inside the clipped text, so the budget above still holds.
     lines = [
         head,
-        *(f"- {_clip(event_line(event, roles, numbers), per_line)}" for event in events),
+        *(
+            f"- {_clip(f'[{board}] {event_line(event, roles, numbers)}', per_line)}"
+            for event in events
+        ),
         *frame,
     ]
     return "\n".join(lines)

@@ -211,9 +211,16 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
             )
         hub = ""
     if hub:
-        root = _hub_root(hub)
-        return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+        return hub_project(hub)
     return directory_project(cwd)
+
+
+def hub_project(hub: str) -> ProjectInfo:
+    """The board an absolute ``hub`` names: :func:`team_project`'s answer under it, for a
+    caller that gives a window a hub this process does not honour (``fleet.spawn``'s
+    ``hub``)."""
+    root = _hub_root(hub)
+    return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
 
 
 def directory_project(cwd: Path | None = None) -> ProjectInfo:

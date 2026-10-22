@@ -339,7 +339,9 @@ aisquare fleet tell coder-auth "use the existing JWT helper, do not add a depend
 Types the text into the agent — **only** when it is *waiting* and its pane is
 alive. Otherwise the message is filed as a board note addressed to that agent,
 and the output says which happened (`✓` typed, `→` noted, `…` neither yet: the
-line says what is at its prompt or on its way). Never interrupts an
+line says what is at its prompt or on its way). The note goes on the board the
+agent reads, the one its next prompt reads, whatever hub or fleet window the
+command runs in. Never interrupts an
 agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
 Under `--json`, `typed` is `yes`, `no`, `unsent` or `maybe` beside `delivered`:
 `unsent` when the text is at its prompt and tmux refused its Enter (press Enter in
@@ -1418,6 +1420,12 @@ gets the one that gives its board, none for the checkout's, a project's root for
 that project's board. A project's own board where the checkout is another's is kept
 only when the agent's session registered on it, or its task is on it; otherwise it
 was only a default, and the replacement reads the checkout's.
+
+The captain (experimental, [docs/captain.md](captain.md)) is the one exception, both
+ways: its own row reads the home board, and its window is given the home's root,
+whatever hub started it; and a seat it spawns reads that seat's own project's board,
+since the captain's processes carry the home as their hub only to land the captain
+itself there.
 
 | On the session's board (the hub's, under one) | On the row's fleet project (whatever the board) |
 |---|---|

@@ -1233,6 +1233,18 @@ class AmbiguousIdError(LookupError):
         self.ref = ref
 
 
+def is_the_home(root: Path) -> bool:
+    """Whether ``root`` is the aisquare home itself (resolved, so a symlink is the same home).
+
+    A root that is a symlink loop is not the home: ``resolve`` raises ``RuntimeError`` for
+    one on 3.11 and 3.12 (``OSError`` from 3.13), and ``project prune`` asks this of every
+    row, where a loop is a root it must report, never a traceback."""
+    try:
+        return root.resolve() == paths.aisquare_home().resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
 class ContextStore(Protocol):
     """Everything the service layer needs from persistent context storage."""
 
@@ -1344,9 +1356,17 @@ class ContextStore(Protocol):
     def get_event_by_seq(self, seq: int) -> TeamEvent | None: ...
     def find_event_by_id(self, ref: str) -> TeamEvent | None: ...
     def events_since(
-        self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
+        self,
+        project_id: str,
+        seq: int,
+        *,
+        exclude_session: str | None = None,
+        exclude_kinds: Collection[str] = (),
+        limit: int = 50,
     ) -> list[TeamEvent]: ...
-    def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]: ...
+    def recent_events(
+        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+    ) -> list[TeamEvent]: ...
     def filtered_events(
         self,
         project_id: str,
@@ -1356,6 +1376,7 @@ class ContextStore(Protocol):
         since_seq: int | None = None,
         kind: str | None = None,
         task_id: str | None = None,
+        exclude_kinds: Collection[str] = (),
         limit: int = 30,
     ) -> list[TeamEvent]: ...
     def team_events_since(
@@ -1979,6 +2000,20 @@ class SqliteStore:
         codename is kept; one another project holds raises ``sqlite3.IntegrityError`` and
         writes nothing.
         """
+        if is_the_home(project.root):
+            # The aisquare home's row is the captain's HOME BOARD (services.captain):
+            # captured so it can hold the captain's row and events, never one of the
+            # owner's projects — a spawn, a codename, a rename or a launch's
+            # activation onboarding it would put `.aisquare` in the sidebar, in
+            # `project list` and in the captain's own projects() tool (T2, 13121).
+            # A spawn's codename is still given to it when it has none: a codename is
+            # no onboarding, and the captain's tmux session was named by it before the
+            # row was written (``fleet._add_named``, 0.8.x's capture-off rule).
+            self.ensure_project(project)
+            home = self._written_project(project.id)
+            if codename is not None and home.codename is None:
+                return self.set_codename(project.id, codename)
+            return home
         now = _now_iso()
         self._conn.execute(
             "INSERT INTO project "
@@ -1998,8 +2033,16 @@ class SqliteStore:
             ),
         )
         self._conn.commit()
-        stored = self.get_project(project.id)
-        assert stored is not None  # just written
+        return self._written_project(project.id)
+
+    def _written_project(self, project_id: str) -> ProjectInfo:
+        """The row just written — a ``KeyError`` if it is gone already (another process's
+        purge between the write and this read), as every lookup here says a missing
+        project. Checked, not asserted: under ``python -O`` an ``assert`` is stripped and
+        ``None`` went back against the return type (pre-gate review of #219)."""
+        stored = self.get_project(project_id)
+        if stored is None:
+            raise KeyError(project_id)
         return stored
 
     def list_projects(
@@ -2038,12 +2081,15 @@ class SqliteStore:
         return [_row_to_project(row) for row in rows]
 
     def captured_projects(self) -> list[ProjectInfo]:
-        """The registrations a session made on its own that nothing has added on purpose."""
+        """The registrations a session made on its own that nothing has added on purpose.
+
+        Never the aisquare home's: the captain's home board is captured on purpose and never
+        onboarded, and doctor counted it among the scratch directories to prune."""
         rows = self._conn.execute(
             f"SELECT {_PROJECT_COLUMNS} FROM project "
             "WHERE forgotten_at IS NULL AND onboarded_at IS NULL ORDER BY name"
         ).fetchall()
-        return [_row_to_project(row) for row in rows]
+        return [project for project in map(_row_to_project, rows) if not is_the_home(project.root)]
 
     def get_project(
         self, project_id: str, *, include_forgotten: bool = False
@@ -2341,7 +2387,13 @@ class SqliteStore:
         return row is not None
 
     def upsert_session(self, session: TeamSession) -> TeamSession:
-        """Insert the session, or revive/refresh it if the id is already known."""
+        """Insert the session, or revive/refresh it if the id is already known.
+
+        A known session keeps the board it first registered on, and its cursor, as on
+        main: the captain line's move to another board (#230's fix 2b) repaired the
+        wrong-board sessions of #230's own hub rule, which hub rule A retired, and
+        shipped a change to main's semantics unpinned (review of #240, F4).
+        """
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
@@ -3156,6 +3208,7 @@ class SqliteStore:
         since_seq: int | None = None,
         kind: str | None = None,
         task_id: str | None = None,
+        exclude_kinds: Collection[str] = (),
         limit: int = 30,
     ) -> list[TeamEvent]:
         """Matching events for ``team log``'s filters, oldest-first.
@@ -3166,7 +3219,9 @@ class SqliteStore:
         events (the MCP ``team_log`` contract). Rides the ``(project_id,
         seq)`` index; ``since_iso`` compares stored ISO-8601 UTC strings
         lexicographically (uniform format by construction). ``session_id`` is
-        exact — prefix resolution is the service layer's job.
+        exact — prefix resolution is the service layer's job. ``exclude_kinds``
+        leaves those kinds out INSIDE the query, so a window stays ``limit``
+        long however many of them the board holds (the captain's audit lines).
         """
         clauses = ["project_id = ?"]
         params: list[str | int] = [project_id]
@@ -3185,6 +3240,11 @@ class SqliteStore:
         if task_id is not None:
             clauses.append("task_id = ?")
             params.append(task_id)
+        if exclude_kinds:
+            # In the query, not after it: a window of N filtered AFTER the LIMIT
+            # comes back short on a board where the excluded kind is common.
+            clauses.append(f"kind NOT IN ({', '.join('?' * len(exclude_kinds))})")
+            params.extend(exclude_kinds)
         paging = since_seq is not None
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
@@ -3194,22 +3254,40 @@ class SqliteStore:
         return [_row_to_event(row) for row in (rows if paging else reversed(rows))]
 
     def events_since(
-        self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
+        self,
+        project_id: str,
+        seq: int,
+        *,
+        exclude_session: str | None = None,
+        exclude_kinds: Collection[str] = (),
+        limit: int = 50,
     ) -> list[TeamEvent]:
+        """A cursor page: the OLDEST ``limit`` events past ``seq``, oldest first.
+
+        ``exclude_kinds`` leaves those kinds out INSIDE the query, as
+        :meth:`filtered_events` does, so ``limit`` counts rows the caller can use.
+        Dropped after the LIMIT, a run of the captain's audit lines filled the whole
+        page, and the event behind it was not read at all (review of #240, finding 11).
+        """
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
             "WHERE project_id = ? AND seq > ? "
             "AND (session_id IS NULL OR session_id != ?) "
-            "ORDER BY seq LIMIT ?",
-            (project_id, seq, exclude_session or "", limit),
+            f"{_and_not_kinds(exclude_kinds)}ORDER BY seq LIMIT ?",
+            (project_id, seq, exclude_session or "", *exclude_kinds, limit),
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 
-    def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]:
+    def recent_events(
+        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+    ) -> list[TeamEvent]:
+        """A window: the NEWEST ``limit`` events, oldest first. ``exclude_kinds`` is left
+        out inside the query, as in :meth:`events_since`: the window stays ``limit`` long
+        however many of those kinds are newer than the events it shows."""
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
-            "WHERE project_id = ? ORDER BY seq DESC LIMIT ?",
-            (project_id, limit),
+            f"WHERE project_id = ? {_and_not_kinds(exclude_kinds)}ORDER BY seq DESC LIMIT ?",
+            (project_id, *exclude_kinds, limit),
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
 
@@ -4460,6 +4538,12 @@ def _glob_prefix(ref: str) -> str:
     """
     stripped = _ref_stripped(ref)
     return f"{stripped}*" if stripped else ""
+
+
+def _and_not_kinds(kinds: Collection[str]) -> str:
+    """``AND kind NOT IN (?, …) `` for a query that leaves ``kinds`` out, or nothing; the
+    caller hands ``*kinds`` to the query at that place."""
+    return f"AND kind NOT IN ({', '.join('?' * len(kinds))}) " if kinds else ""
 
 
 _DEFAULT_BUSY_MS = 5000

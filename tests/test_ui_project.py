@@ -72,6 +72,7 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.tmux import Capture, Completed, PaneFacts, TmuxServer
+from aisquare.core.workspace import project_id_for
 from aisquare.models import (
     DoctorCheck,
     FleetAgent,
@@ -1957,7 +1958,7 @@ def test_a_store_that_cannot_say_whether_the_key_was_minted_refuses_the_attach(
 
 def _another_project_pinned(tmp_path: Path) -> ProjectInfo:
     """A second registered project, pinned by ``project switch`` — the one the tab must ignore."""
-    from aisquare.core.workspace import pin_project, project_id_for
+    from aisquare.core.workspace import pin_project
 
     root = (tmp_path / "pinned-elsewhere").resolve()
     root.mkdir()
@@ -2038,7 +2039,6 @@ def test_under_a_hub_the_explainability_tab_is_about_the_hub_its_launches_join(
     agents authenticate with the hub's key — the one ``key set`` binds from any
     repo under the hub. The tab showed, attached and registered under the PAGE's
     key, which no launch from the page read (review of #170)."""
-    from aisquare.core.workspace import project_id_for
 
     config = load_config()
     config.explainability.targets = {

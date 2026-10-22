@@ -335,9 +335,26 @@ def _import_with_llm(
     ``--llm``): the engine rewrites its description and body, and the rest of it is
     kept — every other frontmatter key (``core.render``'s ``keep``) and, from a skill
     directory, its supporting files, copied without links as the recognised path copies
-    them. Both were dropped (review of #240, "also confirmed")."""
+    them. Both were dropped (review of #240, "also confirmed").
+
+    Such a source keeps its name too: ``name``, else the one the recognised path would
+    copy it under (``_implied_name``), fixed before any engine runs. The draft's own
+    ``name`` renamed the skill, so no persona of its name existed, and under ``--force``
+    the invented name could replace an unrelated persona (review of #201, R1-F1). Only
+    a source with no name of its own — text, a page, stdin whose frontmatter names
+    nothing usable — is named by the engine."""
     from aisquare.services import persona_import
 
+    if name is None and original is not None:
+        try:
+            name = _implied_name(src, original)
+        except PersonaError:
+            pass  # stdin with no usable frontmatter name: there is no name to keep
+        else:
+            try:
+                core._check_name(name, base / name)
+            except PersonaError as exc:
+                raise PersonaError(f"{exc.rule} — pass --name", path=where, code=exc.code) from None
     if name is not None and _occupied(base / name) and not force:
         raise PersonaError(
             f"a {layer} persona named '{name}' already exists at {base / name} — --force "

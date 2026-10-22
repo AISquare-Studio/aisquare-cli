@@ -315,9 +315,11 @@ is converted into a skill by an engine: a name, a one-line description, a body o
 at most 4,000 characters that keeps the source's intent, and notes on what it
 dropped. `--llm` sends a recognised skill through an engine anyway, to reshape
 it; `--condense` asks for a shorter body — the remedy for a skill over the
-4,000-character soft cap, or even over the 12,000 hard cap; `--no-llm` forbids the
-path, for a script that must never spend a token. The source is given to the
-engine as data, never as instructions.
+4,000-character soft cap, or even over the 12,000 hard cap. Either keeps the
+skill's name — `--name`, else the name a copy would take — so only a source with
+no name of its own is named by the engine. `--no-llm` forbids the path, for a
+script that must never spend a token. The source is given to the engine as data,
+never as instructions.
 
 The engines, tried in this order unless `--engine` picks one:
 

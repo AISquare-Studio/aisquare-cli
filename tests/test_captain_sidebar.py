@@ -102,6 +102,31 @@ def test_the_captain_row_sits_under_a_home_heading_not_inside_a_project(
 
 
 @pytest.mark.needs_captain
+def test_the_captain_row_keeps_its_session_figure_beside_its_persona(
+    tmp_path: Path,
+    script: Script,
+) -> None:
+    """Review of #267's merge, M-F1: the captain always runs as its persona, so its row read
+    ``🤖 captain       ⏸ #1·42…`` at the default width — the badge pushed the figure under
+    the row's ellipsis. The chip and ``#<slot>·<pct>%`` stay whole and the badge shows."""
+    seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
+    home = captain_state.home_project()
+    captain = ui_suite.as_persona(
+        ui_suite.on_slot(status(home.id, "captain", "captain", "waiting"), 1), "captain"
+    )
+    script[home.id] = [captain]
+
+    async def body(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await ui_suite.settle(app)
+        return ui_suite.on_screen(row_for(app, captain.agent.id)).strip()
+
+    row = drive(body, headroom=ui_suite.session_use((1, 42.0)))
+    assert row.startswith("🤖 captain"), row
+    assert "⏸ #1·42% · ca" in row and "#1·42…" not in row, row
+
+
+@pytest.mark.needs_captain
 def test_with_no_captain_the_section_says_how_to_start_one(tmp_path: Path, script: Script) -> None:
     seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
 

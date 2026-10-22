@@ -20,7 +20,14 @@ from pathlib import Path
 import pytest
 from rich.text import Text
 
-from aisquare.cli.ui.sidebar import GREEN, RED, YELLOW, agent_row_text, session_percent_text
+from aisquare.cli.ui.sidebar import (
+    BADGE_KEEP,
+    GREEN,
+    RED,
+    YELLOW,
+    agent_row_text,
+    session_percent_text,
+)
 from aisquare.cli.ui.views.agent import info_line
 from aisquare.models import ClaudeAccount, ClaudeUsage, FleetAgent, FleetAgentStatus, TeamSession
 from aisquare.services import claude_accounts as accounts_service
@@ -42,6 +49,7 @@ def _status(
     detail: str | None = None,
     exit_status: int | None = None,
     session: bool = True,
+    persona: str | None = None,
 ) -> FleetAgentStatus:
     agent = FleetAgent(
         id="agt_1",
@@ -55,6 +63,7 @@ def _status(
         created_at=NOW,
         exit_status=exit_status,
         account_slot=slot,
+        persona=persona,
     )
     team = TeamSession(
         id="sess-1",
@@ -230,6 +239,34 @@ def test_the_session_figure_is_green_then_yellow_from_70_then_red_from_90(
     assert _style_of(info_line(_status(), LABELS, {3: percent}), shown) == colour
     row = agent_row_text(_status(), percent)
     assert _style_of(row, shown) == colour and row.plain.rstrip().endswith(f"▶ #3·{shown}")
+
+
+def test_a_persona_badge_gives_way_before_the_session_figure_never_after() -> None:
+    """Review of #267's merge, M-F1: the badge came after a label and figure already sized to
+    fill the row, so the row's own ellipsis ate the ``%`` and the badge was never seen. Now
+    the label's padding gives way first, then the badge is cut, and dropped below
+    ``BADGE_KEEP`` cells; the row is never wider than its width, so the figure stays whole."""
+    for width in (25, 30, 44, 60):
+        for persona in ("skeptic", "a-very-long-persona-name"):
+            status = _status(
+                label="manager", role="manager", state="waiting", slot=1, persona=persona
+            )
+            row = agent_row_text(status, 42.0, width=width)
+            plain = row.plain
+            assert row.cell_len <= width, (width, plain)
+            assert plain.endswith("⏸ #1·42%") or "⏸ #1·42% · " in plain, (width, plain)
+            badge = plain.partition("#1·42%")[2]
+            assert badge.startswith(" · ") and len(badge) >= BADGE_KEEP, (width, plain)
+            if persona in badge:
+                assert plain.endswith(persona)
+            else:
+                assert badge.endswith("…"), (width, plain)
+    # A row with room for everything shows the whole badge, the label still padded.
+    wide = agent_row_text(_status(slot=1, persona="skeptic"), 42.0, width=60).plain
+    assert wide == "🔨 coder-auth    ▶ #1·42% · skeptic"
+    # Too narrow even for a cut badge: it is dropped, the figure is not.
+    tight = agent_row_text(_status(slot=1, persona="skeptic"), 42.0, width=25).plain
+    assert tight.rstrip().endswith("▶ #1·42%") and "·sk" not in tight and " · " not in tight
 
 
 def test_no_hash_tmux_command_role_task_or_working_directory_in_the_info_line() -> None:

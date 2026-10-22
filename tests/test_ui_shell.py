@@ -495,6 +495,44 @@ def test_an_agent_row_gives_way_in_its_label_never_in_its_account_and_session_us
     assert tester.endswith("💤 exited(3)") and "#" not in tester
 
 
+def as_persona(row: FleetAgentStatus, persona: str) -> FleetAgentStatus:
+    """``row`` spawned as ``persona`` (``FleetAgent.persona``)."""
+    return row.model_copy(update={"agent": row.agent.model_copy(update={"persona": persona})})
+
+
+@pytest.mark.parametrize("size", [(90, 40), (120, 40)])
+def test_a_persona_badge_never_takes_the_session_figure_off_an_agent_row(
+    tmp_path: Path, script: Script, size: tuple[int, int]
+) -> None:
+    """Review of #267's merge, M-F1: at the default sidebar width a row with both a slot and a
+    persona read ``⏸ #1·42…`` — the badge pushed the figure under the row's ellipsis and was
+    never seen itself. The owner's order: the label's padding gives way first, then the badge
+    is cut (``…``), and the chip and ``#<slot>·<pct>%`` are never cut."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [
+        as_persona(on_slot(status("prj_a", "manager", "manager", "waiting"), 1), "skeptic"),
+        as_persona(
+            on_slot(status("prj_a", "coder-auth", "coder", "working", minute=1), 3),
+            "a-very-long-persona-name",
+        ),
+    ]
+
+    async def go(pilot: Pilot[None]) -> tuple[int, list[str]]:
+        app = fleet_app(pilot)
+        await settle(app)
+        rows = [on_screen(row) for row in card_for(app, "prj_a").query(AgentRow)]
+        return app.sidebar.size.width, rows
+
+    width, rows = drive(go, headroom=session_use((1, 42.0), (3, 87.0)), size=size)
+    assert width == 30
+    manager, coder = (row.strip() for row in rows)
+    assert manager.startswith("🧭 manager") and "⏸ #1·42% · sk" in manager, manager
+    assert "#1·42…" not in manager
+    assert coder.startswith("🔨 coder-auth"), coder
+    assert coder.endswith("▶ #3·87%") or "▶ #3·87% · " in coder, coder
+    assert "a-very-long-persona-name" not in coder
+
+
 def test_the_session_use_rides_the_slow_headroom_read_never_the_tick(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:

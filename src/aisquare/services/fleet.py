@@ -46,7 +46,7 @@ from typing import Any, Literal
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import claude_sharing, codenames, harness, orchestrator, selfcli
+from aisquare.core import claude_sharing, codenames, harness, orchestrator, personas, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
@@ -459,6 +459,26 @@ def pasted_unsent(entered: PaneWrite, label: str, *, press: str, put: str = "pas
         f"{put} it at its prompt, but tmux could not press Enter ({entered.error}) — {press} "
         "to send it",
     )
+
+
+@dataclass(frozen=True)
+class AttachReceipt:
+    """What :func:`attach_persona` did (docs/plans/spawn-personas.md §4.7)."""
+
+    agent: FleetAgent
+    persona: str
+    replaced: str | None
+    """The persona the agent ran as before, when it was a different one."""
+    delivered: Literal["typed", "noted", "unsent", "maybe"]
+    """``typed`` into a waiting agent's pane, or ``noted``: an agent that could not be
+    typed into gets no note on the board in its place. The board's ``persona_attached``
+    line and its rows are the record, and the agent's own next prompt hands it the
+    briefing, for it alone. ``unsent`` and ``maybe`` as :class:`TellResult` says them —
+    at its prompt with its Enter refused, or tmux did not answer in time — neither to be
+    told again."""
+    how: str
+    """What happened, in words to show the caller: ``tell``'s own for a briefing that was
+    typed; otherwise why it was not, and how the persona reaches the agent."""
 
 
 @dataclass(frozen=True)
@@ -2429,6 +2449,17 @@ def _require_tmux(srv: TmuxServer) -> None:
         raise FleetUnavailable(str(exc)) from exc
 
 
+def role_ok(role: str) -> bool:
+    """The seat rule: whether ``spawn`` accepts ``role``.
+
+    A role is accepted when it is a fleet or harness role, a numbered seat of one
+    (``coder2``), or a role declared in ``team.profiles`` (``aisquare team bind``).
+    ``spawn`` refuses anything else, ``aisquare launch`` applies the same rule, and
+    the UI's New bind form asks it before saving a seat, so all three agree.
+    """
+    return _role_ok(role)
+
+
 def _role_ok(role: str) -> bool:
     """A fleet role, a harness role, or anything ``aisquare launch`` would accept."""
     if role in FLEET_ROLES or role in harness.ROLE_PROFILES:
@@ -2726,6 +2757,7 @@ def spawn(
     agent_args: Sequence[str] = (),
     spawned_by: str = "user",
     account: str | None = None,
+    persona: str | None = None,
     resume: ResumeSpec | None = None,
     size: tuple[int, int] | None = None,
     spec: LaunchSpec | None = None,
@@ -2781,6 +2813,7 @@ def spawn(
     ``AISQUARE_TEAM_HUB`` is set to this process's hub, or blank
     (:func:`orchestrator.window_team_hub`), a replacement's to the hub of the board it
     keeps, and ``AISQUARE_EXPLAINABILITY_TARGET`` to this process's value, or blank.
+
     Every variable set here is THIS window's: none reaches the tmux session's
     environment, so a later spawn sets its own account and opt-out rather than
     inheriting the first spawn's, and a window the operator opens by hand keeps
@@ -2788,6 +2821,10 @@ def spawn(
     ``account`` is resolved through the one account resolver (flag, role
     binding, project default, machine default — #145) and the chosen slot is
     both passed to ``launch`` as ``--account`` and recorded on the row.
+    ``persona`` — the flag, else ``[fleet.roles.<role>].persona``, else none — is
+    checked against the project's personas before anything starts, travels to the
+    window as ``launch --persona`` and is recorded on the row
+    (docs/plans/spawn-personas.md §3.7, §3.8).
 
     The row is written AFTER the window starts (``_record``: the window's
     ``pane_id`` is part of the row, and a label or cap race is settled against
@@ -2860,6 +2897,7 @@ def spawn(
     )
     _refuse_an_env_file_it_cannot_read(role)
     role_config = role_settings(role, config)
+    chosen_persona = _chosen_persona(project, role, persona, role_config, notes)
     # A server that exited at the socket path left its rows live, and the server this spawn
     # starts there would hold them for good: they read lost from now on, in every project,
     # decided while the stale file still says so. And a socket path a running server lost
@@ -3019,6 +3057,9 @@ def spawn(
         # through the resolver lands on the same account whatever its
         # environment says, and sets the account's variables there.
         flags += ["--account", str(choice.account.slot)]
+    if chosen_persona is not None:
+        # A flag, not an env var: the window's environment is the tmux SERVER's.
+        flags += ["--persona", chosen_persona]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
@@ -3030,6 +3071,12 @@ def spawn(
     # server's frozen environment would name (review of #170, D1b round 2, B1).
     # A replacement's is the hub of the board its row recorded (`_board_and_hub`).
     env[orchestrator.TEAM_HUB_ENV_VAR] = hub
+    # The persona as THIS spawn chose it, blank for none. ``launch`` exports
+    # AISQUARE_PERSONA only when it is given one, and the private tmux server keeps the
+    # environment of whoever started it: a manager launched with ``--persona skeptic``
+    # that started the server gave every persona-less seat on it, and every replay of
+    # one, its skeptic briefing (review of #201, F3).
+    env[orchestrator.PERSONA_ENV_VAR] = chosen_persona or ""
     # The deployment override too, for the same reason: the tab resolves the
     # key's deployment, and shows the target, with THIS process's variable,
     # and the window's `launch` has to trace where the tab says. Blank for
@@ -3194,6 +3241,7 @@ def spawn(
             branch=_spawned_on(cwd) if use_worktree else None,
             board=board,
             created_at=_now(),
+            persona=chosen_persona,
         )
         stored = _record(
             agent,
@@ -3237,6 +3285,44 @@ def spawn(
         failures=[*moved, *(typing if typed not in (None, "yes") else [])],
         shared=made,
     )
+
+
+def _chosen_persona(
+    project: ProjectInfo,
+    role: str,
+    flag: str | None,
+    role_config: FleetRoleSettings,
+    notes: list[str],
+) -> str | None:
+    """The spawn's persona — flag > ``[fleet.roles.<role>].persona`` > none — checked
+    against the project's personas before any window or worktree exists.
+
+    A name nothing resolves refuses with the known names; one that came from the
+    config names the key, so a stale default is found at the first spawn rather
+    than after a day of work (§3.7). ``persona-roles`` is advisory: a persona
+    written for other roles is a receipt note, never a refusal. A seat
+    (``coder2``) counts as its role.
+    """
+    # ``""`` is a flag too: a replay's "the row had none" (``_persona_for_replay``),
+    # which must not fall through to a role default adopted since the spawn.
+    name = flag if flag is not None else role_config.persona
+    if not name:
+        return None
+    try:
+        found = personas.resolve(name, project.root)
+    except personas.PersonaError as exc:
+        if flag is not None:
+            raise FleetError(exc.rule) from exc
+        raise FleetError(
+            f"[fleet.roles.{role}].persona = {name!r}: {exc.rule} — fix the key or pass --persona"
+        ) from exc
+    seat_of = re.sub(r"\d+$", "", role)
+    if found.roles and role not in found.roles and seat_of not in found.roles:
+        notes.append(
+            f"persona {name} is written for {', '.join(found.roles)}, not {role} — spawned "
+            "with it anyway"
+        )
+    return name
 
 
 def _launch_binary(
@@ -4449,6 +4535,7 @@ def tell(
     *,
     sender: str | None = None,
     agent_id: str | None = None,
+    note: bool = True,
 ) -> TellResult:
     """Type ``text`` into a WAITING agent; otherwise file it as a board note to it.
 
@@ -4481,7 +4568,19 @@ def tell(
     (:func:`pasted_unsent`) leaves it there, said so, and files no copy: the agent read the
     note at its next prompt, and the text left in its input box went out with whatever was
     typed there next (review of #259, round 10, 4/9).
+
+    ``note=False`` types or says why not and files nothing: what becomes of a message that
+    was not typed is then the caller's to decide. :func:`attach_persona` asks so, because
+    its message is a persona's body, which the board never carries (review of #240,
+    finding 7). Not typed, ``how`` is the reason alone.
     """
+
+    def noted(why: str) -> str:
+        """``why``, and the board note filed in the message's place, when there is one."""
+        if not note:
+            return why
+        return f"{why} — {_file_note(project, label, text, sender, agent=agent)}"
+
     with store_session() as store:
         agent = _live_agent(store, project, label, agent_id=agent_id)
     status = status_of(agent)
@@ -4492,7 +4591,6 @@ def tell(
         except TmuxError:
             facts = None  # tmux that cannot answer is not a pane to type into either
         if not _its_agent(agent, facts):
-            how = _file_note(project, label, text, sender, agent=agent)
             if facts is not None and _outlived(agent, facts.server_started):
                 why = (
                     "it reads as waiting, but the tmux server at its socket is not the one it "
@@ -4503,7 +4601,7 @@ def tell(
                     "it reads as waiting, but its pane is not running the agent yet (the "
                     "launcher or a shell is in the foreground)"
                 )
-            return TellResult("no", f"{why} — {how}")
+            return TellResult("no", noted(why))
         told = type_then_enter(
             srv,
             agent.pane_id,
@@ -4520,6 +4618,9 @@ def tell(
             # could not be filed too: it was the note's error, `delivered=no` (round 11, 6/13).
             # Whatever the note raised: a store locked past its busy timeout is no `FleetError`
             # (round 12, 3/9), and the note is a courtesy once the paste may be on its way.
+            if not note:
+                late = told.late(label, then=" at its prompt, unsent", again="type into it")
+                return TellResult("maybe", late)
             try:
                 how = _file_note(project, label, text, sender, agent=agent)
             except Exception as exc:
@@ -4527,10 +4628,8 @@ def tell(
                 return TellResult("maybe", f"{late}. It was not filed as a board note: {exc}")
             late = told.late(label, then=" at its prompt as well, unsent", again="type into it")
             return TellResult("maybe", f"{how}, and {late}")
-        how = _file_note(project, label, text, sender, agent=agent)
-        return TellResult("no", f"tmux could not type it ({told.error}) — {how}")
-    how = _file_note(project, label, text, sender, agent=agent)
-    return TellResult("no", f"it is {status.state} — {how}")
+        return TellResult("no", noted(f"tmux could not type it ({told.error})"))
+    return TellResult("no", noted(f"it is {status.state}"))
 
 
 def _its_agent(agent: FleetAgent, facts: PaneFacts | None) -> bool:
@@ -4589,6 +4688,93 @@ def _file_note(
     except KeyError as exc:
         raise FleetError(f"unknown sender session {sender!r}") from exc
     return f"filed as board note #{event.seq} to {label}"
+
+
+def attach_persona(
+    project: ProjectInfo, label: str, name: str, *, sender: str | None = None
+) -> AttachReceipt:
+    """Give a RUNNING agent a persona (docs/plans/spawn-personas.md §4.7).
+
+    The persona is resolved first — an unknown name lists the known ones before
+    the store or tmux is touched — then the live agent. One ``persona_attached``
+    board event is written (which also refuses an unknown ``sender`` before
+    anything changes); the ``fleet_agent`` row and, when the agent has joined,
+    its ``team_session`` row record the name. The rows are what make it last: the
+    session-start hook reads the fleet row, so a ``/clear`` or a restart briefs
+    the agent with it again.
+
+    The briefing itself is only ever TYPED, into an agent that is waiting, by
+    ``tell``'s own readiness test (``tell(..., note=False)``). For any other agent
+    nothing is filed in its place. ``tell``'s board note would be the whole fenced
+    body and its guard sentence as an ordinary ``note``: every OTHER session read
+    it in its next delta as if it were addressed to it, ``aisquare board`` and a
+    teammate's session-start briefing showed it, and the distiller wrote it into
+    the project brain (review of #240, finding 7). The board names the persona
+    and never carries its body (§3.1). So such an agent is OWED the briefing
+    (``team.owe_persona_briefing``, a marker under its row): its own next prompt's
+    hook hands it the same preface and block, once and to it alone, unless a
+    session start briefs it first. The receipt says that instead of a delivery.
+    """
+    try:
+        persona = personas.resolve(name, project.root)
+    except personas.PersonaError as exc:
+        raise FleetError(exc.rule) from exc
+    with store_session() as store:
+        agent = _live_agent(store, project, label)
+    replaced = agent.persona if agent.persona and agent.persona != persona.name else None
+    team = _team()
+    note = f"persona {persona.name} attached to {label}"
+    try:
+        # On the board the agent reads, as its spawn recorded it (``_board_of_row``), the
+        # rule ``tell``'s note keeps: resolved from the caller, under a hub the line went to
+        # whichever board the caller resolved, and a hub nobody added (with ``[projects]
+        # capture`` off) raised ``NotAdded`` out of the command (review of #201, F4).
+        team.add_note(
+            f"{note} (replaces {replaced})" if replaced else note,
+            session_ref=sender,
+            to_role=label,
+            kind="persona_attached",
+            cwd=project.root,
+            board_id=_board_of_row(agent),
+        )
+    except (team.TeamDisabledError, project_service.NotAdded) as exc:
+        raise FleetError(f"cannot record the attachment on the board: {exc}") from exc
+    except KeyError as exc:
+        raise FleetError(f"unknown sender session {sender!r}") from exc
+    with store_session() as store:
+        agent = store.set_fleet_agent_persona(agent.id, persona.name)
+        if agent.session_id is not None and store.get_session(agent.session_id) is not None:
+            store.set_session_persona(agent.session_id, persona.name)
+        # What an earlier attach still owes is superseded, and BEFORE anything is typed:
+        # the prompt that types this briefing runs the very hook that hands that one over.
+        # The agent never read what was owed, so the preface names the persona IT ran as.
+        told = team.settle_persona_briefing(store, agent.id, replaced=replaced)
+    told = told if told != persona.name else None
+    preface = team.persona_attached_preface(persona.name, told)
+    # Pinned to the row the attachment was recorded on: a replacement that took the
+    # label meanwhile is refused, not briefed with a persona its row does not carry.
+    typed = tell(
+        project,
+        label,
+        "\n".join([preface, *personas.briefing(persona)]),
+        sender=sender,
+        agent_id=agent.id,
+        note=False,
+    )
+    how = typed.how
+    if typed.typed == "no":
+        with store_session() as store:
+            team.owe_persona_briefing(store, agent.id, replaced=told)
+        how = (
+            f"{how}, so the briefing was not typed: {persona.name} is recorded and reaches it "
+            "with its next prompt, for it alone; the board carries the name only"
+        )
+    delivered: Literal["typed", "noted", "unsent", "maybe"] = (
+        "typed" if typed.typed == "yes" else "noted" if typed.typed == "no" else typed.typed
+    )
+    return AttachReceipt(
+        agent=agent, persona=persona.name, replaced=replaced, delivered=delivered, how=how
+    )
 
 
 def _note_board(store: ContextStore, project: ProjectInfo, label: str) -> str | None:
@@ -6623,6 +6809,7 @@ def _respawn(
         size=size,
         permission_mode=permission_mode,
         spec=agent.launch_spec,
+        persona=_persona_for_replay(project, agent, notes),
         # Only Claude Code's hooks write a board session (`agents connect`
         # installs them for Claude Code alone): a row joined to one is Claude
         # Code whatever its binary is called, resumed or `--fresh`.
@@ -6651,6 +6838,30 @@ def _respawn(
         )
     notes.extend(receipt.notes)
     return receipt, resume is not None, notes
+
+
+def _persona_for_replay(project: ProjectInfo, agent: FleetAgent, notes: list[str]) -> str:
+    """The persona a replay runs as: the ROW's, exactly — the one it was spawned with or
+    given since (``attach_persona``), never the role's default of the day.
+
+    A restart is the same agent (#144), and the row is the record of how it ran
+    (docs/plans/spawn-personas.md §3.8). So a row with no persona replays with
+    none — the empty string, which :func:`_chosen_persona` reads as "none was
+    asked" rather than as "ask the role" — and a row whose persona no longer
+    resolves (deleted, or renamed since) starts without it and the receipt says
+    so: refusing would leave the agent stopped over a prompt it can run without,
+    the failure :func:`_refuse_a_replay_that_cannot_start` exists to prevent.
+    """
+    if not agent.persona:
+        return ""
+    try:
+        personas.resolve(agent.persona, project.root)
+    except personas.PersonaError as exc:
+        notes.append(
+            f"persona {agent.persona} no longer resolves ({exc.rule}) — started without it"
+        )
+        return ""
+    return agent.persona
 
 
 def _refuse_a_replay_that_cannot_start(

@@ -51,6 +51,13 @@ dependencies = [
   # cli/watch.py and cli/ui/ lean on 8.2.x internals. Imported lazily, only by
   # the UI entry, so the hook path pays nothing for it.
   "textual>=8.2,<9",
+  # A persona IS a Claude Code skill directory (docs/plans/spawn-personas.md
+  # §3.3), and a skill's frontmatter is full YAML — block scalars, `metadata`
+  # maps, lists. A flat-subset parser would refuse valid skills, which is the
+  # one thing an interchange format may not do. safe_load only, on a frontmatter
+  # capped at 16 KB, imported inside core/personas.py's parser so the hook path
+  # and `aisquare status` pay nothing for it.
+  "pyyaml>=6.0",
   # Windows ships no IANA time zone database, and `zoneinfo` falls back to this
   # package for one. Without it `ZoneInfo("America/Toronto")` raises there, so a
   # limit message's named zone was dropped for the offset in force NOW, and a
@@ -77,6 +84,14 @@ serve = [
   # guard turns an out-of-range install into a sentence, but only the pin
   # keeps one from being resolved in the first place.
   "mcp>=2.1,<3",
+]
+llm = [
+  # `aisquare persona import`'s api engine (docs/plans/spawn-personas.md §3.9):
+  # the official SDK, imported inside the engine function only, so a base
+  # install never loads it and a machine without it falls through to the
+  # manager engine or to a refusal that names this extra. >=1 is the major
+  # whose `messages.parse` structured-output helper the engine calls.
+  "anthropic>=1",
 ]
 explainability = [
   # This extra installs a distribution that shares our top-level package
@@ -162,6 +177,12 @@ dev = [
   # py.typed and mypy runs strict over tests.
   "jsonschema>=4.18",
   "types-jsonschema>=4.18",
+  # PyYAML ships no py.typed; mypy runs strict over src and tests.
+  "types-PyYAML>=6.0",
+  # The `llm` extra's SDK, so mypy --strict checks the persona import's api engine
+  # against the real `messages.parse` signature (the `mcp`/`serve` precedent).
+  # Tests never call it: they install a fake `anthropic` module.
+  "anthropic>=1",
   # The remote extra's one addition, so the dev env can run tests/test_remote_server.py
   # (starlette + uvicorn already arrive through mcp above).
   "websockets>=12",
@@ -173,7 +194,8 @@ dev = [
   "cryptography>=42",
   # tests/test_remote_page.py builds the sdist and the wheel from it, to prove the
   # bundled page ships; without the backend in the env it skipped in every CI job.
-  # Same floor as build-system.
+  # tests/test_packaging.py builds the wheel too, to assert the bundled personas'
+  # SKILL.md files ship in it. Same floor as build-system.
   "hatchling>=1.30.1",
 ]
 

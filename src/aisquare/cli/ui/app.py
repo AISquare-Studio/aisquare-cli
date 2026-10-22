@@ -57,6 +57,7 @@ from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState, WorkType
 from textual.worker_manager import WorkerManager
 
+from aisquare.cli.ui.attach import NewAccountRequested
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.board import BoardPanel, board_help
 from aisquare.cli.ui.divider import Divider, floor_of
@@ -92,8 +93,11 @@ from aisquare.cli.ui.sidebar import (
     SettingsSelected,
     Sidebar,
     SpawnAgent,
+    StopAgent,
     agent_name,
 )
+from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
+from aisquare.cli.ui.stop import StopAgentScreen
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.ticks import while_running
@@ -115,6 +119,7 @@ from aisquare.models import (
     CheckStatus,
     ClaudeAccount,
     DoctorCheck,
+    FleetAgent,
     FleetAgentStatus,
     HeadroomSummary,
     ProjectForgetReport,
@@ -291,6 +296,7 @@ class HelpScreen(ModalScreen[None]):
             *(self.MAC_COPY_KEYS if mac_keyboard() else ()),
             ("divider", "drag the line beside the sidebar to resize it; double-click puts it back"),
             ("> < =", "from the sidebar: widen, narrow, reset the divider"),
+            ("x", "from the sidebar: stop the selected agent (asks first)"),
             ("t", "themes (applied live, autosaved)"),
             ("R", "remote control — the fleet on your phone: link, QR, password, devices"),
             ("r", "refresh now"),
@@ -1710,18 +1716,82 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             await view.remove()
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
-        # The Spawn dialog is Phase 7 (§9); until it lands the CLI is the way.
+        """The sidebar's spawn-agent row: the Spawn dialog for THAT row's project."""
         project = self.snapshot.project(event.project_id) if self.snapshot else None
-        spawn = (
-            f"{project_service.fleet_command('spawn', project)} <role>"
-            if project is not None
-            else "`fleet spawn` with the project"
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=4)
+            return
+        self.push_screen(
+            SpawnDialog(project, accounts=self._accounts), callback=self.spawn_finished
         )
+
+    def spawn_finished(self, receipt: fleet_service.SpawnReceipt | None) -> None:
+        """The dialog closed: toast the receipt and its notes, then show the new agent.
+
+        The Project view's Start-manager toasts, word for word. ``markup=False``
+        on every one: a note can carry a path or a branch with brackets in it.
+        """
+        if receipt is None:
+            return
+        agent = receipt.agent
         self.notify(
-            f"the spawn dialog is not built yet — from a terminal: {spawn}",
+            f"✓ spawned {agent.label} ({agent.id}) → {receipt.tmux_session} {agent.pane_id}",
             timeout=6,
             markup=False,
         )
+        for note in receipt.notes:
+            self.notify(note, severity="warning", timeout=8, markup=False)
+        self.refresh_data()
+        self.post_message(AgentSelected(agent.project_id, agent.id))
+
+    def on_stop_agent(self, event: StopAgent) -> None:
+        """The agent view's Stop button, or ``x`` on the selected row: one question first.
+
+        A frame whose read of the agent's project failed lists none of its agents
+        (``refresh_data`` fails open with the cost shown), and Stop was then refused as
+        "no longer listed" for an agent that still ran (review of #240, "also confirmed":
+        Stop after a failed refresh). Its open view still holds the status it last
+        showed, and the dialog asks the service about that row, which decides.
+        """
+        project = self.snapshot.project(event.project_id) if self.snapshot else None
+        status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
+        if (
+            status is None
+            and self.snapshot is not None
+            and event.project_id in self.snapshot.notices
+        ):
+            view = self.current_view()
+            if isinstance(view, AgentView) and view.status.agent.id == event.agent_id:
+                status = view.status
+        if project is None or status is None:
+            self.notify("that agent is no longer listed", severity="warning", timeout=4)
+            return
+        self.push_screen(StopAgentScreen(project, status), callback=self.stop_finished)
+
+    def stop_finished(self, agent: FleetAgent | None) -> None:
+        """The dialog closed: toast the ended row, re-read, and leave the view it stopped.
+
+        ``None`` is Cancel, or a refusal the dialog is still showing — nothing
+        happened, so nothing is said. Its own view would otherwise keep polling
+        a pane that is gone, so the shell goes back to the project the way a
+        click on the project's title does.
+        """
+        if agent is None:
+            return
+        self.notify(f"✓ stopped {agent.label} ({agent.id})", timeout=6, markup=False)
+        self.refresh_data()
+        view = self.current_view()
+        if isinstance(view, AgentView) and view.status.agent.id == agent.id:
+            self.post_message(ProjectSelected(agent.project_id))
+
+    def on_spawn_completed(self, event: SpawnCompleted) -> None:
+        """A Spawn dialog opened from a persona's *Attach to new*: the same receipt path."""
+        self.spawn_finished(event.receipt)
+
+    async def on_new_account_requested(self, event: NewAccountRequested) -> None:
+        """The picker's *+ New account*: the Accounts page, its add-account flow started."""
+        await self.on_accounts_selected(AccountsSelected())
+        self.query_one("#accounts", AccountsView).begin_claude_sign_in(None)
 
     async def on_settings_selected(self, event: SettingsSelected) -> None:
         """*⚙ Settings*: the hub, with the keyboard on its first link when it came from the
@@ -2025,6 +2095,7 @@ def _writing_workers() -> dict[str, str]:
     (``FleetApp._holding_the_quit``), so a writer missing here is still never cut off;
     listed, it is refused with its name, before asq stops starting its reads.
     """
+    from aisquare.cli.ui import persona_dialogs, spawn, stop
     from aisquare.cli.ui.views import (
         accounts,
         agent,
@@ -2032,6 +2103,7 @@ def _writing_workers() -> dict[str, str]:
         explainability,
         fleet_bulk,
         onboard,
+        personas_tab,
         project,
         settings,
         welcome,
@@ -2046,7 +2118,10 @@ def _writing_workers() -> dict[str, str]:
         welcome.worker_name("coders"): "the coders' start",
         project.SPAWN_WORKER: "a manager start",
         settings.NICKNAME_WORKER: "a project's rename",
-        agent.STOP_WORKER: "an agent's stop",
+        stop.STOP_WORKER: "an agent's stop",
+        spawn.SPAWN_WORKER: "an agent's spawn",
+        persona_dialogs.IMPORT_WORKER: "a persona's import",
+        personas_tab.ATTACH_WORKER: "a persona's attachment",
         agent.RESTART_WORKER: "an agent's restart",
         fleet_bulk.BULK_WORKER: "Settings ▸ Fleet's restart or stop of every agent",
         explainability.SAVE_WORKER: "Explainability's setup",
@@ -2070,7 +2145,7 @@ def _waited_reads() -> dict[str, str]:
     ``shell-accounts``, ``welcome-validate`` (round 24 of #257). tests/test_ui_writing_workers.py
     checks that every read the UI starts is here.
     """
-    from aisquare.cli.ui import board
+    from aisquare.cli.ui import attach, board, persona_dialogs, spawn
     from aisquare.cli.ui.views import (
         accounts,
         agent,
@@ -2098,6 +2173,9 @@ def _waited_reads() -> dict[str, str]:
         welcome.worker_name("look"): "Welcome's checks",
         welcome.worker_name("candidates"): "Welcome's folder list",
         welcome.worker_name("validate"): "Welcome's folder check",
+        spawn.ACCOUNTS_WORKER: "the Spawn dialog's accounts",
+        attach.TARGETS_WORKER: "the persona target picker's list",
+        persona_dialogs.SKILLS_WORKER: "the Import dialog's skill list",
     }
 
 

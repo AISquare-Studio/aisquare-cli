@@ -64,6 +64,7 @@ from aisquare.cli.ui.views import project as project_view_module
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
+from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core import paths
@@ -349,8 +350,9 @@ def _config_toml() -> dict[str, Any]:
 # --- the tabs -----------------------------------------------------------------------------
 
 
-def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo) -> None:
-    """Manager, Board, AISquare, Settings: no Doctor tab — the doctor is the app's page."""
+def test_project_view_has_the_five_tabs_with_their_widgets(project: ProjectInfo) -> None:
+    """Manager, Board, AISquare, Settings, Personas: no Doctor tab — the doctor is the app's
+    page."""
 
     async def scenario(
         pilot: Pilot[None], host: Host
@@ -361,6 +363,7 @@ def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo)
             ("#tab-board", BoardPanel),
             ("#tab-explainability", ExplainabilityView),
             ("#tab-settings", SettingsView),
+            ("#tab-personas", PersonasTab),
         ):
             assert view.query_one(pane_id).query_one(widget_type)
         ids = [pane.id or "" for pane in view.query("TabPane")]
@@ -383,10 +386,10 @@ def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo)
         )
 
     count, ids, active, labels, first_id, doctors, heading = drive(project, scenario)
-    assert count == 4
+    assert count == 5
     assert ids == list(ProjectView.TAB_IDS)
     assert active == "tab-manager"  # the manager first: that is where the goal goes
-    assert labels == ["Manager", "Board", "AISquare", "Settings"]
+    assert labels == ["Manager", "Board", "AISquare", "Settings", "Personas"]
     assert doctors == 0
     # The AISquare tab opens on an "Explainability" heading, above the status block as before.
     assert first_id == "explainability-heading:bold" and heading == "Explainability"

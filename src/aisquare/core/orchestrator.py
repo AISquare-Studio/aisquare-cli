@@ -53,6 +53,21 @@ def env_role() -> str | None:
     return role or None
 
 
+PERSONA_ENV_VAR = "AISQUARE_PERSONA"
+"""The persona a session was launched as (``launch --persona``); blank is none."""
+
+
+def env_persona() -> str | None:
+    """The persona this session was launched as, if any (``AISQUARE_PERSONA``).
+
+    What ``launch --persona`` exports and the session-start hook reads — not a
+    config input, so a hand-typed ``AISQUARE_PERSONA=skeptic aisquare launch
+    coder`` works with no fleet at all (docs/plans/spawn-personas.md §3.8).
+    """
+    persona = os.environ.get(PERSONA_ENV_VAR, "").strip()
+    return persona or None
+
+
 FLEET_AGENT_ENV_VAR = "AISQUARE_FLEET_AGENT"
 """The variable that carries a fleet row's id into its window — an IDENTITY,
 which is why ``fleet spawn`` keeps it out of the tmux session environment."""

@@ -6,6 +6,211 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **The documented-commands guard no longer fails the checkout that runs the
+  fleet.** `test_the_document_list_has_not_gone_stale` walks the whole
+  repository for markdown with commands in a fenced block, and a root checkout
+  that hosts coder worktrees under `.aisquare-worktrees/` holds one full copy of
+  every document per agent — so `make check` from the root failed, reporting
+  each worktree's README.md and docs pages as unlisted copies of themselves,
+  while every real document passed (measured on `rc/hackathon-v1` with two
+  coder worktrees; from a clean checkout or inside a worktree it passed). The
+  sweep now never enters the fleet's `worktree_dir` (the `[fleet]` default) or
+  any directory holding a `.git` *file* — a linked worktree wherever it was put
+  — the way `core/snapshot.py` already ignores `**/.aisquare-worktrees/**`. It
+  prunes as it walks, so it no longer reads every agent's `.venv` to throw the
+  result away. The guard's rules and its document list are unchanged, and the
+  positive control stays: the same fenced page at the repo's own level is still
+  reported.
+
+### Added
+- **Stop an agent from `asq`.** The agent view's header gains a compact **Stop**
+  button, and `x` with the sidebar focused stops the selected agent — both open
+  one dialog (*Stop* · *Force* · *Cancel*) over `services.fleet.stop`, the same
+  command `aisquare fleet stop` runs, `--force` included. Stop is offered while
+  the agent has a process and on a **💤 exited** row — there it removes the dead
+  window tmux kept for the last screen and the row leaves the listing (#138), the
+  question says so and offers no *Force* — and **both controls ask the same
+  rule**, `sidebar.STOP_STATES`, built on the `ALIVE_STATES` the card's "agents
+  alive" chip already counts by, so a lost row offers none, by button or by key.
+  Beside Stop sits the release train's **Restart** (#138). The call runs in a thread worker with the buttons disabled; a refusal —
+  including the deliberate one where tmux cannot confirm the pane died and the
+  row is left live — stays in the dialog as its own text, with the agent
+  untouched, rather than closing over a stop that did not happen. A stop that
+  worked toasts `✓ stopped <label> (<id>)`, re-reads the fleet, and leaves the
+  stopped agent's view for the project's.
+- **Attach a persona in two steps, from `asq`.** The Personas tab's *Attach to
+  existing* / *Attach to new* open one **target picker**: this project's running
+  **Agents** (each with the persona it runs), the **Binds** `aisquare team bind`
+  pinned (with the binary and the account each environment points at) and the
+  Claude **Accounts** — Agents first for "existing", Binds then Accounts for
+  "new", every section selectable either way, and a filter across all three.
+  Choosing an agent confirms ("it replaces mentor") and calls
+  `fleet_service.attach_persona` in a thread worker; the toast says whether the
+  briefing was `typed` or `noted`. Choosing a bind or an account opens the Spawn
+  dialog preset with the seat, its binary or the slot, and the persona. **+ New
+  bind** is `team bind` as a form, saved through `services.settings.bind_role`,
+  the seat checked by the rule `spawn` applies and the binary by `PATH`, an
+  account filling `CLAUDE_CONFIG_DIR`/`CLAUDE_CODE_TMPDIR` as `launch --account`
+  would; the list re-reads with the new bind selected. **+ New account** opens
+  the Accounts page's own add-account flow. The Spawn dialog's *Pick…* opens the
+  same picker in "new" order and fills its role, binary or account without losing
+  what was typed, and *Import…* beside its Persona field imports a persona and
+  selects it. Measured headless in `tests/test_ui_personas.py` and
+  `tests/test_ui_spawn.py`, with recorders for `list_agents`, `attach_persona`,
+  `spawn`, `bind_role` and the accounts read.
+- **Attach a persona to a running agent.** `aisquare persona attach <name> --to
+  <label>` gives a fleet agent that is already running a persona: the name is
+  checked first (an unknown one lists the known names before anything is
+  touched), one `persona_attached` line goes on the board, the agent's
+  `fleet_agent` row — and its board session, once joined — records it, and the
+  briefing is typed into an agent that is waiting, by `fleet tell`'s readiness
+  test; a busy one is handed it privately with its own next prompt, and the board
+  carries only the `persona_attached` line, never the body. The receipt says
+  `typed` or `noted` (`--json` carries `delivered`). Replacing a persona tells the agent which one it
+  replaces. The session-start hook now asks for the persona on the fleet row
+  `AISQUARE_FLEET_AGENT` names, else `AISQUARE_PERSONA`, else keeps the session's
+  own. So an attached persona is briefed again after a `/clear` or a restart,
+  even for an agent spawned with `--persona`, and a session with no persona
+  anywhere still sees byte-identical text.
+- **Import anything as a persona.** `aisquare persona import` now converts a
+  source that is not already a skill — plain text, another tool's JSON or YAML
+  persona, a page over `https://` — with an LLM: the fleet's own Claude Code,
+  headless, under the manager role's binding first; then the Anthropic API
+  through the official SDK (new optional extra `aisquare-cli[llm]`); then a
+  refusal naming both fixes. The answer is structured, held to the same rules
+  as a copied skill (one retry with the failed rule), kept as a draft under
+  `$AISQUARE_HOME/personas/.drafts/` before anything else, shown and confirmed
+  (`--yes` skips; `--json` or no terminal keeps the draft and exits
+  `needs_confirmation` with its path), and saved with engine, model and
+  `condensed` in `.persona.json`. New flags `--llm/--no-llm`, `--condense`,
+  `--engine`, `--model`, `--yes`; new config `[persona.import]` (`engine =
+  "auto" | "manager" | "api" | "off"`, `api_model`). The headless run is a ruled
+  spawn seam that strips the tracing identity, and `anthropic` and the engine
+  module are imported inside functions, so the CLI's startup and every hook load
+  neither. Saving config now keeps a newer build's unknown key inside a section
+  written under an alias, such as `[persona.import]`.
+- **The Spawn dialog asks as whom.** After who runs the agent — Role (now with
+  *Pick…*), Account, Binary — the dialog has a **Persona** select: `(none)` plus
+  this project's personas with their layer, the role's
+  `[fleet.roles.<role>].persona` preselected and followed as the role changes
+  until you pick one, and the persona's description under the field. It sends
+  `persona=None` while it shows the role's default, the name once one is chosen,
+  and `""` for an explicit `(none)` over a role that has a default — which
+  `fleet spawn` reads as "no persona", so the choice beats the config. The dialog
+  takes presets, `SpawnDialog(project, persona=, role=, binary=, account=)`,
+  applied at compose so the persona-first flow can open it filled in; a preset
+  seat such as `coder2` or an account slot not read yet still shows. *Pick…* posts
+  `PickTargetRequested`, which the dialog answers by opening the target picker.
+  *⚙ Settings ▸ App settings* gains a persona per role, saved through `save_config`
+  and re-read. It lists the personas every project can resolve (the user's and the
+  bundled ones, never one project's own, since the default is machine-wide), and
+  shows a configured name the list lacks as `<name> (custom)`. A
+  sidebar agent row carries a dim `· <persona>` from its fleet row or, failing that,
+  its session. Measured in `tests/test_ui_spawn.py` (the recorder's `persona`,
+  `role`, `account` and `binary`) and `tests/test_ui_app_settings.py` (the bytes of
+  `[fleet.roles.coder] persona = "skeptic"` in `config.toml`).
+- **Run an agent as a persona.** `aisquare launch <role> --persona NAME` and
+  `aisquare fleet spawn <role> --persona NAME` — default: the role's new
+  `[fleet.roles.<role>].persona` — start an agent as someone. The name is checked
+  before anything starts (an unknown one is refused with the known names; a stale
+  config default names its key) and travels as `AISQUARE_PERSONA`, never the body.
+  The SessionStart hook records it on the board row (store v33:
+  `team_session.persona`, `fleet_agent.persona`) and adds the persona's block to
+  the team briefing once, after the role cycle and the lane rule. A session
+  without a persona gets byte-identical text — pinned against the base in
+  `tests/test_persona_briefing.py` — the per-prompt delta and `aisquare board`
+  carry no persona text, and a persona that can no longer be loaded costs one
+  line, never the team block. The board's session line reads `persona:<name>`,
+  `fleet ls` shows `· <name>`, a spawn receipt ends `· persona <name>`, and a
+  persona written for other roles is a receipt note, not a refusal. Found on
+  the way: saving config dropped an unknown key INSIDE a `[fleet.roles.<role>]`
+  or `[explainability.targets.<name>]` entry, because those tables were
+  replaced wholesale; from this build on each kept entry is merged field by
+  field, so a later build's role key survives this one.
+- **A Personas tab in the Project view.** Every persona the project can use —
+  project, user and bundled layers — in one searchable table with the layer,
+  description, roles and the `⇧ shadows` / `✗ invalid` marks, and beside it a
+  preview that is byte-for-byte the block an agent is briefed with, followed by
+  the directory, supporting files, `.persona.json` provenance and warnings. The
+  selected persona can be edited in place (a `TextArea` over the whole
+  `SKILL.md`, re-parsed as you type, *Save* only while it parses, saved through
+  `services.personas.save` — the writer `persona edit` uses — so a refused edit
+  keeps the old bytes), exported to Claude Code's personal or project skills or
+  a directory, removed after one question naming the directory, and validated.
+  Bundled rows open read-only with *Save as…* into a layer. **+ Import…** is
+  `persona import` as a form, run in a thread worker over the same
+  `import_source` the CLI calls: its `progress` lines appear under the form and
+  its `confirm` opens a draft-review modal from the worker
+  (`call_from_thread(push_screen_wait, …)`, verified on Textual 8.2.8 first), so
+  the LLM import path runs through the same form. **+ New** scaffolds through
+  `services.personas.new` and opens the editor on it. *Attach to existing* /
+  *Attach to new* post `AttachRequested`, which the tab answers by opening the
+  target picker. Measured headless in `tests/test_ui_personas.py`: real catalogues
+  written into the isolated home and a `git init` repository, every write and
+  import a recorder, assertions on the keywords received, the rows, the preview
+  text, and a `SKILL.md` left byte-identical when only the recorder saved.
+- **Personas — and a persona is a Claude Code skill.** `aisquare persona`
+  (`list`, `show`, `new`, `edit`, `rm`, `validate`, `import`, `export`, every
+  reporting verb with `--json`) manages how an agent works — a skeptic, a mentor,
+  a minimalist — as `<name>/SKILL.md` directories in three layers: the project
+  (`<repo>/.aisquare/personas`), the user (`$AISQUARE_HOME/personas`) and four
+  bundled ones (`skeptic`, `mentor`, `minimalist`, `careful`), the higher layer
+  winning and `list` saying what it shadows. The same directory is `/name` in
+  Claude Code: `persona import` copies a skill in byte for byte (a skill
+  directory, a `.claude/agents` file, a Cursor rule, stdin, or a skill by name
+  from `import --list`) with a `.persona.json` recording source and sha256, and
+  `persona export --skill --user|--project` copies one out into Claude Code's
+  skills. A round trip is byte-identical. `persona show` prints exactly the
+  block an agent will be briefed with: the body, sanitised, fenced so it cannot
+  close its own block, and one sentence saying a persona never overrides a
+  role's cycle, the lane rule, a task's contract or evidence. A body over 4,000
+  characters warns and over 12,000 is refused; a directory that does not load is
+  listed, never fatal. Something that is not a skill goes through the LLM import
+  path; `--no-llm` refuses it as `not_recognised`. **PyYAML** is now a core
+  dependency — a skill's frontmatter is full YAML and an interchange format may
+  not refuse a valid one — read with `safe_load` only and imported inside the
+  parser: `python -X importtime -c "import aisquare.cli.app"` shows no `yaml`.
+  `launch` and `fleet spawn` run an agent as a persona with `--persona`. Plan:
+  `docs/plans/spawn-personas.md`; guide: `docs/personas.md`.
+- **The Spawn dialog, in `asq`.** `＋ spawn agent` under a project used to
+  toast "the spawn dialog is not built yet"; it now opens a form over the same
+  `services.fleet.spawn` the CLI runs, headed with the project's name and
+  codename so a spawn from the wrong row is visible before it happens. Role
+  (the fleet's roles plus every `team bind` role; `manager` greyed out while
+  one runs), label (prefilled the way `fleet spawn` picks it, re-prefilled when
+  a task is picked unless you typed one, 🎲 for `<role>-<adjective>-<animal>`,
+  live-checked against the label rule), task (the project's open tasks),
+  worktree (disabled with "not a git repository" outside one), permission mode,
+  account (read in a worker so the dialog opens at once), binary, extra agent
+  args (`shlex`-split, a quoting error shown inline) and a first prompt. A field
+  left as it opened is sent as `None` — the role's default, exactly what an
+  omitted flag means — so the service resolves it from the config it reads at
+  spawn time; the fields that show a role default follow the role until you
+  change them. The spawn runs off the UI thread: a `FleetError` stays in the
+  dialog with its reason and *Spawn* re-enables, anything else shows its class
+  name instead of taking the app down, and success toasts the receipt plus each
+  note and opens the new agent's pane. A started spawn cannot be taken back, so
+  `Esc` waits for its answer rather than pretending to cancel it. Measured
+  headless in `tests/test_ui_spawn.py` with a recorder in place of
+  `fleet_service.spawn` — the keywords it received are the assertion — and a
+  tmux guard that fails any test addressing a socket other than its own. Found
+  on the way: a private `_running` on a Textual screen shadows the message
+  pump's own flag and silently leaves every button of the screen dead; the
+  dialog's flag is `_spawning`.
+
+### Changed
+- The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
+  adds the two persona columns, `team_session.persona` (the persona a session was
+  launched as) and `fleet_agent.persona` (the one an agent was spawned with or given
+  since). Both are nullable, and a row from before them reads as no persona. The step
+  is an empty script with the columns in the presence pass's products, so each column
+  is added only where it is absent. A store an earlier persona build stamped v15, or
+  that the captain RC carried to v24, already holds them, and it converges through the
+  presence pass (`_converge_by_presence`), which re-applies any step from v15 on whose
+  products a store lacks. Every such store reaches v33 with its rows, as pinned in
+  `tests/test_store.py`, and 0.8.2 still opens a v33 store.
+
 ## [0.8.2] - 2026-10-19
 
 **A hotfix: a copy in `asq` reaches the clipboard on macOS. Every agent can now be

@@ -1,7 +1,7 @@
 """App settings: the machine-wide settings, whatever project is open.
 
 Everything ``~/.aisquare/config.toml`` holds that is not about one project:
-permission mode, worktree and account per role, the fleet's escape key, agent
+permission mode, worktree, persona and account per role, the fleet's escape key, agent
 cap, worktree root and native-teams switch, how launches pick an account,
 what a usage limit does and what the accounts share. The project's own
 Settings tab keeps what IS the project's (its nickname). Written through
@@ -23,6 +23,13 @@ value here is the ACCOUNT per role (#145): the select beside each role writes
 --account`` writes — the middle rung of the account ladder a launch walks
 (``--account`` > role binding > project default > machine default).
 
+The persona per role (docs/plans/spawn-personas.md §3.8, P4) writes
+``[fleet.roles.<role>].persona``, a machine-wide default, so the select lists the
+personas every project can resolve: the user layer and the bundled ones
+(``core.personas.catalogue(None)``), never one project's own. A configured name the
+list lacks is shown as ``<name> (custom)``, so saving the form never silently drops
+it; ``fleet spawn`` refuses it where it does not resolve, naming the key.
+
 Save writes only the fields changed on the form since it was read: the file as it is
 then holds the rest, a ``config set`` or ``config reset`` made from a shell meanwhile
 included.
@@ -34,6 +41,7 @@ Reached from *⚙ Settings ▸ App settings*: the Settings hub opens
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from typing import ClassVar, NamedTuple
 
 from rich.text import Text
@@ -46,7 +54,7 @@ from textual.widgets import Button, Input, Label, Select, Static, Switch
 from textual.worker import Worker, WorkerState
 
 from aisquare.core import claude_accounts as accounts_core
-from aisquare.core import paths
+from aisquare.core import paths, personas
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
     AccountsSettings,
@@ -126,7 +134,7 @@ ROLE_ID_PREFIX = "role-"
 
 
 def role_widget_id(kind: str, role: str) -> str:
-    """The id of ``role``'s ``kind`` widget (``perm``, ``worktree``, ``acct``):
+    """The id of ``role``'s ``kind`` widget (``perm``, ``worktree``, ``persona``, ``acct``):
     ``role-<kind>-<suffix>``, :func:`widget_suffix` making the role part one to one.
 
     Under :data:`ROLE_ID_PREFIX`, so no role name can spell a fixed id. Written
@@ -175,11 +183,26 @@ def account_options(accounts: list[ClaudeAccount], current: str | None) -> list[
     return [(Text(label), value) for label, value in options]
 
 
+NO_PERSONA = ""
+"""A role's ``(none)``: no ``persona`` key is written for it."""
+
+
+def persona_options(current: str | None, names: Iterable[str]) -> list[tuple[Text, str]]:
+    """``(none)`` and the persona names, with a configured name they lack appended so it
+    shows. Prompts are :class:`Text`, as :func:`permission_options`' are: a name written
+    by hand is free text."""
+    options = [("(none)", NO_PERSONA), *((name, name) for name in names)]
+    if current and current not in {value for _, value in options}:
+        options.append((f"{current} (custom)", current))
+    return [(Text(label), value) for label, value in options]
+
+
 class RoleRow(NamedTuple):
-    """The three fields of one role's row: permission mode, worktree, account."""
+    """The four fields of one role's row: permission mode, worktree, persona, account."""
 
     permission: Select[str]
     worktree: Switch
+    persona: Select[str]
     account: Select[str]
 
 
@@ -236,11 +259,15 @@ class AppSettingsView(VerticalScroll):
     AppSettingsView .row Input { width: 26; }
     AppSettingsView .row Switch { margin-left: 1; }
     AppSettingsView .row .worktree-label { width: 10; margin-left: 2; }
+    AppSettingsView .row .persona-label { width: 9; margin-left: 2; }
+    AppSettingsView .row .persona-select { width: 20; }
+    AppSettingsView #settings-personas-unavailable { display: none; color: $warning; height: auto; }
+    AppSettingsView #settings-personas-unavailable.shown { display: block; }
     AppSettingsView .section { text-style: bold; margin-top: 1; }
     AppSettingsView #settings-buttons Button { margin-right: 1; }
     AppSettingsView #settings-note { color: $text-muted; margin-top: 1; height: auto; }
     """
-    ROLE_SECTION: ClassVar[str] = "roles — permission mode, worktree and account per role"
+    ROLE_SECTION: ClassVar[str] = "roles — permission mode, worktree, persona and account per role"
     ACCOUNTS_SECTION: ClassVar[str] = (
         "accounts — how launches pick one; what a usage limit does; what they share"
     )
@@ -256,6 +283,22 @@ class AppSettingsView(VerticalScroll):
         """The slots the account selects offer — filled by :meth:`_load_accounts`'s worker."""
         self._shown: dict[str, object] = {}
         """What each field showed when the form was (re)read: Save writes only what differs."""
+        self._persona_names, self._personas_unavailable = self._read_persona_names()
+
+    @staticmethod
+    def _read_persona_names() -> tuple[list[str], str | None]:
+        """The machine-wide persona names — or none, and the reason, which the form shows.
+
+        No project: a role's default is machine-wide, so a persona only one project holds
+        would refuse every other project's spawn of that role. ``catalogue`` never raises
+        for one bad directory, so whatever reaches the ``except`` is a real failure (an
+        unreadable layer, a bug). It costs the list, never the form.
+        """
+        try:
+            found, _invalid = personas.catalogue(None)
+        except Exception as exc:
+            return [], f"personas unavailable — {type(exc).__name__}: {exc}"
+        return [persona.name for persona in found], None
 
     @staticmethod
     def _read_config() -> AppConfig:
@@ -337,6 +380,7 @@ class AppSettingsView(VerticalScroll):
             return RoleRow(
                 self.query_one(f"#{role_widget_id('perm', role)}", Select),
                 self.query_one(f"#{role_widget_id('worktree', role)}", Switch),
+                self.query_one(f"#{role_widget_id('persona', role)}", Select),
                 self.query_one(f"#{role_widget_id('acct', role)}", Select),
             )
         except NoMatches:
@@ -347,6 +391,11 @@ class AppSettingsView(VerticalScroll):
     def compose(self) -> ComposeResult:
         yield Static(Text("App settings", style="bold"), id="settings-title")
         yield Static(self.ROLE_SECTION, classes="section")
+        yield Static(
+            Text(self._personas_unavailable or ""),
+            id="settings-personas-unavailable",
+            classes="shown" if self._personas_unavailable else "",
+        )
         for role in self._roles:
             settings = self.fleet.roles.get(role, FleetRoleSettings())
             with Horizontal(classes="row"):
@@ -361,6 +410,14 @@ class AppSettingsView(VerticalScroll):
                 )
                 yield Label("worktree", classes="worktree-label")
                 yield Switch(settings.worktree, id=role_widget_id("worktree", role))
+                yield Label("persona", classes="persona-label")
+                yield Select(
+                    persona_options(settings.persona, self._persona_names),
+                    value=settings.persona or NO_PERSONA,
+                    allow_blank=False,
+                    id=role_widget_id("persona", role),
+                    classes="persona-select",
+                )
                 bound = self._account_bindings.get(role)
                 yield Select(
                     account_options(self._accounts, bound),
@@ -449,6 +506,7 @@ class AppSettingsView(VerticalScroll):
                 continue
             values[role_widget_id("perm", role)] = row.permission.value
             values[role_widget_id("worktree", role)] = row.worktree.value
+            values[role_widget_id("persona", role)] = row.persona.value
         for wid in _INPUTS:
             values[wid] = self.query_one(f"#{wid}", Input).value
         for wid in _SELECTS:
@@ -477,6 +535,10 @@ class AppSettingsView(VerticalScroll):
         self.fleet = config.fleet
         self._roles = role_order(self.fleet)
         self._account_bindings = settings_service.role_account_bindings(config)
+        self._persona_names, self._personas_unavailable = self._read_persona_names()
+        unavailable = self.query_one("#settings-personas-unavailable", Static)
+        unavailable.update(Text(self._personas_unavailable or ""))
+        unavailable.set_class(bool(self._personas_unavailable), "shown")
         self.query_one("#escape-key", Input).value = self.fleet.escape_key
         self.query_one("#max-agents", Input).value = str(self.fleet.max_agents_per_project)
         self.query_one("#worktree-dir", Input).value = self.fleet.worktree_dir
@@ -498,6 +560,8 @@ class AppSettingsView(VerticalScroll):
             row.permission.set_options(permission_options(settings.permission_mode))
             row.permission.value = settings.permission_mode
             row.worktree.value = settings.worktree
+            row.persona.set_options(persona_options(settings.persona, self._persona_names))
+            row.persona.value = settings.persona or NO_PERSONA
             bound = self._account_bindings.get(role)
             row.account.set_options(account_options(self._accounts, bound))
             row.account.value = bound or NO_ACCOUNT
@@ -529,6 +593,9 @@ class AppSettingsView(VerticalScroll):
                 role_update["permission_mode"] = value
             if role_widget_id("worktree", role) in changed:
                 role_update["worktree"] = row.worktree.value
+            chosen = row.persona.value
+            if role_widget_id("persona", role) in changed and isinstance(chosen, str):
+                role_update["persona"] = chosen or None
             if role_update:
                 existing = current.roles.get(role, FleetRoleSettings())
                 roles[role] = existing.model_copy(update=role_update)

@@ -815,11 +815,93 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
         "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
         "AISQUARE_TEAM_HUB": "",  # no hub here, so none from the server either
         "AISQUARE_EXPLAINABILITY_TARGET": "",  # nor a deployment override
+        "AISQUARE_PERSONA": "",  # no persona: blank, never the server's (review of #201, F3)
     }
     assert spawned["cwd"] == project.root and agent.cwd == project.root and not agent.worktree
     assert agent.pane_id == "%1" and agent.binary == "claude" and agent.spawned_by == "user"
     with store_session() as store:
         assert store.fleet_agent_by_label(project.id, "manager") == agent
+
+
+def test_spawn_with_a_persona_carries_it_to_launch_and_records_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    receipt = fleet_service.spawn(project, "tester", persona="skeptic")
+
+    command = _command(tmux)
+    assert command[4:6] == ["launch", "tester"]
+    assert _flag(command, "--persona") == "skeptic"
+    assert command.index("--persona") < command.index("--name")
+    assert receipt.agent.persona == "skeptic"
+    assert receipt.notes == []
+    with store_session() as store:
+        stored = store.fleet_agent_by_label(project.id, receipt.agent.label)
+    assert stored is not None and stored.persona == "skeptic"
+
+
+def test_spawn_without_a_persona_passes_no_flag_and_records_none(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    receipt = fleet_service.spawn(project, "tester")
+
+    assert "--persona" not in _command(tmux)
+    assert receipt.agent.persona is None
+
+
+def test_spawn_refuses_an_unknown_persona_before_any_window_worktree_or_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    with pytest.raises(fleet_service.FleetError) as caught:
+        fleet_service.spawn(project, "coder", persona="nope")
+
+    assert "known: careful, mentor, minimalist, skeptic" in str(caught.value)
+    assert tmux.spawned == []
+    assert not (project.root / ".aisquare-worktrees").exists()
+    with store_session() as store:
+        assert store.fleet_agents(project.id, live_only=False) == []
+
+
+def test_spawn_uses_the_roles_default_persona_and_a_flag_beats_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core.config import FleetRoleSettings
+
+    _settings(monkeypatch, roles={"coder": FleetRoleSettings(persona="minimalist")})
+
+    by_default = fleet_service.spawn(project, "coder")
+    by_flag = fleet_service.spawn(project, "coder", persona="careful")
+
+    assert _flag(_command(tmux, 0), "--persona") == "minimalist"
+    assert by_default.agent.persona == "minimalist" and by_default.notes == []
+    assert _flag(_command(tmux, 1), "--persona") == "careful"
+    assert by_flag.agent.persona == "careful" and by_flag.notes == []
+
+
+def test_a_stale_default_persona_refuses_naming_the_config_key(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core.config import FleetRoleSettings
+
+    _settings(monkeypatch, roles={"coder": FleetRoleSettings(persona="retired")})
+
+    with pytest.raises(fleet_service.FleetError) as caught:
+        fleet_service.spawn(project, "coder")
+
+    assert "[fleet.roles.coder].persona = 'retired'" in str(caught.value)
+    assert "known: careful, mentor, minimalist, skeptic" in str(caught.value)
+    assert tmux.spawned == []
+
+
+def test_a_persona_written_for_other_roles_is_a_receipt_note_never_a_refusal(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    receipt = fleet_service.spawn(project, "coder", worktree=False, persona="skeptic")
+
+    assert receipt.agent.persona == "skeptic"
+    assert receipt.notes == [
+        "persona skeptic is written for tester, reviewer, runner, not coder — "
+        "spawned with it anyway"
+    ]
 
 
 def test_spawn_records_where_its_server_listens_and_in_which_boot(
@@ -986,6 +1068,18 @@ def test_spawn_refuses_an_unknown_role_but_accepts_a_bound_one(
     receipt = fleet_service.spawn(project, "scribe")
     assert receipt.agent.role == "scribe" and receipt.agent.label == "scribe-1"
     assert _command(tmux)[5] == "scribe"
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [("tester", True), ("coder2", True), ("scribe", True), ("codr", False)],
+)
+def test_role_ok_is_the_public_name_of_the_rule_spawn_applies(role: str, expected: bool) -> None:
+    """A fleet role, a numbered seat, a name bound with `team bind`, and a typo."""
+    bound = CliRunner().invoke(app, ["team", "bind", "scribe", "--bin", "claude"])
+    assert bound.exit_code == 0, bound.output
+    assert fleet_service.role_ok(role) is expected
+    assert fleet_service.role_ok(role) is fleet_service._role_ok(role)
 
 
 def test_spawn_refuses_a_worktree_outside_git(
@@ -1763,6 +1857,7 @@ def test_spawn_can_keep_native_agent_teams_on(
         "AISQUARE_FLEET_AGENT": agent.id,
         "AISQUARE_TEAM_HUB": "",
         "AISQUARE_EXPLAINABILITY_TARGET": "",
+        "AISQUARE_PERSONA": "",
     }
 
 
@@ -3053,6 +3148,114 @@ def test_tell_an_unknown_label_is_no_such_agent(tmux: FakeTmux, project: Project
         fleet_service.tell(project, "coder-9", "hello")
     with pytest.raises(NoSuchAgent, match="no live agent 'coder-9'"):
         fleet_service.stop(project, "coder-9")
+
+
+# --- attach a persona to a running agent (docs/plans/spawn-personas.md §4.7, §7 "P8") ---
+
+
+def _preface(name: str, *, replaces: str | None = None) -> str:
+    tail = f"; it replaces {replaces}" if replaces else ""
+    return f"aisquare: the operator attached persona {name} to you — it applies from now on{tail}"
+
+
+def test_attaching_to_a_waiting_agent_records_it_and_types_the_briefing(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    from aisquare.core import personas
+
+    agent = _coder(project)
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+
+    receipt = fleet_service.attach_persona(project, "coder-1", "skeptic")
+
+    briefing = personas.briefing(personas.resolve("skeptic", project.root))
+    assert (receipt.persona, receipt.replaced, receipt.delivered) == ("skeptic", None, "typed")
+    assert tmux.typed == [
+        (agent.pane_id, "paste", "\n".join([_preface("skeptic"), *briefing])),
+        (agent.pane_id, "key", "Enter"),
+    ]
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+        session = store.get_session(agent.session_id or "")
+    assert row is not None and row.persona == "skeptic"
+    assert session is not None and session.persona == "skeptic"
+    assert _events(project, "persona_attached") == ["persona skeptic attached to coder-1"]
+    assert _events(project, "note") == []
+
+
+def test_attaching_to_a_busy_agent_records_it_and_files_no_briefing_on_the_board(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """The briefing is typed or it is not delivered. Filed as a board note, which is what
+    this pinned before, it carried the persona's body to every other session on the board
+    (review of #240, finding 7). The whole rule is pinned in
+    ``tests/test_attaching_to_a_busy_agent_keeps_the_persona_off_the_board.py``."""
+    agent = _coder(project)
+    _board_session(agent, "working")
+
+    receipt = fleet_service.attach_persona(project, "coder-1", "skeptic")
+
+    assert receipt.delivered == "noted" and "with its next prompt" in receipt.how
+    assert tmux.typed == [], "never typed into a busy agent"
+    assert _events(project, "note") == [], "and nothing filed on the board in its place"
+    assert _events(project, "persona_attached") == ["persona skeptic attached to coder-1"]
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+    assert row is not None and row.persona == "skeptic"
+
+
+def test_attaching_an_unknown_persona_refuses_before_the_store_or_tmux(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    agent = _coder(project)
+    tmux.installed = False  # from here on any tmux call would raise TmuxUnavailable instead
+
+    with pytest.raises(FleetError, match="known: careful, mentor, minimalist, skeptic"):
+        fleet_service.attach_persona(project, "coder-1", "nope")
+
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+    assert row is not None and row.persona is None
+    assert _events(project, "persona_attached") == []
+
+
+def test_attaching_to_an_unknown_label_is_no_such_agent(
+    tmux: FakeTmux, project: ProjectInfo
+) -> None:
+    with pytest.raises(NoSuchAgent, match="no live agent 'coder-9'"):
+        fleet_service.attach_persona(project, "coder-9", "skeptic")
+    assert _events(project, "persona_attached") == []
+
+
+def test_replacing_a_persona_records_the_new_one_and_the_preface_names_the_old(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    agent = _coder(project, persona="minimalist")
+    _board_session(agent, "waiting")
+    tmux.set_command(agent.pane_id, "claude")
+
+    receipt = fleet_service.attach_persona(project, "coder-1", "skeptic")
+
+    assert (receipt.persona, receipt.replaced) == ("skeptic", "minimalist")
+    assert tmux.typed[0][2].startswith(_preface("skeptic", replaces="minimalist") + "\n")
+    assert _events(project, "persona_attached") == [
+        "persona skeptic attached to coder-1 (replaces minimalist)"
+    ]
+
+
+def test_attaching_to_an_agent_that_has_not_joined_records_only_the_fleet_row(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    agent = _coder(project)
+
+    fleet_service.attach_persona(project, "coder-1", "careful")
+
+    with store_session() as store:
+        row = store.get_fleet_agent(agent.id)
+        session = store.get_session(agent.session_id or "")
+    assert row is not None and row.persona == "careful"
+    assert session is None
 
 
 def test_tell_attributes_the_note_to_the_sender(
@@ -15038,6 +15241,45 @@ def test_a_resumed_replacement_that_dies_before_its_first_hook_is_ended_like_any
     [after] = [s for s in fleet_service.list_agents(project) if s.agent.id == coder.id]
     assert after.state == "exited" and after.agent.ended_at is not None
     assert f"{coder.label} exited (0)" in _events(project, "agent_exited")
+
+
+def test_restart_replays_the_rows_persona_and_says_when_it_no_longer_resolves(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart is the same agent (#144), and the row is the record of how it ran
+    (spawn-personas §3.8): the persona it was spawned with comes back with it; a row
+    that had none replays with none, even once the role has adopted a default; and a
+    persona deleted since starts the agent without it and SAYS so — refusing would
+    leave the agent stopped over a prompt it can run without, the failure the binary's
+    ``_refuse_a_replay_that_cannot_start`` exists to prevent."""
+    from aisquare.core.config import FleetRoleSettings
+
+    skill = project.root / ".aisquare" / "personas" / "tempo" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: tempo\ndescription: A steady tempo, for this test.\n---\n"
+        "Work at a steady tempo.\n",
+        encoding="utf-8",
+    )
+    kept = fleet_service.spawn(project, "coder", label="coder-kept", persona="careful").agent
+    plain = fleet_service.spawn(project, "coder", label="coder-plain").agent
+    gone = fleet_service.spawn(project, "coder", label="coder-gone", persona="tempo").agent
+    # A default adopted since the spawns: a replay must not pick it up.
+    _settings(monkeypatch, roles={"coder": FleetRoleSettings(persona="minimalist")})
+    shutil.rmtree(skill.parent)
+    for agent in (kept, plain, gone):
+        tmux.die(agent.pane_id, 0)
+
+    kept_again = fleet_service.restart(project, "coder-kept")
+    plain_again = fleet_service.restart(project, "coder-plain")
+    gone_again = fleet_service.restart(project, "coder-gone")
+
+    assert kept_again.started.persona == "careful"
+    assert _flag(_command(tmux, -3), "--persona") == "careful"
+    assert plain_again.started.persona is None and "--persona" not in _command(tmux, -2)
+    assert gone_again.started.persona is None and "--persona" not in _command(tmux, -1)
+    assert [note for note in gone_again.notes if "persona tempo no longer resolves" in note]
+    assert all("started without it" in note for note in gone_again.notes if "tempo" in note)
 
 
 @pytest.mark.parametrize("gap", ["dead", "gone"])

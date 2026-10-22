@@ -91,6 +91,12 @@ ALIVE_STATES: frozenset[str] = fleet_service.PROCESS_STATES
 alive and parked (#146), not gone. The fleet's own set, which Stop and ``--all`` act on:
 a third copy of it could count as alive what they leave, or the reverse (review of #266,
 round 3)."""
+STOP_STATES: frozenset[str] = ALIVE_STATES | {"exited"}
+"""Where **Stop** is offered — the agent view's button and the sidebar's ``x`` ask
+this one constant, never a copy of it: a process to stop (``ALIVE_STATES``), or an
+exited agent's dead window — `remain-on-exit` keeps it for the last screen, and Stop
+on the 💤 row removes it, which takes the row off the listing (``fleet stop`` on an
+ended row, #138). A ✗ lost row has neither: it is ``fleet reap``'s business."""
 
 
 class AddProject(Message):
@@ -113,6 +119,20 @@ class AgentSelected(Message):
 class SpawnAgent(Message):
     def __init__(self, project_id: str) -> None:
         self.project_id = project_id
+        super().__init__()
+
+
+class StopAgent(Message):
+    """Stop this agent, please: the agent view's button, or ``x`` on the selected row.
+
+    Both controls ask the SHELL rather than calling the service, because the
+    shell is what holds the :class:`ProjectInfo` a stop needs (``on_spawn_agent``
+    resolves a project the same way) and what owns the dialog.
+    """
+
+    def __init__(self, project_id: str, agent_id: str) -> None:
+        self.project_id = project_id
+        self.agent_id = agent_id
         super().__init__()
 
 
@@ -209,7 +229,12 @@ def ordered_agents(statuses: Iterable[FleetAgentStatus]) -> list[FleetAgentStatu
 
 
 def agent_row_text(status: FleetAgentStatus) -> Text:
-    """``🧭 manager       ⏸`` — icon, label, state chip, exit status when exited."""
+    """``🧭 manager       ⏸ · skeptic`` — icon, label, state chip, exit status, persona.
+
+    The persona badge is the row's (what the agent was spawned with) or, for an
+    agent the row does not know one for, its session's (what it launched as) —
+    docs/plans/spawn-personas.md §0 item 9.
+    """
     agent = status.agent
     chip, style = STATE_CHIP.get(status.state, STATE_CHIP["unknown"])
     text = Text(no_wrap=True, overflow="ellipsis")
@@ -221,6 +246,9 @@ def agent_row_text(status: FleetAgentStatus) -> Text:
         text.append(" exited", style="dim")
         if agent.exit_status is not None:
             text.append(f"({agent.exit_status})", style="dim")
+    persona = agent.persona or (status.session.persona if status.session is not None else None)
+    if persona:
+        text.append(f" · {persona}", style="dim")
     return text
 
 
@@ -1072,6 +1100,8 @@ class Sidebar(Vertical):
         ("down", "cursor_down", "next"),
         ("up", "cursor_up", "previous"),
         ("enter", "activate", "open"),
+        # Out of the footer, which is full at 80 columns; the help screen (?) lists it.
+        Binding("x", "stop_agent", "stop", show=False),
         # The partition, for terminals without mouse reporting (#137): live only
         # while the sidebar has focus, so a pane still receives < > = as text.
         # Out of the footer (it is full); the help screen (?) lists them.
@@ -1659,3 +1689,34 @@ class Sidebar(Vertical):
             if row.selection_key == self._cursor_key:
                 row.activate()
                 return
+
+    def action_stop_agent(self) -> None:
+        """``x``: the Stop dialog for the SELECTED agent; any other selection does nothing.
+
+        The binding is the sidebar's, not the row's — the rows are Statics with
+        ``can_focus=False`` on purpose (see ``#projects`` above), so there is no
+        focused row to bind to. It acts on what is selected, which is what the
+        user sees highlighted and what the open view is showing.
+
+        The agent names its own project, so a row selected under one card cannot
+        be stopped against another's ``ProjectInfo``.
+
+        It asks ``STOP_STATES`` too — the rule the agent view's button asks, the
+        same constant, not a copy of it. A lost row is an ordinary selectable
+        row, so without this the key offered exactly the Stop the button
+        refuses; and ``stop`` does not decline such a row, it ends it outright
+        with no ``/exit`` and no grace, which is ``fleet reap``'s outcome and
+        outside this task (found by coder3a-1 before the PR opened). An exited
+        row IS offered: its dead window is what Stop removes there (#138).
+        """
+        key = self.selected_key
+        if key is None or not key.startswith("agent:") or self.last_frame is None:
+            return
+        agent_id = key.removeprefix("agent:")
+        _projects, agents = self.last_frame
+        for statuses in agents.values():
+            for status in statuses:
+                if status.agent.id == agent_id:
+                    if status.state in STOP_STATES:
+                        self.post_message(StopAgent(status.agent.project_id, agent_id))
+                    return

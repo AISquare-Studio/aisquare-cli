@@ -34,6 +34,7 @@ import shutil
 import sqlite3
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -41,10 +42,12 @@ from rich.text import Text
 
 from aisquare.cli.common import fail
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import harness, orchestrator
+from aisquare.core import harness, orchestrator, personas
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
+from aisquare.core.workspace import git_common_root
+from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
@@ -115,6 +118,26 @@ def _role_ok(role: str) -> bool:
     written down.
     """
     return role in ROLES or bool(_SEAT.match(role)) or role in _declared_roles()
+
+
+def _check_persona(name: str, project: ProjectInfo | None) -> None:
+    """Refuse a persona this project cannot resolve, before anything starts (§3.7).
+
+    The project layer is the working directory's own project
+    (``orchestrator.directory_project``), the one ``fleet spawn`` checked the name
+    against, never the board's: under ``AISQUARE_TEAM_HUB`` the board is the hub's,
+    and a seat spawned with a persona from its own repository's layer died at launch
+    on "no persona named …" (review of #201, F1). With no answer from the directory
+    (a symlink loop) it is the board's, else the git repository around it.
+    """
+    try:
+        root: Path | None = orchestrator.directory_project(Path.cwd()).root
+    except OSError:
+        root = project.root if project is not None else git_common_root(Path.cwd())
+    try:
+        personas.resolve(name, root)
+    except personas.PersonaError as exc:
+        fail(str(exc), error="unknown_persona", ref=name)
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
@@ -225,6 +248,15 @@ def launch(
             metavar="ACCOUNT",
         ),
     ] = None,
+    persona: Annotated[
+        str | None,
+        typer.Option(
+            "--persona",
+            help="Persona this session runs as (see `aisquare persona list`): exported as "
+            "AISQUARE_PERSONA and briefed once, at session start.",
+            metavar="NAME",
+        ),
+    ] = None,
 ) -> None:
     """Launch an agent session already attached to this project's team board.
 
@@ -280,7 +312,15 @@ def launch(
             style="dim",
         )
 
+    if persona is not None:
+        _check_persona(persona, project)
+
     env = {**os.environ, "AISQUARE_ROLE": role}
+    if persona is not None:
+        # The name travels, never the body: argv is visible in `ps` and a body
+        # can be thousands of characters. The session-start hook resolves it and
+        # renders the briefing (docs/plans/spawn-personas.md §3.2).
+        env["AISQUARE_PERSONA"] = persona
     # The role's bound spec plus this launch's overrides, carried verbatim.
     # Resolved even with no flag, so a bound role launches correctly without
     # the operator remembering to say anything.

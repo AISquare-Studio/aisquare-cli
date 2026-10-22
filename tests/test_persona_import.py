@@ -14,6 +14,7 @@ import json
 import subprocess
 import sys
 import types
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -579,7 +580,9 @@ def test_llm_flags_force_and_forbid_the_engines(
     )
 
     assert forced.exit_code == 0, forced.output
-    assert len(runs.calls) == 1 and (_user_layer() / "reshaped").is_dir()
+    # The skill keeps its own name, not the engine's (review of #201, R1-F1).
+    assert len(runs.calls) == 1 and (_user_layer() / "already-a-skill").is_dir()
+    assert not (_user_layer() / "reshaped").exists()
     assert json.loads(forbidden.stdout)["error"] == "not_recognised"
     assert json.loads(bogus.stdout)["error"] == "usage"
     assert len(runs.calls) == 1
@@ -777,3 +780,158 @@ def test_condensing_a_skill_keeps_its_other_frontmatter_and_its_supporting_files
     )
     assert (result.persona.path / "notes.txt").is_file()
     assert sorted(result.persona.files) == ["notes.txt", "reference/checklist.md"]
+
+
+# --- an engine never renames a skill it rewrites (review of #201, R1-F1) ---------------------
+
+#: Not any source's name: an engine that answered with it renamed the skill.
+INVENTED = "careful-reviewer"
+
+
+def _drafts_named(monkeypatch: pytest.MonkeyPatch, name: str = INVENTED) -> list[str]:
+    """``persona_import.draft`` answering with ``name``; returns each source it was handed."""
+    handed: list[str] = []
+
+    def draft(
+        source_text: str, **_kwargs: object
+    ) -> tuple[persona_import.PersonaDraft, persona_import.RanEngine, str | None]:
+        handed.append(source_text)
+        answer = {**DRAFT, "name": name, "body": "Short and complete."}
+        return persona_import.PersonaDraft.model_validate(answer), "manager", None
+
+    monkeypatch.setattr(persona_import, "draft", draft)
+    return handed
+
+
+def _long_skill(tmp_path: Path, directory: str = "long-skill") -> Path:
+    source = tmp_path / directory
+    source.mkdir()
+    (source / "SKILL.md").write_text(
+        "---\nname: long-skill\ndescription: Long.\n---\n" + "w" * 9_000 + "\n", encoding="utf-8"
+    )
+    return source
+
+
+def _bare_skill(tmp_path: Path) -> Path:
+    """A recognised bare file whose frontmatter name is neither its stem nor the draft's."""
+    source = tmp_path / "reviewer.md"
+    source.write_text(
+        "---\nname: steady-reviewer\ndescription: Steady.\n---\nYou review steadily.\n",
+        encoding="utf-8",
+    )
+    return source
+
+
+def test_condensing_a_skill_directory_keeps_the_directorys_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's reproduction: `persona import ./long-skill --condense --yes` saved
+    the engine's name, so no long-skill persona existed for a role or a spawn to use."""
+    _drafts_named(monkeypatch)
+    seen: list[service.PersonaDraftView] = []
+
+    result = _import(str(_long_skill(tmp_path)), condense=True, seen=seen)
+
+    assert result.persona.name == "long-skill"
+    assert result.persona.path == _user_layer() / "long-skill"
+    assert result.persona.frontmatter["name"] == "long-skill"
+    assert [view.name for view in seen] == ["long-skill"]  # and the review screen said so
+    assert not (_user_layer() / INVENTED).exists()
+
+
+def test_llm_on_a_recognised_bare_skill_keeps_its_frontmatter_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drafts_named(monkeypatch)
+
+    result = _import(str(_bare_skill(tmp_path)), llm="always")
+
+    assert result.persona.name == "steady-reviewer"
+    assert result.persona.frontmatter["name"] == "steady-reviewer"
+    assert not (_user_layer() / INVENTED).exists()
+
+
+@pytest.mark.parametrize(
+    ("make", "options", "own"),
+    [
+        (_long_skill, {"condense": True}, "long-skill"),
+        (_bare_skill, {"llm": "always"}, "steady-reviewer"),
+    ],
+    ids=["--condense on a directory", "--llm on a bare file"],
+)
+def test_name_overrides_both_the_skills_own_name_and_the_drafts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make: Callable[[Path], Path],
+    options: dict[str, Any],
+    own: str,
+) -> None:
+    _drafts_named(monkeypatch)
+    source = str(make(tmp_path))
+
+    picked = _import(source, name="my-pick", **options)
+    unnamed = _import(source, **options)  # the name --name overrode
+
+    assert picked.persona.name == "my-pick" and picked.persona.frontmatter["name"] == "my-pick"
+    assert unnamed.persona.name == own
+
+
+@pytest.mark.parametrize(
+    ("source", "options"),
+    [
+        ("notes", {}),
+        ("-", {"condense": True, "stdin": b"---\ndescription: Pasted.\n---\nBody.\n"}),
+    ],
+    ids=["text that is no skill", "stdin whose frontmatter names nothing"],
+)
+def test_a_source_with_no_name_of_its_own_still_takes_the_drafts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, options: dict[str, Any]
+) -> None:
+    """The recognised path asks stdin like this for --name; the engine's name stands in."""
+    _drafts_named(monkeypatch)
+
+    result = _import(str(_notes(tmp_path)) if source == "notes" else source, **options)
+
+    assert result.persona.name == INVENTED
+
+
+def test_a_persona_holding_the_kept_name_is_refused_before_any_engine_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As the recognised path refuses it; --force replaces it. The engine's invented name
+    was free, so the import saved beside the persona it should have collided with."""
+    held = _user_layer() / "long-skill"
+    held.mkdir(parents=True)
+    (held / "SKILL.md").write_text(
+        "---\nname: long-skill\ndescription: Held.\n---\nYou hold the name.\n", encoding="utf-8"
+    )
+    handed = _drafts_named(monkeypatch)
+    source = str(_long_skill(tmp_path))
+
+    with pytest.raises(PersonaError) as caught:
+        _import(source, condense=True)
+
+    assert caught.value.code == "persona_exists"
+    assert "'long-skill' already exists" in str(caught.value)
+    assert handed == []
+    assert personas.load(held, layer="user").description == "Held."
+    forced = _import(source, condense=True, force=True)
+    assert forced.replaced and forced.persona.path == held
+    assert forced.persona.description == DRAFT["description"]
+    assert not (_user_layer() / INVENTED).exists()
+
+
+def test_a_kept_name_that_breaks_the_rule_is_refused_before_any_engine_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recognised path refuses this directory's name too; the engine cannot fix a
+    name it is not asked for, so two drafts would fail on it."""
+    handed = _drafts_named(monkeypatch)
+
+    with pytest.raises(PersonaError) as caught:
+        _import(str(_long_skill(tmp_path, "Long_Skill")), condense=True)
+
+    assert caught.value.code == "invalid_name"
+    assert "'Long_Skill' breaks the skill-name rule" in str(caught.value)
+    assert "pass --name" in str(caught.value)
+    assert handed == []

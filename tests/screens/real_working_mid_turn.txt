@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.282                             
+▝▜██████▀  Fable 5.1 · Claude Team                          
+ ▝▝   ▝▝   ~/…/-home-work-work-aisquare-cli/932fe5e9-3582-42ad-a393-3176c1e81203/scratchpad/fixture/proj-a              
+
+
+❯ Without using any tools, write the numbers one to fifteen in words, one per line, slowly, then the word done          
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✽ Sautéing… (running UserPromptSubmit hook · 0s)            
+                                                                                                      ● high · /effort  
+───────────────────────────────────────────────────────────────────────────────────────────────────────── screen-coder ─
+❯                                                                                                                       
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · esc to interrupt · ← for agents        

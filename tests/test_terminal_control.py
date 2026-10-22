@@ -1576,9 +1576,9 @@ def test_an_ended_client_answers_what_waits_and_says_why(tmp_path: Path) -> None
 def test_the_control_client_is_started_without_the_tracing_identity(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The seam strips the identity, as ``_tmux`` does: ``attach-session`` can start the
-    server, which hands its environment to every window."""
-    from aisquare.core.spawn import IDENTITY_ENV_VARS
+    """The seam strips the identity and the team variables, as ``_tmux`` does:
+    ``attach-session`` can start the server, which hands its environment to every window."""
+    from aisquare.core.spawn import IDENTITY_ENV_VARS, TEAM_ENV_VARS
 
     seen: dict[str, Any] = {}
 
@@ -1588,10 +1588,13 @@ def test_the_control_client_is_started_without_the_tracing_identity(
 
     name = next(iter(IDENTITY_ENV_VARS))
     monkeypatch.setenv(name, "inherited")
+    for team in TEAM_ENV_VARS:  # a server we start holds none (#240, fleet-board fix 3)
+        monkeypatch.setenv(team, "inherited")
     monkeypatch.setattr(subprocess, "Popen", popen)  # what ``_spawn_client`` calls
     with pytest.raises(TmuxError):
         tmux_control._spawn_client(["tmux", "-C", "attach-session"])
     assert name not in seen["env"]
+    assert not set(TEAM_ENV_VARS) & set(seen["env"])
     assert seen["start_new_session"] is True
 
 

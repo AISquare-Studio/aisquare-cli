@@ -912,7 +912,7 @@ def test_a_read_asked_for_while_a_hand_over_waits_is_held_and_a_write_is_not() -
             first = start(app, ui_app._DOCTOR_WORKER, "the first doctor", exclusive=True)
             newest = start(app, ui_app._DOCTOR_WORKER, "the newest doctor", exclusive=True)
             write = start(app, doctor_view.FIX_WORKER, "a fix")
-            await app.workers.wait_for_complete([write])
+            await write.wait()  # each worker awaited on its own (tests/ui_workers.py)
             assert (first.state, newest.state) == (WorkerState.PENDING, WorkerState.PENDING)
             assert first not in set(app.workers) and newest in set(app.workers)
             assert ran == ["a fix"], "the writer began; the reads are held"
@@ -920,7 +920,7 @@ def test_a_read_asked_for_while_a_hand_over_waits_is_held_and_a_write_is_not() -
 
             app.hand_off = None  # called off
             assert app._worker_threads.release() == []
-            await app.workers.wait_for_complete([newest])
+            await newest.wait()
             assert ran == ["a fix", "the newest doctor"], "the newest read, once"
 
             app.hand_off = ("uninstall",)

@@ -64,6 +64,7 @@ from aisquare.cli.ui.views import project as project_view_module
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
+from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.project import ManagerTab, ProjectView
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core import paths
@@ -71,6 +72,7 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.config import ExplainabilityTarget, load_config, save_config
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.tmux import Capture, Completed, PaneFacts, TmuxServer
+from aisquare.core.workspace import project_id_for
 from aisquare.models import (
     DoctorCheck,
     FleetAgent,
@@ -351,8 +353,9 @@ def _config_toml() -> dict[str, Any]:
 # --- the tabs -----------------------------------------------------------------------------
 
 
-def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo) -> None:
-    """Manager, Board, AISquare, Settings: no Doctor tab — the doctor is the app's page."""
+def test_project_view_has_the_five_tabs_with_their_widgets(project: ProjectInfo) -> None:
+    """Manager, Board, AISquare, Settings, Personas: no Doctor tab — the doctor is the app's
+    page."""
 
     async def scenario(
         pilot: Pilot[None], host: Host
@@ -363,6 +366,7 @@ def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo)
             ("#tab-board", BoardPanel),
             ("#tab-explainability", ExplainabilityView),
             ("#tab-settings", SettingsView),
+            ("#tab-personas", PersonasTab),
         ):
             assert view.query_one(pane_id).query_one(widget_type)
         ids = [pane.id or "" for pane in view.query("TabPane")]
@@ -385,10 +389,10 @@ def test_project_view_has_the_four_tabs_with_their_widgets(project: ProjectInfo)
         )
 
     count, ids, active, labels, first_id, doctors, heading = drive(project, scenario)
-    assert count == 4
+    assert count == 5
     assert ids == list(ProjectView.TAB_IDS)
     assert active == "tab-manager"  # the manager first: that is where the goal goes
-    assert labels == ["Manager", "Board", "AISquare", "Settings"]
+    assert labels == ["Manager", "Board", "AISquare", "Settings", "Personas"]
     assert doctors == 0
     # The AISquare tab opens on an "Explainability" heading, above the status block as before.
     assert first_id == "explainability-heading:bold" and heading == "Explainability"
@@ -1956,7 +1960,7 @@ def test_a_store_that_cannot_say_whether_the_key_was_minted_refuses_the_attach(
 
 def _another_project_pinned(tmp_path: Path) -> ProjectInfo:
     """A second registered project, pinned by ``project switch`` — the one the tab must ignore."""
-    from aisquare.core.workspace import pin_project, project_id_for
+    from aisquare.core.workspace import pin_project
 
     root = (tmp_path / "pinned-elsewhere").resolve()
     root.mkdir()
@@ -2037,7 +2041,6 @@ def test_under_a_hub_the_explainability_tab_is_about_the_hub_its_launches_join(
     agents authenticate with the hub's key — the one ``key set`` binds from any
     repo under the hub. The tab showed, attached and registered under the PAGE's
     key, which no launch from the page read (review of #170)."""
-    from aisquare.core.workspace import project_id_for
 
     config = load_config()
     config.explainability.targets = {

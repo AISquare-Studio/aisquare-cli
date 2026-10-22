@@ -90,7 +90,7 @@ from dataclasses import dataclass
 from functools import partial
 
 from aisquare.core import tmux as tmux_module
-from aisquare.core.spawn import untraced_env
+from aisquare.core.spawn import tmux_client_env
 from aisquare.core.tmux import (
     MIN_VERSION,
     Capture,
@@ -254,8 +254,9 @@ def _command(args: Sequence[str]) -> str:
 def _spawn_client(argv: list[str]) -> subprocess.Popen[bytes]:
     """THE seam (``core.spawn.SEAMS``): start one ``tmux -C`` client, identity stripped.
 
-    Stripped like ``core.tmux._tmux``: ``attach-session`` starts a server when none
-    is running, and a server inherits the environment of whoever started it. Its
+    Stripped like ``core.tmux._tmux``, team variables too (``tmux_client_env``):
+    ``attach-session`` starts a server when none is running, and a server inherits the
+    environment of whoever started it. Its
     own session (``start_new_session``), so the outer terminal's job-control signals
     — ``SIGINT``, ``SIGTSTP``, ``SIGWINCH`` — reach the UI and never the client.
     """
@@ -265,7 +266,7 @@ def _spawn_client(argv: list[str]) -> subprocess.Popen[bytes]:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=untraced_env(),
+            env=tmux_client_env(),
             start_new_session=True,
         )
     except FileNotFoundError as exc:

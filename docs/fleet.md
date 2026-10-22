@@ -102,18 +102,57 @@ tmux can see and its row says so (`no hooks`).
    anything a user sees, and a reviewer as the
    work needs them, reopens what fails, calls a validator once everything is
    done, and posts `READY: <PRs + evidence>` when its gate passes. It never
-   writes code and never merges — a human does (Phase 5).
+   writes code and never merges — a human does (Phase 5). The project's
+   **Personas** tab lists the personas it can use, previews exactly what an
+   agent is briefed with, and imports, edits, exports, removes and validates
+   them (`docs/personas.md`).
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
    bell), **⏳ limited** (parked on a Claude usage limit, with the reset time),
    **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
-   session; click into the pane and every key you type goes to it. `＋ spawn
-   agent` on a project starts one of your own (Phase 4).
+   session; click into the pane and every key you type goes to it. The header
+   carries a **Stop** button whenever the agent still has a process, and on a
+   **💤 exited** row, where it removes the dead window tmux kept for the last
+   screen and takes the row off the listing — a **✗ lost** row shows none — and
+   it asks first: *Stop* sends `/exit` and kills the window after the grace
+   period, *Force* skips the `/exit`, *Cancel* does nothing at all. A refusal
+   stays in the dialog with its reason and the agent keeps running (`fleet stop`
+   below: tmux that cannot confirm the pane died leaves the row live); a stop
+   toasts `✓ stopped <label> (<id>)`, the list re-reads and the view returns to
+   the project. Beside it, **Restart** starts the agent again under its label —
+   same role, task, worktree, account and persona; its session is resumed from
+   the transcript when that is on disk (`fleet restart` below) — and the new row
+   is shown if this view is still the one on screen. Both ignore a click in the
+   second after they appear or move.
+   **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
+   project, headed with its name and codename. It reads in two steps. First who
+   runs it: role (the fleet's roles plus any role bound with `team bind`;
+   `manager` is greyed out while one runs; *Pick…* beside it opens the target
+   picker — a bound teammate or an account fills these fields), account and
+   binary. Then as whom:
+   **persona** — `(none)` or one of the project's personas, the role's
+   `[fleet.roles.<role>].persona` preselected, its description shown under it,
+   and *Import…* beside it to bring one in (`docs/personas.md`).
+   Then label (prefilled `<role>-1`, or `<role>-<task short id>` once a task is
+   picked; 🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
+   disables *Spawn* and shows the rule), task (the project's open tasks),
+   worktree (disabled with "not a git repository" outside one), permission mode,
+   extra agent args (split like a shell would; a quoting error is shown inline)
+   and a first prompt. A field left as it opened means the role's default,
+   exactly as an omitted `fleet spawn` flag does; picking `(none)` over a role
+   that has a default persona spawns without one. A refusal —
+   the agent limit, a binary not on your `PATH` — stays in the dialog with its
+   reason; a spawn toasts its receipt and notes and opens the new agent's pane.
+   `Esc` cancels, except while a spawn is already running: that one cannot be
+   taken back, so the dialog waits for its answer, and *Pick…* and *Import…*
+   are disabled until it has it.
 5. Selecting an agent gives its pane the keyboard at once — type, and it reaches
    Claude Code. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
-   `q` quits the UI — and the agents keep running.
+   `x` opens the Stop dialog for the selected agent — the same rule as the
+   button, so on a project row or a **✗ lost** agent it does nothing — `q` quits
+   the UI, and the agents keep running.
    The line between the navigator and the content is a divider: drag it to
    give an agent's pane more columns or the navigator room for long labels
    (bounded so neither side becomes unusable, and re-bounded when the terminal
@@ -183,15 +222,17 @@ aisquare fleet spawn manager
 aisquare fleet spawn coder --label coder-auth --task tsk_01k9q8p3
 aisquare fleet spawn tester --no-worktree
 aisquare fleet spawn reviewer --permission-mode acceptEdits
+aisquare fleet spawn coder --persona skeptic
 aisquare fleet spawn coder --bin claude2 --prompt "start from the failing test" -- --model opus
 ```
 
 Starts an agent in the project's tmux session — a window running
 `aisquare launch <role> …` — with the role's permission flags and a session id
 minted *before* launch, records it, and prints a receipt:
-`✓ spawned coder-auth (agt_…) → asq-amber-otter %7`. Anything the receipt
-should tell you — a label that had to be suffixed, a worktree or branch that
-already existed, an agent that did not come up before its prompt was typed —
+`✓ spawned coder-auth (agt_…) → asq-amber-otter %7`, ending `· persona skeptic`
+when the agent runs as one. Anything the receipt should tell you — a label that
+had to be suffixed, a worktree or branch that already existed, an agent that did
+not come up before its prompt was typed, a persona written for other roles —
 follows as a `⚠` line.
 
 | Flag | Meaning | Default |
@@ -203,12 +244,18 @@ follows as a `⚠` line.
 | `--permission-mode M` | Claude Code permission mode | the role's setting: `auto` |
 | `--bin B` | the agent executable | the role's binding, else `claude` |
 | `--prompt TEXT` | first message typed once the agent is up | none |
+| `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
 
 Refused, with the reason in the message: a second `manager`, more agents than
 `max_agents_per_project`, `--worktree` in a project that is not a git
-repository, an unknown role, a `--task` that is already done or dropped.
+repository, an unknown role, a `--task` that is already done or dropped, a
+persona the project does not have (the known names are listed; a stale
+`[fleet.roles.<role>].persona` default names its key). All of these are checked
+before any window exists. A known role is one of `aisquare launch`'s roles, a
+numbered seat of one (`coder2`), or a role bound with `team bind` — the same
+rule `aisquare launch` applies, public as `services.fleet.role_ok`.
 
 **What the agent is told.** `fleet spawn` exports `AISQUARE_FLEET_AGENT` — the
 agent's row — onto its window, and the session-start hook joins the session to
@@ -256,7 +303,7 @@ aisquare fleet ls --all
 aisquare fleet status --project amber-otter
 ```
 
-One row per agent — label, role, state chip, `(worktree)`, the detail behind
+One row per agent — label, role, state chip, `(worktree)`, `· <persona>`, the detail behind
 the state, the pane id — under a header naming the project, its codename and
 its tmux session. `ls` shows live agents; `--all` (`-a`) includes the ones that
 have ended. `status` is the same data, always live only.
@@ -292,12 +339,21 @@ aisquare fleet tell coder-auth "use the existing JWT helper, do not add a depend
 Types the text into the agent — **only** when it is *waiting* and its pane is
 alive. Otherwise the message is filed as a board note addressed to that agent,
 and the output says which happened (`✓` typed, `→` noted, `…` neither yet: the
-line says what is at its prompt or on its way). Never interrupts an
+line says what is at its prompt or on its way). The note goes on the board the
+agent reads, the one its next prompt reads, whatever hub or fleet window the
+command runs in. Never interrupts an
 agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
 Under `--json`, `typed` is `yes`, `no`, `unsent` or `maybe` beside `delivered`:
 `unsent` when the text is at its prompt and tmux refused its Enter (press Enter in
 its pane to send it), `maybe` when tmux did not answer in time with the text or its
 Enter, which may still arrive. Neither is to be told again: read the agent's pane.
+
+`aisquare persona attach <name> --to <label>` types a persona's briefing into a
+waiting agent the same way, and keeps the persona on the agent's row so a `/clear`
+or a restart briefs it again ([docs/personas.md](personas.md)). A busy agent gets
+no note in the briefing's place: the board names the persona and never carries its
+body, and the agent's own next prompt hands it the briefing, for it alone. The
+receipt reads `typed` or `noted`.
 
 ### `fleet stop`
 
@@ -315,7 +371,9 @@ inherits is visible. A release the store refused — or one the board could not
 be told about — is reported, never swallowed: the row is down, the operator is
 told which claims stayed with the ended session, and the command **exits 1**,
 the same contract `fleet shutdown` and `fleet reap` keep for the same fact.
-`--force` skips the graceful exit.
+`--force` skips the graceful exit. In `asq` this is the agent view's **Stop**
+button and `x` on the selected sidebar row — the same command behind one
+confirmation, `--force` included.
 
 **When tmux cannot confirm the pane died** — a wedged server, a `tmux` that
 left `PATH`, a socket that is there but refuses this user (`Permission denied`)
@@ -1038,6 +1096,14 @@ worktree = false
 extra_args = []
 ```
 
+A role may also name a default persona — every spawn of that role runs as it
+unless `--persona` names another:
+
+```toml
+[fleet.roles.coder]
+persona = "minimalist"                    # checked at spawn: a name the project lacks refuses, naming this key
+```
+
 A role or a key your file leaves out takes its default above; a role the table
 above does not name gets `auto`, no worktree and no extra args. A config file that will not parse costs you the customisation and
 never the fleet: the defaults apply and nothing refuses.
@@ -1354,6 +1420,12 @@ gets the one that gives its board, none for the checkout's, a project's root for
 that project's board. A project's own board where the checkout is another's is kept
 only when the agent's session registered on it, or its task is on it; otherwise it
 was only a default, and the replacement reads the checkout's.
+
+The captain (experimental, [docs/captain.md](captain.md)) is the one exception, both
+ways: its own row reads the home board, and its window is given the home's root,
+whatever hub started it; and a seat it spawns reads that seat's own project's board,
+since the captain's processes carry the home as their hub only to land the captain
+itself there.
 
 | On the session's board (the hub's, under one) | On the row's fleet project (whatever the board) |
 |---|---|

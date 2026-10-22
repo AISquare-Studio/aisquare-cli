@@ -584,7 +584,9 @@ def test_a_role_named_like_a_fixed_field_neither_takes_its_id_nor_takes_the_form
 
     assert len(ids) == len(set(ids)), "one field per id, on the whole form"
     assert {wid for wid in ids if wid.startswith(ROLE_ID_PREFIX)} == {
-        role_widget_id(kind, role) for kind in ("perm", "worktree", "acct") for role in roles
+        role_widget_id(kind, role)
+        for kind in ("perm", "worktree", "persona", "acct")
+        for role in roles
     }, "the prefix is the roles' alone"
     saved = load_config().fleet
     assert saved.worktree_dir == ".trees"
@@ -629,3 +631,108 @@ def test_role_names_modes_and_bindings_written_by_hand_are_shown_as_text_not_mar
     assert saved.fleet.max_agents_per_project == 5
     assert saved.fleet.roles["a[/b]c"].permission_mode == "x[/y]", "the hand edit stands"
     assert saved.team.profiles["a[/b]c"].account == "w[/z]"
+
+
+# --- the persona per role (#201) ------------------------------------------------------------
+
+
+def _persona_prompts(host: AppHost, role: str) -> list[str]:
+    from textual.widgets import OptionList
+
+    from aisquare.cli.ui.views.app_settings import role_widget_id
+
+    field = host.query_one(f"#{role_widget_id('persona', role)}", Select)
+    overlay = field.query_one(OptionList)
+    return [str(overlay.get_option_at_index(i).prompt) for i in range(overlay.option_count)]
+
+
+def test_a_roles_persona_is_saved_to_config_toml_and_read_back() -> None:
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
+        await pilot.pause()
+        host.query_one("#role-persona-coder", Select).value = "skeptic"
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return host.notices
+
+    notices = drive(scenario)
+    assert any(m.startswith("✓ settings saved") for m, _ in notices), notices
+    roles = _config_toml()["fleet"]["roles"]
+    assert roles["coder"]["persona"] == "skeptic"  # the bytes, under the coder's own table
+    assert "persona" not in roles.get("tester", {})
+    assert load_config().fleet.roles["coder"].persona == "skeptic"
+
+
+def test_choosing_none_removes_the_roles_persona_rather_than_writing_an_empty_one() -> None:
+    from aisquare.core.config import FleetRoleSettings
+
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(persona="skeptic")
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> object:
+        await pilot.pause()
+        field = host.query_one("#role-persona-coder", Select)
+        before = field.value
+        field.value = ""
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return before
+
+    assert drive(scenario) == "skeptic"
+    assert "persona" not in _config_toml()["fleet"]["roles"]["coder"]
+    assert load_config().fleet.roles["coder"].persona is None
+
+
+def test_a_project_only_persona_is_never_offered_as_a_machine_wide_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #240, "also confirmed": the form saved a persona only the open project
+    holds as ``[fleet.roles.<role>].persona``, a machine-wide default, so every other
+    project's spawn of that role refused it. The form lists the personas every project
+    can resolve — the user's and the bundled ones — and a configured name it lacks shows
+    as ``(custom)``, kept rather than dropped by a save."""
+    from aisquare.core.config import FleetRoleSettings
+
+    repo = tmp_path / "repo"
+    skill = repo / ".aisquare" / "personas" / "local-only" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: local-only\ndescription: Only this project has it.\n---\nBe local.\n",
+        encoding="utf-8",
+    )
+    (repo / ".git").mkdir()
+    monkeypatch.chdir(repo)
+    config = load_config()
+    config.fleet.roles["tester"] = FleetRoleSettings(persona="ghost")
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[list[str], list[str]]:
+        await pilot.pause()
+        return _persona_prompts(host, "coder"), _persona_prompts(host, "tester")
+
+    coder, tester = drive(scenario)
+    assert coder[0] == "(none)" and "skeptic" in coder
+    assert "local-only" not in coder, "a project's own persona is not a machine-wide default"
+    assert tester[-1] == "ghost (custom)"
+
+
+def test_the_form_says_why_it_lists_no_personas_when_they_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unreadable(root: Path | None = None) -> Any:
+        raise PermissionError(13, "Permission denied", "/h/.aisquare/personas")
+
+    monkeypatch.setattr("aisquare.core.personas.catalogue", unreadable)
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[bool, str, list[str]]:
+        await pilot.pause()
+        note = host.query_one("#settings-personas-unavailable", Static)
+        return bool(note.display), str(note.render()), _persona_prompts(host, "coder")
+
+    shown, text, prompts = drive(scenario)
+    assert shown
+    assert text == (
+        "personas unavailable — PermissionError: [Errno 13] Permission denied: "
+        "'/h/.aisquare/personas'"
+    )
+    assert prompts == ["(none)"]  # no names, and the form is still up

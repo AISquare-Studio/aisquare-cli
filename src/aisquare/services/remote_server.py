@@ -3175,7 +3175,10 @@ def remote_board_payload(project: str | None = None, *, glance: bool = False) ->
     31, 4/7). The project is found in that store too (:func:`_resolve_project_in`): in one
     of its own, every frame opened two (round 33, 8/10).
 
-    #240 fold: pass ``exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS`` here (one line).
+    The captain's audit (``team.CAPTAIN_AUDIT_KINDS``) is left out in the query, before the
+    window is counted, as ``aisquare board`` leaves it out: one ``captain_action`` line per
+    captain call filled the tab's 200 events and pushed every real one off it (review of
+    #240, F3; the fold main 0.8.2 marked here).
     """
     from aisquare.cli.team import board_json
     from aisquare.core.store import store_session
@@ -3186,7 +3189,12 @@ def remote_board_payload(project: str | None = None, *, glance: bool = False) ->
         team_service._require_enabled()
         board = _remote_project_board(target, store)
         read = team_service.board_data_in(
-            store, target.root, events=BOARD_EVENTS, project=board, glance=glance
+            store,
+            target.root,
+            events=BOARD_EVENTS,
+            project=board,
+            glance=glance,
+            exclude_kinds=team_service.CAPTAIN_AUDIT_KINDS,
         )
     return board_json(*read)
 

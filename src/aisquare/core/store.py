@@ -1013,6 +1013,15 @@ _SCHEMA_V31 = ""
 # script is empty: it is in :data:`_PRODUCTS`, and its backfill
 # (:func:`_board_existing_agents`) gives a row from before it its session's board.
 _SCHEMA_V32 = ""
+# v33 (#201, docs/plans/spawn-personas.md §5): the persona a session was launched as and
+# the one a fleet agent was spawned with. Nullable: no persona is the default and the
+# common case, and a row records what was ASKED even when the persona could not be
+# loaded. The persona line stamped these columns as its own v15 (#208 converged that
+# number); stamped here, a store of that line holds them already, and so does the
+# captain RC's v24, so the columns are the whole step and the script is empty: they are
+# in :data:`_PRODUCTS`, added only where absent, and a row from before them keeps NULL,
+# which reads as no persona.
+_SCHEMA_V33 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1047,6 +1056,7 @@ _MIGRATIONS = (
     _SCHEMA_V30,
     _SCHEMA_V31,
     _SCHEMA_V32,
+    _SCHEMA_V33,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1101,6 +1111,9 @@ _PRODUCTS: dict[int, _Products] = {
     29: _Products(("team_task_number", "team_task_unnumbered")),
     30: _Products(columns=(("fleet_agent", "branch", "TEXT"),)),
     31: _Products(columns=(("fleet_agent", "board", "TEXT"),)),
+    32: _Products(
+        columns=(("team_session", "persona", "TEXT"), ("fleet_agent", "persona", "TEXT"))
+    ),
 }
 
 _PROJECT_COLUMNS = (
@@ -1165,7 +1178,7 @@ in the wall-clock median. Older than this it stays open and is excluded
 instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path, account, model, effort, limit_resets_at"
+    "transcript_path, account, model, effort, limit_resets_at, persona"
 )
 _USAGE_COLUMNS = (
     "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at, "
@@ -1182,7 +1195,7 @@ _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
     "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
-    "board",
+    "board", "persona",
 )  # fmt: skip
 _FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
 
@@ -1218,6 +1231,18 @@ class AmbiguousIdError(LookupError):
     def __init__(self, ref: str) -> None:
         super().__init__(f"entry id {ref!r} is ambiguous")
         self.ref = ref
+
+
+def is_the_home(root: Path) -> bool:
+    """Whether ``root`` is the aisquare home itself (resolved, so a symlink is the same home).
+
+    A root that is a symlink loop is not the home: ``resolve`` raises ``RuntimeError`` for
+    one on 3.11 and 3.12 (``OSError`` from 3.13), and ``project prune`` asks this of every
+    row, where a loop is a root it must report, never a traceback."""
+    try:
+        return root.resolve() == paths.aisquare_home().resolve()
+    except (OSError, RuntimeError):
+        return False
 
 
 class ContextStore(Protocol):
@@ -1277,6 +1302,7 @@ class ContextStore(Protocol):
         label: str | None = None,
         focus: str | None = None,
     ) -> TeamSession: ...
+    def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession: ...
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
@@ -1330,9 +1356,17 @@ class ContextStore(Protocol):
     def get_event_by_seq(self, seq: int) -> TeamEvent | None: ...
     def find_event_by_id(self, ref: str) -> TeamEvent | None: ...
     def events_since(
-        self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
+        self,
+        project_id: str,
+        seq: int,
+        *,
+        exclude_session: str | None = None,
+        exclude_kinds: Collection[str] = (),
+        limit: int = 50,
     ) -> list[TeamEvent]: ...
-    def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]: ...
+    def recent_events(
+        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+    ) -> list[TeamEvent]: ...
     def filtered_events(
         self,
         project_id: str,
@@ -1342,6 +1376,7 @@ class ContextStore(Protocol):
         since_seq: int | None = None,
         kind: str | None = None,
         task_id: str | None = None,
+        exclude_kinds: Collection[str] = (),
         limit: int = 30,
     ) -> list[TeamEvent]: ...
     def team_events_since(
@@ -1425,6 +1460,7 @@ class ContextStore(Protocol):
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
     def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
+    def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent: ...
     def end_fleet_agent_if_live(
         self, agent_id: str, *, exit_status: int | None = None
     ) -> FleetAgent | None: ...
@@ -1523,6 +1559,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         server_started_at=_maybe_dt(row["server_started_at"]),
         branch=row["branch"],
         board=row["board"],  # never NULL as read (`_FLEET_AGENT_READ`)
+        persona=row["persona"],
     )
 
 
@@ -1653,6 +1690,7 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         model=row["model"],
         effort=row["effort"],
         limit_resets_at=_maybe_dt(row["limit_resets_at"]),
+        persona=row["persona"],
     )
 
 
@@ -1962,6 +2000,20 @@ class SqliteStore:
         codename is kept; one another project holds raises ``sqlite3.IntegrityError`` and
         writes nothing.
         """
+        if is_the_home(project.root):
+            # The aisquare home's row is the captain's HOME BOARD (services.captain):
+            # captured so it can hold the captain's row and events, never one of the
+            # owner's projects — a spawn, a codename, a rename or a launch's
+            # activation onboarding it would put `.aisquare` in the sidebar, in
+            # `project list` and in the captain's own projects() tool (T2, 13121).
+            # A spawn's codename is still given to it when it has none: a codename is
+            # no onboarding, and the captain's tmux session was named by it before the
+            # row was written (``fleet._add_named``, 0.8.x's capture-off rule).
+            self.ensure_project(project)
+            home = self._written_project(project.id)
+            if codename is not None and home.codename is None:
+                return self.set_codename(project.id, codename)
+            return home
         now = _now_iso()
         self._conn.execute(
             "INSERT INTO project "
@@ -1981,8 +2033,16 @@ class SqliteStore:
             ),
         )
         self._conn.commit()
-        stored = self.get_project(project.id)
-        assert stored is not None  # just written
+        return self._written_project(project.id)
+
+    def _written_project(self, project_id: str) -> ProjectInfo:
+        """The row just written — a ``KeyError`` if it is gone already (another process's
+        purge between the write and this read), as every lookup here says a missing
+        project. Checked, not asserted: under ``python -O`` an ``assert`` is stripped and
+        ``None`` went back against the return type (pre-gate review of #219)."""
+        stored = self.get_project(project_id)
+        if stored is None:
+            raise KeyError(project_id)
         return stored
 
     def list_projects(
@@ -2021,12 +2081,15 @@ class SqliteStore:
         return [_row_to_project(row) for row in rows]
 
     def captured_projects(self) -> list[ProjectInfo]:
-        """The registrations a session made on its own that nothing has added on purpose."""
+        """The registrations a session made on its own that nothing has added on purpose.
+
+        Never the aisquare home's: the captain's home board is captured on purpose and never
+        onboarded, and doctor counted it among the scratch directories to prune."""
         rows = self._conn.execute(
             f"SELECT {_PROJECT_COLUMNS} FROM project "
             "WHERE forgotten_at IS NULL AND onboarded_at IS NULL ORDER BY name"
         ).fetchall()
-        return [_row_to_project(row) for row in rows]
+        return [project for project in map(_row_to_project, rows) if not is_the_home(project.root)]
 
     def get_project(
         self, project_id: str, *, include_forgotten: bool = False
@@ -2324,17 +2387,24 @@ class SqliteStore:
         return row is not None
 
     def upsert_session(self, session: TeamSession) -> TeamSession:
-        """Insert the session, or revive/refresh it if the id is already known."""
+        """Insert the session, or revive/refresh it if the id is already known.
+
+        A known session keeps the board it first registered on, and its cursor, as on
+        main: the captain line's move to another board (#230's fix 2b) repaired the
+        wrong-board sessions of #230's own hub rule, which hub rule A retired, and
+        shipped a change to main's semantics unpinned (review of #240, F4).
+        """
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
             "transcript_path = COALESCE(excluded.transcript_path, transcript_path), "
             "account = COALESCE(excluded.account, account), "
             "model = COALESCE(excluded.model, model), "
-            "effort = COALESCE(excluded.effort, effort)",
+            "effort = COALESCE(excluded.effort, effort), "
+            "persona = COALESCE(excluded.persona, persona)",
             (
                 session.id,
                 session.project_id,
@@ -2351,6 +2421,7 @@ class SqliteStore:
                 session.model,
                 session.effort,
                 session.limit_resets_at.isoformat() if session.limit_resets_at else None,
+                session.persona,
             ),
         )
         self._conn.commit()
@@ -3137,6 +3208,7 @@ class SqliteStore:
         since_seq: int | None = None,
         kind: str | None = None,
         task_id: str | None = None,
+        exclude_kinds: Collection[str] = (),
         limit: int = 30,
     ) -> list[TeamEvent]:
         """Matching events for ``team log``'s filters, oldest-first.
@@ -3147,7 +3219,9 @@ class SqliteStore:
         events (the MCP ``team_log`` contract). Rides the ``(project_id,
         seq)`` index; ``since_iso`` compares stored ISO-8601 UTC strings
         lexicographically (uniform format by construction). ``session_id`` is
-        exact — prefix resolution is the service layer's job.
+        exact — prefix resolution is the service layer's job. ``exclude_kinds``
+        leaves those kinds out INSIDE the query, so a window stays ``limit``
+        long however many of them the board holds (the captain's audit lines).
         """
         clauses = ["project_id = ?"]
         params: list[str | int] = [project_id]
@@ -3166,6 +3240,11 @@ class SqliteStore:
         if task_id is not None:
             clauses.append("task_id = ?")
             params.append(task_id)
+        if exclude_kinds:
+            # In the query, not after it: a window of N filtered AFTER the LIMIT
+            # comes back short on a board where the excluded kind is common.
+            clauses.append(f"kind NOT IN ({', '.join('?' * len(exclude_kinds))})")
+            params.extend(exclude_kinds)
         paging = since_seq is not None
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
@@ -3175,22 +3254,40 @@ class SqliteStore:
         return [_row_to_event(row) for row in (rows if paging else reversed(rows))]
 
     def events_since(
-        self, project_id: str, seq: int, *, exclude_session: str | None = None, limit: int = 50
+        self,
+        project_id: str,
+        seq: int,
+        *,
+        exclude_session: str | None = None,
+        exclude_kinds: Collection[str] = (),
+        limit: int = 50,
     ) -> list[TeamEvent]:
+        """A cursor page: the OLDEST ``limit`` events past ``seq``, oldest first.
+
+        ``exclude_kinds`` leaves those kinds out INSIDE the query, as
+        :meth:`filtered_events` does, so ``limit`` counts rows the caller can use.
+        Dropped after the LIMIT, a run of the captain's audit lines filled the whole
+        page, and the event behind it was not read at all (review of #240, finding 11).
+        """
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
             "WHERE project_id = ? AND seq > ? "
             "AND (session_id IS NULL OR session_id != ?) "
-            "ORDER BY seq LIMIT ?",
-            (project_id, seq, exclude_session or "", limit),
+            f"{_and_not_kinds(exclude_kinds)}ORDER BY seq LIMIT ?",
+            (project_id, seq, exclude_session or "", *exclude_kinds, limit),
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 
-    def recent_events(self, project_id: str, *, limit: int = 10) -> list[TeamEvent]:
+    def recent_events(
+        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+    ) -> list[TeamEvent]:
+        """A window: the NEWEST ``limit`` events, oldest first. ``exclude_kinds`` is left
+        out inside the query, as in :meth:`events_since`: the window stays ``limit`` long
+        however many of those kinds are newer than the events it shows."""
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
-            "WHERE project_id = ? ORDER BY seq DESC LIMIT ?",
-            (project_id, limit),
+            f"WHERE project_id = ? {_and_not_kinds(exclude_kinds)}ORDER BY seq DESC LIMIT ?",
+            (project_id, *exclude_kinds, limit),
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
 
@@ -3313,7 +3410,7 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
@@ -3344,6 +3441,7 @@ class SqliteStore:
                 agent.server_started_at.isoformat() if agent.server_started_at else None,
                 agent.branch,
                 agent.board if agent.board is not None else agent.project_id,
+                agent.persona,
             ),
         )
         self._conn.commit()
@@ -4100,6 +4198,28 @@ class SqliteStore:
             raise KeyError(agent_id)
         return agent
 
+    def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent:
+        """The persona a running agent was given (``fleet.attach_persona``, plan §4.7)."""
+        self._conn.execute("UPDATE fleet_agent SET persona = ? WHERE id = ?", (persona, agent_id))
+        self._conn.commit()
+        agent = self.get_fleet_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        return agent
+
+    def set_session_persona(self, session_id: str, persona: str | None) -> TeamSession:
+        """The persona a joined session now runs as — beside ``set_fleet_agent_persona``."""
+        session = self.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
+        self._conn.execute(
+            "UPDATE team_session SET persona = ? WHERE id = ?", (persona, session.id)
+        )
+        self._conn.commit()
+        updated = self.get_session(session.id)
+        assert updated is not None  # just updated
+        return updated
+
     def end_fleet_agent_if_live(
         self, agent_id: str, *, exit_status: int | None = None
     ) -> FleetAgent | None:
@@ -4418,6 +4538,12 @@ def _glob_prefix(ref: str) -> str:
     """
     stripped = _ref_stripped(ref)
     return f"{stripped}*" if stripped else ""
+
+
+def _and_not_kinds(kinds: Collection[str]) -> str:
+    """``AND kind NOT IN (?, …) `` for a query that leaves ``kinds`` out, or nothing; the
+    caller hands ``*kinds`` to the query at that place."""
+    return f"AND kind NOT IN ({', '.join('?' * len(kinds))}) " if kinds else ""
 
 
 _DEFAULT_BUSY_MS = 5000

@@ -6,8 +6,18 @@ worktree, task) + actions + the ``TerminalPane``". The header is a one-line
 is DATA and is appended as text, never as markup, so a label or a path with
 brackets in it reaches the screen intact (tests/test_console_markup.py's
 rule). The shell calls :meth:`AgentView.refresh_status` on its poll; a changed
-``pane_id`` (a restart) re-attaches the pane. Actions (stop, restart, open in
-tmux, transcript) are the shell's buttons and land with it.
+``pane_id`` (a restart) re-attaches the pane.
+
+**Stop** and **Restart** are the actions §4.2 promised. Stop only asks: it
+posts :class:`StopAgent` and the shell opens the dialog (``cli/ui/stop.py``),
+which owns the service call — one confirmation, *Force* included, over the
+same ``services.fleet.stop`` the CLI runs. It shows where
+``sidebar.STOP_STATES`` says: while the agent HAS a process (``ALIVE_STATES``,
+the constant the card's "agents alive" chip counts by), and on a 💤 exited
+row, whose dead window `remain-on-exit` kept for the last screen (#138) — Stop
+there removes it and the row leaves the listing. A ✗ lost row offers no Stop:
+it is ``fleet reap``'s business. **Restart** (#138) runs the service off the
+UI thread; the shell's next frame is what repaints, never an optimistic guess.
 """
 
 from __future__ import annotations
@@ -25,7 +35,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.ui.click_guard import GuardedButton
-from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP
+from aisquare.cli.ui.sidebar import ROLE_ICON, STATE_CHIP, STOP_STATES, StopAgent
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
@@ -112,16 +122,10 @@ def shown_pane(status: FleetAgentStatus) -> str | None:
     return None if status.state == "lost" or status.held else status.agent.pane_id
 
 
-STOP_WORKER = "agent-stop"
 RESTART_WORKER = "agent-restart"
 #: States in which there is a process to stop; anything else is a row to restart. The
 #: service's own set, which `fleet restart|stop --all` acts on.
 _STOPPABLE: frozenset[str] = fleet_service.PROCESS_STATES
-#: Where **Stop** is offered: a process to stop, or an exited agent's dead window —
-#: `remain-on-exit` keeps it for the last screen, and Stop on the 💤 row removes it,
-#: which takes the row off the listing (``fleet stop`` on an ended row). Without it a
-#: 💤 row whose restart is refused (a coder whose task is done) could not be cleared.
-_SHOWS_STOP: frozenset[str] = _STOPPABLE | {"exited"}
 
 
 class AgentView(Vertical):
@@ -130,8 +134,10 @@ class AgentView(Vertical):
     **Stop** and **Restart** (#138) are the actions §4.2 promised and this view
     never had: a manager ended with ctrl+c inside its window showed 💤 forever
     with nothing to click, and ``fleet spawn manager`` refused until a hand-run
-    ``reap``. Both run the service off the UI thread; the shell's next frame is
-    what repaints, never an optimistic guess. A restart resumes the agent's own
+    ``reap``. Stop asks the shell for its dialog (:class:`StopAgent`); the dialog
+    runs the stop and owns its answer, including a refusal. Restart runs the
+    service off the UI thread; the shell's next frame is what repaints, never an
+    optimistic guess. A restart resumes the agent's own
     session when its transcript is on disk, so the manager comes back knowing
     its intake and its coders; the shell then shows the new row if this view is
     still the one on screen (:class:`AgentRestarted`). Both buttons ignore a mouse
@@ -204,6 +210,7 @@ class AgentView(Vertical):
             # must not stop or restart the agent it shows instead.
             yield GuardedButton("Stop", id="agent-stop", compact=True)
             yield GuardedButton("Restart", id="agent-restart", compact=True, variant="primary")
+        yield from self.compose_bars()
         yield TerminalPane(
             shown_pane(self.status),
             server=self.server,
@@ -212,6 +219,11 @@ class AgentView(Vertical):
             label=self.status.agent.label,
             id="agent-pane",
         )
+
+    def compose_bars(self) -> ComposeResult:
+        """More bars between the header and the pane — the captain's (``views/captain.py``,
+        T4); an ordinary agent has none."""
+        yield from ()
 
     def on_mount(self) -> None:
         self._paint_actions()
@@ -238,23 +250,22 @@ class AgentView(Vertical):
             self.pane.attach(wanted)
 
     def _paint_actions(self) -> None:
-        """Stop while there is a process or a dead window; Restart always (an exited row is
-        exactly its case).
+        """Stop where ``STOP_STATES`` says — a process, or a dead window; Restart always (an
+        exited row is exactly its case).
 
-        Greyed while THIS view's own stop or restart runs, and only then: ``self.workers``
+        Greyed while THIS view's own restart runs, and only then (a stop runs inside its
+        own modal dialog): ``self.workers``
         is the app's whole list, and a finished worker is still in it when its
         ``StateChanged`` arrives — nothing else repaints the buttons afterwards (the shell
         feeds a view only when its status changed), so a failed restart would otherwise
         stay greyed with no way to retry it.
         """
         busy = any(
-            worker.node is self
-            and worker.name in (STOP_WORKER, RESTART_WORKER)
-            and not worker.is_finished
+            worker.node is self and worker.name == RESTART_WORKER and not worker.is_finished
             for worker in self.workers
         )
         stop = self.query_one("#agent-stop", Button)
-        stop.display = self.status.state in _SHOWS_STOP
+        stop.display = self.status.state in STOP_STATES
         stop.disabled = busy
         stop.tooltip = (
             "/exit, a grace period, then the window is killed (as `fleet stop` does)"
@@ -266,28 +277,18 @@ class AgentView(Vertical):
         restart.disabled = busy
         restart.label = "Restart" if self.status.state in _STOPPABLE else "Restart (resume)"
         restart.tooltip = (
-            "Start it again under this label — same role, task, worktree and account; its "
-            "session is resumed from the transcript when that is on disk (as `fleet restart` "
-            "does)"
+            "Start it again under this label — same role, task, worktree, account and "
+            "persona; its session is resumed from the transcript when that is on disk (as "
+            "`fleet restart` does)"
         )
 
     @on(Button.Pressed, "#agent-stop")
     def _stop(self, event: Button.Pressed) -> None:
         event.stop()
         agent = self.status.agent
-        # Pinned to THIS row (``agent_id``), never to whoever holds the label now: the
-        # view outlives its row, and a 💤 view's Stop by label stopped the replacement.
-        self.run_worker(
-            lambda: fleet_service.stop(
-                fleet_service.project_of(agent), agent.label, agent_id=agent.id
-            ),
-            name=STOP_WORKER,
-            group=STOP_WORKER,
-            exclusive=True,
-            thread=True,
-            exit_on_error=False,
-        )
-        self._paint_actions()
+        # THIS row's id: the dialog pins the stop to it (``agent_id``), never to whoever
+        # holds the label now — the view outlives its row.
+        self.post_message(StopAgent(agent.project_id, agent.id))
 
     @on(Button.Pressed, "#agent-restart")
     def _restart(self, event: Button.Pressed) -> None:
@@ -308,31 +309,18 @@ class AgentView(Vertical):
         self._paint_actions()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        if event.worker.name not in (STOP_WORKER, RESTART_WORKER):
+        if event.worker.name != RESTART_WORKER:
             return
         if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             return
         label = self.status.agent.label
         if event.state is WorkerState.ERROR:
-            verb = "stop" if event.worker.name == STOP_WORKER else "restart"
             self.notify(
-                f"could not {verb} {label}: {event.worker.error}",
+                f"could not restart {label}: {event.worker.error}",
                 severity="error",
                 timeout=8,
                 markup=False,
             )
-        elif event.worker.name == STOP_WORKER:
-            self.notify(f"✓ stopped {label}", timeout=5, markup=False)
-            receipt = event.worker.result
-            if isinstance(receipt, fleet_service.StopReceipt) and receipt.release_failed:
-                # `fleet stop` prints this and exits 1: a claim left with the ended
-                # session is not a clean stop, and the button must not read as one.
-                self.notify(
-                    f"claims: {receipt.release_failed}",
-                    severity="warning",
-                    timeout=8,
-                    markup=False,
-                )
         else:
             receipt = event.worker.result
             if isinstance(receipt, fleet_service.RestartReceipt):

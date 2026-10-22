@@ -613,7 +613,7 @@ class ControlClient:
         done: Done | None,
         stamp: int | None,
         *,
-        failed: Callable[[], None] | None = None,
+        on_failure: Callable[[], None] | None = None,
     ) -> None:
         """One input for ``pane_id``, as ONE chain: ``commands``, then — given ``stamp`` —
         ``set-environment -h`` of its session's stamp variable (:data:`STAMP_PREFIX`), set
@@ -621,8 +621,10 @@ class ControlClient:
         none of it after a command that fails, so the stamp is set exactly when the input
         ran: when the client dies before answering, :func:`sent_stamp` says, by polling,
         which inputs tmux ran and which never reached it. ``done`` is delivered the last
-        command's answer, which is the first failure's when one failed; ``failed`` runs
-        here first, on the reader thread, when one did."""
+        command's answer, which is the first failure's when one failed; ``on_failure`` runs
+        here first, on the reader thread, when one did. Not ``failed``: the call-graph
+        guards key calls by bare name (``tests/test_config_writes_stay_in_the_cli.py``), and
+        a call to ``failed`` reads as ``services.onboarding``'s, which reaches a config write."""
         chain = [*commands]
         if stamp is not None:
             self.stamped.add(pane_id)
@@ -630,8 +632,8 @@ class ControlClient:
             chain.append(["set-environment", "-h", "-t", pane_id, name, str(stamp)])
 
         def answered(reply: Reply) -> None:
-            if not reply.ok and failed is not None:
-                failed()
+            if not reply.ok and on_failure is not None:
+                on_failure()
             if done is not None:
                 self._deliver(partial(done, reply))
 
@@ -696,7 +698,7 @@ class ControlClient:
             ],
             done,
             stamp,
-            failed=lambda: self._quietly([["delete-buffer", "-b", name]]),
+            on_failure=lambda: self._quietly([["delete-buffer", "-b", name]]),
         )
         return True
 

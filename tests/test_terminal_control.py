@@ -166,7 +166,7 @@ def _key_latencies(
         latencies: list[float] = []
         async with host.run_test(size=(100, 10)) as pilot:
             pane = host.pane
-            forward, show = pane._send, pane._show_capture
+            forward, show = pane._send_translation, pane._show_capture
 
             def recording_send(translation: Any) -> None:
                 sent.append(time.monotonic())
@@ -177,7 +177,7 @@ def _key_latencies(
                 frames.append((time.monotonic(), capture.lines[0] if capture.lines else ""))
                 return changed
 
-            monkeypatch.setattr(pane, "_send", recording_send)
+            monkeypatch.setattr(pane, "_send_translation", recording_send)
             monkeypatch.setattr(pane, "_show_capture", recording_show)
             pane.focus()
             await wait_until(pilot, lambda: pane.facts is not None, timeout=5.0)

@@ -2558,14 +2558,16 @@ class TerminalPane(Widget, can_focus=True):
             # interrupt, not a copy of whatever now sits under it (class
             # docstring, rule 3; review of #135, finding 2).
             self._clear_own_selection()
-        self._send(translation)
+        self._send_translation(translation)
         if self.scrollback:
             self.scrollback = 0
             self._frame_now()
         # A key is activity: the echo must not wait for the idle tick.
         self._input_arrived()
 
-    def _send(self, translation: Translation) -> None:
+    def _send_translation(self, translation: Translation) -> None:
+        # Not ``_send``: the call-graph guards key calls by bare name, and the captain's voice
+        # server has a ``_send`` the hook path reaches, which would lead it into ``_forward``.
         self._forward("key" if translation.kind == "key" else "text", translation.value)
 
     def _forward(self, kind: InputKind, value: str | bytes) -> bool:

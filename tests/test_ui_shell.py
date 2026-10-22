@@ -2439,7 +2439,7 @@ def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
 
     monkeypatch.setattr(fleet_service, "list_agents", fake)
 
-    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+    async def go(pilot: Pilot[None]) -> tuple[str, str, bool]:
         app = fleet_app(pilot)
         for seen in threads.values():
             seen.clear()
@@ -2447,10 +2447,13 @@ def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
         answer[0] = "working"
         app.refresh_data()  # what the two-second timer runs
         await settle(app)
-        return shown(row_for(app, "agt_a_manager")), shown(row_for(app, "agt_b_manager"))
+        rows = shown(row_for(app, "agt_a_manager")), shown(row_for(app, "agt_b_manager"))
+        return *rows, app.captain_on
 
-    row_a, row_b = drive(go)
-    assert len(threads["store"]) == 1 and len(threads["list_agents"]) == 2, threads
+    row_a, row_b, captain = drive(go)
+    # With the captain on, the read also looks up its home board, in a session of its own
+    # (``_read_captain``): one more, off the UI thread as well.
+    assert len(threads["store"]) == 1 + captain and len(threads["list_agents"]) == 2, threads
     main = threading.main_thread()
     assert all(t is not main for seen in threads.values() for t in seen), threads
     assert row_a.rstrip().endswith("▶") and row_b.rstrip().endswith("▶")  # …and painted

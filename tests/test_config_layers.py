@@ -238,6 +238,12 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "share_settings": False,
         },
         "projects": {"capture": False},
+        # The persona train and the captain's switch, added since (#201, #240).
+        "persona": {
+            "system_prompt": True,
+            "import": {"engine": "auto", "api_model": "claude-opus-5"},
+        },
+        "experimental": {"captain": False},
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

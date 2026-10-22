@@ -46,6 +46,12 @@ otherwise inherit a live identity:
     check entitlement. A real LLM process, but NOT a session: it is a
     yes/no question about the account, and a Run for it is pure noise
     attributed to whoever happened to be probing.
+  * ``services/persona_import.py::draft_with_manager`` — ``persona import``'s
+    manager engine: one headless ``claude -p`` under the manager role's binding
+    that turns a source into a persona draft (docs/plans/spawn-personas.md
+    §3.9). A real model process but not a session — like the probe, one
+    question and one answer — so a Run for it would be attributed to whoever
+    happened to import.
   * ``core/brain.py::_run`` — the gbrain worker. Not an agent session, and its
     own ``_env`` already contemplates an Anthropic key path
     (``ANTHROPIC_API_KEY`` is popped only when embeddings are off), so an
@@ -123,6 +129,10 @@ Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
   * ``services/ngrok_tunnel.py::popen_tied`` — the R panel's ngrok, under the
     parent that ends it with this process; a tunnel to ``127.0.0.1``, no model,
     not stripped.
+  * ``services/captain/speaker.py::run_subprocess`` — the captain's speech
+    synthesiser (``powershell.exe`` + System.Speech, ``say``, ``spd-say``), the
+    text on stdin or as one argument; no model process, and stripped anyway:
+    a synthesiser has no use for an identity, and ``powershell.exe`` is a shell.
 
 Checked and NOT a seam, recorded so the next reader does not re-derive it:
   * ``services/project.py`` — catches ``subprocess.SubprocessError`` but starts
@@ -181,6 +191,17 @@ MARKER_ENV_VARS = ("AISQUARE_PIPELINE_ID", "AISQUARE_TRACE_AGENT_NAME", "AISQUAR
 #: user-visible output and the reserved-var guard.
 IDENTITY_ENV_VARS = (*TRACING_ENV_VARS, *MARKER_ENV_VARS)
 
+#: The variables that tie a process to one board, seat or role. A fleet window gets
+#: each of its own (``fleet.spawn``'s ``-e`` pairs). A tmux server copies the
+#: environment of the client that starts it into its global environment, and every
+#: window opened on it inherits that, so none of these may reach a server (fix 3 of
+#: the fleet-board card, follow-up tsk_01m3k89bkhpj): the owner's asqui launcher
+#: exported the launch folder's git root as AISQUARE_TEAM_HUB, and the server it
+#: started pinned every window opened there by hand to that board. The switches
+#: (``AISQUARE_TEAM``, ``AISQUARE_TEAM_DELTA``) are not here: a shell that sets one
+#: has made a choice for its whole fleet.
+TEAM_ENV_VARS = ("AISQUARE_TEAM_HUB", "AISQUARE_FLEET_AGENT", "AISQUARE_ROLE", "AISQUARE_PERSONA")
+
 TRACED = "traced"
 EXCLUDED = "excluded"
 
@@ -211,6 +232,13 @@ SEAMS: dict[str, Seam] = {
         EXCLUDED,
         "runs `claude -p` to test an entitlement; a Run for it is junk data "
         "attributed to whoever was probing",
+        strips_identity=True,
+    ),
+    "aisquare/services/persona_import.py::draft_with_manager": Seam(
+        EXCLUDED,
+        "`persona import`'s manager engine runs `claude -p` once to draft a persona; like "
+        "the entitlement probe it is a question, not a session, and a Run for it is junk "
+        "attributed to whoever imported",
         strips_identity=True,
     ),
     "aisquare/core/brain.py::_run": Seam(
@@ -363,6 +391,14 @@ SEAMS: dict[str, Seam] = {
         "group once this process is gone. A tunnel to 127.0.0.1, never the model API; not "
         "stripped, like `tmux attach`",
     ),
+    "aisquare/services/captain/speaker.py::run_subprocess": Seam(
+        EXCLUDED,
+        "the captain's speech synthesiser (`powershell.exe` + System.Speech, `say`, "
+        "`spd-say`) with the text on stdin or as one argument (T3). No model process; "
+        "stripped anyway — a synthesiser has no use for an identity, and powershell "
+        "is a shell",
+        strips_identity=True,
+    ),
 }
 
 
@@ -398,3 +434,15 @@ def git_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
+
+
+def tmux_client_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """What a tmux client runs with: :func:`untraced_env` less :data:`TEAM_ENV_VARS`.
+
+    The client that finds no server starts one, and the server keeps that client's
+    environment as its global one, so a server the fleet starts holds no team
+    variable: ``AISQUARE_PERSONA`` among them, so a window opened in it by hand is briefed
+    as no one's persona (review of #201, F7). The home (``AISQUARE_HOME``) stays: the
+    windows need it.
+    """
+    return {k: v for k, v in untraced_env(base).items() if k not in TEAM_ENV_VARS}

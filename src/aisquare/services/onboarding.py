@@ -336,23 +336,26 @@ def parse_checks(stdout: str) -> tuple[list[DoctorCheck], str | None]:
 
 
 def run_doctor(
-    cwd: Path | None, *, run: Runner = selfcli.run, say: Callable[[str], None] | None = None
+    cwd: Path | None, *, run: Runner = selfcli.run, on_line: Callable[[str], None] | None = None
 ) -> tuple[list[DoctorCheck], str | None]:
-    """``aisquare --json doctor`` in ``cwd``: (checks, error).
+    """``aisquare --json doctor`` in ``cwd``: (checks, error). ``on_line`` is told each line
+    of the run as it goes (:func:`onboard`'s log). Not ``say``: the hook-path guards follow
+    calls by bare name, and the captain's ``say`` starts the captain
+    (tests/test_remote_names_stay_off_the_hook_graph.py).
 
     ``doctor`` exits 1 whenever a check FAILS and still prints the full report,
     so the exit code is not what decides here — the report is. Only a report
     that cannot be read is an error.
     """
     args = ["--json", "doctor"]
-    if say is not None:
-        say(f"$ aisquare {' '.join(args)}")
+    if on_line is not None:
+        on_line(f"$ aisquare {' '.join(args)}")
     result, asked = _invoke(run, args, cwd)
     if result is None:
         return [], asked
-    if say is not None:
+    if on_line is not None:
         for line in _stderr_lines(result):
-            say(f"  {line}")
+            on_line(f"  {line}")
     checks, error = parse_checks(result.stdout)
     if error is not None and result.returncode != 0 and not result.stdout.strip():
         error = failure_reason(result, "doctor")
@@ -412,7 +415,7 @@ def onboard(
     for note in report.notes:
         say(f"  note: {note}")
 
-    checks, doctor_error = run_doctor(path, run=run, say=say)
+    checks, doctor_error = run_doctor(path, run=run, on_line=say)
     if doctor_error is not None:
         say(f"⚠ {doctor_error}")
     else:

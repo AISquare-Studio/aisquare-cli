@@ -109,7 +109,9 @@ def _shown(widget: Static) -> str:
 # --- the sidebar ------------------------------------------------------------------------
 
 
-def test_the_sidebar_has_the_projects_then_settings_and_its_status_and_nothing_else() -> None:
+def test_the_sidebar_has_the_projects_then_settings_and_its_status_and_nothing_else(
+    captain_off: None,
+) -> None:
     async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str, bool]:
         app = _app(pilot)
         sidebar = app.sidebar

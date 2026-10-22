@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,10 @@ _HEAD_BYTES = 1_000_000
 #: How much of a transcript's tail the refusal counter reads: enough for a
 #: turn's worth of tool results, small enough to cost a hook nothing.
 _TAIL_BYTES = 256_000
+
+#: How far back :func:`last_reply` will read for the prompt a reply answers — a turn
+#: bigger than this has lost its anchor, and says "no prompt" rather than guess.
+_REPLY_MAX_BYTES = 64_000_000
 
 #: The longest tool-result text that can still be a refusal. Claude Code's own
 #: sentence is ~170 characters, but the tool result need not stop there: the
@@ -135,6 +140,93 @@ def size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def last_reply(
+    path: Path,
+    *,
+    since: datetime | None = None,
+    tail_bytes: int = _TAIL_BYTES,
+    max_bytes: int = _REPLY_MAX_BYTES,
+) -> str | None:
+    """The assistant's text since the transcript's last prompt, or ``None`` when nothing has
+    answered a prompt yet (or there is none). ``""`` is an answer without text.
+
+    "The last prompt" is the newest ``user`` entry whose content is text the user
+    sent — a tool result also arrives as a ``user`` entry, and so does what Claude
+    Code writes itself (``isMeta``: a command's caveat, a hook's context); neither
+    is one. What follows it is the turn that answered: every assistant text block,
+    in order, joined by newlines (a tool call's own blocks are not text). For the
+    captain (``services.captain.brain``): its reply to what the owner just said.
+
+    ``since`` is when that was said: a last prompt stamped earlier is an older
+    turn's, and the answer is ``None`` — the text has not reached the transcript
+    yet. An entry with no ``timestamp`` cannot be told apart and counts. Nor is a
+    prompt with no assistant entry after it answered: a hook that stamped the row
+    ``waiting`` in the moment before the prompt's own hook said ``working`` must not
+    hand back an empty reply.
+
+    The tail read grows (four times over, up to ``max_bytes``) while it holds no prompt:
+    one turn's tool results can outweigh ``tail_bytes`` — a ``read_pane`` of every
+    agent — and the reply must not vanish with the prompt that anchors it.
+    """
+    size_now = size(path)
+    window = tail_bytes
+    while True:
+        found = _reply_in(_tail_entries(path, window))
+        if found is not None or window >= min(size_now, max_bytes):
+            break
+        window = min(window * 4, max_bytes)
+    if found is None:
+        return None
+    asked_at, text = found
+    if since is not None and asked_at is not None and asked_at < since:
+        return None
+    return text
+
+
+def _reply_in(entries: Iterator[dict[str, Any]]) -> tuple[datetime | None, str | None] | None:
+    """The last prompt's time and the text after it — ``None`` for the text while nothing
+    has answered it — or ``None`` when no prompt is there."""
+    reply: list[str] | None = None
+    prompted = False
+    asked_at: datetime | None = None
+    for entry in entries:
+        message = entry.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if entry.get("type") == "user" and not entry.get("isMeta") and _is_prompt(content):
+            reply, prompted, asked_at = None, True, _timestamp(entry)
+        elif entry.get("type") == "assistant" and prompted and isinstance(content, list):
+            reply = (reply or []) + [
+                str(block.get("text", ""))
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text" and block.get("text")
+            ]
+    if not prompted:
+        return None
+    return asked_at, "\n".join(reply).strip() if reply is not None else None
+
+
+def _timestamp(entry: dict[str, Any]) -> datetime | None:
+    """An entry's ``timestamp`` (``2026-09-25T10:00:00.412Z``), aware; ``None`` if unreadable."""
+    raw = entry.get("timestamp")
+    if not isinstance(raw, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
+
+
+def _is_prompt(content: Any) -> bool:
+    """A ``user`` entry the user typed: text, not a tool result."""
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        kinds = {block.get("type") for block in content if isinstance(block, dict)}
+        return "text" in kinds and "tool_result" not in kinds
+    return False
 
 
 def _is_refusal(block: Any) -> bool:

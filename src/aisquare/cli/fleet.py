@@ -127,7 +127,10 @@ def _agent_line(status: FleetAgentStatus, labels: Mapping[int, str] | None = Non
     # page use (the alias, or `plain claude` for slot 1; review of #205, finding
     # 10); absent when nothing chose and the window ran on its shell's claude.
     on = f"  {slot_label(agent.account_slot, labels)}" if agent.account_slot is not None else ""
-    return f"  {agent.label:<24} {agent.role:<10} {chip}{where}{on}{extra}  {agent.pane_id}"
+    persona = f"  · {agent.persona}" if agent.persona else ""
+    return (
+        f"  {agent.label:<24} {agent.role:<10} {chip}{where}{on}{persona}{extra}  {agent.pane_id}"
+    )
 
 
 def slot_label(slot: int, labels: Mapping[int, str] | None) -> str:
@@ -210,6 +213,15 @@ def spawn(
             metavar="ACCOUNT",
         ),
     ] = None,
+    persona: Annotated[
+        str | None,
+        typer.Option(
+            "--persona",
+            help="Persona the agent runs as (see `aisquare persona list`); default: the "
+            "role's fleet.roles.<role>.persona setting, else none.",
+            metavar="NAME",
+        ),
+    ] = None,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -233,6 +245,7 @@ def spawn(
             agent_args=list(ctx.args),
             spawned_by=as_session or "user",
             account=account,
+            persona=persona,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -255,10 +268,11 @@ def spawn(
         if receipt.asked_label and receipt.asked_label != receipt.agent.label
         else ""
     )
+    persona = f" · persona {receipt.agent.persona}" if receipt.agent.persona else ""
     console = stdout_console()
     console.print(
         f"✓ spawned {receipt.agent.label}{asked} ({receipt.agent.id}) → "
-        f"{receipt.tmux_session} {receipt.agent.pane_id}"
+        f"{receipt.tmux_session} {receipt.agent.pane_id}{persona}"
     )
     for note in receipt.notes:
         console.print(f"  {'✓' if note in receipt.shared else '⚠'} {note}")

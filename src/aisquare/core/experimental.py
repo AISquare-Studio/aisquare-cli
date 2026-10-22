@@ -11,13 +11,14 @@ set turns it off (``0``, and a typo), and unset or empty defers to the config.
 Off: ``aisquare captain`` and every subcommand exit 2 with :data:`CAPTAIN_OFF`, and so
 does the server's lean entry (``python -m aisquare.services.captain``); only the group's
 own ``--help`` prints. The fleet UI shows no insignia, captain row or captain view and
-starts no ui receiver, ``captain`` is an unknown role to ``launch`` and ``fleet spawn``,
-the bundled ``captain`` persona is absent, the voice page does not serve (it is a
-subcommand), ``fleet restart`` and ``fleet switch`` refuse the captain's own row with the
-same line, the home's row is a captured row like any other (``services.project.tracked``),
-and doctor says so in one ok row. On, all of it is as it was before the switch. Nothing
-else reads it: every other role, fleet row and board, and the store, are the same either
-way.
+starts no ui receiver, ``captain`` is an unknown role to ``launch`` and ``fleet spawn``
+unless the owner declared it, the bundled ``captain`` persona is absent, the voice page
+does not serve (it is a subcommand), ``fleet restart`` and ``fleet switch`` refuse the
+captain's own row with the same line, the home's row is a captured row like any other
+(``services.project.tracked``), and doctor says so in one ok row. The NAME ``captain``
+is special nowhere (:func:`captain_role`): a role declared under it, and a label, behave
+as on main. On, all of it is as it was before the switch. Nothing else reads it: every
+other role, fleet row and board, and the store, are the same either way.
 
 The captain's own window is handed the variable as its starter has it
 (:func:`captain_environment`), so a switch set for one shell holds in the window too.
@@ -55,6 +56,18 @@ def captain_enabled() -> bool:
         return load_config().experimental.captain
     except Exception:  # an unreadable config is no opt-in
         return False
+
+
+def captain_role(role: str) -> bool:
+    """Whether ``role`` is the captain's: its name while the captain is on.
+
+    Every special case for the captain's role or label asks this, never the name alone.
+    Off, ``captain`` is a name like any other: a ``[team.profiles.captain]`` the owner
+    declared launched under the captain's refusals and briefing, and a coder labelled
+    ``captain`` was stopped by a restart that then could not start it (review of #240,
+    R1-F1 and R1-F2).
+    """
+    return role == "captain" and captain_enabled()
 
 
 def captain_environment() -> dict[str, str]:

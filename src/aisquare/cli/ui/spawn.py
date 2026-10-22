@@ -100,7 +100,7 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, Target
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
 from aisquare.cli.ui.views.app_settings import permission_options
-from aisquare.core import codenames, harness, personas
+from aisquare.core import codenames, experimental, harness, personas
 from aisquare.core.config import FleetRoleSettings, load_config
 from aisquare.core.personas import Persona
 from aisquare.core.store import store_session
@@ -371,7 +371,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._fleet = fleet_service.settings()
         self._git = fleet_service.is_git_project(project.root)
         self._role = role or "coder"
-        self._captain = self._role == fleet_service.CAPTAIN_ROLE
+        self._captain = experimental.captain_role(self._role)
         """Started through ``brain.start``, its role, label, task and args fixed (T4)."""
         roles = role_choices(_bound_roles())
         self._roles = roles if self._role in roles else [*roles, self._role]
@@ -675,7 +675,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         )
         label_problem = (
             None
-            if self._role in ("manager", fleet_service.CAPTAIN_ROLE)
+            if self._label_fixed()
             else self._label_problem(self.query_one("#spawn-label", Input).value)
         )
         args_problem: str | None = None
@@ -700,6 +700,11 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         value = self.query_one("#spawn-persona", Select).value
         return value if isinstance(value, str) else NO_PERSONA
 
+    def _label_fixed(self) -> bool:
+        """Whether the role runs under one label only: the manager's, and the captain's while
+        it is on (``fleet._fixed_label``); off, ``captain`` takes a label like any role."""
+        return self._role == "manager" or experimental.captain_role(self._role)
+
     def _relabel(self, old_role: str) -> None:
         """Re-prefill the label for the current role and task — unless the user changed it."""
         if self._take_over():
@@ -712,7 +717,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             label.value = self._prefill
         else:
             label.value = self._kept_label
-        locked = self._role in ("manager", fleet_service.CAPTAIN_ROLE)
+        locked = self._label_fixed()
         label.disabled = locked
         self.query_one("#spawn-dice", Button).disabled = locked
 
@@ -892,7 +897,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             self.query_one(selector).disabled = source is not None
         self._lock_other_screens()  # Pick…: the teammate's lock, and a running spawn's
         submit = self.query_one("#spawn-submit", Button)
-        if label.disabled and self._role not in ("manager", fleet_service.CAPTAIN_ROLE):
+        if label.disabled and not self._label_fixed():
             label.value = self._prefill  # a take-over's lock, never the user's typing
         if source is None:
             task.value = NO_TASK
@@ -1116,9 +1121,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         ):
             persona = None  # the role's default — or no persona where there is no default
         return {
-            "label": None
-            if self._role in ("manager", fleet_service.CAPTAIN_ROLE) or label == self._prefill
-            else label,
+            "label": None if self._label_fixed() or label == self._prefill else label,
             "task_id": self._task_value() or None,
             "worktree": worktree,
             "permission_mode": None if mode == defaults.permission_mode else mode,

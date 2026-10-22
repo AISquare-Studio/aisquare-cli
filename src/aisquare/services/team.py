@@ -28,7 +28,7 @@ from pathlib import Path
 from types import EllipsisType
 from typing import Any, Final, NamedTuple
 
-from aisquare.core import brain, harness, insights, orchestrator, workspace
+from aisquare.core import brain, experimental, harness, insights, orchestrator, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
@@ -1925,7 +1925,7 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
-        if base_role(session.role) == CAPTAIN_ROLE:
+        if experimental.captain_role(base_role(session.role)):
             # Bound like every fleet row (rule 1 of the fleet-row section), or a
             # `/clear` left the row on the ended id and `say` waited on a session that
             # would never answer. The captain has no task, so there is nothing to brief.

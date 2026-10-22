@@ -1077,6 +1077,8 @@ def _fixed_label(role: str, wanted: str | None) -> str | None:
         raise FleetError(f"the label {MANAGER_LABEL!r} is reserved for the manager role")
     if role == "manager":
         return MANAGER_LABEL
+    if not experimental.captain_enabled():
+        return None  # off, `captain` is a label like any other, as on main (#240, R1-F1)
     if wanted == CAPTAIN_LABEL and role != CAPTAIN_ROLE:
         raise FleetError(f"the label {CAPTAIN_LABEL!r} is reserved for the captain")
     if role == CAPTAIN_ROLE:
@@ -2721,7 +2723,7 @@ def _spawn_board_and_hub(
     home's root a window with no hub read ``$HOME``'s board, and under a shell's hub, the
     hub's (T2).
     """
-    if role == CAPTAIN_ROLE:
+    if experimental.captain_role(role):
         hub = str(project.root)
     if hub is None:
         return _board_for(project), orchestrator.window_team_hub()
@@ -3115,7 +3117,7 @@ def spawn(
     """
     config = settings()
     _require_role(role)
-    if role == CAPTAIN_ROLE and not _is_home_project(project):
+    if experimental.captain_role(role) and not _is_home_project(project):
         raise FleetError(
             "the captain lives on the home board, one per home — `aisquare captain` starts "
             f"it; it cannot be spawned into {_name(project)}"
@@ -3133,7 +3135,7 @@ def spawn(
         worktree = worktree if worktree is not None else spec.worktree
         if replayed_args:
             agent_args = _replayed_args(role, spec, config)
-    if role == CAPTAIN_ROLE and not _is_the_captains_launch(cwd, agent_args):
+    if experimental.captain_role(role) and not _is_the_captains_launch(cwd, agent_args):
         # `fleet spawn captain` on the home was a captain with every tool, in the
         # home itself — and `aisquare captain` then attached to it and typed into it.
         raise FleetError(
@@ -3196,7 +3198,7 @@ def spawn(
                 f"project; `{project_service.fleet_command('stop', project, 'manager')}` "
                 "first"
             )
-    if role == CAPTAIN_ROLE:
+    if experimental.captain_role(role):
         existing = next((agent for agent in live if agent.role == CAPTAIN_ROLE), None)
         if existing is not None:
             raise FleetError(
@@ -3351,7 +3353,7 @@ def spawn(
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
-    if role == CAPTAIN_ROLE:
+    if experimental.captain_role(role):
         # The launcher activates a board BEFORE it hands the agent its `-e` pairs,
         # from its cwd — the brain folder, where `.aisquare` above it is a project
         # marker. With the hub only in `-e`, it onboarded the brain folder (or
@@ -4325,7 +4327,7 @@ def _relabel(
     """
     if agent.role == "manager":
         raise FleetError(f"{_name(project)} already has a manager — one per project")
-    if agent.role == CAPTAIN_ROLE:
+    if experimental.captain_role(agent.role):
         raise FleetError("the home already has a captain — one per home")
     if agent.worktree:
         raise FleetError(
@@ -7244,7 +7246,14 @@ def _refuse_the_captain_while_off(agent: FleetAgent) -> None:
     and without its rules. Asked before anything is stopped, and said in the one line
     every captain refusal says (review of #240, finding 13).
     """
-    if agent.role == CAPTAIN_ROLE and not experimental.captain_enabled():
+    # Only the captain's own row, on the home board: off, a role the owner declared as
+    # `captain` restarts like any other (review of #240, R1-F2).
+    home = project_id_for(paths.aisquare_home().resolve())
+    if (
+        agent.role == CAPTAIN_ROLE
+        and agent.project_id == home
+        and not experimental.captain_enabled()
+    ):
         raise FleetError(experimental.CAPTAIN_OFF)
 
 
@@ -8086,7 +8095,7 @@ def _restart_prompt(agent: FleetAgent) -> str:
     ``working`` from its start hook, with no turn to end — refused the board's
     nudges for as long as that row stayed fresh (review of #163, round 2).
     """
-    if agent.role == CAPTAIN_ROLE:
+    if experimental.captain_role(agent.role):
         # The captain has no shell (T2): it picks up through its own tools.
         return (
             "You are the captain, restarted and resumed mid-session: call attention() to see "
@@ -8129,7 +8138,7 @@ def _handoff_prompt(
     short on purpose: the board and the working tree are the source of truth,
     and the prompt points at them instead of retelling them.
     """
-    if agent.role == CAPTAIN_ROLE:
+    if experimental.captain_role(agent.role):
         return (
             f"You are the captain, taking over from a previous session ({reason or 'it stopped'})."
             " Call attention() to see what needs the owner, and since(project) for what "

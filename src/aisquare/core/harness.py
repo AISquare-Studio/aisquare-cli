@@ -60,7 +60,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
-from aisquare.core import spawn
+from aisquare.core import experimental, spawn
 from aisquare.core.paths import aisquare_home, expand_user
 
 if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
@@ -956,7 +956,7 @@ def _role_cycle_core(
     """The role-specific half of the cycle for an already-normalised ``role``;
     see :func:`role_cycle`."""
     sid = session_short_id
-    if role == "captain":
+    if experimental.captain_role(role):
         # The captain has no shell (services.captain, T2): its cycle names tools only.
         return [
             "Your standing cycle (captain): you act as the owner across every project and",

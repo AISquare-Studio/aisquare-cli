@@ -383,7 +383,7 @@ def launch(
             "bound with `aisquare team bind`",
             error="unknown_role",
         )
-    if role in UNSEATED and orchestrator.env_fleet_agent() is None:
+    if experimental.captain_role(role) and orchestrator.env_fleet_agent() is None:
         # Only the window `aisquare captain` starts is the captain: its brain folder,
         # its one server, no other tool. By hand in a project this was plain claude
         # with every tool, briefed as the one captain that has no shell.

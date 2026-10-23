@@ -21,6 +21,13 @@ did not. Three ways in, chosen per write:
 - **The inbox socket** (``socket``): W2's, behind ``[fleet] inbox_delivery``; nothing here
   posts to it yet.
 
+None of them types over a human (P0-W2, #276). Every typed write asks :func:`draft_guard`
+first: nothing goes in while Claude Code's input box holds a draft (read by structure, its
+own dim placeholder and suggestion left out), or while someone has typed into the pane in
+``asq`` within ``[fleet] draft_quiet_seconds`` (the typing lease ``asq`` touches,
+:func:`touch_typing_lease`). A refused nudge waits and is sent once the box is clear; a
+refused tell is filed as a note, which the agent is handed at the end of its turn.
+
 How each write into a pane ended is said in one vocabulary (:data:`Typed`,
 :class:`PaneWrite`, :class:`TellResult`), which lived in ``services.fleet`` and is
 re-exported there under the same names.
@@ -31,17 +38,18 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from aisquare.core import claude_screen as screen
 from aisquare.core import harness, paths
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import TmuxError, TmuxPartlyTyped, TmuxServer, TmuxTimedOut
 from aisquare.models import FleetAgent
-from aisquare.services.captain import screen
 
 FIRST_PROMPT_FLAG = "--first-prompt-file"
 """``aisquare launch``'s option naming the file a first message waits in."""
@@ -217,6 +225,9 @@ class Delivered:
     ``None``, nothing could say (a pane whose screen this reader does not know)."""
     presses: int
     """How many times Enter was pressed: 1, or more when the first one was swallowed."""
+    refused: str | None = None
+    """Why nothing was typed at all: a human's draft in the input box, or a human typing in
+    the pane (:func:`draft_guard`). ``told`` then says it too, as ``no``."""
 
 
 def holds(composer: str | None, text: str) -> bool:
@@ -257,9 +268,19 @@ def deliver_typed(
     monotonic: Callable[[], float],
     done: str = "typed into its pane at its prompt",
     what: str = "the text",
+    guard: float | None = None,
+    re_press: tuple[float, ...] = RE_PRESS,
+    last_wait: float = LAST_WAIT,
 ) -> Delivered:
     """Paste ``text`` into a ready pane, check it is in the input box, press Enter, and see a
     turn start; press Enter again only while it provably did not.
+
+    ``guard``, when given, is ``[fleet] draft_quiet_seconds``, and :func:`draft_guard` is
+    asked first: a human's draft in the box, or a human typing, and nothing is typed
+    (``Delivered.refused``). A box that already holds exactly this text — a nudge whose
+    Enter was dropped last time — is not pasted into again: it is sent. ``re_press`` and
+    ``last_wait`` are the schedule; a caller that must not wait a minute (a nudge, inside
+    another agent's board write) passes a shorter one.
 
     The caller has waited for the pane to be ready (``fleet._type_prompt``: Claude Code's
     input box drawn, no dialog). ``reads_box``: the pane is Claude Code's, whose box this
@@ -283,7 +304,18 @@ def deliver_typed(
     Enter after the box submitted every stranded prompt). Without ``reads_box`` nothing
     proves that, so one Enter is all there is, as before.
     """
-    pasted = pane_write(what, lambda: server.paste(pane_id, text))
+    if guard is not None:
+        why = draft_guard(server, pane_id, ours=text, quiet=guard)
+        if why is not None:
+            return Delivered(TellResult("no", why), None, 0, refused=why)
+    # No box drawn is a screen this reader does not know (a layout it does not parse, a pane
+    # past its wait): nothing can prove the text still waits there, so one Enter, as before.
+    box = _composer(server, pane_id) if reads_box else None
+    reads_box = reads_box and box is not None
+    waiting = guard is not None and reads_box and holds(box, text)
+    pasted = (
+        PaneWrite("yes", what) if waiting else pane_write(what, lambda: server.paste(pane_id, text))
+    )
     if pasted.typed != "yes":
         return Delivered(pasted, None, 0)
     if reads_box:
@@ -295,7 +327,7 @@ def deliver_typed(
     sleep(ENTER_GAP)
     presses = 0
     stopped: str | None = None
-    for wait in (*RE_PRESS, LAST_WAIT):
+    for wait in (*re_press, last_wait):
         entered = pane_write("Enter", lambda: server.send_keys(pane_id, "Enter"))
         presses += 1
         if entered.typed != "yes":
@@ -338,6 +370,75 @@ def deliver_typed(
         False,
         presses,
     )
+
+
+def _composer(server: TmuxServer, pane_id: str) -> str | None:
+    lines = _box(server, pane_id)
+    return screen.composer_text(lines) if lines is not None else None
+
+
+# --- the draft guard (P0-W2, #276) ----------------------------------------------------------
+
+
+def typing_lease(socket: str, pane_id: str) -> Path:
+    """The file ``asq`` touches while someone types into ``pane_id`` on the tmux server named
+    ``socket``: ``$AISQUARE_HOME/run/typing/<socket>-<pane>``, its mtime the last key."""
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{socket}-{pane_id.lstrip('%')}")
+    return paths.aisquare_home() / "run" / "typing" / name
+
+
+def touch_typing_lease(socket: str, pane_id: str) -> None:
+    """Say someone is typing into ``pane_id`` now (``asq``'s ``_forward``). Never raises: a home
+    that cannot be written costs the lease, and the input box is still read."""
+    path = typing_lease(socket, pane_id)
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+
+def human_typing(socket: str, pane_id: str, *, quiet: float, now: float | None = None) -> bool:
+    """Whether someone typed into ``pane_id`` in ``asq`` within the last ``quiet`` seconds."""
+    try:
+        touched = typing_lease(socket, pane_id).stat().st_mtime
+    except OSError:
+        return False
+    return (time.time() if now is None else now) - touched < quiet
+
+
+def draft_guard(
+    server: TmuxServer, pane_id: str, *, ours: str | None = None, quiet: float
+) -> str | None:
+    """Why typing into ``pane_id`` now would land in a human's draft, or ``None`` to go ahead.
+
+    Two signals, either one enough. Claude Code's input box holds text that is not ``ours``
+    (:func:`screen.composer_text`: the dim placeholder and suggestion are not a draft); and
+    someone typed into the pane in ``asq`` within ``quiet`` seconds (:func:`human_typing`),
+    which also covers a draft the box reader cannot see — a long one wrapped past the box,
+    a binary that is not Claude Code. A human at ``tmux attach`` leaves no lease; the box
+    reader covers them. A screen tmux will not show is no draft.
+    """
+    if human_typing(server.socket, pane_id, quiet=quiet):
+        return "someone is typing in its pane"
+    composer = _composer(server, pane_id)
+    if composer and not (ours is not None and holds(composer, ours)):
+        return "a draft is in its input box"
+    return None
+
+
+def prompted_since(store: ContextStore, session_id: str, since: datetime) -> Callable[[], bool]:
+    """The acknowledgement of a tell or a nudge typed at ``since``: the session's
+    ``UserPromptSubmit`` stamped ``prompted_at`` past it (``store.mark_prompted``). Asked of
+    ``store``, the one connection the caller holds for the wait."""
+
+    def acked() -> bool:
+        session = store.get_session(session_id)
+        return (
+            session is not None
+            and session.prompted_at is not None
+            and (session.prompted_at >= since)
+        )
+
+    return acked
 
 
 def _ack_within(

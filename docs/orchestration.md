@@ -123,6 +123,16 @@ the claim: `task claim` and `task next --claim` print the task's contract
 into a coder's pane. `task show <ref>` prints the whole task. The rest of the
 coordination is the ambient state of the board.
 
+A note addressed to a session does not wait for its next prompt. When the
+session's turn ends, its `Stop` hook hands it the notes addressed to its role
+or its fleet label (`aisquare note --to`, `fleet tell` to a busy agent), the
+way the manager is kept going on fresh board decisions. The same guards apply:
+never on a turn already continuing from a stop hook, and at most `[fleet]
+max_continuations_per_hour` an hour. The manager's nudge, the one line typed to
+wake a waiting manager, never goes into a draft a human has started in its
+input box. It waits until the box is clear, and the human's own submit hands
+the manager the same delta meanwhile.
+
 Orchestration is **opt-in per repo** (a role launch or `aisquare team on`)
 and fails open everywhere: the hooks are designed so orchestration can
 never break a Claude session, even when it is broken or absent. Repos

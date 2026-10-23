@@ -3007,6 +3007,7 @@ def spawn(
     start_point: str | None = None,
     fork: bool = False,
     hub: str | None = None,
+    remote_control: bool | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -3133,6 +3134,8 @@ def spawn(
         if permission_mode is None:
             permission_mode = spec.permission_mode or ""
         worktree = worktree if worktree is not None else spec.worktree
+        if remote_control is None:
+            remote_control = spec.remote_control  # Claude Code's Remote Control, as spawned
         if replayed_args:
             agent_args = _replayed_args(role, spec, config)
     if experimental.captain_role(role) and not _is_the_captains_launch(cwd, agent_args):
@@ -3350,6 +3353,15 @@ def spawn(
     if chosen_persona is not None:
         # A flag, not an env var: the window's environment is the tmux SERVER's.
         flags += ["--persona", chosen_persona]
+    # Claude Code's Remote Control (#289): the spawn's choice, else the role's. The window's
+    # `launch` decides whether Claude Code would take it, after its tracing wiring; asked
+    # for only when on, or when it turns a role's default off, so any other spawn's window
+    # command is as it was.
+    asked_remote = remote_control if remote_control is not None else role_config.remote_control
+    if asked_remote:
+        flags += ["--remote-control"]
+    elif role_config.remote_control:
+        flags += ["--no-remote-control"]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
@@ -3549,6 +3561,7 @@ def spawn(
                 command=list(command),
                 recorded_by=__version__,
                 hub=hub,
+                remote_control=asked_remote,
             ),
             socket_path=socket_path,
             boot_id=tmux_core.boot_id(),

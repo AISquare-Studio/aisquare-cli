@@ -41,10 +41,12 @@ from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     REVIEWER_ARGS,
+    AppConfig,
     FleetRoleSettings,
     FleetSettings,
     replacing_the_former_reviewer_default,
     replacing_the_former_reviewer_default_first,
+    save_config,
 )
 from aisquare.core.ids import new_agent_id, new_task_id
 from aisquare.core.orchestrator import team_project
@@ -18187,3 +18189,61 @@ def test_spawn_types_its_prompt_once_the_trust_question_is_answered(
     assert tmux.typed == [(pane, "paste", "start on tsk_1"), (pane, "key", "Enter")]
     assert receipt.notes == [] and clock.now < PROMPT_TIMEOUT
     assert claude_sharing.shows_trust_prompt(TRUST_SCREEN)  # the fixture is the question
+
+
+# --- Claude Code's own Remote Control, per role (#289) -------------------------------------
+
+
+def test_a_spawn_with_remote_control_keeps_it_through_a_restart(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """``fleet spawn --remote-control``: the window's launch is asked for it, the row's spec
+    records it, and ``fleet restart`` asks for it again from the spec."""
+    agent = fleet_service.spawn(project, "coder", worktree=False, remote_control=True).agent
+    spawned = _command(tmux)
+    tmux.die(agent.pane_id, 0)
+
+    restarted = fleet_service.restart(project, agent.label).started
+
+    assert "--remote-control" in spawned and "--no-remote-control" not in spawned
+    assert agent.launch_spec is not None and agent.launch_spec.remote_control is True
+    assert "--remote-control" in _command(tmux), "the restart replays it"
+    assert restarted.launch_spec is not None and restarted.launch_spec.remote_control is True
+
+
+def test_no_remote_control_turns_a_roles_default_off_and_nothing_asks_without_one(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    config = AppConfig()
+    config.fleet.roles["reviewer"] = FleetRoleSettings.model_validate({"remote_control": True})
+    save_config(config)
+
+    by_default = fleet_service.spawn(project, "reviewer", worktree=False).agent
+    default_command = _command(tmux)
+    turned_off = fleet_service.spawn(
+        project, "reviewer", worktree=False, remote_control=False
+    ).agent
+    off_command = _command(tmux)
+    plain = fleet_service.spawn(project, "coder", worktree=False).agent
+
+    assert "--remote-control" in default_command
+    assert by_default.launch_spec is not None and by_default.launch_spec.remote_control
+    assert "--no-remote-control" in off_command and "--remote-control" not in off_command
+    assert turned_off.launch_spec is not None and not turned_off.launch_spec.remote_control
+    plain_command = _command(tmux)
+    assert not any("remote-control" in part for part in plain_command), "as it was before"
+    assert plain.launch_spec is not None and not plain.launch_spec.remote_control
+
+
+def test_fleet_ls_json_says_whether_each_agent_asked_for_remote_control(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, runner: CliRunner
+) -> None:
+    fleet_service.spawn(project, "coder", label="coder-rc", worktree=False, remote_control=True)
+    fleet_service.spawn(project, "coder", label="coder-plain", worktree=False)
+
+    result = runner.invoke(app, ["--json", "fleet", "ls", "--project", project.id])
+
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.stdout)["agents"]
+    agents = {row["agent"]["label"]: row["remote_control"] for row in rows}
+    assert agents == {"coder-rc": True, "coder-plain": False}

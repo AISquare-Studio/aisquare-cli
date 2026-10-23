@@ -112,6 +112,15 @@ registered but hidden until they do something real.
 | `--no-color` | disable coloured output |
 | `--profile NAME` | configuration profile |
 
+### Configuration keys
+
+Set with `aisquare config set <section>.<key> <value>`, or in *⚙ Settings ▸ App
+settings*. Every key is a default you can change.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `fleet.roles.<role>.remote_control` | `false` | start the role's Claude Code sessions with Claude Code's own Remote Control, titled `<project> · <label>`, so claude.ai/code and the Claude app can continue them ([remote](remote.md#claude-codes-own-remote-control)); `fleet spawn --remote-control` / `--no-remote-control` overrides it per spawn, and a restart keeps the choice |
+
 ### Roadmap commands
 
 `sync`, `connectors`, `capture`, `policy` / `enforce` and `open` are the cloud

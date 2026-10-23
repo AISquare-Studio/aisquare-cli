@@ -330,6 +330,7 @@ def test_spawn_consumes_its_own_options_and_forwards_nothing_else(
         "spawned_by": "mgr-session",
         "account": None,
         "persona": None,
+        "remote_control": None,
     }
 
 
@@ -583,7 +584,7 @@ def test_ls_json_names_where_each_agents_server_is_asked(
     it): the path its tmux server is asked at (`tmux -S`), or null where it is asked by
     its socket's name (`tmux -L`). The keys each agent has are pinned with it, so one
     added or dropped is a change the CHANGELOG has to name: `held` since (review of #259,
-    round 1)."""
+    round 1), and `remote_control` (#289)."""
     at = Path("/tmp/tmux-1000/asq")
     agents = [
         _status(_agent("coder-auth"), "working").model_copy(update={"socket_at": at}),
@@ -597,7 +598,17 @@ def test_ls_json_names_where_each_agents_server_is_asked(
     listed = json.loads(result.stdout)["agents"]
     assert [agent["socket_at"] for agent in listed] == [str(at), None]
     assert all(
-        set(agent) == {"agent", "state", "detail", "session", "tmux_session", "socket_at", "held"}
+        set(agent)
+        == {
+            "agent",
+            "state",
+            "detail",
+            "session",
+            "tmux_session",
+            "socket_at",
+            "held",
+            "remote_control",
+        }
         for agent in listed
     ), listed
 

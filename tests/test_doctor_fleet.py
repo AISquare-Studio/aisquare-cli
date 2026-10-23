@@ -1683,3 +1683,56 @@ def test_the_fleet_server_row_warns_about_a_seats_identity_on_the_server(tmp_pat
 def test_the_fleet_server_row_reaches_the_real_doctor_after_the_fleet_terminal() -> None:
     names = [check.name for check in diagnostics.doctor()]
     assert names.index("fleet terminal") < names.index("fleet server env"), names
+
+
+# --- remote control (#289) ------------------------------------------------------------------
+
+
+def _roles_with_remote_control(*roles: str, tracing: bool = False) -> None:
+    from aisquare.core.config import AppConfig, FleetRoleSettings, save_config
+
+    config = AppConfig()
+    for role in roles:
+        config.fleet.roles[role] = FleetRoleSettings.model_validate({"remote_control": True})
+    config.explainability.enabled = tracing
+    save_config(config)
+
+
+def test_the_remote_control_row_is_absent_while_no_role_asks() -> None:
+    from aisquare.services import diagnostics
+
+    assert diagnostics._check_remote_control(environ={}) is None
+    assert "remote control" not in {check.name for check in diagnostics.doctor()}
+
+
+def test_the_remote_control_row_lists_the_roles_and_is_ok_with_nothing_in_the_way() -> None:
+    from aisquare.services import diagnostics
+
+    _roles_with_remote_control("reviewer", "coder")
+
+    check = diagnostics._check_remote_control(environ={})
+
+    assert check is not None and check.status.value == "ok"
+    assert check.detail.startswith("on for coder, reviewer — ")
+    assert "remote control" in {row.name for row in diagnostics.doctor()}
+
+
+def test_the_remote_control_row_names_each_blocker_without_its_value() -> None:
+    """What `launch` would step aside for, said before a launch: a base URL on another
+    host, an OAuth token, tracing's proxy — the variable and the host, never a secret."""
+    from aisquare.services import diagnostics
+
+    _roles_with_remote_control("coder", tracing=True)
+    environ = {
+        "ANTHROPIC_BASE_URL": "https://user:secret@gateway.example/v1",
+        "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-example",
+    }
+
+    check = diagnostics._check_remote_control(environ=environ)
+
+    assert check is not None and check.status.value == "warn"
+    assert "coder: ANTHROPIC_BASE_URL in this shell points at gateway.example" in check.detail
+    assert "coder: CLAUDE_CODE_OAUTH_TOKEN is set in this shell" in check.detail
+    assert "explainability tracing sends every traced launch through its proxy" in check.detail
+    assert "secret" not in check.detail and "sk-ant" not in check.detail
+    assert check.fix is not None and "aisquare explainability disable" in check.fix

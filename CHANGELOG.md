@@ -84,6 +84,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the day; one that no longer resolves steps down to the role's current
   default, then to none, each said on the receipt and never a refusal (owner
   decision, 2026-09-24; supersedes #209).
+- **A fleet role can start its agents with Claude Code's own Remote Control** (#289).
+  `[fleet.roles.<role>] remote_control = true`, or `fleet spawn --remote-control` /
+  `--no-remote-control` for one agent, starts Claude Code with `--remote-control
+  "<project> · <label>"`, so the session can be continued from claude.ai/code or the
+  Claude app. The Spawn dialog has a *Remote control* switch at the role's default.
+  The choice is recorded on the row (a restart and a switch keep it), and
+  `fleet ls --json` reports it as `remote_control`. `aisquare launch` leaves the flag
+  off, saying why in one line, when the binary is not Claude Code, when your own
+  line carries `--remote-control` or `--rc`, when `ANTHROPIC_BASE_URL` names another
+  host (the explainability proxy does), or when `CLAUDE_CODE_OAUTH_TOKEN` is set. A
+  doctor row, `remote control`, names the roles that have it on and what Claude Code
+  would refuse; it appears only while a role has it on. Off for every role by
+  default. `docs/remote.md` compares it with `aisquare remote`.
 - **Stop an agent from `asq`.** The agent view's header gains a compact **Stop**
   button, and `x` with the sidebar focused stops the selected agent — both open
   one dialog (*Stop* · *Force* · *Cancel*) over `services.fleet.stop`, the same

@@ -147,7 +147,12 @@ def test_an_entry_the_user_added_to_a_mapping_is_written_with_only_what_it_sets(
     save_config(config, target)
     written = _file(target)
     assert written["team"] == {"profiles": {"coder": {"account": "2"}}}
-    designer = {"permission_mode": "auto", "worktree": False, "extra_args": []}
+    designer = {
+        "permission_mode": "auto",
+        "worktree": False,
+        "extra_args": [],
+        "remote_control": False,
+    }
     assert written["fleet"] == {"roles": {**_ROLES, "designer": designer}}
     loaded = load_config(target)
     assert loaded.team.profiles == {"coder": RoleLaunchProfile(account="2")}
@@ -244,6 +249,10 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "import": {"engine": "auto", "api_model": "claude-opus-5"},
         },
         "experimental": {"captain": False},
+        # Claude Code's own Remote Control, per role, off (#289).
+        "fleet": {
+            "roles": {role: {"remote_control": False} for role in _V1_DEFAULTS["fleet"]["roles"]}
+        },
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

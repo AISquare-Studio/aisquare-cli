@@ -1188,3 +1188,97 @@ def test_configure_target_can_write_a_target_without_moving_the_machine_to_it() 
 
     explainability.configure_target(config, target_name="prod", make_active=True)
     assert config.explainability.target == "prod", "the switch is still there, explicitly"
+
+
+# ── the Run's root is posted off the launch path (#129 e, #51) ───────────────
+
+
+def test_the_window_starts_without_waiting_on_the_root_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The root post (a WAN write, 3 s budget, over budget on 2 of 11 launches in #129)
+    sat between the probe and the agent's exec. It is a detached worker now: the wiring
+    returns at once, still on the traceparent path, since the gateway holds the child
+    batches until the root lands. The key reaches the worker on stdin, never its argv."""
+    from aisquare.services import explainability_ops
+
+    posted: list[str] = []
+    monkeypatch.setattr(
+        explainability_ops, "open_run_root", lambda *args, **kw: posted.append("inline")
+    )
+    started: list[tuple[list[str], bytes]] = []
+    monkeypatch.setattr(
+        explainability, "_start_root_worker", lambda argv, key: started.append((argv, key))
+    )
+
+    wiring = wire_session(
+        _settings(proxy_url="https://proxy.example:9443"),
+        "coder",
+        session_id="sess-1",
+        api_key="wk-secret",
+        gateway_url="https://gateway.example",
+        prober=_healthy,
+    )
+
+    assert posted == [], "no inline post on the launch path"
+    [(argv, key)] = started
+    assert argv[-5:] == [
+        "explainability",
+        "post-root",
+        "https://gateway.example",
+        "aisquare-coder",
+        "sess-1",
+    ]
+    assert key == b"wk-secret"
+    assert all("wk-secret" not in arg for arg in argv)
+    assert wiring.owns_trace
+    identity = explainability.trace_identity("sess-1")
+    assert f"traceparent: {identity.traceparent}" in wiring.env["ANTHROPIC_CUSTOM_HEADERS"]
+
+
+def test_a_worker_that_cannot_start_falls_back_to_the_pipeline_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(argv: list[str], key: bytes) -> None:
+        raise OSError("fork failed")
+
+    monkeypatch.setattr(explainability, "_start_root_worker", refuse)
+    wiring = wire_session(
+        _settings(proxy_url="https://proxy.example:9443"),
+        "coder",
+        session_id="sess-1",
+        api_key="wk-secret",
+        gateway_url="https://gateway.example",
+        prober=_healthy,
+    )
+    assert not wiring.owns_trace
+    assert "X-Pipeline-Id: sess-1" in wiring.env["ANTHROPIC_CUSTOM_HEADERS"]
+    assert "fork failed" in wiring.reason
+
+
+def test_the_post_root_worker_posts_with_the_key_from_stdin_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typer.testing import CliRunner
+
+    from aisquare.cli.app import app
+    from aisquare.services import explainability_ops
+
+    calls: list[tuple[str, str, str, str]] = []
+
+    def open_run_root(
+        gateway_url: str, api_key: str, agent_name: str, pipeline_id: str, **_: object
+    ) -> explainability_ops.HttpVerdict:
+        calls.append((gateway_url, api_key, agent_name, pipeline_id))
+        ok = len(calls) == 2
+        return explainability_ops.HttpVerdict(ok=ok, status=202 if ok else None, detail="x")
+
+    monkeypatch.setattr(explainability_ops, "open_run_root", open_run_root)
+    monkeypatch.setattr(explainability_ops, "_root_retry_sleep", lambda _s: None)
+    result = CliRunner().invoke(
+        app,
+        ["explainability", "post-root", "https://g.example", "aisquare-coder", "sess-1"],
+        input="wk-secret\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == [("https://g.example", "wk-secret", "aisquare-coder", "sess-1")] * 2

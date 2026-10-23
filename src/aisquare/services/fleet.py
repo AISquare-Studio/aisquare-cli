@@ -105,6 +105,7 @@ from aisquare.services import auto_mode, explainability_ops
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import project as project_service
+from aisquare.services.captain import screen as pane_screen
 
 FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
@@ -150,6 +151,13 @@ _STATUS_WINDOW = 1.0
 _POLL_INTERVAL = 0.25
 _PROMPT_SETTLE = 2.0
 """After the agent process appears, its UI needs a moment before it reads input."""
+_SUBMIT_GRACE = 1.0
+"""How long a prompt may sit in Claude Code's input box after its Enter before the Enter is
+read as lost and pressed once more (:func:`_submitted`)."""
+_SUBMIT_TIMEOUT = 5.0
+"""How long :func:`_submitted` reads the pane back for the prompt to leave the input box."""
+_SECURITY_PRESSES = 3
+"""How many Enters :func:`_at_input_box` gives Claude Code's first-run Security notes."""
 _SHELLS = frozenset({"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "ash"})
 _NOT_AN_AGENT = _SHELLS | {"tmux"}
 """Foreground commands that are never the agent: a shell (left behind after an
@@ -317,8 +325,10 @@ class SpawnReceipt:
     the claims of a hand-over not moved, the previous session not marked ended. Each
     is in ``notes`` too; a prompt typed past the wait is typed, and is not here."""
     shared: list[str] = field(default_factory=list)
-    """The notes that say a share was made into the agent's account (a folder's trust
-    copied, its settings.json linked): done, not a warning. Each is in ``notes`` too."""
+    """The notes that say something was done for the agent, not a warning: a share made into
+    its account (a folder's trust copied, its settings.json linked), or a key the launcher
+    pressed so its prompt went in (#32: past the Security notes, a lost Enter pressed
+    again). Each is in ``notes`` too."""
 
 
 @dataclass(frozen=True)
@@ -2563,7 +2573,8 @@ def _with_trust_prompts(
     by_id: Mapping[str, TeamSession | None],
     addresses: Mapping[str, _Address] | None = None,
 ) -> list[FleetAgentStatus]:
-    """``statuses``, every agent at Claude Code's folder-trust question read ``attention``.
+    """``statuses``, every agent at Claude Code's folder-trust question read ``attention``, and
+    every one at its first-run Security notes screen (#32, L2).
 
     An agent there fires no hook — Claude Code runs none in a folder nobody trusted — so
     it read a healthy ``waiting`` (or ``working``, while the dialog drew) with no reason,
@@ -2594,6 +2605,11 @@ def _with_trust_prompts(
                 lines = []
             if claude_sharing.shows_trust_prompt(lines):
                 detail = trust_prompt_detail(agent.cwd)
+                status = status.model_copy(update={"state": "attention", "detail": detail})
+            elif claude_sharing.shows_security_notes(lines):
+                # Its only key is Enter, which a spawn presses (#32, L2): still there, it is
+                # one nobody typed into — a window the human opened first, or a refused key.
+                detail = f"{SECURITY_NOTES} — press Enter in its window"
                 status = status.model_copy(update={"state": "attention", "detail": detail})
         shown.append(status)
     return shown
@@ -3585,9 +3601,21 @@ def spawn(
     if takes_over is not None and identity.session_id is not None:
         stored = _take_over(stored, takes_over, identity.session_id, moved)
     _supersede(rows, views, stored, config)
+    if prompt is None and task is not None and resume is None and takes_over is None:
+        prompt = task_prompt(task)
     typing: list[str] = []
+    done: list[str] = []
     typed = (
-        _type_prompt(srv, stored.pane_id, prompt, typing, folder=cwd, to=(project, stored.label))
+        _type_prompt(
+            srv,
+            stored.pane_id,
+            prompt,
+            typing,
+            folder=cwd,
+            to=(project, stored.label),
+            claude_code=claude_code or harness.is_default_agent(resolution.binary),
+            done=done,
+        )
         if prompt
         else None
     )
@@ -3595,10 +3623,10 @@ def spawn(
         agent=stored,
         asked_label=label,
         tmux_session=tmux_session,
-        notes=[*notes, *moved, *typing],
+        notes=[*notes, *moved, *done, *typing],
         prompt_typed=typed,
         failures=[*moved, *(typing if typed not in (None, "yes") else [])],
-        shared=made,
+        shared=[*made, *done],
     )
 
 
@@ -4375,6 +4403,8 @@ def _type_prompt(
     *,
     folder: Path | None = None,
     to: tuple[ProjectInfo, str],
+    claude_code: bool = False,
+    done: list[str] | None = None,
 ) -> Typed:
     """Wait (bounded) for the agent to come up, then paste the prompt and press Enter.
 
@@ -4399,6 +4429,15 @@ def _type_prompt(
     :data:`PROMPT_TIMEOUT` was typed into, and the receipt said ``yes`` for an agent the
     Enter had ended (review of #259, round 13). A question drawn after that look still
     reads what was typed; no look can close that.
+
+    Claude Code (``claude_code``) is typed into once its input box is drawn
+    (:func:`_at_input_box`), not once its process runs, and read back after
+    (:func:`_submitted`) (#32, L3). Until its prompt is mounted, Claude Code reads the
+    keyboard with an early-input buffer that keeps the text and turns the Enter into a
+    newline, then trims it: a prompt typed then sat in the input box, unsent. The same wait
+    presses Enter past the first-run Security notes screen, which ate the prompt (#32,
+    L2; the owner's D1 at board seq 671). A key pressed so is said in ``done``, not
+    ``notes``: it is what made the prompt go in, not why it did not.
 
     Never raises: it runs after the row is recorded, and ``restart`` and
     ``switch`` read a raise out of ``spawn`` as "no replacement started" — they
@@ -4440,6 +4479,8 @@ def _type_prompt(
         _sleep(_PROMPT_SETTLE)
         if not _past_trust_prompt(srv, pane_id, notes, folder=folder, to=to):
             return "no"
+        if claude_code and not _at_input_box(srv, pane_id, notes, done, folder=folder, to=to):
+            return "no"
     elif "\n" in prompt:
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s and the prompt has "
@@ -4450,6 +4491,10 @@ def _type_prompt(
         return "no"
     else:
         if not _past_trust_prompt(srv, pane_id, notes, folder=folder, to=to, wait=False):
+            return "no"
+        if claude_code and not _at_input_box(
+            srv, pane_id, notes, done, folder=folder, to=to, wait=False
+        ):
             return "no"
         notes.append(
             f"the agent did not come up within {PROMPT_TIMEOUT:.0f} s — prompt typed anyway"
@@ -4465,7 +4510,146 @@ def _type_prompt(
         return "no"
     if told.typed != "yes":
         notes.append(f"the prompt: {told.how}")
-    return told.typed
+        return told.typed
+    return _submitted(srv, pane_id, prompt, notes, done, to=to) if claude_code else "yes"
+
+
+def _at_input_box(
+    srv: TmuxServer,
+    pane_id: str,
+    notes: list[str],
+    done: list[str] | None = None,
+    *,
+    folder: Path | None = None,
+    to: tuple[ProjectInfo, str],
+    wait: bool = True,
+) -> bool:
+    """Whether Claude Code is at its input box, ready for the prompt: waited for (bounded).
+
+    On the way, Claude Code's first-run Security notes screen ("Press Enter to continue")
+    is pressed past, up to :data:`_SECURITY_PRESSES` times: typed there, the prompt was
+    lost and its Enter only moved the screen on (#32, L2). The folder-trust question,
+    which can follow it, is :func:`_past_trust_prompt`'s. A screen still at the notes, or
+    at another dialog (:func:`pane_screen.modal_showing`), is not typed into: its Enter
+    would answer the dialog. Any other screen with no box drawn by the deadline is typed
+    into as before, and the note says so. A screen tmux will not show is typed as before.
+    Without ``wait``, one look.
+    """
+    deadline = _monotonic() + (PROMPT_TIMEOUT if wait else 0.0)
+    pressed = 0
+    while True:
+        try:
+            lines = srv.capture(pane_id).lines
+        except TmuxError:
+            return True
+        if claude_sharing.shows_trust_prompt(lines):
+            if not _past_trust_prompt(srv, pane_id, notes, folder=folder, to=to, wait=wait):
+                return False
+            continue
+        notes_up = claude_sharing.shows_security_notes(lines)
+        if notes_up and pressed < _SECURITY_PRESSES:
+            enter = pane_write("Enter", lambda: srv.send_keys(pane_id, "Enter"))
+            if enter.typed == "yes":
+                pressed += 1
+                _sleep(_PROMPT_SETTLE)
+                continue
+        if pressed and not notes_up:
+            (notes if done is None else done).append(f"pressed Enter past {SECURITY_NOTES}")
+            pressed = 0  # said once: the notes are not drawn again
+        if not notes_up and pane_screen.input_box_at(pane_screen.tail(lines)) is not None:
+            return True
+        if _monotonic() >= deadline:
+            dialog = SECURITY_NOTES if notes_up else pane_screen.modal_showing(lines)
+            if dialog is not None:
+                notes.append(
+                    f"the agent is at {dialog} — the prompt was NOT typed (its Enter would "
+                    "answer it). Answer it in the agent's window "
+                    f"(`{project_service.fleet_command('attach', to[0])}`), then send the "
+                    f"prompt: `{_tell(*to)} …`"
+                )
+                return False
+            if wait:
+                notes.append(
+                    f"Claude Code did not draw its input box within {PROMPT_TIMEOUT:.0f} s "
+                    "— prompt typed anyway"
+                )
+            return True
+        _sleep(_POLL_INTERVAL)
+
+
+def _submitted(
+    srv: TmuxServer,
+    pane_id: str,
+    prompt: str,
+    notes: list[str],
+    done: list[str] | None = None,
+    *,
+    to: tuple[ProjectInfo, str],
+) -> Typed:
+    """How a prompt typed into Claude Code with its Enter ended, read back from the pane.
+
+    ``yes`` once it has left the input box (:func:`_in_input_box`). Still there after
+    :data:`_SUBMIT_GRACE`, its Enter was lost — read by an early-input buffer as a
+    newline (:func:`_type_prompt`) — and Enter is pressed once more: the box holds the
+    prompt, so that Enter sends it and answers nothing else. Still there at
+    :data:`_SUBMIT_TIMEOUT`, ``unsent``, and the note says where to press Enter. A screen
+    tmux will not show is ``yes``, as before this read (#32, L3).
+    """
+    start = _monotonic()
+    pressed = False
+    while True:
+        _sleep(_POLL_INTERVAL)
+        try:
+            lines = srv.capture(pane_id).lines
+        except TmuxError:
+            return "yes"
+        if not _in_input_box(lines, prompt):
+            return "yes"
+        waited = _monotonic() - start
+        if not pressed and waited >= _SUBMIT_GRACE:
+            enter = pane_write("Enter", lambda: srv.send_keys(pane_id, "Enter"))
+            if enter.typed != "yes":
+                notes.append(
+                    "the prompt: typed it at its prompt, but it sat there unsent and "
+                    + pasted_unsent(enter, "the agent", press="press Enter in its pane").how
+                )
+                return "maybe" if enter.typed == "maybe" else "unsent"
+            pressed = True
+            (notes if done is None else done).append(
+                "the prompt sat in Claude Code's input box after its Enter — pressed Enter again"
+            )
+            continue
+        if waited >= _SUBMIT_TIMEOUT:
+            notes.append(
+                "the prompt: typed it at its prompt, but it is still in the input box, unsent "
+                f"— press Enter in its window (`{project_service.fleet_command('attach', to[0])}`)"
+            )
+            return "unsent"
+
+
+def _in_input_box(lines: Sequence[str], prompt: str) -> bool:
+    """Whether Claude Code's input box, drawn at the foot of ``lines``, holds ``prompt``: its
+    first words, or the placeholder a long paste is shown as (``[Pasted text #1 …]``)."""
+    rows = pane_screen.tail(lines)
+    top = pane_screen.input_box_at(rows)
+    if top is None:
+        return False
+    body: list[str] = []
+    for row in rows[top + 1 :]:
+        if pane_screen.RULE.match(row):
+            break
+        body.append(row)
+    text = " ".join(" ".join(body).replace(pane_screen.PROMPT_MARK, " ").split())
+    words = " ".join(prompt.split())[:_PROMPT_HEAD]
+    return bool(text) and (text.startswith(words) or text.startswith("[Pasted text"))
+
+
+_PROMPT_HEAD = 24
+"""How much of a prompt :func:`_in_input_box` matches: enough to be the prompt, short enough
+to fit on the box's first row."""
+
+SECURITY_NOTES = "Claude Code's first-run Security notes screen"
+"""How the Security notes screen is named in a note and an ``attention`` detail."""
 
 
 def _tell(project: ProjectInfo, label: str) -> str:
@@ -8196,6 +8380,19 @@ def _resume_prompt(agent: FleetAgent, reason: str | None) -> str:
 
 _HANDOFF_NOTES = 5
 _HANDOFF_DETAIL = 600
+
+
+def task_prompt(task: TeamTask) -> str:
+    """The first message of an agent spawned for ``task`` with no prompt of its own (#32, L1):
+    read the task, then claim it. Without it the agent sat idle at an empty prompt until
+    someone typed this by hand. The owner's words (board seq 671, D2)."""
+    ref = str(task.number) if task.number is not None else task.id
+    named = f"#{ref}" if task.number is not None else ref
+    return (
+        f"Start on your assigned task {named}: {' '.join(task.title.split())}. Read its "
+        f"whole contract with "
+        f"`aisquare task show {ref}`, then claim it with `aisquare task claim {ref}`."
+    )
 
 
 def _handoff_prompt(

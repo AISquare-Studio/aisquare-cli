@@ -272,6 +272,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dialog's flag is `_spawning`.
 
 ### Changed
+
+- **`fleet spawn --task` with no `--prompt` tells the agent to start on its
+  task** (#32; the owner's decision, board seq 671): its first message names the
+  task and says to read it with `aisquare task show N`, then claim it with
+  `aisquare task claim N`. A spawn with neither is typed nothing, and reads
+  `waiting`.
 - The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
   adds the two persona columns, `team_session.persona` (the persona a session was
   launched as) and `fleet_agent.persona` (the one an agent was spawned with or given
@@ -338,6 +344,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A `fleet spawn --prompt` is sent, not left in the input box** (#32). It was
+  typed once the agent's process ran and two seconds had passed. A Claude Code
+  still starting reads the keyboard into an early-input buffer that keeps the
+  text and takes its Enter for a newline, so the prompt sat in the box unsent.
+  The launcher now waits for Claude Code's input box, then reads the pane back:
+  a prompt still in the box gets one more Enter, and one still there after it
+  is reported as unsent, with where to press Enter.
+- **A new account's first spawn starts working** (#32). Claude Code's
+  first-run "Security notes" screen took the spawn's prompt and lost it. The
+  launcher presses Enter past it, then types the prompt. An agent left at that
+  screen reads `attention` in `fleet ls`, the sidebar and Remote, with the
+  reason, and its prompt is kept rather than typed into it.
+- **An agent that has had no prompt reads `waiting`, not `working`** (#32).
+  Every session start (not a compaction) leaves the board row waiting until
+  its first prompt; only the captain's did before, so a `fleet spawn` with no
+  prompt sat idle while `fleet ls` and the board said it was working.
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for
   every other spawn: a seat reads the board of the hub its spawner honours, and its

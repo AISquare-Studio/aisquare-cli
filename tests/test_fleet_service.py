@@ -89,7 +89,7 @@ from aisquare.services.fleet import (
     FleetUnavailable,
     NoSuchAgent,
 )
-from tests import bundled_personas, fakebin
+from tests import bundled_personas, captain_screens, fakebin
 from tests.cycles import unscoped
 from tests.fsperms import can_deny_reads, can_symlink, remove_tree
 from tests.projects import add_project
@@ -210,7 +210,11 @@ class FakeTmux(TmuxServer):
         self.typed: list[tuple[str, str, str]] = []
         """``(pane_id, kind, text)`` with kind ``literal`` / ``paste`` / ``key``."""
         self.screens: dict[str, list[str]] = {}
-        """What each pane shows — what ``capture`` answers; blank until a test draws one."""
+        """What each pane shows — what ``capture`` answers; :attr:`idle_screen` until a test
+        draws one."""
+        self.idle_screen: list[str] = list(captain_screens.INPUT_BOX)
+        """What a pane no test drew on shows: Claude Code waiting at its empty input box,
+        which a spawn's prompt waits for (#32, L3)."""
         self.captured: list[str] = []
         """Every pane whose screen was asked for, in order."""
         self.killed: list[str] = []
@@ -437,7 +441,7 @@ class FakeTmux(TmuxServer):
         if facts is None:
             raise TmuxError(f"can't find pane: {pane_id}")
         self.captured.append(pane_id)
-        return Capture(list(self.screens.get(pane_id, [])), facts, 0)
+        return Capture(list(self.screens.get(pane_id, self.idle_screen)), facts, 0)
 
     # The strict twins the shutdown paths use: each is the lenient answer UNLESS
     # the server could not be asked, and that single distinction is `reachable()`
@@ -4755,6 +4759,31 @@ def test_a_spawned_agent_is_told_its_task_on_its_first_start(
     assert _row(agent.id).session_id == first, "the minted id is the row's from the spawn"
 
 
+@pytest.mark.parametrize("source", ["startup", "resume", "clear"])
+def test_an_agent_that_has_had_no_prompt_reads_waiting_not_working(
+    source: str,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#32, L1: a ``fleet spawn`` with no prompt sat idle at an empty prompt, and ``fleet ls``
+    and the board listed it ``working`` for the row's whole fresh window: the start hook's
+    upsert said so, and only the captain's start took it back. Its first prompt's hook is
+    what says ``working``; a compaction, which can come mid-turn, keeps what the turn said."""
+    agent, session_id = _spawned(project, "coder", None, tmux, monkeypatch)
+
+    team_service.hook_session_start(session_id, project.root, source)
+
+    with store_session() as store:
+        session = store.get_session(session_id)
+    assert session is not None and session.state == "waiting"
+    assert fleet_service.status_of(_row(agent.id)).state == "waiting"
+    team_service.hook_prompt_heartbeat(session_id, project.root)
+    team_service.hook_session_start(session_id, project.root, "compact")
+    assert fleet_service.status_of(_row(agent.id)).state == "working"
+
+
 def test_a_fleet_agents_cycle_names_its_own_project_under_a_hub(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -6358,6 +6387,7 @@ def test_a_replacement_that_could_not_take_the_task_is_refused_before_the_stop(
     _two_slots_with_usage(monkeypatch, work=95, personal=10)
     task = _add_task(project, "Ship auth")
     agent = _coder(project, task_id=task.id, account="2")
+    tmux.typed.clear()  # its first prompt, read-and-claim (#32, D2): not counted here
     _with_transcript(agent, None)
     _as_080_left_it(agent)
     raw = sqlite3.connect(str(paths.db_path()))
@@ -13149,7 +13179,8 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
     with store_session() as store:
         revived = store.get_session(agent.session_id or "")
         still = store.get_task(task.id)
-    assert revived is not None and revived.ended_at is None and revived.state == "working"
+    # Waiting at its prompt until its first line is typed (#32, L1), not `working`.
+    assert revived is not None and revived.ended_at is None and revived.state == "waiting"
     assert still is not None and still.status == "doing" and still.claimed_by == agent.session_id
 
 
@@ -13559,6 +13590,7 @@ def test_switch_starts_fresh_with_a_hand_off_prompt_when_asked_or_when_there_is_
     agent = fleet_service.spawn(
         project, "coder", worktree=False, account="2", task_id=task.id
     ).agent
+    tmux.typed.clear()  # its first prompt, read-and-claim (#32, D2): not counted here
     _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk
     with store_session() as store:
         team_service._emit(
@@ -14276,6 +14308,7 @@ def test_restart_stops_a_running_agent_first_and_starts_fresh_when_asked_or_with
 ) -> None:
     task = _add_task(project, "Ship auth")
     agent = _coder(project, task_id=task.id)
+    tmux.typed.clear()  # its first prompt, read-and-claim (#32, D2): not counted here
     _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk
     with store_session() as store:
         team_service._emit(
@@ -14419,6 +14452,7 @@ def test_a_refused_restart_leaves_the_exited_row_its_window_and_a_running_agent_
     goes only once the replacement is up and recorded (``_supersede``)."""
     task = _add_task(project, "Ship auth")
     coder = _coder(project, task_id=task.id)
+    tmux.typed.clear()  # its first prompt, read-and-claim (#32, D2): not counted here
     with store_session() as store:
         store.set_task_status(task.id, "done")
     tmux.die(coder.pane_id, 0)
@@ -14434,6 +14468,7 @@ def test_a_refused_restart_leaves_the_exited_row_its_window_and_a_running_agent_
     # A running agent is refused the same way BEFORE it is stopped: nothing typed.
     billing = _add_task(project, "Ship billing")
     running = _coder(project, label="coder-billing", task_id=billing.id)
+    tmux.typed.clear()  # its first prompt, read-and-claim (#32, D2): not counted here
     with store_session() as store:
         store.set_task_status(billing.id, "dropped")
     with pytest.raises(FleetError, match="is dropped"):
@@ -15094,6 +15129,7 @@ def test_restart_hands_off_the_session_s_own_entries_on_a_busy_board(
     agent's, and the prompt lost "the previous session's last board entries"."""
     task = _add_task(project, "Ship auth")
     agent = _coder(project, task_id=task.id)
+    tmux.typed.clear()  # its first prompt, read-and-claim (#32, D2): not counted here
     _with_transcript(agent, tmp_path / "missing.jsonl")  # named, not on disk
     with store_session() as store:
         team_service._emit(
@@ -17312,6 +17348,7 @@ def test_a_switch_whose_task_closes_during_the_stop_starts_the_replacement_witho
     agent = fleet_service.spawn(
         project, "coder", worktree=False, task_id=task.id, account="2"
     ).agent
+    tmux.typed.clear()  # its first prompt, read-and-claim (#32, D2): not counted here
     _with_transcript(agent, None)  # nothing to resume: a hand-off prompt
     original_spawn = tmux.spawn_window
 
@@ -17357,6 +17394,7 @@ def test_a_switch_that_spawn_would_refuse_is_refused_before_the_stop(
     agent = fleet_service.spawn(
         project, "coder", worktree=False, task_id=task.id, account="2"
     ).agent
+    tmux.typed.clear()  # its first prompt, read-and-claim (#32, D2): not counted here
     _with_transcript(agent, None)
     if refused == "a closed task":
         with store_session() as store:
@@ -18210,7 +18248,7 @@ def test_spawn_types_its_prompt_once_the_trust_question_is_answered(
     def answered_on_the_third_look(pane_id: str, **kwargs: Any) -> Capture:
         nonlocal asked
         asked += 1
-        tmux.screens[pane_id] = TRUST_SCREEN if asked < 3 else ["\u276f "]
+        tmux.screens[pane_id] = TRUST_SCREEN if asked < 3 else captain_screens.INPUT_BOX
         return original_capture(pane_id, **kwargs)
 
     monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
@@ -18220,3 +18258,219 @@ def test_spawn_types_its_prompt_once_the_trust_question_is_answered(
     assert tmux.typed == [(pane, "paste", "start on tsk_1"), (pane, "key", "Enter")]
     assert receipt.notes == [] and clock.now < PROMPT_TIMEOUT
     assert claude_sharing.shows_trust_prompt(TRUST_SCREEN)  # the fixture is the question
+
+
+# --- #32: the launcher types into Claude Code once it can read, and reads the pane back ---
+
+
+def _claude_code_screen(name: str) -> list[str]:
+    """A real ``capture-pane -e`` of Claude Code 2.1.309, run in an isolated config dir."""
+    return (
+        (Path(__file__).parent / "fixtures" / "claude_code" / f"{name}_2.1.309.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+
+
+SECURITY_SCREEN = _claude_code_screen("security_notes")
+"""The first-run Security notes screen: "Press Enter to continue…" is its only key."""
+UNSENT_SCREEN = _claude_code_screen("prompt_unsent")
+"""``say hi in one word`` and Enter typed 0.25 s into Claude Code's start: the text sits in
+its input box, unsent — the early-input buffer took the Enter for a newline (#32, L3)."""
+SENT_SCREEN = _claude_code_screen("prompt_sent")
+"""The same pane after one more Enter: the prompt is in the transcript, the box is empty."""
+
+
+def _drawn(
+    tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch, screen: Callable[[str], list[str]]
+) -> None:
+    """Every pane is Claude Code from its first poll, and shows ``screen(pane_id)``."""
+    original_facts, original_capture = tmux.pane_facts, tmux.capture
+
+    def up(pane_id: str) -> PaneFacts | None:
+        tmux.set_command(pane_id, "claude")
+        return original_facts(pane_id)
+
+    def capture(pane_id: str, **kwargs: Any) -> Capture:
+        tmux.screens[pane_id] = screen(pane_id)
+        return original_capture(pane_id, **kwargs)
+
+    monkeypatch.setattr(tmux, "pane_facts", up)
+    monkeypatch.setattr(tmux, "capture", capture)
+
+
+def _enters(tmux: FakeTmux, pane: str) -> int:
+    return tmux.typed.count((pane, "key", "Enter"))
+
+
+def test_the_real_screens_read_as_what_they_are() -> None:
+    """The readers on the captures: the notes are no trust question and no input box, the
+    unsent prompt is in the box, and the sent one only in the transcript above it."""
+    assert claude_sharing.shows_security_notes(SECURITY_SCREEN)
+    assert not claude_sharing.shows_trust_prompt(SECURITY_SCREEN)
+    assert not claude_sharing.shows_security_notes(UNSENT_SCREEN)
+    assert not claude_sharing.shows_security_notes(TRUST_SCREEN)
+    prompt = "say hi in one word"
+    assert fleet_service._in_input_box(UNSENT_SCREEN, prompt)
+    assert not fleet_service._in_input_box(SENT_SCREEN, prompt)
+    assert not fleet_service._in_input_box(SECURITY_SCREEN, prompt)
+
+
+def test_spawn_types_its_prompt_once_claude_code_draws_its_input_box(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#32, L3: "up" was the process running plus a 2 s settle. Typed before Claude Code
+    mounts its prompt, the early-input buffer kept the text and took the Enter for a
+    newline: the prompt sat in the box, unsent. A slow start (hooks, MCP servers) is past
+    the settle, so the box is what is waited for."""
+    _drawn(tmux, monkeypatch, lambda _: [] if clock.now < 6 else captain_screens.INPUT_BOX)
+    pasted_at: list[float] = []
+    original_paste = tmux.paste
+
+    def paste(pane_id: str, text: str) -> None:
+        pasted_at.append(clock.now)
+        original_paste(pane_id, text)
+
+    monkeypatch.setattr(tmux, "paste", paste)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="hello")
+
+    pane = receipt.agent.pane_id
+    assert tmux.typed == [(pane, "paste", "hello"), (pane, "key", "Enter")]
+    assert pasted_at and pasted_at[0] >= 6, "typed once the box was drawn, not at the settle"
+    assert receipt.prompt_typed == "yes" and receipt.notes == []
+
+
+def test_a_prompt_left_in_the_input_box_by_its_enter_is_sent_with_one_more(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#32, L3: the paste and its Enter go through, yet the prompt is still in the box (the
+    real capture). The pane is read back, and one more Enter sends it — once: a box that
+    holds the prompt is the one place that Enter can only send it."""
+    _drawn(
+        tmux,
+        monkeypatch,
+        lambda pane: (
+            UNSENT_SCREEN
+            if (pane, "paste", "say hi in one word") in tmux.typed and _enters(tmux, pane) < 2
+            else captain_screens.INPUT_BOX
+        ),
+    )
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="say hi in one word")
+
+    pane = receipt.agent.pane_id
+    assert _enters(tmux, pane) == 2
+    assert receipt.prompt_typed == "yes"
+    [again] = [note for note in receipt.notes if "pressed Enter again" in note]
+    assert again in receipt.shared and receipt.failures == []  # done, not a warning
+
+
+def test_a_prompt_that_stays_in_the_input_box_is_unsent_not_typed(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Still in the box after the second Enter: ``unsent``, with where to press Enter — not
+    ``yes``, which the board and the page read as an agent at work, and no third Enter."""
+    _drawn(
+        tmux,
+        monkeypatch,
+        lambda pane: (
+            UNSENT_SCREEN
+            if (pane, "paste", "say hi in one word") in tmux.typed
+            else captain_screens.INPUT_BOX
+        ),
+    )
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="say hi in one word")
+
+    assert _enters(tmux, receipt.agent.pane_id) == 2
+    assert receipt.prompt_typed == "unsent"
+    assert any("still in the input box, unsent" in note for note in receipt.failures)
+
+
+def test_spawn_presses_enter_past_the_first_run_security_notes_then_types_its_prompt(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#32, L2 (the owner's D1, board seq 671): on an account's first run Claude Code shows
+    its Security notes, whose only key is Enter. The prompt typed there was lost and its
+    Enter moved the screen on (reproduced on 2.1.309), so a new account's first spawn sat
+    idle. The launcher presses Enter past it, then types the prompt into the box."""
+    _drawn(
+        tmux,
+        monkeypatch,
+        lambda pane: SECURITY_SCREEN if _enters(tmux, pane) == 0 else captain_screens.INPUT_BOX,
+    )
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="hello")
+
+    pane = receipt.agent.pane_id
+    assert tmux.typed == [(pane, "key", "Enter"), (pane, "paste", "hello"), (pane, "key", "Enter")]
+    assert receipt.prompt_typed == "yes" and receipt.failures == []
+    [past] = [note for note in receipt.notes if fleet_service.SECURITY_NOTES in note]
+    assert past in receipt.shared  # done, not a warning: the CLI says it with a ✓
+
+
+def test_a_prompt_is_not_typed_into_security_notes_that_stay(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The notes still up after the Enters it is given: the prompt is kept, not typed into
+    a screen that would lose it, and the receipt says where the agent waits."""
+    _drawn(tmux, monkeypatch, lambda _: SECURITY_SCREEN)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="hello")
+
+    pane = receipt.agent.pane_id
+    assert all(entry == (pane, "key", "Enter") for entry in tmux.typed)
+    assert _enters(tmux, pane) == fleet_service._SECURITY_PRESSES
+    assert receipt.prompt_typed == "no"
+    [note] = receipt.failures
+    assert fleet_service.SECURITY_NOTES in note
+    assert "NOT typed" in note and "fleet tell" in note
+
+
+def test_an_agent_left_at_the_security_notes_reads_attention_with_the_reason(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#32, L2: a pane at the notes fires no hook and read a healthy waiting. Like the trust
+    question it reads ``attention``, its detail saying what unblocks it."""
+    agent = _coder(project)
+    tmux.screens[agent.pane_id] = SECURITY_SCREEN
+    [status] = fleet_service.list_agents(project)
+    assert status.state == "attention"
+    assert status.detail is not None and status.detail.startswith(fleet_service.SECURITY_NOTES)
+
+
+def test_a_spawn_for_a_task_with_no_prompt_is_told_to_read_and_claim_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#32, L1 (the owner's D2, board seq 671): ``fleet spawn --task`` with no ``--prompt``
+    left the agent idle at an empty prompt. Its first message reads and claims its task. A
+    spawn with neither is typed nothing."""
+    task = _add_task(project, "Ship auth")
+    agent = _coder(project, task_id=task.id)
+    number = _task_now(task.id).number
+    [(pane, kind, text)] = [entry for entry in tmux.typed if entry[1] == "paste"]
+    assert (pane, kind) == (agent.pane_id, "paste")
+    assert f"`aisquare task show {number}`" in text
+    assert f"`aisquare task claim {number}`" in text
+    assert "Ship auth" in text and "\n" not in text
+    assert (agent.pane_id, "key", "Enter") in tmux.typed
+
+    tmux.typed.clear()
+    bare = fleet_service.spawn(project, "coder", worktree=False, label="coder-bare")
+    assert tmux.typed == [] and bare.prompt_typed is None

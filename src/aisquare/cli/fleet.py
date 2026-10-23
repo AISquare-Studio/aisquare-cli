@@ -201,7 +201,12 @@ def spawn(
         str | None, typer.Option("--bin", help="Agent executable (default: the role's binding).")
     ] = None,
     prompt: Annotated[
-        str | None, typer.Option("--prompt", help="First message to type once the agent is up.")
+        str | None,
+        typer.Option(
+            "--prompt",
+            help="First message to type once the agent is up. With --task and no --prompt, "
+            "the agent is told to read and claim its task.",
+        ),
     ] = None,
     account: Annotated[
         str | None,

@@ -93,6 +93,7 @@ from tests import bundled_personas, fakebin
 from tests.cycles import unscoped
 from tests.fsperms import can_deny_reads, can_symlink, remove_tree
 from tests.projects import add_project
+from tests.unix_listener import Accepting
 
 PYTHON_LAUNCHER = "python3"
 """What ``pane_current_command`` reads while ``python -m aisquare launch`` is resolving."""
@@ -8178,7 +8179,10 @@ def test_shutdown_records_rows_lost_with_a_reason_when_the_server_was_killed_by_
 def _socket_file(name: str, *, listening: bool) -> Iterator[Path]:
     """A real socket file at ``<short dir>/tmux-<uid>/<name>``, the shape tmux makes:
     listening, or stale, as tmux leaves it when its server exits. Under ``/tmp``, as an
-    AF_UNIX path is small (about 100 bytes). Skips where tmux cannot run."""
+    AF_UNIX path is small (about 100 bytes). Skips where tmux cannot run.
+
+    A listening one accepts every connect, as tmux's server does (``tests.unix_listener``):
+    one that only listened was read as stale by the second probe on macOS."""
     import tempfile
 
     if not hasattr(socket, "AF_UNIX") or not hasattr(os, "getuid"):
@@ -8187,13 +8191,18 @@ def _socket_file(name: str, *, listening: bool) -> Iterator[Path]:
     path = base / f"tmux-{os.getuid()}" / name
     path.parent.mkdir()
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    accepting: Accepting | None = None
     try:
         server.bind(str(path))
         server.listen(1)
-        if not listening:
+        if listening:
+            accepting = Accepting(server)
+        else:
             server.close()
         yield path
     finally:
+        if accepting is not None:
+            accepting.close()
         server.close()
         shutil.rmtree(base, ignore_errors=True)
 

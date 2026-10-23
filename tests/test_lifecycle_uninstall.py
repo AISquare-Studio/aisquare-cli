@@ -41,6 +41,7 @@ from aisquare.services.install_route import Facts
 from tests.fsperms import can_deny_reads, can_symlink
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
 from tests.remote_elsewhere import remote_lock, remote_on_elsewhere
+from tests.unix_listener import Accepting
 
 _EVENTS = (
     ("SessionStart", "session-start"),
@@ -1085,9 +1086,10 @@ def test_the_probe_asks_the_socket_file_itself() -> None:
         assert socket_answer(path) == "gone", "no file: no evidence"
         server.bind(str(path))
         server.listen(1)
+        listening = Accepting(server)  # as tmux's server: a second probe is not refused
         assert socket_answer(path) == "answers"
         assert TmuxServer("asq").listener(path) == "answers", "a recorded path is asked"
-        server.close()
+        listening.close()
         assert socket_answer(path) is None, "a stale file: no server"
     finally:
         server.close()
@@ -1117,6 +1119,7 @@ def test_a_recorded_socket_is_asked_whatever_this_shell_rebuilds(
     try:
         server.bind(str(recorded))
         server.listen(1)
+        listening = Accepting(server)  # as tmux's server: a second probe is not refused
         _initialised(runner, tmp_path)
         _live_agent(tmp_path / "new", "coder-1", socket_path=recorded)
         _live_agent(tmp_path / "old", "coder-2")  # spawned before rows recorded a path
@@ -1129,7 +1132,7 @@ def test_a_recorded_socket_is_asked_whatever_this_shell_rebuilds(
                 0,
                 None,
             )
-        server.close()  # the file stays, as tmux leaves it when its server exits
+        listening.close()  # the file stays, as tmux leaves it when its server exits
         assert lifecycle.running_fleet() == (("coder-2 (old)",), 1, None), "a stale file"
     finally:
         server.close()
@@ -1158,12 +1161,13 @@ def test_a_recorded_socket_taken_from_under_its_server_still_counts(
     try:
         server.bind(str(recorded))
         server.listen(1)
+        listening = Accepting(server)
         _initialised(runner, tmp_path)
         _live_agent(tmp_path / "repo", "coder-1", socket_path=recorded)
         recorded.unlink()  # tmpfiles or logind: the server still listens, on no file
 
         assert lifecycle.running_fleet() == (("coder-1 (repo)",), 0, None)
-        server.close()
+        listening.close()
         assert lifecycle.running_fleet() == (("coder-1 (repo)",), 0, None), "no file: no answer"
     finally:
         server.close()

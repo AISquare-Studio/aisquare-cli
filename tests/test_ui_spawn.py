@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sqlite3
 import threading
 import time
 from collections.abc import Callable, Coroutine, Iterator, Sequence
@@ -45,11 +46,12 @@ from textual.widgets import (
     TextArea,
 )
 
+from aisquare.cli.ui import app as app_module
 from aisquare.cli.ui import spawn as spawn_module
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
-from aisquare.cli.ui.sidebar import SpawnAgent, SpawnRow, agent_row_text
+from aisquare.cli.ui.sidebar import AddProject, SpawnAgent, SpawnRow, agent_row_text
 from aisquare.cli.ui.spawn import (
     LABEL_RULE,
     NO_TASK,
@@ -81,6 +83,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
+from aisquare.services.captain import state as captain_state
 from tests.ui_workers import settle_page, settle_workers
 
 T = TypeVar("T")
@@ -986,6 +989,146 @@ def test_a_receipt_dismisses_toasts_it_and_its_notes_refreshes_and_opens_the_new
     assert refreshes >= 1
     assert current == f"agent-{agent.id}"  # the new agent's live pane is what shows next
     assert [call[1] for call in spawns.calls] == ["coder"]
+
+
+async def _submit_spawn(pilot: Pilot[None], app: RecordingFleetApp) -> None:
+    """Open prj_a's spawn dialog from its row and press Spawn."""
+    await pilot.click(spawn_row(app, "prj_a"))
+    await pilot.pause()
+    assert isinstance(app.screen, SpawnDialog)
+    await pilot.click("#spawn-submit")
+
+
+def test_a_spawn_whose_next_read_finds_the_store_unreadable_says_its_row_comes_next(
+    tmp_path: Path,
+    fleet: dict[str, list[FleetAgentStatus]],
+    spawns: SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #272, m1: the frame read after a spawn found the store unreadable and kept
+    the frame shown, and the select that waited for it said "that agent is no longer
+    listed" of the agent just spawned. It says its row comes on the next refresh, as a
+    restart's does, and moves nothing."""
+    (tmp_path / "alpha" / ".git").mkdir(parents=True)
+    register(tmp_path / "alpha", project_id="prj_a", codename="amber-otter")
+
+    def unreadable() -> Any:
+        raise sqlite3.OperationalError("database is locked")
+
+    def answer(target: ProjectInfo, role: str) -> fleet_service.SpawnReceipt:
+        receipt = receipt_for(target, label="coder-1-2")
+        fleet[target.id] = [FleetAgentStatus(agent=receipt.agent, state="working")]
+        monkeypatch.setattr(app_module, "store_session", unreadable)  # the read after it
+        return receipt
+
+    spawns.answer = answer
+
+    async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> list[Any]:
+        shown_before = app.content.current
+        await _submit_spawn(pilot, app)
+        await settle_workers(app)
+        for _ in range(3):
+            await pilot.pause()
+        assert app.store_error is not None, "the premise: the read after it found no store"
+        return [shown_before, app.content.current, app.notices]
+
+    shown_before, current, notices = drive_app(scenario)
+    assert ("that agent is no longer listed", "warning") not in notices, notices
+    assert ("coder-1-2 spawned — its row appears on the next refresh", "information") in notices
+    assert current == shown_before
+
+
+def test_a_spawn_whose_read_outlives_the_users_move_leaves_them_where_they_went(
+    tmp_path: Path,
+    fleet: dict[str, list[FleetAgentStatus]],
+    spawns: SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #272, m2: the new agent is opened off a frame read after the spawn, and a
+    read that hung for seconds then moved the view and the focus off wherever the user
+    had gone meanwhile. A restart's select never did (``_show_restarted``); nor does this."""
+    (tmp_path / "alpha" / ".git").mkdir(parents=True)
+    register(tmp_path / "alpha", project_id="prj_a", codename="amber-otter")
+    spawned = threading.Event()
+    held = threading.Event()
+    gate = threading.Event()
+    listing = fleet_service.list_agents
+
+    def answer(target: ProjectInfo, role: str) -> fleet_service.SpawnReceipt:
+        receipt = receipt_for(target, label="coder-1-2")
+        fleet[target.id] = [FleetAgentStatus(agent=receipt.agent, state="working")]
+        spawned.set()
+        return receipt
+
+    def hung(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        if spawned.is_set():  # the read after the spawn
+            held.set()
+            gate.wait(10)
+        return listing(project, live_only=live_only)
+
+    spawns.answer = answer
+    monkeypatch.setattr(fleet_service, "list_agents", hung)
+
+    async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> list[Any]:
+        try:
+            await _submit_spawn(pilot, app)
+            for _ in range(200):
+                if held.is_set():
+                    break
+                await pilot.pause(0.02)
+            assert held.is_set(), "the premise: the read after the spawn is held"
+            app.post_message(AddProject())  # the user goes elsewhere meanwhile
+            for _ in range(200):
+                if app.content.current == "onboard":
+                    break
+                await pilot.pause(0.02)
+        finally:
+            gate.set()
+        await settle_workers(app)
+        for _ in range(3):
+            await pilot.pause()
+        return [app.content.current, app.notices]
+
+    current, notices = drive_app(scenario)
+    assert current == "onboard", "where the user went"
+    assert not any("no longer listed" in message for message, _ in notices), notices
+
+
+@pytest.mark.needs_captain
+def test_a_first_captain_whose_next_read_fails_says_its_row_comes_next(
+    fleet: dict[str, list[FleetAgentStatus]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #272, m3: the first captain ever spawned, and the captain's read in the
+    frame after it failed. That frame keeps the last frame's home, which had none, so the
+    select said "that agent is no longer listed" of the captain just started."""
+    home = captain_state.home_project()
+    listing = fleet_service.list_agents
+
+    def failing(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        if project.id == home.id:
+            raise fleet_service.FleetUnavailable("database is locked")
+        return listing(project, live_only=live_only)
+
+    monkeypatch.setattr(fleet_service, "list_agents", failing)
+    captain = spawned_agent(home, label="captain", role=fleet_service.CAPTAIN_ROLE)
+
+    async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> list[Any]:
+        assert app.snapshot is not None and app.snapshot.home is None, "no home shown yet"
+        shown_before = app.content.current
+        app.spawn_finished(
+            fleet_service.SpawnReceipt(
+                agent=captain, asked_label=None, tmux_session="asq-home", notes=[]
+            )
+        )
+        await settle_workers(app)
+        for _ in range(3):
+            await pilot.pause()
+        return [shown_before, app.content.current, app.notices]
+
+    shown_before, current, notices = drive_app(scenario)
+    assert ("that agent is no longer listed", "warning") not in notices, notices
+    assert ("captain spawned — its row appears on the next refresh", "information") in notices
+    assert current == shown_before
 
 
 def test_the_module_names_its_workers_apart_from_the_manager_tabs() -> None:

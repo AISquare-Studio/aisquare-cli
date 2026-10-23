@@ -808,7 +808,11 @@ def test_it_runs_in_place_of_a_hook_whose_script_cannot_start(machine: Machine, 
         with pytest.raises(OSError):  # the premise: exec refuses it (a bad interpreter)
             subprocess.run([str(dead)], capture_output=True, check=False)
     else:  # the premise: /bin/sh starts and its exec finds no Python
-        assert subprocess.run([str(dead)], capture_output=True, check=False).returncode == 127
+        # 127 from dash and bash; 126 from macOS's /bin/sh (bash 3.2 as sh), which says
+        # "cannot execute: No such file or directory" of the missing interpreter.
+        ran = subprocess.run([str(dead)], capture_output=True, text=True, check=False)
+        assert ran.returncode in (126, 127), ran
+        assert "gone/python" in ran.stderr, ran
 
     result = machine.run("stop")
 

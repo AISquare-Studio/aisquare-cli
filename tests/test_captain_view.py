@@ -778,3 +778,83 @@ def test_page_serving_is_the_voice_page_itself_not_any_listener() -> None:
         finally:
             server.shutdown()
             server.server_close()
+
+
+# --- #267 review, item (a): Textual already dispatches up the MRO ----------------------------
+
+
+@pytest.mark.needs_captain
+def test_the_captain_view_runs_the_agent_views_mount_and_restart_handlers_once(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Textual calls ``on_mount`` and ``on_worker_state_changed`` on every class of the MRO
+    that defines one; an explicit ``super()`` on top ran AgentView's twice: its actions
+    painted twice, its labels asked twice, and a failed restart said twice."""
+    from types import SimpleNamespace
+
+    from textual.worker import Worker, WorkerState
+
+    from aisquare.cli.ui.views import agent as agent_view
+
+    mounts: list[str] = []
+    real_mount = AgentView.on_mount
+
+    def counted_mount(self: AgentView) -> None:
+        mounts.append(type(self).__name__)
+        real_mount(self)
+
+    monkeypatch.setattr(AgentView, "on_mount", counted_mount)
+    script[captain_state.home_project().id] = [_captain("waiting")]
+
+    async def body(pilot: Pilot[None]) -> list[str]:
+        app = fleet_app(pilot)
+        await refreshed(app)
+        view = await _open_view(pilot)
+        said: list[str] = []
+        monkeypatch.setattr(view, "notify", lambda message, **_: said.append(str(message)))
+        failed = SimpleNamespace(
+            name=agent_view.RESTART_WORKER,
+            group=agent_view.RESTART_WORKER,
+            error=RuntimeError("no"),
+            result=None,
+        )
+        view.post_message(Worker.StateChanged(failed, WorkerState.ERROR))  # type: ignore[arg-type]
+        await pilot.pause()
+        return said
+
+    said = drive(body)
+    assert mounts == ["CaptainView"], mounts
+    assert len(said) == 1, said
+
+
+@pytest.mark.needs_captain
+def test_the_bar_reads_nothing_while_the_view_is_hidden(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#267 review, item (d): the 1 s interval read state.json behind any other view."""
+    from aisquare.cli.ui.views import captain as captain_view
+
+    reads: list[int] = []
+    real = captain_view.read_bar
+
+    def counted() -> Any:
+        reads.append(1)
+        return real()
+
+    monkeypatch.setattr(captain_view, "read_bar", counted)
+    script[captain_state.home_project().id] = [_captain("waiting")]
+
+    async def body(pilot: Pilot[None]) -> tuple[int, int]:
+        app = fleet_app(pilot)
+        await refreshed(app)
+        await _open_view(pilot)
+        app.content.current = "welcome"
+        await pilot.pause()
+        await settle_page(app)
+        hidden_from = len(reads)
+        await pilot.pause(captain_view.THINKING_TICK_S * 2.5)
+        await settle_page(app)
+        return hidden_from, len(reads)
+
+    hidden_from, after = drive(body)
+    assert after == hidden_from, "no read while hidden"

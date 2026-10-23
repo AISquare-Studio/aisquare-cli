@@ -390,6 +390,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stopped it and then refused to start it again. They now refuse first, and
   nothing is stopped. Off, a declared `captain` in the aisquare home restarts like
   any other role.
+- **The captain's view says a failed restart once,** and reads its bar only while
+  it is on screen. It ran the agent view's own handlers a second time, so a
+  restart that failed was said twice, and its one-second read of the captain's
+  state went on behind every other view.
 - **`aisquare persona` and the Personas tab read the project layer spawn and
   launch read.** They asked git for it, so a project that is not a git repository
   (a folder marked with `.aisquare`) listed none of the project personas its spawns

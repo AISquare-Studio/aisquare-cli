@@ -298,9 +298,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Role bindings in App settings, and a doctor line for each** (#98). *⚙ Settings ▸
   App settings* lists every role `aisquare team bind` bound: its binary, its args,
   and its environment, with `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` shown and
-  any other variable by name only. *Edit* opens the bind form on it and replaces
-  what it shows, as `team bind --clear` then `team bind` would; *Unset key…* and
-  *Clear* are `--unset` and `--clear`. `aisquare doctor` gains a `role bindings`
+  any other variable by name only. *Edit* opens the bind form on the binding as the
+  file holds it then, with each value masked until *Show values*, and replaces
+  it, as `team bind --clear` then `team bind` would; *Unset key…* and *Clear* are
+  `--unset` and `--clear`. The section re-reads the file on *Reload* and whenever
+  the page is shown again. `aisquare doctor` gains a `role bindings`
   line: a binding whose `CLAUDE_CONFIG_DIR` has no aisquare hooks (its sessions
   never reach the board) or whose `CLAUDE_CODE_TMPDIR` cannot be written warns,
   with the fix; with no such binding the line is absent.

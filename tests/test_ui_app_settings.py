@@ -807,7 +807,7 @@ def test_edit_opens_the_bind_form_on_the_binding_and_writes_what_team_bind_write
     `team bind --clear` then `team bind` with the new values would."""
     from textual.widgets import TextArea
 
-    from aisquare.cli.ui.attach import NewBindScreen
+    from aisquare.cli.ui.attach import MASKED, NewBindScreen
 
     monkeypatch.setattr(
         "aisquare.cli.ui.attach.shutil.which", lambda name: f"/usr/local/bin/{name}"
@@ -843,7 +843,7 @@ def test_edit_opens_the_bind_form_on_the_binding_and_writes_what_team_bind_write
 
     seen = drive(scenario)
     assert seen["form"] is True
-    assert seen["prefilled"] == ("coder", True, "claude2", "A=1", "--model opus")
+    assert seen["prefilled"] == ("coder", True, "claude2", f"A={MASKED}", "--model opus")
     assert paths.config_path().read_bytes() == expected
     assert "args -v" in str(seen["shown"]), "the section shows what the file holds now"
 
@@ -901,3 +901,141 @@ def test_the_role_bindings_section_fits_80_columns() -> None:
 
     right, buttons = asyncio.run(run())
     assert right <= 80 and buttons and max(buttons) <= 80, (right, buttons)
+
+
+def _binding_shown(host: App[Any], role: str) -> str | None:
+    """What the section shows for ``role``'s binding, or ``None`` when it lists none."""
+    rows = host.query(f"#binding-row-{role}")
+    if not rows:
+        return None
+    return "\n".join(str(widget.render()) for widget in rows.first().query(Static))
+
+
+def test_reload_shows_the_bindings_a_shell_wrote_meanwhile() -> None:
+    """Review of #334 (reviewer-a's walk): Reload re-read every field but the bindings, so
+    a role bound in a shell never showed, and a key unset there stayed listed."""
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[str | None, str | None]:
+        await settle(pilot)
+        settings_service.bind_role("coder", env={"GH_TOKEN": "x"}, args=["-v"])
+        host.query_one("#reload-settings", Button).press()
+        await settle(pilot)
+        bound = _binding_shown(host, "coder")
+        settings_service.bind_role("coder", unset=["GH_TOKEN"])
+        host.query_one("#reload-settings", Button).press()
+        await settle(pilot)
+        return bound, _binding_shown(host, "coder")
+
+    bound, unset = drive(scenario)
+    assert bound is not None and "GH_TOKEN" in bound
+    assert unset is not None and "GH_TOKEN" not in unset
+
+
+def test_edit_opens_on_the_binding_the_file_holds_now_not_the_one_last_shown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Save writes the edited binding whole, so an Edit opened on what the section last
+    read wrote a shell's later `team bind` away (review of #334). The page sits open
+    beside the shell in a tmux split, shown all along: only Edit itself can read it."""
+    monkeypatch.setattr(
+        "aisquare.cli.ui.attach.shutil.which", lambda name: f"/usr/local/bin/{name}"
+    )
+    settings_service.bind_role("coder", args=["-v"])
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[str, list[str]]:
+        await settle(pilot)
+        settings_service.bind_role("coder", args=["--debug"])  # the shell, meanwhile
+        host.query_one("#binding-edit-coder", Button).press()
+        await settle(pilot)
+        prefilled = host.screen.query_one("#bind-args", Input).value
+        host.screen.query_one("#bind-save", Button).press()
+        await settle(pilot)
+        return prefilled, load_config().team.profiles["coder"].args
+
+    prefilled, saved = drive(scenario)
+    assert prefilled == "-v --debug"
+    assert saved == ["-v", "--debug"], "the shell's arg survives an Edit and Save"
+
+
+def test_edit_of_a_binding_cleared_meanwhile_says_so_and_opens_nothing() -> None:
+    settings_service.bind_role("coder", args=["-v"])
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[bool, str | None]:
+        await settle(pilot)
+        settings_service.clear_role_binding("coder")
+        host.query_one("#binding-edit-coder", Button).press()
+        await settle(pilot)
+        return host.screen is not host.query_one(AppSettingsView).screen, _binding_shown(
+            host, "coder"
+        )
+
+    opened, shown = drive(scenario)
+    assert opened is False and shown is None
+
+
+def test_edit_masks_every_env_value_until_show_values_and_keeps_one_left_masked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The section names GH_TOKEN and never shows its value, and Edit showed it in clear
+    (review of #334). Each value is masked until *Show values*; a masked value saves as
+    the one stored, and a value typed over its mask saves as typed."""
+    from textual.widgets import TextArea
+
+    from aisquare.cli.ui.attach import MASKED
+
+    monkeypatch.setattr(
+        "aisquare.cli.ui.attach.shutil.which", lambda name: f"/usr/local/bin/{name}"
+    )
+    settings_service.bind_role("coder", env={"GH_TOKEN": "ghp_secret", "A": "1"})
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[str]:
+        await settle(pilot)
+        host.query_one("#binding-edit-coder", Button).press()
+        await settle(pilot)
+        area = host.screen.query_one("#bind-env", TextArea)
+        reveal = host.screen.query_one("#bind-env-reveal", Switch)
+        seen = [area.text]
+        reveal.value = True
+        await settle(pilot)
+        seen.append(area.text)
+        reveal.value = False
+        await settle(pilot)
+        seen.append(area.text)
+        area.load_text(f"GH_TOKEN={MASKED}\nA=2")
+        await settle(pilot)
+        host.screen.query_one("#bind-save", Button).press()
+        await settle(pilot)
+        return seen
+
+    masked, shown, again = drive(scenario)
+    assert masked == again == f"GH_TOKEN={MASKED}\nA={MASKED}"
+    assert shown == "GH_TOKEN=ghp_secret\nA=1"
+    assert load_config().team.profiles["coder"].env == {"GH_TOKEN": "ghp_secret", "A": "2"}
+
+
+def test_the_keyboard_reaches_new_bind_opens_the_form_and_escape_closes_it() -> None:
+    """Step 6 of the PR's walk, which the tmux walk could not prove end to end: at 80
+    columns, Tab reaches *+ New bind*, Enter opens the bind form, and Escape closes it
+    having written nothing."""
+    from aisquare.cli.ui.attach import NewBindScreen
+
+    async def run() -> tuple[str | None, bool, bool]:
+        host = AppHost()
+        async with host.run_test(size=(80, 40)) as pilot:
+            await settle(pilot)
+            for _ in range(120):
+                await pilot.press("tab")
+                if host.focused is not None and host.focused.id == "bindings-new":
+                    break
+            reached = host.focused.id if host.focused is not None else None
+            await pilot.press("enter")
+            await settle(pilot)
+            opened = isinstance(host.screen, NewBindScreen)
+            await pilot.press("escape")
+            await settle(pilot)
+            return reached, opened, isinstance(host.screen, NewBindScreen)
+
+    reached, opened, still_open = asyncio.run(run())
+    assert reached == "bindings-new"
+    assert opened is True and still_open is False
+    assert not paths.config_path().exists(), "Escape writes nothing"

@@ -663,11 +663,21 @@ class AppSettingsView(VerticalScroll):
             )
 
     async def reload_bindings(self) -> None:
-        """Show the bindings the file holds now, after a write (or one made elsewhere)."""
+        """Show the bindings the file holds now: after this page's own write, on Reload,
+        and each time the page is shown, so one a shell wrote meanwhile shows (review of
+        #334: the page is built once and kept).
+
+        On this view's own message queue (``call_later``, ``on_show``), never a worker: one
+        rebuild ends before the next begins, which two at once would not (a row's id
+        mounted twice), and the read is the one file the form reads on this thread too.
+        """
         self._role_bindings = dict(self._read_config().team.profiles)
         rows = self.query_one("#role-bindings", Vertical)
         await rows.remove_children()
         await rows.mount_all(list(self._binding_rows()))
+
+    async def on_show(self) -> None:
+        await self.reload_bindings()
 
     def _binding_role(self, button_id: str | None, kind: str) -> str | None:
         """The bound role a binding button belongs to, by its id."""
@@ -751,6 +761,7 @@ class AppSettingsView(VerticalScroll):
             row.account.value = bound or NO_ACCOUNT
         self._shown = self._field_values()
         self._load_accounts()  # the slots as they are now, off the UI thread
+        self.call_later(self.reload_bindings)
 
     # --- writing -----------------------------------------------------------------------
 
@@ -913,8 +924,15 @@ class AppSettingsView(VerticalScroll):
             return
         event.stop()
         if (role := self._binding_role(button, "edit")) is not None:
-            editing = (role, self._role_bindings[role])
-            self.app.push_screen(NewBindScreen([], editing=editing), self._binding_saved)
+            # The binding as the file holds it now: Save writes it whole, so one opened on
+            # what the section last read would write a shell's later `team bind` away.
+            current = self._read_config().team.profiles.get(role)
+            if current != self._role_bindings.get(role):
+                self.call_later(self.reload_bindings)
+            if current is None:
+                self.notify(f"{role} is no longer bound (changed outside this page)", markup=False)
+                return
+            self.app.push_screen(NewBindScreen([], editing=(role, current)), self._binding_saved)
         elif (role := self._binding_role(button, "unset")) is not None:
             profile = self._role_bindings[role]
             keys = [*profile.env, *sorted(profile.env_files)]
@@ -929,7 +947,7 @@ class AppSettingsView(VerticalScroll):
     def _binding_saved(self, seat: str | None) -> None:
         if seat is not None:
             self.notify(f"bound {seat} — saved to {paths.config_path()}", markup=False)
-            self.run_worker(self.reload_bindings(), group="role-bindings")
+            self.call_later(self.reload_bindings)
 
     def _unset(self, role: str, key: str | None) -> None:
         if key is None:
@@ -940,7 +958,7 @@ class AppSettingsView(VerticalScroll):
             self.notify(f"{key} not unset: {exc}", severity="error", markup=False)
             return
         self.notify(f"{role}: {key} unset (aisquare team bind {role} --unset {key})", markup=False)
-        self.run_worker(self.reload_bindings(), group="role-bindings")
+        self.call_later(self.reload_bindings)
 
     def _clear(self, role: str, confirmed: bool | None) -> None:
         if not confirmed:
@@ -951,7 +969,7 @@ class AppSettingsView(VerticalScroll):
             self.notify(f"{role}'s binding not cleared: {exc}", severity="error", markup=False)
             return
         self.notify(f"{role}: binding cleared (aisquare team bind {role} --clear)", markup=False)
-        self.run_worker(self.reload_bindings(), group="role-bindings")
+        self.call_later(self.reload_bindings)
 
     # --- reset -------------------------------------------------------------------------
 

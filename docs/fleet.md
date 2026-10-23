@@ -1144,15 +1144,21 @@ never the fleet: the defaults apply and nothing refuses.
 every role `team bind` bound: its binary, its args, and its environment, with
 `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` shown with their values and any other
 variable by name only, since a value may be a token.
-- *Edit* opens the bind form on it. Its *Save* replaces the binary, environment and
-  args, which `team bind <role> --clear` followed by a fresh `team bind` would also
-  do. Variables bound to a file and the account stay as they were.
+- *Edit* opens the bind form on the binding as `config.toml` holds it at that moment,
+  so a `team bind` run in a shell since is never written away. Each environment
+  value shows as `••••` until you turn on *Show values*. A value left masked is
+  saved as the one stored; type over it to change it. Its *Save* replaces the
+  binary, environment and args, which `team bind <role> --clear` followed by a
+  fresh `team bind` would also do. Variables bound to a file and the account stay
+  as they were.
 - *Unset key…* is `team bind <role> --unset KEY`.
 - *Clear* (it asks first) is `team bind <role> --clear`.
 - *+ New bind* makes one.
 
 Each of these writes at once, apart from the page's *Save*, through the same writer
-`team bind` uses.
+`team bind` uses. The section re-reads the file after each write, on *Reload*, and
+whenever the page is shown again, so a binding made in a shell shows without
+restarting `asq`.
 
 **Model and effort per role stay where they already live** — one home
 per concept: `aisquare team harness` (the ladder and the effort offsets),

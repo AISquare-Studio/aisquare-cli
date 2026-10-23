@@ -112,21 +112,6 @@ registered but hidden until they do something real.
 | `--no-color` | disable coloured output |
 | `--profile NAME` | configuration profile |
 
-### Configuration keys
-
-Set with `aisquare config set <section>.<key> <value>`, or in *⚙ Settings ▸ App
-settings*. Every key is a default you can change.
-
-| Key | Default | What it does |
-| --- | --- | --- |
-| `accounts.pick` | `headroom` | how a launch picks an account when nothing names one: `headroom` (the first under `switch_at`) or `default` (the machine default) |
-| `accounts.switch_at` | `85` | percent USED of the fuller window (and, for an agent of that family, its family week) at which an account counts as full |
-| `accounts.prefer` | `priority` | of the accounts under `switch_at`, `priority` takes the first in order; `reset-soonest` takes the one whose week resets first |
-| `accounts.on_limit` | `switch` | on a usage limit, `switch` hands a fleet agent to another account; `wait` leaves it parked |
-| `accounts.wait_if_reset_within_minutes` | `15` | with `switch`, wait instead when the limit lifts this soon |
-| `accounts.share_trust` | `true` | copy a folder's trust into the account a launch runs on |
-| `accounts.share_settings` | `false` | keep every managed account's `settings.json` a link to the plain claude's |
-
 ### Roadmap commands
 
 `sync`, `connectors`, `capture`, `policy` / `enforce` and `open` are the cloud
@@ -143,6 +128,13 @@ list` prints every key. The ones that need more than their name:
 
 | Key | Default | What it does |
 | --- | --- | --- |
+| `accounts.pick` | `headroom` | how a launch picks an account when nothing names one: `headroom` (the first under `switch_at`) or `default` (the machine default) |
+| `accounts.switch_at` | `85` | percent USED of the fuller window (and, for an agent of that family, its family week) at which an account counts as full |
+| `accounts.prefer` | `priority` | of the accounts under `switch_at`, `priority` takes the first in order; `reset-soonest` takes the one whose week resets first |
+| `accounts.on_limit` | `switch` | on a usage limit, `switch` hands a fleet agent to another account; `wait` leaves it parked |
+| `accounts.wait_if_reset_within_minutes` | `15` | with `switch`, wait instead when the limit lifts this soon |
+| `accounts.share_trust` | `true` | copy a folder's trust into the account a launch runs on |
+| `accounts.share_settings` | `false` | keep every managed account's `settings.json` a link to the plain claude's |
 | `capture.enabled` | `true` | `false`: the `UserPromptSubmit` hook stores no prompt (`aisquare log` stays empty) and spools none for Explainability. The turn's metrics row (no text), the teammate delta and the CI experiment, if you turned it on, carry on. A config that cannot be read records no prompt either, with one line on stderr. |
 | `fleet.first_prompt` | `argv` | how an agent's first message reaches it: `argv` gives a Claude Code agent its message on its command line and types it for any other binary; `type` types it for every agent ([fleet](fleet.md#the-first-message)). |
 | `fleet.prompt_ack_seconds` | `45` | how long `fleet spawn`, `restart` and `switch` wait for the agent's first turn to start, and how long a listing gives it before the agent reads `attention`: "first prompt not taken". |

@@ -893,9 +893,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         agent = source.agent
         if agent.role not in self._roles:
             self._roles.append(agent.role)
-            self.query_one("#spawn-role", Select).set_options(
-                [(self._role_prompt(r), r) for r in self._roles]
-            )
+            self._offer_roles()
         self.query_one("#spawn-role", Select).value = agent.role
         persona = agent.persona or NO_PERSONA
         self._persona_touched = True
@@ -1108,7 +1106,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             roles = self.query_one("#spawn-role", Select)
             if role not in self._roles:
                 self._roles.append(role)
-                roles.set_options([(self._role_prompt(r), r) for r in self._roles])
+                self._offer_roles()
                 self._offer_role_personas()
                 if self._manager_live:
                     self.call_after_refresh(self._grey_out_manager)
@@ -1120,6 +1118,19 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             slots = self.query_one("#spawn-account", Select)
             slots.set_options(self._account_options(self._account_statuses))
             slots.value = account
+
+    def _offer_roles(self) -> None:
+        """Rebuild what the Role field offers once the role list has grown, its value kept.
+
+        Silent, as ``_offer_role_personas`` is. Rebuilt, a Select falls back to its first
+        option, and a ``Select.Changed`` for it reached ``_role_changed``: the form passed
+        through that role on its way to the one asked for. The first is *(none)* now, with
+        no default persona, and the persona it set on the way read as the owner's pick
+        (``_persona_changed``), so the persona stopped following the role."""
+        field = self.query_one("#spawn-role", Select)
+        with self.prevent(Select.Changed):
+            field.set_options([(self._role_prompt(r), r) for r in self._roles])
+            field.value = self._role
 
     def _offer_role_personas(self) -> None:
         """Rebuild what the Persona field offers once the role list has grown, its value kept.

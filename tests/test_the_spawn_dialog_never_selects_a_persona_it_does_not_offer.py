@@ -140,9 +140,10 @@ def test_a_role_pick_brings_in_does_not_stop_the_persona_following_the_role(
 ) -> None:
     """What the fix must not cost. Rebuilding what the field offers passes through *(none)*
     and back, and as a ``Select.Changed`` that read as the owner's pick: the persona was
-    sent as chosen and no longer followed the role. Every role in play has one default here
-    (the role list's own rebuild passes through its first role, the manager, as it always
-    did), so nothing but the persona rebuild could have touched the field."""
+    sent as chosen and no longer followed the role. Every role in play has one default here,
+    so nothing but a rebuild could have touched the field — and the role list's own rebuild
+    is as silent: it passed through its first role, now *(none)*, whose empty persona read
+    as a pick the same way (``SpawnDialog._offer_roles``)."""
     for role in ("coder", "manager", "coder2"):
         configure_role(role, persona="minimalist")
     monkeypatch.setattr(fleet_service, "list_agents", lambda project, *, live_only=True: [])

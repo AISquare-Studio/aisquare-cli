@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
@@ -53,7 +53,6 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.clipboard import copy_and_tell
 from aisquare.cli.ui.remote_control import AUTO_OFF_CHOICES, READ_ONLY_REASON, RemoteController
-from aisquare.cli.ui.sidebar import Activatable
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.remote import (
     ELSEWHERE,
@@ -124,7 +123,7 @@ def store_ngrok_token(token: str) -> None:
         raise TokenRefused(f"the token could not be saved: {type(exc).__name__}") from None
 
 
-def shown(widget: Widget) -> bool:
+def remote_shown(widget: Widget) -> bool:
     """Whether ``widget`` is on the screen in front: displayed, and every container around
     it too (a page the content switcher put away is not), under no dialog."""
     if not widget.is_attached or widget.screen is not widget.app.screen:
@@ -234,12 +233,12 @@ class RemoteSection(Vertical):
     def on_mount(self) -> None:
         table = self.query_one("#settings-remote-devices", DataTable)
         self._device_columns = table.add_columns("id", "device", "last seen", "expires", "")
-        self.check()
-        self.set_interval(TICK_S, self.tick)
+        self.remote_check()
+        self.set_interval(TICK_S, self.remote_tick)
 
     # --- what Remote needs --------------------------------------------------------------------
 
-    def check(self) -> None:
+    def remote_check(self) -> None:
         """Look again at what Remote needs (an ngrok, its token), and paint."""
         self.ngrok, self.token = ngrok_found(), has_authtoken()
         self.repaint()
@@ -253,19 +252,19 @@ class RemoteSection(Vertical):
 
     def on_token_saved(self, event: TokenSaved) -> None:
         event.stop()
-        self.check()
+        self.remote_check()
 
     def on_ngrok_looked_for(self, event: NgrokLookedFor) -> None:
         event.stop()
-        self.check()
+        self.remote_check()
 
     # --- paint from the controller ----------------------------------------------------------
 
     @while_running
-    def tick(self) -> None:
+    def remote_tick(self) -> None:
         """The one-second tick: the link to copy once it arrives, and a paint while shown."""
         self._copy_when_public()
-        if shown(self):
+        if remote_shown(self):
             self.repaint()
 
     def _copy_when_public(self) -> None:
@@ -343,7 +342,7 @@ class RemoteSection(Vertical):
         )
         self.query_one("#settings-remote-regen", Button).disabled = not controller.running
         collapsed = self.query_one("#settings-remote-advanced", Collapsible).collapsed
-        if not collapsed and shown(self):  # the devices are read only where they show
+        if not collapsed and remote_shown(self):  # the devices are read only where they show
             self._paint_devices(controller.devices())
 
     def _paint_devices(self, devices: list[dict[str, Any]]) -> None:
@@ -394,7 +393,7 @@ class RemoteSection(Vertical):
         self.repaint()
 
     @on(Button.Pressed, "#settings-remote-revoke")
-    def _revoke(self, event: Button.Pressed) -> None:
+    def _remote_revoke(self, event: Button.Pressed) -> None:
         event.stop()
         row = self.query_one("#settings-remote-devices", DataTable).cursor_row
         if 0 <= row < len(self._device_rows):
@@ -480,21 +479,21 @@ class TokenSlot(Vertical):
         self.query_one("#settings-remote-token-problem").display = False
 
     @on(Button.Pressed, "#settings-remote-token-open")
-    def _open(self, event: Button.Pressed) -> None:
+    def _remote_open_dashboard(self, event: Button.Pressed) -> None:
         event.stop()
         self.app.open_url(AUTHTOKEN_FROM)
 
     @on(Button.Pressed, "#settings-remote-token-save")
     def _save_pressed(self, event: Button.Pressed) -> None:
         event.stop()
-        self.save()
+        self.remote_save_token()
 
     @on(Input.Submitted, "#settings-remote-token-field")
     def _save_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        self.save()
+        self.remote_save_token()
 
-    def save(self) -> None:
+    def remote_save_token(self) -> None:
         """Save what the field holds, off the UI thread; one save at a time."""
         if any(
             worker.node is self and worker.name == TOKEN_WORKER and not worker.is_finished
@@ -560,12 +559,16 @@ class NgrokMissing(Vertical):
         self.post_message(NgrokLookedFor())
 
 
-class RemoteChip(Activatable):
+class RemoteChip(Static):
     """``📡 remote · N devices`` in the sidebar while this asq's Remote is on; hidden while it
-    is off. A click opens the ``R`` modal."""
+    is off. A click opens the ``R`` modal.
+
+    A ``Static``, not one of the sidebar's ``Activatable`` rows: never under the keyboard
+    cursor, and none of its names is the sidebar's (``tests/test_remote_names_stay_off_the_
+    hook_graph.py``: a remote module shares no name with the rest)."""
 
     DEFAULT_CSS = """
-    RemoteChip { color: $success; }
+    RemoteChip { height: 1; color: $success; text-wrap: nowrap; text-overflow: ellipsis; }
     """
 
     ALLOW_SELECT = False
@@ -577,11 +580,11 @@ class RemoteChip(Activatable):
 
     def on_mount(self) -> None:
         self.display = False
-        self.tick()
-        self.set_interval(CHIP_TICK_S, self.tick)
+        self.remote_tick()
+        self.set_interval(CHIP_TICK_S, self.remote_tick)
 
     @while_running
-    def tick(self) -> None:
+    def remote_tick(self) -> None:
         controller = self.controller
         self.display = controller.running
         if not controller.running:
@@ -590,5 +593,6 @@ class RemoteChip(Activatable):
         noun = "device" if signed_in == 1 else "devices"
         self.update(Text(f"📡 remote · {signed_in} {noun}"))
 
-    def activate(self) -> None:
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
         self.app.push_screen(RemotePanel(self.controller))

@@ -7261,12 +7261,12 @@ def _refuse_the_captain_while_off(agent: FleetAgent) -> None:
     if (
         agent.role == CAPTAIN_ROLE
         and not experimental.captain_enabled()
-        and _is_the_captains_row(agent)
+        and is_the_captains_row(agent)
     ):
         raise FleetError(experimental.CAPTAIN_OFF)
 
 
-def _is_the_captains_row(agent: FleetAgent) -> bool:
+def is_the_captains_row(agent: FleetAgent) -> bool:
     """Whether ``agent``'s row is one the captain's start made: on the home board, launched
     with the captain's folder and no tool but its server (:func:`_is_the_captains_launch`)."""
     args = agent.launch_spec.extra_args if agent.launch_spec is not None else None

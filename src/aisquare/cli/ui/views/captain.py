@@ -308,10 +308,23 @@ class CaptainView(AgentView):
         yield Input(placeholder=SAY_PLACEHOLDER, id="captain-say", compact=True)
 
     def on_mount(self) -> None:
-        super().on_mount()
+        # No super(): Textual calls AgentView's own on_mount after this one, as it calls
+        # every class's handler up the MRO; called here too, it ran twice (#267 review, (a)).
         self.tick()
         self._paint_quick_action()
         self.thinking_timer = self.set_interval(THINKING_TICK_S, self.tick)
+
+    def on_show(self) -> None:
+        """Back on screen: the bar reads again at once, then on its interval."""
+        if self.thinking_timer is not None:
+            self.thinking_timer.resume()
+            self.tick()
+
+    def on_hide(self) -> None:
+        """Off screen (another view, or the captain closed): no read of state.json a second
+        for a bar nobody sees (#267 review, (d))."""
+        if self.thinking_timer is not None:
+            self.thinking_timer.pause()
 
     def refresh_status(self, status: FleetAgentStatus) -> None:
         super().refresh_status(status)
@@ -477,8 +490,7 @@ class CaptainView(AgentView):
             self._voice_answered(event)
             return
         if event.worker.name != TELL_WORKER:
-            super().on_worker_state_changed(event)
-            return
+            return  # AgentView's restart: Textual calls its handler itself (#267 review, (a))
         if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
             return
         from aisquare.services.captain import brain

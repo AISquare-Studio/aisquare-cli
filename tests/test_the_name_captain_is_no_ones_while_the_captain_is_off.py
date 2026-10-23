@@ -186,6 +186,31 @@ def test_off_a_declared_captain_in_the_home_restarts_like_any_other_role(
     assert restarted.started.role == "captain" and restarted.started.label == agent.label
 
 
+@pytest.mark.needs_captain
+def test_once_on_a_declared_captain_in_the_home_is_not_taken_for_the_captain(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captain_off: None,
+    declared_captain: None,
+) -> None:
+    """Review of #240, R2-m5: ``brain.find`` adopted any live home row whose role was
+    ``captain``, so `aisquare captain` attached to the owner's declared role."""
+    from aisquare.core import paths
+    from aisquare.core.workspace import project_id_for
+    from aisquare.services.captain import brain
+
+    root = paths.aisquare_home().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    home = ProjectInfo(id=project_id_for(root), root=root)
+    with store_session() as store:
+        store.ensure_project(home)
+    fleet_service.spawn(home, "captain", worktree=False)
+    _on(monkeypatch)
+
+    assert brain.find() is None
+
+
 # --- R1-F2: a declared role named captain ---------------------------------------------
 
 

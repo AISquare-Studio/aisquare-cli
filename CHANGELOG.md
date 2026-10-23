@@ -63,9 +63,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `aisquare doctor` shows one ok row, `captain: off (experimental)`.
 
   On, the captain is exactly as above. asq reads the switch once, when it starts, and
-  each command above reads it when it runs. Whatever it says, the home's own row is
-  never added as a project, and `project prune` and doctor's captured row leave it
-  alone (Fixed, below). Every other role, fleet row and board, and the store
+  each command above reads it when it runs. Whatever it says, the aisquare home is
+  hidden by default: no capture adds it as a project, and `project prune` and
+  doctor's captured row leave it alone (Fixed, below). Adding it on purpose
+  (`aisquare init` or `aisquare project onboard` there, or `+` in asq) makes it a
+  project with its own card, which never shows the captain's row; it warns once
+  that the folder holds aisquare's settings, the fleet database and every Claude
+  account's login data, which agents working there can read and change. Removing
+  it from the fleet hides it again. Every other role, fleet row and board, and the store
   (schema v33), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line
@@ -280,11 +285,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - In `asq`, every agent has one info line, the same on the Manager tab and in the
   agent's own view: its label, its state, the Claude account it runs on (by name)
   with how much of that account's five-hour session is used, the model and the
-  effort it runs at, and its pane, as in
-  `🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4`. A line too long
-  for its row shortens the agent's label first (to six characters at least), then is
-  cut at its end, so the account and its use stay. The figure is
-  green below 70 %, yellow from 70 % and red from 90 %. The agent view no longer
+  effort it runs at, its pane, and the persona it runs as, as in
+  `🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4 · skeptic`. A line
+  too long for its row drops the persona first, as the sidebar's rows do (cut while a
+  letter of it fits, never left as a bare `·`), then shortens the agent's label (to six
+  characters at least), then is cut at its end, so the account and its use stay. The
+  figure is green below 70 %, yellow from 70 % and red from 90 %. The agent view no longer
   shows the role, the task or the working directory there.
 - The sidebar's agent rows show the account's slot and its session use after the
   state chip, as in `▶ #3·87%`. A long label is shortened to make room, never the
@@ -405,13 +411,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A sidebar agent row is drawn at its width from its first frame.** It was
   first drawn at full width and cut at its end, the persona badge or the session
   figure behind a long label, until it repainted.
-- **The captain says yes to an agent's prompt only on the owner's words.** Its
-  `press` with a key that can approve (yes, the yes digit, Enter) and its `paste`
-  with `submit` took no confirmation, so text read off a pane could have the
-  captain approve a command nobody asked for; they now read the owner's words as
-  `stop` and `restart` do, naming the agent, its role or its project, or a yes to
-  the captain's own question. And a `paste` is refused while a prompt shows on the
-  pane, as `tell` is: its Enter picked the highlighted "1. Yes".
 - **One bad row no longer empties the captain's attention queue.** A row the
   running version cannot read (a newer kind after a downgrade, a hand edit), a byte
   that is not UTF-8 or a bad cursor made the whole `queue.json` read as empty, and
@@ -434,6 +433,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stopped it and then refused to start it again. They now refuse first, and
   nothing is stopped. Off, a declared `captain` in the aisquare home restarts like
   any other role.
+- **The captain's view says a failed restart once,** and reads its bar only while
+  it is on screen. It ran the agent view's own handlers a second time, so a
+  restart that failed was said twice, and its one-second read of the captain's
+  state went on behind every other view.
+- **The Spawn dialog keeps the label `captain` for the captain while it is on,**
+  as the fleet does: a coder labelled `captain` no longer gets an enabled Spawn
+  that the fleet then refuses, a declared `captain` role shows the label it sends,
+  and the dialog keeps the switch it opened with. `aisquare captain` no longer
+  attaches to a declared `captain` role spawned into the home while it was off.
+- **A persona's folder and SKILL.md follow your umask,** as any file you make does.
+  A new persona was made 0700 and a saved SKILL.md 0600, so other accounts and
+  tools that read your files could not read it. A mode you set on a SKILL.md is
+  kept when it is saved.
 - **`aisquare persona` and the Personas tab read the project layer spawn and
   launch read.** They asked git for it, so a project that is not a git repository
   (a folder marked with `.aisquare`) listed none of the project personas its spawns

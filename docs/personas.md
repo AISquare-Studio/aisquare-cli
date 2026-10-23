@@ -109,7 +109,9 @@ name: `persona:skeptic` on the session's line, `· skeptic` in `fleet ls`. A
 persona removed or broken after launch costs one line in the briefing
 (`… — launched without it`), never the session. Setting the variable by hand,
 `AISQUARE_PERSONA=skeptic aisquare launch coder`, works too; it is checked when
-the session starts rather than before.
+the session starts rather than before. Where the persona sits beside the role
+cycle and your own `CLAUDE.md`, and why a long one costs the briefing: [Which
+instructions an agent follows](instructions.md).
 
 `fleet spawn --persona` passes the name to `launch` inside the agent's window and
 records it on the fleet row; without the flag the role's
@@ -207,8 +209,10 @@ full — engine, model, size, frontmatter, body, what it dropped — before *Sav
 keeps it or *Discard* leaves it under `.drafts`. A refusal stays in the form
 with its reason. *Cancel* (or `Esc`) while it runs imports nothing and, under
 *Force*, replaces nothing (a draft an LLM already wrote stays under `.drafts`);
-once the persona is being written it is too late to cancel, so the form waits
-and a toast says what was imported. **+ New** asks
+an engine that is drafting is stopped, its `claude -p` and what it started ended
+within two seconds, and an API answer that arrives afterwards is dropped. Once the
+persona is being written it is too late to cancel, so the form waits and a toast
+says what was imported. **+ New** asks
 for a name, a layer and a description, creates the scaffold, and opens it in
 the editor.
 
@@ -298,6 +302,29 @@ importing that skill needs `--name`.
 
 The default layer is `--user`. A name already taken in that layer is refused
 unless you pass `--force`; `--name` picks another directory name.
+
+### Import several at once
+
+```sh
+aisquare persona import ./skills/code-review ./notes/how-we-review.txt ./agents/reviewer.md
+aisquare persona import --from-dir ./team-skills --no-llm
+aisquare --json persona import --from-dir ./team-skills --yes
+```
+
+Name several sources, or `--from-dir DIR` for every skill directory and file in
+`DIR` (hidden ones aside, by name), and each goes through the same import, in
+turn. One refusal does not stop the rest. The receipt is one table, SOURCE ·
+NAME · ENGINE · OUTCOME, with each refusal's code and reason on its row and a
+count on stderr; `--json` prints a list, one object per source, with `outcome`
+`imported` or `refused` and, for a refusal, its `error` and `message`. The exit is
+0 when every source was imported and 1 when any was refused. `--name` names one
+persona, so it is refused with more than one source. Without a terminal, an
+engine's draft is kept and its row reads `needs_confirmation` unless you pass
+`--yes`, as for one source. One source alone prints and exits as it always did.
+
+**Ctrl-C** ends an import: an engine's `claude -p` and what it started are ended
+within two seconds, nothing is written, and the exit is 130. In a batch, the
+sources before it stay imported, and the table says where it stopped.
 
 ### Import anything else — the LLM path
 

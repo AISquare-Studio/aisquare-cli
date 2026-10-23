@@ -28,6 +28,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -36,6 +37,7 @@ from textual import events
 
 from aisquare.cli.ui import terminal as terminal_module
 from aisquare.cli.ui.terminal import TerminalPane
+from aisquare.cli.ui.views.agent import key_spellings
 from aisquare.core import tmux_control
 from aisquare.core.tmux import (
     BUNDLED_CONF,
@@ -47,6 +49,7 @@ from aisquare.core.tmux import (
     _tmux,
 )
 from aisquare.core.tmux_control import ControlClient, Reply, quote
+from aisquare.models import FleetAgent, FleetAgentStatus
 from tests.pane_harness import FakePane, FakeTmux, mouse_event
 from tests.test_terminal_pane import Host, run, screen_text, wait_until
 
@@ -363,6 +366,60 @@ def test_real_tmux_hidden_panes_send_nothing_and_keep_running(
     assert found["running"] == {b: True, c: True}, found["running"]
     assert on_b[b] > 0 and on_b[a] == 0 and on_b[c] == 0, on_b
     assert hidden == {a: 0, b: 0, c: 0}, hidden
+
+
+@_needs_tmux
+@pytest.mark.parametrize("agent", ["codex", "claude-code"])
+def test_real_tmux_shift_enter_reaches_the_control_client_in_the_shown_agents_spelling(
+    agent: str, live: TmuxServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113 0.8.2, A11: the control-mode pane sends a key in the shown agent's own
+    spelling (``AgentAdapter.key_spellings``, which the Agent view hands its pane). Codex
+    0.162.1 submits on ``S-Enter`` and takes ``C-j`` as its newline, so shift+enter goes down
+    the control client's pipe as ``C-j``, and reaches the program as a line feed; Claude
+    Code's newline is ``S-Enter`` itself — where the server can carry it (tmux >= 3.5), and
+    ``C-j`` below that, for every agent (``keys.LEGACY_FALLBACK``)."""
+    script = _mouse_echo(tmp_path)  # prints every read it gets, one line each
+    pane_id = _window(live, "asq-spell", tmp_path, [sys.executable, str(script)])
+    row = FleetAgent(
+        id="agt_spell",
+        project_id="prj_spell",
+        label="coder-1",
+        role="coder",
+        agent=agent,
+        pane_id=pane_id,
+        cwd=tmp_path,
+        created_at=datetime.now(tz=UTC),
+    )
+    sent: list[tuple[str, ...]] = []
+    piped = ControlClient.send_keys
+
+    def recording(self: ControlClient, pane: str, *keys: str, **kwargs: Any) -> None:
+        sent.append(keys)
+        piped(self, pane, *keys, **kwargs)
+
+    monkeypatch.setattr(ControlClient, "send_keys", recording)
+
+    async def drive() -> tuple[bool, list[str]]:
+        host = Host(live, pane_id)
+        async with host.run_test(size=(80, 24)) as pilot:
+            pane = host.pane
+            pane.key_spellings = key_spellings(FleetAgentStatus(agent=row))
+            pane.focus()
+            await wait_until(pilot, lambda: _serving(pane), timeout=5.0)
+            await pilot.pause(0.3)
+            await pilot.press("shift+enter")
+            await wait_until(pilot, lambda: "read 1 " in "\n".join(screen_text(pane)), 3.0)
+            return pane._extended_keys(), screen_text(pane)
+
+    extended, screen = run(drive())
+    read = next(line for line in screen if "read 1 " in line)
+    if agent == "codex" or not extended:
+        assert sent == [("C-j",)], sent
+        assert "read 1 '\\n'" in read, read  # the line feed Codex reads as a newline
+    else:
+        assert sent == [("S-Enter",)], sent
+        assert "'\\n'" not in read, read
 
 
 @_needs_tmux

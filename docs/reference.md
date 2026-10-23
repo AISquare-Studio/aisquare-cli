@@ -9,7 +9,7 @@ removes exactly them):
 | Hook | What it does |
 | --- | --- |
 | `SessionStart` | inject orientation: snapshot pointers, context, team briefing |
-| `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on); deliver the teammate delta; heartbeat, which stamps the session's last prompt and marks its fleet agent's first message taken ([fleet](fleet.md#the-first-message)) |
+| `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on), unless `capture.enabled` is off; deliver the teammate delta; heartbeat, which stamps the session's last prompt and marks its fleet agent's first message taken ([fleet](fleet.md#the-first-message)) |
 | `Stop` | mark the session waiting; renew its task leases |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |
@@ -128,8 +128,11 @@ list` prints every key. The ones that need more than their name:
 
 | Key | Default | What it does |
 | --- | --- | --- |
+| `capture.enabled` | `true` | `false`: the `UserPromptSubmit` hook stores no prompt (`aisquare log` stays empty) and spools none for Explainability. The turn's metrics row (no text), the teammate delta and the CI experiment, if you turned it on, carry on. A config that cannot be read records no prompt either, with one line on stderr. |
 | `fleet.first_prompt` | `argv` | how an agent's first message reaches it: `argv` gives a Claude Code agent its message on its command line and types it for any other binary; `type` types it for every agent ([fleet](fleet.md#the-first-message)). |
 | `fleet.prompt_ack_seconds` | `45` | how long `fleet spawn`, `restart` and `switch` wait for the agent's first turn to start, and how long a listing gives it before the agent reads `attention`: "first prompt not taken". |
+| `projects.capture` | `false` | `true`: every directory a hooked session runs in gets a row, as 0.8.0 did; off, only a project you added records anything ([fleet](fleet.md#naming)). |
+| `redaction.level` | `standard` | how much is scrubbed from what leaves the machine: `off`, `standard` or `strict` ([Explainability](connecting-your-agents-to-explainability.md)). |
 
 ## Architecture
 

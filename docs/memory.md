@@ -48,6 +48,12 @@ Prompts are recorded only in a project you added (`aisquare project onboard`,
 keeps nothing. `[projects] capture = true` records them in every directory, as
 0.8.0 did ([fleet](fleet.md#naming)).
 
+`aisquare config set capture.enabled false` stops recording prompts
+everywhere: `aisquare log` stays empty and nothing is spooled for
+Explainability. Teammate updates still arrive, and each turn still gets its
+metrics row, without the text. A config file that cannot be read records no
+prompt either, and says so on stderr.
+
 The **active project** is whichever repo contains your working directory, or
 the one you pin with `aisquare project switch <name>`. Everything —
 context, snapshots, prompt history, team state — scopes to it consistently.

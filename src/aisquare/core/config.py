@@ -34,7 +34,9 @@ from aisquare.models import Pool, RedactionLevel
 
 
 class CaptureSettings(BaseModel):
-    """Settings for the background capture pipeline."""
+    """Prompt capture. ``enabled`` off: the ``UserPromptSubmit`` hook neither stores the
+    prompt (``aisquare log``) nor spools it for Explainability (#268); the turn's metrics
+    row, without text, and the teammate delta still happen."""
 
     enabled: bool = True
 

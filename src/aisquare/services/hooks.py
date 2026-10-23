@@ -26,9 +26,10 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import insights, selfcli
+from aisquare.core import insights, paths, selfcli
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import spawn as spawn_core
+from aisquare.core.config import load_config
 from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.version import DISTRIBUTION, __version__
@@ -457,6 +458,19 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
     block below is work the turn already contains, not a delay before it.
     """
     began = datetime.now(tz=UTC)
+    # ``capture.enabled``, read once a prompt (#268). Off, the prompt is neither stored nor
+    # spooled; the turn row below still opens, without text, and the teammate delta is the
+    # caller's, not capture. A config that cannot be read may have said off, so it records
+    # no prompt either: privacy fails closed, unlike every other setting's house default.
+    try:
+        record = load_config(paths.config_path(), copy=False).capture.enabled
+    except Exception as exc:
+        sys.stderr.write(
+            f"aisquare: prompt not recorded — the config could not be read to check "
+            f"capture.enabled ({type(exc).__name__}); run: aisquare doctor\n"
+        )
+        record = False
+    text = prompt if record and prompt is not None and prompt.strip() else None
     try:
         with store_session() as store:
             project = active_project(store, cwd)
@@ -469,10 +483,10 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
             if not project_service.tracked(store, project):
                 return ""
             project_service.capture(store, project)
-            if prompt is not None and prompt.strip():
-                store.add_prompt(prompt, project.id, source="claude-code")
-        if prompt is not None and prompt.strip():
-            insights.record_prompt(prompt, session_id=session_id, project_id=project.id)
+            if text is not None:
+                store.add_prompt(text, project.id, source="claude-code")
+        if text is not None:
+            insights.record_prompt(text, session_id=session_id, project_id=project.id)
     except Exception as exc:  # never disrupt the session to record it — but say what it cost
         # Swallowed here so the teammate delta still reaches the session; on
         # stderr, never stdout, for the reason cli/hook.py gives — stdout is

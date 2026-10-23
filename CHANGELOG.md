@@ -317,6 +317,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Two tests no longer fail a loaded CI runner.** The 90-column info-line test
+  read the Agent view's line right after resizing the terminal to 140 columns, but
+  Textual hands a resize to the screen from a 1/120 s timer that the test's settle
+  does not wait for, so on windows-latest the line still had its 90-column width.
+  It now waits, bounded, for the width to change, then for the line's repaint. The
+  burst-of-keys test allowed one lock wait plus 1 s and a loaded ubuntu runner took
+  3.007 s; it now allows two waits, still far under the 10 s a wait counted from a
+  free thread would take. Neither test asserts less, and each still goes red when
+  the code it guards breaks. No product change.
 - **Every first message reaches its agent and starts a turn, or `fleet ls` says it
   did not.** A spawn's `--prompt`, the line `fleet restart` and `fleet switch` start
   a replacement with, a fresh hand-off and the usage-limit hand-over's were typed

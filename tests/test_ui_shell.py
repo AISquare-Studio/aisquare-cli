@@ -659,11 +659,24 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
     # Slots 1 and 4 unaliased: the registry's built-in names, "plain claude" and "account 4".
     monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work", 3: "max"})
 
-    async def bar(pilot: Pilot[None], agent_id: str) -> tuple[int, str]:
+    async def bar(
+        pilot: Pilot[None], agent_id: str, *, unlike: int | None = None
+    ) -> tuple[int, str]:
         app = fleet_app(pilot)
         await pilot.click(row_for(app, agent_id))
         await settle(app)
         header = app.query_one(f"#agent-{agent_id} #agent-header", Static)
+        if unlike is not None:
+            # The app hands a resize to its screen from a 1/120 s timer, and ``settle``
+            # waits for messages, not timers: on windows-latest the line still had its
+            # 90-column width after one (run 40013597204). So the line's width is waited
+            # for until it is no longer ``unlike``, bounded, so a line that never changes
+            # fails on its width below, not on a hang; then a settle, for the line's own
+            # repaint at the new width (``InfoLine.on_resize``).
+            deadline = time.monotonic() + 5.0
+            while header.content_size.width == unlike and time.monotonic() < deadline:
+                await pilot.pause()
+            await settle(app)
         (strip,) = header.render_lines(Region(0, 0, header.outer_size.width, 1))
         return header.content_size.width, strip.text.strip()
 
@@ -681,7 +694,8 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
         }
         await pilot.resize_terminal(140, 30)
         await settle(app)
-        seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
+        narrow, _ = seen["agt_a_coder-01k8zq7m"]
+        seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m", unlike=narrow)
         return seen
 
     seen = drive(

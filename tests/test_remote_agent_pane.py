@@ -563,7 +563,12 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     assert read.status_code == 200 and took < 1.0, f"the read waited {took:.2f} s"
     assert [status for status, _ in answers] == [409] * taps and tmux.sent == []
     slowest = max(elapsed for _, elapsed in answers)
-    assert slowest < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.0, slowest
+    # A tap's wait runs from when it reached the server, so none waits much past one lock
+    # wait, however many queue for the write pool. Counted from a free thread instead, each
+    # pool's worth would wait its own turn: ceil(36 / 8) waits, 10 s. The bound sits between,
+    # at two waits: one wait plus 1 s was missed by 7 ms on a loaded ubuntu runner (3.007 s,
+    # run 40013797813), the client's own time being the rest.
+    assert slowest < 2 * remote_server.SEND_KEYS_LOCK_WAIT_SECONDS, slowest
 
 
 def test_keys_queued_behind_actions_holding_every_write_thread_are_not_typed_as_one_ends(

@@ -58,7 +58,7 @@ from textual.widgets import ContentSwitcher, Footer, Static
 from textual.worker import Worker, WorkerState, WorkType
 from textual.worker_manager import WorkerManager
 
-from aisquare.cli.ui.attach import NewAccountRequested
+from aisquare.cli.ui.attach import NewAccountRequested, ReturnTo
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.board import BoardPanel, board_help
 from aisquare.cli.ui.divider import Divider, floor_of
@@ -105,12 +105,22 @@ from aisquare.cli.ui.stop import StopAgentScreen
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.ticks import while_running
-from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, UsageRead, read_session
+from aisquare.cli.ui.views.accounts import (
+    AccountsChanged,
+    AccountsView,
+    SignInAbandoned,
+    SignInLanded,
+    UsageRead,
+    WelcomeRequested,
+    next_step,
+    read_session,
+)
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.app_settings import AppSettingsView
 from aisquare.cli.ui.views.captain import CaptainView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
+from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.remote import RemotePanel
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
@@ -222,6 +232,20 @@ def _remember_ui_state(key: str, value: str | None) -> None:
             store.set_ui_state(key, value)
     except Exception:
         return
+
+
+def _live_manager(status: FleetAgentStatus) -> bool:
+    """A manager row that is running: neither ended nor exited, nor its pane lost."""
+    agent = status.agent
+    return (
+        agent.role == "manager"
+        and agent.ended_at is None
+        and status.state
+        not in (
+            "exited",
+            "lost",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -845,6 +869,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
+        self.after_sign_in: ReturnTo | None = None
+        """Where a sign-in started from Welcome, the picker or the Spawn dialog goes back to
+        once it lands (#286, #215): at most one, used once, and dropped when the sign-in
+        does not land or the Accounts page is left first (:meth:`_content_switched`)."""
         self.store_error: str | None = None
         """Why the newest refresh kept the previous frame, or ``None`` when it did not."""
         self._fleet_worker: Worker[_FleetRead] | None = None
@@ -915,6 +943,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def on_mount(self) -> None:
         restore_theme(self)
         self._theme_restored = True
+        self.watch(self.content, "current", self._content_switched, init=False)
         self.show_captured = _ui_state(SHOW_CAPTURED_KEY) == "1"
         # The first frame is read here, on the UI thread, before anything is drawn: there
         # is nothing on screen yet for the read to hold up, and what was open last time is
@@ -2212,9 +2241,88 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.spawn_finished(event.receipt)
 
     async def on_new_account_requested(self, event: NewAccountRequested) -> None:
-        """The picker's *+ New account*: the Accounts page, its add-account flow started."""
-        await self.on_accounts_selected(AccountsSelected())
+        """The picker's *+ New account*: the Accounts page, its add-account flow started,
+        and the way back once it lands (``event.return_to``)."""
+        await self.on_accounts_selected(AccountsSelected(return_to=event.return_to))
         self.query_one("#accounts", AccountsView).begin_claude_sign_in(None)
+
+    def _content_switched(self, current: str | None) -> None:
+        """Any other page than Accounts drops the way back: the user went elsewhere first."""
+        if current != "accounts":
+            self.after_sign_in = None
+
+    async def on_sign_in_landed(self, event: SignInLanded) -> None:
+        """A sign-in landed: back to where it was started from, used once — or, from
+        nowhere in particular, the one step after it on the Accounts page (#286)."""
+        back, self.after_sign_in = self.after_sign_in, None
+        if back is None:
+            self._say_next_step()
+        elif back.kind == "welcome":
+            await self.action_welcome()
+            self.query_one(WelcomeView).back_from_sign_in()
+        elif back.kind == "picker":
+            self._reopen_picker(back, event.slot)
+        else:
+            self._reopen_spawn(back, event.slot)
+
+    def on_sign_in_abandoned(self, event: SignInAbandoned) -> None:
+        """No login landed: nothing is reopened, and the one toast says so."""
+        back, self.after_sign_in = self.after_sign_in, None
+        if back is not None:
+            where = {"welcome": "Welcome", "picker": "the picker", "spawn": "the Spawn dialog"}
+            self.notify(f"no sign-in landed — {where[back.kind]} was not reopened", timeout=6)
+
+    async def on_welcome_requested(self, event: WelcomeRequested) -> None:
+        await self.action_welcome()
+
+    def on_board_panel_agent_wanted(self, event: BoardPanel.AgentWanted) -> None:
+        """The board's 🔔 or ❓ count: the live agent it names, selected in the sidebar."""
+        rows = self.snapshot.agents.get(event.project_id, []) if self.snapshot else []
+        agent = next(
+            (s.agent for s in rows if s.agent.label == event.label and s.agent.ended_at is None),
+            None,
+        )
+        if agent is None:
+            self.notify(f"no live agent is labelled {event.label}", timeout=4, markup=False)
+            return
+        self.post_message(AgentSelected(agent.project_id, agent.id))
+
+    def _say_next_step(self) -> None:
+        snapshot = self.snapshot
+        projects = snapshot.projects if snapshot is not None else []
+        managed = {
+            project_id
+            for project_id, rows in (snapshot.agents.items() if snapshot is not None else ())
+            if any(_live_manager(status) for status in rows)
+        }
+        self.query_one("#accounts", AccountsView).show_next_step(next_step(projects, managed))
+
+    def _reopen_picker(self, back: ReturnTo, slot: int) -> None:
+        """The persona picker again, from the Personas tab that opened it, the new slot
+        highlighted (#215): what it is chosen for stays that tab's."""
+        try:
+            tab = self.query_one(f"#project-{back.project_id}").query_one(PersonasTab)
+        except NoMatches:
+            self.notify("the picker's project is no longer open", severity="warning", timeout=6)
+            return
+        form = back.form
+        tab.open_picker(
+            str(form.get("persona", "")),
+            "existing" if form.get("intent") == "existing" else "new",
+            select=f"account:{slot}",
+            filter_text=str(form.get("filter", "")),
+        )
+
+    def _reopen_spawn(self, back: ReturnTo, slot: int) -> None:
+        """The Spawn dialog again, as it was typed, on the new account (#286)."""
+        project = self.snapshot.project(back.project_id or "") if self.snapshot else None
+        if project is None:
+            self.notify("that project is no longer listed", severity="warning", timeout=6)
+            return
+        dialog = SpawnDialog(
+            project, accounts=self._accounts, **{**back.form, "account": str(slot)}
+        )
+        self.push_screen(dialog, callback=self.spawn_finished)
 
     async def on_settings_selected(self, event: SettingsSelected) -> None:
         """*⚙ Settings*: the hub, with the keyboard on its first link when it came from the
@@ -2235,10 +2343,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     async def on_accounts_selected(self, event: AccountsSelected) -> None:
         """The Accounts page — from the hub or the status line; *⚙ Settings* stays the
-        highlighted row either way, the page being one of Settings' own."""
+        highlighted row either way, the page being one of Settings' own. One asked for with
+        a way back keeps it for the sign-in started there (:attr:`after_sign_in`)."""
         await self._show(
             "accounts", lambda: AccountsView(escape_key=self.escape_key, id="accounts")
         )
+        if event.return_to is not None:
+            self.after_sign_in = event.return_to
         self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("accounts")
         if self.accounts_overview is not None:

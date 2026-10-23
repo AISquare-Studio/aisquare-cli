@@ -50,7 +50,7 @@ from __future__ import annotations
 import contextlib
 import math
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -80,6 +80,7 @@ from aisquare.models import (
     ClaudeAccountStatus,
     ClaudeIdentity,
     ClaudeUsage,
+    ProjectInfo,
     UsageTrend,
 )
 from aisquare.services import auth as auth_service
@@ -87,6 +88,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import credits as credits_service
 from aisquare.services import destinations, device_flow, iam
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 from aisquare.services.credits import WorkspaceCredits
 
 USAGE_SECONDS = accounts_service.USAGE_MAX_AGE_SECONDS
@@ -175,6 +177,48 @@ class AccountsChanged(Message):
 class UsageRead(Message):
     """The page's usage read landed (a tick, or *↻ Refresh usage*): the sidebar's status line
     reads the same cache again now, at no request, rather than at its next minute."""
+
+
+class SignInLanded(Message):
+    """A Claude Code sign-in the page watched landed and was wired: ``slot`` holds it. The
+    shell goes back to where it was started from, or names the next step (#286)."""
+
+    def __init__(self, slot: int) -> None:
+        self.slot = slot
+        super().__init__()
+
+
+class SignInAbandoned(Message):
+    """A sign-in the page started ended with no login to use — cancelled, its window closed,
+    or it never opened: the shell drops where it would have gone back to."""
+
+
+class WelcomeRequested(Message):
+    """The next step's *Go to Welcome* (``w``)."""
+
+
+@dataclass(frozen=True)
+class NextStep:
+    """The one thing to do after a sign-in that came from nowhere in particular (#286)."""
+
+    text: str
+    welcome: bool = False
+    """Whether the step is Welcome's: the line offers *Go to Welcome*."""
+
+
+def next_step(projects: Sequence[ProjectInfo], managed: Collection[str]) -> NextStep:
+    """The step after a sign-in, from the shell's frame — derived, never stored.
+
+    ``projects`` are the listed ones, in the sidebar's order; ``managed`` the ids of those
+    with a live manager. No project: add one. None of them managed: start the first one's
+    manager, which Welcome walks through. Otherwise the fleet is up: spawn under a project.
+    """
+    if not projects:
+        return NextStep("Next: add a project (+ beside Fleet)")
+    if not any(project.id in managed for project in projects):
+        name = project_service.display_name(projects[0])
+        return NextStep(f"Next: open {name} and press Start manager", welcome=True)
+    return NextStep("Next: \uff0b spawn agent under a project")  # the sidebar's own row
 
 
 # --- pure helpers (unit-testable without a running app) ----------------------------------
@@ -825,13 +869,16 @@ class AccountsView(Vertical):
     AccountsView #usage-bar Button { margin: 0 2 0 0; }
     AccountsView #usage-age { width: auto; height: 1; color: $text-muted; }
     AccountsView #accounts-notice { height: auto; margin-top: 1; }
+    AccountsView #accounts-next-row { height: auto; }
+    AccountsView #accounts-next { width: auto; height: auto; padding-top: 1; }
+    AccountsView #accounts-next-welcome { margin-left: 2; }
     AccountsView #login-box { height: 1fr; min-height: 12; border-top: solid $primary; }
     AccountsView #login-header { height: auto; padding: 0 1; }
     AccountsView #login-pane { height: 1fr; }
     AccountsView #login-actions { height: auto; padding: 0 1; }
     """
 
-    BINDINGS: ClassVar = []
+    BINDINGS: ClassVar = [Binding("w", "go_welcome", "welcome", show=False)]
 
     def __init__(
         self,
@@ -907,6 +954,9 @@ class AccountsView(Vertical):
             with Horizontal(classes="actions", id="claude-actions"):
                 yield Button("+ Add Claude account", id="claude-add", variant="primary")
             yield Static("", id="accounts-notice")
+            with Horizontal(id="accounts-next-row"):
+                yield Static("", id="accounts-next")
+                yield Button("Go to Welcome (w)", id="accounts-next-welcome", compact=True)
         with Vertical(id="login-box"):
             yield Static("", id="login-header")
             yield TerminalPane(None, escape_key=self.escape_key, id="login-pane")
@@ -917,6 +967,7 @@ class AccountsView(Vertical):
         self.query_one("#aisquare-code", Static).display = False
         self.query_one("#aisquare-cancel", Button).display = False
         self.query_one("#login-box", Vertical).display = False
+        self.query_one("#accounts-next-row", Horizontal).display = False
         self._paint_aisquare()
         if self.overview is not None:
             self._paint_claude(self.overview)
@@ -1108,6 +1159,30 @@ class AccountsView(Vertical):
     def _notice(self, text: str, tone: str = "dim") -> None:
         style = {"ok": "green", "warn": "yellow", "error": "bold red"}.get(tone, "dim")
         self.query_one("#accounts-notice", Static).update(Text(text, style=style))
+        self.query_one("#accounts-next-row", Horizontal).display = False  # said since
+
+    def show_next_step(self, step: NextStep) -> None:
+        """Under the notice of a sign-in that landed: the one step after it (#286)."""
+        self.query_one("#accounts-next", Static).update(Text(step.text, style="bold"))
+        self.query_one("#accounts-next-welcome", Button).display = step.welcome
+        self.query_one("#accounts-next-row", Horizontal).display = True
+
+    def next_step_shown(self) -> str | None:
+        """The next step's text while it is shown, else ``None`` (what a test reads)."""
+        if not self.query_one("#accounts-next-row", Horizontal).display:
+            return None
+        visual = self.query_one("#accounts-next", Static).visual
+        return getattr(visual, "plain", None)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "go_welcome":
+            button = self.query_one("#accounts-next-welcome", Button)
+            return bool(self.query_one("#accounts-next-row", Horizontal).display and button.display)
+        return True
+
+    @on(Button.Pressed, "#accounts-next-welcome")
+    def action_go_welcome(self) -> None:
+        self.post_message(WelcomeRequested())
 
     # --- usage (the one thing here that costs a request) ---------------------------------------
 
@@ -1625,6 +1700,7 @@ class AccountsView(Vertical):
             account = accounts_service.begin_sign_in(slot)
         except accounts_service.AccountsError as exc:
             self._notice(f"✗ {exc}", "error")
+            self.post_message(SignInAbandoned())
             return
         if slot is None:
             self._open_login_window(account, fresh=True, since=None)
@@ -1653,6 +1729,7 @@ class AccountsView(Vertical):
                 else f"it could not be read ({error or 'cancelled'})"
             )
             self._notice(f"✗ {self._name_of(account)}: no log-in opened — {why}", "error")
+            self.post_message(SignInAbandoned())
             return
         self._open_login_window(account, fresh=False, since=worker.result[1])
 
@@ -1670,6 +1747,7 @@ class AccountsView(Vertical):
             if fresh:
                 accounts_service.abandon_sign_in(account)
             self._notice(f"✗ could not open a sign-in window: {exc}", "error")
+            self.post_message(SignInAbandoned())
             return
         self.login = _ClaudeLogin(account, window.pane_id, server, fresh, since)
         header = Text()
@@ -1785,8 +1863,10 @@ class AccountsView(Vertical):
             who = status.identity.email if status.identity else name
             hooks = "hooks installed" if status.hooks_installed else "hooks NOT installed"
             self._notice(f"✓ {name}: {who} · {hooks}", "ok" if status.hooks_installed else "warn")
+            self.post_message(SignInLanded(status.account.slot))
         elif state is WorkerState.ERROR:
             self._notice(_hooks_did_not_install(worker.error), "warn")
+            self.post_message(SignInAbandoned())
         self.post_message(AccountsChanged())
 
     def _abandon_login(self, reason: str) -> None:
@@ -1797,6 +1877,7 @@ class AccountsView(Vertical):
             return
         if not login.fresh:
             self._notice(f"sign-in cancelled — {reason}; nothing changed", "warn")
+            self.post_message(SignInAbandoned())
             self.post_message(AccountsChanged())
             return
         account = login.account
@@ -1832,6 +1913,8 @@ class AccountsView(Vertical):
         else:
             what = "the new slot was discarded" if settled is True else "nothing changed"
             self._notice(f"sign-in cancelled — {reason}; {what}", "warn")
+        # Cancelled, so nothing is reopened, even a login that landed and was kept.
+        self.post_message(SignInAbandoned())
         self.post_message(AccountsChanged())
 
     @on(Button.Pressed, "#login-cancel")

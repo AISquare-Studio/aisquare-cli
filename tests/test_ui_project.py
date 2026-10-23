@@ -57,7 +57,7 @@ from textual.widgets import (
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.cli.ui.board import COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, BoardPanel
+from aisquare.cli.ui.board import COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, EMPTY_ROW, BoardPanel
 from aisquare.cli.ui.divider import Divider
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import project as project_view_module
@@ -933,7 +933,8 @@ def test_board_tab_shows_this_projects_tasks_and_not_anothers(
     assert other.id != project.id
 
     async def rows(pilot: Pilot[None], host: Host) -> int:
-        return host.query_one("#tasks", DataTable).row_count
+        """The task rows: with none open, the table's one row is the empty state (#286)."""
+        return sum(key.value != EMPTY_ROW for key in host.query_one("#tasks", DataTable).rows)
 
     assert drive(project, rows) == 2
     assert drive(other, rows) == 0  # the panel reads the project it was given, not the cwd

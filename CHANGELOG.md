@@ -190,8 +190,8 @@ adapter.**
 - **Attach a persona in two steps, from `asq`.** The Personas tab's *Attach to
   existing* / *Attach to new* open one **target picker**: this project's running
   **Agents** (each with the persona it runs), the **Binds** `aisquare team bind`
-  pinned (with the binary and the account each environment points at) and the
-  Claude **Accounts** — Agents first for "existing", Binds then Accounts for
+  pinned (with the binary and the account each environment points at) and every
+  agent's **Accounts** — Agents first for "existing", Binds then Accounts for
   "new", every section selectable either way, and a filter across all three.
   Choosing an agent confirms ("it replaces mentor") and calls
   `fleet_service.attach_persona` in a thread worker; the toast says whether the
@@ -199,8 +199,9 @@ adapter.**
   dialog preset with the seat, its binary or the slot, and the persona. **+ New
   bind** is `team bind` as a form, saved through `services.settings.bind_role`,
   the seat checked by the rule `spawn` applies and the binary by `PATH`, an
-  account filling `CLAUDE_CONFIG_DIR`/`CLAUDE_CODE_TMPDIR` as `launch --account`
-  would; the list re-reads with the new bind selected. **+ New account** opens
+  account filling its agent's variables as `launch --account` would
+  (`CLAUDE_CONFIG_DIR`/`CLAUDE_CODE_TMPDIR`, or `CODEX_HOME`); the list re-reads
+  with the new bind selected. **+ New account** opens
   the Accounts page's own add-account flow. The Spawn dialog's *Pick…* opens the
   same picker in "new" order and fills its role, binary or account without losing
   what was typed, and *Import…* beside its Persona field imports a persona and
@@ -523,7 +524,16 @@ adapter.**
   *Use Codex*. Doctor has a row per Codex home (partial, stale, hooks off,
   unverified, plugin route) with one-click Connect and *Sign in account N*.
   Settings and the spawn dialog show each role's agent, account and the flags
-  its next spawn passes.
+  its next spawn passes. The Spawn dialog has an **Agent** field (blank: the
+  role's agent, which it names): it offers that agent's accounts alone, its own
+  permission controls (Claude Code's mode, or Codex's sandbox and approval
+  policy, or the one `WRITE:APPROVALS` for every agent) with the flags they pass
+  under them, and sends `agent=` with `account=`; an account preset or picked
+  brings its own agent. The target picker lists every agent's slots, reads a
+  bind's account from its agent's home variable (`CODEX_HOME` as much as
+  `CLAUDE_CONFIG_DIR`), and *+ New bind* has an Agent field its binary and
+  accounts follow. The sidebar's `#slot·%` and the info line's `account · %`
+  show a Codex row's own figure beside Claude Code's.
 - **The Codex plugin**: `codex plugin marketplace add AISquare-Studio/aisquare-cli`,
   then `codex plugin add aisquare@aisquare-cli`, then trust its hooks in
   `/hooks`. It stands down while `$CODEX_HOME/hooks.json` runs aisquare's own,

@@ -167,10 +167,16 @@ minutes](fleet.md#the-first-five-minutes)):
   one permission for every agent (`fleet.roles.<role>.permission`,
   `WRITE:APPROVALS`) is a select of its own, and the line shows what each agent
   would be passed under it ([the table](fleet.md#one-permission-for-every-agent)).
-- **The spawn dialog** (`＋ spawn agent`) is `fleet spawn` with the role, agent,
-  account (the launching agent's slots only) and permission (Claude Code's
-  `--permission-mode`, or Codex's `--sandbox` and `--approval`), and shows the
-  flags the launch will pass. It calls the same `services.fleet.spawn`.
+- **The spawn dialog** (`＋ spawn agent`) is `fleet spawn` with the role, agent
+  (blank: the role's, which the field names), account (the launching agent's slots
+  only; an account preset or picked brings its agent, since slots are one ladder)
+  and permission (the one `WRITE:APPROVALS` for every agent, or Claude Code's
+  `--permission-mode`, or Codex's `--sandbox` and `--approval`, as the agent's
+  `sandbox_permissions` says), beside the persona, presets and hand-off, and shows
+  the flags the launch will pass. It calls the same `services.fleet.spawn`. Its
+  target picker lists every agent's slots, reads a bind's account from its agent's
+  home variable, and *+ New bind* defaults the binary to the chosen agent's and
+  sets that agent's home (`claude_accounts.launch_env`).
 
 Model/account profiles continue to use `team bind`.
 Settings retains custom values written by another version, so they can be
@@ -275,7 +281,9 @@ fleet, captain and asq code asks as #113's 0.8.2 lanes wire it in.
 | Doctor | Claude Code rows | Same on a Codex-only home with no `claude` on PATH: exit 0, Codex `observed`. | Smoke 18; SMOKE6 (18) |
 | Model and effort per role | Its ladder, with an availability probe | **Differs:** pins in `[agents.models.codex]` and no AISquare probe. Levels pass unchanged, and `ultracode` becomes `max`. | Live hooks: each level reached the provider |
 | The ui-tester's browser | `--chrome` | **Differs:** no `--chrome`. The doctor names Codex's own `browser_use` feature and browser plugin. | Unit tests; not exercised live |
-| shift+Enter in asq's pane | A newline | **Differs:** sent as ctrl+J, Codex's newline (Codex submits on shift+Enter). | Measured on 0.162.1; unit tests |
+| shift+Enter in asq's pane | A newline | **Differs:** sent as ctrl+J, Codex's newline (Codex submits on shift+Enter), over the tmux control-mode client as much as polled. | Measured on 0.162.1; unit tests; headless on a real tmux control client (`tests/test_terminal_control.py`: `C-j` for Codex, `S-Enter` for Claude Code on tmux 3.5+) |
+| The Spawn dialog and the target picker | Role, account, permission mode | The Agent field filters the accounts to that agent's and shows its own permission controls; the picker lists Codex slots, and a bind on one sets `CODEX_HOME`. | UI tests (`tests/test_ui_spawn.py`, `tests/test_ui_target_picker_agents.py`) |
+| `account · %` on the info line and `#slot·%` on the sidebar | The Claude account's five-hour window | Same, from the Codex account's own reading (the rollout's primary window), beside the Claude rows' in one map: slots are one ladder. | UI tests over a recorded `rate_limits` reading (`tests/test_agent_info_line.py`) |
 | Native sub-agent teams off | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0` | `-c agents.enabled=false` | The launch line on a real Codex manager |
 | Codex's update dialog | None | **Differs:** an npm-installed 0.162.1 opens *Update available · 0.162.1 → 0.163.0* in a starting pane once a newer release is out, its first choice, which an Enter picks, running `npm install -g @openai/codex`. A fleet window's Codex launches with `-c check_for_update_on_startup=false` unless the operator's config, `-c` or `-p` profile sets the key. | CI on `72a88fc0` met it in the Codex native job; fixed in `1fdc8165`, green since. SMOKE6 (update dialog): all 9 fleet command lines carry the flag; a control without it shows the dialog; with the operator's setting it opens, `tell` is not typed and the stub `npm` never ran |
 | A project on `PYTHONPATH` (direnv) | Its hooks run in its environment, as its tools do. | The agent keeps `PYTHONPATH` for its own tools; every Python aisquare starts for it ignores it (`-E`): its hooks, its broker, the window's launch, the hand-over. | Live: `test_real_codex_in_a_direnv_project_keeps_its_pythonpath_and_aisquare_imports_none_of_it` (a control without `-E` on the window's launch fails it). SMOKE6 (PYTHONPATH): the agent's tool imported the project's package; no aisquare process, nor a restart, imported the tree's `sitecustomize` |

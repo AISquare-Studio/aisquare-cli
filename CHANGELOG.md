@@ -261,6 +261,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dialog's flag is `_spawning`.
 
 ### Changed
+- **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and
+  the suite on one Linux leg (py3.12), the Linux package job and the other jobs
+  bar the ambient legs and the demo. Pushes to `rc/**` and `main`, PRs into
+  `main`, the nightly and a run by hand keep the full matrix (CONTRIBUTING).
 - The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
   adds the two persona columns, `team_session.persona` (the persona a session was
   launched as) and `fleet_agent.persona` (the one an agent was spawned with or given

@@ -610,6 +610,16 @@ class AgentTranscript(Protocol):
         them), then the rest. ``()`` where the agent has no such dialog."""
         ...
 
+    def reply_since(self, file: Path, since: datetime | None) -> str | None:
+        """The agent's words since the transcript's newest prompt of the human's: every
+        message of the turn that answers it, in order, joined by newlines (a call's own
+        records are no words), for the captain's reply to what the owner just said. ``""``
+        is an answer without words. ``None`` with no prompt, while nothing of the agent's
+        follows it, or when it is older than ``since`` (when it was said: the words have not
+        reached the transcript yet; a prompt with no time counts). Reads back from the end,
+        far enough to find that prompt behind one turn's tool results. Never raises."""
+        ...
+
 
 class AgentAdapter(Protocol):
     """One terminal agent, in the terms the shared services ask in.

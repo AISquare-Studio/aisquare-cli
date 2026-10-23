@@ -1071,6 +1071,32 @@ def test_the_transcript_page_names_the_human_and_the_agent(
     assert page.more is False and page.lines[-1] == ""
 
 
+def test_the_reply_since_the_newest_prompt_is_read_off_a_recorded_moment(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``reply_since`` (the captain's reply to what the owner just said), off the agent's own
+    transcript: its words after the newest prompt of a turn that ended on them; nothing yet
+    when that prompt is older than ``since``; no words for a turn interrupted before any;
+    nothing for a transcript that is not there."""
+    from datetime import timedelta
+
+    from aisquare.services import transcript
+
+    reader = _reader(adapter)
+    moments = _moments(adapter)
+    asked = moments["asked"]
+    path = _written(asked, tmp_path / "asked.jsonl")
+    reply = reader.reply_since(path, None)
+    assert reply is not None and reply.endswith(asked["expect"]["last_text_end"]), reply
+    tail = transcript.read_transcript_tail(path, agent=adapter.id)
+    assert tail is not None and tail.newest_at is not None
+    assert reader.reply_since(path, tail.newest_at + timedelta(minutes=1)) is None
+    assert reader.reply_since(path, tail.newest_at - timedelta(days=1)) == reply
+    interrupted = _written(moments["interrupted"], tmp_path / "interrupted.jsonl")
+    assert not reader.reply_since(interrupted, None), "an interrupted turn said nothing"
+    assert reader.reply_since(tmp_path / "gone.jsonl", None) is None
+
+
 # --- Remote's key pad: the keys that end the agent on one press --------------------------
 
 

@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -148,6 +149,75 @@ class CodexTranscript:
         if kind != "question":
             return keys
         return (*(AnswerKey(str(n), (str(n),)) for n in range(1, options + 1)), *keys)
+
+    def reply_since(self, file: Path, since: datetime | None) -> str | None:
+        return _rollout_reply(file, since)
+
+
+_REPLY_MAX_BYTES = 64_000_000
+"""How far back :func:`_rollout_reply` reads for the prompt a reply answers, as Claude Code's
+reader does: a turn bigger than this has lost its anchor, and says "no prompt"."""
+_RAW_TIMESTAMP = re.compile(rb'\A\{"timestamp"\s*:\s*"([^"\\]{1,64})"')
+"""A record's time off the bytes of a line too long to parse: its first key."""
+
+
+def _rollout_reply(file: Path, since: datetime | None) -> str | None:
+    """The agent's words since the rollout's newest prompt of the human's (``AgentTranscript.
+    reply_since``): each assistant ``message`` after it, oldest first, joined by newlines.
+
+    The prompt is the newest ``user`` message that is not Codex's own context (:func:`_own`:
+    its ``<turn_aborted>``, ``<environment_context>``, AGENTS.md), so a turn the human
+    interrupted keeps its prompt. A call (``function_call`` and the rest) answers it too,
+    with no words, as a tool use does on Claude Code. The ``event_msg`` copies of the
+    conversation (``agent_message``, ``item_completed``) are not read again. Read backwards
+    from the end up to :data:`_REPLY_MAX_BYTES`; a line too long to parse is read for its
+    kind (a long message of the agent's is parsed all the same: it is the reply)."""
+    try:
+        size = file.stat().st_size
+    except OSError:
+        return None
+    words: list[str] = []
+    answered = False
+    try:
+        for _, raw in lines_backwards(file, size, budget=_REPLY_MAX_BYTES):
+            if len(raw) > MAX_LINE:
+                kind, _ = _rollout_unparsed(raw, set(), None)
+                if kind == "user_prompt":
+                    stamp = _RAW_TIMESTAMP.match(raw)
+                    when = stamp.group(1).decode("utf-8", "replace") if stamp else None
+                    return _reply(words, answered, record_time({"timestamp": when}), since)
+                if kind == "assistant_text":
+                    with suppress(ValueError, UnicodeDecodeError, RecursionError):
+                        words.insert(0, _message_text(_payload(json.loads(raw))))
+                answered = answered or kind in ("assistant_text", "assistant_tool")
+                continue
+            record = parse_line(raw)
+            if record is None or record.get("type") != "response_item":
+                continue
+            payload = _payload(record)
+            kind = payload.get("type")
+            if kind in _CALLS:
+                answered = True
+            elif kind == "message" and payload.get("role") == "assistant":
+                answered = True
+                text = _message_text(payload)
+                if text.strip():
+                    words.insert(0, text)
+            elif kind == "message" and payload.get("role") == "user":
+                if _own(_message_text(payload).lstrip()):
+                    continue
+                return _reply(words, answered, record_time(record), since)
+    except OSError:
+        return None
+    return None
+
+
+def _reply(
+    words: list[str], answered: bool, asked_at: datetime | None, since: datetime | None
+) -> str | None:
+    if since is not None and asked_at is not None and asked_at < since:
+        return None  # an older turn's prompt: the reply has not reached the rollout yet
+    return "\n".join(words).strip() if answered else None
 
 
 def _payload(record: Mapping[str, Any]) -> Mapping[str, Any]:

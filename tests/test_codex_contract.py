@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import tomllib
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from aisquare.core import agents
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters import get_adapter as _get_adapter
 from aisquare.core.agent_adapters.codex import TOOL_FEATURES, CodexAdapter
+from aisquare.core.agent_adapters.codex_transcript import CodexTranscript
 from aisquare.core.agent_adapters.types import (
     BadEffortError,
     ForkArgs,
@@ -731,6 +733,40 @@ def test_codexs_trust_dialog_is_the_owners_and_its_approval_a_chooser_on_1_and_e
         wholes[shown["what"]] = prompt.whole
     moved = wholes["the hook review, its highlight moved by a 2"]
     assert moved == wholes["the hook review"], "the highlight moved: the same prompt"
+
+
+# --- the captain's reply, off a Codex rollout ------------------------------------------
+
+ROLLOUT = Path(__file__).parent / "fixtures" / "agent_transcripts" / "codex-0.162.1.jsonl"
+
+
+def _rollout_head(tmp_path: Path, lines: int) -> Path:
+    head = ROLLOUT.read_text(encoding="utf-8").splitlines()[:lines]
+    path = tmp_path / f"rollout-{lines}.jsonl"
+    path.write_text("".join(line + "\n" for line in head), encoding="utf-8")
+    return path
+
+
+def test_codexs_reply_is_its_messages_after_the_newest_prompt_of_the_humans(
+    tmp_path: Path,
+) -> None:
+    """On 0.162.1's recorded rollout: the newest ``user`` message that is not Codex's own
+    (``<turn_aborted>`` is) anchors the reply; its assistant messages after it are the words,
+    a call alone an answer without any; nothing before an answer, or before the prompt."""
+    reader = CodexTranscript()
+    whole = reader.reply_since(_rollout_head(tmp_path, 74), None)
+    assert (
+        whole is not None and whole.startswith("Here is the plan.") and "Paint the button" in whole
+    )
+    asked = reader.reply_since(_rollout_head(tmp_path, 29), None)
+    assert asked is not None and asked.startswith("done: Chunk ID") and asked.endswith("go on?")
+    assert reader.reply_since(_rollout_head(tmp_path, 14), None) == "", "a call, then Esc"
+    assert reader.reply_since(_rollout_head(tmp_path, 10), None) == "", "a call at work"
+    assert reader.reply_since(_rollout_head(tmp_path, 7), None) is None, "nothing answered yet"
+    assert reader.reply_since(_rollout_head(tmp_path, 6), None) is None, "no prompt"
+    said_at = datetime(2026, 10, 19, 18, 46, 43, 61000, tzinfo=UTC)  # the PLAN prompt
+    assert reader.reply_since(_rollout_head(tmp_path, 74), said_at) == whole
+    assert reader.reply_since(_rollout_head(tmp_path, 74), said_at + timedelta(seconds=1)) is None
 
 
 def test_a_resumed_codex_thread_keeps_its_first_developer_instructions() -> None:

@@ -158,6 +158,28 @@ class FakeTranscript:
             return (*picks, AnswerKey("Back", ("Escape",)))
         return ()
 
+    def reply_since(self, file: Path, since: datetime | None) -> str | None:
+        # What it said since the newest thing it heard; a run or a pick answers with no words.
+        said: list[str] = []
+        answered = False
+        try:
+            records = list(lines_backwards(file, file.stat().st_size, budget=1 << 20))
+        except OSError:
+            return None
+        for _, raw in records:
+            record = parse_line(raw) or {}
+            kind = record.get("kind")
+            if kind == "heard":
+                at = record_time(record)
+                if since is not None and at is not None and at < since:
+                    return None
+                return "\n".join(said).strip() if answered else None
+            if kind in ("said", "run", "pick"):
+                answered = True
+            if kind == "said":
+                said.insert(0, str(record.get("text", "")))
+        return None
+
 
 def _fake_call(record: Mapping[str, Any], at: datetime | None) -> PendingTool:
     """A ``run`` or a ``pick`` as a pending call; a pick's choices as the questions the

@@ -117,8 +117,11 @@ re-reported — so a missing chip means *not reported*, never *wrong*. Tiering
 is enforced at launch, not policed in the store.
 
 On every prompt, each session receives a compact delta of what teammates did
-since its last turn. Nothing needs forwarding; the coordination is the
-ambient state of the board.
+since its last turn. The board lists task titles; the contract travels with
+the claim: `task claim` and `task next --claim` print the task's contract
+(`--detail`) and the reason it was last reopened, so nobody pastes a contract
+into a coder's pane. `task show <ref>` prints the whole task. The rest of the
+coordination is the ambient state of the board.
 
 Orchestration is **opt-in per repo** (a role launch or `aisquare team on`)
 and fails open everywhere: the hooks are designed so orchestration can
@@ -128,10 +131,12 @@ that never opt in see nothing.
 ### Tasks: idempotent, atomic, dependency-aware
 
 ```sh
-aisquare task add "wire auth" --role coder        # idempotent — safe to re-emit (#1)
+aisquare task add "wire auth" --role coder --detail "<objective · why · acceptance>"
+                                                  # idempotent — safe to re-emit (#1)
 aisquare task add "ship it" --needs 1             # held until #1 is done
 aisquare task next --role coder --claim --as <id> # atomic claim — exactly one winner; a
-                                                  # fleet agent's own assigned task comes first
+                                                  # fleet agent's own assigned task comes first;
+                                                  # prints the contract and any reopen reason
 aisquare task review 1 --note "how to verify" --as <id>
 aisquare task reopen '#1' --reason "fails on py3.11" --as <id>
 aisquare note "JWT it is" --kind decision --as <id>

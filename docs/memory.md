@@ -80,16 +80,17 @@ aisquare project prune --missing --worktrees  # the stale ones, after a confirma
 `aisquare project onboard` (also run by `init`) packs the codebase with
 Repomix into three artifacts under `~/.aisquare/projects/<id>/snapshot/`: a
 **full pack** (every file), a **skeleton** (structure + signatures — the
-cheap thing agents read first), and a **per-file index** (char offsets +
+cheap thing agents orient from), and a **per-file index** (char offsets +
 token counts, so an agent can open one file's slice of the pack instead of
 all of it). Re-run with `--refresh` after big changes.
 
-The session-start directive says "read this FIRST" only of a skeleton of at
-most 25 000 tokens, the most Claude Code's Read tool returns in one call by
-default (the pack when there is no skeleton). A bigger one is named with its
-size and "never read it from the top": the agent finds the files it needs in
-the index and reads only their slices, so a skeleton read whole is never
-carried by every later request.
+The session-start directive says "read this FIRST" only of a skeleton (the
+pack when there is no skeleton) of at most 12 000 tokens, as the snapshot
+counts them: one default Read. Claude Code's Read returns a page of at most
+25 000 of its own tokens, which held about 14 000 of these on a measured
+skeleton. A bigger one is named with its size and "never read it from the
+top": the agent finds the files it needs in the index and reads only their
+slices, so a skeleton paged in whole is never carried by every later request.
 
 A pack has to fit a **token budget**: `[snapshot] max_tokens` in
 `~/.aisquare/config.toml`, 150 000 by default (the cap the server packs with).

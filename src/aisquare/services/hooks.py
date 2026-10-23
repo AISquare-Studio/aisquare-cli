@@ -498,11 +498,14 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
     return block
 
 
-#: The most Claude Code's Read tool returns in one call by default, in tokens; a larger
-#: file comes back in pages (code.claude.com/docs/en/tools-reference). Only a skeleton
-#: this size is "read this FIRST": anything bigger is paged in whole and then carried
-#: by every later request, so the agent is sent to the index instead (#282).
-_READ_FIRST_MAX = 25_000
+#: The largest skeleton (or pack, when there is none) the directive says "read this FIRST"
+#: of, in the tokens the snapshot meta counts (o200k). Claude Code's Read returns a page
+#: of at most 25,000 of its own tokens by default (code.claude.com/docs/en/tools-reference),
+#: which on Claude Code 2.1.309 held 14,163 of these on the ``between`` fixture
+#: (tests/snapshot_repos.py). 12,000 leaves room for code that tokenizes worse, so what is
+#: read first is one Read. Anything bigger was paged in and then carried by every later
+#: request, so the agent is sent to the index instead (#282).
+_READ_FIRST_MAX = 12_000
 
 
 def _directive(project_id: str, *, has_prompts: bool) -> str:
@@ -512,16 +515,29 @@ def _directive(project_id: str, *, has_prompts: bool) -> str:
         # Only a skeleton this pack made has a size on the meta. One left by an
         # earlier, smaller run (the compressed pack makes none) matches no tree.
         has_skeleton = snap.skeleton_token_count > 0 and snap.skeleton_path.exists()
-        skeleton = snap.skeleton_path if has_skeleton else snap.pack_path
         tokens = snap.skeleton_token_count if has_skeleton else snap.token_count
+        pack = (
+            "Pack (compressed: structure + signatures"
+            if snap.compressed
+            else "Full pack (every file's contents"
+        )
         if tokens <= _READ_FIRST_MAX:
             lines += [
                 "aisquare has a packed snapshot of this codebase — use it to understand the",
                 "project fast and cheaply instead of grepping or listing files:",
-                f"- Skeleton (structure + signatures, read this FIRST): {skeleton}",
-                f"- Full pack (every file's contents, open on demand): {snap.pack_path}",
+            ]
+            if has_skeleton:
+                lines += [
+                    f"- Skeleton (structure + signatures, read this FIRST): {snap.skeleton_path}",
+                    f"- {pack}, open on demand): {snap.pack_path}",
+                ]
+            else:
+                lines.append(f"- {pack}, read this FIRST): {snap.pack_path}")
+            lines += [
                 f"- Per-file index (char offsets + token counts): {snap.index_path}",
-                "Orient from the skeleton; open the full pack only for implementation detail.",
+                "Orient from the skeleton; open the full pack only for implementation detail."
+                if has_skeleton
+                else "Orient from the pack; open source files directly for implementation detail.",
             ]
         else:
             # Within the budget, but more than one Read. The index is built from the
@@ -529,12 +545,12 @@ def _directive(project_id: str, *, has_prompts: bool) -> str:
             lines += [
                 "aisquare has a packed snapshot of this codebase — use it to understand the",
                 "project fast and cheaply instead of grepping or listing files.",
-                f"The {'skeleton' if has_skeleton else 'pack'} is {tokens:,} tokens, more than "
-                "one Read returns: never read it from the top.",
+                f"The {'skeleton' if has_skeleton else 'pack'} is {tokens:,} tokens, too big "
+                "to read whole: never read it from the top.",
                 "Find the files you need in the index and read only their slices of the pack "
                 "(char offsets):",
                 f"- Per-file index into the pack (char offsets + token counts): {snap.index_path}",
-                f"- Full pack (every file's contents, open on demand): {snap.pack_path}",
+                f"- {pack}, open on demand): {snap.pack_path}",
             ]
             if has_skeleton:
                 lines.append(f"- Skeleton (structure + signatures): {snap.skeleton_path}")

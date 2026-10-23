@@ -215,10 +215,11 @@ def test_an_over_budget_skeleton_is_never_read_first(
 @pytest.mark.parametrize(
     ("full", "compressed", "read_first", "named"),
     [
-        (120_000, 20_000, True, "skeleton"),  # the skeleton is what is measured, not the pack
-        (120_000, 25_000, True, "skeleton"),  # one default Read, exactly
+        (120_000, 8_000, True, "skeleton"),  # the skeleton is what is measured, not the pack
+        (120_000, 12_000, True, "skeleton"),  # at the limit
+        (120_000, 20_000, False, "skeleton"),  # two default Reads of the `between` fixture
         (140_000, 90_000, False, "skeleton"),
-        (200_000, 20_000, True, "pack"),  # compressed pack kept, no skeleton beside it
+        (200_000, 8_000, True, "pack"),  # compressed pack kept, no skeleton beside it
         (200_000, 90_000, False, "pack"),
     ],
 )
@@ -232,7 +233,8 @@ def test_a_skeleton_is_read_first_only_when_one_read_holds_it(
     named: str,
 ) -> None:
     """Under the budget, "read this FIRST" still cost up to 150k tokens, carried by every
-    later request. Only a file one default Read returns (25k tokens) is read first."""
+    later request. One default Read of the `between` fixture held 14,163 of the tokens the
+    meta counts, so only a file of at most 12,000 is read first."""
     from aisquare.core import snapshot
 
     _pack_measuring(monkeypatch, full=full, compressed=compressed)
@@ -248,6 +250,34 @@ def test_a_skeleton_is_read_first_only_when_one_read_holds_it(
     if not read_first:
         assert f"The {named} is {compressed:,} tokens" in result.stdout
         assert "never read it from the top" in result.stdout
+    # A compressed pack holds signatures, not every file's contents, and is said to.
+    label = "Pack (compressed: structure + signatures" if meta.compressed else "Full pack (every"
+    assert f"- {label}" in result.stdout
+
+
+def test_a_full_pack_whose_skeleton_failed_is_not_called_a_skeleton(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The skeleton beside a full pack is best-effort. Without it, the pack read first holds
+    every file's contents, and the directive says so instead of calling it the skeleton."""
+    from aisquare.core import snapshot
+
+    def repomix(_root: Path, *, compress: bool, ignore: Any = ()) -> tuple[str, str]:
+        if compress:
+            raise OSError("repomix: killed")
+        return _PACK, "full"
+
+    monkeypatch.setattr(snapshot, "_run_repomix", repomix)
+    monkeypatch.setattr(snapshot, "_total_tokens", lambda _text, _out: 8_000)
+    meta = snapshot.generate(current_project(work_dir).id, work_dir)
+    assert meta.status == "ready" and not meta.compressed and not meta.skeleton_path.exists()
+
+    result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
+    assert result.exit_code == 0, result.output
+    assert (
+        f"- Full pack (every file's contents, read this FIRST): {meta.pack_path}" in result.stdout
+    )
+    assert "Skeleton" not in result.stdout
 
 
 def test_a_skeleton_left_by_an_earlier_pack_is_not_measured_or_named(

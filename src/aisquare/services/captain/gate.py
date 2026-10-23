@@ -41,7 +41,6 @@ import contextlib
 import hmac
 import os
 import re
-import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -215,7 +214,7 @@ def unlock(code: str, *, now: datetime | None = None) -> Window:
             else:
                 verdict.append(f"{reason} ({failures} in a row; {THROTTLE} lock code entry)")
             return record
-        window = Window(f"w-{secrets.token_hex(4)}", moment + WINDOW)
+        window = Window(f"w-{_window_id()}", moment + WINDOW)
         verdict.append(window)
         return {"window": window.id, "until": window.until.isoformat(), "last_step": step}
 
@@ -312,6 +311,14 @@ def _spoken(span: timedelta) -> str:
         return f"{minutes} minutes"
     hours, rest = divmod(minutes, 60)
     return f"{hours} hours" if rest == 0 else f"{hours} hours {rest} minutes"
+
+
+def _window_id() -> str:
+    """A fresh window's id, as random as a token. ``secrets`` is imported here: it is a
+    heavy import, kept off a module's scope (tests/test_iam_single_reader.py)."""
+    import secrets
+
+    return secrets.token_hex(4)
 
 
 def _read_secret() -> str:

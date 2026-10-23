@@ -845,7 +845,10 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   label and task, in its worktree as it stands (the branch it was on, any
   uncommitted work), on the account with the most headroom (`--to` names
   one), **resuming its session** from its transcript (`claude --resume
-  <path>`) when that file is on disk — the resumed agent keeps its task claims
+  <path>`) when that file is on disk (a session resumed under another account
+  keeps writing its original transcript while Claude Code reports a path under
+  the new account that is never created, so the board keeps the file on disk,
+  and the next restart or switch resumes it too) — the resumed agent keeps its task claims
   and is told in one line to continue, and no exit is announced for it —
   `--fresh` (or a transcript that is not on disk) starts new with a hand-off
   prompt built from the board instead; that agent takes the claims over too,

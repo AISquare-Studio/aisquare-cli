@@ -1,4 +1,5 @@
-"""The persona dialogs the Personas tab opens — Import, Confirm draft, New, Edit, Export, Remove.
+"""The persona dialogs the Personas tab opens — Import, Confirm draft, New, Edit (in
+``$EDITOR`` or the text box), Export, Remove.
 
 docs/plans/spawn-personas.md §4.3 to §4.5. Each is a ``ModalScreen`` over ONE
 ``services.personas`` call — the seam ``aisquare persona`` uses — so no rule is
@@ -31,6 +32,10 @@ empty model as ``None``, so ``import_source`` — which owns the ladder — deci
 
 from __future__ import annotations
 
+import contextlib
+import secrets
+import shlex
+import shutil
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,9 +61,14 @@ from textual.widgets import (
 )
 from textual.worker import Worker, WorkerState, get_current_worker
 
+from aisquare.cli.ui.terminal import EscapeToSidebar, TerminalPane
+from aisquare.core import paths
 from aisquare.core import personas as core
 from aisquare.core.agents import _claude_home
+from aisquare.core.editor import editor_command
 from aisquare.core.personas import Layer, PersonaError
+from aisquare.core.tmux import TmuxError, TmuxServer
+from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 
 IMPORT_ENGINES: tuple[str, ...] = ("auto", "manager", "api")
@@ -731,6 +741,226 @@ class EditPersonaScreen(_Dialog):
 
 def personas_bundled_hint() -> str:
     return "bundled — read-only; Save as… copies it into a layer, where it shadows this one"
+
+
+# --- Edit in $EDITOR (#212) ---------------------------------------------------------------
+
+EDITOR_SESSION = "asq-persona-edit"
+"""The session on the fleet's tmux server the editor windows open in, beside the
+Accounts sign-in's ``asq-accounts``."""
+EDITOR_POLL = 0.5
+"""Seconds between asks of whether the editor has exited."""
+
+
+def editor_unavailable() -> str | None:
+    """Why Edit cannot open ``$EDITOR`` in a pane here, or ``None`` when it can. The text
+    box editor (:class:`EditPersonaScreen`) stands in then: #212's "no tmux server or no
+    $EDITOR", where no editor is ``$VISUAL``/``$EDITOR``/``vi`` all missing."""
+    if shutil.which("tmux") is None:
+        return "tmux is not installed"
+    command = editor_command()
+    if not command or shutil.which(command[0]) is None:
+        named = command[0] if command else ""
+        return f"no editor to run: {named!r} is not on your PATH (set $EDITOR)"
+    return None
+
+
+def _write_draft(name: str, text: str) -> Path:
+    """A copy of the SKILL.md for the editor to work on, under the cache."""
+    folder = paths.cache_dir() / "persona-edits"
+    folder.mkdir(parents=True, exist_ok=True)
+    draft = folder / f"{name}-{secrets.token_hex(4)}.md"
+    draft.write_text(text, encoding="utf-8")
+    return draft
+
+
+class EditorPaneScreen(_Dialog):
+    """``$EDITOR`` on the persona's SKILL.md, in a pane rendered in place, the way the
+    Accounts sign-in pane hosts ``claude login`` (#212).
+
+    The editor runs in a window on the fleet's tmux server (``fleet.open_window``, the one
+    way a window opens there), and a :class:`TerminalPane` shows it. It works on a DRAFT,
+    a copy under the cache, never on the SKILL.md itself. When it exits,
+    ``services.personas.finish_edit`` checks the draft and saves it through ``save``, the
+    one writer; a draft left as it was writes nothing. Text that does not parse is not
+    saved: the dialog says why and offers *Reopen editor* on the same draft, so nothing
+    typed is lost. An editor that exits non-zero saves nothing, as ``persona edit`` does.
+
+    Dismisses with ``True`` when something was written and ``False`` when nothing was.
+    When no window could be opened it dismisses with the reason (a ``str``), and the tab
+    opens the text box editor instead.
+    """
+
+    DEFAULT_CSS = dialog_css(
+        "EditorPaneScreen",
+        "EditorPaneScreen > Vertical { width: 120; height: 90%; }\n"
+        "EditorPaneScreen #editor-pane { height: 1fr; min-height: 8; }\n"
+        "EditorPaneScreen #editor-reopen { display: none; }\n"
+        "EditorPaneScreen #editor-reopen.shown { display: block; }",
+    )
+    CANCEL: ClassVar[Any] = False
+
+    def __init__(self, name: str, layer: Layer, directory: Path, root: Path | None) -> None:
+        super().__init__()
+        self.persona_name = name
+        self.persona_layer: Layer = layer
+        self.directory = directory
+        self.root = root
+        self.draft: Path | None = None
+        self._before = ""
+        self._server: TmuxServer | None = None
+        self._pane: str | None = None
+        self._timer: Timer | None = None
+
+    def compose(self) -> ComposeResult:
+        escape = str(getattr(self.app, "escape_key", "f12"))
+        with Vertical():
+            header = Text()
+            header.append(self.persona_name, style="bold")
+            header.append(
+                f"  {self.persona_layer} · {self.directory / core.SKILL_FILE}", style="dim"
+            )
+            header.append(
+                f"\n{shlex.join(editor_command())} on a copy: save and quit, and it is checked "
+                f"and saved. {escape.upper()} leaves the pane.",
+                style="dim",
+            )
+            yield Static(header, classes="dialog-header")
+            yield TerminalPane(
+                None,
+                escape_key=escape,
+                label=f"the editor on {self.persona_name}",
+                id="editor-pane",
+            )
+            yield Static(id="editor-status", classes="dialog-status")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Reopen editor", id="editor-reopen", variant="primary")
+                yield Button("Cancel", id="editor-cancel")
+
+    def on_mount(self) -> None:
+        self.note("#editor-status", None)
+        try:
+            self._before = (self.directory / core.SKILL_FILE).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            self.dismiss(f"the SKILL.md could not be read — {type(exc).__name__}: {exc}")
+            return
+        self.draft = _write_draft(self.persona_name, self._before)
+        why = self._open_editor()
+        if why is not None:
+            self._discard_draft()
+            self.dismiss(why)
+
+    def _open_editor(self) -> str | None:
+        """Open the editor's window on the draft and show it; why not, when it could not."""
+        if self.draft is None:
+            return "no draft to edit"
+        try:
+            config = fleet_service.settings()
+            server = fleet_service.server(config)
+            window = fleet_service.open_window(
+                server,
+                EDITOR_SESSION,
+                name=f"persona-{self.persona_name}",
+                cwd=self.directory,
+                command=[*editor_command(), str(self.draft)],
+                config=config,
+            )
+        except (TmuxError, fleet_service.FleetError, OSError) as exc:
+            return f"no editor pane could be opened ({exc})"
+        self._server, self._pane = server, window.pane_id
+        pane = self.query_one("#editor-pane", TerminalPane)
+        pane.server = server
+        pane.attach(window.pane_id)
+        pane.focus()
+        self.query_one("#editor-reopen", Button).set_class(False, "shown")
+        self._timer = self.set_interval(EDITOR_POLL, self._poll)
+        return None
+
+    def _poll(self) -> None:
+        """Whether the editor has exited: its pane dead (the fleet keeps it, remain-on-exit)
+        or gone. A server that could not be asked is asked again next tick: a draft is read
+        only once the editor has finished with it."""
+        server, pane = self._server, self._pane
+        if server is None or pane is None:
+            return
+        try:
+            facts = server.pane_facts_or_raise(pane)
+        except TmuxError:
+            return
+        if facts is not None and not facts.dead:
+            return
+        self._editor_exited(facts.dead_status if facts is not None else None)
+
+    def _editor_exited(self, status: int | None) -> None:
+        self._close_window()
+        if status not in (None, 0):
+            self._finish(False, f"the editor exited {status}: nothing saved")
+            return
+        try:
+            after = self.draft.read_text(encoding="utf-8") if self.draft is not None else ""
+            saved = personas_service.finish_edit(
+                self.persona_name, self._before, after, root=self.root, layer=self.persona_layer
+            )
+        except (PersonaError, OSError, UnicodeDecodeError) as exc:
+            line = exc.line if isinstance(exc, PersonaError) else None
+            at = "" if line is None else f"line {line}: "
+            self.note("#editor-status", f"✗ {at}{failure(exc)}", style="bold red")
+            reopen = self.query_one("#editor-reopen", Button)
+            reopen.set_class(True, "shown")
+            reopen.focus()
+            return
+        self._finish(saved is not None, None if saved is not None else "unchanged")
+
+    def _finish(self, saved: bool, notice: str | None) -> None:
+        self._discard_draft()
+        if notice is not None:
+            self.notify(f"{self.persona_name}: {notice}", timeout=5, markup=False)
+        self.dismiss(saved)
+
+    def _close_window(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+        server, pane, self._pane = self._server, self._pane, None
+        if server is not None and pane is not None:
+            with contextlib.suppress(TmuxError):  # already gone is what we want
+                server.kill_window(pane)
+        self.query_one("#editor-pane", TerminalPane).attach(None)
+
+    def _discard_draft(self) -> None:
+        if self.draft is not None:
+            self.draft.unlink(missing_ok=True)
+            self.draft = None
+
+    @on(Button.Pressed, "#editor-reopen")
+    def _reopen(self) -> None:
+        why = self._open_editor()
+        if why is not None:
+            self.note("#editor-status", f"✗ {why}", style="bold red")
+        else:
+            self.note("#editor-status", None)
+
+    def on_escape_to_sidebar(self, event: EscapeToSidebar) -> None:
+        """The pane's escape hatch: in a dialog there is no sidebar, so Cancel takes focus."""
+        event.stop()
+        self.query_one("#editor-cancel", Button).focus()
+
+    def action_cancel(self) -> None:
+        """Esc (off the pane) or Cancel: the editor's window closed, the draft dropped, and
+        nothing saved."""
+        self._close_window()
+        self._discard_draft()
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#editor-cancel")
+    def _cancel(self) -> None:
+        self.action_cancel()
+
+    def on_unmount(self) -> None:
+        if self._pane is not None and self._server is not None:
+            with contextlib.suppress(TmuxError):
+                self._server.kill_window(self._pane)
+        self._discard_draft()
 
 
 # --- Export and Remove ----------------------------------------------------------------------

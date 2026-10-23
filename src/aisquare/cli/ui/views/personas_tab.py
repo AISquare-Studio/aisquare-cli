@@ -494,11 +494,32 @@ class PersonasTab(Vertical):
             self._open(entry)
 
     def _open(self, entry: Entry) -> None:
-        """The SKILL.md in the editor — read-only with *Save as…* for a bundled persona."""
+        """The SKILL.md in ``$EDITOR``, in a pane (#212). The text box editor for a bundled
+        persona (read-only, with *Save as…*) and wherever no pane can open."""
+        if entry.layer != "bundled" and dialogs.editor_unavailable() is None:
+            self.app.push_screen(
+                dialogs.EditorPaneScreen(entry.name, entry.layer, entry.path, self.root),
+                callback=lambda result: self._edited(entry, result),
+            )
+            return
+        self._open_text(entry)
+
+    def _open_text(self, entry: Entry) -> None:
         self.app.push_screen(
             dialogs.EditPersonaScreen(entry.name, entry.layer, entry.path, self.root),
             callback=lambda saved: self.reload(select=entry.name if saved else entry.key),
         )
+
+    def _edited(self, entry: Entry, result: bool | str | None) -> None:
+        """The editor pane closed: re-read the catalogue. A pane that could not open hands
+        over to the text box editor, saying why."""
+        if isinstance(result, str):
+            self.notify(
+                f"{result} — editing in the text box instead", severity="warning", markup=False
+            )
+            self._open_text(entry)
+            return
+        self.reload(select=entry.name if result else entry.key)
 
     @on(Button.Pressed, "#persona-export")
     def action_export(self) -> None:

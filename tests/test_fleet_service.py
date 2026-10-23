@@ -18301,17 +18301,22 @@ def test_a_switch_after_a_cross_account_resume_resumes_the_real_transcript(
 
 
 def _limit_handed_over_inline(
-    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    nudges: list[str] | None = None,
+    message: str = "You've hit your session limit",
 ) -> tuple[FleetAgent, list[str]]:
     """An agent on slot 2 hits a limit with ``on_limit = "switch"`` (the default); the hook's
-    detached worker is run inline. Returns the agent and every manager nudge."""
+    detached worker is run inline. Returns the agent and every manager nudge (also collected
+    into ``nudges`` when given, for a caller whose worker raises)."""
     from aisquare.services import hooks as hooks_service
 
     agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
     transcript = tmp_path / f"{agent.session_id}.jsonl"
     transcript.write_text('{"type":"user"}\n', encoding="utf-8")
     _with_transcript(agent, transcript)
-    nudges: list[str] = []
+    nudges = [] if nudges is None else nudges
     monkeypatch.setattr(
         team_service, "_nudge_manager", lambda project_id, *, reason, board: nudges.append(reason)
     )
@@ -18324,7 +18329,7 @@ def _limit_handed_over_inline(
     hooks_service.turn_failed(
         session_id=agent.session_id,
         error="rate_limit",
-        message="You've hit your session limit",
+        message=message,
     )
     return agent, nudges
 
@@ -18340,7 +18345,8 @@ def test_a_limit_with_on_limit_switch_moves_the_agent_once_and_wakes_no_manager(
 
     agent, nudges = _limit_handed_over_inline(project, monkeypatch, tmp_path)
 
-    [limited] = _events(project, "limited")
+    assert _events(project, "limited") == []  # its own kind, which wakes nobody
+    [limited] = _events(project, team_service.LIMITED_HANDING_OVER)
     assert "moving it to another account automatically" in limited
     assert "fleet switch" not in limited  # the manager is not asked to do it too
     assert len(_events(project, "switched")) == 1
@@ -18382,9 +18388,43 @@ def test_a_refused_hand_over_is_handover_failed_and_wakes_the_manager(
 ) -> None:
     _two_slots_with_usage(monkeypatch, work=95, personal=99)  # nowhere under the line
 
-    _agent, nudges = _limit_handed_over_inline(project, monkeypatch, tmp_path)
+    _agent, nudges = _limit_handed_over_inline(
+        project,
+        monkeypatch,
+        tmp_path,
+        message="You've hit your weekly limit · resets Mon 12:00am (America/Toronto)",
+    )
 
     assert _events(project, "switched") == []
     [failed] = _events(project, "handover_failed")
+    assert "fleet switch" in failed
+    assert "its own limit resets in " in failed  # the other answer: wait (reviewer-a)
+    assert len(nudges) == 1
+
+
+def test_a_hand_over_worker_that_crashes_posts_handover_failed_and_wakes_the_manager(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #304, finding 1: with the hand-over coming, the `limited` line wakes nobody,
+    so the worker is the only one left to say it could not move the agent. It said so for a
+    `FleetError` alone; anything else (a locked store, a tmux error, a bug) went to the
+    worker's DEVNULL stderr and the agent sat parked until the reset, days for a week."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+
+    def crash(*args: Any, **kwargs: Any) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(fleet_service, "switch", crash)
+
+    nudges: list[str] = []
+    with pytest.raises(sqlite3.OperationalError):  # still the worker's to report as it did
+        _limit_handed_over_inline(project, monkeypatch, tmp_path, nudges)
+
+    [failed] = _events(project, "handover_failed")
+    assert "hand-over worker failed (OperationalError: database is locked)" in failed
     assert "fleet switch" in failed
     assert len(nudges) == 1

@@ -19,6 +19,7 @@ default agent does.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -36,7 +37,7 @@ from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project
-from aisquare.models import FleetAgent, ProjectInfo
+from aisquare.models import FleetAgent, ProjectInfo, TeamSession
 from aisquare.services import auto_mode, ci_augment, install_route
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
@@ -412,6 +413,32 @@ HANDOVER_COOLDOWN = timedelta(minutes=10)
 automatic path: a cap on the ping-pong a wrong reading could otherwise drive."""
 
 
+def _own_reset(session: TeamSession) -> str:
+    """``; its own limit resets in 2d 4h (Mon 00:00)`` — the other answer to a hand-over that
+    failed, beside the ``fleet switch`` it names (#277); ``""`` when the limit named none."""
+    if session.limit_resets_at is None:
+        return ""
+    return f"; its own limit resets {claude_accounts_core.format_reset(session.limit_resets_at)}"
+
+
+def fresh_replacement_refusal(agent: FleetAgent, *, now: datetime | None = None) -> str | None:
+    """Why ``fleet switch`` refuses ``agent`` without ``--force``, or ``None`` (#277): it is a
+    replacement the automatic hand-over spawned less than :data:`HANDOVER_COOLDOWN` ago.
+
+    One limit, one switch: a manager woken by the same limit used to switch the replacement
+    the hand-over had just started. Here, beside the cooldown it shares with the automatic
+    path's own brake (:func:`hand_over`), rather than in ``services/fleet.py``.
+    """
+    since = (now or datetime.now(tz=UTC)) - agent.created_at
+    if agent.spawned_by != HANDOVER_SPAWNER or since >= HANDOVER_COOLDOWN:
+        return None
+    minutes = max(1, int(since.total_seconds() // 60))
+    return (
+        f"{agent.label!r} was moved {minutes} min ago by the usage-limit hand-over; "
+        "`--force` moves it again"
+    )
+
+
 def hand_over(session_id: str, *, reason: str | None = None) -> None:
     """Move the limited fleet agent of ``session_id`` — the detached half of the hand-over.
 
@@ -460,7 +487,7 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
             f"{agent.label}: not switched — moved {max(1, int(since.total_seconds() // 60))} "
             "min ago; waiting for the reset instead — "
             f"`{project_service.fleet_command('switch', project, agent.label)} --force` "
-            "moves it again",
+            f"moves it again{_own_reset(session)}",
             session_id=session.id,
             label=agent.label,
         )
@@ -477,11 +504,27 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
         # The manager's to act on (#277): the refusal names `fleet switch` or the reset.
         team_service.hook_handover_failed(
             session.project_id,
-            f"{agent.label}: not switched — {exc}",
+            f"{agent.label}: not switched — {exc}{_own_reset(session)}",
             session_id=session.id,
             label=agent.label,
         )
         return
+    except Exception as exc:
+        # Anything else — a locked store, a tmux error, a bug. The `limited` line woke
+        # nobody because this worker was coming, and its stderr is DEVNULL (`_detach`), so
+        # unsaid here the agent sat parked until the reset (review of #304, finding 1). Said
+        # best effort, then raised for the CLI wrapper to fail open as before.
+        with contextlib.suppress(Exception):
+            team_service.hook_handover_failed(
+                session.project_id,
+                f"{agent.label}: not switched — hand-over worker failed "
+                f"({type(exc).__name__}: {exc}); "
+                f"`{project_service.fleet_command('switch', project, agent.label)}` moves it "
+                f"by hand{_own_reset(session)}",
+                session_id=session.id,
+                label=agent.label,
+            )
+        raise
     if receipt.failures:
         team_service.hook_note(
             session.project_id,

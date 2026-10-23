@@ -1105,8 +1105,11 @@ def test_under_a_hub_the_limit_is_handed_over_from_the_agents_own_row(
 
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
 
-    limited = [text for kind, text in _events(hub) if kind == "limited"]
+    limited = [text for kind, text in _events(hub) if kind in team_service.LIMITED_KINDS]
     assert len(limited) == 1 and limited[0].startswith("coder-db hit its weekly limit"), limited
+    assert [kind for kind, _ in _events(hub) if kind in team_service.LIMITED_KINDS] == [
+        team_service.LIMITED_HANDING_OVER
+    ]
     # The hand-over moves it, so the line names no switch and wakes no manager (#277)…
     assert team_service.HANDING_OVER_SAID in limited[0] and switch not in limited[0]
     assert nudged == []
@@ -2161,3 +2164,25 @@ def test_reset_soonest_prefers_the_week_that_ends_first(fake_home: Path) -> None
     # `priority`, the default, behaves as it always has.
     first, _ = service.headroom_choice(service.list_accounts(), switch_at=85, fetch=fetch)
     assert first is not None and first.slot == 2
+
+
+def test_a_switch_by_hand_never_falls_back_to_a_marked_account(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    """Review of #304 (reviewer-a, major 2): the marks gated the headroom rung alone, so a
+    manual switch with every other account marked fell to the machine default and moved the
+    agent onto the account that had just refused it — the very switch `handover_failed`
+    tells the manager to run. Without `--to`, a marked account is no target; with it, the
+    choice is the operator's."""
+    _slot("left@example.com", "tok-left")  # slot 2: the account being left
+    _slot("refused@example.com", "tok-refused")  # slot 3: refused weekly, the default
+    service.set_default("3")
+    service.remember_limit(3, "weekly", NOW + timedelta(days=2))
+    fetch = _Usage({"tok-left": _payload(95), "tok-refused": _payload(5)})
+
+    by_hand = service.choose_for_handover(role="coder", project=work, exclude=(2,), fetch=fetch)
+
+    assert by_hand.account is None
+    assert any("account 3 skipped — weekly limit until " in note for note in by_hand.notes)
+    named = service.choose_for_handover("3", role="coder", project=work, exclude=(2,))
+    assert named.account is not None and named.account.slot == 3  # --to is the operator's

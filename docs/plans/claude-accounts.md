@@ -366,15 +366,24 @@ for the long ones.
   A 429 that names no reset leaves no mark.
 - `hooks.turn_failed` decides whether the hand-over will run BEFORE the board
   write (`_plan_hand_over`) and passes `handing_over` to `hook_stop_failure`: the
-  `limited` line then says *moving it to another account automatically
-  (`on_limit = "switch"`)*, names no `fleet switch`, nudges no manager, and
-  `_wakes_manager` lets it pass. The worker's refusals (the cooldown, no account
-  under the line, a worker that would not start) are `handover_failed`, a wake
+  line is then its own kind, `limited_handing_over` (no wake kind; the Remote
+  reads it as `limited`), says *moving it to another account automatically
+  (`on_limit = "switch"`)*, names no `fleet switch` and nudges no manager. The
+  worker's refusals (the cooldown, no account under the line, a worker that would
+  not start, and any exception the worker dies on) are `handover_failed`, a wake
   kind that nudges a waiting manager; a hand-over already in flight stays a plain
   note, since that worker's own outcome follows. `switched` is no longer a wake
   kind: a completed move needs no decision.
 - `fleet.switch` refuses, without `force` (`fleet switch --force`), a row the
-  automatic hand-over spawned less than `HANDOVER_COOLDOWN` (10 min) ago.
+  automatic hand-over spawned less than `HANDOVER_COOLDOWN` (10 min) ago
+  (`hooks.fresh_replacement_refusal`, beside the cooldown).
+- The headroom rung reads the marks, and so does `choose_for_handover`'s
+  fallback: a hand-over or a switch without `--to` never lands on a marked
+  account through the binding, project default or machine default rung, and
+  `handover_failed` names the agent's own reset. A launch's `--account`, role
+  binding, project default and `pick = "default"` are choices someone made and are
+  not second-guessed; when every candidate is marked, a spawn falls to the machine
+  default as it does when no usage can be read (owner call 6).
 - `[accounts] prefer = "priority" | "reset-soonest"`: with `reset-soonest`,
   `headroom_choice` takes, of the candidates under `switch_at`, the one whose
   `week_resets_at` is earliest (none last; priority breaks ties). Spawn picks and

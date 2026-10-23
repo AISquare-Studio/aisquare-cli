@@ -397,16 +397,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   With `on_limit = "switch"` the `limited` line woke the manager with a `fleet
   switch` while the hand-over was already moving the agent, and once that had
   finished the manager's switch moved the replacement again: two `switched` for
-  one limit. The line now says *moving it to another account automatically* and
-  wakes nobody, the manager's cycle acts on `handover_failed` instead, a
+  one limit. The line is now a `limited_handing_over` event, *moving it to another
+  account automatically*, that wakes nobody, the manager's cycle acts on `handover_failed` instead, a
   replacement minutes old is refused without `--force`, and `switched` is news on
   the next delta, not a wake-up. And a pick read only the five-hour and seven-day
   windows: the per-family weeks (`seven_day_opus`, `seven_day_sonnet`), `limits[]`
   and a window's `locked_reason` were dropped, so an Opus agent was moved onto an
   account whose Opus week was spent and refused at once. They are read now, a
   family week counting for an agent of that family, and every limit an agent hits
-  is remembered on its account until the reset it named, so no pick sends an
-  agent back before then. (#277)
+  is remembered on its account until the reset it named, so no pick by headroom
+  sends an agent back before then. (#277)
 
 - **A killed test run no longer leaves its tmux servers running.** Teardown ends every
   server a test starts, but a run that is killed (a timeout, `kill`, an xdist worker that

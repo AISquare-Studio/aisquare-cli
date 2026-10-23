@@ -885,9 +885,17 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   gains *≈ 40 min to the limit* once two readings of the same window exist.
 - **Limits are remembered.** Every usage limit an agent hits leaves a mark on
   the account it was on until the reset the message named (*weekly limit ·
-  resets Mon 12:00am*), and every pick — a spawn, a hand-over, a switch by hand
-  — skips that account until then, saying so: *account 3 skipped — weekly
-  limit until Mon 00:00 (in 2d 4h), refused 10:42*. A session or weekly limit
+  resets Mon 12:00am*), and every pick by headroom — a spawn with `pick =
+  "headroom"`, the automatic hand-over, a `fleet switch` without `--to` —
+  skips that account until then, saying so: *account 3 skipped — weekly
+  limit until Mon 00:00 (in 2d 4h), refused 10:42*. A hand-over or a `fleet
+  switch` without `--to` never takes a marked account, its fallback rungs (the
+  binding, the project default, the machine default) included: with nowhere
+  else to go it refuses, and `handover_failed` says when the agent's own limit
+  resets. A launch's choices are not second-guessed: `--account`, a role
+  binding, a project default and `pick = "default"` still name the account, and
+  when every account carries a mark a spawn falls to the machine default as it
+  does when no usage can be read. `--to` always names the account. A session or weekly limit
   closes the account to every agent; an Opus or Sonnet limit to that family's.
   The endpoint may read an account under the line while it refuses, so the
   refusal is believed over the reading. A live reading that shows a family
@@ -896,8 +904,9 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
 - **A usage limit.** When an agent's turn ends on one (Claude Code's
   `StopFailure` hook, `You've hit your session limit · resets 12:30am`), its
   row turns **⏳ limited** with the reset time and a `limited` line goes on the
-  board. When the automatic hand-over (below) will move it, the line says
-  *moving it to another account automatically* and wakes nobody; otherwise it
+  board. When the automatic hand-over (below) will move it, the line is a
+  `limited_handing_over` event that says *moving it to another account
+  automatically* and wakes nobody; otherwise it
   names `aisquare fleet switch <label>` and the manager is woken. Claude
   Code's own wait-and-continue at the reset is left running. `fleet switch`
   stops the agent as `fleet stop` would and starts it again under the same

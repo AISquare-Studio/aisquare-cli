@@ -771,6 +771,8 @@ def _window(raw: Any) -> tuple[float | None, datetime | None]:
 
 _FAMILY_WEEK = "seven_day_"
 """The prefix of a per-family weekly window in the usage payload: ``seven_day_opus``…"""
+_FAMILIES = frozenset(MODEL_FAMILIES.values())
+"""The model families a per-family window or limit can name (``opus``, ``sonnet``…)."""
 _SESSION_KINDS = frozenset({"session", "five_hour"})
 _WEEK_KINDS = frozenset({"weekly", "week", "seven_day"})
 
@@ -796,7 +798,7 @@ def _family_weeks(payload: Mapping[str, Any]) -> tuple[dict[str, float], dict[st
             resets[family] = when
     for kind, percent in _limits(payload):
         family = kind.removeprefix(_FAMILY_WEEK)
-        if family in MODEL_FAMILIES.values():
+        if family in _FAMILIES:
             percents[family] = max(percents.get(family, percent), percent)
     return percents, resets
 
@@ -1650,8 +1652,7 @@ class LimitMark:
     def blocks(self, family: str | None) -> bool:
         """Whether it shuts the account to an agent of ``family``: a window every model
         shares blocks everyone; a family's only that family (an unknown word is shared)."""
-        families = set(MODEL_FAMILIES.values())
-        return self.window not in families or self.window == family
+        return self.window not in _FAMILIES or self.window == family
 
     def describe(self, *, now: datetime) -> str:
         """``weekly limit until Mon 00:00 (in 2d 4h), refused 10:42``."""
@@ -1900,8 +1901,9 @@ def choose_for_handover(
     (no least-bad answer, see :func:`headroom_choice`) and otherwise refuses,
     which leaves the agent parked with Claude Code's own wait intact; a manual
     switch keeps the least-bad answer and, when no usage can be read at all,
-    falls back to the ladder minus the account being left. Either reads every
-    candidate's usage live, never from the cache a launch uses: it is moving an
+    falls back to the ladder minus the account being left — and minus an account
+    with a limit mark still in force for the agent (#277): only ``--to`` names one.
+    Either reads every candidate's usage live, never from the cache a launch uses: it is moving an
     agent off an account that just filled, and a figure even a minute old could
     send it to another that has filled since.
 
@@ -1937,6 +1939,21 @@ def choose_for_handover(
     fallback = choose(
         None, role=role, project=project, exclude=skip, spread=False, fetch=fetch, family=family
     )
+    # The ladder's rungs read no marks: on a hand-over they are not a choice someone made for
+    # THIS move, and with every other account marked the machine default moved the agent
+    # back onto the account that had just refused it (review of #304, reviewer-a, major 2).
+    # Only `--to` (``explicit``, above) may name a marked account.
+    if fallback.account is not None:
+        moment = _now()
+        mark = next(
+            (m for m in limit_marks(now=moment).get(fallback.account.slot, []) if m.blocks(family)),
+            None,
+        )
+        if mark is not None:
+            said = f"{core.label(fallback.account)} ({fallback.source}) skipped — "
+            return AccountChoice(
+                None, None, [*notes, *fallback.notes, said + mark.describe(now=moment)]
+            )
     return AccountChoice(fallback.account, fallback.source, [*notes, *fallback.notes])
 
 

@@ -140,10 +140,10 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
         "question",
         "agent_exited",
         # #146: an agent parked on a usage limit needs a decision (switch it, or
-        # wait) — unless the automatic hand-over is moving it (#277: the line says so,
-        # `HANDING_OVER_SAID`, and `_wakes_manager` lets it pass). A hand-over that
-        # moved one is news, not a decision: `switched` arrives with the next delta.
-        # One that could not is the manager's to act on: `handover_failed`.
+        # wait) — unless the automatic hand-over is moving it, which is its own kind,
+        # `LIMITED_HANDING_OVER`, and no wake (#277). A hand-over that moved one is
+        # news, not a decision: `switched` arrives with the next delta. One that could
+        # not is the manager's to act on: `handover_failed`.
         "limited",
         "handover_failed",
         # P0-W1a (#122): an agent whose first message never started a turn sits idle
@@ -152,10 +152,15 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
     }
 )
 
-#: What a ``limited`` line says when the automatic hand-over is about to move the agent
-#: (``on_limit = "switch"``): the manager has nothing to do, so the line wakes nobody.
-#: Woken by it, a manager following its cycle switched the agent too — once the hand-over
-#: had finished, it moved the replacement again (#277).
+#: The kind of the usage-limit line when the automatic hand-over is about to move the agent
+#: (``on_limit = "switch"``): the manager has nothing to do, so it is no wake kind. Woken by
+#: a ``limited`` line, a manager following its cycle switched the agent too — once the
+#: hand-over had finished, it moved the replacement again (#277). Its own KIND, not a
+#: phrase in the text: a reworded line must not change who is woken (review of #304).
+LIMITED_HANDING_OVER = "limited_handing_over"
+#: Every kind a usage-limit line is written as, for the readers that show one.
+LIMITED_KINDS: frozenset[str] = frozenset({"limited", LIMITED_HANDING_OVER})
+#: What that line says of the hand-over.
 HANDING_OVER_SAID = "moving it to another account automatically"
 
 #: Event kinds written for the HUMAN board only: the 🔔 transition and a Claude
@@ -211,8 +216,6 @@ def _wakes_manager(event: TeamEvent) -> bool:
     without this it would sit past the cursor until an unrelated event arrived.
     Unaddressed news (a plain note, a decision, a claim) still waits its turn.
     """
-    if event.kind == "limited" and HANDING_OVER_SAID in event.text:
-        return _addressed_to_manager(event.to_role)
     return event.kind in MANAGER_WAKE_KINDS or _addressed_to_manager(event.to_role)
 
 
@@ -2556,7 +2559,7 @@ def hook_stop_failure(
             _emit(
                 store,
                 session.project_id,
-                "limited",
+                LIMITED_HANDING_OVER if handing_over else "limited",
                 _limited_text(
                     label,
                     text,

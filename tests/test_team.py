@@ -1868,5 +1868,11 @@ def test_the_limited_line_says_who_moves_the_agent() -> None:
         return TeamEvent(id="e", project_id="p", kind=kind, text=text, created_at=now)
 
     assert team_service._wakes_manager(event("limited", by_hand))
-    assert not team_service._wakes_manager(event("limited", moving))
+    # On the KIND, never the wording (review of #304): the phrase in a plain `limited` line
+    # still wakes, and the hand-over's own kind does not, whatever it says.
+    assert team_service._wakes_manager(event("limited", moving))
+    assert not team_service._wakes_manager(event(team_service.LIMITED_HANDING_OVER, by_hand))
     assert "handover_failed" in team_service.MANAGER_WAKE_KINDS
+    from aisquare.services import remote_needs
+
+    assert remote_needs.LIMITED_EVENT_KINDS == team_service.LIMITED_KINDS

@@ -744,7 +744,8 @@ class AccountsSettings(BaseModel):
     takes the first in the operator's order; ``reset-soonest`` takes the one whose weekly
     window resets first, priority breaking ties, so a week's allowance is spent before it
     lapses rather than draining accounts with days still to run. It applies to a launch's
-    pick and to a hand-over's.
+    pick and to a hand-over's. The week is the shared seven-day window's reset, for every
+    agent: a family week (Opus, Sonnet) only ever makes an account read fuller.
 
     ``share_trust``, on by default, copies a folder's trust into the account a launch
     runs on when any other account has it, so an agent never waits at Claude Code's

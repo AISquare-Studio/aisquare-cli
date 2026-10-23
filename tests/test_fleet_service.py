@@ -13189,7 +13189,8 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
     with store_session() as store:
         revived = store.get_session(agent.session_id or "")
         still = store.get_task(task.id)
-    assert revived is not None and revived.ended_at is None and revived.state == "working"
+    # A resumed session sits at its prompt until the resume line is typed (#123): `waiting`.
+    assert revived is not None and revived.ended_at is None and revived.state == "waiting"
     assert still is not None and still.status == "doing" and still.claimed_by == agent.session_id
 
 

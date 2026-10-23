@@ -393,6 +393,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads in the background and only repaints on the UI thread: with four projects
   of three agents each, a tick holds the UI for about 2 ms, where it held it for
   about 117 ms.
+- **Session start tells an agent to read the skeleton first only when one Read
+  holds it** (#282). Over the `[snapshot] max_tokens` budget, the directive still
+  said "Skeleton (read this FIRST)" of a skeleton #129 measured at 1,497,000
+  tokens, so an agent that obeyed paged through a file larger than its whole
+  context. Within the budget it said the same of a skeleton of up to 150,000
+  tokens, carried by every later request. Now only a skeleton (or the pack, when
+  there is no skeleton) of at most 12,000 tokens is read first: one default Read,
+  which held 14,163 of those tokens on a measured skeleton. A bigger one is named
+  with its size and "never read it from the top", and the agent is sent to the
+  per-file index for the slices it needs. A skeleton left on disk by an earlier,
+  smaller pack is no longer named, and a pack is no longer called the skeleton
+  or "every file's contents" when it is not.
 
 ## [0.8.2] - 2026-10-19
 

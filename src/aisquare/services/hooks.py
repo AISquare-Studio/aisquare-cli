@@ -498,29 +498,77 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
     return block
 
 
+#: The largest skeleton (or pack, when there is none) the directive says "read this FIRST"
+#: of, in the tokens the snapshot meta counts (o200k). Claude Code's Read returns a page
+#: of at most 25,000 of its own tokens by default (code.claude.com/docs/en/tools-reference),
+#: which on Claude Code 2.1.309 held 14,163 of these on the ``between`` fixture
+#: (tests/snapshot_repos.py). 12,000 leaves room for code that tokenizes worse, so what is
+#: read first is one Read. Anything bigger was paged in and then carried by every later
+#: request, so the agent is sent to the index instead (#282).
+_READ_FIRST_MAX = 12_000
+
+
 def _directive(project_id: str, *, has_prompts: bool) -> str:
     lines: list[str] = []
     snap = snapshot_core.load(project_id)
     if snap is not None and snap.status == "ready" and snap.pack_path.exists():
-        skeleton = snap.skeleton_path if snap.skeleton_path.exists() else snap.pack_path
-        lines += [
-            "aisquare has a packed snapshot of this codebase — use it to understand the",
-            "project fast and cheaply instead of grepping or listing files:",
-            f"- Skeleton (structure + signatures, read this FIRST): {skeleton}",
-            f"- Full pack (every file's contents, open on demand): {snap.pack_path}",
-            f"- Per-file index (char offsets + token counts): {snap.index_path}",
-            "Orient from the skeleton; open the full pack only for implementation detail.",
-        ]
+        # Only a skeleton this pack made has a size on the meta. One left by an
+        # earlier, smaller run (the compressed pack makes none) matches no tree.
+        has_skeleton = snap.skeleton_token_count > 0 and snap.skeleton_path.exists()
+        tokens = snap.skeleton_token_count if has_skeleton else snap.token_count
+        pack = (
+            "Pack (compressed: structure + signatures"
+            if snap.compressed
+            else "Full pack (every file's contents"
+        )
+        if tokens <= _READ_FIRST_MAX:
+            lines += [
+                "aisquare has a packed snapshot of this codebase — use it to understand the",
+                "project fast and cheaply instead of grepping or listing files:",
+            ]
+            if has_skeleton:
+                lines += [
+                    f"- Skeleton (structure + signatures, read this FIRST): {snap.skeleton_path}",
+                    f"- {pack}, open on demand): {snap.pack_path}",
+                ]
+            else:
+                lines.append(f"- {pack}, read this FIRST): {snap.pack_path}")
+            lines += [
+                f"- Per-file index (char offsets + token counts): {snap.index_path}",
+                "Orient from the skeleton; open the full pack only for implementation detail."
+                if has_skeleton
+                else "Orient from the pack; open source files directly for implementation detail.",
+            ]
+        else:
+            # Within the budget, but more than one Read. The index is built from the
+            # pack, so its offsets slice the pack, not the skeleton.
+            lines += [
+                "aisquare has a packed snapshot of this codebase — use it to understand the",
+                "project fast and cheaply instead of grepping or listing files.",
+                f"The {'skeleton' if has_skeleton else 'pack'} is {tokens:,} tokens, too big "
+                "to read whole: never read it from the top.",
+                "Find the files you need in the index and read only their slices of the pack "
+                "(char offsets):",
+                f"- Per-file index into the pack (char offsets + token counts): {snap.index_path}",
+                f"- {pack}, open on demand): {snap.pack_path}",
+            ]
+            if has_skeleton:
+                lines.append(f"- Skeleton (structure + signatures): {snap.skeleton_path}")
     elif snap is not None and snap.status == "skeleton_only" and snap.skeleton_path.exists():
         # Over budget even compressed: the skeleton and its index are still the
-        # cheapest orientation there is. No full pack to offer, so none is named.
+        # cheapest orientation there is, but never read whole: #129 measured one
+        # of 1.497M tokens. No full pack to offer, so none is named.
+        budget = f"the {snap.max_tokens:,}-token budget" if snap.max_tokens else "the budget"
         lines += [
-            "aisquare has a packed skeleton of this codebase (structure + signatures; the",
-            "full pack was skipped as over budget) — use it to understand the project fast",
-            "and cheaply instead of grepping or listing files:",
-            f"- Skeleton (read this FIRST): {snap.skeleton_path}",
+            "aisquare has a per-file index into a skeleton of this codebase (structure +",
+            "signatures; the full pack was skipped as over budget) — use it to understand the",
+            "project fast and cheaply instead of grepping or listing files.",
+            f"The skeleton is {snap.skeleton_token_count:,} tokens, over {budget}: never read "
+            "it from the top.",
+            "Find the files you need in the index and read only their slices (char offsets):",
             f"- Per-file index into the skeleton (char offsets + token counts): {snap.index_path}",
-            "Orient from the skeleton; open source files directly for implementation detail.",
+            f"- Skeleton (structure + signatures): {snap.skeleton_path}",
+            "Open source files directly for implementation detail.",
         ]
     if has_prompts:
         lines.append(

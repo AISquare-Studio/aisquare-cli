@@ -93,17 +93,40 @@ def write_prompt_file(agent_id: str, text: str) -> Path:
     return path
 
 
+_PROMPT_FILE = re.compile(r"^agt_[0-9a-z]+\.txt$")
+"""The name :func:`write_prompt_file` gives a first message: the agent's id, ``.txt``."""
+
+
+class NotAPromptFile(ValueError):
+    """A path ``launch --first-prompt-file`` was handed that no spawn wrote."""
+
+
 def take_prompt_file(path: Path) -> str | None:
     """The first message at ``path``, and the file gone: read once, by the launch it was
     written for. ``None`` when it is not there, which is every launch after the first, a
     restart replaying the recorded command included: a restart is given a line of its own,
-    never the old prompt."""
+    never the old prompt.
+
+    Only a file :func:`write_prompt_file` wrote is taken: ``<agent id>.txt`` directly in
+    :func:`prompts_dir`, its real path (a link is followed first) and a regular file.
+    Anything else raises :class:`NotAPromptFile` and is neither read nor deleted. The option
+    is hidden, not private: pointed at ``~/.ssh/config``, the launch read it into the agent's
+    first message and deleted it (review of #330, round 1)."""
     try:
-        text = path.read_text(encoding="utf-8")
-    except (FileNotFoundError, IsADirectoryError):
+        real = path.resolve(strict=True)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except (OSError, RuntimeError) as exc:  # a link loop, a folder it may not read
+        raise NotAPromptFile(f"{path} cannot be resolved ({exc})") from exc
+    folder = prompts_dir().resolve()
+    if real.parent != folder or not _PROMPT_FILE.match(real.name) or not real.is_file():
+        raise NotAPromptFile(f"{path} is not a first-message file the fleet wrote")
+    try:
+        text = real.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
     with contextlib.suppress(OSError):
-        path.unlink()
+        real.unlink()
     return text
 
 

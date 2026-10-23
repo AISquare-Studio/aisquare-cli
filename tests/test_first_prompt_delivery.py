@@ -45,6 +45,7 @@ from aisquare.services.captain import screen
 from tests import test_fleet_service as fleet_suite
 from tests.captain_screens import MARK, REAL_RULE, REAL_TOP_RULE
 from tests.cycles import unscoped
+from tests.fsperms import can_symlink
 from tests.test_fleet_service import FakeClock, FakeTmux, _board_session, _command, _flag
 
 # The fleet suite's fixtures, bound here so pytest finds them for this module's tests.
@@ -391,6 +392,45 @@ def test_the_launcher_reads_and_deletes_the_first_prompt_and_passes_it_after_a_d
     assert "--" not in spy["argv"] and "starting without one" in again.output
 
 
+@pytest.mark.parametrize("where", ["outside", "wrong-name", "a-link-out"])
+def test_the_launcher_never_takes_a_file_the_fleet_did_not_write(
+    runner: CliRunner,
+    tmp_path: Path,
+    spy: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    """Review of #330, round 1: the option is hidden, not private. Pointed at ``~/.ssh/config``
+    the launch read it into the agent's first message and deleted it. Only ``<agent
+    id>.txt`` directly in ``run/prompts``, as its real path, is taken; anything else is
+    neither read nor deleted, and the agent starts without a first message, which it says."""
+    if where == "a-link-out" and not can_symlink():
+        pytest.skip("no symlinks here")
+    work = tmp_path / "repo"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    secret = tmp_path / "config"
+    secret.write_text("Host *\n  IdentityFile ~/.ssh/id_ed25519\n", encoding="utf-8")
+    folder = delivery.prompts_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    handed = {
+        "outside": secret,
+        "wrong-name": folder / "notes.txt",
+        "a-link-out": folder / "agt_01linkout.txt",
+    }[where]
+    if where == "wrong-name":
+        handed.write_text("not the fleet's", encoding="utf-8")
+    if where == "a-link-out":
+        handed.symlink_to(secret)
+
+    result = runner.invoke(app, ["launch", "coder", delivery.FIRST_PROMPT_FLAG, str(handed)])
+
+    assert result.exit_code == 0, result.output
+    assert "--" not in spy["argv"] and "IdentityFile" not in " ".join(spy["argv"])
+    assert secret.exists() and handed.exists(), "neither read into a prompt nor deleted"
+    assert "not read, not deleted" in result.output
+
+
 # --- acknowledgement, and a first message never taken ---------------------------------------
 
 
@@ -457,6 +497,45 @@ def test_an_unacknowledged_first_prompt_reads_attention_once(
         store.mark_prompted(agent.session_id, later, agent_id=agent.id)  # a human's Enter
     [status] = fleet_service.list_agents(project)
     assert status.state != "attention"
+
+
+@pytest.mark.parametrize("evidence", ["its-stop", "its-session-stamp"])
+def test_a_turn_whose_prompt_record_failed_is_not_read_as_not_taken(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    evidence: str,
+) -> None:
+    """Review of #330, round 1: the ``UserPromptSubmit`` hook fails open, so a locked store
+    costs its record of the prompt, not the turn. The row stayed ``pending`` under a turn
+    that ran, and once the agent sat idle past the wait a listing posted ``prompt_unsent``
+    and woke the manager. The turn's own evidence takes it instead: the ``Stop`` that ended
+    the turn, or the session's ``prompted_at`` when only the row's update was lost."""
+    agent = fleet_service.spawn(project, "coder", worktree=False, prompt="go").agent
+    assert agent.session_id is not None
+    _board_session(agent, "waiting")
+    if evidence == "its-stop":
+        monkeypatch.setenv("AISQUARE_FLEET_AGENT", agent.id)
+        team_service.hook_stop(agent.session_id, project.root)
+        monkeypatch.delenv("AISQUARE_FLEET_AGENT")
+    else:
+        with store_session() as store:
+            store._conn.execute(  # type: ignore[attr-defined]
+                "UPDATE team_session SET prompted_at = ? WHERE id = ?",
+                ((datetime.now(tz=UTC) + timedelta(seconds=2)).isoformat(), agent.session_id),
+            )
+            store._conn.commit()  # type: ignore[attr-defined]
+    tmux.screens[agent.pane_id] = _box()  # idle, the turn done
+    later = datetime.now(tz=UTC) + timedelta(seconds=46)
+    monkeypatch.setattr(fleet_service, "_now", lambda: later)
+
+    [status] = fleet_service.list_agents(project)
+
+    assert status.state != "attention" and _row(agent.id).first_prompt == "acked"
+    with store_session() as store:
+        events = store.events_since(project.id, 0, limit=500)
+    assert [e for e in events if e.kind == "prompt_unsent"] == []
 
 
 def test_a_first_prompt_still_inside_its_wait_is_not_attention(

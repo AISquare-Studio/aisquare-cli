@@ -1418,6 +1418,9 @@ class ContextStore(Protocol):
         self, session_id: str, at: datetime, *, agent_id: str | None = None
     ) -> bool: ...
     def mark_first_prompt_unsent(self, agent_id: str, at: datetime) -> bool: ...
+    def take_first_prompt(
+        self, at: datetime, *, session_id: str, agent_id: str | None = None
+    ) -> bool: ...
     def first_prompt_rows(self, since: datetime) -> list[FleetAgent]: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
@@ -3506,10 +3509,22 @@ class SqliteStore:
         prompt took one. One transaction, an indexed read and at most two indexed updates:
         every prompt of every session pays it, and no row is read back.
         """
-        stamp = at.isoformat()
         self._conn.execute(
-            "UPDATE team_session SET prompted_at = ? WHERE id = ?", (stamp, session_id)
+            "UPDATE team_session SET prompted_at = ? WHERE id = ?", (at.isoformat(), session_id)
         )
+        return self.take_first_prompt(at, session_id=session_id, agent_id=agent_id)
+
+    def take_first_prompt(
+        self, at: datetime, *, session_id: str, agent_id: str | None = None
+    ) -> bool:
+        """Mark the first message of ``session_id``'s fleet row taken (``acked``), as
+        :meth:`mark_prompted` does, without stamping ``prompted_at``: for a ``Stop``, which
+        ends a turn that only a prompt starts. A ``UserPromptSubmit`` whose own record failed
+        (a locked store; the hook fails open) left the row ``pending`` under a turn that ran,
+        and a listing read it "first prompt not taken" (review of #330, round 1). Not the
+        stamp: a tell's acknowledgement asks ``prompted_at``, and a Stop is no prompt.
+        Returns whether this took one."""
+        stamp = at.isoformat()
         # A read, then a compare-and-set on what it found: no ``RETURNING``, which the SQLite
         # of an older Python lacks.
         found = self._conn.execute(

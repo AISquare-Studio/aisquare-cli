@@ -662,6 +662,36 @@ def test_an_app_a_test_builds_runs_no_release_check_and_run_ui_runs_the_real_one
     assert built == [{"release_check": updates.check_for_release, "after_update": True}]
 
 
+def test_the_release_check_adds_no_timer_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The hourly ask rides the housekeeping tick. On Windows every pending Textual timer holds
+    a thread of asyncio's default executor while it sleeps (``textual._win_sleep``), and a
+    runner has eight: the check's own hourly interval took one for the app's whole life, and
+    seven UI tests whose thread workers queued behind the timers failed on Windows CI, the same
+    seven twice (runs 39991862850, 40013337378), reproduced with that sleep emulated."""
+    real = FleetApp.set_interval
+    timers: dict[bool, list[str]] = {True: [], False: []}
+    current: list[bool] = []
+
+    def recording(self: FleetApp, interval: float, callback: Any = None, *a: Any, **k: Any) -> Any:
+        timers[current[-1]].append(getattr(callback, "__name__", repr(callback)))
+        return real(self, interval, callback, *a, **k)
+
+    monkeypatch.setattr(FleetApp, "set_interval", recording)
+
+    async def run(with_check: bool) -> None:
+        current.append(with_check)
+        check = (lambda: None) if with_check else None
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], release_check=check)
+        async with app.run_test(size=(140, 40)):
+            await settle_page(app)
+
+    asyncio.run(run(True))
+    asyncio.run(run(False))
+
+    assert timers[True], "control: the app's own timers were seen"
+    assert timers[True] == timers[False], "the check set a timer of its own"
+
+
 def test_a_ctrl_c_in_the_quit_names_the_command_without_asqs_own_flag() -> None:
     said = ui_app._hand_off_undone(ui_app.UPDATE_HAND_OFF)
 

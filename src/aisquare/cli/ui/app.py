@@ -186,6 +186,9 @@ ACCOUNTS_WORKER = "shell-accounts"
 """The thread worker that reads the accounts' frame (``FleetApp.refresh_accounts``)."""
 HEADROOM_WORKER = "sidebar-headroom"
 """The thread worker that reads the status line's headroom (``FleetApp.refresh_headroom``)."""
+HOUSEKEEPING_SECONDS = 30.0
+"""How often asq's housekeeping tick runs (:meth:`FleetApp._housekeeping`): Remote's auto-off,
+and the release check's hourly ask, which has no timer of its own."""
 HEADROOM_SECONDS = 60.0
 """How often the status line's headroom is re-read — never on the two-second tick. A read
 goes to the network only for an account whose cached usage is over five minutes old."""
@@ -847,6 +850,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """The newer release the ⬆ row offers; ``None`` while none is (``check_release``)."""
         self.after_update = after_update
         """Opened by ``upgrade --one-click``: reattach the agents the press recorded."""
+        self._release_asked_at = 0.0
+        """When the release check was last asked (``time.monotonic``): the housekeeping tick
+        asks again once ``updates.ASK_EVERY_SECONDS`` have passed (:meth:`_housekeeping`)."""
         self._refreshed: tuple[str | None] | None = None
         """PyPI's answer to the update dialog's own ask (``updates.refresh_latest``), once it
         has landed: ``(None,)`` when the lookup found none. ``None`` while it is out."""
@@ -974,11 +980,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self._reattach()
         if self._release_check is not None:
             self.check_release()
-            self.set_interval(updates_service.ASK_EVERY_SECONDS, self.check_release)
         # wait=False here and below: a Remote that stops runs down on a thread of its own,
         # since stopping uvicorn and ngrok froze the fleet UI for seconds (r3 review of #243).
         self.remote.restore(wait=False)
-        self.set_interval(30.0, self._remote_auto_off)
+        self.set_interval(HOUSEKEEPING_SECONDS, self._housekeeping)
         self.set_interval(30.0, self.remote.revive_tunnel_if_dead)
         # The captain's ui actions (T4): after the first frame, which they resolve against.
         # Only with the captain on, read once at start as the rest of the shell reads it: off,
@@ -1124,6 +1129,22 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         severity: SeverityLevel = "warning" if news.trouble else "information"
         self.notify(news.text, title="Remote", severity=severity, timeout=10, markup=False)
+
+    def _housekeeping(self) -> None:
+        """Every :data:`HOUSEKEEPING_SECONDS`: Remote's auto-off, and the release check's ask
+        once :data:`~aisquare.services.updates.ASK_EVERY_SECONDS` have passed since the last.
+
+        One tick for both, not a timer each: on Windows every pending Textual timer holds a
+        thread of asyncio's default executor for as long as it sleeps (``textual._win_sleep``),
+        and a runner has eight. An hourly interval of the release check's own took one for
+        the app's whole life, and the UI tests whose thread workers then queued behind the
+        timers failed on Windows CI, the same seven twice (runs 39991862850, 40013337378)."""
+        self._remote_auto_off()
+        if (
+            self._release_check is not None
+            and time.monotonic() - self._release_asked_at >= updates_service.ASK_EVERY_SECONDS
+        ):
+            self.check_release()
 
     def _remote_auto_off(self) -> None:
         """The 30 s auto-off check; a Remote whose timer ran out stops without this thread."""
@@ -2289,14 +2310,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     def check_release(self) -> None:
         """Ask, off the UI thread, whether a newer aisquare is out
-        (``updates.check_for_release``): at the start and every hour after. PyPI is asked
-        only once the last answer is a day old, and a lookup that failed is tried again on
-        the next hour's ask. One at a time."""
+        (``updates.check_for_release``): at the start, and from the housekeeping tick every
+        hour after (:meth:`_housekeeping`). PyPI is asked only once the last answer is a day
+        old, and a lookup that failed is tried again on the next hour's ask. One at a time."""
         check = self._release_check
         if check is None or any(
             worker.name == CHECK_WORKER and not worker.is_finished for worker in self.workers
         ):
             return
+        self._release_asked_at = time.monotonic()
         self.run_worker(
             check, name=CHECK_WORKER, group=CHECK_WORKER, thread=True, exit_on_error=False
         )

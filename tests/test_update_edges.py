@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from textual.pilot import Pilot
 
+from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import UpdateRow
 from aisquare.models import FleetAgent, FleetAgentStatus
@@ -84,9 +85,11 @@ def test_the_opt_out_set_while_asq_runs_withdraws_the_offer_without_a_lookup(
 def test_the_app_asks_again_on_its_own_schedule_and_toasts_a_newer_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ask repeats by itself (``set_interval``), with no one calling ``check_release``:
-    the release the 24h tick finds replaces the row's and is toasted."""
+    """The ask repeats by itself (the app's housekeeping tick, which has the hourly ask in it),
+    with no one calling ``check_release``: the release the 24h tick finds replaces the row's
+    and is toasted."""
     monkeypatch.setattr(updates, "ASK_EVERY_SECONDS", 0.05)
+    monkeypatch.setattr(ui_app, "HOUSEKEEPING_SECONDS", 0.05)
     newer = updates.Offer(version="0.9.2", current="0.9.0", runnable=True, announce=True)
     asked: list[int] = []
 

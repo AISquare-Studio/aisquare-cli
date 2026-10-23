@@ -79,7 +79,11 @@ tmux can see and its row says so (`no hooks`).
    the left and a Welcome page on the right that walks you to a fleet in three
    steps: pick a project, connect Claude Code (it names the install command
    when Claude Code is missing), then start the manager and two coders. Press
-   `w` in the sidebar to come back to it. No script ever meets a
+   `w` in the sidebar to come back to it. Step 2's *Sign in* opens Accounts, and
+   once that sign-in lands Welcome is shown again with the keyboard on the next
+   step, *Start manager* when the sign-in was all it waited for; a sign-in that
+   lands from nowhere in particular names the next step under the notice
+   instead ("Next: open alpha and press Start manager"). No script ever meets a
    full-screen app, and the two ways of getting no UI differ. **In a pipe or
    with `TERM=dumb`**: the help page on stdout and exit 2, byte for byte as
    before — the same ~5 KB either way (5,159 bytes at 80 columns, measured).
@@ -106,6 +110,19 @@ tmux can see and its row says so (`no hooks`).
    **Personas** tab lists the personas it can use, previews exactly what an
    agent is briefed with, and imports, edits, exports, removes and validates
    them (`docs/personas.md`).
+
+   **3a. Reading the board.** The **Board** tab's top line says what needs
+   you: `needs you: 🔔 1 waiting · ❓ 2 questions · 👀 1 in review · ⛔ 1
+   blocked`, each count a button to the first thing it counts, or "nothing
+   needs you — the manager is working; talk to it on the Manager tab". 🔔 is a
+   pane waiting on a key and ❓ a question to you: press it, and the agent's
+   pane opens, where you answer. 👀 is a card waiting on a reviewer agent, or
+   on you on its PR; ⛔ is blocked, and its detail says on what. The counts are
+   the captain's attention queue's (`docs/captain.md`), read from the board's
+   own tick; stale agents are left to the captain. Nothing on the board is
+   typed into: you talk to the manager, and it writes the tasks. With none
+   open, the table says so: "No open tasks. The manager writes them when you
+   give it a goal on the Manager tab."
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
@@ -146,7 +163,12 @@ tmux can see and its row says so (`no hooks`).
    reason; a spawn toasts its receipt and notes and opens the new agent's pane.
    `Esc` cancels, except while a spawn is already running: that one cannot be
    taken back, so the dialog waits for its answer, and *Pick…* and *Import…*
-   are disabled until it has it.
+   are disabled until it has it. *Pick… ▸ + New account* leaves for the
+   Accounts page's sign-in, and once it lands the dialog opens again as it was
+   typed (label, task, first prompt, persona, binary), on the new account; the
+   persona picker's *+ New account* comes back the same way, the new account
+   highlighted. A sign-in that does not land reopens nothing, and one toast says
+   so; going to another page first drops the way back.
 5. Selecting an agent gives its pane the keyboard at once — type, and it reaches
    Claude Code. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
@@ -1967,5 +1989,8 @@ issue with your terminal's name.
   and no wake-ups, and its row would say `no hooks`. v1 is Claude Code only
   (plan §8.5); nothing in the schema blocks the rest.
 - **Auto-merge on green** as an opt-in policy. In v1 a human merges (plan §3.5).
-- **Remote or multi-machine fleets** — the cloud roadmap is unchanged.
+- **Remote or multi-machine fleets** — postponed (#293). Today a manager can
+  drive another box's fleet over SSH:
+  [docs/runbooks/multi-machine-ssh.md](runbooks/multi-machine-ssh.md); the
+  design is in [docs/plans/multi-machine-fleet.md](plans/multi-machine-fleet.md).
 - **A tmux-less backend** for hosts without tmux (plan §3.1, option A).

@@ -913,6 +913,10 @@ class AgentConnection(BaseModel):
     until that key goes. ``agents connect`` leaves the key alone. ``None`` otherwise."""
 
 
+EndedBy = Literal["stopped", "died"]
+"""How a fleet agent's row ended (``FleetAgent.ended_by``, #38): ``stopped`` on aisquare's
+word — ``fleet stop``, Stop all, ``shutdown``, a hand-over's old row — or ``died``, a death
+a read or ``reap`` recorded that nobody asked for."""
 FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]
 """What a fleet agent is doing, DERIVED at read time and never stored: a fresh
 ``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
@@ -1127,6 +1131,10 @@ class FleetAgent(BaseModel):
     persona: str | None = None
     """The persona the agent was spawned with: ``--persona``, else the role's
     ``[fleet.roles.<role>].persona``, else none."""
+    ended_by: EndedBy | None = None
+    """How the row ended (v34, #38): ``stopped`` when aisquare ended it on purpose, ``died``
+    when a read or ``reap`` recorded a death nobody asked for. ``None`` while it runs, and on
+    a row ended before the column, which is read by its exit status (Restart all)."""
 
 
 class FleetAgentStatus(BaseModel):

@@ -689,7 +689,7 @@ def _replace(project: ProjectInfo, pane_id: str = "%2") -> FleetAgent:
     """What a ``fleet restart`` or a usage-limit hand-over in another process leaves: the
     row ended, and a younger one holding the label. Neither takes the agent's lock."""
     with store_session() as store:
-        store.end_fleet_agent("agt_coder-1")
+        store.end_fleet_agent("agt_coder-1", ended_by="stopped")
     row = FleetAgent(
         id="agt_coder-1-2",
         project_id=project.id,
@@ -748,7 +748,7 @@ def test_keys_pinned_to_a_row_that_ended_with_no_replacement_yet_are_stale_not_a
     (merge of round 5 of #243). Unpinned, no row is still a gone agent."""
     tmux = _serving(monkeypatch, Tmux(OLDER))
     with store_session() as store:
-        store.end_fleet_agent("agt_coder-1")
+        store.end_fleet_agent("agt_coder-1", ended_by="stopped")
     send = live_writes().handlers["send-keys"]
     with pytest.raises(RequestError) as refused:
         send({"agent": "coder-1", "agent_id": "agt_coder-1", "keys": ["1"]})

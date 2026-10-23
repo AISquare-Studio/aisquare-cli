@@ -243,7 +243,7 @@ follows as a `⚠` line.
 | `--worktree` / `--no-worktree` | run in its own git worktree | the role's setting: on for coder and reviewer |
 | `--permission-mode M` | Claude Code permission mode | the role's setting: `auto` |
 | `--bin B` | the agent executable | the role's binding, else `claude` |
-| `--prompt TEXT` | first message typed once the agent is up: for Claude Code, once its input box is drawn, past its first-run Security notes screen (Enter), and read back from the pane so a lost Enter is pressed once more | with `--task`, "Start on your assigned task #N … `aisquare task show N`, then `aisquare task claim N`"; else none |
+| `--prompt TEXT` | first message typed once the agent is up: for Claude Code, once its input box is drawn, past its first-run Security notes screen (Enter), and read back from the pane so a lost Enter is pressed once more | with `--task`, "Start on your assigned task #N … `aisquare task show N`, then do what the ASSIGNED TO YOU line of your briefing says" — that line says per role and state whether to claim; else none |
 | `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
@@ -402,8 +402,13 @@ aisquare fleet stop --all
 aisquare fleet stop --all --managers
 ```
 
-These restart or stop every running agent in every project at once. `--managers`
-acts on the managers alone and leaves their teams. *⚙ Settings ▸ Fleet* in `asq`
+These restart or stop every running agent in every project at once, and a restart
+also brings back every agent that **died**: one that ended for a reason nobody gave
+it — killed (an outside SIGTERM, exit 143), crashed, its tmux server gone, a reboot.
+An agent aisquare stopped on purpose (`fleet stop`, *Stop all*, `fleet shutdown`) is
+not brought back; the store records how each agent ended (`stopped` or `died`), and
+`fleet stop` of a 💤 agent's window marks it stopped too. `--managers` acts on the
+managers alone and leaves their teams. *⚙ Settings ▸ Fleet* in `asq`
 does the same through the same service function (below). An agent is running when
 it has a process: ▶ working, ⏸ waiting, 🔔 needs you, ⏳ limited, or · unknown. Each
 is restarted or stopped the way `fleet restart` and `fleet stop` do it for one agent.
@@ -412,7 +417,13 @@ when that is on disk. Each agent is acted on by its row, never by its label, so 
 label that passed to another agent meanwhile never makes that agent the one
 stopped. Some agents are left alone, and each is named with the reason:
 
-- an exited (💤) or lost agent: `exited`, `lost`;
+- for a stop, an exited (💤) or lost agent: `exited`, `lost` — there is nothing to
+  stop;
+- for a restart, a dead agent that was not killed: one stopped on purpose (`stopped
+  on purpose`), one that exited 0 (`ended by itself (exit 0)`: someone typed `/exit`
+  in its window), one that died more than 7 days ago, and an older row of a label
+  that was started again since. A row that ended before aisquare recorded how is
+  read by its exit status: a signal or an error is a death, no status is left;
 - the agent running the command: `this session`. That is the row
   `AISQUARE_FLEET_AGENT` names, and with `restart --as SESSION` also that session's
   row, so a manager that runs `restart --all` isn't stopped half-way through it;
@@ -423,13 +434,22 @@ stopped. Some agents are left alone, and each is named with the reason:
   A `project forget` that races a spawn can leave a running agent on it. Its
   replacement would add the project back, so the restart leaves it, and
   `stop --all` stops it, as `fleet shutdown --all` does;
-- an agent that ended after the list was read and before its turn: `already
-  exited`. Each agent is looked at again just before it is acted on, so one that
-  exited or was stopped meanwhile is not started again, and its 💤 window stays.
+- for a stop, an agent that ended after the list was read and before its turn:
+  `already exited`. Each agent is looked at again just before it is acted on, so
+  one that exited or was stopped meanwhile is left, and its 💤 window stays. A
+  restart looks again too: one that died meanwhile is started again as a dead one
+  is, and one that exited 0 or was stopped on purpose meanwhile is left, by the
+  rule above.
   One that another command ends after this run has sent it `/exit` is not left
   alone: it fails, and a restart says no replacement was started.
 
-The agents are taken one at a time, each project's manager first. Each one is printed
+The agents are taken one at a time. A stop takes each project's manager first; a
+restart takes it last, after its team. A restarted manager — by `restart --all`,
+`--managers`, *Restart all…* or a plain `fleet restart manager` — is told, at the end
+of its first message (resumed or fresh), which of its team died and are still dead,
+each with its state, its task and the exact command that brings it back
+(`aisquare fleet restart --project <codename> <label>`), so after a crash
+*Managers only* is enough: the managers bring their teams back. Each one is printed
 as it is done, under its project's name, and the count comes last. A restart's notes
 follow its line, as `fleet restart` prints them, with ⚠ on the ones that say what
 didn't happen. A stop's follow it as `fleet stop` prints them: the `fleet reap` that
@@ -444,11 +464,15 @@ beta
 restarted 1 · skipped 1 · failed 1
 ```
 
+A dead agent's line says so (`✓ coder-1 … was dead (exit 143), restarted — resumed
+its session`), and the count splits the two: `restarted 4 (3 running, 1 dead) ·
+skipped 0 · failed 0`.
+
 One agent's failure is only its own line; the rest are still restarted or stopped.
 The command **exits 1** when any agent failed, a project's agents couldn't be read,
 or a stop left claims behind (the same as `fleet stop`). `--json` prints one
 object: `receipts`, each with `project`, `agent`, `outcome` (`done`, `skipped` or
-`failed`) and `why`, plus, for one that was done, the fields `fleet restart --json`
+`failed`), `why` and `was` (`running` or `dead`, as the list was read), plus, for one that was done, the fields `fleet restart --json`
 or `fleet stop --json` prints for that agent (a stop's `agent` is then the row as
 the stop ended it). The object also has `unread`, `summary`, `ok` and `interrupted`. Interrupted with
 Ctrl-C, it **exits 130**, and it still says how far it got: the agents done so far
@@ -465,8 +489,10 @@ sessions and the server, and a restart brings each agent back.
 **In `asq`: *⚙ Settings ▸ Fleet*.** *Restart all…* and *Stop all…* each open a
 dialog. It lists the agents it will act on, grouped by project (the project's name,
 then `label · role · state` for each agent). The agents it leaves are listed dim,
-with the reason. A *Managers only* switch redraws the list and the count, and the
-confirm button names the count (*Restart 4 managers*, *Stop 9 agents*). *Cancel*
+with the reason. A dead agent a restart brings back is listed apart, `💤 exited (143)
+— will be started again`. A *Managers only* switch redraws the list and the count, and
+the confirm button names the count (*Restart 4 managers*, *Stop 9 agents*), with the
+dead apart when there are any (*Restart 5 agents (4 running, 1 dead)*). *Cancel*
 has the focus, and Escape cancels too. When nobody would be acted on, the dialog
 says *nothing to restart* (or *nothing to stop*) and its confirm button stays
 greyed. The list is read when the dialog opens, and read again on confirm. Confirm

@@ -57,8 +57,9 @@ EveryAgent = Annotated[
     typer.Option(
         "--all",
         help="Every running agent in every project's fleet, not one label (not with a label "
-        "or --project). Exited (💤) agents are left as they are, and so is the agent running "
-        "this command.",
+        "or --project). A restart also brings back every agent that died (killed, crashed, "
+        "its server gone) and leaves one stopped on purpose; a stop leaves exited (💤) agents "
+        "as they are. The agent running this command is left either way.",
     ),
 ]
 ManagersOnly = Annotated[
@@ -205,7 +206,7 @@ def spawn(
         typer.Option(
             "--prompt",
             help="First message to type once the agent is up. With --task and no --prompt, "
-            "the agent is told to read and claim its task.",
+            "the agent is told to read its task and follow its briefing.",
         ),
     ] = None,
     account: Annotated[
@@ -350,10 +351,13 @@ def restart(
     mode, arguments — not as the role's config reads today; --permission-mode
     changes the mode, and later restarts keep it.
 
-    With --all, every running agent in every project is restarted so, one line
-    each by project, then a count; --managers restarts the managers alone. It
-    exits 1 when any of them failed, and 130 when interrupted, after saying how
-    far it got.
+    With --all, every running agent in every project is restarted so, and so is
+    every one that died without being stopped (killed, crashed, its tmux server
+    gone); one stopped on purpose is left. One line each by project, then a
+    count of running and dead; --managers restarts the managers alone, and a
+    restarted manager is told which of its team died and the command that
+    brings each back. It exits 1 when any of them failed, and 130 when
+    interrupted, after saying how far it got.
     """
     label = _one_or_every(
         ctx,
@@ -675,7 +679,11 @@ def _bulk_lines(receipt: fleet_service.BulkReceipt) -> list[str]:
     elif receipt.outcome == "failed":
         said, mark = f"failed — {receipt.why}", "✗"
     elif isinstance(result, fleet_service.RestartReceipt):
-        before = "stopped and " if result.was_running else ""
+        if receipt.dead:  # apart from the running ones (#38)
+            code = agent.exit_status
+            before = f"was dead{f' (exit {code})' if code is not None else ''}, "
+        else:
+            before = "stopped and " if result.was_running else ""
         said, mark = f"{before}restarted — {result.how}", "✓"
     else:
         said, mark = "stopped", "✓"
@@ -700,6 +708,7 @@ def _bulk_json(report: fleet_service.BulkReport) -> dict[str, object]:
             "agent": receipt.agent.model_dump(mode="json"),
             "outcome": receipt.outcome,
             "why": receipt.why,
+            "was": "dead" if receipt.dead else "running",  # when the plan was read (#38)
         }
         result = receipt.result
         if isinstance(result, fleet_service.RestartReceipt):

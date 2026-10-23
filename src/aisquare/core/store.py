@@ -43,6 +43,7 @@ from aisquare.models import (
     UNKNOWN_KEY_UID,
     ClaudeAccountRecord,
     ContextEntry,
+    EndedBy,
     FleetAgent,
     LaunchSpec,
     PendingRevocation,
@@ -1022,6 +1023,13 @@ _SCHEMA_V32 = ""
 # in :data:`_PRODUCTS`, added only where absent, and a row from before them keeps NULL,
 # which reads as no persona.
 _SCHEMA_V33 = ""
+# v34 (#38): how a fleet agent's row ended — ``stopped`` when aisquare ended it on purpose
+# (``fleet stop``, Stop all, ``shutdown``, a hand-over's old row), ``died`` when a read or
+# ``reap`` recorded a death nobody asked for (killed, crashed, its server gone). Restart all
+# brings the second back and leaves the first. The column is the whole step, so the script
+# is empty: it is in :data:`_PRODUCTS`, and a row from before it keeps NULL, which
+# ``services.fleet`` reads by its exit status.
+_SCHEMA_V34 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1057,6 +1065,7 @@ _MIGRATIONS = (
     _SCHEMA_V31,
     _SCHEMA_V32,
     _SCHEMA_V33,
+    _SCHEMA_V34,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1114,6 +1123,7 @@ _PRODUCTS: dict[int, _Products] = {
     32: _Products(
         columns=(("team_session", "persona", "TEXT"), ("fleet_agent", "persona", "TEXT"))
     ),
+    33: _Products(columns=(("fleet_agent", "ended_by", "TEXT"),)),
 }
 
 _PROJECT_COLUMNS = (
@@ -1195,7 +1205,7 @@ _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
     "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
-    "board", "persona",
+    "board", "persona", "ended_by",
 )  # fmt: skip
 _FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
 
@@ -1459,11 +1469,14 @@ class ContextStore(Protocol):
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
-    def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
+    def end_fleet_agent(
+        self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
+    ) -> FleetAgent: ...
     def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent: ...
     def end_fleet_agent_if_live(
-        self, agent_id: str, *, exit_status: int | None = None
+        self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
     ) -> FleetAgent | None: ...
+    def mark_fleet_agent_stopped(self, agent_id: str) -> FleetAgent: ...
     def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool: ...
     def record_fleet_agent_branch(self, agent_id: str, branch: str | None) -> None: ...
     # The Claude account registry (v15, #145): the arrangement of the slots.
@@ -1560,6 +1573,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         branch=row["branch"],
         board=row["board"],  # never NULL as read (`_FLEET_AGENT_READ`)
         persona=row["persona"],
+        ended_by=row["ended_by"],
     )
 
 
@@ -3416,7 +3430,7 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
@@ -3448,6 +3462,7 @@ class SqliteStore:
                 agent.branch,
                 agent.board if agent.board is not None else agent.project_id,
                 agent.persona,
+                agent.ended_by,
             ),
         )
         self._conn.commit()
@@ -4197,9 +4212,11 @@ class SqliteStore:
         ).fetchone()
         return _row_to_fleet_agent(row) if row is not None else None
 
-    def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent:
+    def end_fleet_agent(
+        self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
+    ) -> FleetAgent:
         """Mark an agent ended (idempotent: an already-ended row keeps its first end)."""
-        self.end_fleet_agent_if_live(agent_id, exit_status=exit_status)
+        self.end_fleet_agent_if_live(agent_id, exit_status=exit_status, ended_by=ended_by)
         agent = self.get_fleet_agent(agent_id)
         if agent is None:
             raise KeyError(agent_id)
@@ -4228,9 +4245,11 @@ class SqliteStore:
         return updated
 
     def end_fleet_agent_if_live(
-        self, agent_id: str, *, exit_status: int | None = None
+        self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
     ) -> FleetAgent | None:
         """End a LIVE agent's row and return it; ``None`` when it was already ended.
+
+        ``ended_by`` is how (v34, #38): ``stopped`` on aisquare's word, ``died`` otherwise.
 
         The UPDATE is a compare-and-set on ``ended_at IS NULL``, for a caller that
         announces the end: every fleet read records a dead pane (#138), so two
@@ -4239,14 +4258,28 @@ class SqliteStore:
         for the other to land in (review of #138).
         """
         cursor = self._conn.execute(
-            "UPDATE fleet_agent SET ended_at = ?, exit_status = ? "
+            "UPDATE fleet_agent SET ended_at = ?, exit_status = ?, ended_by = ? "
             "WHERE id = ? AND ended_at IS NULL",
-            (_now_iso(), exit_status, agent_id),
+            (_now_iso(), exit_status, ended_by, agent_id),
         )
         self._conn.commit()
         if cursor.rowcount == 0:
             return None
         return self.get_fleet_agent(agent_id)
+
+    def mark_fleet_agent_stopped(self, agent_id: str) -> FleetAgent:
+        """Record an ENDED row as stopped on aisquare's word (#38): a 💤 row whose window
+        ``fleet stop`` removed, which Restart all must then leave. A live row is untouched:
+        its end is written with how it ended."""
+        self._conn.execute(
+            "UPDATE fleet_agent SET ended_by = 'stopped' WHERE id = ? AND ended_at IS NOT NULL",
+            (agent_id,),
+        )
+        self._conn.commit()
+        agent = self.get_fleet_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        return agent
 
     def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool:
         """Clear a LIVE row's recorded server start while it is still ``started``; whether it did.

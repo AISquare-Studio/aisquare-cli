@@ -1133,7 +1133,8 @@ def test_each_all_receipt_s_json_is_the_one_agent_command_s(
 
     [receipt] = every["receipts"]
     assert {key: receipt[key] for key in one} == one
-    assert set(receipt) - set(one) == {"project", "outcome", "why"} | (
+    # `was`: running or dead when the plan was read (#38), a bulk receipt's own field.
+    assert set(receipt) - set(one) == {"project", "outcome", "why", "was"} | (
         {"agent"} if action == "restart" else set()
     )
 

@@ -2412,6 +2412,47 @@ def test_paste_refuses_a_busy_pane(
     assert fleet_rec.panes["%1"].pastes == []
 
 
+# --- full control: the captain unblocks an agent on its own ------------------------------
+#
+# The owner's decision, 2026-10-23, closing #240 R1-F3 as by design: the captain's purpose is
+# complete control of the agents' CLIs, so it can always unblock them, permission prompts
+# included, whether or not the owner is there. No owner words are asked for any of these:
+# a review that brings a gate back on press, approve_prompt, unblock or a submitted paste
+# fails here.
+
+
+@pytest.mark.parametrize("call", ["press yes", "approve_prompt", "unblock"])
+def test_the_captain_approves_a_permission_chooser_with_no_owner_words(
+    call: str, alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, CHOOSER, **{"1": IDLE})
+    target = {"project": "alpha", "label": "coder-1"}
+    if call == "press yes":
+        ok(actions.press("alpha", "coder-1", "yes", utterance=""))
+    else:
+        ok(actions.act(call, target, utterance=""))
+    assert pane.keys == [("1",)], "the chooser's Yes, pressed"
+    assert audit(alpha.id)[-1]["ok"] is True
+
+
+def test_the_captain_submits_a_paste_into_a_pane_at_a_prompt_with_no_owner_words(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, CHOOSER, **{"Enter": IDLE})
+    result = ok(actions.paste("alpha", "coder-1", "go on", submit=True, utterance=""))
+    assert pane.typed == [("paste", "go on"), ("keys", "Enter")]
+    assert result["submitted"] is True
+
+
+@pytest.mark.parametrize("key", ["enter", "1", "2"])
+def test_the_captain_presses_any_answering_key_at_a_prompt_with_no_owner_words(
+    key: str, alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, CHOOSER, **{"Enter": IDLE, "1": IDLE, "2": IDLE})
+    ok(actions.press("alpha", "coder-1", key, utterance=""))
+    assert pane.keys == [(actions.KEYS[key],)]
+
+
 # --- ui ---------------------------------------------------------------------------------
 
 

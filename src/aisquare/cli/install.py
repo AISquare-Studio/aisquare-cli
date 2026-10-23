@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+import traceback
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -196,11 +197,19 @@ def _emit_plan(plan: lifecycle_service.UpgradePlan) -> None:
     _fleet_lines(plan)
 
 
-def _fleet_lines(plan: lifecycle_service.UpgradePlan) -> None:
+def _fleet_lines(plan: lifecycle_service.UpgradePlan, *, one_click: bool = False) -> None:
     """The live fleet, a Remote on elsewhere, the role bindings a move back ignores and what
     it reads otherwise in config.toml, said before anything is installed: in the plan, and
-    under --yes."""
-    if plan.fleet_warning is not None:
+    under --yes.
+
+    Under ``--one-click`` the fleet is said as a fact, not with the advice to stop it first:
+    keeping the agents running is what asq's ⬆ update is for (review of #301)."""
+    if plan.fleet_warning is not None and one_click:
+        count = len(plan.live_agents)
+        keeps = f"{count} agent{'s keep' if count != 1 else ' keeps'} running"
+        fires = "they fire" if count != 1 else "it fires"
+        _say(f"· {keeps}; a hook {fires} during the install is lost")
+    elif plan.fleet_warning is not None:
         _say(f"⚠ {plan.fleet_warning}")
     elif plan.fleet_error is not None:
         _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
@@ -272,6 +281,9 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
     for note in report.notes:
         _say(f"· {note}")
 
+
+#: The command a person runs instead of ``--one-click``, as asq's own flag is never told.
+_ONE_CLICK_COMMAND = "aisquare upgrade"
 
 #: What ``upgrade --one-click`` opens asq as: the asq that reattaches the agents the press
 #: recorded (``services.updates``), and says how that went.
@@ -364,11 +376,30 @@ def upgrade(
     if not one_click:
         _upgrade(check=check, version=version, yes=yes, dry_run=dry_run, reopen=reopen)
         return
+    # Every way the run can end goes back to asq: a failure the command reports, a Ctrl-C in
+    # uv's run and an error nobody expected alike, said first and read before Enter. Left
+    # to the exception, the last two ended in a shell with no asq (review of #301, m2).
     try:
         _upgrade(check=False, version=version, yes=True, dry_run=False, reopen=True, one_click=True)
     except typer.Exit as exc:
         if exc.exit_code:
             _reopen(True, one_click=True, failed=True)
+        raise
+    except KeyboardInterrupt:
+        stderr_console().print(
+            f"✗ the upgrade was interrupted. Run it again by hand: {_ONE_CLICK_COMMAND}",
+            markup=False,
+        )
+        _reopen(True, one_click=True, failed=True)
+        raise
+    except Exception as exc:
+        stderr_console().print(traceback.format_exc().rstrip(), markup=False, highlight=False)
+        stderr_console().print(
+            f"✗ the upgrade stopped on an error: {type(exc).__name__}: {exc}. Run it again "
+            f"by hand: {_ONE_CLICK_COMMAND}",
+            markup=False,
+        )
+        _reopen(True, one_click=True, failed=True)
         raise
 
 
@@ -457,7 +488,7 @@ def _upgrade(
             _reopen(reopen, one_click=one_click)
             return
     elif not json_output:
-        _fleet_lines(plan)  # --yes skips the plan, not what it costs the fleet
+        _fleet_lines(plan, one_click=one_click)  # --yes skips the plan, not what it costs the fleet
         move = (
             f"moving aisquare {plan.current} back to {plan.destination}"
             if plan.backwards

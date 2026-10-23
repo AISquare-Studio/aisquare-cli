@@ -16,17 +16,18 @@ is announced once, and offered under *⚙ Settings* until the version that runs 
 newer (the plan's ``up_to_date``: a version ahead of PyPI's is offered nothing).
 
 The update is ``aisquare upgrade``'s, handed the terminal as Doctor's Update hands it. At the
-press, :func:`record_press` writes down every agent alive then, by row and pane; the asq that
-reopens takes that record once (:func:`take_press`), and :func:`reattach_agents` restarts each one
-whose pane is gone through ``fleet.restart``, which resumes its session when the transcript
-is on disk. Agents outlive asq on the fleet's tmux server, so normally every one is still
-there. Nothing else is ever restarted: an ordinary start reads no record.
+press, :func:`agents_alive_now` reads every agent's row and pane again, and
+:func:`record_press` writes down the ones alive then; the asq that reopens takes that record
+once (:func:`take_press`), and :func:`reattach_agents` restarts each one whose pane is gone
+through ``fleet.restart``, which resumes its session when the transcript is on disk. Agents
+outlive asq on the fleet's tmux server, so normally every one is still there. Nothing else is
+ever restarted: an ordinary start reads no record.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -135,6 +136,9 @@ def check_for_release(now: datetime | None = None) -> Offer | None:
                 store.set_ui_state(LATEST_KEY, found)
     if latest is None or lifecycle_service.newer_release(latest, __version__) is not True:
         return None
+    # The dialog's own plan, built on this answer and offline, decides whether the row says
+    # "restart to update": one rule for both, so the two cannot disagree (review of #301).
+    plan = lifecycle_service.upgrade_plan(known_latest=install_route.LatestRelease(latest))
     with store_session() as store:
         announce = store.ui_state(ANNOUNCED_KEY) != latest
         if announce:
@@ -142,7 +146,7 @@ def check_for_release(now: datetime | None = None) -> Offer | None:
     return Offer(
         version=latest,
         current=__version__,
-        runnable=install_route.not_automated(route) is None,
+        runnable=plan.runnable,
         announce=announce,
     )
 
@@ -167,6 +171,25 @@ class Press:
     agents: tuple[Kept, ...]
 
 
+def agents_alive_now(project_ids: Collection[str]) -> list[FleetAgent]:
+    """The agents alive at this moment in the projects ``project_ids`` names, read again.
+
+    Each live row is read from the store and its pane from tmux (``fleet.status_of``), and
+    kept when the listing reads it as having a process (``fleet.PROCESS_STATES``). Not the
+    frame on screen, which is up to a refresh old: an agent that exited since would have
+    been recorded and restarted after the reopen, and only the agents live at the press
+    are ever restarted (review of #301, m1). The projects are the ones the frame lists, so
+    the record holds what the dialog counted from: never a forgotten project's row.
+    """
+    with store_session() as store:
+        rows = [agent for agent in store.live_fleet_agents() if agent.project_id in project_ids]
+    return [
+        agent
+        for agent in rows
+        if fleet_service.status_of(agent).state in fleet_service.PROCESS_STATES
+    ]
+
+
 def record_press(agents: Iterable[FleetAgent]) -> Press:
     """Write down ``agents``, the ones alive at the press, for the asq that reopens."""
     press = Press(
@@ -183,6 +206,12 @@ def record_press(agents: Iterable[FleetAgent]) -> Press:
     with store_session() as store:
         store.set_ui_state(PRESSED_KEY, json.dumps(payload))
     return press
+
+
+def forget_press() -> None:
+    """Drop the record :func:`record_press` wrote: the hand-over it was for did not happen."""
+    with store_session() as store:
+        store.set_ui_state(PRESSED_KEY, None)
 
 
 def take_press() -> Press | None:

@@ -18,7 +18,7 @@ import pytest
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
-from aisquare.services import install_route, updates
+from aisquare.services import install_route, lifecycle, updates
 from aisquare.services import settings as settings_service
 from aisquare.services.install_route import LatestRelease
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
@@ -174,6 +174,21 @@ def test_an_install_asq_does_not_update_still_gets_the_row_with_no_restart(
     assert offer is not None and offer.version == "0.9.1" and offer.runnable is False
 
 
+def test_the_row_says_restart_only_where_the_dialogs_plan_runs(
+    running: Tool,
+    machine: Machine,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``Offer.runnable`` is the plan's ``runnable``, the dialog's own rule: a uv tool whose
+    uv is gone from PATH is offered how, not a restart (review of #301)."""
+    monkeypatch.setattr(install_route, "find_uv", lambda: None)
+
+    offer = updates.check_for_release(NOW)
+
+    assert offer is not None and offer.runnable is False
+    assert lifecycle.upgrade_plan().runnable is False, "the plan agrees"
+
+
 # --- what is offered, and announced -----------------------------------------------------------
 
 
@@ -255,6 +270,46 @@ def test_the_press_is_read_back_once_by_the_reopen(project: ProjectInfo) -> None
         ("agt_reviewer-1", "%7", "reviewer-1"),
     ]
     assert updates.take_press() is None, "forgotten as it is read: one reopen acts on it"
+
+
+def test_the_press_reads_each_agent_again_and_keeps_only_the_live(
+    project: ProjectInfo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At the press every live row of the listed projects is read again from tmux: one that
+    exited since the frame is not recorded, so the reopen never restarts it (review of #301,
+    m1). A row of a project the frame does not list is not asked of at all."""
+    with store_session() as store:
+        other = store.onboard_project(ProjectInfo(id="prj_other", root=tmp_path / "other"))
+    agents = [
+        _agent(project, "coder-1", "%1"),
+        _agent(project, "coder-2", "%2"),
+        _agent(project, "coder-3", "%3"),
+        _agent(project, "coder-4", "%4"),
+    ]
+    _agent(other, "elsewhere-1", "%9")
+    fleet = _Fleet(
+        monkeypatch,
+        {
+            "coder-1": ("waiting", ""),
+            "coder-2": ("exited", "exit 0"),
+            "coder-3": ("lost", "pane gone"),
+            "coder-4": ("unknown", "tmux could not be asked"),
+        },
+    )
+    monkeypatch.setattr(updates, "__version__", "0.9.0")
+
+    alive = updates.agents_alive_now({project.id})
+    updates.record_press(alive)
+    fleet.states.update({"coder-1": ("lost", "pane gone"), "coder-4": ("waiting", "")})
+    monkeypatch.setattr(updates, "__version__", "0.9.1")
+    outcome = updates.reattach_after_update()
+
+    assert [agent.label for agent in alive] == ["coder-1", "coder-4"]
+    assert agents[1].label == "coder-2" and fleet.restarted == [("coder-1", "agt_coder-1")]
+    assert outcome is not None
+    assert (
+        outcome.toast() == "✓ aisquare 0.9.1 — 1 agent reattached, 1 restarted (coder-1: pane gone)"
+    )
 
 
 def test_a_record_that_cannot_be_read_is_no_press() -> None:

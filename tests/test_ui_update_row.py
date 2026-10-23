@@ -11,7 +11,9 @@ execs once the app has quit.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import dataclasses
+import threading
+from collections.abc import Awaitable, Callable, Collection
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -25,8 +27,16 @@ from aisquare.cli import install as install_cli
 from aisquare.cli.app import app as cli_app
 from aisquare.cli.ui import app as ui_app
 from aisquare.cli.ui.app import FleetApp
-from aisquare.cli.ui.sidebar import UPDATE_KEY, SettingsRow, StatusLine, UpdateRow
-from aisquare.cli.ui.update import UpdateScreen
+from aisquare.cli.ui.sidebar import (
+    ALIVE_STATES,
+    UPDATE_KEY,
+    SettingsRow,
+    StatusLine,
+    UpdateRow,
+)
+from aisquare.cli.ui.update import PRESS_WORKER, UpdateScreen
+from aisquare.cli.ui.views.doctor import DoctorView
+from aisquare.models import FleetAgent
 from aisquare.services import install_route, lifecycle, updates
 from aisquare.services.install_route import Facts, InstallRoute, LatestRelease
 from aisquare.services.lifecycle import UpgradePlan
@@ -35,7 +45,7 @@ from tests.rendered import plain
 from tests.test_lifecycle_upgrade import Machine, Tool, machine, tool  # noqa: F401
 from tests.test_ui_doctor_handoff import Terminal, terminal  # noqa: F401
 from tests.test_ui_shell import Script, no_real_tmux, script, seed, shown, status  # noqa: F401
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until
 
 T = TypeVar("T")
 
@@ -286,28 +296,174 @@ def test_an_install_asq_does_not_update_shows_the_command_and_no_restart(
     assert hand_off is None and updates.take_press() is None
 
 
-def test_restart_and_update_records_the_live_agents_then_hands_over_as_doctors_update(
+@pytest.fixture
+def alive_now(monkeypatch: pytest.MonkeyPatch, script: Script) -> list[Collection[str]]:  # noqa: F811
+    """``updates.agents_alive_now`` as the press reads it: the script's rows that are alive
+    NOW, which a test changes after the frame was painted. Each ask's project ids are kept."""
+    asked: list[Collection[str]] = []
+
+    def alive(project_ids: Collection[str]) -> list[FleetAgent]:
+        asked.append(set(project_ids))
+        return [
+            row.agent
+            for project_id in project_ids
+            for row in script.get(project_id, [])
+            if row.state in ALIVE_STATES
+        ]
+
+    monkeypatch.setattr(updates, "agents_alive_now", alive)
+    return asked
+
+
+def test_restart_and_update_records_the_agents_alive_at_the_press_then_hands_over(
     tmp_path: Path,
     script: Script,  # noqa: F811
     planned: list[dict[str, Any]],
+    alive_now: list[Collection[str]],
 ) -> None:
+    """The record is read at the press, not taken from the frame: reviewer-1 was alive in the
+    frame the dialog counted from and exited before the press, so the reopen must not restart
+    it (review of #301, m1). The hand-over is Doctor's, with ``--one-click``."""
     _two_alive(tmp_path, script)
 
-    async def body(pilot: Pilot[None], app: FleetApp) -> Any:
-        await _open_by_keyboard(pilot, app)
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[Any, str]:
+        screen = await _open_by_keyboard(pilot, app)
+        counted = shown(screen.query_one("#update-text", Static))
+        script["prj_a"][1] = status("prj_a", "reviewer-1", "reviewer", "exited", exit_status=0)
         await pilot.click("#update-confirm")
         await settle_page(app)
-        return app.hand_off
+        return app.hand_off, counted
 
-    hand_off = _drive(body)
+    hand_off, counted = _drive(body)
 
+    assert "2 agents keep running" in counted, "the dialog counted from the frame"
     assert hand_off == ("upgrade", "--one-click")
+    assert alive_now == [{"prj_a"}], "the frame's projects, read again at the press"
     press = updates.take_press()
     assert press is not None
     assert [(k.agent_id, k.pane_id, k.label) for k in press.agents] == [
         ("agt_a_coder-1", "%1", "coder-1"),
-        ("agt_a_reviewer-1", "%1", "reviewer-1"),
-    ], "the agents alive at the press; the exited row is left alone"
+    ], "only the agent still alive at the press; the one that exited since is left alone"
+
+
+def test_a_refused_hand_over_leaves_no_record_behind(
+    tmp_path: Path,
+    script: Script,  # noqa: F811
+    planned: list[dict[str, Any]],
+    alive_now: list[Collection[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A writer still running refuses the hand-over, as for Doctor's Update; the record the
+    press wrote goes with it (review of #301, m3)."""
+    _two_alive(tmp_path, script)
+    monkeypatch.setattr(FleetApp, "_work_running", lambda self, names: "a fix")
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[Any, list[str]]:
+        await _open_by_keyboard(pilot, app)
+        await pilot.click("#update-confirm")
+        return app.hand_off, await _toasts(app)
+
+    hand_off, toasts = _drive(body)
+
+    assert hand_off is None
+    assert "a fix is still running — try again when it ends" in toasts
+    assert alive_now == [{"prj_a"}], "control: the press did read and record"
+    assert updates.take_press() is None
+
+
+def test_only_the_dialogs_own_press_hands_over() -> None:
+    """A worker of the press's name that this dialog did not start (a stray, a test's
+    stand-in) hands nothing over, whatever it answers: an update runs on a confirmed press."""
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> Any:
+        app.run_worker(
+            lambda: updates.Press(previous="0.9.0", agents=()),
+            name=PRESS_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+        await settle_page(app)
+        return app.hand_off
+
+    assert _drive(body) is None
+
+
+def test_an_update_called_off_takes_its_record_with_it() -> None:
+    """A second press past the wait stays in asq: the record of the update that will not run
+    goes; Doctor's own hand-over called off leaves the store alone (control)."""
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[bool, bool]:
+        updates.record_press([])
+        app.hand_off = ("upgrade", "--reopen")
+        app._call_off_hand_off()
+        doctors = updates.take_press() is not None
+        updates.record_press([])
+        app.hand_off = ui_app.UPDATE_HAND_OFF
+        app._call_off_hand_off()
+        return doctors, updates.take_press() is None
+
+    doctors_kept, update_dropped = _drive(body, offer=None)
+
+    assert doctors_kept and update_dropped
+
+
+def test_an_update_kept_waiting_names_the_row_to_press_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The overdue toast says what to press: on the ⬆ path that is the row, not Doctor's
+    buttons; pressed, the row calls the hand-over off as Doctor's second press does."""
+    now = [1000.0]
+    monkeypatch.setattr(ui_app, "_hand_off_clock", lambda: now[0])
+    release = threading.Event()
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[list[str], Any]:
+        said: list[str] = []
+        app.notify = lambda message, **_: said.append(str(message))  # type: ignore[method-assign]
+        app.exit = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        app.run_worker(release.wait, name="hung-read", thread=True, exit_on_error=False)
+        app.on_doctor_view_hand_off(DoctorView.HandOff(ui_app.UPDATE_HAND_OFF))
+        now[0] += ui_app._HAND_OFF_PATIENCE
+        await settle_until(app, lambda: len(said) == 2, group="held")
+        app.query_one(UpdateRow).activate()
+        await settle_page(app, group="held")
+        release.set()
+        await settle_page(app)
+        return said, app.hand_off
+
+    said, hand_off = _drive(body)
+
+    assert said == [
+        "asq quits once the reads running end",
+        "Still waiting for a read after 10 s. Press the ⬆ row again to stay in asq; quit, and "
+        "it runs once they end.",
+        "Called off: asq carries on",
+    ], said
+    assert hand_off is None
+
+
+def test_the_row_says_what_the_dialogs_plan_says(
+    tmp_path: Path,
+    script: Script,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The check found a runnable install; by the press uv had gone from PATH. The dialog
+    and the row both follow the plan: Close only, and the row says how to update."""
+    _two_alive(tmp_path, script)
+    gone = dataclasses.replace(_plan(), reason="uv is not on PATH")
+    monkeypatch.setattr(lifecycle, "upgrade_plan", lambda *a, **k: gone)
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[list[str], str, bool]:
+        screen = await _open_by_keyboard(pilot, app)
+        buttons = [str(b.label) for b in screen.query(Button)]
+        row = shown(app.query_one(UpdateRow))
+        assert app.release is not None
+        return buttons, row, app.release.runnable
+
+    buttons, row, runnable = _drive(body)
+
+    assert buttons == ["Close"]
+    assert row == "⬆︎ 0.9.1 · how to update"
+    assert runnable is False
 
 
 def test_a_ctrl_c_in_the_quit_names_the_command_without_asqs_own_flag() -> None:
@@ -410,6 +566,68 @@ def test_a_ctrl_c_at_a_failed_one_clicks_prompt_stays_in_the_shell(
 
     assert result.exit_code == 1
     assert terminal.prompts == [_ENTER] and terminal.reopened == []
+
+
+@pytest.mark.parametrize(
+    ("raised", "said"),
+    [
+        (
+            KeyboardInterrupt(),
+            "✗ the upgrade was interrupted. Run it again by hand: aisquare upgrade",
+        ),
+        (
+            RuntimeError("uv vanished"),
+            "✗ the upgrade stopped on an error: RuntimeError: uv vanished. Run it again by "
+            "hand: aisquare upgrade",
+        ),
+    ],
+)
+def test_a_one_click_cut_short_says_so_waits_for_enter_and_reopens(
+    runner: CliRunner,
+    tool: Tool,  # noqa: F811
+    machine: Machine,  # noqa: F811
+    terminal: Terminal,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    raised: BaseException,
+    said: str,
+) -> None:
+    """A Ctrl-C in uv's run, or an error nobody expected, is a failure like any: said, read
+    before Enter, and asq back on the version still installed (review of #301, m2)."""
+
+    def installer(*_args: object, **_kwargs: object) -> int:
+        raise raised
+
+    monkeypatch.setattr(install_route, "run_installer", installer)
+
+    result = runner.invoke(cli_app, ["upgrade", "--one-click"])
+
+    assert result.exit_code != 0
+    assert said in result.stderr, result.output
+    assert terminal.prompts == [_ENTER], "the failure is read before asq comes back"
+    assert terminal.reopened == [["ui", "--after-update"]]
+
+
+def test_one_click_says_the_fleet_keeps_running_without_advising_a_shutdown(
+    runner: CliRunner,
+    tool: Tool,  # noqa: F811
+    machine: Machine,  # noqa: F811
+    terminal: Terminal,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keeping the agents running is what the ⬆ update is for: one factual line, not the
+    advice to stop them first that ``--yes`` prints (control)."""
+    monkeypatch.setattr(
+        lifecycle, "running_fleet", lambda: (("coder-1 (proj)", "reviewer-1 (proj)"), 0, None)
+    )
+
+    one_click = runner.invoke(cli_app, ["upgrade", "--one-click"])
+    plain_yes = runner.invoke(cli_app, ["upgrade", "--yes"])
+
+    assert one_click.exit_code == 0 and plain_yes.exit_code == 0, one_click.output
+    line = "· 2 agents keep running; a hook they fire during the install is lost"
+    assert line in one_click.stdout
+    assert "fleet shutdown" not in one_click.stdout
+    assert "fleet shutdown" in plain_yes.stdout and line not in plain_yes.stdout
 
 
 def test_upgrade_without_the_flag_is_as_before(

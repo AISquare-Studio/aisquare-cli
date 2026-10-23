@@ -31,6 +31,9 @@ from aisquare.services.lifecycle import UpgradePlan
 PLAN_WORKER = "update-plan"
 """The read the row starts before the dialog opens: how this install upgrades, and whether
 Remote is on in another process (:func:`~aisquare.services.lifecycle.upgrade_plan`)."""
+PRESS_WORKER = "update-press"
+"""*Restart & update*'s read of the agents alive at the press, and its record of them
+(``services.updates.agents_alive_now``, ``record_press``): it writes."""
 REATTACH_WORKER = "update-reattach"
 """The reopened asq's look at the agents the press recorded, restarting any that are gone."""
 CHECK_WORKER = "update-check"
@@ -100,9 +103,17 @@ class UpdateScreen(ModalScreen[bool]):
             text.append(remote, style="yellow")
         return text
 
+    def heading(self) -> Text:
+        """``Update aisquare 0.8.2 → 0.8.3``: the versions are data, never markup."""
+        text = Text("Update aisquare ")
+        text.append(self.plan.current)
+        text.append(" → ")
+        text.append(self.version)
+        return text
+
     def compose(self) -> ComposeResult:
         box = Vertical(id="update-box")
-        box.border_title = f"Update aisquare {self.plan.current} → {self.version}"
+        box.border_title = self.heading()
         with box:
             yield Static(self.body(), id="update-text", classes="update-text")
             with Horizontal(id="update-buttons"):

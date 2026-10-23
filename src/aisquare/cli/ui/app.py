@@ -106,7 +106,13 @@ from aisquare.cli.ui.stop import StopAgentScreen
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.ticks import while_running
-from aisquare.cli.ui.update import CHECK_WORKER, PLAN_WORKER, REATTACH_WORKER, UpdateScreen
+from aisquare.cli.ui.update import (
+    CHECK_WORKER,
+    PLAN_WORKER,
+    PRESS_WORKER,
+    REATTACH_WORKER,
+    UpdateScreen,
+)
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, UsageRead, read_session
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.app_settings import AppSettingsView
@@ -837,6 +843,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """The newer release the ⬆ row offers; ``None`` while none is (``check_release``)."""
         self.after_update = after_update
         """Opened by ``upgrade --one-click``: reattach the agents the press recorded."""
+        self._press_worker: Worker[updates_service.Press] | None = None
+        """*Restart & update*'s read and record of the agents alive at the press: only its
+        answer hands over (:meth:`_update_pressed`)."""
         self._accounts = accounts
         self.accounts_overview: AccountsOverview | None = None
         """The last Accounts frame that was read; ``None`` before the first or when disabled."""
@@ -1642,6 +1651,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.worker.name == PLAN_WORKER:
             self._update_planned(event)
             return
+        if event.worker.name == PRESS_WORKER:
+            self._update_pressed(event)
+            return
         if event.worker.name == REATTACH_WORKER:
             self._reattached(event)
             return
@@ -2349,28 +2361,74 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         if not isinstance(plan, lifecycle_service.UpgradePlan):
             return
+        if plan.runnable != offer.runnable:
+            # The install changed since the check (uv gone from PATH, say): the row says
+            # what the dialog will, as both read one plan's rule (review of #301).
+            self.release = replace(offer, runnable=plan.runnable)
+            self.sidebar.show_update(offer.version, runnable=plan.runnable)
         self.push_screen(
             UpdateScreen(plan, offer.version, len(self._live_agents())), self._update_answered
         )
 
     def _update_answered(self, confirmed: bool | None) -> None:
-        """*Restart & update*: write down the agents alive now, then hand the terminal over
-        as Doctor's Update does (:meth:`on_doctor_view_hand_off`). Without that record the
-        reopen could not restart an agent that went, so a store that refuses it refuses the
-        update. Cancel, Escape and Close change nothing."""
-        if not confirmed:
+        """*Restart & update*: read the agents alive now and write them down, off the UI
+        thread (:meth:`_update_pressed` hands over once that is done). Cancel, Escape and Close
+        change nothing.
+
+        Read again rather than taken from the frame on screen, which is up to a refresh old:
+        an agent that exited since would have been restarted after the reopen (review of
+        #301, m1). The projects asked of are the frame's, the ones the dialog counted from.
+        """
+        if not confirmed or any(
+            worker.name == PRESS_WORKER and not worker.is_finished for worker in self.workers
+        ):
             return
-        try:
-            updates_service.record_press(self._live_agents())
-        except Exception as exc:
+        snapshot = self.snapshot
+        project_ids: set[str] = set()
+        if snapshot is not None:
+            project_ids = {project.id for project in snapshot.projects}
+            if snapshot.home is not None:
+                project_ids.add(snapshot.home.id)
+        self._press_worker = self.run_worker(
+            lambda: updates_service.record_press(updates_service.agents_alive_now(project_ids)),
+            name=PRESS_WORKER,
+            group=PRESS_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _update_pressed(self, event: Worker.StateChanged) -> None:
+        """Hand the terminal over as Doctor's Update does (:meth:`on_doctor_view_hand_off`),
+        once the agents alive at the press are written down. Without that record the reopen
+        could not restart an agent that went, so a record that could not be written refuses
+        the update; a hand-over refused (a writer still running) leaves no record behind
+        (review of #301, m3). Only the read this dialog started hands over."""
+        if event.worker is not self._press_worker:
+            return
+        if event.state is WorkerState.ERROR:
             self.notify(
-                f"could not write down the running agents ({exc}): nothing was updated",
+                f"could not write down the running agents ({event.worker.error}): nothing was "
+                "updated",
                 severity="error",
                 timeout=8,
                 markup=False,
             )
             return
+        if event.state is not WorkerState.SUCCESS:
+            return
+        if not isinstance(event.worker.result, updates_service.Press):
+            return
         self.on_doctor_view_hand_off(DoctorView.HandOff(UPDATE_HAND_OFF))
+        if self.hand_off != UPDATE_HAND_OFF:
+            self._forget_press()
+
+    def _forget_press(self) -> None:
+        """Drop the press's record: the update it was for did not start. A store that will not
+        take it leaves a record only ``ui --after-update`` reads, and the next press rewrites."""
+        try:
+            updates_service.forget_press()
+        except Exception:
+            return
 
     def _reattach(self) -> None:
         """Opened by the one-click update: look at the agents the press recorded, off the UI
@@ -2609,9 +2667,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         waited = _hand_off_clock() - self._hand_off_since
         if not self._hand_off_overdue and waited >= _HAND_OFF_PATIENCE:
             self._hand_off_overdue = True
+            again = "the ⬆ row" if self.hand_off == UPDATE_HAND_OFF else "Update or Uninstall"
             self.notify(
-                f"Still waiting for {_in_words(running)} after {waited:.0f} s. Press Update "
-                "or Uninstall again to stay in asq; quit, and it runs once they end.",
+                f"Still waiting for {_in_words(running)} after {waited:.0f} s. Press {again} "
+                "again to stay in asq; quit, and it runs once they end.",
                 severity="warning",
                 timeout=10,
             )
@@ -2630,6 +2689,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """
         if self._hand_off_poll is not None:
             self._hand_off_poll.stop()
+        if self.hand_off == UPDATE_HAND_OFF:
+            self._forget_press()  # the ⬆ update that recorded it will not run
         self.hand_off = None
         self._hand_off_overdue = False
         self.notify("Called off: asq carries on", timeout=4)
@@ -2745,6 +2806,7 @@ def _writing_workers() -> dict[str, str]:
         accounts.RENAME_WORKER: "an account's rename",
         PROJECT_REMOVE_WORKER: "a project's removal",
         REATTACH_WORKER: "the update's restart of the agents it kept",
+        PRESS_WORKER: "the update's record of the running agents",
     }
 
 

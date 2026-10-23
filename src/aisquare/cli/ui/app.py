@@ -1495,11 +1495,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 name=_binary_of(agent),
                 more=[AgentHeadroom(_binary_of(a), s, every) for a, s, every in others],
             )
-            # The per-slot session use rides this read to every open info line; the views
-            # never read usage themselves, and the two-second tick never asks for it. Asked
-            # of the switcher that holds the views, as `_forget_views` does, whatever screen
-            # is on top (review of #267, 2).
-            self.session_usage = summary.session_by_slot
+            # The per-slot session use rides this read to every open info line, every agent's
+            # slots; the views never read usage themselves, and the two-second tick never asks
+            # for it. Asked of the switcher that holds the views, as `_forget_views` does,
+            # whatever screen is on top (review of #267, 2).
+            self.session_usage = accounts_service.session_by_slot(s for _, s, _ in result)
             content = self.content
             for view in content.query(AgentView):
                 view.show_usage(self.session_usage)

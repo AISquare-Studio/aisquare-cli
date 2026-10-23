@@ -1719,6 +1719,16 @@ def fleet_headroom(
     )
 
 
+def session_by_slot(summaries: Iterable[HeadroomSummary]) -> dict[int, float]:
+    """Slot → five-hour window percent USED across every agent's summary, as the agent rows
+    and info lines show it: one :func:`fleet_headroom` per agent (a Codex account's room is
+    nothing to a Claude Code agent), and slots are one ladder, so no two agents share one."""
+    union: dict[int, float] = {}
+    for summary in summaries:
+        union.update(summary.session_by_slot)
+    return union
+
+
 def read_fleet_headroom(
     accounts: Sequence[ClaudeAccount] | None = None,
     *,

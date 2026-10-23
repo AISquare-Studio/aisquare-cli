@@ -13,13 +13,18 @@ The sidebar's rows say ``#<slot>·<pct>%`` with the same colours, from the same 
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import asyncio
+import json
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 
 import pytest
 from rich.text import Text
+from textual.widgets import Static
 
+from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import (
     BADGE_KEEP,
     GREEN,
@@ -29,8 +34,31 @@ from aisquare.cli.ui.sidebar import (
     session_percent_text,
 )
 from aisquare.cli.ui.views.agent import info_line
-from aisquare.models import ClaudeAccount, ClaudeUsage, FleetAgent, FleetAgentStatus, TeamSession
+from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters.types import AgentEvent
+from aisquare.models import (
+    AccountsOverview,
+    ClaudeAccount,
+    ClaudeAccountStatus,
+    ClaudeInstall,
+    ClaudeUsage,
+    FleetAgent,
+    FleetAgentStatus,
+    HeadroomSummary,
+    TeamSession,
+)
 from aisquare.services import claude_accounts as accounts_service
+from tests import test_ui_shell as ui_suite
+from tests.test_codex_contract import ROLLOUT as CODEX_ROLLOUT
+from tests.test_codex_contract import TURN_CONTEXT
+from tests.test_ui_shell import Script, on_screen, on_slot, row_for, seed, settle
+
+# The shell suite's fixtures, bound here so pytest finds them for this module's tests
+# (``no_real_tmux`` is autouse there: every tmux call held to a private socket).
+no_real_tmux = ui_suite.no_real_tmux
+script = ui_suite.script
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 NOW = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
 CWD = Path("/home/me/[archive]/repo")
@@ -347,3 +375,160 @@ def test_bracketed_labels_and_model_names_render_literally() -> None:
     line = info_line(status, labels, {2: 30.0}).plain
     for literal in ("[bold]coder[/bold]", "[red]opus[/]", "[x]", "[i]work[/i]", "[link=x]y[/link]"):
         assert literal in line
+
+
+# --- a Codex row (SCOPE #113 0.8.2, A8) ------------------------------------------------------
+#
+# Codex's hooks carry no effort, and its account's use is the rollout's own primary window
+# (``token_count.rate_limits``, measured on 0.162.1 as 42 % of a 300-minute window, M9). The
+# readings below are those fixtures, read through the code that reads them in the app:
+# ``CodexAdapter.decode_event`` for the model and effort of the turn, the Codex accounts'
+# ``usage`` and ``fleet_headroom`` for the slot's figure, and ``session_by_slot`` for the one
+# map every agent's slots share with Claude Code's.
+
+CODEX_SLOT = 5
+
+
+def _codex_slot(home: Path) -> ClaudeAccount:
+    """A Codex slot whose one session recorded 42 % of its five-hour window (M9)."""
+    rollout = home / "sessions" / "2026" / "10" / "23" / "rollout-2026-10-23T15-52-00-a.jsonl"
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    resets = int((datetime.now(tz=UTC) + timedelta(hours=2)).timestamp())
+    records = [
+        {"type": "session_meta", "payload": {"id": "a", "cli_version": "0.162.1"}},
+        {
+            "timestamp": datetime.now(tz=UTC).isoformat().replace("+00:00", "Z"),
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": None,
+                "rate_limits": {
+                    "limit_id": "codex",
+                    "primary": {
+                        "used_percent": 42.0,
+                        "window_minutes": 300,
+                        "resets_at": resets,
+                    },
+                    "secondary": None,
+                },
+            },
+        },
+    ]
+    rollout.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return ClaudeAccount(slot=CODEX_SLOT, config_dir=home, managed=True, agent="codex")
+
+
+def _codex_turn(tmp_path: Path) -> AgentEvent:
+    """Codex's prompt as its hook hands it over, over a rollout whose newest turn ran with
+    ``model_reasoning_effort="high"`` (the recorded fixtures)."""
+    rollout = tmp_path / "rollout.jsonl"
+    head = CODEX_ROLLOUT.read_text(encoding="utf-8").splitlines()[:74]
+    rollout.write_text("".join(f"{line}\n" for line in [*head, TURN_CONTEXT]), encoding="utf-8")
+    events = json.loads((FIXTURES / "agent_events" / "codex.json").read_text("utf-8"))["events"]
+    payload = {**events["UserPromptSubmit"]["payload"], "transcript_path": str(rollout)}
+    event = get_adapter("codex").decode_event({**payload, "hook_event_name": "UserPromptSubmit"})
+    assert event is not None
+    return event
+
+
+def _codex_status(turn: AgentEvent, state: str = "working") -> FleetAgentStatus:
+    agent = FleetAgent(
+        id="agt_codex",
+        project_id="prj_1",
+        label="coder-1",
+        role="coder",
+        agent="codex",
+        binary="codex",
+        pane_id="%7",
+        cwd=CWD,
+        created_at=NOW,
+        account_slot=CODEX_SLOT,
+    )
+    team = TeamSession(
+        id="sess-codex",
+        project_id="prj_1",
+        role="coder",
+        started_at=NOW,
+        last_seen_at=NOW,
+        model=turn.model,
+        effort=turn.effort,
+        agent="codex",
+    )
+    return FleetAgentStatus(agent=agent, state=state, session=team)
+
+
+def test_a_codex_rows_line_and_sidebar_figure_come_from_its_own_readings(tmp_path: Path) -> None:
+    account = _codex_slot(tmp_path / "codex-5")
+    reading = accounts_service.usage(account)
+    codex = accounts_service.fleet_headroom([account], {CODEX_SLOT: reading})
+    claude = accounts_service.fleet_headroom(
+        [ClaudeAccount(slot=2, config_dir=tmp_path / "claude-2", managed=True)],
+        {2: ClaudeUsage(available=True, session_percent=87.0, week_percent=10.0)},
+    )
+    # One map for every agent's slots: Claude Code's summary first, as the app reads them.
+    usage = accounts_service.session_by_slot([claude, codex])
+    assert usage == {2: 87.0, CODEX_SLOT: 42.0}
+    status = _codex_status(_codex_turn(tmp_path))
+    line = info_line(status, {CODEX_SLOT: "codex-1"}, usage)
+    assert line.plain == "🔨 coder-1  codex  ▶ working  codex-1 · 42%  gpt-5.5-codex high  %7"
+    assert agent_row_text(status, usage.get(CODEX_SLOT)).plain.endswith("▶ #5·42%")
+    # Control: Claude Code's summary alone — what the line read before — has no figure for it.
+    alone = info_line(status, {CODEX_SLOT: "codex-1"}, claude.session_by_slot).plain
+    assert "codex-1  gpt-5.5-codex high" in alone and "42%" not in alone
+
+
+def test_the_sidebar_and_the_info_line_show_a_codex_rows_figure_beside_claudes(
+    tmp_path: Path, script: Script
+) -> None:
+    """Mounted: the app reads one headroom summary per agent, and the figures the rows and
+    the info lines show are every agent's slots — the first summary alone (Claude Code's)
+    left a Codex row on ``#5`` with no figure."""
+    codex_account = _codex_slot(tmp_path / "codex-5")
+    claude_account = ClaudeAccount(slot=2, config_dir=tmp_path / "claude-2", managed=True)
+    overview = AccountsOverview(
+        claude=ClaudeInstall(installed=True),
+        accounts=[
+            ClaudeAccountStatus(account=account, label=f"account {account.slot}", signed_in=True)
+            for account in (claude_account, codex_account)
+        ],
+    )
+
+    def headroom(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
+        listed = list(accounts or [])
+        readings = {
+            account.slot: (
+                accounts_service.usage(account)
+                if account.agent == "codex"
+                else ClaudeUsage(available=True, session_percent=87.0)
+            )
+            for account in listed
+        }
+        return accounts_service.fleet_headroom(listed, readings)
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+    codex_row = on_slot(ui_suite.status("prj_a", "coder-1", "coder", "working", minute=1), 5)
+    codex_row = codex_row.model_copy(
+        update={"agent": codex_row.agent.model_copy(update={"agent": "codex"})}
+    )
+    script["prj_a"] = [on_slot(ui_suite.status("prj_a", "manager", "manager", "waiting"), 2)]
+    script["prj_a"].append(codex_row)
+
+    async def run() -> tuple[str, str, str]:
+        app = FleetApp(
+            refresh_seconds=3600, doctor=lambda: [], accounts=lambda: overview, headroom=headroom
+        )
+        async with app.run_test(size=(140, 40)) as pilot:
+            await settle(app)
+            await pilot.click(row_for(app, "agt_a_coder-1"))
+            await settle(app)
+            header = app.query_one("#agent-agt_a_coder-1 #agent-header", Static)
+            return (
+                on_screen(row_for(app, "agt_a_manager")),
+                on_screen(row_for(app, "agt_a_coder-1")),
+                str(header.render()),
+            )
+
+    manager, coder, header = asyncio.run(run())
+    assert manager.rstrip().endswith("⏸ #2·87%"), manager
+    assert coder.rstrip().endswith("▶ #5·42%"), coder
+    assert "account 5 · 42%" in header, header

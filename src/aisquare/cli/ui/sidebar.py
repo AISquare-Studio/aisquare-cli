@@ -61,6 +61,7 @@ from aisquare.cli.ui.groups import (
 )
 from aisquare.cli.ui.terminal import InPlaceField
 from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, ProjectInfo
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services.project import NICKNAME_MAX, display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
@@ -1804,14 +1805,15 @@ class Sidebar(Vertical):
     ) -> None:
         """The status line's Claude dot, and one for each other agent's accounts (``more``),
         from the usage cache (``FleetApp.refresh_headroom``), and the agent rows' session use
-        from the same read — never from the two-second tick."""
+        from the same read, every agent's slots — never from the two-second tick."""
         self.headroom = headroom
         self.every_needs_login = every_needs_login
         self.headroom_name = name
         self.more_headroom = tuple(more)
         self._paint_status()
-        if headroom.session_by_slot != self.session_usage:
-            self.session_usage = headroom.session_by_slot
+        usage = accounts_service.session_by_slot([headroom, *(m.headroom for m in more)])
+        if usage != self.session_usage:
+            self.session_usage = usage
             for row in self.query(AgentRow):
                 row.paint()
 

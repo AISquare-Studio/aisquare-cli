@@ -75,6 +75,10 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "switch",
         )
     ),
+    ("code", "find"),
+    ("code", "refs"),
+    ("code", "similar"),
+    ("code", "index"),
     ("explainability", "status"),
     ("explainability", "env"),
     ("explainability", "enable"),

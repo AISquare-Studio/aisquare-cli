@@ -716,6 +716,8 @@ def emit_onboard(report: OnboardReport) -> None:
         )
     else:
         console.print(f"snapshot: {snapshot_core.skipped_detail()}")
+    if report.code_index is not None:
+        console.print(f"code index: {report.code_index}", markup=False)
     if report.seeded:
         console.print(f"seeded {len(report.seeded)} project fact(s):")
         for entry in report.seeded:

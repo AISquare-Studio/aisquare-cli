@@ -202,6 +202,8 @@ def initialize(
             # Off (no Node, or no packer: optional, not a fault) or a pack that
             # failed and why -- the same sentence `project onboard` prints, from one place.
             notes.append(f"Snapshot: {report.snapshot_note or snapshot_core.skipped_detail()}.")
+        if report.code_index is not None:
+            notes.append(f"Code index: {report.code_index}.")
 
     for agent in agents:
         try:

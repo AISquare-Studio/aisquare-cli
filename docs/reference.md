@@ -31,7 +31,7 @@ concurrency-tested against racing parallel sessions):
 ├── fleet-tmux.conf  # the fleet's private tmux server config (regenerated, not yours)
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
-├── projects/     # per-project data — snapshot/ (Repomix pack), brain/ (gbrain)
+├── projects/     # per-project data — snapshot/ (Repomix pack), code/ (symbol index), brain/ (gbrain)
 ├── cache/        # disposable (e.g. last_injection.json)
 └── log/          # capture and diagnostic logs
 ```
@@ -55,6 +55,9 @@ aisquare
 ├── project (workspace)  info · list · switch · link · onboard [--refresh] · forget <id|path> [--purge]
 │                   rename <nickname> [--clear]   — what the sidebar and the lists call it
 │                   prune [--missing] [--worktrees] [--purge] [--yes]
+├── code            find <name> [--kind K] [--limit N] · refs <name> [--defs] [--limit N]
+│                   similar <name|path:line> [--limit N] · index [--full] [--status]
+│                   — the project's symbol index (docs/memory.md#symbol-index; [code] enabled, max_file_kb)
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
 ├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot]

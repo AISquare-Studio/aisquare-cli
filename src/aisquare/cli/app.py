@@ -19,6 +19,7 @@ from aisquare.cli import (
     auth,
     captain,
     capture,
+    code,
     connectors,
     context,
     enforce,
@@ -158,6 +159,7 @@ launch.register(app)  # needs context_settings to forward agent args
 app.command("serve")(serve.serve)
 app.add_typer(remote.app, name="remote")
 app.add_typer(fleet.app, name="fleet")
+app.add_typer(code.app, name="code")
 app.add_typer(persona.app, name="persona")
 app.add_typer(captain.app, name="captain")
 app.command("ui")(fleet.ui)

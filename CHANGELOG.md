@@ -354,6 +354,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads in the background and only repaints on the UI thread: with four projects
   of three agents each, a tick holds the UI for about 2 ms, where it held it for
   about 117 ms.
+- **The captain says yes to an agent's prompt only on the owner's words.** Its
+  `press` with a key that can approve (yes, the yes digit, Enter) and its `paste`
+  with `submit` took no confirmation, so text read off a pane could have the
+  captain approve a command nobody asked for; they now read the owner's words as
+  `stop` and `restart` do, naming the agent, its role or its project, or a yes to
+  the captain's own question. And a `paste` is refused while a prompt shows on the
+  pane, as `tell` is: its Enter picked the highlighted "1. Yes".
 
 ## [0.8.2] - 2026-10-19
 

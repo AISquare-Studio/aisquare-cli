@@ -291,11 +291,13 @@ def protected_report_ids() -> set[str] | None:
         return None
 
 
-def _pid_alive(pid: int) -> bool:
+def _pid_alive(pid: int) -> bool | None:
+    """Whether ``pid`` runs; None where that cannot be asked.
+
+    On Windows ``os.kill`` terminates the process whatever the signal number, so a
+    liveness probe there would kill the wrapper it asks about."""
     if not _POSIX:
-        # os.kill on Windows terminates the process whatever the signal number, so it
-        # cannot be asked. Assume alive; age alone retires the directory there.
-        return True
+        return None
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -308,8 +310,9 @@ def _pid_alive(pid: int) -> bool:
 def _prune_orphaned_pending(root: Path) -> list[str]:
     """Remove the ``.pending-*`` of a wrapper that was killed outright.
 
-    Only when the wrapper pid it recorded is gone and it is over an hour old (over a day
-    where the pid cannot be asked), so a long command that is still running keeps it.
+    Only when the wrapper pid it recorded is gone and it is over an hour old. A run whose
+    wrapper is alive is never removed, however long it takes. Where the pid cannot be
+    asked (Windows), a directory over a day old is taken as abandoned.
     """
     removed: list[str] = []
     for path in root.glob(".pending-*"):
@@ -321,7 +324,7 @@ def _prune_orphaned_pending(root: Path) -> list[str]:
         except (OSError, ValueError):
             # No readable pid: nothing proves the owner is gone.
             continue
-        if (not alive and age > 3600) or age > 86400:
+        if (alive is False and age > 3600) or (alive is None and age > 86400):
             with suppress(OSError):
                 shutil.rmtree(path)
                 removed.append(path.name)
@@ -514,9 +517,24 @@ def _forward_signals(child: subprocess.Popen[bytes], seen: _Interrupts) -> Itera
             signal.signal(number, handler)
 
 
+class InterruptedAfterSave(Exception):
+    """An interrupt arrived while a report was being saved; the report IS saved.
+
+    Raised once publishing is done, so the caller can still name the report, which an
+    interrupt raised from inside publishing would have lost."""
+
+    def __init__(self, report: CommandReport, number: int) -> None:
+        super().__init__(f"interrupted by signal {number} after report {report.id} was saved")
+        self.report = report
+        self.number = number
+
+
 @contextmanager
-def _defer_interrupts() -> Iterator[None]:
-    """The command already ran: publish its report first, THEN honour an interrupt."""
+def _defer_interrupts() -> Iterator[list[int]]:
+    """The command already ran: hold any interrupt until its report is published.
+
+    Yields the signals that arrived meanwhile, for the caller to honour once it has the
+    saved report in hand (:class:`InterruptedAfterSave`)."""
     pending: list[int] = []
     previous: dict[int, Callable[[int, FrameType | None], Any] | int | None] = {}
     if threading.current_thread() is threading.main_thread():
@@ -527,12 +545,10 @@ def _defer_interrupts() -> Iterator[None]:
         for number in _interrupt_signals():
             previous[number] = signal.signal(number, defer)
     try:
-        yield
+        yield pending
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)
-        if pending:
-            raise KeyboardInterrupt if pending[0] == signal.SIGINT else SystemExit(128 + pending[0])
 
 
 #: How often the wait re-checks for the command's exit; a signal handler runs in between.
@@ -544,20 +560,29 @@ _POLL_WHILE_RUNNING = 0.1
 #: sleep 600 & echo started'`` blocked for the sleeper's whole lifetime.
 _DRAIN_AFTER_EXIT = 2.0
 
+#: However much keeps arriving, capture stops this long after the command exited. The
+#: silence window alone is renewed by every byte, so a leftover process that writes a
+#: line every second (a server's heartbeat, a watcher) would hold ``asq exec`` forever.
+_DRAIN_MAX = 10.0
 
-class _Reader(threading.Thread):
+
+class _Reader:
     """Copies one pipe into its file, keeping the first ``limit`` bytes.
 
     A thread per pipe rather than ``select``: Windows cannot select on a pipe. The thread
     owns its pipe and closes it at EOF. Once :meth:`stop` is called it keeps reading, so a
     leftover writer never blocks on a full pipe, but writes nothing more: the report is
     already being sealed.
+
+    It HAS a thread rather than being one: a subclass's attributes share a namespace with
+    ``threading.Thread``'s private ones, and 3.13's ``Thread._handle`` is exactly the name
+    a file handle gets, which made every run raise ``TypeError`` at ``start()``.
     """
 
-    def __init__(self, pipe: IO[bytes], handle: BinaryIO, limit: int) -> None:
-        super().__init__(daemon=True)
+    def __init__(self, pipe: IO[bytes], sink: BinaryIO, limit: int) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
         self._pipe = pipe
-        self._handle = handle
+        self._sink = sink
         self._limit = limit
         self._lock = threading.Lock()
         self._stopped = False
@@ -566,7 +591,16 @@ class _Reader(threading.Thread):
         self.last_data = time.monotonic()
         self.error: OSError | None = None
 
-    def run(self) -> None:
+    def start(self) -> None:
+        self._thread.start()
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def join(self, timeout: float | None = None) -> None:
+        self._thread.join(timeout)
+
+    def _run(self) -> None:
         fd = self._pipe.fileno()
         try:
             while data := os.read(fd, 65536):
@@ -577,7 +611,7 @@ class _Reader(threading.Thread):
                     self.observed += len(data)
                     retained = data[: max(0, self._limit - self.kept)]
                     if retained:
-                        self._handle.write(retained)
+                        self._sink.write(retained)
                         self.kept += len(retained)
         except OSError as exc:
             with self._lock:
@@ -590,7 +624,7 @@ class _Reader(threading.Thread):
     def stop(self) -> StreamRecord:
         with self._lock:
             self._stopped = True
-            self._handle.close()
+            self._sink.close()
             return StreamRecord(
                 observed_bytes=self.observed,
                 retained_bytes=self.kept,
@@ -605,7 +639,8 @@ def _capture(
 
     Waits on the CHILD, not on pipe EOF: a grandchild that inherited a pipe keeps it open
     after the command exits. Once the command has exited, what is still arriving is
-    drained until :data:`_DRAIN_AFTER_EXIT` of silence, and then capture stops.
+    drained until :data:`_DRAIN_AFTER_EXIT` of silence, or :data:`_DRAIN_MAX` after the
+    exit at the latest, and then capture stops.
     """
     readers: dict[str, _Reader] = {}
     try:
@@ -623,8 +658,9 @@ def _capture(
                     continue
             exited = time.monotonic()
             while any(reader.is_alive() for reader in readers.values()):
+                now = time.monotonic()
                 last = max(exited, *(reader.last_data for reader in readers.values()))
-                remaining = _DRAIN_AFTER_EXIT - (time.monotonic() - last)
+                remaining = min(_DRAIN_AFTER_EXIT - (now - last), _DRAIN_MAX - (now - exited))
                 if remaining <= 0:
                     break
                 for reader in readers.values():
@@ -755,7 +791,7 @@ def run_command(
         else:
             records, held_open = _capture(child, pending, max_output_bytes, seen)
             returncode = child.returncode
-        with _defer_interrupts():
+        with _defer_interrupts() as deferred:
             draft = CommandReport(
                 id=report_id,
                 argv=list(argv),
@@ -784,10 +820,13 @@ def run_command(
                 display_stderr_bytes=0,
                 per_stream_limit=max_output_bytes,
             )
-            return _publish(pending, draft, source_root, files_before, compact=compact)
+            report = _publish(pending, draft, source_root, files_before, compact=compact)
     except BaseException:
         shutil.rmtree(pending, ignore_errors=True)
         raise
+    if deferred:
+        raise InterruptedAfterSave(report, deferred[0])
+    return report
 
 
 def _publish(

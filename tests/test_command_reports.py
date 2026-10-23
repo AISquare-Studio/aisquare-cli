@@ -15,6 +15,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Collection
 from contextlib import suppress
@@ -874,3 +875,83 @@ def test_a_command_outside_the_named_project_is_unknown(tmp_path: Path) -> None:
     report = reports.run_command(python("print(1)"), cwd=elsewhere, project_id=project_id)
     assert report.returncode == 0 and not report.source_known
     assert report.source_capture_error and "outside" in report.source_capture_error
+
+
+# --------------------------------------------------------------------------- review of #300
+
+
+def test_the_pipe_reader_shares_no_attribute_with_threading_thread(tmp_path: Path) -> None:
+    """Review of #300, 1: the reader subclassed ``threading.Thread`` and named its file
+    ``_handle``, which on 3.13 is Thread's own handle, so every run raised ``TypeError``
+    at ``start()``. Whatever the interpreter, none of its attributes may be Thread's."""
+    with (tmp_path / "out").open("wb") as sink, (tmp_path / "in").open("wb+") as pipe:
+        reader = reports._Reader(pipe, sink, 10)
+        assert not isinstance(reader, threading.Thread)
+        assert not set(vars(reader)) & set(vars(threading.Thread())), "a shadowed attribute"
+
+
+def test_a_chatty_grandchild_holds_the_wrapper_no_longer_than_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #300, 2: the silence window is renewed by every byte, so a leftover
+    process that writes every second held ``asq exec`` for its whole life."""
+    monkeypatch.setattr(reports, "_DRAIN_MAX", 3.0)
+    chatty = (
+        "import subprocess, sys;"
+        "p = subprocess.Popen([sys.executable, '-c',"
+        " 'import time\\nfor _ in range(100):\\n print(\"tick\", flush=True); time.sleep(0.3)'],"
+        " stdout=sys.stdout, start_new_session=(sys.platform != 'win32'));"
+        "print('started', p.pid, flush=True)"
+    )
+    started = time.monotonic()
+    report = reports.run_command(python(chatty))
+    elapsed = time.monotonic() - started
+    stdout = reports.read_stream(report.id, "stdout", raw=True)
+    grandchild = int(stdout.split()[1])
+    try:
+        assert report.returncode == 0
+        assert b"tick" in stdout, "output inside the cap is kept"
+        assert report.output_pipes_held_open
+        assert elapsed < 9, f"capture waited {elapsed:.1f}s for a grandchild that never goes quiet"
+    finally:
+        with suppress(OSError):
+            os.kill(grandchild, getattr(signal, "SIGKILL", signal.SIGTERM))
+
+
+@POSIX_ONLY
+def test_a_live_wrappers_run_is_never_removed_however_old() -> None:
+    """Review of #300, 3: a run in progress was removed once a day old, live wrapper or
+    not. Only a run whose wrapper is gone is abandoned."""
+    root = reports.reports_dir()
+    root.mkdir(parents=True)
+    finished = subprocess.Popen([sys.executable, "-c", "pass"])
+    finished.wait()
+    old = time.time() - 3 * 86400
+    for name, pid in (("live", os.getpid()), ("dead", finished.pid)):
+        directory = root / f".pending-{name}"
+        directory.mkdir()
+        (directory / "wrapper.pid").write_text(f"{pid}\n")
+        os.utime(directory, (old, old))
+    assert reports.prune_reports(protect=set()) == [".pending-dead"]
+    assert (root / ".pending-live").is_dir()
+
+
+def test_an_interrupt_while_the_report_is_saved_still_names_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #300, 4: an interrupt during publishing exited 130 with nothing printed,
+    so the saved report could not be found."""
+
+    def interrupted(root: Path | None) -> tuple[None, None]:
+        signal.raise_signal(signal.SIGINT)
+        return None, None
+
+    monkeypatch.setattr(reports, "_source_after", interrupted)
+    result = CliRunner().invoke(cli(), ["exec", "--", *python("print('ran')")])
+    assert result.exit_code == 128 + signal.SIGINT, result.output
+    saved = reports.list_reports()
+    assert len(saved) == 1
+    assert f"asq report {saved[0].id}" in result.stderr
+    with pytest.raises(reports.InterruptedAfterSave) as caught:
+        reports.run_command(python("print('again')"))
+    assert reports.load_report(caught.value.report.id).returncode == 0

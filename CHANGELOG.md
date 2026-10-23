@@ -17,8 +17,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   streams' originals are kept, the first 1 MiB each by default, with truncation
   marked. Interrupts go to the command's process group, the second as SIGTERM and
   the third as SIGKILL, and a background process holding the output pipe no longer
-  keeps the wrapper waiting: it stops after a bounded drain and records
-  `output_pipes_held_open`. With `--project`, the report holds the checkout's
+  keeps the wrapper waiting: it stops after two seconds of silence, ten seconds
+  after the exit at most, and records `output_pipes_held_open`. With `--project`, the report holds the checkout's
   per-file source identity before and after the command: content, not Git HEAD;
   build directories left out among untracked files only; submodule and nested-repo
   content counted; a worktree as its own files; the home tree refused; and a

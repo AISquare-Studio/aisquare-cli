@@ -53,12 +53,16 @@ While the command runs, Ctrl-C, SIGTERM and SIGHUP go to its whole process group
 second interrupt is sent as SIGTERM and a third as SIGKILL, so a command that ignores
 Ctrl-C cannot hold your terminal. The report is still saved, and `interrupted_by`
 records the first signal you sent, even when the command caught it and exited 0. An
-interrupt that arrives after the command has finished waits until the report is saved.
+interrupt that arrives after the command has finished waits until the report is saved;
+then `asq exec` prints the report's ID and exits 130 (128 + the signal) without printing
+the output.
 
 If the command exits but leaves a process holding its output open, as
 `sh -c 'setsid server & echo started'` does, `asq exec` does not wait for that process.
-It keeps reading for two seconds after the last byte, then stops, returns, and records
-`output_pipes_held_open`. Anything written after that is not in the report.
+It keeps reading until two seconds pass with no output, and never more than ten
+seconds after the command exited, so a process that keeps writing cannot hold it either.
+Then it stops, returns, and records `output_pipes_held_open`. Anything written after
+that is not in the report.
 
 On Windows there are no process groups to signal: the command shares the console and
 receives Ctrl-C itself, and a second or third Ctrl-C terminates it.
@@ -140,8 +144,9 @@ source, and how it ended.
 Reports are kept under `~/.aisquare/reports` (or `$AISQUARE_HOME/reports`), one
 directory each, readable by you only on Linux and macOS. A report appears there only
 once its streams and metadata are fully written; a run in progress lives in a
-`.pending-…` directory, which is removed if its `asq exec` was killed and is gone for
-over an hour.
+`.pending-…` directory. That directory is removed only once its `asq exec` is gone and
+it is over an hour old; a run whose `asq exec` is still alive is never removed. On
+Windows, where that cannot be asked, a directory over a day old is removed.
 
 Each run keeps the first 1 MiB of each stream (`--max-output-bytes` raises it to 16
 MiB). Truncation is marked with the observed and kept byte counts, and what was past

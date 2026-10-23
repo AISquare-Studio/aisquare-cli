@@ -126,6 +126,12 @@ def exec_command(
             project_id=project,
             max_output_bytes=max_output_bytes,
         )
+    except service.InterruptedAfterSave as stopped:
+        # Interrupted while the report was being saved: it is saved, so name it, then
+        # stop as the interrupt asked rather than going on to print the output.
+        with suppress(OSError):
+            _emit_footer(stopped.report, raw=raw, stream="both")
+        raise typer.Exit(128 + stopped.number) from None
     except (OSError, ValueError) as exc:
         fail(
             f"Command report failed: {exc}. "

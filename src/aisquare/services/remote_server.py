@@ -2867,13 +2867,7 @@ def remote_agent_held(
     if wait is None:
         held = lock.acquire(blocking=False)
     else:
-        arrived = _WRITE_ARRIVED.get()
-        left = wait if arrived is None else wait - (time.monotonic() - arrived)
-        if left <= 0:
-            busy = f"the machine was busy with other actions for {wait:g} s"
-            said = busy if nothing is None else f"{busy} — {nothing} to {label}"
-            raise RequestError(409, "busy", said)
-        held = lock.acquire(timeout=left)
+        held = lock.acquire(timeout=_remote_wait_left(label, wait, nothing))
     if not held:
         busy = f"another action on {label} is still running"
         raise RequestError(409, "busy", busy if nothing is None else f"{busy} — {nothing}")
@@ -2881,6 +2875,18 @@ def remote_agent_held(
         yield
     finally:
         lock.release()
+
+
+def _remote_wait_left(label: str, wait: float, nothing: str | None) -> float:
+    """What is left of a write's ``wait`` since its request arrived (:data:`_WRITE_ARRIVED`),
+    or 409 ``busy`` when nothing is (:func:`remote_agent_held`)."""
+    arrived = _WRITE_ARRIVED.get()
+    left = wait if arrived is None else wait - (time.monotonic() - arrived)
+    if left <= 0:
+        busy = f"the machine was busy with other actions for {wait:g} s"
+        said = busy if nothing is None else f"{busy} — {nothing} to {label}"
+        raise RequestError(409, "busy", said)
+    return left
 
 
 @contextlib.contextmanager
@@ -2909,9 +2915,17 @@ def remote_agent_turn(
     again in the others (review of #259, round 6, 8/10). The quick answers take the lock
     alone (``remote_needs._needs_answer_now``): they re-derive the agent's whole state
     under it, not a row.
+
+    A write whose wait ran out while it waited for a thread is refused before the row is
+    read: a burst of keys during an action left the write pool in waves, each tap reading
+    the store before its refusal, and the last taps answered a second late under load
+    (delta review of #274, n3).
     """
+    nothing = None if wait is None else done
+    if wait is not None:
+        _remote_wait_left(label, wait, nothing)
     _remote_turn_pinned(target, label, pin, live_only=live_only, done=done)
-    with remote_agent_held(target.id, label, wait=wait, nothing=None if wait is None else done):
+    with remote_agent_held(target.id, label, wait=wait, nothing=nothing):
         yield _remote_turn_pinned(target, label, pin, live_only=live_only, done=done)
 
 

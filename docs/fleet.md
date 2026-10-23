@@ -1594,7 +1594,7 @@ whether the running fleet server still has a prefix key.
   which is why each spawn carries this shell's display variables (below).
 - **Type the file's path** in your message.
 
-Claude Code's own Remote Control ([remote](remote.md#claude-codes-own-remote-control))
+Claude Code's own Remote Control (#289)
 is another way: the Claude app can attach a photo to the session. To record what your
 terminal sends on a drop or a paste (#288), start `asq` with
 `AISQUARE_PASTE_LOG=/tmp/paste.log`: each paste adds one line, with its length, its

@@ -373,7 +373,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   separate `task show` that nothing named, so people pasted contracts into coders'
   panes. A claim now prints the contract, the reason the task was last reopened
   (which was lost the moment a reopened task was claimed again) and `aisquare task
-  show <ref>`. `task next` without `--claim` says when a task has a contract. The
+  show <ref>`, with the ref a bare number (`#2` would start a comment in a shell). `task next` without `--claim` says when a task has a contract. The
   coder's cycle names `task show`, the manager's says the contract belongs in
   `--detail`, and `--detail`'s help says it is the contract. `--json` is unchanged.
   (#74)

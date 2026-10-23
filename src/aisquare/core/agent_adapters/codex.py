@@ -439,6 +439,9 @@ class CodexAdapter:
         redraws_while_asking=True,
         working_on_screen=working_on_screen,
         tool_shell_env="CODEX_THREAD_ID",
+        # `codex exec resume <id> -c developer_instructions=Y` kept the thread's first X
+        # and dropped Y; a later resume without -c still carried X (0.162.1).
+        resume_keeps_system_prompt=True,
         # -c and -a as well: `fleet spawn` owns neither. `launch` owns both, and keeps
         # -c KEY=VALUE for Codex by its shape; its -a is --account (`launch --help`).
         value_options=frozenset(

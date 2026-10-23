@@ -134,6 +134,13 @@ class AgentCapabilities:
     """A session resumes from another config dir (Claude Code finds a transcript by its
     absolute path), so ``fleet switch`` to another account resumes it; otherwise the
     thread lives in its home and the replacement starts fresh with a hand-off prompt."""
+    resume_keeps_system_prompt: bool = False
+    """A resumed session keeps what :meth:`AgentAdapter.system_prompt_args` gave its first
+    launch and ignores what a resume passes (Codex's thread holds its first turn's
+    ``developer_instructions``, measured on 0.162.1): a ``fleet restart`` or ``switch`` of a
+    row whose persona changed since leaves its system prompt as it was, and the new persona
+    reaches it through the session-start briefing alone. Claude Code takes the file again
+    at every launch, a resume included."""
     pid_env: str | None = None
     """The variable in which the agent hands each hook its own pid (Claude Code's
     ``CLAUDE_PID``): the process identity ``services.team`` binds a fleet row to. Any such

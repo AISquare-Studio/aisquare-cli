@@ -1189,7 +1189,10 @@ operator's config sets the key: Codex's `notice.hide_rate_limit_model_nudge=true
 `starts_at_its_prompt` (its `SessionStart` fires once it is at rest at its prompt,
 Claude Code's), `start_dialog_mark` (what its screen shows at a dialog before its start,
 where an Enter answers it: Claude Code's `Enter to confirm`, which keeps a prompt out
-and stops the wait for its start), `resumes_across_homes`, `exports_home_env`, `own_doctor_check`, `model_ladders`,
+and stops the wait for its start), `resumes_across_homes`, `resume_keeps_system_prompt` (a
+resumed session keeps the system prompt `system_prompt_args` gave its first launch and
+ignores a new one, Codex's: a restart's receipt says a persona changed since reaches it
+through the briefing alone), `exports_home_env`, `own_doctor_check`, `model_ladders`,
 `model_proxy` (its traffic goes through the explainability proxy, the lane the doctor and
 Remote's card judge it by; with `native_telemetry` instead, the card judges its own
 telemetry's lane, and with neither it reads untraced), `positional_prompt`, `first_context_file_only`, `sandbox_permissions`,
@@ -1260,6 +1263,8 @@ The store profile is [the sandbox and the store](#the-sandbox-and-the-aisquare-s
   capability;
 - its `system_prompt_args` names neither the block nor its text, or still answers when the
   launch arguments already carry its own answer (the operator's seam wins);
+- it keeps a system prompt across a resume (`resume_keeps_system_prompt`) with no seam to
+  set one;
 - the agent has no `transcript_reader`, or it misreads one of its four recorded moments
   (`tests/fixtures/agent_transcripts/<id>.json`: the pending calls and what each waits
   for, the newest record, the last words, a walk cut short on a small file); the shared

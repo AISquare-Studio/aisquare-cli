@@ -573,6 +573,18 @@ def test_the_system_prompt_seam_names_the_block_and_stands_down_before_the_opera
     assert adapter.system_prompt_args(block, text, ["--verbose", *seam], home) is None
 
 
+def test_only_an_agent_with_a_system_seam_keeps_it_across_a_resume(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``capabilities.resume_keeps_system_prompt`` tells a restart's receipt that the persona
+    in the system prompt is still its first launch's: only an agent whose
+    ``system_prompt_args`` has a seam has one to keep."""
+    keeps = adapter.capabilities.resume_keeps_system_prompt
+    assert isinstance(keeps, bool)
+    seam = adapter.system_prompt_args(tmp_path / "b.md", "persona", [], _home(adapter, tmp_path))
+    assert seam is not None or not keeps, f"{adapter.id} keeps a system prompt it cannot set"
+
+
 # --- account slots: a login's fingerprint, folder trust shared between accounts ---------------
 
 

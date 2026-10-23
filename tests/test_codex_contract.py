@@ -592,6 +592,14 @@ def test_the_operators_own_developer_instructions_argument_wins(
     assert codex.system_prompt_args(tmp_path / "b.md", "p", after_the_boundary, tmp_path)
 
 
+def test_a_resumed_codex_thread_keeps_its_first_developer_instructions() -> None:
+    """Measured on 0.162.1 (M4): ``codex exec resume <id> -c developer_instructions=Y`` kept
+    the thread's first value and dropped Y, and a later resume without ``-c`` still carried
+    it. Claude Code takes its file again at every launch."""
+    assert CODEX.capabilities.resume_keeps_system_prompt is True
+    assert get_adapter("claude-code").capabilities.resume_keeps_system_prompt is False
+
+
 def test_the_adapter_installs_its_event_set() -> None:
     events = {hook.event for hook in get_adapter("codex").capabilities.hooks}
     assert events == {

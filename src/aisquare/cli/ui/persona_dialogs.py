@@ -603,7 +603,10 @@ class EditPersonaScreen(_Dialog):
 
     DEFAULT_CSS = dialog_css(
         "EditPersonaScreen",
-        "EditPersonaScreen #edit-text { height: 20; }",
+        # As tall as a dialog may be, the text box taking what the rest leaves: a fixed
+        # 20 rows pushed Save and Cancel below an 80x30 terminal's edge.
+        "EditPersonaScreen > Vertical { height: 94%; }\n"
+        "EditPersonaScreen #edit-text { height: 1fr; min-height: 3; }",
     )
     CANCEL: ClassVar[Any] = False
 

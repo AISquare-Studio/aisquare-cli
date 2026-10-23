@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+**Upgrading:**
+- **A task title with words outside ASCII now has a different key** (#270):
+  `Fix вход` was keyed `fix` and is now `fix-вход`. No store migration is
+  needed. Re-adding a title exactly as a task already on the board has it still
+  answers "already tracked (idempotent)", found under its old key. A task added
+  before the upgrade under a title with *no* ASCII letters was keyed `task` and
+  is not looked up this way: re-adding its title adds a new task beside it, and
+  the old one can be dropped. Every ASCII title keys exactly as before.
+
 ### Added
 
 - **The captain** — the home-level voice-and-text agent that runs every
@@ -303,6 +312,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Two tasks whose titles have no ASCII letters are two tasks** (#270). A
+  task's key, which makes `task add` idempotent, kept only `[a-z0-9]` from the
+  title, so `Исправить вход` and `Добавить тесты` both keyed `task`, and the
+  second add answered "already tracked" with the first. The key is now the
+  title's own letters, digits and marks in any script, NFKC-normalised and
+  casefolded (`исправить-вход`, `修复登录`, `हिन्दी-परीक्षण`). A title of
+  emoji alone is keyed by a hash of it. See Upgrading.
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for
   every other spawn: a seat reads the board of the hub its spawner honours, and its

@@ -137,6 +137,15 @@ aisquare task reopen '#1' --reason "fails on py3.11" --as <id>
 aisquare note "JWT it is" --kind decision --as <id>
 ```
 
+A task is **idempotent on its key**: `task add` with a key the board already holds
+answers "already tracked (idempotent)" with that task, instead of adding a second.
+`--key` sets the key; without it, the key is the title's letters, digits and marks
+in any script, NFKC-normalised and casefolded, with every other run as one `-`, clipped
+to 64 characters: `Wire the auth flow!` → `wire-the-auth-flow`, `Исправить вход` →
+`исправить-вход`, `修复登录` → `修复登录`. A title of emoji alone is keyed by a hash
+of it (`t-…`). A title with words outside ASCII added before #270 was keyed by its
+ASCII letters only (`Fix вход` → `fix`), and re-adding exactly that title still finds it.
+
 Every task has a **number on its board** — `#1`, `#2`, … in the order tasks
 were added to that project — shown beside its id on the board, in `task list`,
 `task show` and every receipt (`✓ claimed: #12 tsk_01k… [doing] …`). Any task

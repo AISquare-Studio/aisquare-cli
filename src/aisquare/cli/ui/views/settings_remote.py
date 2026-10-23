@@ -317,7 +317,7 @@ class RemoteSection(Vertical):
     def on_token_saved(self, event: TokenSaved) -> None:
         event.stop()
         self._replacing = False
-        self.controller.token_saved()  # a tunnel not up starts again, with the new token
+        self.controller.token_saved()  # a tunnel not up, or signing in, starts with the new one
         self.remote_check()
 
     def on_ngrok_looked_for(self, event: NgrokLookedFor) -> None:

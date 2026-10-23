@@ -447,3 +447,62 @@ def test_the_bundled_ngrok_is_the_controllers_default() -> None:
     default = inspect.signature(RemoteController).parameters["tunnel_factory"].default
     assert default is bundled_ngrok
     assert ngrok_tunnel.AUTHTOKEN_FROM in AUTHTOKEN_HINT
+
+
+# --- delta review of #274 (#40), m4: a token saved while ngrok signs in -------------------------
+
+
+def test_a_token_saved_while_ngrok_signs_in_replaces_that_sign_in_with_the_new_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delta review of #274, m4: Save during a sign-in (up to 20 s) found the tunnel running
+    and left it be. It signed in with the old token, ngrok refused it, and it ended as a first
+    tunnel with a lasting error: nothing retried it, and the slot asked again for the token
+    Save had just checked. The sign-in is cancelled and the new token's starts at once."""
+    script = bundled(monkeypatch, Script(url="https://abc.ngrok-free.app", hold=threading.Event()))
+    token = [TOKEN]
+    made: list[SdkTunnel] = []
+
+    def factory(port: int) -> SdkTunnel:
+        made.append(SdkTunnel(port, token=lambda: token[0]))
+        return made[-1]
+
+    controller = RemoteController(server=fake_server(), tunnel_factory=factory, url_timeout=5)
+    controller.turn_on()
+    assert script.signing_in.wait(5), "the premise: the first tunnel is signing in"
+    token[0] = "2newTOKEN_9876543210"
+    assert controller.token_saved() is True, "the sign-in with the old token is replaced"
+    assert ended(made[0]), "the old sign-in is cancelled"
+    assert script.calls.cancelled == 1
+    assert script.hold is not None
+    script.hold.set()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert script.calls.tokens == [TOKEN, "2newTOKEN_9876543210"]
+    assert controller.tunnel is made[1] and controller.public_origin == "https://abc.ngrok-free.app"
+    assert controller.tunnel_error() is None, "the slot does not ask again"
+    controller.turn_off()
+
+
+def test_a_token_saved_under_a_tunnel_that_is_up_says_it_is_for_the_next_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """m4's second half: *Change ngrok token* under a tunnel that is up keeps its session
+    (a restart would move the link of one with no static domain), and the status line says
+    the new token waits for ngrok's next start, where it said nothing."""
+    script = bundled(monkeypatch, Script(url="https://abc.ngrok-free.app"))
+    made: list[SdkTunnel] = []
+
+    def factory(port: int) -> SdkTunnel:
+        made.append(SdkTunnel(port, token=lambda: TOKEN))
+        return made[-1]
+
+    controller = RemoteController(server=fake_server(), tunnel_factory=factory, url_timeout=5)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert controller.public_origin == "https://abc.ngrok-free.app"
+    assert controller.token_saved() is False, "the session that is up is kept"
+    assert len(made) == 1 and made[0].running and script.calls.closed == 0
+    assert remote_control.TOKEN_AT_NEXT_START in controller.status_line()
+    controller.turn_off()

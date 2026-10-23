@@ -100,6 +100,9 @@ STARTING = "starting Remote…"
 """The status line while a start's deadline is written, before ngrok starts."""
 STARTING_NGROK = "starting ngrok…"
 """The status line from ngrok's start until it announces a URL, or fails to."""
+TOKEN_AT_NEXT_START = "new ngrok token saved — ngrok signs in with it at its next start"
+"""The status line when a token is saved under a tunnel that is up: it stays signed in with
+the one it started with, and a restart would change the link of one with no static domain."""
 SAVING = "saving to remote.json…"
 """The status line's line while a write the controls asked for waits (:data:`SAVING_AFTER`)."""
 SAVING_AFTER = 0.5
@@ -1136,8 +1139,22 @@ class RemoteController:
         """A new ngrok token was saved in Settings → Remote: what the last tunnel said of the
         old one is forgotten, and a tunnel of this Remote's that is not up starts again now,
         signed in with the new one (:meth:`revive_tunnel_if_dead`, which leaves one that ended
-        for want of a token to its error, and waits for its minute); whether one started."""
+        for want of a token to its error, and waits for its minute); whether one started.
+
+        One still signing in is not up either: it signs in with the old token, and one ngrok
+        refused ended as a first tunnel with a lasting error, which nothing retried, and the
+        slot asked again for the token Save had just checked (delta review of #274, m4). It
+        is replaced. One that is up keeps its session, and the status line says the token is
+        for its next start (:data:`TOKEN_AT_NEXT_START`).
+        """
         self._last_tunnel_error = None
+        tunnel = self.tunnel
+        if self.running and tunnel is not None and tunnel.running:
+            if tunnel.public_url is None:
+                return self.revive_tunnel_if_dead(retry=True, replace=True)
+            with self._lock:
+                self.message = TOKEN_AT_NEXT_START
+            return False
         return self.revive_tunnel_if_dead(retry=True)
 
     def served_elsewhere(self) -> bool:
@@ -1358,9 +1375,10 @@ class RemoteController:
     """The tunnel a start could not start (no ngrok on PATH, a spawn that failed): its first
     start is the watchdog's, and says so, since it never stopped."""
 
-    def revive_tunnel_if_dead(self, *, retry: bool = False) -> bool:
+    def revive_tunnel_if_dead(self, *, retry: bool = False, replace: bool = False) -> bool:
         """Start ngrok again when it died under a Remote that is still on; ``True`` when it did.
         ``retry``: a new token was saved (:meth:`token_saved`), so at once, whatever it died of.
+        ``replace``: with it, one still signing in with the old token is stopped and replaced.
 
         The app runs this every 30 s. Without it, a tunnel that died in the night
         left the server up and unreachable, and the phone's link dead until
@@ -1385,7 +1403,7 @@ class RemoteController:
         for an off and on that nothing asked for (sweep 5 of #243).
         """
         dead = self.tunnel
-        if not self.running or dead is None or dead.running:
+        if not self.running or dead is None or (dead.running and not replace):
             return False
         if (
             not retry
@@ -1402,15 +1420,20 @@ class RemoteController:
         ):
             return False
         self._revived_at = now
+        # On a thread of its own, as this runs on Textual's: what the dead ngrok left in its
+        # group (a launcher's ngrok, still up) is given its seconds to end. One replaced is
+        # told first, so its sign-in is cancelled before the new one binds the domain.
+        stopping = threading.Thread(target=dead.stop_tunnel, name="ngrok-stop", daemon=True)
+        if replace:
+            stopping.start()
         tunnel = self._watched_tunnel()
         failure = tunnel.start_tunnel()
         if failure is not None:  # the dead one stays, so the next minute tries again
             self.message = failure
             self._unreachable(failure)
             return False
-        # On a thread of its own, as this runs on Textual's: what the dead ngrok left in its
-        # group (a launcher's ngrok, still up) is given its seconds to end.
-        threading.Thread(target=dead.stop_tunnel, name="ngrok-stop", daemon=True).start()
+        if not replace:
+            stopping.start()
         with self._lock:
             if self.public_origin is not None:  # else the last restart never came up: keep it
                 self._origin_before_revive = self.public_origin

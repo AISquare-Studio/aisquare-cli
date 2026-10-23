@@ -1,0 +1,152 @@
+{
+  "about": "Gemini-shaped's session log (tests/gemini_shaped_agent.py GeminiShapedTranscript): a call's result arrives in a later $patch line.",
+  "moments": {
+    "permission": {
+      "records": [
+        {
+          "type": "user",
+          "content": "deploy it",
+          "timestamp": "2026-10-22T10:00:00.000Z"
+        },
+        {
+          "type": "gemini",
+          "content": "running it",
+          "toolCalls": [
+            {
+              "id": "call-1",
+              "name": "run_shell_command",
+              "args": {
+                "command": "make deploy"
+              }
+            }
+          ],
+          "timestamp": "2026-10-22T10:00:05.000Z"
+        }
+      ],
+      "expect": {
+        "newest": "assistant_tool",
+        "pending": [
+          [
+            "call-1",
+            "run_shell_command",
+            "tool"
+          ]
+        ],
+        "mark": "make deploy"
+      }
+    },
+    "question": {
+      "records": [
+        {
+          "type": "user",
+          "content": "paint it",
+          "timestamp": "2026-10-22T10:00:00.000Z"
+        },
+        {
+          "type": "gemini",
+          "content": "",
+          "toolCalls": [
+            {
+              "id": "call-2",
+              "name": "ask_user",
+              "args": {
+                "question": "Which colour?",
+                "options": [
+                  "Red",
+                  "Blue"
+                ]
+              }
+            }
+          ],
+          "timestamp": "2026-10-22T10:00:05.000Z"
+        }
+      ],
+      "expect": {
+        "newest": "assistant_tool",
+        "pending": [
+          [
+            "call-2",
+            "ask_user",
+            "question"
+          ]
+        ],
+        "options": 2
+      }
+    },
+    "interrupted": {
+      "records": [
+        {
+          "type": "user",
+          "content": "deploy it",
+          "timestamp": "2026-10-22T10:00:00.000Z"
+        },
+        {
+          "type": "gemini",
+          "content": "",
+          "toolCalls": [
+            {
+              "id": "call-1",
+              "name": "run_shell_command",
+              "args": {
+                "command": "make deploy"
+              }
+            }
+          ],
+          "timestamp": "2026-10-22T10:00:05.000Z"
+        },
+        {
+          "type": "info",
+          "content": "Request cancelled.",
+          "timestamp": "2026-10-22T10:00:09.000Z"
+        }
+      ],
+      "expect": {
+        "newest": "interrupted",
+        "pending": []
+      }
+    },
+    "asked": {
+      "records": [
+        {
+          "type": "user",
+          "content": "tidy it",
+          "timestamp": "2026-10-22T10:00:00.000Z"
+        },
+        {
+          "type": "gemini",
+          "content": "",
+          "toolCalls": [
+            {
+              "id": "call-3",
+              "name": "replace",
+              "args": {
+                "file_path": "/repo/a.py"
+              }
+            }
+          ],
+          "timestamp": "2026-10-22T10:00:10.000Z"
+        },
+        {
+          "$patch": {
+            "toolCalls": [
+              {
+                "id": "call-3",
+                "status": "success"
+              }
+            ]
+          }
+        },
+        {
+          "type": "gemini",
+          "content": "Done. Ship it?",
+          "timestamp": "2026-10-22T10:00:30.000Z"
+        }
+      ],
+      "expect": {
+        "newest": "assistant_text",
+        "pending": [],
+        "last_text_end": "Ship it?"
+      }
+    }
+  }
+}

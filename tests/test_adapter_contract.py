@@ -1,9 +1,11 @@
-"""The adapter protocol, held for every registered adapter and a synthetic third one.
+"""The adapter protocol, held for every registered adapter and two synthetic ones.
 
-Parametrized over ``agent_adapters.adapters()`` plus :class:`tests.fake_agent.FakeAgentAdapter`,
-which is registered for this module only. The fake speaks a native vocabulary unlike Claude
-Code's and Codex's, so a shared service that special-cases either of them, or reads a payload
-or writes a flag itself instead of asking the adapter, fails here for the fake.
+Parametrized over ``agent_adapters.adapters()`` plus :class:`tests.fake_agent.FakeAgentAdapter`
+and :class:`tests.gemini_shaped_agent.GeminiShapedAdapter`, registered for this module only.
+The fake speaks a native vocabulary unlike Claude Code's and Codex's, so a shared service that
+special-cases either of them, or reads a payload or writes a flag itself instead of asking the
+adapter, fails here for the fake; the Gemini-shaped one has the shapes neither has (a home
+variable naming the folder its config dir is in, hook timeouts in milliseconds).
 
 What a new adapter must bring for this suite to pass (docs/coding-agents.md, "Adding a
 terminal agent"): a recorded-payload fixture for every hook event it installs
@@ -72,13 +74,14 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from tests import fakebin
 from tests.fake_agent import FakeAgentAdapter
+from tests.gemini_shaped_agent import GeminiShapedAdapter
 from tests.test_fleet_service import FakeTmux
 
 FIXTURES = Path(__file__).parent / "fixtures" / "agent_events"
 TRANSCRIPTS = Path(__file__).parent / "fixtures" / "agent_transcripts"
 SCREENS = Path(__file__).parent / "fixtures" / "agent_screens"
 REGISTERED = tuple(adapter.id for adapter in adapters())
-ALL = (*REGISTERED, FakeAgentAdapter.id)
+ALL = (*REGISTERED, FakeAgentAdapter.id, GeminiShapedAdapter.id)
 
 #: Stands, in :data:`EXPECTED_PERMISSIONS`, for the adapter's own ``store_access`` for the
 #: intent's write scope, the aisquare home it is given being the test's.
@@ -103,6 +106,10 @@ EXPECTED_PERMISSIONS: dict[str, dict[str, list[str]]] = {
     "fake-agent": {
         "coder": ["--write", "workspace", "--approvals", "auto", STORE],
         "reviewer": ["--write", "read_only", "--approvals", "auto", STORE],
+    },
+    "gemini-shaped": {
+        "coder": ["--approval-mode", "auto_edit"],
+        "reviewer": ["--approval-mode", "plan"],
     },
 }
 
@@ -172,6 +179,17 @@ def fake_agent(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeAgentAdapter]:
         yield fake
     finally:
         unregister(fake.id)
+
+
+@pytest.fixture(autouse=True)
+def gemini_shaped(monkeypatch: pytest.MonkeyPatch) -> Iterator[GeminiShapedAdapter]:
+    monkeypatch.delenv(GeminiShapedAdapter.home_env, raising=False)
+    shaped = GeminiShapedAdapter()
+    register(shaped)
+    try:
+        yield shaped
+    finally:
+        unregister(shaped.id)
 
 
 @pytest.fixture(params=ALL)
@@ -928,7 +946,7 @@ def test_a_slots_config_dir_holds_its_hooks_once_signed_in(
     adapter: AgentAdapter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``AgentAccounts.config_dir``: a slot's sign-in connects aisquare in the config dir the
-    agent reads there (Gemini CLI's would be ``<slot>/.gemini``), which a hook naming
+    agent reads there (Gemini-shaped's ``<slot>/.gemini``, not the slot), which a hook naming
     it (``--config-dir``) maps back to the slot."""
     slot = _accounts_or_skip(adapter, monkeypatch)
     account = accounts_core.create_account(adapter.id)

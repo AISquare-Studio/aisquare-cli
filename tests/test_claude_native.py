@@ -32,6 +32,7 @@ from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
 from aisquare.models import ProjectInfo
 from aisquare.services import fleet, team
+from tests.conftest import _PRIVATE_FLEETS
 
 #: Not a key: approved in the config dir, so Claude Code asks nothing about it, and
 #: never sent anywhere that answers (``ANTHROPIC_BASE_URL`` below).
@@ -77,13 +78,22 @@ class Native:
         return thread
 
 
+def _inside(entry: str, folder: Path) -> bool:
+    return bool(entry) and Path(entry).is_relative_to(folder)
+
+
 @pytest.fixture
 def native(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Native]:
     """A project whose folder Claude Code's account has not trusted, under a home and a
     config dir of their own, both removed after, and a tmux server killed after however
     far the test got (review r4 of #113, finding 15)."""
-    binary = shutil.which("claude")
+    # The installed Claude Code, not the suite's stand-in that 0.8.2's `no_real_fleet` puts
+    # first on PATH (conftest), and ahead of it, so the fleet's window starts this one.
+    path = os.environ.get("PATH", "").split(os.pathsep)
+    real = [entry for entry in path if not any(_inside(entry, own) for own in _PRIVATE_FLEETS)]
+    binary = shutil.which("claude", path=os.pathsep.join(real))
     assert binary, "AISQUARE_TEST_CLAUDE requires an installed Claude Code"
+    monkeypatch.setenv("PATH", os.pathsep.join([str(Path(binary).parent), *path]))
     outside = Path(tempfile.mkdtemp(prefix="asq-", dir="/var/tmp"))
     srv: TmuxServer | None = None
     try:

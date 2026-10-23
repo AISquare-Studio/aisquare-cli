@@ -1386,7 +1386,10 @@ config is bundled and regenerated (do not edit it): status line off,
 `remain-on-exit on` so a crashed agent's last screen stays readable, truecolor,
 extended keys on so shift+enter and friends reach Claude Code, mouse off (the
 UI owns the mouse), monitor-activity on. One server for every project; one
-session per project; one window per agent.
+session per project; one window per agent. Agents survive an update of aisquare:
+`aisquare launch` hands each pane to the agent's own program, so no aisquare
+code runs in a pane, and asq's ⬆ *Restart & update* reattaches them after it
+reopens, restarting any whose pane is gone ([Updating from asq](install.md#updating-from-asq)).
 
 **Each agent is asked of its own server.** A spawn records the socket its
 server says it listens on, and every fleet command — `fleet ls` and the UI,

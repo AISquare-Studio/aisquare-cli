@@ -259,6 +259,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the way: a private `_running` on a Textual screen shadows the message
   pump's own flag and silently leaves every button of the screen dead; the
   dialog's flag is `_spawning`.
+- **asq says when a newer aisquare is out, and updates in one confirmed click.**
+  At most once a day asq asks PyPI what `aisquare upgrade --check` asks it (at
+  start when the last answer is 24 hours old, and again each day while it
+  runs, off the UI thread). A newer release shows as `⬆ 0.8.3 · restart to
+  update` under *⚙ Settings*, until asq runs that version or a newer one, with
+  one toast the first time each release is found. The row opens a confirm
+  dialog with the live agent count; *Restart & update* hands the terminal to
+  `aisquare upgrade` the way Doctor's Update does, with no y/N, and asq reopens
+  by itself on the new version, in the view it had open. The fleet's tmux panes
+  and their sessions keep running; the agents alive at the press are recorded,
+  and any whose pane is gone after the reopen is restarted on its session
+  (`fleet restart`). The toast says `✓ aisquare 0.8.3 — 2 agents reattached`,
+  and names each restart and its reason. A failed install stays on screen with
+  "Press Enter to go back to asq", and the old version reopens. Homebrew, pip
+  and pipx installs get the row and a dialog with the command that updates
+  them; a checkout or an editable install is never checked. A failed lookup
+  (offline) is silent and tried again within the hour. Off with
+  `aisquare config set updates.check false` (`[updates] check`), or the
+  *check daily* switch in App settings. What it found lives in the store's
+  `ui_state`. `aisquare upgrade`, `--check`, `--reopen` and Doctor's Update
+  behave as before; the new `upgrade --one-click` and `ui --after-update` are
+  hidden.
 
 ### Changed
 - The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33

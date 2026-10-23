@@ -5,7 +5,8 @@ with a disclosure, its name (the nickname, else the basename — renamed in plac
 chips (agents alive · 🔔 count), a ⋯ menu, and — when two projects share a name —
 the path as a dim subtitle; under it one ``AgentRow`` per fleet agent (role icon,
 label, state chip, exit status) and a spawn-agent row. Below the separator, one
-row, *⚙ Settings* (the Settings hub: App settings, Accounts, Doctor), and under it
+row, *⚙ Settings* (the Settings hub: App settings, Accounts, Doctor), under it the
+⬆ row while a newer aisquare is out (:func:`update_row_text`), and under that
 one dim status line (:func:`status_line_text`): the AISquare sign-in and the
 Claude accounts' headroom as two dots. A click on that line opens Accounts.
 
@@ -19,7 +20,7 @@ Two rules shape the code more than the layout does:
   mounts or unmounts a widget.
 - **Rows post messages; the app decides.** ``AddProject``, ``ProjectSelected``,
   ``AgentSelected``, ``SpawnAgent``, ``SettingsSelected``, ``AccountsSelected``,
-  ``RenameProject`` and ``OpenProjectMenu`` are the whole contract between this
+  ``UpdateSelected``, ``RenameProject`` and ``OpenProjectMenu`` are the whole contract between this
   pane and the shell (the Settings hub posts ``AppSettingsSelected``,
   ``AccountsSelected`` and ``DoctorSelected``). Nothing here opens a view or
   writes the store.
@@ -157,6 +158,10 @@ class SettingsSelected(Message):
 
 class AppSettingsSelected(Message):
     """The hub's *App settings*: the machine-wide settings page."""
+
+
+class UpdateSelected(Message):
+    """The ⬆ row: the dialog that updates aisquare to the release it offers, or says how."""
 
 
 class RenameProject(Message):
@@ -339,6 +344,13 @@ SETTINGS_KEY = "settings"
 SETTINGS_ICON = "\u2699\ufe0e"
 """⚙ in its text presentation (VS15): a monotone gear, never the coloured emoji."""
 
+UPDATE_KEY = "update"
+"""The ⬆ row's key: reachable from the keyboard, never the highlighted selection (it opens
+a dialog, not a page)."""
+
+UPDATE_ICON = "\u2b06\ufe0e"
+"""⬆ in its text presentation (VS15), as :data:`SETTINGS_ICON` is."""
+
 GREEN, YELLOW, ORANGE_RED, RED = "#3fb950", "#e6c200", "#ff5f00", "#dc143c"
 """The status line's dot colours, as truecolor: an ANSI name is the THEME's to paint.
 Textual paints ``yellow`` through the theme's ANSI palette — textual-dark's is an
@@ -418,6 +430,16 @@ def status_line_text(
     text.append("claude", style="dim")
     if headroom is not None and headroom.needs_login:
         text.append(" ⚠", style="yellow")
+    return text
+
+
+def update_row_text(version: str, *, runnable: bool = True) -> Text:
+    """``⬆ 0.8.3 · restart to update`` — the row under *⚙ Settings* while a newer release is
+    out. An install asq does not update itself (Homebrew, pip) is told how instead, so the
+    row says that: its dialog shows the command and no restart."""
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(f"{UPDATE_ICON} {version}", style=f"bold {GREEN}")
+    text.append(" · restart to update" if runnable else " · how to update", style="dim")
     return text
 
 
@@ -1170,6 +1192,32 @@ def doctor_badge(failing: int, warning: int) -> str:
     )
 
 
+class UpdateRow(Activatable):
+    """The ⬆ row under *⚙ Settings* (:func:`update_row_text`), shown while a newer aisquare is
+    out. Click or Enter → the update dialog; never the highlighted selection."""
+
+    DEFAULT_CSS = """
+    UpdateRow { display: none; }
+    UpdateRow.offered { display: block; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__(Text(""), id="update-row")
+        self.selection_key = UPDATE_KEY
+        self.version: str | None = None
+        """The release offered; ``None`` while none is."""
+
+    def message(self) -> Message:
+        return UpdateSelected()
+
+    def offer(self, version: str | None, *, runnable: bool = True) -> None:
+        """Show the row for ``version``; ``None`` takes it away."""
+        self.version = version
+        if version is not None:
+            self.update(update_row_text(version, runnable=runnable))
+        self.set_class(version is not None, "offered")
+
+
 class CaptainSection(Vertical):
     """The home-level heading above the projects: the captain's row (one per home, T2).
 
@@ -1242,7 +1290,8 @@ class StatusLine(Static):
 
 
 class OthersSection(Vertical):
-    """Everything that is not a project, under the separator: *⚙ Settings* and its status."""
+    """Everything that is not a project, under the separator: *⚙ Settings*, the ⬆ row while a
+    release is offered, and the status line."""
 
     DEFAULT_CSS = """
     OthersSection { height: auto; border-top: solid $primary; padding: 0 1; }
@@ -1250,6 +1299,7 @@ class OthersSection(Vertical):
 
     def compose(self) -> ComposeResult:
         yield SettingsRow()
+        yield UpdateRow()
         yield StatusLine(status_line_text(None, None), id="status-line")
 
 
@@ -1762,6 +1812,10 @@ class Sidebar(Vertical):
             self.session_usage = headroom.session_by_slot
             for row in self.query(AgentRow):
                 row.paint()
+
+    def show_update(self, version: str | None, *, runnable: bool = True) -> None:
+        """The ⬆ row for a newer release (``services.updates.check``); ``None`` hides it."""
+        self.query_one(UpdateRow).offer(version, runnable=runnable)
 
     def _paint_status(self) -> None:
         line = status_line_text(

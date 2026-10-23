@@ -98,6 +98,7 @@ from aisquare.cli.ui.sidebar import (
     Sidebar,
     SpawnAgent,
     StopAgent,
+    UpdateSelected,
     agent_name,
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
@@ -105,6 +106,7 @@ from aisquare.cli.ui.stop import StopAgentScreen
 from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.ticks import while_running
+from aisquare.cli.ui.update import CHECK_WORKER, PLAN_WORKER, REATTACH_WORKER, UpdateScreen
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, UsageRead, read_session
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
 from aisquare.cli.ui.views.app_settings import AppSettingsView
@@ -133,9 +135,11 @@ from aisquare.models import (
     ProjectInfo,
 )
 from aisquare.services import claude_accounts as accounts_service
-from aisquare.services import diagnostics, project_groups
+from aisquare.services import diagnostics, install_route, project_groups
 from aisquare.services import fleet as fleet_service
+from aisquare.services import lifecycle as lifecycle_service
 from aisquare.services import project as project_service
+from aisquare.services import updates as updates_service
 
 DoctorRunner = Callable[[], list[DoctorCheck]]
 """What the Doctor page runs: ``diagnostics.doctor`` in production, a stub in tests."""
@@ -146,6 +150,14 @@ AccountsReader = Callable[[], AccountsOverview]
 HeadroomReader = Callable[[Sequence[ClaudeAccount] | None], HeadroomSummary]
 """What the status line's Claude dot reads: ``claude_accounts.read_fleet_headroom`` (through
 the five-minute usage cache) in production, a stub in tests."""
+
+ReleaseCheck = Callable[[], updates_service.Offer | None]
+"""What the ⬆ row asks whether a newer aisquare is out: ``updates.check`` in production (PyPI
+at most once a day), a stub in tests."""
+
+UPDATE_HAND_OFF = ("upgrade", "--one-click")
+"""What the ⬆ dialog's *Restart & update* hands the terminal to, as Doctor's Update hands it
+``upgrade --reopen``: no question, and asq back at once on the new version (``--one-click``)."""
 
 _DoctorReport = tuple[Path | None, list[DoctorCheck]]
 """What the doctor worker hands back: the scope it ran for, and its checks."""
@@ -795,6 +807,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         headroom: HeadroomReader | None = accounts_service.read_fleet_headroom,
         headroom_seconds: float = HEADROOM_SECONDS,
         remote: RemoteController | None = None,
+        release_check: ReleaseCheck | None = updates_service.check,
+        after_update: bool = False,
     ) -> None:
         super().__init__()
         self._workers = self._worker_threads = _WorkerThreads(self)
@@ -818,6 +832,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.remote.call_back = self.call_later
         self.refresh_seconds = refresh_seconds
         self._doctor = doctor
+        self._release_check = release_check
+        self.release: updates_service.Offer | None = None
+        """The newer release the ⬆ row offers; ``None`` while none is (``check_release``)."""
+        self.after_update = after_update
+        """Opened by ``upgrade --one-click``: reattach the agents the press recorded."""
         self._accounts = accounts
         self.accounts_overview: AccountsOverview | None = None
         """The last Accounts frame that was read; ``None`` before the first or when disabled."""
@@ -932,6 +951,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # a restored Doctor page runs it itself, as opening it does.
         if not self._restore_selection():
             self.run_doctor()
+        # After the first frame, off the UI thread: the reopen's look at the agents the press
+        # recorded, and the release check, which asks PyPI at most once a day whatever the
+        # hourly ask (`services.updates`).
+        if self.after_update:
+            self._reattach()
+        if self._release_check is not None:
+            self.check_release()
+            self.set_interval(updates_service.ASK_EVERY_SECONDS, self.check_release)
         # wait=False here and below: a Remote that stops runs down on a thread of its own,
         # since stopping uvicorn and ngrok froze the fleet UI for seconds (r3 review of #243).
         self.remote.restore(wait=False)
@@ -1609,6 +1636,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.worker.name == HEADROOM_WORKER:
             self._headroom_read(event)
             return
+        if event.worker.name == CHECK_WORKER:
+            self._release_checked(event)
+            return
+        if event.worker.name == PLAN_WORKER:
+            self._update_planned(event)
+            return
+        if event.worker.name == REATTACH_WORKER:
+            self._reattached(event)
+            return
         if event.worker.name != _DOCTOR_WORKER:
             return
         if event.worker is not self._doctor_worker:
@@ -2227,6 +2263,150 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if from_keyboard:
             self.query_one("#settings-hub", SettingsHubView).focus_first()
 
+    # --- the ⬆ row: a newer aisquare, and the one-click update ------------------------------
+
+    def check_release(self) -> None:
+        """Ask, off the UI thread, whether a newer aisquare is out (``updates.check``): at the
+        start and every hour after. PyPI is asked only once the last answer is a day old, and
+        a lookup that failed is tried again on the next hour's ask. One at a time."""
+        check = self._release_check
+        if check is None or any(
+            worker.name == CHECK_WORKER and not worker.is_finished for worker in self.workers
+        ):
+            return
+        self.run_worker(
+            check, name=CHECK_WORKER, group=CHECK_WORKER, thread=True, exit_on_error=False
+        )
+
+    def _release_checked(self, event: Worker.StateChanged) -> None:
+        """Show the ⬆ row for the release the check found, or take it away; the first time a
+        release is found, one toast says so. A check that failed changes nothing, silently."""
+        if event.state is not WorkerState.SUCCESS:
+            return
+        offer = event.worker.result
+        if offer is not None and not isinstance(offer, updates_service.Offer):
+            return
+        self.release = offer
+        if offer is None:
+            self.sidebar.show_update(None)
+            return
+        self.sidebar.show_update(offer.version, runnable=offer.runnable)
+        if offer.announce:
+            how = "restarts asq to update" if offer.runnable else "says how to update this install"
+            self.notify(
+                f"aisquare {offer.version} is out (you run {offer.current}) — ⬆ in the "
+                f"sidebar {how}",
+                timeout=10,
+                markup=False,
+            )
+
+    def on_update_selected(self, event: UpdateSelected) -> None:
+        """The ⬆ row: read how this install updates, off the UI thread; the dialog opens on
+        the answer (:meth:`_update_planned`). Pressed again while an update's hand-over waits
+        for the reads running, it is Doctor's second press: past the wait, it calls it off."""
+        if self.hand_off is not None:
+            self.on_doctor_view_hand_off(DoctorView.HandOff(self.hand_off))
+            return
+        offer = self.release
+        if offer is None or any(
+            worker.name == PLAN_WORKER and not worker.is_finished for worker in self.workers
+        ):
+            return
+        known = install_route.LatestRelease(offer.version)
+        self.run_worker(
+            lambda: lifecycle_service.upgrade_plan(known_latest=known),
+            name=PLAN_WORKER,
+            group=PLAN_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _live_agents(self) -> list[FleetAgent]:
+        """Every agent alive in the frame on screen (``ALIVE_STATES``): the ones an update keeps."""
+        if self.snapshot is None:
+            return []
+        return [
+            status.agent
+            for statuses in self.snapshot.agents.values()
+            for status in statuses
+            if status.state in ALIVE_STATES
+        ]
+
+    def _update_planned(self, event: Worker.StateChanged) -> None:
+        """Open the update dialog on the plan read for it, or say why it could not be read."""
+        offer = self.release
+        if event.state is WorkerState.ERROR:
+            self.notify(
+                f"could not read how aisquare updates here: {event.worker.error}",
+                severity="error",
+                timeout=8,
+                markup=False,
+            )
+            return
+        plan = event.worker.result
+        if event.state is not WorkerState.SUCCESS or offer is None:
+            return
+        if not isinstance(plan, lifecycle_service.UpgradePlan):
+            return
+        self.push_screen(
+            UpdateScreen(plan, offer.version, len(self._live_agents())), self._update_answered
+        )
+
+    def _update_answered(self, confirmed: bool | None) -> None:
+        """*Restart & update*: write down the agents alive now, then hand the terminal over
+        as Doctor's Update does (:meth:`on_doctor_view_hand_off`). Without that record the
+        reopen could not restart an agent that went, so a store that refuses it refuses the
+        update. Cancel, Escape and Close change nothing."""
+        if not confirmed:
+            return
+        try:
+            updates_service.record_press(self._live_agents())
+        except Exception as exc:
+            self.notify(
+                f"could not write down the running agents ({exc}): nothing was updated",
+                severity="error",
+                timeout=8,
+                markup=False,
+            )
+            return
+        self.on_doctor_view_hand_off(DoctorView.HandOff(UPDATE_HAND_OFF))
+
+    def _reattach(self) -> None:
+        """Opened by the one-click update: look at the agents the press recorded, off the UI
+        thread, restarting any that is gone (``updates.after_update``)."""
+        self.run_worker(
+            updates_service.after_update,
+            name=REATTACH_WORKER,
+            group=REATTACH_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _reattached(self, event: Worker.StateChanged) -> None:
+        """Say what the reopen found of the agents the press kept, and show the restarts."""
+        if event.state is WorkerState.ERROR:
+            self.notify(
+                f"could not look at the agents the update kept: {event.worker.error}",
+                severity="error",
+                timeout=10,
+                markup=False,
+            )
+            return
+        outcome = event.worker.result
+        if event.state is not WorkerState.SUCCESS:
+            return
+        if not isinstance(outcome, updates_service.Reattached):
+            return
+        trouble = bool(outcome.failed) or not outcome.updated
+        self.notify(
+            outcome.toast(),
+            severity="warning" if trouble else "information",
+            timeout=12,
+            markup=False,
+        )
+        if outcome.restarted:
+            self.refresh_data()
+
     async def on_app_settings_selected(self, event: AppSettingsSelected) -> None:
         """The hub's *App settings*: the machine-wide settings, under *⚙ Settings*."""
         await self._show("app-settings", lambda: AppSettingsView(id="app-settings"))
@@ -2563,6 +2743,7 @@ def _writing_workers() -> dict[str, str]:
         accounts.ARRANGE_WORKER: "an account change",
         accounts.RENAME_WORKER: "an account's rename",
         PROJECT_REMOVE_WORKER: "a project's removal",
+        REATTACH_WORKER: "the update's restart of the agents it kept",
     }
 
 
@@ -2589,6 +2770,8 @@ def _waited_reads() -> dict[str, str]:
     return {
         _DOCTOR_WORKER: "the doctor's checks",
         FLEET_WORKER: "the sidebar's read of the fleet",
+        CHECK_WORKER: "the release check",
+        PLAN_WORKER: "how aisquare updates here",
         ACCOUNTS_WORKER: "the accounts' read",
         HEADROOM_WORKER: "the accounts' headroom",
         doctor.ROUTE_WORKER: "how aisquare was installed",
@@ -2639,6 +2822,10 @@ REMOTE_QUIT_QUIET_SECONDS = 0.5
 _HANDED_OVER = {"upgrade": "Update", "uninstall": "Uninstall"}
 """The Doctor's button for each command it hands over (``doctor.HAND_OFFS``)."""
 
+_ASQS_OWN_FLAGS = frozenset({"--reopen", "--one-click"})
+"""The hidden flags asq hands over with, to open it again afterwards: never in a command
+a person is told to type."""
+
 
 def _hand_off_undone(hand_off: tuple[str, ...]) -> str:
     """What a Ctrl-C in the quit's waits says of the hand-over it ends: that the Update or
@@ -2646,13 +2833,14 @@ def _hand_off_undone(hand_off: tuple[str, ...]) -> str:
 
     The Ctrl-C ends the process at once (``remote_server._remote_quit_now``), and said
     nothing of it: a user who pressed it to hurry the upgrade along could not tell that
-    ``aisquare upgrade`` never ran (round 4 of #259). ``--reopen`` is asq's own, to open it
-    again once the command is done, and not asked of a command typed in a shell.
+    ``aisquare upgrade`` never ran (round 4 of #259). ``--reopen`` and ``--one-click`` are
+    asq's own, to open it again once the command is done, and not asked of a command typed
+    in a shell.
     """
     from aisquare.core import selfcli
     from aisquare.services import install_route
 
-    args = [arg for arg in hand_off if arg != "--reopen"]
+    args = [arg for arg in hand_off if arg not in _ASQS_OWN_FLAGS]
     button = _HANDED_OVER.get(args[0], args[0]) if args else "the hand-over"
     command = install_route.command_line(["aisquare", *selfcli.global_flags(), *args])
     return f"⚠ {button} did not run: asq quit at the Ctrl-C — `{command}` runs it"

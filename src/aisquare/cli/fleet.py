@@ -1288,7 +1288,17 @@ def interactive_terminal() -> bool:
     return not_interactive_reason() is None
 
 
-def ui() -> None:
+def ui(
+    after_update: Annotated[
+        bool,
+        typer.Option(
+            "--after-update",
+            hidden=True,
+            help="Reattach the agents asq's ⬆ Restart & update recorded, restarting any "
+            "whose pane is gone (what `upgrade --one-click` reopens asq with).",
+        ),
+    ] = False,
+) -> None:
     """Open the fleet UI — every project, agent and session in one view."""
     if get_state().json_output:
         fail(
@@ -1307,4 +1317,4 @@ def ui() -> None:
         )
     from aisquare.cli.ui.app import run_ui  # lazy: textual is heavy and only the UI needs it
 
-    run_ui()
+    run_ui(after_update=after_update)

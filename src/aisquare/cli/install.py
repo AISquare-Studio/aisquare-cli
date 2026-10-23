@@ -273,7 +273,12 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         _say(f"· {note}")
 
 
-def _reopen(reopen: bool) -> None:
+#: What ``upgrade --one-click`` opens asq as: the asq that reattaches the agents the press
+#: recorded (``services.updates``), and says how that went.
+ONE_CLICK_REOPEN = ("ui", "--after-update")
+
+
+def _reopen(reopen: bool, *, one_click: bool = False, failed: bool = False) -> None:
     """Hand the terminal back to asq (``--reopen``: what asq's Update and Uninstall run).
 
     Only at a terminal, never under ``--json``, and only where the caller says
@@ -282,14 +287,20 @@ def _reopen(reopen: bool) -> None:
     the notes) would vanish unread. Ctrl-C or a closed stdin stays here. The asq
     that opens is a new process of THIS install, so after an upgrade it is the
     version just installed.
+
+    ``one_click`` is asq's ⬆ *Restart & update* (``--one-click``): asq opens at once, as
+    :data:`ONE_CLICK_REOPEN`, its toast the account of the run. Only a run that ``failed``
+    waits for Enter, so the failure is read first, and it opens asq all the same: the
+    version that was installed, whose agents were never touched.
     """
     if not reopen or get_state().json_output or not _stdin_is_a_terminal():
         return
-    try:
-        input("Press Enter to go back to asq ")
-    except (EOFError, KeyboardInterrupt):
-        return
-    selfcli.exec_self(["ui"])
+    if not one_click or failed:
+        try:
+            input("Press Enter to go back to asq ")
+        except (EOFError, KeyboardInterrupt):
+            return
+    selfcli.exec_self(list(ONE_CLICK_REOPEN) if one_click else ["ui"])
 
 
 def _fallback(plan: lifecycle_service.UpgradePlan) -> str:
@@ -329,6 +340,15 @@ def upgrade(
             help="Open asq again afterwards, unless something failed (asq's Update button).",
         ),
     ] = False,
+    one_click: Annotated[
+        bool,
+        typer.Option(
+            "--one-click",
+            hidden=True,
+            help="Upgrade without asking and open asq again at once, after Enter when "
+            "something failed (asq's ⬆ Restart & update).",
+        ),
+    ] = False,
 ) -> None:
     """Upgrade aisquare in place, then re-connect its Claude Code hooks.
 
@@ -341,6 +361,27 @@ def upgrade(
     already runs is nothing to do on every install. Asks first at a terminal;
     off a terminal it is a dry run unless --yes.
     """
+    if not one_click:
+        _upgrade(check=check, version=version, yes=yes, dry_run=dry_run, reopen=reopen)
+        return
+    try:
+        _upgrade(check=False, version=version, yes=True, dry_run=False, reopen=True, one_click=True)
+    except typer.Exit as exc:
+        if exc.exit_code:
+            _reopen(True, one_click=True, failed=True)
+        raise
+
+
+def _upgrade(
+    *,
+    check: bool,
+    version: str | None,
+    yes: bool,
+    dry_run: bool,
+    reopen: bool,
+    one_click: bool = False,
+) -> None:
+    """:func:`upgrade`, its flags read. ``one_click`` reopens asq at once on success."""
     json_output = get_state().json_output
     try:
         plan = lifecycle_service.upgrade_plan(version, check=check)
@@ -392,7 +433,7 @@ def upgrade(
                 f"aisquare {plan.current} is up to date (PyPI's latest is "
                 f"{plan.latest_version}) — nothing to do"
             )
-        _reopen(reopen)
+        _reopen(reopen, one_click=one_click)
         return
     if dry_run or not yes:
         _emit_plan(plan)
@@ -413,7 +454,7 @@ def upgrade(
         )
         if not typer.confirm(f"{move}{during}?", default=False):
             _say("nothing changed")
-            _reopen(reopen)
+            _reopen(reopen, one_click=one_click)
             return
     elif not json_output:
         _fleet_lines(plan)  # --yes skips the plan, not what it costs the fleet
@@ -452,7 +493,7 @@ def upgrade(
     _emit_report(report)
     if any(not hook.ok for hook in report.hooks):
         raise typer.Exit(1)
-    _reopen(reopen)
+    _reopen(reopen, one_click=one_click)
 
 
 # --- uninstall ---------------------------------------------------------------------------

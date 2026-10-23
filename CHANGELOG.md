@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`aisquare ui --project <ref>` and `--group <name>`** (both repeatable) list only
+  those projects for the session, plus the captain's section when it is on; a name
+  that matches nothing is refused before the app starts (#83).
+- **`[fleet] pane_clipboard = "off" | "on"`.** On, a program in an agent's pane may
+  set your clipboard with OSC 52: tmux keeps it as a paste buffer and hands it to the
+  terminal `fleet attach` runs in (#101, which measured tmux dropping it). Off, the
+  default, keeps any program a pane runs from writing your clipboard. Claude Code's own
+  copies reach tmux's paste buffer either way. Applies to a server started after the
+  change.
+
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in
@@ -261,6 +271,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dialog's flag is `_spawning`.
 
 ### Changed
+
+- **`asq`'s tick costs what its agents cost, not what its project list costs** (#83).
+  Every two seconds the sidebar read every listed project: a store session each, and
+  two tmux processes each, whether it had an agent or not. It now reads them all in
+  one store session, asks each tmux server once (`list-panes -a`), and skips a project
+  with no live agent and none that ended in the last day, and the members of a
+  collapsed group, whose header counts their live agents instead. A card whose agents
+  did not change is not repainted. With 50 listed projects, 10 of them with 3 agents:
+  51 store sessions and 20 tmux processes per read became 1 and 1, the read ~200 ms to
+  ~11 ms, and the UI thread's paint ~15 ms to ~4–7 ms (measured on one Mac).
+- **The fleet's tmux server turns the mouse on** (#100), so the wheel scrolls Claude
+  Code in `fleet attach`. A plain drag there is tmux's selection now; hold Shift
+  (Option in macOS Terminal and iTerm2) to select in your own terminal. `asq` is
+  unaffected: it sends mouse reports straight to the pane. Applies to a server started
+  after the upgrade.
 - The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
   adds the two persona columns, `team_session.persona` (the persona a session was
   launched as) and `fleet_agent.persona` (the one an agent was spawned with or given

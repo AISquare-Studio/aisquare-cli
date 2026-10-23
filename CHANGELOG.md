@@ -392,13 +392,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A sidebar agent row is drawn at its width from its first frame.** It was
   first drawn at full width and cut at its end, the persona badge or the session
   figure behind a long label, until it repainted.
-- **The captain says yes to an agent's prompt only on the owner's words.** Its
-  `press` with a key that can approve (yes, the yes digit, Enter) and its `paste`
-  with `submit` took no confirmation, so text read off a pane could have the
-  captain approve a command nobody asked for; they now read the owner's words as
-  `stop` and `restart` do, naming the agent, its role or its project, or a yes to
-  the captain's own question. And a `paste` is refused while a prompt shows on the
-  pane, as `tell` is: its Enter picked the highlighted "1. Yes".
 - **One bad row no longer empties the captain's attention queue.** A row the
   running version cannot read (a newer kind after a downgrade, a hand edit), a byte
   that is not UTF-8 or a bad cursor made the whole `queue.json` read as empty, and
@@ -421,6 +414,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stopped it and then refused to start it again. They now refuse first, and
   nothing is stopped. Off, a declared `captain` in the aisquare home restarts like
   any other role.
+- **The captain's view says a failed restart once,** and reads its bar only while
+  it is on screen. It ran the agent view's own handlers a second time, so a
+  restart that failed was said twice, and its one-second read of the captain's
+  state went on behind every other view.
+- **The Spawn dialog keeps the label `captain` for the captain while it is on,**
+  as the fleet does: a coder labelled `captain` no longer gets an enabled Spawn
+  that the fleet then refuses, a declared `captain` role shows the label it sends,
+  and the dialog keeps the switch it opened with. `aisquare captain` no longer
+  attaches to a declared `captain` role spawned into the home while it was off.
 - **`aisquare persona` and the Personas tab read the project layer spawn and
   launch read.** They asked git for it, so a project that is not a git repository
   (a folder marked with `.aisquare`) listed none of the project personas its spawns

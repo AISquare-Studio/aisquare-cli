@@ -370,7 +370,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._fleet = fleet_service.settings()
         self._git = fleet_service.is_git_project(project.root)
         self._role = role or "coder"
-        self._captain = experimental.captain_role(self._role)
+        self._captain_on = experimental.captain_enabled()
+        """The switch as this dialog read it, once: every captain rule here asks this, so a
+        flag flipped while the dialog is open never mixes the two (review of #240, R2-m5)."""
+        self._captain = self._captain_role(self._role)
         """Started through ``brain.start``, its role, label, task and args fixed (T4)."""
         roles = role_choices(_bound_roles())
         self._roles = roles if self._role in roles else [*roles, self._role]
@@ -659,6 +662,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             return LABEL_RULE
         if label == fleet_service.MANAGER_LABEL:
             return f"the label {fleet_service.MANAGER_LABEL!r} is reserved for the manager role"
+        if label == fleet_service.CAPTAIN_LABEL and self._captain_on:
+            # fleet._fixed_label's on-only reservation: Spawn enabled, then the fleet refused.
+            return f"the label {fleet_service.CAPTAIN_LABEL!r} is reserved for the captain"
         return None
 
     def _validate(self) -> bool:
@@ -699,20 +705,29 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         value = self.query_one("#spawn-persona", Select).value
         return value if isinstance(value, str) else NO_PERSONA
 
-    def _label_fixed(self) -> bool:
-        """Whether the role runs under one label only: the manager's, and the captain's while
-        it is on (``fleet._fixed_label``); off, ``captain`` takes a label like any role."""
-        return self._role == "manager" or experimental.captain_role(self._role)
+    def _captain_role(self, role: str) -> bool:
+        """``experimental.captain_role`` on the switch as this dialog read it."""
+        return role == fleet_service.CAPTAIN_ROLE and self._captain_on
+
+    def _label_fixed(self, role: str | None = None) -> bool:
+        """Whether ``role`` (the current one by default) runs under one label only: the
+        manager's, and the captain's while it is on (``fleet._fixed_label``); off,
+        ``captain`` takes a label like any role."""
+        role = self._role if role is None else role
+        return role == "manager" or self._captain_role(role)
 
     def _relabel(self, old_role: str) -> None:
         """Re-prefill the label for the current role and task — unless the user changed it."""
         if self._take_over():
             return  # a take-over keeps its source's label (_apply_handoff)
         label = self.query_one("#spawn-label", Input)
-        if old_role != "manager":
+        # A fixed label (the manager's, the captain's) is never the user's to keep, and a
+        # locked field shows what is sent: keyed on "manager" alone, the captain's showed a
+        # typed label it never sent (review of #240, R2-m5).
+        if not self._label_fixed(old_role):
             self._kept_label = label.value if label.value != self._prefill else None
         self._prefill = self._label_for(self._role, self._task_value())
-        if self._role == "manager" or self._kept_label is None:
+        if self._label_fixed() or self._kept_label is None:
             label.value = self._prefill
         else:
             label.value = self._kept_label

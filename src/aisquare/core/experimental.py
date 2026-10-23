@@ -53,7 +53,7 @@ def captain_enabled() -> bool:
     if override:
         return override in _ON_VALUES
     try:
-        return load_config().experimental.captain
+        return load_config(copy=False).experimental.captain  # a read, never a change (R2-m4)
     except Exception:  # an unreadable config is no opt-in
         return False
 

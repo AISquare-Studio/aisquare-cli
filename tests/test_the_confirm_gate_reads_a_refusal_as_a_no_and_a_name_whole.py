@@ -79,8 +79,6 @@ def test_the_refusal_vocabulary_is_the_owners_list() -> None:
         "stop": ("stop", "force stop"),
         "restart": ("restart",),
         "spawn": ("spawn",),
-        "press": ("press", "approve", "answer"),
-        "paste": ("send", "submit", "paste"),
     }
     assert (words.KEEPS, words.KEEP_REACH) == (("leave", "keep"), 2)
     assert set(words.NO_WORDS) < set(words.NEGATIVES), "every no that begins is a no alone"

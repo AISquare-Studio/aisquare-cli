@@ -988,6 +988,27 @@ def typed_root(path: Path | None) -> Path:
         raise NotAFolder(f"{start} cannot be looked at ({exc.strerror or exc})") from exc
 
 
+HOME_WARNING = (
+    "this folder is aisquare's own home: it holds aisquare's settings, the fleet database "
+    "and every Claude account's login data, so agents working here can read and change them"
+)
+"""What adding the aisquare home as a project says, once (the owner's decision D5)."""
+
+
+def onboard_on_purpose(store: ContextStore, project: ProjectInfo) -> tuple[ProjectInfo, str | None]:
+    """The owner's own "add this folder" (``init``, ``project onboard``): the project, and
+    :data:`HOME_WARNING` when this made the aisquare home a project, else ``None``.
+
+    The home stays hidden by default; only this adds it (D5), and it warns rather than
+    refuses. Said when the home BECOMES a project, so ``init``, which onboards and then
+    runs ``project onboard``'s steps, says it once.
+    """
+    before = store.get_project(project.id)
+    added = store.onboard_project(project, explicit=True)
+    became = is_the_home(project.root) and (before is None or before.onboarded_at is None)
+    return added, HOME_WARNING if became else None
+
+
 def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
     """Pack the codebase into a snapshot and seed facts from ecosystem markers.
 
@@ -1001,7 +1022,7 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
     facts = [fact for marker, fact in _ECOSYSTEM_MARKERS if (root / marker).exists()]
     seeded: list[ContextEntry] = []
     with store_session() as store:
-        store.onboard_project(project)  # the deliberate add (#139)
+        _, warning = onboard_on_purpose(store, project)  # the deliberate add (#139)
         project_entries = store.entries("project", project_id=project.id)
         already_onboarded = any(entry.source == "onboard" for entry in project_entries)
         if not (already_onboarded and not refresh):
@@ -1013,7 +1034,7 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
                     store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
                 )
     snapshot, note = _ensure_snapshot(project, refresh=refresh)
-    return OnboardReport(seeded=seeded, snapshot=snapshot, snapshot_note=note)
+    return OnboardReport(seeded=seeded, snapshot=snapshot, snapshot_note=note, warning=warning)
 
 
 def snapshot_settings() -> SnapshotSettings:

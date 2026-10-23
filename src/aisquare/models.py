@@ -807,6 +807,9 @@ class OnboardReport(BaseModel):
     pack failed and why. ``None`` when a pack was made or reused. Set beside a
     ``snapshot``, it is a ``--refresh`` that failed: that is the last pack, kept,
     and agents still get it."""
+    warning: str | None = None
+    """``project_service.HOME_WARNING`` when this onboarding made the aisquare home a
+    project (D5), said once; else ``None``."""
 
 
 class ProjectForgetReport(BaseModel):

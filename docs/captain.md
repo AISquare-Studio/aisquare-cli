@@ -9,7 +9,8 @@ work, and says every refusal as it came.
 Three ideas carry the feature:
 
 - **One captain, on the home board.** The captain lives on the project row for
-  `$AISQUARE_HOME` (captured, never onboarded, so it never joins your projects),
+  `$AISQUARE_HOME` (captured, not onboarded, so it joins your projects only if
+  you add it yourself),
   runs from `$AISQUARE_HOME/captain/brain`, and has no tool but its own
   Actions server. `aisquare captain` starts it or attaches to it.
 - **Every effect is a tool call with a receipt.** The captain's hands are the
@@ -50,9 +51,14 @@ The captain ships **off**. While it is off:
   capture off, it registers nothing and is briefed on no board.
 - `aisquare doctor` shows one ok row, `captain: off (experimental)`.
 
-Whatever the switch says, the home's own row is never added as a project, and
-`aisquare project prune` and doctor's captured row leave it alone: it is the
-captain's home board.
+Whatever the switch says, the home is hidden by default: nothing adds its own row
+as a project by itself, and `aisquare project prune` and doctor's captured row
+leave it alone: it is the captain's home board. You can add it on purpose with
+`aisquare init` or `aisquare project onboard` there, or `+` in asq. It then has
+its own card, which leaves out the captain's row (the captain stays in its own
+section), and the add warns once that this folder holds aisquare's settings, the
+fleet database and every Claude account's login data, which agents working there
+can read and change. Removing it from the fleet hides it again.
 
 Turn it on for this home:
 

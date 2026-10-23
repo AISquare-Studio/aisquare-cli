@@ -63,9 +63,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `aisquare doctor` shows one ok row, `captain: off (experimental)`.
 
   On, the captain is exactly as above. asq reads the switch once, when it starts, and
-  each command above reads it when it runs. Whatever it says, the home's own row is
-  never added as a project, and `project prune` and doctor's captured row leave it
-  alone (Fixed, below). Every other role, fleet row and board, and the store
+  each command above reads it when it runs. Whatever it says, the aisquare home is
+  hidden by default: no capture adds it as a project, and `project prune` and
+  doctor's captured row leave it alone (Fixed, below). Adding it on purpose
+  (`aisquare init` or `aisquare project onboard` there, or `+` in asq) makes it a
+  project with its own card, which never shows the captain's row; it warns once
+  that the folder holds aisquare's settings, the fleet database and every Claude
+  account's login data, which agents working there can read and change. Removing
+  it from the fleet hides it again. Every other role, fleet row and board, and the store
   (schema v33), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line

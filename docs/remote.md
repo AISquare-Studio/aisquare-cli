@@ -71,7 +71,20 @@ uses it for the links in notifications.
 
 ## Start
 
-**From the fleet UI.** Run `aisquare ui` and press `R`. Switch Remote on: the
+**From the fleet UI's Settings.** Run `aisquare ui` and open *⚙ Settings*: its
+*Remote control* section has *Turn on remote control*. If something Remote needs
+is missing, a checklist comes first, each line with its command and a Copy
+button: the remote extra (the install line above), ngrok, and an ngrok authtoken
+(`ngrok config add-authtoken <token>`). Without the extra nothing can start; with
+it, *Turn on anyway* serves this machine until ngrok is there. On, the section
+shows the link, copies it by itself once ngrok's link arrives (a toast says so),
+and shows a Copy button, the QR code, the passphrase and *Turn off*. *Advanced*,
+folded until clicked, has the rest of the panel's controls: a new passphrase,
+the write switch, auto-off and the connected devices with Revoke. It is the same
+Remote as the `R` panel's below, and while it is on the sidebar shows
+`📡 remote · N devices`, which opens the panel.
+
+**From the fleet UI's `R` panel.** Press `R` (the footer shows it). Switch Remote on: the
 panel starts the server and ngrok, shows the link, a QR code and the passphrase,
 the write switch, the auto-off timer (30, 60 or 120 minutes, or Never) and the
 devices that have unlocked. Scan the QR code with the phone; until ngrok is up

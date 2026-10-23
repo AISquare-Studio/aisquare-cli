@@ -10,8 +10,8 @@ and you are typing into the session itself.
 Three ideas carry the whole feature:
 
 - **One view.** Left: a navigator — `Fleet ▸ projects ▸ agents`, then under a
-  line *⚙ Settings* (App settings, Accounts, Doctor, and *Fleet*'s *Restart all…*
-  and *Stop all…*) with a dim status line: the
+  line *⚙ Settings* (App settings, Accounts, Doctor, *Fleet*'s *Restart all…*
+  and *Stop all…*, *Remote control* and *Captain*) with a dim status line: the
   AISquare sign-in and the Claude accounts' headroom as two dots (`?` explains
   the colours; a click opens Accounts). Right: whatever you clicked — onboarding
   for a new directory, a project's manager, an agent's live session, the board,
@@ -726,9 +726,12 @@ The app — what bare `asq` runs. Explicit so a script or alias can reach it, an
 so `aisquare ui --help` exists. Without an interactive terminal it refuses with
 the reason (`not_a_tty`) rather than starting a full-screen app into a pipe.
 
-Press `R` for Remote control: the fleet on your phone through your own ngrok
-tunnel, with the link, a QR code and the passphrase in one panel — see
-[Phone control](remote.md).
+*⚙ Settings ▸ Remote control* turns Remote on: the fleet on your phone through
+your own ngrok tunnel, with the link, a QR code and the passphrase, and a checklist
+first when ngrok or the remote extra is missing. `R` opens the same Remote in one
+panel — see [Phone control](remote.md). *⚙ Settings ▸ Captain* switches the
+experimental captain on and off with no restart; `AISQUARE_EXPERIMENTAL_CAPTAIN`,
+when set, wins over it ([docs/captain.md](captain.md)).
 
 ---
 

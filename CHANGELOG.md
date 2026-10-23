@@ -306,6 +306,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tmux as before. Polling is quicker too: typing no longer holds frames back
   until you stop, and an echo that takes longer than 50 ms no longer waits half a
   second to show.
+- Remote control is in `asq`'s *⚙ Settings* now, as well as behind `R`.
+  *Turn on remote control* starts it. If the remote extra, ngrok or an ngrok
+  authtoken is missing, a checklist comes first, each line with its command and
+  a Copy button. On, the section shows the link and copies it by itself once
+  ngrok's link arrives, and shows the QR code, the passphrase and *Turn off*.
+  The write switch, auto-off, a new passphrase and the connected devices sit
+  under a folded *Advanced*. It is the same Remote the `R` panel shows. The
+  footer shows `R remote` again (the sidebar's ↓ and ↑ share one entry,
+  `↓↑ move`, so it fits 80 columns), and while Remote is on the sidebar shows
+  `📡 remote · N devices`, which opens the panel.
+- The experimental captain has a box in `asq`'s *⚙ Settings ▸ Captain*. Ticking it
+  saves `experimental.captain` and shows the ★ and the Captain section at once,
+  with no restart; unticking hides them. While `AISQUARE_EXPERIMENTAL_CAPTAIN` is
+  set, it wins over the setting: the box shows the state it forces, greyed, with a
+  line saying why.
+- With no captain running, the Captain section offers *▶ Start captain*, which
+  opens the Spawn dialog with the captain chosen, as the ★ does. It used to show
+  the command to type instead.
+- The captain's view in `asq` has a one-line message box. Enter types the line into
+  the captain's pane the way *What's up* does and clears the box. If the send is
+  refused, a notice says why and the line comes back.
 
 ### Fixed
 

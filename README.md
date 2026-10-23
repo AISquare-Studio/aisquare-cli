@@ -91,9 +91,10 @@ board. Every effect is one of its 24 tools, each leaving one audit event with
 your words; `stop`, `spawn` and `restart` happen only when your words name what
 they act on, and a refusal is said, never faked.
 
-It ships **off**. Turn it on once, or for one shell with
-`AISQUARE_EXPERIMENTAL_CAPTAIN=1`; while it is off, `aisquare captain` refuses
-with one line saying so, and `asq` shows no captain:
+It ships **off**. Turn it on in `asq` under *⚙ Settings ▸ Captain*, at once and
+with no restart, or once from a shell, or for one shell with
+`AISQUARE_EXPERIMENTAL_CAPTAIN=1`, which wins over the setting; while it is off,
+`aisquare captain` refuses with one line saying so, and `asq` shows no captain:
 
 ```sh
 aisquare config set experimental.captain true

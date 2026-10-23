@@ -714,6 +714,30 @@ def test_the_idle_clock_stands_still_while_a_tool_call_runs() -> None:
     assert idle.idle_for() == 0, "one of two calls is still running"
 
 
+def test_a_hung_tool_call_keeps_the_server_awake_only_up_to_its_cap() -> None:
+    """Review of #240, R1-F4: plain ``aisquare serve --stdio`` too. A call that never returns,
+    with an orphaned client (pipe open, no EOF), held idle_for() at 0 for ever; main's
+    watchdog closed the process after --close-after."""
+    tick = Tick()
+    idle = mcp_server.IdleClock(tick)
+    hung = idle.started()
+    tick.now += mcp_server.CALL_CAP_S - 1
+    assert idle.idle_for() == 0, "a long real call is still activity"
+    tick.now += 1 + 300
+    assert idle.idle_for() == 300, "past its cap the deadline runs"
+    late = idle.started()
+    assert idle.idle_for() == 0, "a fresh call alongside it is activity again"
+    idle.finished(late)
+    tick.now += 5
+    assert idle.idle_for() == 5 and idle.in_flight == 1
+    idle.finished(hung)
+    assert idle.in_flight == 0
+
+
+def test_the_cap_outlasts_the_longest_call_the_captain_makes() -> None:
+    assert actions.ASK_TIMEOUT_MAX + actions.UI_TIMEOUT_S < mcp_server.CALL_CAP_S
+
+
 def test_the_stdio_runner_counts_a_tool_call_in_flight_for_its_whole_run(
     projects: dict[str, ProjectInfo], monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -332,7 +332,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing, so a call longer than the deadline was killed mid-flight and its answer
   lost. The clock now stands still while a call runs and counts from the end of
   the last one; an abandoned server still closes itself. Found gating the captain's
-  Actions server (#217), which shares the runner.
+  Actions server (#217), which shares the runner. A call still running counts for
+  at most 15 minutes, so a hung one cannot keep an abandoned server alive.
 - **The documented-commands guard no longer fails the checkout that runs the
   fleet.** `test_the_document_list_has_not_gone_stale` walks the whole
   repository for markdown with commands in a fenced block, and a root checkout

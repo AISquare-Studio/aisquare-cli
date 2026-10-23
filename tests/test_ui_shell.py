@@ -3303,6 +3303,7 @@ class StopRecorder:
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         self.calls.append((project.id, label, force, agent_id))
         if self.refuse is not None:
@@ -3561,6 +3562,7 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         stopped.append(True)
         return fleet_service.StopReceipt(ended(live.agent), [])
@@ -3787,6 +3789,7 @@ def test_the_app_stays_live_while_a_stop_is_in_flight(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         entered.set()
         if not release.wait(10):
@@ -3837,6 +3840,7 @@ def test_a_refusal_re_reads_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         raise fleet_service.FleetError("tmux did not answer, so its row is left live")
 

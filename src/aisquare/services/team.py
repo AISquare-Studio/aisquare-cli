@@ -26,13 +26,19 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, Final, NamedTuple
+from typing import Any, Final, Literal, NamedTuple
 
 from aisquare.core import brain, experimental, harness, insights, orchestrator, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
-from aisquare.core.store import AmbiguousIdError, ContextStore, store_session, unmet_needs
+from aisquare.core.store import (
+    AmbiguousIdError,
+    ContextStore,
+    Relevance,
+    store_session,
+    unmet_needs,
+)
 from aisquare.core.tmux import TmuxError
 from aisquare.models import (
     CLOSED_STATUSES,
@@ -123,13 +129,13 @@ def base_role(role: str) -> str:
     return harness.base_role(role)
 
 
-#: The board events worth waking a manager for: a sub-agent's verdict or hand-off
+#: The board kinds worth waking a manager for: a sub-agent's verdict or hand-off
 #: (``task_review``, ``task_done``), a task that needs the manager back
-#: (``task_blocked``, ``task_reopened``), a result or a question on the board, and
-#: an agent that went away (``agent_exited`` is the fleet's, emitted wherever a
-#: fleet row ends: ``fleet.stop`` — and so ``fleet shutdown`` — and ``fleet.reap``).
-#: A plain note, a decision or a claim is news, not a decision the manager has to
-#: make — it arrives with the next prompt's delta like everyone else's.
+#: (``task_blocked``, ``task_reopened``), a result or a question on the board, and an
+#: agent parked on a usage limit (#146: switch it, or wait). An exit is not a kind that
+#: wakes: :func:`wake_class` wakes for one that failed or left a claim open (P1 WS-2,
+#: #279). A plain note, a decision, a claim, a clean exit, a switch or a restart is news,
+#: not a decision the manager has to make — it arrives with the next wake or prompt delta.
 MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
     {
         "task_review",
@@ -138,7 +144,6 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
         "task_reopened",
         "result",
         "question",
-        "agent_exited",
         # #146: an agent parked on a usage limit needs a decision (switch it, or
         # wait) — unless the automatic hand-over is moving it, which is its own kind,
         # `LIMITED_HANDING_OVER`, and no wake (#277). A hand-over that moved one is
@@ -162,6 +167,8 @@ LIMITED_HANDING_OVER = "limited_handing_over"
 LIMITED_KINDS: frozenset[str] = frozenset({"limited", LIMITED_HANDING_OVER})
 #: What that line says of the hand-over.
 HANDING_OVER_SAID = "moving it to another account automatically"
+
+WakeClass = Literal["own", "wake", "info"]
 
 #: Event kinds written for the HUMAN board only: the 🔔 transition and a Claude
 #: Code notification's feed line (#153). They never reach a teammate's prompt
@@ -204,19 +211,45 @@ def _addressed_to_manager(to_role: str | None) -> bool:
     return (to_role or "").strip().lower() == MANAGER_ROLE
 
 
-def _wakes_manager(event: TeamEvent) -> bool:
-    """Whether one board event is something the manager has to come back for (§7.3).
+def wake_class(event: TeamEvent, me: TeamSession) -> WakeClass:
+    """What one board event is to the manager ``me`` (P1 WS-2, #279; fleet-tui §7.3).
 
-    Two ways in. Its KIND is one of :data:`MANAGER_WAKE_KINDS` — a verdict, a
-    hand-off, a result, a question, an exit. Or it is ADDRESSED to the manager:
-    §7.3 path 2 counts ``note --to manager`` as wake-worthy, and a mailbox that
-    delivers only while the recipient happens to be idle is not a mailbox. The
-    same note written while the manager is WORKING has no other path — path 2
-    refuses a working manager by design, and 'note' is not a wake kind — so
-    without this it would sit past the cursor until an unrelated event arrived.
-    Unaddressed news (a plain note, a decision, a claim) still waits its turn.
+    - ``own``: ``me`` caused it (its ``actor``): its own ``fleet stop``, written under the
+      stopped agent's session. Never shown to it, and left out in the query
+      (``exclude_actor``), as what it wrote is (``exclude_session``).
+    - ``wake``: a kind of :data:`MANAGER_WAKE_KINDS`; or addressed to the manager (§7.3
+      path 2: a mailbox that delivers only while the recipient is idle is not one); or an
+      exit that failed (a non-zero status, or none: a kill or a loss) or that left a claim
+      open (``meta.released``, owner Q4: an orphaned task).
+    - ``info``: everything else — a clean exit, a switch, a restart, a claim, a note, a
+      decision. It stays past the cursor and rides along with the next wake or delta.
+
+    Every Stop's wake-up, its deferral, and the nudges of an exit read this one rule, so
+    none of them disagrees about what is worth a manager's turn: each such turn re-sends
+    the manager's whole context to act on nothing.
     """
-    return event.kind in MANAGER_WAKE_KINDS or _addressed_to_manager(event.to_role)
+    if event.actor is not None and event.actor == me.id:
+        return "own"
+    if event.kind in MANAGER_WAKE_KINDS or _addressed_to_manager(event.to_role):
+        return "wake"
+    if event.kind == "agent_exited" and exit_wakes(event.meta):
+        return "wake"
+    return "info"
+
+
+def exit_wakes(meta: Mapping[str, object] | None) -> bool:
+    """Whether an ``agent_exited`` with these details wakes a manager (:func:`wake_class`).
+
+    A failed exit (a non-zero status, or none: a kill or a loss), one that released an
+    open claim, or one with a reason beyond its status (``why``: a hand-over whose
+    replacement did not start) does. An exit from before the details (no ``meta``) does
+    too: nothing says it was clean."""
+    if meta is None:
+        return True
+    status = meta.get("status")
+    released = meta.get("released")
+    # A reason beyond its status (a hand-over whose replacement did not start) wakes too.
+    return status != 0 or (isinstance(released, int) and released > 0) or bool(meta.get("why"))
 
 
 class TeamDisabledError(RuntimeError):
@@ -391,6 +424,8 @@ def _emit(
     session_id: str | None = None,
     task_id: str | None = None,
     to_role: str | None = None,
+    actor: str | None = None,
+    meta: dict[str, object] | None = None,
 ) -> TeamEvent:
     """Write one board event — and, when configured, spool it for the gateway.
 
@@ -398,7 +433,8 @@ def _emit(
     here and not at each of the twenty call sites: an insight the board records
     but the gateway never hears about is exactly the gap #50 exists to close.
     It runs after the commit and cannot raise, so a full disk costs a span, not
-    a note.
+    a note. ``actor`` is who caused it when not its author (:attr:`TeamEvent.actor`),
+    ``meta`` its details (:attr:`TeamEvent.meta`).
     """
     stored = store.add_team_event(
         TeamEvent(
@@ -410,6 +446,8 @@ def _emit(
             task_id=task_id,
             to_role=to_role,
             created_at=_now(),
+            actor=actor,
+            meta=meta,
         )
     )
     insights.record_team_event(
@@ -1066,6 +1104,37 @@ def verify_receipt(
         roles = {s.id: s.role for s in store.team_sessions(board.id)}
         line = event_line(event, roles, store.task_numbers(board.id))
         return VerifyResult(event=event, board_id=board.id, board_name=board.name, line=line)
+
+
+@dataclass(frozen=True)
+class ShownEvent:
+    """One board event with everything around it (``aisquare team show``, P1 WS-2, #279)."""
+
+    event: TeamEvent | None
+    board_id: str
+    board_name: str
+    elsewhere: str | None = None
+    author: TeamSession | None = None
+    task: TeamTask | None = None
+
+
+def show_event(
+    receipt: str, *, session_ref: str | None = None, cwd: Path | None = None
+) -> ShownEvent:
+    """The event ``receipt`` names, in full: what an agent's one-line update points at.
+
+    Found as :func:`verify_receipt` finds it — a seq or an event id, on the caller's
+    board — and a receipt on another board is refused the same way, naming that board.
+    """
+    _require_enabled()
+    with store_session() as store:
+        found = verify_receipt(receipt, session_ref=session_ref, cwd=cwd)
+        event = found.event
+        if event is None:
+            return ShownEvent(None, found.board_id, found.board_name, found.elsewhere)
+        author = store.get_session(event.session_id) if event.session_id else None
+        task = store.get_task(event.task_id) if event.task_id else None
+        return ShownEvent(event, found.board_id, found.board_name, author=author, task=task)
 
 
 _SIGNAL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
@@ -1924,15 +1993,47 @@ def _heals(session: TeamSession, transcript_path: str | None) -> bool:
     return not Path(recorded).is_file() and Path(transcript_path).is_file()
 
 
-def _briefing_events(store: ContextStore, project_id: str) -> list[TeamEvent]:
+def _briefing_events(
+    store: ContextStore, project_id: str, session: TeamSession | None = None
+) -> list[TeamEvent]:
     """The recent updates an agent is briefed with: the board's last :data:`_BOARD_EVENTS`
     that are an agent's to read, :data:`HUMAN_BOARD_KINDS` left out in the query.
 
     Read unfiltered, the five were whatever came last — and after the owner had asked
     the captain about the board a few times, that was five audit lines carrying the
     owner's words, with the decisions and results pushed out (review of #240, finding 11).
+    ``session``'s board context (:func:`_board_reading`) applies: ``none`` reads none, so a
+    reviewer meant to judge a change cold is not briefed with the others' verdicts first.
     """
-    return store.recent_events(project_id, exclude_kinds=HUMAN_BOARD_KINDS, limit=_BOARD_EVENTS)
+    reads, relevant = (True, None) if session is None else _board_reading(store, session)
+    if not reads:
+        return []
+    return store.recent_events(
+        project_id, exclude_kinds=HUMAN_BOARD_KINDS, relevant=relevant, limit=_BOARD_EVENTS
+    )
+
+
+def _board_reading(store: ContextStore, session: TeamSession) -> tuple[bool, Relevance | None]:
+    """``(whether session reads the board's events at all, what it keeps of them)`` by its
+    board context (``AISQUARE_BOARD_CONTEXT``, P1 WS-2, #279).
+
+    ``all``: every event, as before. ``none``: none — no recent updates at start, an empty
+    delta with the cursor still moving; its assignment, tasks, protocol and cycle stay.
+    ``relevant``: events on the tasks it claimed or was assigned, those addressed to its
+    role or label, and decisions — chosen in the query, so forty others cannot hide one. A
+    manager reads everything, whatever the variable says: the board is its job.
+    """
+    context = orchestrator.board_context()
+    if context == "all" or session.role == MANAGER_ROLE:
+        return True, None
+    if context == "none":
+        return False, None
+    tasks = {t.id for t in store.team_tasks(session.project_id) if t.claimed_by == session.id}
+    named = _hook_named_row(store)
+    if named is not None and named.task_id:
+        tasks.add(named.task_id)
+    names = tuple(n for n in {session.role, session.label or ""} if n)
+    return True, Relevance(task_ids=tuple(sorted(tasks)), names=names)
 
 
 def hook_session_start(
@@ -2028,7 +2129,7 @@ def hook_session_start(
             project,
             store.team_sessions(project.id),
             store.team_tasks(project.id),
-            _briefing_events(store, project.id),
+            _briefing_events(store, project.id, session),
             me=session,
             assigned=assigned,
             briefing=True,
@@ -2103,7 +2204,7 @@ def hook_prompt_heartbeat(
                 project,
                 store.team_sessions(project.id),
                 store.team_tasks(project.id),
-                _briefing_events(store, project.id),
+                _briefing_events(store, project.id, session),
                 me=session,
                 assigned=assigned,
                 labels=lambda: slot_labels_via(store),
@@ -2139,14 +2240,17 @@ def hook_prompt_heartbeat(
         # teammate context — left out IN the query, so the limit counts what is
         # delivered: dropped after it, a run of audit lines was the whole page, prompt
         # after prompt, with a coder's result behind it (review of #240, finding 11).
+        reads, relevant = _board_reading(store, session)
         events = store.events_since(
             session.project_id,
             session.cursor,
             exclude_session=session.id,
             exclude_kinds=HUMAN_BOARD_KINDS,
+            exclude_actor=session.id,
+            relevant=relevant,
             limit=_DELTA_LIMIT * 3 + 1,
         )
-        if not events or not orchestrator.delta_enabled():
+        if not events or not orchestrator.delta_enabled() or not reads:
             # Nothing delivered is still something read: the cursor moves past it, the
             # left-out rows included, rather than stay in front of them for every later
             # prompt to scan again.
@@ -2157,14 +2261,14 @@ def hook_prompt_heartbeat(
         truncated = len(events) > _DELTA_LIMIT
         shown = events[:_DELTA_LIMIT]
         store.touch_session(session.id, cursor=shown[-1].seq, state="working")
-        roles = {s.id: s.role for s in store.team_sessions(session.project_id)}
+        authors = authors_of(store.team_sessions(session.project_id))
         board = _board_of(store, session.project_id).name
         # One read, and only when a line names a task: this runs on every prompt.
         numbers = store.task_numbers(session.project_id) if any(e.task_id for e in shown) else {}
         return (
             collision
             + briefing
-            + _render_delta(shown, roles, truncated=truncated, board=board, numbers=numbers)
+            + _render_delta(shown, authors, truncated=truncated, board=board, numbers=numbers)
         )
 
 
@@ -2296,6 +2400,7 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
         me.cursor,
         exclude_session=me.id,
         exclude_kinds=HUMAN_BOARD_KINDS,
+        exclude_actor=me.id,
         limit=_DELTA_LIMIT * 3 + 1,
     )
 
@@ -2324,7 +2429,7 @@ def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
     if not orchestrator.delta_enabled():
         return None
     for event in _wake_candidates(store, me):
-        if _wakes_manager(event):
+        if wake_class(event, me) == "wake":
             return f"deferred:{event.kind}"
     return None
 
@@ -2347,7 +2452,7 @@ def _manager_wakeup(
     if stop_hook_active or not orchestrator.delta_enabled():
         return None
     events = _wake_candidates(store, me)
-    if not any(_wakes_manager(event) for event in events):
+    if not any(wake_class(event, me) == "wake" for event in events):
         return None
     key = continuation_key(me.id, _now())
     used = _count(store.get_meta(key))
@@ -2355,13 +2460,13 @@ def _manager_wakeup(
         return None
     truncated = len(events) > _DELTA_LIMIT
     shown = events[:_DELTA_LIMIT]
-    roles = {s.id: s.role for s in store.team_sessions(me.project_id)}
+    authors = authors_of(store.team_sessions(me.project_id))
     board = _board_of(store, me.project_id).name
     numbers = store.task_numbers(me.project_id) if any(e.task_id for e in shown) else {}
     store.set_meta(key, str(used + 1))
     store.touch_session(me.id, cursor=shown[-1].seq, state="working")
     return StopDecision(
-        reason=_render_wakeup(shown, roles, truncated=truncated, board=board, numbers=numbers),
+        reason=_render_wakeup(shown, authors, truncated=truncated, board=board, numbers=numbers),
         cursor=shown[-1].seq,
     )
 
@@ -3051,9 +3156,13 @@ def _render_board(
         if len(open_tasks) > _BOARD_TASKS:
             lines.append(f"  … {len(open_tasks) - _BOARD_TASKS} more — `aisquare task list`")
     if events:
-        roles = {s.id: s.role for s in sessions}
         lines.append("recent updates:")
-        lines.extend(f"  - {event_line(event, roles, numbers)}" for event in events)
+        if me is None:  # the human board keeps every event's full text
+            roles = {s.id: s.role for s in sessions}
+            lines.extend(f"  - {event_line(event, roles, numbers)}" for event in events)
+        else:
+            authors = authors_of(sessions)
+            lines.extend(f"  - {short_line(event, authors, numbers)}" for event in events)
     if me is not None:
         lines += [
             "Protocol: check this board before starting work; teammate updates",
@@ -3063,6 +3172,7 @@ def _render_board(
             f"`aisquare task done <id> --as {short_id(me.id)}`. Share decisions/results:",
             f'`aisquare note "…" --as {short_id(me.id)}`. Full board: `aisquare board`.',
             "Every ✓ prints a receipt (seq N); `aisquare team verify <seq>` re-checks it.",
+            "Updates arrive one line each (#seq …); `aisquare team show <seq>` prints one in full.",
             *_role_cycle(me, fleet),
         ]
         if briefing and me.persona:
@@ -4007,22 +4117,54 @@ def event_line(
     return f"{who} {kind}{target}:{task} {event.text}"
 
 
+#: How much of an event's first line an agent-facing line shows (P1 WS-2, #279): the rest
+#: is one command away (``aisquare team show <seq>``), and an injected line is carried by
+#: every later request until compaction.
+SHORT_TEXT = 160
+
+
+def short_line(
+    event: TeamEvent, authors: Mapping[str, str], numbers: Mapping[str, int] | None = None
+) -> str:
+    """``#812 coder-auth review #12: PR #300 ready … → aisquare team show 812`` — one event
+    as an agent reads it (P1 WS-2, #279): its seq, who wrote it (``authors``: a session id →
+    its label, else its role; ``cli`` for none), the kind, the addressee, the task's board
+    number (its id when it has none), and the first line of the text up to
+    :data:`SHORT_TEXT` characters. Anything more is marked, with the command that prints it.
+    The human board (``aisquare board``) keeps full text (:func:`event_line`)."""
+    who = authors.get(event.session_id, "?") if event.session_id else "cli"
+    target = f" → {event.to_role}" if event.to_role else ""
+    number = (numbers or {}).get(event.task_id) if event.task_id else None
+    task = f" #{number}" if number is not None else (f" {event.task_id}" if event.task_id else "")
+    first, _, rest = event.text.strip().partition("\n")
+    first = first.rstrip()
+    more = bool(rest.strip()) or len(first) > SHORT_TEXT
+    text = first[:SHORT_TEXT].rstrip() if len(first) > SHORT_TEXT else first
+    pointer = f" … → aisquare team show {event.seq}" if more else ""
+    return f"#{event.seq} {who} {event.kind.replace('task_', '')}{target}{task}: {text}{pointer}"
+
+
+def authors_of(sessions: Sequence[TeamSession]) -> dict[str, str]:
+    """Session id → how :func:`short_line` names its author: its label, else its role."""
+    return {s.id: s.label or s.role for s in sessions}
+
+
 def _render_delta(
     events: list[TeamEvent],
-    roles: dict[str, str],
+    authors: Mapping[str, str],
     *,
     truncated: bool,
     board: str,
     numbers: Mapping[str, int] | None = None,
 ) -> str:
-    """The per-prompt delta. Each line names its board (fix 5 of the fleet-board card,
-    tsk_01m3k89bkhpj): two fleets' updates once mixed in one delta, because the seats of
-    both registered on a third board, and no line said which board it came from."""
+    """The per-prompt delta: one :func:`short_line` per event. The board is named once, in
+    the block's header: one delta reads one board (fix 5 of the fleet-board card,
+    tsk_01m3k89bkhpj, put it on every line)."""
     count = f"{len(events)}{'+' if truncated else ''}"
     lines = [
-        "<aisquare-team-delta>",
+        f'<aisquare-team-delta board="{board}">',
         f"{count} teammate update(s) since your last prompt:",
-        *(f"- [{board}] {event_line(event, roles, numbers)}" for event in events),
+        *(f"- {short_line(event, authors, numbers)}" for event in events),
     ]
     if truncated:
         lines.append("… more waiting — run `aisquare board` for the full picture.")
@@ -4037,11 +4179,11 @@ def _render_delta(
 #: at all and the wake-up is silently gone.
 _WAKEUP_REASON_BUDGET = 8_000
 
-#: The most one rendered event line may cost. Board text is unbounded and the
-#: coder's own cycle asks for ``--note "how to verify + evidence"``, so one 2 KB
-#: note must not crowd out the other nine events — every event the reason shows
-#: has to stay legible, because ``_manager_wakeup`` advances the cursor past all
-#: of them and nothing will show them again.
+#: The most one rendered event line may cost. Each is a :func:`short_line` now, its text
+#: cut at :data:`SHORT_TEXT` with ``aisquare team show <seq>`` naming the rest, so this
+#: clips only what a line in a non-Latin script costs once JSON escapes it: every event
+#: the reason shows has to stay legible, because ``_manager_wakeup`` advances the cursor
+#: past all of them.
 _WAKEUP_LINE_BUDGET = 400
 
 
@@ -4091,7 +4233,7 @@ _ELLIPSIS_COST = _output_cost("…")
 
 def _render_wakeup(
     events: list[TeamEvent],
-    roles: dict[str, str],
+    authors: Mapping[str, str],
     *,
     truncated: bool,
     board: str,
@@ -4116,7 +4258,10 @@ def _render_wakeup(
     rather than assumed.
     """
     count = f"{len(events)}{'+' if truncated else ''}"
-    head = f"{count} board update(s) from your fleet arrived while you were finishing this turn:"
+    head = (
+        f"{count} board update(s) from your fleet arrived while you were finishing this turn "
+        f"(board {board}):"
+    )
     frame = [
         *(["… more waiting — run `aisquare board` for the full picture."] if truncated else []),
         f"Act on what needs the manager — reopen, re-spec, spawn, report. {WAKEUP_CLOSE}",
@@ -4124,13 +4269,9 @@ def _render_wakeup(
     spent = _output_cost(head) + sum(_output_cost(line) + 2 for line in frame)
     share = max((_WAKEUP_REASON_BUDGET - spent) // max(len(events), 1) - 4, _ELLIPSIS_COST)
     per_line = min(_WAKEUP_LINE_BUDGET, share)
-    # The board label is inside the clipped text, so the budget above still holds.
     lines = [
         head,
-        *(
-            f"- {_clip(f'[{board}] {event_line(event, roles, numbers)}', per_line)}"
-            for event in events
-        ),
+        *(f"- {_clip(short_line(event, authors, numbers), per_line)}" for event in events),
         *frame,
     ]
     return "\n".join(lines)

@@ -325,7 +325,7 @@ def test_prompt_submit_delivers_teammate_delta_once(
     runner.invoke(app, ["task", "add", "wire auth", "--as", "bbbb2222"])
 
     first = _prompt(runner, PLANNER, work_dir)
-    assert "<aisquare-team-delta>" in first.stdout
+    assert "<aisquare-team-delta board=" in first.stdout
     assert "wire auth" in first.stdout
     second = _prompt(runner, PLANNER, work_dir)  # nothing new → nothing injected
     assert second.stdout.strip() == ""
@@ -1767,7 +1767,9 @@ def test_each_delta_line_names_its_board_and_only_the_sessions_own_board_is_read
 
     lines = [line for line in delta.splitlines() if line.startswith("- ")]
     assert lines, delta
-    assert all(line.startswith(f"- [{board.root.name}] ") for line in lines), lines
+    # Named once, in the block's header: one delta reads one board (P1 WS-2, #279).
+    assert f'<aisquare-team-delta board="{board.root.name}">' in delta
+    assert all(line.startswith("- #") for line in lines), lines
     assert "wire auth" in delta and "the other train's news" not in delta
 
 

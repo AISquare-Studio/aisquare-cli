@@ -103,6 +103,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "distill",
             "prune",
             "verify",
+            "show",
             "signal",
             "signals",
             "spawn",

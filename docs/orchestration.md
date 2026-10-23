@@ -121,7 +121,13 @@ since its last turn. The board lists task titles; the contract travels with
 the claim: `task claim` and `task next --claim` print the task's contract
 (`--detail`) and the reason it was last reopened, so nobody pastes a contract
 into a coder's pane. `task show <ref>` prints the whole task. The rest of the
-coordination is the ambient state of the board.
+coordination is the ambient state of the board. Each event is one line —
+`#812 coder-auth review #12: PR #300 ready … → aisquare team show 812` — with the
+board named once in the block's header; `aisquare team show <seq>` prints the whole
+event. What of the board an agent reads is its board context
+(`[fleet.roles.<role>] board_context`, `fleet spawn --board-context`): `all`, `relevant`
+(its own tasks, what is addressed to its role or label, and decisions) or `none` (the
+reviewer's default: no recent updates at start and no deltas). A manager reads `all`.
 
 Orchestration is **opt-in per repo** (a role launch or `aisquare team on`)
 and fails open everywhere: the hooks are designed so orchestration can
@@ -164,6 +170,7 @@ any time:
 
 ```sh
 aisquare team verify 42                     # is seq 42 really on this board? exit 0/1
+aisquare team show 42                       # the whole event: author, actor, task, details, text
 aisquare team verify evt_01k… --as <id>     # by event id (prefix ok), session's board
 aisquare team log --mine --as <id>          # read back your own recent writes
 aisquare team log --by aaaa1111 --since 15m --kind decision   # filters compose
@@ -345,6 +352,7 @@ Orchestration has no config files — a handful of env knobs:
 | `AISQUARE_TEAM=0` | master off switch — hooks and commands no-op |
 | `AISQUARE_TEAM_HUB` | point sessions from several repos at one shared board |
 | `AISQUARE_TEAM_DELTA=0` | mute per-prompt teammate deltas for a session |
+| `AISQUARE_BOARD_CONTEXT` | `all`, `relevant` or `none`: what of the board a session reads (set per fleet window from the role's `board_context`; a manager reads `all`) |
 | `AISQUARE_TEAM_LEASE_MIN` | task-claim lease in minutes (default 120) |
 | `AISQUARE_MODEL_<ROLE>` | pin a role's model outright (skips the harness ladder) |
 | `AISQUARE_EFFORT` | base effort for spawned roles (default `high`, else inherits `CLAUDE_EFFORT`) |

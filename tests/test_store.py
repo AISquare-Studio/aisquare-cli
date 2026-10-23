@@ -435,7 +435,8 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v29 a task's number on its board, v30 its unique index, v31 the branch of a fleet
     # agent's worktree (review of #259, round 15), v32 the board a fleet agent reads (round 25),
     # v33 the persona a session and a fleet agent run as (#201), v34 a fleet agent's first
-    # message and a session's last prompt (P0-W1a, #122)
+    # message and a session's last prompt (P0-W1a, #122), v35 who caused a board event and
+    # its details (P1 WS-2, #279)
     assert version == SCHEMA_VERSION == 34
 
 
@@ -1265,6 +1266,8 @@ _FIRST_PROMPT_COLUMNS = {
     ("column", "fleet_agent.first_prompt_at"),
 }
 """v34's products (P0-W1a): no dump of an older store holds them, every store reaches them."""
+#: P1 WS-2's step (#279, v35): who caused a board event, and its details.
+_EVENT_ACTOR_COLUMNS = {("column", "team_event.actor"), ("column", "team_event.meta")}
 # Main's v22 to v24 by name: SQLite's automatic index for the primary key is left out.
 _MAINS_STEPS_PAST_21 = {
     ("table", "pending_revocation"),
@@ -1454,7 +1457,12 @@ def test_mains_v24_store_gains_the_persona_columns_and_keeps_every_row() -> None
     finally:
         raw.close()
     assert (version, missing) == (SCHEMA_VERSION, [])
-    assert shape == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | _FIRST_PROMPT_COLUMNS
+    assert shape == (
+        _replayed_shape("main_v32_fresh.sql")
+        | _PERSONA_COLUMNS
+        | _FIRST_PROMPT_COLUMNS
+        | _EVENT_ACTOR_COLUMNS
+    )
     assert shape == _built(SCHEMA_VERSION), "not the schema a fresh store has"
     assert after == before, "a row the store held changed on a column it had"
     assert agent is not None and (agent.persona, agent.account_slot) == (None, 1)
@@ -1523,12 +1531,12 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     fresh = _built(SCHEMA_VERSION)
 
     assert SCHEMA_VERSION == 34
-    v34 = _FIRST_PROMPT_COLUMNS
-    assert fresh == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | v34
+    later = _FIRST_PROMPT_COLUMNS | _EVENT_ACTOR_COLUMNS  # v34, v35
+    assert fresh == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | later
     for schema in _RC_V21_SCHEMAS:
-        steps = _MAINS_STEPS_PAST_21 | _mains_steps_past_24() | v34
+        steps = _MAINS_STEPS_PAST_21 | _mains_steps_past_24() | later
         assert fresh == _replayed_shape(schema) | steps
-    assert fresh == _replayed_shape("rc_v24_fresh.sql") | _mains_steps_past_24() | v34
+    assert fresh == _replayed_shape("rc_v24_fresh.sql") | _mains_steps_past_24() | later
     open_store().close()
     raw = sqlite3.connect(str(_db_path()))
     try:

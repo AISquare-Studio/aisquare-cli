@@ -23,6 +23,9 @@ class Accepting:
     def __init__(self, server: socket.socket) -> None:
         self._server = server
         self._done = threading.Event()
+        # A full backlog too: a probe queued while the thread is late is not refused, as two
+        # probes back to back were on a loaded Mac before the thread had taken the first.
+        server.listen(socket.SOMAXCONN)
         server.settimeout(0.05)
         self._thread = threading.Thread(target=self._accept, daemon=True)
         self._thread.start()

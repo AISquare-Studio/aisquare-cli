@@ -17,7 +17,12 @@ from textual.pilot import Pilot
 from textual.widgets import Button, Static, Switch
 
 from aisquare.cli.ui.app import FleetApp
-from aisquare.cli.ui.sidebar import AppSettingsSelected, project_name, project_subtitle
+from aisquare.cli.ui.sidebar import (
+    AppSettingsSelected,
+    project_name,
+    project_subtitle,
+    short_path,
+)
 from aisquare.models import ProjectInfo
 from aisquare.services import settings as settings_service
 from tests.test_ui_shell import card_for, drive, fleet_app, refreshed, seed, settle, shown
@@ -34,6 +39,12 @@ TWINS_AND_ONE = (
     ("prj_u", "unique", None),
 )
 """Two projects named ``api``, one named ``unique``."""
+
+
+def _directory(tmp_path: Path, rel: str) -> str:
+    """The line a seeded project's card shows: :func:`short_path` of its root, with the
+    platform's own separators — the sidebar's helper, so no ``/`` is assumed here."""
+    return short_path(tmp_path / rel)
 
 
 def _subtitles(app: FleetApp) -> dict[str, str | None]:
@@ -59,15 +70,17 @@ async def _save_preference(app: FleetApp, on: bool) -> None:
 
 def test_the_subtitle_rule_is_twins_only_unless_always() -> None:
     projects = [
-        ProjectInfo(id="prj_w", root=Path("/w/work/api")),
-        ProjectInfo(id="prj_o", root=Path("/w/oss/api")),
-        ProjectInfo(id="prj_u", root=Path("/w/unique")),
+        ProjectInfo(id="prj_w", root=Path("/w", "work", "api")),
+        ProjectInfo(id="prj_o", root=Path("/w", "oss", "api")),
+        ProjectInfo(id="prj_u", root=Path("/w", "unique")),
     ]
     names = Counter(project_name(project) for project in projects)
     off = [project_subtitle(project, names, always=False) for project in projects]
     on = [project_subtitle(project, names, always=True) for project in projects]
-    assert off == ["/w/work/api", "/w/oss/api", None]
-    assert on == ["/w/work/api", "/w/oss/api", "/w/unique"]
+    # The sidebar's own helper: native separators, ``\w\work\api`` on Windows.
+    work, oss, unique = (short_path(project.root) for project in projects)
+    assert off == [work, oss, None]
+    assert on == [work, oss, unique]
 
 
 def test_off_by_default_only_twins_show_their_directory(tmp_path: Path) -> None:
@@ -79,9 +92,11 @@ def test_off_by_default_only_twins_show_their_directory(tmp_path: Path) -> None:
 
     always, lines = drive(go)
     assert always is False
-    assert lines["prj_w"] is not None and lines["prj_w"].endswith("work/api")
-    assert lines["prj_o"] is not None and lines["prj_o"].endswith("oss/api")
-    assert lines["prj_u"] is None
+    assert lines == {
+        "prj_w": _directory(tmp_path, "work/api"),
+        "prj_o": _directory(tmp_path, "oss/api"),
+        "prj_u": None,
+    }
 
 
 def test_saving_it_on_shows_every_directory_at_once_and_off_brings_the_twins_rule_back(
@@ -105,7 +120,7 @@ def test_saving_it_on_shows_every_directory_at_once_and_off_brings_the_twins_rul
     seen = drive(go)
     assert seen["before"]["prj_u"] is None
     unique = seen["after save"]["prj_u"]
-    assert unique is not None and unique.endswith("unique"), seen
+    assert unique == _directory(tmp_path, "unique"), seen
     assert seen["after a tick"] == seen["after save"], "the frame keeps what was saved"
     for state in ("off again", "off, after a tick"):
         lines = seen[state]
@@ -129,7 +144,7 @@ def test_it_is_read_at_the_start_and_reset_all_turns_it_off(tmp_path: Path) -> N
         return at_start, _subtitles(app)["prj_u"]
 
     at_start, after_reset = drive(go)
-    assert at_start is not None and at_start.endswith("unique")
+    assert at_start == _directory(tmp_path, "unique")
     assert after_reset is None
 
 
@@ -164,4 +179,4 @@ def test_the_refresh_tick_never_reads_the_preference(
     at_start, after_ticks, ticked, reloaded = drive(go)
     assert at_start == 1 and after_ticks == 1, "read once, at the start"
     assert ticked is None, "the ticks painted with the value the app holds"
-    assert reloaded is not None and reloaded.endswith("unique"), "Reload hands it over"
+    assert reloaded == _directory(tmp_path, "unique"), "Reload hands it over"

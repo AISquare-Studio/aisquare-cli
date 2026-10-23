@@ -117,7 +117,9 @@ def test_the_sidebar_has_the_projects_then_settings_and_its_status_and_nothing_e
         sidebar = app.sidebar
         sections = [child.id or type(child).__name__ for child in sidebar.children]
         others = app.query_one(OthersSection)
-        inside = [type(child).__name__ for child in others.children]
+        # Remote's chip (#33) is there too, and shows only while Remote is on: off, as here,
+        # it takes no row.
+        inside = [type(child).__name__ for child in others.children if child.display]
         return (
             sections,
             inside,
@@ -225,7 +227,8 @@ def test_the_hub_is_titled_settings_and_says_what_each_link_opens() -> None:
         hub = app.query_one(SettingsHubView)
         return (
             _shown(hub.query_one("#settings-title", Static)),
-            [str(button.label) for button in hub.query(Button).results(Button)],
+            # The hub's own buttons: Remote's and the Captain's sections have theirs (#33).
+            [str(button.label) for button in hub.query(".hub-link").results(Button)],
             [_shown(about) for about in hub.query(".hub-about").results(Static)],
         )
 

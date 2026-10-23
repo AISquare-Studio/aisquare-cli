@@ -694,10 +694,11 @@ def test_m_is_refused_while_focus_is_in_a_view_and_the_palette_lists_remote_cont
     drive(go, tunnel=missing_ngrok)
 
 
-def test_r_is_off_the_footer_so_the_footer_fits_80_columns() -> None:
+def test_r_remote_is_in_the_footer_and_the_footer_still_fits_80_columns() -> None:
     """The footer is the one row every screen of the shell shares, and at 80 columns
-    "R remote" pushed the keys after it off the edge. ``R`` still opens the panel, and
-    the help screen and the palette list it (the test above)."""
+    "R remote" pushed the keys after it off the edge, so it left the footer, and the owner
+    did not find Remote (#33). It is back, and fits: the sidebar's ↓ and ↑ share one entry,
+    "↓↑ move". ``R`` opens the panel, and the help screen and the palette list it too."""
 
     async def go(pilot: Pilot[None]) -> str:
         app = pilot.app
@@ -710,7 +711,8 @@ def test_r_is_off_the_footer_so_the_footer_fits_80_columns() -> None:
 
     footer = drive(go, tunnel=missing_ngrok, size=(80, 24))
     assert "help" in footer, f"the last row is the footer: {footer!r}"
-    assert "remote" not in footer
+    assert "R remote" in footer and "↓↑ move" in footer, footer
+    assert footer.index("R remote") < footer.index("? help"), "nothing after it is cut off"
 
 
 # --- state survives a restart of the TUI ---------------------------------------------------------

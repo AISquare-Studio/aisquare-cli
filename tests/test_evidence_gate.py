@@ -539,6 +539,34 @@ def test_under_a_hub_an_unrelated_repository_is_still_no_source_root(
     assert _check(brief, source_root=worktree) == {"R1": "pass"}
 
 
+def test_under_a_hub_a_repository_a_check_was_recorded_in_is_a_source_root(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of --source-root: a hub's board can cover several repositories,
+    and a check run in one of them is about it. That repository is a checkout of the
+    brief (its passes are compared with it); one no check names is still refused."""
+    sibling = tmp_path / "sibling"
+    sibling.mkdir()
+    _git(sibling, "init", "-q")
+    (sibling / "lib.py").write_text("VALUE = 1\n")
+    _git(sibling, "add", ".")
+    _git(sibling, "commit", "-q", "-m", "one")
+    stranger = tmp_path / "stranger"
+    stranger.mkdir()
+    _git(stranger, "init", "-q")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(repo))
+    brief, task = _linked()
+    report = _run(_py("print('ok')"), task=task, cwd=sibling)
+    assert report.source_root is not None and Path(report.source_root).samefile(sibling)
+    _record(brief, task, report)
+
+    assert _check(brief, source_root=sibling) == {"R1": "pass"}
+    (sibling / "lib.py").write_text("VALUE = 2\n")
+    assert _check(brief, source_root=sibling) == {"R1": "stale"}
+    with pytest.raises(briefs.SourceRootError):
+        briefs.check(brief.id, source_root=stranger)
+
+
 def test_evidence_needs_exactly_one_backing(runner: CliRunner, tmp_path: Path) -> None:
     _, task = _linked()
     shot = tmp_path / "shot.png"

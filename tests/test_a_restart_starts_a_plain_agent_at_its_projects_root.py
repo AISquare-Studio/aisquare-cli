@@ -40,4 +40,4 @@ def test_a_restart_starts_a_plain_agent_at_its_projects_root_not_its_recorded_fo
     restarted = fleet_service.restart(plain_project, agent.label).started
 
     assert Path(restarted.cwd) == plain_project.root
-    assert Path(tmux.spawned[-1]["cwd"]) == plain_project.root
+    assert str(tmux.spawned[-1]["cwd"]) == str(plain_project.root)

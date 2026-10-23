@@ -387,6 +387,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stopped it and then refused to start it again. They now refuse first, and
   nothing is stopped. Off, a declared `captain` in the aisquare home restarts like
   any other role.
+- **`aisquare persona` and the Personas tab read the project layer spawn and
+  launch read.** They asked git for it, so a project that is not a git repository
+  (a folder marked with `.aisquare`) listed none of the project personas its spawns
+  used, and a project added at a repository's subdirectory showed the repository's.
+  Every place that looks a persona up now takes the project layer from one rule;
+  outside any project there is still none, and `persona new --project` there still
+  refuses.
+- **Opening a project in `asq` no longer reads the persona catalogue.** The
+  Personas tab is built, and reads the personas, when you first open it.
+- **An agent launched with `--persona` before its project was on the board gets
+  its persona when it joins.** It joined at its first prompt without the persona
+  block, and ran without it until a `/clear`.
+- **A `--force` import or export whose last step fails keeps the persona it was
+  replacing.** The old copy was left in a hidden `.<name>.old-*` folder, and the
+  persona was gone from the catalogue.
+- **`persona show --json` names the layers the persona shadows**, as
+  `persona list --json` does; it always said `[]`.
+- **The Personas tab's attach toast says how the persona reaches the agent
+  whenever it was not typed**, as `persona attach` does: for an unsent or
+  unconfirmed briefing as well as a noted one.
+- **A spawn's "written for other roles" note counts a numbered seat as its role
+  only for the built-in roles**, as the board and the model ladder do: `coder2` is a
+  coder, and a declared role such as `bot7` is its own.
 
 ## [0.8.2] - 2026-10-19
 

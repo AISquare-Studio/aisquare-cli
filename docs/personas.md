@@ -66,18 +66,20 @@ block.
 ## Where personas live
 
 ```text
-<repo>/.aisquare/personas/<name>/SKILL.md     project — shared with the repo, wins
+<project>/.aisquare/personas/<name>/SKILL.md  project — shared with the repo, wins
 $AISQUARE_HOME/personas/<name>/SKILL.md       user    — this machine, every project
 (inside the aisquare package)                 bundled — ships with the CLI, read-only
 ```
 
-The project layer is the git repository around your working directory. When
-two layers hold the same name the higher one wins, and `persona list` marks the
-winner `(shadows bundled)`. A directory that does not load is listed as
+The project layer is the project your working directory is in: its git
+repository's principal checkout, else the nearest folder marked as one (`.aisquare`,
+`.hg`); outside any project there is none. Spawn, launch, the session's briefing,
+`persona` and the Personas tab all read the same one. When two layers hold the same
+name the higher one wins, and `persona list` marks the winner `(shadows bundled)`. A directory that does not load is listed as
 `✗ <path>: <reason>` and never hides the others.
 
 Claude Code's own skill directories — `<config dir>/skills/` and
-`<repo>/.claude/skills/` — are **not** a layer: most skills are workflows, not
+`<project>/.claude/skills/` — are **not** a layer: most skills are workflows, not
 personalities. They are where `persona import` finds skills and where
 `persona export --skill` puts personas.
 

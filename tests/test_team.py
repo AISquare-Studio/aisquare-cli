@@ -619,6 +619,26 @@ def test_running_session_auto_joins_on_prompt_after_activation(
     assert _prompt(runner, CODER, work_dir).stdout.strip() == ""
 
 
+def test_a_session_that_joins_on_its_prompt_is_briefed_with_its_persona(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Launched with ``--persona`` before the team was on, it joined at its first prompt:
+    the row recorded no persona and the board came without the block, until a ``/clear``
+    (review of #201, R1-F3). The join is its first injection, and briefs it as a start does;
+    the next prompt is a delta again, with no persona text."""
+    monkeypatch.setenv("AISQUARE_PERSONA", "skeptic")
+    assert _start(runner, CODER, work_dir).stdout.strip() == ""
+    runner.invoke(app, ["team", "on"])
+
+    first = _prompt(runner, CODER, work_dir).stdout
+    with store_session() as store:
+        joined = store.get_session(CODER)
+
+    assert joined is not None and joined.persona == "skeptic"
+    assert '<aisquare-persona name="skeptic"' in first
+    assert "aisquare-persona" not in _prompt(runner, CODER, work_dir).stdout
+
+
 def test_role_cycles_are_injected_automatically(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

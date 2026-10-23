@@ -47,8 +47,7 @@ from aisquare.core import experimental, harness, orchestrator, paths, personas
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
-from aisquare.core.workspace import git_common_root, project_id_for
-from aisquare.models import ProjectInfo
+from aisquare.core.workspace import project_id_for
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
@@ -137,30 +136,20 @@ def _role_ok(role: str) -> bool:
     )
 
 
-def _persona_root(project: ProjectInfo | None) -> Path | None:
-    """Where a launch resolves its persona: the working directory's own project
-    (``orchestrator.directory_project``), the one ``fleet spawn`` checked the name against
-    and the session-start hook briefs from, never the board's. Under ``AISQUARE_TEAM_HUB``
-    the board is the hub's, and a seat spawned with a persona from its own repository's
-    layer died at launch on "no persona named …" (review of #201, F1). With no answer from
-    the directory (a symlink loop) it is the board's, else the git repository around it.
+def _check_persona(name: str, root: Path | None) -> None:
+    """Refuse a persona this project cannot resolve, before anything starts (§3.7).
 
-    One rule for the check and the system-prompt file both: the file resolved at the
-    board's root, so under a hub the launch the check had passed ended in a traceback, or
-    wrote the HUB's persona of that name into the system prompt while the hook briefed the
+    ``root`` is ``personas.project_root()``, the working directory's own project: the one
+    ``fleet spawn`` checked the name against and the session-start hook briefs from, never
+    the board's. Under ``AISQUARE_TEAM_HUB`` the board is the hub's, and a seat spawned
+    with a persona from its own repository's layer died at launch on "no persona named …"
+    (review of #201, F1). The system-prompt file is resolved at the same root: at the
+    board's, under a hub the launch the check had passed ended in a traceback, or wrote
+    the HUB's persona of that name into the system prompt while the hook briefed the
     repository's (review of #240, F1).
     """
     try:
-        return orchestrator.directory_project(Path.cwd()).root
-    except OSError:
-        return project.root if project is not None else git_common_root(Path.cwd())
-
-
-def _check_persona(name: str, project: ProjectInfo | None) -> None:
-    """Refuse a persona this project cannot resolve, before anything starts (§3.7), in the
-    layer :func:`_persona_root` names."""
-    try:
-        personas.resolve(name, _persona_root(project))
+        personas.resolve(name, root)
     except personas.PersonaError as exc:
         fail(str(exc), error="unknown_persona", ref=name)
 
@@ -172,7 +161,7 @@ _SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
 
 
 def _persona_system_prompt(
-    name: str, project: ProjectInfo | None, binary: str, args: Sequence[str]
+    name: str, root: Path | None, binary: str, args: Sequence[str]
 ) -> list[str]:
     """The persona in the agent's system prompt too, where the binary has a seam for it.
 
@@ -215,7 +204,7 @@ def _persona_system_prompt(
         )
         return []
     try:
-        persona = personas.resolve(name, _persona_root(project))
+        persona = personas.resolve(name, root)
     except personas.PersonaError as exc:
         # Checked a moment ago (``_check_persona``), in the same layer: one removed or broken
         # since costs the seam, never the launch, and the hook says what it finds.
@@ -444,8 +433,10 @@ def launch(
             style="dim",
         )
 
+    # Asked once, for the check and the system-prompt file both: one git call.
+    persona_root = personas.project_root() if persona is not None else None
     if persona is not None:
-        _check_persona(persona, project)
+        _check_persona(persona, persona_root)
 
     env = {**os.environ, "AISQUARE_ROLE": role}
     if persona is not None:
@@ -632,7 +623,7 @@ def launch(
     # resolve inside cannot fail here.
     persona_args = (
         _persona_system_prompt(
-            persona, project, resolution.binary, [*profile.args, *role_args, *ctx.args]
+            persona, persona_root, resolution.binary, [*profile.args, *role_args, *ctx.args]
         )
         if persona is not None
         else []

@@ -47,10 +47,15 @@ class FakeServer:
 
     def run(self, *args: str, stdin: bytes | None = None) -> str:
         self.calls.append(args)
-        if args[:2] == ("show-environment", "-g"):
-            return "".join(f"{k}={v}\n" for k, v in self.env.items())
+        if args[:2] == ("show-environment", "-g") and len(args) == 3:
+            if args[2] not in self.env:
+                raise RuntimeError(f"unknown variable: {args[2]}")  # tmux exits 1
+            return f"{args[2]}={self.env[args[2]]}\n"
         if args[:3] == ("set-environment", "-g", "-u"):
             self.env.pop(args[3], None)
+            return ""
+        if args[:2] == ("set-environment", "-g") and len(args) == 4:
+            self.env[args[2]] = args[3]
             return ""
         raise AssertionError(f"unexpected tmux call {args}")
 
@@ -279,9 +284,78 @@ def test_reset_removes_a_binding_and_names_the_shell_but_never_edits_an_rc(
     assert result.exit_code == 0, result.output
     report = json.loads(result.output)
     assert load_config().team.profiles["coder"].env == {"X": "y"}
-    assert report["shell_unset"] == "unset ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS"
+    assert report["shell_unset"] == "unset ANTHROPIC_BASE_URL", "only what this shell sets"
     assert report["rc_files"] == [str(rc)]
     assert rc.read_text(encoding="utf-8") == f"export ANTHROPIC_BASE_URL={PROXY}\n"
+
+
+def test_reset_keeps_a_foreign_gateway_beside_our_headers_and_other_headers(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #321, minor 1: our header lines made the whole place ours, and reset
+    removed the operator's gateway URL and their own auth header with them."""
+    _configure(enabled=False)
+    mixed = f"Authorization: Bearer corp-SECRET\n{HEADERS}"
+    path = _slot_settings({"ANTHROPIC_BASE_URL": FOREIGN, "ANTHROPIC_CUSTOM_HEADERS": mixed})
+    config = load_config()
+    config.team.profiles["coder"] = _profile()
+    config.team.profiles["coder"].env.update(
+        {"ANTHROPIC_BASE_URL": FOREIGN, "ANTHROPIC_CUSTOM_HEADERS": HEADERS}
+    )
+    save_config(config)
+    server = FakeServer({"ANTHROPIC_BASE_URL": FOREIGN, "ANTHROPIC_CUSTOM_HEADERS": mixed})
+    monkeypatch.setattr(ops, "_fleet_tmux_server", lambda: server)
+
+    result = runner.invoke(app, ["explainability", "reset", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "SECRET" not in result.output
+    env = json.loads(path.read_text(encoding="utf-8"))["env"]
+    assert env == {
+        "ANTHROPIC_BASE_URL": FOREIGN,
+        "ANTHROPIC_CUSTOM_HEADERS": "Authorization: Bearer corp-SECRET",
+    }
+    assert load_config().team.profiles["coder"].env == {"ANTHROPIC_BASE_URL": FOREIGN}
+    assert server.env == {
+        "ANTHROPIC_BASE_URL": FOREIGN,
+        "ANTHROPIC_CUSTOM_HEADERS": "Authorization: Bearer corp-SECRET",
+    }
+    assert _row(server).status is CheckStatus.ok
+
+
+def test_reset_leaves_an_env_file_that_holds_more_than_ours(
+    fake_home: Path, tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file is never edited, so a binding to one that also holds the operator's
+    header is not dropped either: reset says what to do instead."""
+    _configure(enabled=False)
+    holder = tmp_path / "headers"
+    holder.write_text(f"Authorization: Bearer corp-SECRET\n{HEADERS}\n", encoding="utf-8")
+    config = load_config()
+    config.team.profiles["coder"] = _profile()
+    config.team.profiles["coder"].env_files["ANTHROPIC_CUSTOM_HEADERS"] = str(holder)
+    save_config(config)
+    monkeypatch.setattr(ops, "_fleet_tmux_server", lambda: FakeServer(running=False))
+
+    result = runner.invoke(app, ["explainability", "reset", "--yes"])
+
+    assert result.exit_code == 1
+    assert f"{holder} holds more than ours" in result.output
+    assert "SECRET" not in result.output
+    assert load_config().team.profiles["coder"].env_files == {
+        "ANTHROPIC_CUSTOM_HEADERS": str(holder)
+    }
+
+
+def test_a_url_is_shown_without_userinfo_or_query(fake_home: Path) -> None:
+    """Review of #321, minor 2: the doctor's line and --json carried a URL verbatim."""
+    _configure(enabled=False)
+    _slot_settings({"ANTHROPIC_BASE_URL": "https://bob:tok-SECRET@corp.example/v1?key=SECRET#x"})
+    row = _row()
+    assert "SECRET" not in row.detail
+    assert "https://corp.example/v1" in row.detail
+    [source] = ops.routing_sources(env={}, server=FakeServer(running=False))
+    assert source.as_json()["base_url"] == "https://corp.example/v1"
 
 
 def test_disable_names_the_leftovers_and_the_reset(

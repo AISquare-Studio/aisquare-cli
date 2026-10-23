@@ -549,8 +549,9 @@ aisquare explainability reset --dry-run
 aisquare explainability reset --yes
 ```
 
-`reset` turns tracing off (targets kept), removes the two keys from each
-settings file (a `settings.json.bak-<stamp>` copy kept beside it, written under
+`reset` turns tracing off (targets kept) and removes only what is ours (a proxy
+URL of ours and our header lines; your own gateway URL and headers beside them
+stay) from each settings file (a `settings.json.bak-<stamp>` copy kept beside it, written under
 Claude Code's own lock), from the bindings, and from the fleet tmux server. A
 shell cannot be changed from here: it prints the `unset` line and the rc files
 that mention the variables, and edits neither. A second run says "nothing to

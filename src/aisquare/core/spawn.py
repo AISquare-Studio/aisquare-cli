@@ -493,13 +493,36 @@ def git_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def agent_identity_env_vars() -> tuple[str, ...]:
+    """Every registered agent's process-identity variables: the one it sets in its tools'
+    shells alone (``AgentCapabilities.tool_shell_env``, Codex's ``CODEX_THREAD_ID``) and the
+    one it hands each hook its pid in (``pid_env``, Claude Code's ``CLAUDE_PID``).
+
+    Each says which agent process a shell is under. A tmux server started from inside an
+    agent's tool shell pinned them for every window opened on it, and a ``codex`` started by
+    hand in such a window took itself for that thread's nested child
+    (``core.agent_sessions.own_process``); ``aisquare launch`` clears them only for the
+    agent it starts."""
+    from aisquare.core.agent_adapters import adapters
+
+    named = (
+        name
+        for adapter in adapters()
+        for name in (adapter.capabilities.tool_shell_env, adapter.capabilities.pid_env)
+        if name
+    )
+    return tuple(dict.fromkeys(named))
+
+
 def tmux_client_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
-    """What a tmux client runs with: :func:`untraced_env` less :data:`TEAM_ENV_VARS`.
+    """What a tmux client runs with: :func:`untraced_env` less :data:`TEAM_ENV_VARS` and
+    every agent's process identity (:func:`agent_identity_env_vars`).
 
     The client that finds no server starts one, and the server keeps that client's
     environment as its global one, so a server the fleet starts holds no team
     variable: ``AISQUARE_PERSONA`` among them, so a window opened in it by hand is briefed
-    as no one's persona (review of #201, F7). The home (``AISQUARE_HOME``) stays: the
-    windows need it.
+    as no one's persona (review of #201, F7). Nor the identity of the agent whose tool
+    shell started it. The home (``AISQUARE_HOME``) stays: the windows need it.
     """
-    return {k: v for k, v in untraced_env(base).items() if k not in TEAM_ENV_VARS}
+    dropped = {*TEAM_ENV_VARS, *agent_identity_env_vars()}
+    return {k: v for k, v in untraced_env(base).items() if k not in dropped}

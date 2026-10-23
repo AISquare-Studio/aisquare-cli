@@ -1733,6 +1733,32 @@ def test_the_fleet_server_row_warns_about_a_seats_identity_on_the_server(tmp_pat
     )
 
 
+def test_the_fleet_server_row_names_an_agents_process_identity_pinned_on_the_server(
+    tmp_path: Path,
+) -> None:
+    """SCOPE #113 0.8.2, A12: a server started from inside an agent's tool shell pins that
+    agent's process identity for every window opened there (``core.spawn.
+    agent_identity_env_vars``): Codex's ``CODEX_THREAD_ID``, set only in its tools' shells,
+    and Claude Code's ``CLAUDE_PID``. A ``codex`` started by hand in such a window takes
+    itself for that thread's child. Always foreign, so always a warning naming each."""
+    server = FakeServer(absent=False, socket="asqui")
+    server.scripted = {
+        ("show-environment", "-g"): (
+            "AISQUARE_HOME=/h\nCODEX_THREAD_ID=019a2b3c-4d5e-7f60-8a1b-000000000001\n"
+            "CLAUDE_PID=31337\n"
+        )
+    }
+
+    check = _server_env_row(server, (tmp_path,))
+
+    assert check.status is CheckStatus.warn
+    assert "CODEX_THREAD_ID=019a2b3c-4d5e-7f60-8a1b-000000000001" in check.detail
+    assert "CLAUDE_PID=31337" in check.detail
+    assert check.fix is not None
+    assert "set-environment -gu CODEX_THREAD_ID" in check.fix
+    assert "set-environment -gu CLAUDE_PID" in check.fix
+
+
 def test_the_fleet_server_row_reaches_the_real_doctor_after_the_fleet_terminal() -> None:
     names = [check.name for check in diagnostics.doctor()]
     assert names.index("fleet terminal") < names.index("fleet server env"), names

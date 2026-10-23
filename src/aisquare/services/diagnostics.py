@@ -28,7 +28,7 @@ from aisquare.core.agent_adapters.types import AgentAdapter, PluginInstall
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.keys import EXTENDED_MINIMUM
-from aisquare.core.spawn import TEAM_ENV_VARS
+from aisquare.core.spawn import TEAM_ENV_VARS, agent_identity_env_vars
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
 from aisquare.core.terminal import outer_terminal
@@ -2666,7 +2666,8 @@ def _check_fleet_server_env(
     boards: Collection[Path] | None = None,
     cwd: Path | None = None,
 ) -> DoctorCheck:
-    """``fleet server env``: a team variable the running fleet server hands every window.
+    """``fleet server env``: a team variable, or an agent's process identity, the running
+    fleet server hands every window.
 
     A tmux server copies the environment of the client that started it into its global
     environment, and every window opened on it inherits that. The fleet's own starts are
@@ -2676,8 +2677,12 @@ def _check_fleet_server_env(
     spawn sets each window's own hub (``orchestrator.window_team_hub``, a replacement's the
     one its row recorded), so a pinned hub reaches only a window opened there by hand, and
     the row warns when it is unlike the board a fleet on the server reads. A seat's row id,
-    role or persona on a server is foreign to every window, so it always warns. ``boards``
-    are the fleets' board roots; ``None`` reads them from the store. Never starts a server.
+    role or persona on a server is foreign to every window, so it always warns, and so does
+    an agent's process identity (``core.spawn.agent_identity_env_vars``: Codex's
+    ``CODEX_THREAD_ID``, Claude Code's ``CLAUDE_PID``), which a server started from inside
+    that agent's tool shell pins: a ``codex`` started there by hand takes itself for that
+    thread's child. ``boards`` are the fleets' board roots; ``None`` reads them from the
+    store. Never starts a server.
     """
     name = "fleet server env"
     try:
@@ -2689,10 +2694,11 @@ def _check_fleet_server_env(
         if srv.server_absent():
             return _ok(name, "fleet server not running (nothing to read)")
         held = _server_environment(srv)
-        pinned = {var: held[var] for var in TEAM_ENV_VARS if var in held}
+        watched = (*TEAM_ENV_VARS, *agent_identity_env_vars())
+        pinned = {var: held[var] for var in watched if var in held}
         where = f"the fleet server (-L {srv.socket})"
         if not pinned:
-            return _ok(name, f"{where} pins no team variable")
+            return _ok(name, f"{where} pins no team variable and no agent's process identity")
         wanted = list(boards) if boards is not None else _fleet_boards(srv.socket, cwd)
         hub = pinned.get("AISQUARE_TEAM_HUB")
         unlike: list[str] = []
@@ -2713,7 +2719,7 @@ def _check_fleet_server_env(
         return _warn(
             name,
             f"{where} pins {'; '.join(said)}: a window opened on it by hand inherits "
-            "them (a fleet spawn sets its own)",
+            "them (a fleet spawn sets or clears its own)",
             "; ".join(f"tmux -L {srv.socket} set-environment -gu {var}" for var in clear),
         )
     except Exception as exc:  # diagnostics must never crash

@@ -312,8 +312,8 @@ def test_turning_remote_on_shows_link_qr_password_and_copies_ngroks_link_once_it
             "copied": list(copied),
         }
         announce(tunnels[0])
-        section.tick()
-        section.tick()  # a second tick copies nothing more
+        section.remote_tick()
+        section.remote_tick()  # a second tick copies nothing more
         await pilot.pause()
         return {
             "before": before,
@@ -432,7 +432,7 @@ def test_the_chip_shows_while_remote_is_on_and_a_click_opens_the_r_panel(ready: 
         section = await opened(pilot)
         section.query_one("#settings-remote-turn-on", Button).press()
         await written(pilot)
-        chip.tick()
+        chip.remote_tick()
         await pilot.pause()
         on, said = chip.display, shown(chip)
         await pilot.click(chip)

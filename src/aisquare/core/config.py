@@ -508,10 +508,6 @@ _V1_DEFAULTS: dict[str, Any] = {
             "validator": {"permission_mode": "auto", "worktree": False, "extra_args": []},
             "ui-tester": {"permission_mode": "auto", "worktree": False, "extra_args": []},
         },
-        "max_agents_total": 0,
-        "min_free_mb": 2048,
-        "test_gate_mb": 0,
-        "test_gate_wait_minutes": 15,
     },
     "accounts": {
         "pick": "default",

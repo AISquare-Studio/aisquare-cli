@@ -373,6 +373,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so typed in a coder's window it started a claude with every tool, briefed as the
   captain, and bound the coder's row to it. The window's fleet row must now be the
   captain's, on the home board.
+- **A fork of an ended teammate whose worktree was removed starts at its work.**
+  The fork's branch was cut at the checkout's HEAD while it resumed a conversation
+  about commits it did not have. It is now cut at the tip of the branch the
+  teammate's row recorded, and when that is gone too, the hand-off's notes say the
+  fork starts without the teammate's commits.
 
 ## [0.8.2] - 2026-10-19
 

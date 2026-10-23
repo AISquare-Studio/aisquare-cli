@@ -7836,7 +7836,7 @@ def hand_off(
             _persona_for_replay(project, agent, notes, role=runs_as) if persona is None else persona
         ),
         claude_code=session is not None,
-        start_point=_head_of(Path(agent.cwd)) if own else None,
+        start_point=_fork_point(project, agent, notes) if own else None,
         fork=True,
     )
     resumed = resume is not None
@@ -7909,6 +7909,35 @@ def _head_of(tree: Path) -> str | None:
     """The commit ``tree``'s checkout is on, or ``None`` when git cannot say."""
     done = _git(tree, "rev-parse", "--verify", "--quiet", "HEAD")
     return (done.stdout.strip() or None) if done.returncode == 0 else None
+
+
+def _fork_point(project: ProjectInfo, source: FleetAgent, notes: list[str]) -> str | None:
+    """Where a fork's branch is cut: the commit its source's tree is on, else the tip of the
+    branch its row recorded (review of #240, R1-F7: an exited source whose worktree was
+    removed gave ``None``, and the fork was cut at the checkout's HEAD while it resumed a
+    conversation about commits it lacked). Neither there, the fork starts at the checkout's
+    HEAD, and its receipt says so."""
+    head = _head_of(Path(source.cwd)) if Path(source.cwd).is_dir() else None
+    if head is not None:
+        return head
+    if source.branch is not None:
+        done = _git(
+            project.root,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{source.branch}^{{commit}}",
+        )
+        if done.returncode == 0 and done.stdout.strip():
+            notes.append(
+                f"{source.label}'s worktree is gone — the fork is cut at its branch {source.branch}"
+            )
+            return done.stdout.strip()
+    notes.append(
+        f"{source.label}'s worktree and branch are gone — the fork starts at "
+        f"{project.root.name}'s HEAD, without any commit {source.label} made there"
+    )
+    return None
 
 
 def _fork_prompt(

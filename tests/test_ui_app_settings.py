@@ -102,7 +102,12 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml() -> None:
     assert on_disk["coder"]["permission_mode"] == "plan"  # the bytes, not the widget
     assert on_disk["coder"]["worktree"] is True  # the role's table whole, for older builds
     assert load_config().fleet.roles["coder"].worktree is True  # untouched fields survive
-    assert on_disk["manager"] == {"permission_mode": "auto", "worktree": False, "extra_args": []}
+    assert on_disk["manager"] == {
+        "permission_mode": "auto",
+        "worktree": False,
+        "extra_args": [],
+        "board_context": "all",
+    }
     assert fleet_on_disk["worktree_dir"] == ".fleet-trees"  # the worktree root (§4.2)
     assert "escape_key" not in fleet_on_disk  # an untouched fleet field keeps its default
     assert load_config().fleet.escape_key == "f12"

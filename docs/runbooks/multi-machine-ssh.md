@@ -51,15 +51,20 @@ its absolute path, or wrap the command in `bash -lc '…'`.
 ## 3. Brief the manager
 
 Give the manager the commands it may run against B, in its persona or as a
-`CLAUDE.md` line in the project on A. `<codename>` is B's project codename:
+`CLAUDE.md` line in the project on A. `<codename>` is B's project codename, and
+`~/src/repo` is the repository on B:
 
 ```text
 ssh boxb -- ~/.local/bin/aisquare --json fleet ls --project <codename>
 ssh boxb -- ~/.local/bin/aisquare fleet spawn coder --project <codename> --label coder-docker --task 12 --prompt "<brief>"
-ssh boxb -- ~/.local/bin/aisquare team log --since-seq <N> --json
+ssh boxb -- 'cd ~/src/repo && ~/.local/bin/aisquare team log --since-seq <N> --json'
 ssh boxb -- ~/.local/bin/aisquare fleet tell coder-docker --project <codename> "<steer>"
 ```
 
+The `fleet` verbs name the project with `--project`. `team log` has no such
+option: it reads the board of the directory it runs in, and an SSH command runs
+in the home directory, where it answers `[]` for ever. So it runs from inside
+the repository (with the forced command in step 5, the script does that `cd`).
 `team log --since-seq <N>` returns only the board events past the last `seq`
 the manager saw, so it can poll B's board without rereading it. A task on B is
 B's: B's board and A's board are separate, so the manager reads B's results
@@ -80,12 +85,18 @@ scrollback, which tmux on B provides.
 
 ## 5. Security: what B gives A
 
-B trusts A's key completely. A manager with a shell on B can do anything B's user
-can, and so can anyone who takes that key. Two narrowings, best used together:
+B trusts A's key completely. **Whatever you do, a key that can run `aisquare` on
+B can run any command as B's user**, and so can anyone who takes that key:
+`fleet spawn` passes the arguments it does not know on to `claude` (a
+`--settings` file with hooks, an `--mcp-config` server: each runs a command),
+`config set` changes how every agent on B is launched, and `team bind --arg`
+adds arguments to a role. So:
 
 1. **A dedicated user on B** (`fleet` above) that owns only the repository and
-   B's aisquare home. That user's permissions are the real boundary.
-2. **A key restricted to aisquare commands.** In that user's
+   B's aisquare home, and nothing else you care about. **That user is the only
+   boundary.** Give it no `sudo`, no access to other users' files, and only the
+   Claude accounts this work may spend.
+2. **A forced command, for hygiene, not confinement.** In that user's
    `~/.ssh/authorized_keys` on B, the fleet key gets a forced command and
    `restrict` (no port forwarding, no agent forwarding, no terminal):
 
@@ -94,22 +105,29 @@ can, and so can anyone who takes that key. Two narrowings, best used together:
    ```
 
    `/home/fleet/bin/aisquare-only` (executable, owned by root or by `fleet`
-   with no write access for anyone else) runs `aisquare …` and nothing else. It
-   splits the command with `shlex`, which honours quotes and never runs what
-   it reads, and refuses `--bin`, which would start another program in an agent's
-   window:
+   with no write access for anyone else) takes away the plain shell and runs
+   every command from the repository, so `team log` reads the right board. It
+   splits the command with `shlex`, which honours quotes and never runs what it
+   reads, and runs only `aisquare`. It refuses `--bin` too, the most obvious way
+   to start another program, but as the paragraph above says, that does not make
+   the key safe: `aisquare` itself can still start any command.
 
    ```text
    #!/usr/bin/env python3
-   """Forced command for the fleet key: run `aisquare …` and nothing else."""
+   """Forced command for the fleet key: `aisquare …` only, run from the repository."""
    import os, shlex, sys
    from pathlib import Path
 
+   REPO = Path.home() / "src/repo"  # the repository on B
+
    words = shlex.split(os.environ.get("SSH_ORIGINAL_COMMAND", ""))
+   if words[:1] == ["cd"] and words[2:3] == ["&&"] and Path(words[1]).expanduser() == REPO:
+       words = words[3:]  # the brief's `cd … && aisquare team log`: the cd is done below
    if not words or Path(words[0]).name != "aisquare":
        sys.exit("refused: this key runs aisquare commands only")
    if any(word == "--bin" or word.startswith("--bin=") for word in words):
        sys.exit("refused: --bin is not allowed over this key")
+   os.chdir(REPO)
    binary = str(Path.home() / ".local/bin/aisquare")
    os.execv(binary, [binary, *words[1:]])
    ```
@@ -117,11 +135,10 @@ can, and so can anyone who takes that key. Two narrowings, best used together:
    With `restrict` there is no terminal, so step 4's `ssh -t` needs another
    key: your own, not the manager's.
 
-A forced command narrows the **shell**, not the **agents**. A coder spawned on B
-runs with its role's permission mode, and `fleet tell` types whatever the
-manager sends into it. So the agents on B can still do what their role
-allows. Keep B's roles' permission modes and the dedicated user's access as
-tight as the work allows.
+Beyond the key, the agents themselves: a coder spawned on B runs with its role's
+permission mode, and `fleet tell` types whatever the manager sends into it. Keep
+B's roles' permission modes, and the dedicated user's access, as tight as the
+work allows.
 
 ## When this is retired
 

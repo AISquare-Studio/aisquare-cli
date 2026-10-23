@@ -33,8 +33,11 @@ tests and Docker run on one box while coding runs on another.
   `ssh boxb tmux -L asq -C attach …`, so remote panes look like local ones.
 - **Events back.** Board events reach A by pulling `team log --since-seq` from B
   on the existing refresh, or through P2's parent-manager routing (#199).
-- **Trust.** The same model as the runbook: a dedicated user on B, and a key
-  whose forced command runs aisquare only.
+- **Trust.** The same model as the runbook. A key that can run `aisquare` on B
+  can run any command as B's user (`fleet spawn` forwards arguments to `claude`;
+  `config set` and `team bind --arg` change launches), so the dedicated user on B
+  is the boundary; a forced command only removes the plain shell. A `--host`
+  transport should not pretend otherwise.
 
 ## Alternatives considered
 

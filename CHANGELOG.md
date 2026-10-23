@@ -17,7 +17,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tmux, and the trust model. B trusts A's key completely, so the runbook
   recommends a dedicated user and a key whose forced command runs `aisquare` and
   nothing else. (#293)
+- **Which instructions an agent follows** (`docs/instructions.md`, linked from the
+  README, Orchestration and Personas). Your `CLAUDE.md` files, the role cycle, the
+  persona and aisquare's memory all reach a fleet agent, and nothing ranks them:
+  the page says where each lands, that a conflict is removed rather than ranked
+  (with a `CLAUDE.md` snippet that keeps *use subagents* out of fleet agents), what
+  a subagent does and does not see, how to clear a stale `CLAUDE.md` section out of
+  aisquare's memory, and the 10,000-character cap on a hook's output. (#292)
 
+- **`aisquare persona import` takes several sources, or `--from-dir DIR`** (#294).
+  Each goes through the same import in turn, and one refusal does not stop the
+  rest. The receipt is one table (SOURCE · NAME · ENGINE · OUTCOME), `--json` a
+  list of results, and the exit is 1 when any source was refused. One source
+  alone reads as before; `--name` is refused with more than one.
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in
@@ -359,6 +371,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   none. A *Fork* as another role started without the teammate's persona, which the
   dialog showed and kept; it now keeps it, as *Take over* does, and a persona the
   dialog changed is the dialog's.
+- **Cancelling a persona import stops its engine** (#211). *Cancel* or `Esc` in
+  the Import dialog closed it and published nothing, but the manager engine's
+  `claude -p` ran on until its 180-second timeout. It now runs in a session of
+  its own and is waited on in 0.2-second steps: on a cancel it, and what it
+  started, are ended within two seconds (SIGTERM, then SIGKILL), and an api
+  answer that arrives after a cancel is dropped. `aisquare persona import`
+  handles Ctrl-C the same way, writes nothing and exits 130.
 - **`aisquare project prune --captured-only` never takes the captain's home board,**
   and doctor no longer counts it among the captured directories. The home is
   captured on purpose and never added, so once the captain sat idle the prune took
@@ -404,6 +423,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   though the index had stored them. Each word is now a quoted FTS5 string: a
   keyword is a word to find like any other ("No entries match 'AND'.", exit 0),
   and words are Unicode letters and digits, split as the index splits them.
+- **No agent label is longer than 24 characters, and the manager is told the
+  limit** (#291). A label a live agent held at 24 characters was suffixed to 26
+  (`coder-authentication-ref-2`), and a role bound with `team bind` whose name
+  was near 24 characters made a `<role>-<task>` label longer than any `--label`
+  may be, as did a fork with no label under such a role. The stem before `-2`,
+  `-3` … or the task's short id is now trimmed so the whole fits
+  (`coder-authentication-r-2`). An over-long `--label` is refused
+  with one that fits (`label 'coder-authentication-refactor' is 29 characters
+  — at most 24; try 'coder-authentication-ref'`), so a manager that has already
+  added the task retries in the same turn instead of leaving the task without an
+  agent, and the manager's cycle now says "at most 24 characters".
 
 ## [0.8.2] - 2026-10-19
 

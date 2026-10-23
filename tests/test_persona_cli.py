@@ -178,6 +178,84 @@ def test_import_copies_a_directory_refuses_a_second_time_and_renames_only_the_di
     assert "differs from the directory 'other'" in renamed.stderr
 
 
+def _three_sources(tmp_path: Path) -> list[Path]:
+    """Two skills and one file that is none: what #294's batch is asked to import."""
+    first = _skill(tmp_path / "src", "first-skill")
+    second = _skill(tmp_path / "src", "second-skill")
+    notes = tmp_path / "src" / "notes.txt"
+    notes.write_text("remember to be kind\n", encoding="utf-8")
+    return [first, notes, second]
+
+
+def test_a_batch_imports_what_it_can_refuses_the_rest_in_one_table_and_exits_1(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """#294: several sources in one command. One refusal does not stop the rest; the
+    receipt is one table; the exit is 1 because one was refused."""
+    first, notes, second = _three_sources(tmp_path)
+
+    result = runner.invoke(
+        app, ["persona", "import", str(first), str(notes), str(second), "--no-llm"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert (_user_layer() / "first-skill").is_dir() and (_user_layer() / "second-skill").is_dir()
+    lines = result.stdout.splitlines()
+    assert lines[0].split() == ["SOURCE", "NAME", "ENGINE", "OUTCOME"]
+    assert len(lines) == 4, result.stdout
+    assert lines[1].startswith(str(first)) and lines[1].split()[1:] == [
+        "first-skill",
+        "copy",
+        "imported",
+    ]
+    assert lines[2].startswith(str(notes)) and "refused (not_recognised)" in lines[2]
+    assert lines[3].split()[1:] == ["second-skill", "copy", "imported"]
+    assert "2 imported, 1 not" in result.stderr
+
+
+def test_a_batch_under_json_is_a_list_of_results(runner: CliRunner, tmp_path: Path) -> None:
+    first, notes, second = _three_sources(tmp_path)
+
+    code, payload = _json(runner, "import", str(first), str(notes), str(second), "--no-llm")
+
+    assert code == 1
+    assert [row["outcome"] for row in payload] == ["imported", "refused", "imported"]
+    assert [row["source"] for row in payload] == [str(first), str(notes), str(second)]
+    assert payload[0]["name"] == "first-skill" and payload[0]["engine"] == "copy"
+    assert payload[0]["path"] == str(_user_layer() / "first-skill")
+    assert (payload[1]["error"], payload[1]["outcome"]) == ("not_recognised", "refused")
+    assert "--no-llm forbids it" in payload[1]["message"]
+
+
+def test_from_dir_imports_each_entry_and_exits_0_when_all_were_imported(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    library = tmp_path / "library"
+    _skill(library, "beta-skill")
+    _skill(library, "alpha-skill")
+    (library / ".hidden").mkdir()
+
+    code, payload = _json(runner, "import", "--from-dir", str(library))
+
+    assert code == 0, payload
+    assert [row["name"] for row in payload] == ["alpha-skill", "beta-skill"], "by name, no .hidden"
+    assert all(row["outcome"] == "imported" for row in payload)
+
+
+def test_name_is_refused_for_more_than_one_source_and_one_source_reads_as_before(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    first, _notes, second = _three_sources(tmp_path)
+
+    code, refused = _json(runner, "import", str(first), str(second), "--name", "both")
+    single_code, single = _json(runner, "import", str(first))
+
+    assert (code, refused["error"]) == (1, "usage")
+    assert not (_user_layer() / "both").exists()
+    assert single_code == 0 and isinstance(single, dict), "one source: the object it always was"
+    assert single["name"] == "first-skill"
+
+
 def test_an_agent_shaped_markdown_file_lands_as_its_stem_skill_md(
     runner: CliRunner, tmp_path: Path
 ) -> None:

@@ -1057,8 +1057,8 @@ def _role_cycle_core(
             f"gate is PASS: `{fleet('reap')}` again, then",
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
             "Never write code. Never merge. Blocked twice on one task? Ask the human:",
-            f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',
-            "(coder-auth, not coder-2).",
+            f'`aisquare note "…" --kind question --as {sid}`. Labels are unique, descriptive',
+            "and at most 24 characters (coder-auth, not coder-2).",
         ]
     if role == "ui-tester":
         return [

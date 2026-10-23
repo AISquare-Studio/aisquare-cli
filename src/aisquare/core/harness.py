@@ -963,7 +963,8 @@ def role_cycle(
 ) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
 
-    ``task`` is the task the agent was spawned for (``#12`` or its id), when it was: a
+    ``task`` is the task the agent was spawned for (``12`` or its id, never ``#12``, which a
+    shell reads as a comment), when it was: a
     tester or ui-tester then verifies that one task and stops after its verdict (#129 a).
 
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as

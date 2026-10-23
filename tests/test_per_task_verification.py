@@ -13,6 +13,9 @@ account's default model, where `team spawn` launched the role's ladder.
 from __future__ import annotations
 
 import json
+import re
+import shlex
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -20,9 +23,12 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import harness
+from aisquare.models import TeamSession
 from aisquare.services import team as team_service
 from tests.cycles import unscoped
 from tests.projects import add_project
+
+NOW = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -70,10 +76,26 @@ def test_a_tester_spawned_for_a_task_verifies_that_one_and_stops(role: str) -> N
     pooled = " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
     assert "Repeat." in pooled and "--task" not in pooled
 
-    own = " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped, task="#12"))
-    assert "`aisquare task next --status review --task #12 --as abcd1234`" in own
+    own = " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped, task="12"))
+    assert "`aisquare task next --status review --task 12 --as abcd1234`" in own
     assert "Repeat." not in own
     assert "After that one verdict, tell the user and stop: take no other task." in own
+
+
+def test_a_spawned_for_testers_first_command_survives_the_shell(work: Path) -> None:
+    """Review of #338: `--task #12` reads in a shell as `--task` and a comment, so the
+    tester's first command lost its task and its `--as`. The briefing names the task bare."""
+    task, _ = team_service.add_task("verify me", role="coder", cwd=work)
+    assert task.number is not None
+    me = TeamSession(
+        id="abcd1234-0000", project_id=task.project_id, role="tester", started_at=NOW,
+        last_seen_at=NOW,
+    )  # fmt: skip
+    cycle = " ".join(team_service._role_cycle(me, None, task))
+    command = re.search(r"`(aisquare task next --status review --task [^`]+)`", cycle)
+    assert command is not None, cycle
+    words = shlex.split(command.group(1), comments=True)
+    assert words[words.index("--task") + 1] == str(task.number) and "--as" in words
 
 
 def test_the_manager_spawns_one_tester_per_task_and_the_validator_gates_once() -> None:

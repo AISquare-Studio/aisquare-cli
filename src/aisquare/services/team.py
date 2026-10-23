@@ -3785,9 +3785,10 @@ def _role_cycle(
     name, under a hub the hub project's own pause, a manager kept spawning in the project the
     human then named while ``fleet pause`` paused that one (review of #259, round 27, 6/7).
     """
-    # The task it was spawned for, as the board numbers it: a tester's cycle verifies that
-    # one and stops (#129 a).
-    spawned_for = None if task is None else (task.id if task.number is None else f"#{task.number}")
+    # The task it was spawned for, as the board numbers it — bare, never `#12`: in a shell a
+    # word that starts with `#` begins a comment, and `--task #12 --as …` ran as `--task`
+    # alone (review of #338). A tester's cycle verifies that one and stops (#129 a).
+    spawned_for = None if task is None else (task.id if task.number is None else str(task.number))
     if project is not None:
         return harness.role_cycle(
             base_role(me.role),

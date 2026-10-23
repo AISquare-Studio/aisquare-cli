@@ -420,9 +420,11 @@ SOLO_INSTRUCTIONS = "aisquare's shared task board (team_board) and saved project
 
 def _serves_a_team() -> bool:
     """Whether the session this server starts for has a team: a role or a fleet row in
-    its environment, or, on an active board, an open task, a live fleet agent or more
-    than one live session (its own may already be one). The instructions are read once,
-    at the client's start, and rode every request of a solo session for nothing.
+    its environment, or, on an active board, an open task, a live fleet agent or ANY
+    live session (:func:`~aisquare.services.team.board_has_team`): the server has no
+    session id, so it cannot tell its own row from a teammate's, and counts it as one.
+    The instructions are read once, at the client's start, and rode every request of a
+    solo session for nothing.
 
     Fail-open: any doubt, a read that fails included, is a team."""
     from aisquare.core import orchestrator

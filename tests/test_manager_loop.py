@@ -1471,3 +1471,26 @@ def test_a_manager_reads_the_whole_board_whatever_the_variable_says(
     monkeypatch.setenv("AISQUARE_BOARD_CONTEXT", "none")
     _emit_from_coder("note", "for the manager")
     assert "for the manager" in _prompt(runner, MANAGER, work_dir).stdout
+
+
+@pytest.mark.parametrize(
+    ("text", "wakes"),
+    [
+        ("coder-1 exited (0)", False),
+        ("coder-1 exited (1)", True),
+        ("coder-1 exited (?)", True),
+        ("coder-1 exited (0): its replacement did not start", True),
+        ("something else entirely", True),
+    ],
+)
+def test_an_exit_from_before_its_details_is_read_from_its_text(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, work_dir: Path, text: str, wakes: bool
+) -> None:
+    """Review of #336, 4: an `agent_exited` written before `meta` existed reads its status
+    from its text, so an upgrade does not wake the manager once for each clean exit."""
+    _fleet(runner, monkeypatch, work_dir)
+    seq = _emit_from_coder("agent_exited", text)
+    with store_session() as store:
+        event = store.get_event_by_seq(seq)
+    assert event is not None and event.meta is None
+    assert (team_service.wake_class(event, _session(MANAGER)) == "wake") is wakes

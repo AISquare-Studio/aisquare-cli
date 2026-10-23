@@ -232,9 +232,28 @@ def wake_class(event: TeamEvent, me: TeamSession) -> WakeClass:
         return "own"
     if event.kind in MANAGER_WAKE_KINDS or _addressed_to_manager(event.to_role):
         return "wake"
-    if event.kind == "agent_exited" and exit_wakes(event.meta):
+    if event.kind == "agent_exited" and exit_wakes(
+        event.meta if event.meta is not None else _exit_meta_from_text(event.text)
+    ):
         return "wake"
     return "info"
+
+
+#: An exit's text as ``services.fleet._emit_exit`` wrote it before the details were stored:
+#: ``coder-1 exited (0)``, ``(?)`` for no status, ``: <why>`` after it when there was one.
+_EXIT_TEXT = re.compile(r" exited \((-?\d+|\?)\)(?:: (.+))?$")
+
+
+def _exit_meta_from_text(text: str) -> dict[str, object] | None:
+    """The details of an exit written before ``meta`` existed, read from its text, so an
+    upgrade does not wake a manager once for every clean exit past its cursor (review of
+    #336, 4). ``None`` for a text that does not say: that exit wakes, nothing says it was
+    clean."""
+    found = _EXIT_TEXT.search(text.split(" — stopped by ")[0])
+    if found is None:
+        return None
+    status = None if found.group(1) == "?" else int(found.group(1))
+    return {"status": status, "released": 0, "why": found.group(2)}
 
 
 def exit_wakes(meta: Mapping[str, object] | None) -> bool:

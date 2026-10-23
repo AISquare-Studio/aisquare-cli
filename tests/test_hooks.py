@@ -190,3 +190,30 @@ def test_the_claude_md_chain_is_the_hook_inputs_cwd_not_the_hook_process_cwd(
     assert result.exit_code == 0, result.output
     assert "use the hook's tox" in result.stdout
     assert "use the session's make check" not in result.stdout
+
+
+def test_a_preference_is_left_out_only_when_it_is_whole_lines_of_a_claude_md(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #346: "Use uv" was dropped beside a CLAUDE.md line that only starts
+    with it. A shorter rule the user asked for is not the longer one Claude Code loads."""
+    claude_home = tmp_path / "claude-home"
+    claude_home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    (claude_home / "CLAUDE.md").write_text(
+        "# tools\n- Use uv run for every Python command, and never pip install into the system.\n"
+        "- Never push to main without review.\n"
+    )
+    for text in (
+        "Use uv",
+        "Never push",
+        "- Never push to main   without review.",
+    ):
+        runner.invoke(app, ["context", "add", text, "--user"])
+
+    result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
+
+    assert result.exit_code == 0, result.output
+    assert "- Use uv\n" in result.stdout
+    assert "- Never push\n" in result.stdout
+    assert "without review" not in result.stdout

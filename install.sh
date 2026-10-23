@@ -1653,9 +1653,9 @@ init_home() {
     step "Setting up $(aisquare_home_shown)"
 
     # --agent claude-code installs the six lifecycle hooks and ingests the
-    # CLAUDE.md of the config dir sessions from this shell read; without --no-onboard it also packs the Repomix
-    # snapshot in the same run. That is `claude-code` and `snapshot` fixed in one
-    # command (§4).
+    # CLAUDE.md of the config dir sessions from this shell read; without
+    # --no-onboard it also registers the project. It packs no Repomix snapshot:
+    # that is opt-in (`aisquare project onboard`), and doctor reads none as ok (§4).
     #
     # NEVER --reinit. It is exactly the flag a script author reaches for to make
     # a step "clean", and here it resets config.toml and DISCARDS the role

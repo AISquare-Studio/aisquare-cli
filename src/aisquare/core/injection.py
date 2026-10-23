@@ -57,37 +57,51 @@ def claude_md_files(cwd: Path | None) -> list[Path]:
     return files
 
 
-def _normalised(text: str) -> str:
-    return _WHITESPACE.sub(" ", text).strip()
+def _lines(text: str) -> list[str]:
+    """``text``'s non-blank lines, each with its whitespace collapsed."""
+    return [
+        line for line in (_WHITESPACE.sub(" ", raw).strip() for raw in text.splitlines()) if line
+    ]
+
+
+def _holds_whole_lines(haystack: list[str], needle: list[str]) -> bool:
+    """Whether ``needle`` is a contiguous run of whole lines of ``haystack``."""
+    width = len(needle)
+    return any(
+        haystack[start : start + width] == needle for start in range(len(haystack) - width + 1)
+    )
 
 
 def without_loaded_preferences(
     entries: list[ContextEntry], loaded: Iterable[Path]
 ) -> list[ContextEntry]:
-    """``entries`` less the user-pool ones whose text Claude Code already loads this
-    session from one of the ``loaded`` files (:func:`claude_md_files`).
+    """``entries`` less the user-pool ones that duplicate content Claude Code already
+    loads this session from one of the ``loaded`` files (:func:`claude_md_files`).
 
     ``agents connect`` imports ``~/.claude/CLAUDE.md`` into the user pool section by
     section, so every session saw those sections twice: once from Claude Code, once
-    under "Your preferences". An entry whose text a file still holds is dropped (by
-    content, whitespace aside); one the file no longer holds, and every entry from any
-    other source, stays. A file that cannot be read is simply not loaded.
+    under "Your preferences". An entry is dropped only when its lines are the whole
+    file or a contiguous run of WHOLE lines in it (whitespace aside, blank lines
+    ignored): "Use uv" beside a line "Use uv run for every Python command" is a
+    preference of its own, and stays. So does every entry a file no longer holds. A
+    file that cannot be read is simply not loaded.
     """
-    texts: list[str] = []
+    files: list[list[str]] = []
     for path in loaded:
         try:
-            texts.append(_normalised(path.read_text(encoding="utf-8")))
+            lines = _lines(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError):
             continue
-    texts = [text for text in texts if text]
-    if not texts:
+        if lines:
+            files.append(lines)
+    if not files:
         return entries
     return [
         entry
         for entry in entries
         if entry.pool != "user"
-        or not (wanted := _normalised(entry.text))
-        or not any(wanted in text for text in texts)
+        or not (wanted := _lines(entry.text))
+        or not any(_holds_whole_lines(lines, wanted) for lines in files)
     ]
 
 

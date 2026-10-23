@@ -2695,9 +2695,9 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         return _warn(
             "snapshot", f"could not check the snapshot: {exc}", "Try: aisquare project onboard"
         )
-    # A stored pack is what agents get even where nothing can pack any more (Node
-    # gone, or on PATH only for the installer's own run): it says so, rather than
-    # "ready" beside a repomix row that reads off.
+    # A stored pack stays on disk even where nothing can pack any more (Node gone,
+    # or on PATH only for the installer's own run): it says so, rather than "ready"
+    # beside a repomix row that reads off.
     if snap is not None and snap.status == "ready":
         return _ok(
             "snapshot",

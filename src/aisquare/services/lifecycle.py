@@ -105,7 +105,7 @@ def _configured_explainability(settings: ExplainabilitySettings) -> str | None:
     return "; ".join(parts) or None
 
 
-#: What ``init`` and doctor say about the Repomix pack ``init`` no longer makes.
+#: What ``init`` says about the Repomix pack it no longer makes (doctor words it as a row).
 SNAPSHOT_OPT_IN = "not packed (opt-in: aisquare project onboard packs one)"
 
 

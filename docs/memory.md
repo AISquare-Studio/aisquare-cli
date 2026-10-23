@@ -78,11 +78,10 @@ aisquare project prune --missing --worktrees  # the stale ones, after a confirma
 ```
 
 `aisquare project onboard` packs the codebase on demand with Repomix (`init`
-no longer does, and no agent is pointed at the pack) into three artifacts under `~/.aisquare/projects/<id>/snapshot/`: a
-**full pack** (every file), a **skeleton** (structure + signatures — the
-cheap thing agents read first), and a **per-file index** (char offsets +
-token counts, so an agent can open one file's slice of the pack instead of
-all of it). Re-run with `--refresh` after big changes.
+no longer does, and no agent is pointed at the pack) into three artifacts
+under `~/.aisquare/projects/<id>/snapshot/`: a **full pack** (every file), a
+**skeleton** (structure + signatures), and a **per-file index** (char offsets +
+token counts, for opening one file's slice of the pack instead of all of it). Re-run with `--refresh` after big changes.
 
 A pack has to fit a **token budget**: `[snapshot] max_tokens` in
 `~/.aisquare/config.toml`, 150 000 by default (the cap the server packs with).

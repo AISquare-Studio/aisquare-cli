@@ -63,6 +63,8 @@ def test_a_solo_session_gets_no_team_block_but_is_on_the_board(
     runner: CliRunner, work_dir: Path
 ) -> None:
     _team_on(runner)
+    # Its MCP server starts with its client, before SessionStart writes its row.
+    assert mcp_server.server_instructions() == mcp_server.SOLO_INSTRUCTIONS
     assert "<aisquare-team>" not in _start(runner, SOLO, work_dir)
     with store_session() as store:
         assert store.get_session(SOLO) is not None
@@ -79,6 +81,19 @@ def test_the_second_session_has_a_team_and_the_first_is_briefed_once(
     assert "<aisquare-team>" in first
     assert "You are team session cccc3333" in first
     assert _prompt(runner, SOLO, work_dir) == ""
+
+
+def test_a_session_joining_one_live_teammate_sees_the_team_in_both_places(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """Review of #346: B's MCP server starts before B's SessionStart row exists, with
+    teammate A already live. It counted one live session, took it for B's own, and
+    gave B the solo line while B's hook rendered the team block."""
+    _team_on(runner)
+    _start(runner, OTHER, work_dir)  # A, live
+    assert mcp_server.server_instructions() == mcp_server.TEAM_INSTRUCTIONS  # B's server
+    assert "<aisquare-team>" in _start(runner, SOLO, work_dir)  # B's SessionStart
+    assert mcp_server.server_instructions() == mcp_server.TEAM_INSTRUCTIONS  # and after
 
 
 def test_an_open_task_is_a_team(runner: CliRunner, work_dir: Path) -> None:
@@ -194,7 +209,9 @@ def test_a_solo_onboarded_repo_sends_far_fewer_characters_per_request(
     snapshot_dir = paths.project_data_dir(current_project(work_dir).id) / "snapshot"
 
     saved = _snapshot_db()
-    after = _start(runner, SOLO, work_dir) + mcp_server.server_instructions()
+    # The MCP server asks before the session's own row is written, as it starts.
+    instructions = mcp_server.server_instructions()
+    after = _start(runner, SOLO, work_dir) + instructions
     _restore_db(saved)
     monkeypatch.setattr(team_service, "_solo", lambda *args, **kwargs: False)
     monkeypatch.setattr(

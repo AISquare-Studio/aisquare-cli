@@ -2024,10 +2024,16 @@ def _solo(
         return False
 
 
-def _has_team(store: ContextStore, project_id: str, session_id: str) -> bool:
+def _has_team(store: ContextStore, project_id: str, session_id: str | None) -> bool:
     """Whether a session with no role and no fleet row has a team on this board: an open
-    task, a live fleet agent, or another session seen within :data:`_STALE_AFTER` that has
-    not ended. Three reads on indexed columns, and only while a session is off the board.
+    task, a live fleet agent, or a live session (seen within :data:`_STALE_AFTER`, not
+    ended) other than the caller's own row. Three reads on indexed columns.
+
+    ``session_id`` is the caller's row where it is known (the hooks). Where it is not —
+    the MCP server, started by its client alongside SessionStart and before that hook
+    writes the row — ANY live session is a team: it may be a teammate, and the board is
+    the fail-safe answer. A session restarting beside its own not-yet-ended previous row
+    reads as a team for that reason.
     """
     if any(task.status in _OPEN_TASKS for task in store.team_tasks(project_id)):
         return True
@@ -2039,14 +2045,8 @@ def _has_team(store: ContextStore, project_id: str, session_id: str) -> bool:
 
 def board_has_team(store: ContextStore, project_id: str) -> bool:
     """:func:`_has_team` for a caller that is not a session yet (the MCP server, started by
-    its client): an open task, a live fleet agent, or more than one live session, since
-    the caller's own may already be on the board."""
-    if any(task.status in _OPEN_TASKS for task in store.team_tasks(project_id)):
-        return True
-    if store.fleet_agents(project_id, live_only=True):
-        return True
-    seen = store.team_sessions_seen_since(project_id, _now() - _STALE_AFTER)
-    return sum(1 for other in seen if other.ended_at is None) > 1
+    its client): its own row is not known, so any live session counts."""
+    return _has_team(store, project_id, None)
 
 
 def hook_prompt_heartbeat(

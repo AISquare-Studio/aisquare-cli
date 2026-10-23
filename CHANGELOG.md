@@ -354,6 +354,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads in the background and only repaints on the UI thread: with four projects
   of three agents each, a tick holds the UI for about 2 ms, where it held it for
   about 117 ms.
+- **A spawn from `asq` no longer calls its new agent "no longer listed".** When
+  the read after the spawn found the store busy, or, with the captain on, the
+  first captain's read failed, the agent just started was said to be gone; now
+  its row appears on the next refresh, as a restart's does. And a read that
+  takes long no longer pulls you back to the new agent once you have moved on.
+- **A sidebar agent row is drawn at its width from its first frame.** It was
+  first drawn at full width and cut at its end, the persona badge or the session
+  figure behind a long label, until it repainted.
 
 ## [0.8.2] - 2026-10-19
 

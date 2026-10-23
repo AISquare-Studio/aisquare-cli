@@ -349,7 +349,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   paste. Remote no longer answers "not installed" with a pip, uv or pipx command,
   or tells you to run `ngrok config`; only a damaged install gets one line with
   the command that repairs it. `aisquare-cli[remote]` still resolves, and adds
-  nothing.
+  nothing. If ngrok later refuses your token, or Remote was turned on with none,
+  Settings shows the field again, on or off, as *Replace your ngrok token*
+  (*Change ngrok token* under *Advanced* opens it at any time), and a token saved
+  while Remote is on starts ngrok again at once.
 
 ### Fixed
 

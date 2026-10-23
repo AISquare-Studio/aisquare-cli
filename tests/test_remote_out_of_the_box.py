@@ -239,6 +239,46 @@ def test_a_session_ngrok_says_the_token_of_is_refused_ends_at_once(
     assert tunnel.error == BAD_TOKEN
 
 
+def test_a_token_reset_mid_session_is_said_and_the_next_start_signs_in_with_the_new_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The controller's side of m1: the session the SDK cannot sign in again ends, the
+    watchdog starts a new tunnel, whose sign-in says why (ngrok's code is in it), and once a
+    new token is pasted in Settings (:meth:`RemoteController.token_saved`) the tunnel comes
+    back signed in with that one, at once."""
+    script = bundled(monkeypatch, Script(url="https://abc.ngrok-free.app"))
+    clock = [100.0]
+    token = [TOKEN]
+    made: list[SdkTunnel] = []
+
+    def factory(port: int) -> SdkTunnel:
+        made.append(SdkTunnel(port, token=lambda: token[0], ticks=lambda: clock[0]))
+        return made[-1]
+
+    controller = RemoteController(server=fake_server(), tunnel_factory=factory, url_timeout=5)
+    controller.turn_on()
+    assert controller._waiter is not None
+    controller._waiter.join(5)
+    assert controller.public_origin == "https://abc.ngrok-free.app"
+    script.refuse = "ERR_NGROK_107"  # the token is reset on ngrok's dashboard
+    script.disconnect("transport error")
+    clock[0] += RECONNECT_SECONDS
+    script.disconnect("reconnect error")
+    assert ended(made[0])
+    assert controller.revive_tunnel_if_dead() is True, "the watchdog acts"
+    controller._waiter.join(5)
+    assert controller.status_line() == BAD_TOKEN, "the status line says why"
+    assert controller.tunnel_error() == BAD_TOKEN, "Settings offers the token field"
+    token[0], script.refuse = "2newTOKEN_9876543210", None
+    assert controller.token_saved() is True, "a new token starts the tunnel at once"
+    controller._waiter.join(5)
+    assert script.calls.tokens[-1] == "2newTOKEN_9876543210"
+    assert controller.public_origin == "https://abc.ngrok-free.app"
+    assert controller.tunnel_error() is None
+    assert controller.status_line() == "ngrok stopped — restarted it", "on the same link"
+    controller.turn_off()
+
+
 def test_a_stop_during_the_sign_in_cancels_it_and_binds_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

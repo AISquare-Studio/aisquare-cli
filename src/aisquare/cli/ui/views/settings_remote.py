@@ -14,6 +14,10 @@ second one: what it turns on, the ``R`` modal shows on, and the other way round.
   a command to run (:class:`NgrokMissing`).
 - *On*: the link, copied by itself once ngrok's link (the one a phone can reach) arrives
   after a turn-on here, with a toast; *Copy*; the QR; the password; *Turn off*.
+- The token slot shows on and off alike while ngrok refused the token Remote's tunnel signed
+  in with, or there was none (``RemoteController.tunnel_error``), as *Replace your ngrok
+  token* where there is one; *Change ngrok token* under Advanced opens it too. A saved
+  token starts again a tunnel that is not up (review of #274, F-1).
 
 **What Remote needs** (#34: ngrok bundled, its token pasted here), in one place:
 :func:`ngrok_found` (is there an ngrok to start: the bundled SDK, else one on PATH),
@@ -21,12 +25,13 @@ second one: what it turns on, the ``R`` modal shows on, and the other way round.
 with ngrok and keep it, or raise :class:`TokenRefused` with why) and :meth:`NgrokMissing.fix`
 (look again, for a damaged install's ngrok). All of it is ``services.ngrok_sdk``'s.
 
-**Advanced**, collapsed until clicked: *Regenerate password*, *Allow write actions*,
-*Auto-off* and the connected devices with *Revoke*, as the modal has them.
+**Advanced**, collapsed until clicked: *Change ngrok token*, *Regenerate password*, *Allow
+write actions*, *Auto-off* and the connected devices with *Revoke*, as the modal has them.
 
 The controller is the model and every control calls it and repaints from it, on a
 one-second tick while the section shows, as the modal does; the public link arrives from
-ngrok's log on a thread of the controller's. Self-contained, so a later Settings layout
+ngrok's log on a thread of the controller's. What Remote needs is looked at on a thread
+worker (:meth:`RemoteSection.remote_check`). Self-contained, so a later Settings layout
 moves it with the line that mounts it (``views.settings_hub``).
 
 :class:`RemoteChip` is the sidebar's ``📡 remote · N devices`` while Remote is on: a click
@@ -64,7 +69,9 @@ from aisquare.cli.ui.views.remote import (
     qr_art,
 )
 from aisquare.services import ngrok_sdk
+from aisquare.services.ngrok_sdk import BAD_TOKEN
 from aisquare.services.ngrok_tunnel import AUTHTOKEN_FROM as AUTHTOKEN_FROM
+from aisquare.services.ngrok_tunnel import AUTHTOKEN_HINT
 
 TICK_S = 1.0
 """How often the section repaints from the controller while it shows, as the modal does."""
@@ -73,11 +80,20 @@ CHIP_TICK_S = 2.0
 
 TOKEN_WORKER = "settings-remote-token"
 """The worker that saves a pasted ngrok token (:func:`store_ngrok_token`)."""
+CHECK_WORKER = "settings-remote-check"
+"""The worker that looks at what Remote needs (:func:`remote_needs`)."""
 
 OFF_ABOUT = "the fleet on your phone: a link, its QR code and a password"
 TOKEN_TITLE = "Paste your ngrok token"
+REPLACE_TITLE = "Replace your ngrok token"
 TOKEN_ABOUT = "Remote reaches your phone through ngrok: a free account's token, once."
+ENV_TOKEN = (
+    "NGROK_AUTHTOKEN is set where asq started: ngrok signs in with it, not with a token saved here"
+)
+"""The one line beside the token field while ``NGROK_AUTHTOKEN`` overrides what it saves."""
 NGROK_MISSING = ngrok_sdk.SDK_MISSING
+TOKEN_TROUBLE = (BAD_TOKEN, AUTHTOKEN_HINT)
+"""What a tunnel says that ended for want of a token ngrok takes: the token slot shows."""
 
 
 # --- what Remote needs (#34: services.ngrok_sdk) ---------------------------------------------
@@ -100,6 +116,18 @@ def has_authtoken(
     ``NGROK_AUTHTOKEN``, the one pasted here, or an ``authtoken:`` in the human's own ngrok
     config (``configs``: ngrok 3's and ngrok 2's when not given)."""
     return ngrok_sdk.find_authtoken(environ, configs) is not None
+
+
+def token_from_environment(environ: Mapping[str, str] = os.environ) -> bool:
+    """Whether ``NGROK_AUTHTOKEN`` is set: ngrok signs in with it, whatever is saved here."""
+    return bool(environ.get("NGROK_AUTHTOKEN", "").strip())
+
+
+def remote_needs() -> tuple[bool, bool, bool]:
+    """What Remote needs, as it is now: an ngrok (:func:`ngrok_found`, which imports the SDK's
+    native library), a token (:func:`has_authtoken`, which parses ngrok's own configs), and
+    whether ``NGROK_AUTHTOKEN`` overrides a saved one. On a worker (:data:`CHECK_WORKER`)."""
+    return ngrok_found(), has_authtoken(), token_from_environment()
 
 
 def store_ngrok_token(token: str) -> None:
@@ -153,15 +181,21 @@ class RemoteSection(Vertical):
     RemoteSection #settings-remote-devices { height: 6; }
     RemoteSection .remote-adv-row { height: auto; margin-bottom: 1; }
     RemoteSection .remote-adv-row Static { width: auto; padding: 0 1 0 0; }
+    RemoteSection .remote-adv-row Button { margin: 0 2 0 0; }
     """
 
     def __init__(self, controller: RemoteController | None = None, *, id: str | None = None):
         super().__init__(id=id)
         self._controller = controller
-        self.ngrok = True
-        """Whether there is an ngrok to start, as last looked (:func:`ngrok_found`)."""
-        self.token = True
+        self.ngrok: bool | None = None
+        """Whether there is an ngrok to start, as last looked (:func:`ngrok_found`); ``None``
+        until the first look answers."""
+        self.token: bool | None = None
         """Whether an ngrok token is configured, as last looked (:func:`has_authtoken`)."""
+        self.env_token = False
+        """Whether ``NGROK_AUTHTOKEN`` is set, as last looked (:func:`token_from_environment`)."""
+        self._replacing = False
+        """*Change ngrok token* (Advanced) opened the token slot, until a token is saved."""
         self._copy_armed = False
         """A turn-on here waits for ngrok's link, to copy it once it arrives."""
         self._was_running: bool | None = None
@@ -186,17 +220,19 @@ class RemoteSection(Vertical):
         with Vertical(id="settings-remote-off"):
             yield Static(Text(OFF_ABOUT), id="settings-remote-about", classes="remote-about")
             yield NgrokMissing(id="settings-remote-ngrok-missing")
-            yield TokenSlot(id="settings-remote-token")
-            with Horizontal(classes="remote-buttons", id="settings-remote-turn-on-row"):
-                yield Button(
-                    "Turn on remote control",
-                    id="settings-remote-turn-on",
-                    variant="primary",
-                    compact=True,
-                )
-        with Vertical(id="settings-remote-on"):
+        with Vertical(id="settings-remote-on-head"):
             yield Static("", id="settings-remote-state")
             yield Static("", id="settings-remote-status")
+        # On and off alike: under why Remote has no tunnel, whichever view says it.
+        yield TokenSlot(id="settings-remote-token")
+        with Horizontal(classes="remote-buttons", id="settings-remote-turn-on-row"):
+            yield Button(
+                "Turn on remote control",
+                id="settings-remote-turn-on",
+                variant="primary",
+                compact=True,
+            )
+        with Vertical(id="settings-remote-on"):
             yield Static("", id="settings-remote-link")
             with Horizontal(classes="remote-buttons"):
                 yield Button("Copy link", id="settings-remote-copy", compact=True)
@@ -207,6 +243,7 @@ class RemoteSection(Vertical):
             yield Static("", id="settings-remote-password")
         with Collapsible(title="Advanced", collapsed=True, id="settings-remote-advanced"):
             with Horizontal(classes="remote-adv-row"):
+                yield Button("Change ngrok token", id="settings-remote-change-token", compact=True)
                 yield Button("Regenerate password", id="settings-remote-regen", compact=True)
             with Vertical(classes="remote-adv-row"):
                 yield Checkbox(
@@ -233,25 +270,54 @@ class RemoteSection(Vertical):
     def on_mount(self) -> None:
         table = self.query_one("#settings-remote-devices", DataTable)
         self._device_columns = table.add_columns("id", "device", "last seen", "expires", "")
+        self.repaint()
         self.remote_check()
         self.set_interval(TICK_S, self.remote_tick)
 
     # --- what Remote needs --------------------------------------------------------------------
 
     def remote_check(self) -> None:
-        """Look again at what Remote needs (an ngrok, its token), and paint."""
-        self.ngrok, self.token = ngrok_found(), has_authtoken()
+        """Look again at what Remote needs (an ngrok, its token), off the UI thread, and paint
+        once it answers (:meth:`_remote_checked`).
+
+        It ran on Textual's thread at Settings' first open and at each turn-off: the SDK's
+        import loads a native library (a third of a second cold) and the token is looked
+        for in up to two YAML files of ngrok's (review of #274, m6)."""
+        self.run_worker(
+            remote_needs,
+            name=CHECK_WORKER,
+            group=CHECK_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    @on(Worker.StateChanged)
+    def _remote_checked(self, event: Worker.StateChanged) -> None:
+        needs = event.worker.result
+        if event.worker.name != CHECK_WORKER or not isinstance(needs, tuple):
+            return
+        self.ngrok, self.token, self.env_token = needs
         self.repaint()
 
-    def _paint_needs(self) -> None:
-        """Off: the token slot while there is no token, in place of *Turn on*; the ngrok line
-        only while ngrok is missing."""
-        self.query_one(NgrokMissing).display = not self.ngrok
-        self.query_one(TokenSlot).display = not self.token
-        self.query_one("#settings-remote-turn-on-row").display = self.token
+    def _paint_needs(self, running: bool) -> None:
+        """The token slot while there is no token, or ngrok refused the one there is (on and
+        off alike), or *Change ngrok token* asked for it; off, *Turn on* while there is a token,
+        and the ngrok line only while ngrok is missing. Neither the slot for want of a token
+        nor *Turn on* before the first look answers."""
+        self.query_one(NgrokMissing).display = self.ngrok is False
+        trouble = self.controller.tunnel_error()
+        slot = self.query_one(TokenSlot)
+        slot.display = self.token is False or trouble in TOKEN_TROUBLE or self._replacing
+        slot.remote_paint(
+            replacing=bool(self.token) or trouble == BAD_TOKEN, env_token=self.env_token
+        )
+        self.query_one("#settings-remote-turn-on-row").display = not running and bool(self.token)
 
     def on_token_saved(self, event: TokenSaved) -> None:
         event.stop()
+        self._replacing = False
+        self.controller.token_saved()  # a tunnel not up starts again, with the new token
         self.remote_check()
 
     def on_ngrok_looked_for(self, event: NgrokLookedFor) -> None:
@@ -286,9 +352,10 @@ class RemoteSection(Vertical):
         controller = self.controller
         running = controller.running
         if self._was_running and not running:
-            self.ngrok, self.token = ngrok_found(), has_authtoken()  # back to Off: look again
+            self.remote_check()  # back to Off: look again
         self._was_running = running
         self.query_one("#settings-remote-off").display = not running
+        self.query_one("#settings-remote-on-head").display = running
         self.query_one("#settings-remote-on").display = running
         if running:
             self._paint_on()
@@ -299,7 +366,7 @@ class RemoteSection(Vertical):
             if status:
                 about.append("\n" + status, style="yellow")
             self.query_one("#settings-remote-about", Static).update(about)
-            self._paint_needs()
+        self._paint_needs(running)
         self._paint_advanced(heard)
 
     def _paint_on(self) -> None:
@@ -386,6 +453,17 @@ class RemoteSection(Vertical):
         if url is not None:
             copy_and_tell(self.app, url, "Link copied", sent="the link")
 
+    @on(Button.Pressed, "#settings-remote-change-token")
+    def _change_token(self, event: Button.Pressed) -> None:
+        """Open the token slot to replace the token there is (or close it again)."""
+        event.stop()
+        self._replacing = not self._replacing
+        self.repaint()
+        if self._replacing:
+            field = self.query_one("#settings-remote-token-field", Input)
+            field.focus()
+            field.scroll_visible(animate=False)
+
     @on(Button.Pressed, "#settings-remote-regen")
     def _regenerate(self, event: Button.Pressed) -> None:
         event.stop()
@@ -440,7 +518,9 @@ class NgrokLookedFor(Message):
 class TokenSlot(Vertical):
     """*Paste your ngrok token*: the field, where a free one comes from, *Save*, and why a
     token was refused, beside the field. The section shows it while no token is configured,
-    in the place of *Turn on remote control* (:meth:`RemoteSection._paint_needs`).
+    in the place of *Turn on remote control*, and as *Replace your ngrok token* while ngrok
+    refuses the one there is (:meth:`RemoteSection._paint_needs`), with a line saying so
+    where ``NGROK_AUTHTOKEN`` overrides what it saves.
 
     *Save* (or Enter) hands the field to :func:`store_ngrok_token` on a worker; the field
     hides what is typed, and the token is said nowhere.
@@ -454,11 +534,13 @@ class TokenSlot(Vertical):
     TokenSlot #settings-remote-token-field { width: 1fr; max-width: 60; }
     TokenSlot #settings-remote-token-row Button { margin: 0 0 0 2; }
     TokenSlot #settings-remote-token-problem { height: auto; color: $error; }
+    TokenSlot #settings-remote-token-env { height: auto; color: $warning; }
     """
 
     def compose(self) -> ComposeResult:
         yield Static(Text(TOKEN_TITLE), id="settings-remote-token-title")
         yield Static(Text(TOKEN_ABOUT), classes="remote-token-about")
+        yield Static(Text(ENV_TOKEN), id="settings-remote-token-env")
         yield Static(
             Text.assemble("A free one: ", (AUTHTOKEN_FROM, f"link {AUTHTOKEN_FROM}")),
             id="settings-remote-token-link",
@@ -477,6 +559,16 @@ class TokenSlot(Vertical):
 
     def on_mount(self) -> None:
         self.query_one("#settings-remote-token-problem").display = False
+        self.query_one("#settings-remote-token-env").display = False
+
+    def remote_paint(self, *, replacing: bool, env_token: bool) -> None:
+        """*Replace your ngrok token* where there is one, else *Paste…*; the line saying that
+        ``NGROK_AUTHTOKEN`` wins over what is saved here, while it is set."""
+        title = REPLACE_TITLE if replacing else TOKEN_TITLE
+        shown = self.query_one("#settings-remote-token-title", Static)
+        if str(shown.content) != title:
+            shown.update(Text(title))
+        self.query_one("#settings-remote-token-env").display = env_token
 
     @on(Button.Pressed, "#settings-remote-token-open")
     def _remote_open_dashboard(self, event: Button.Pressed) -> None:

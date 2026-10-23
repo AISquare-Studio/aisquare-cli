@@ -279,13 +279,24 @@ def needs_you(
     return found
 
 
+NOTHING_SHORT = "nothing needs you"
+""":data:`NOTHING_NEEDS_YOU` where the whole sentence does not fit."""
+STRIP_TAIL = "— click one to go to it"
+BUTTON_CELLS = 3
+"""What a compact button adds to its label in cells: its padding and the margin after it."""
+
+
 class NeedsYouStrip(Horizontal):
-    """The line over the board: what needs you, each count a button to it (#286)."""
+    """The line over the board: what needs you, each count a button to it (#286).
+
+    It fits the width it has rather than run off it: the whole line, else without its
+    tail, else each count as its glyph and number alone (``🔔 1``). Inside `asq` at 80
+    columns the board is about 50 wide, which the whole line overran."""
 
     DEFAULT_CSS = """
     NeedsYouStrip { height: 1; }
     NeedsYouStrip Static { width: auto; height: 1; }
-    NeedsYouStrip Button { margin: 0 1 0 0; }
+    NeedsYouStrip Button { margin: 0 1 0 0; min-width: 0; }
     """
 
     class Picked(Message):
@@ -295,6 +306,10 @@ class NeedsYouStrip(Horizontal):
             self.kind = kind
             super().__init__()
 
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self.needs = NeedsYou()
+
     def compose(self) -> ComposeResult:
         yield Static("", id="needs-you-lead")
         for kind, *_rest in NEEDS_YOU:
@@ -302,21 +317,46 @@ class NeedsYouStrip(Horizontal):
         yield Static("", id="needs-you-tail")
 
     def show(self, needs: NeedsYou) -> None:
+        self.needs = needs
+        self._fit(self.size.width)
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._fit(event.size.width)
+
+    def _fit(self, width: int) -> None:
+        """The longest form of the line that fits ``width`` (all of them before a size)."""
         lead = self.query_one("#needs-you-lead", Static)
         tail = self.query_one("#needs-you-tail", Static)
-        any_count = False
-        for kind, glyph, one, many in NEEDS_YOU:
-            count = needs.count(kind)
-            button = self.query_one(f"#needs-you-{kind}", Button)
-            button.display = bool(count)
-            button.label = f"{glyph} {count} {one if count == 1 else many}"
-            any_count = any_count or bool(count)
-        if any_count:
-            lead.update(Text("needs you: ", style="bold"))
-            tail.update(Text("— click one to go to it", style="dim"))
-        else:
-            lead.update(Text(NOTHING_NEEDS_YOU, style="dim"))
+        counts = [
+            (kind, glyph, one, many, self.needs.count(kind)) for kind, glyph, one, many in NEEDS_YOU
+        ]
+        shown = [entry for entry in counts if entry[4]]
+        for kind, *_rest, count in counts:
+            self.query_one(f"#needs-you-{kind}", Button).display = bool(count)
+        if not shown:
+            fits = width <= 0 or cell_len(NOTHING_NEEDS_YOU) <= width
+            lead.update(Text(NOTHING_NEEDS_YOU if fits else NOTHING_SHORT, style="dim"))
             tail.update("")
+            return
+        lead_text = "needs you: "
+        for compact, with_tail in ((False, True), (False, False), (True, False)):
+            labels = {
+                kind: f"{glyph} {count}"
+                if compact
+                else f"{glyph} {count} {one if count == 1 else many}"
+                for kind, glyph, one, many, count in shown
+            }
+            used = cell_len(lead_text) + sum(
+                cell_len(label) + BUTTON_CELLS for label in labels.values()
+            )
+            if with_tail:
+                used += cell_len(STRIP_TAIL)
+            if width <= 0 or used <= width or compact:
+                break
+        for kind, label in labels.items():
+            self.query_one(f"#needs-you-{kind}", Button).label = label
+        lead.update(Text(lead_text, style="bold"))
+        tail.update(Text(STRIP_TAIL, style="dim") if with_tail else "")
 
     @on(Button.Pressed)
     def _pressed(self, event: Button.Pressed) -> None:

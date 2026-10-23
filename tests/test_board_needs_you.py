@@ -234,3 +234,56 @@ def test_a_count_goes_to_the_first_thing_it_counts(board: dict[str, Any]) -> Non
     cursor, detail, wanted = drive(go)
     assert cursor == "tsk_0002" and "fix the login race" in detail
     assert wanted == [(PROJECT.id, "coder-auth")], "the pane's agent, for the shell to select"
+
+
+def drive_at(width: int, fn: Callable[[Host, BoardPanel], Awaitable[T]]) -> T:
+    async def run() -> T:
+        app = Host()
+        async with app.run_test(size=(width, 30)) as pilot:
+            await pilot.pause()
+            await settle_page(app)
+            await pilot.pause()
+            return await fn(app, app.query_one(BoardPanel))
+
+    return asyncio.run(run())
+
+
+WORDED = "needs you: 🔔 1 waiting ❓ 1 question 👀 1 in review ⛔ 1 blocked"
+
+
+@pytest.mark.parametrize(
+    ("width", "line"),
+    [
+        (140, f"{WORDED} — click one to go to it"),
+        (80, WORDED),
+        (50, "needs you: 🔔 1 ❓ 1 👀 1 ⛔ 1"),
+    ],
+)
+def test_the_strip_fits_the_width_it_has(board: dict[str, Any], width: int, line: str) -> None:
+    """Inside `asq` at 80 columns the board is about 50 wide: the whole line ran off it,
+    two counts with it. It drops its tail, then its words, before anything is cut."""
+    board["events"] = [_event(1, "ses_manager", "question", "staging or prod first?")]
+
+    async def go(app: Host, panel: BoardPanel) -> tuple[str, list[str]]:
+        strip = panel.query_one(board_mod.NeedsYouStrip)
+        cut = [
+            str(child.id)
+            for child in strip.children
+            if child.display and child.region.right > strip.region.right
+        ]
+        return strip_line(panel), cut
+
+    shown, cut = drive_at(width, go)
+    assert shown == line
+    assert cut == [], f"run past the strip at {width} columns: {cut}"
+
+
+def test_nothing_needs_you_shortens_rather_than_runs_off(board: dict[str, Any]) -> None:
+    board["sessions"] = [MANAGER]
+    board["tasks"] = []
+
+    async def go(app: Host, panel: BoardPanel) -> str:
+        return strip_line(panel)
+
+    assert drive_at(50, go) == board_mod.NOTHING_SHORT
+    assert drive_at(140, go) == NOTHING_NEEDS_YOU

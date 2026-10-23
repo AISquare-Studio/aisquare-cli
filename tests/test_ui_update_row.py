@@ -20,6 +20,7 @@ from typing import Any, ClassVar, TypeVar
 import pytest
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
+from textual.worker import Worker
 from typer.testing import CliRunner
 
 from aisquare.cli import fleet as fleet_cli
@@ -620,19 +621,25 @@ def test_an_app_a_test_builds_runs_no_release_check_and_run_ui_runs_the_real_one
     """The check runs in the asq a person opens (``run_ui``), never in a FleetApp built without
     one: every UI test's app started a check worker and an hourly ask (Windows CI, 7 failures
     on bff5c05e)."""
+    # Every start, read as it begins: a quick worker has left ``app.workers`` by the time the
+    # app has settled, so a list read afterwards could not see the check's (sabotage M36).
     started: list[str] = []
+    real_start = Worker._start
 
-    async def body(pilot: Pilot[None], app: FleetApp) -> bool:
-        started.extend(str(worker.name) for worker in app.workers)
-        return app.query_one(UpdateRow).display
+    def start(worker: Worker[Any], *args: Any, **kwargs: Any) -> None:
+        started.append(str(worker.name))
+        real_start(worker, *args, **kwargs)
 
-    async def run() -> bool:
+    monkeypatch.setattr(Worker, "_start", start)
+
+    async def run() -> tuple[bool, object]:
         app = FleetApp(refresh_seconds=3600, doctor=lambda: [])
-        async with app.run_test(size=(140, 40)) as pilot:
+        async with app.run_test(size=(140, 40)):
             await settle_page(app)
-            return await body(pilot, app)
+            return app.query_one(UpdateRow).display, app._release_check
 
-    displayed = asyncio.run(run())
+    displayed, check = asyncio.run(run())
+    assert started, "control: the app's own starts were seen"
     built: list[dict[str, Any]] = []
 
     class Built:
@@ -650,7 +657,8 @@ def test_an_app_a_test_builds_runs_no_release_check_and_run_ui_runs_the_real_one
     monkeypatch.setattr(ui_app, "FleetApp", build)
     ui_app.run_ui(after_update=True)
 
-    assert displayed is False and CHECK_WORKER not in started
+    assert check is None and displayed is False
+    assert CHECK_WORKER not in started, started
     assert built == [{"release_check": updates.check_for_release, "after_update": True}]
 
 

@@ -1811,11 +1811,14 @@ def next_task(
     claim: bool = False,
     session_ref: str | None = None,
     cwd: Path | None = None,
+    task_ref: str | None = None,
 ) -> TeamTask | None:
     """The oldest pickable task for a role — the heart of a looped session.
 
     With ``claim`` (only valid for ``todo``), the returned task is atomically
-    claimed; a race with another looper simply moves on to the next task.
+    claimed; a race with another looper simply moves on to the next task. ``task_ref``
+    (``--task``: a board number or an id) returns that task when it is in ``status`` and
+    ready, and nothing else (#129 a): a tester spawned for one review takes that one.
     """
     _require_enabled()
     _DELIVERY.set(None)
@@ -1834,9 +1837,15 @@ def next_task(
         # together raced for the same one while their own sat idle.
         row = _fleet_row_hint(store, session, claim=claim)
         prefer = row.task_id if row is not None else None
+        only = None
+        if task_ref is not None:
+            named = find_task(store, task_ref, board.id)
+            if named is None:
+                raise KeyError(task_ref)
+            only = named.id
         picked: TeamTask | None = None
         while True:
-            task = store.next_task(board.id, role=role, status=status, prefer=prefer)
+            task = store.next_task(board.id, role=role, status=status, prefer=prefer, only=only)
             if task is None or not claim:
                 picked = task
                 break
@@ -3192,7 +3201,7 @@ def _render_board(
             f'`aisquare note "…" --as {short_id(me.id)}`. Full board: `aisquare board`.',
             "Every ✓ prints a receipt (seq N); `aisquare team verify <seq>` re-checks it.",
             "Updates arrive one line each (#seq …); `aisquare team show <seq>` prints one in full.",
-            *_role_cycle(me, fleet),
+            *_role_cycle(me, fleet, assigned.task if assigned is not None else None),
         ]
         if briefing and me.persona:
             # The session's own project, whose layer the persona was checked against
@@ -3753,7 +3762,9 @@ def kickoff_prompt(
     return "\n".join([f"You are {label}.", *_assignment_lines(assignment, me)])
 
 
-def _role_cycle(me: TeamSession, project: ProjectInfo | None) -> list[str]:
+def _role_cycle(
+    me: TeamSession, project: ProjectInfo | None, task: TeamTask | None = None
+) -> list[str]:
     """The standing work cycle for a role — injected so nobody has to paste it.
 
     The cycles themselves live in :mod:`aisquare.core.harness` (one source of
@@ -3774,16 +3785,21 @@ def _role_cycle(me: TeamSession, project: ProjectInfo | None) -> list[str]:
     name, under a hub the hub project's own pause, a manager kept spawning in the project the
     human then named while ``fleet pause`` paused that one (review of #259, round 27, 6/7).
     """
+    # The task it was spawned for, as the board numbers it: a tester's cycle verifies that
+    # one and stops (#129 a).
+    spawned_for = None if task is None else (task.id if task.number is None else f"#{task.number}")
     if project is not None:
         return harness.role_cycle(
             base_role(me.role),
             short_id(me.id),
             fleet=lambda verb: project_service.fleet_command(verb, project),
             paused=harness.pause_signal(project.id, me.project_id),
+            task=spawned_for,
         )
     cycle = harness.role_cycle(
         base_role(me.role),
         short_id(me.id),
+        task=spawned_for,
         fleet=lambda verb: (
             install_route.command_line(["aisquare", "fleet", verb, "--project"])
             + f" {_NO_CYCLE_PROJECT}"

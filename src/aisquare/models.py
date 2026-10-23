@@ -1087,6 +1087,11 @@ class LaunchSpec(BaseModel):
     (``core.orchestrator.window_team_hub``). A restart or switch gives the replacement's
     window the same, whoever runs it (``services.fleet._board_and_hub``). ``None`` on a spec
     recorded before 0.8.1 kept it."""
+    model: str | None = None
+    """The ``--model`` the spawn resolved down the role's ladder (#129 b), ``None`` when it
+    passed none: another binary, a model already in the arguments, or an untiered role."""
+    effort: str | None = None
+    """The ``--effort`` passed beside ``model``."""
     board_context: str | None = None
     """What of the board the agent reads (``all``, ``relevant``, ``none``; P1 WS-2, #279),
     as its spawn resolved it, so a restart or switch keeps it. ``None`` on a spec recorded

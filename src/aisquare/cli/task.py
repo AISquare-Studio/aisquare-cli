@@ -233,6 +233,14 @@ def next_(
     claim: Annotated[
         bool, typer.Option("--claim", help="Atomically claim the task (todo only).")
     ] = False,
+    only: Annotated[
+        str | None,
+        typer.Option(
+            "--task",
+            help="Only this task (#n or id), when it is in --status and ready; else nothing.",
+            metavar="TASK",
+        ),
+    ] = None,
     as_session: SessionRef = None,
 ) -> None:
     """Pick up the next available task — built for looped sessions."""
@@ -241,7 +249,7 @@ def next_(
     narrowed: TaskStatus = status  # type: ignore[assignment]
     try:
         task = team_service.next_task(
-            role=role, status=narrowed, claim=claim, session_ref=as_session
+            role=role, status=narrowed, claim=claim, session_ref=as_session, task_ref=only
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

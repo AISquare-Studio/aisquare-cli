@@ -25,6 +25,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -47,7 +48,6 @@ DEFAULT_STREAM_LIMIT = 1024 * 1024
 MAX_STREAM_LIMIT = 16 * 1024 * 1024
 RETAIN_REPORTS = 64
 RETAIN_DAYS = 14
-_POSIX = os.name == "posix"
 _REPORT_ID = re.compile(r"^[0-9a-f]{32}$")
 _OFF = {"0", "false", "no", "off"}
 #: report.json is read back with this bound; argv is capped so the document always fits.
@@ -296,7 +296,7 @@ def _pid_alive(pid: int) -> bool | None:
 
     On Windows ``os.kill`` terminates the process whatever the signal number, so a
     liveness probe there would kill the wrapper it asks about."""
-    if not _POSIX:
+    if sys.platform == "win32":
         return None
     try:
         os.kill(pid, 0)
@@ -477,7 +477,7 @@ def _escalate(child: subprocess.Popen[bytes], number: int, count: int) -> None:
     and already received the Ctrl-C itself, so the first is not repeated, and the second
     and third terminate the child.
     """
-    if _POSIX:
+    if sys.platform != "win32":
         sent = number if count == 1 else signal.SIGTERM if count == 2 else signal.SIGKILL
         with suppress(ProcessLookupError, PermissionError):
             os.killpg(child.pid, sent)
@@ -487,7 +487,7 @@ def _escalate(child: subprocess.Popen[bytes], number: int, count: int) -> None:
 
 
 def _interrupt_signals() -> list[int]:
-    names = ("SIGINT", "SIGTERM", "SIGHUP") if _POSIX else ("SIGINT", "SIGBREAK")
+    names = ("SIGINT", "SIGBREAK") if sys.platform == "win32" else ("SIGINT", "SIGTERM", "SIGHUP")
     return [getattr(signal, name) for name in names if hasattr(signal, name)]
 
 
@@ -680,7 +680,7 @@ def _capture(
 
 
 def _kill_tree(child: subprocess.Popen[bytes]) -> None:
-    if _POSIX:
+    if sys.platform != "win32":
         with suppress(ProcessLookupError, PermissionError):
             os.killpg(child.pid, signal.SIGKILL)
     else:
@@ -771,7 +771,7 @@ def run_command(
                 cwd=working_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                start_new_session=_POSIX,
+                start_new_session=sys.platform != "win32",
             )
         except OSError as exc:
             launch_error = str(exc)[:4096]

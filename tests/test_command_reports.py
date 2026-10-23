@@ -21,6 +21,7 @@ from collections.abc import Collection
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 import typer
@@ -199,6 +200,8 @@ def test_a_death_by_signal_is_recorded(number: int) -> None:
 
 @POSIX_ONLY
 def test_a_death_by_signal_is_reproduced_after_the_report_is_saved() -> None:
+    if sys.platform == "win32":  # what mypy narrows; POSIX_ONLY alone it does not read
+        pytest.skip("process groups, setsid and POSIX signals")
     result = subprocess.run(
         [
             sys.executable,
@@ -647,7 +650,7 @@ def test_the_escalation_ladder(monkeypatch: pytest.MonkeyPatch) -> None:
         pid = 4242
 
     for count in (1, 2, 3, 4):
-        reports._escalate(Child(), signal.SIGINT, count)  # type: ignore[arg-type]
+        reports._escalate(cast("subprocess.Popen[bytes]", Child()), signal.SIGINT, count)
     assert sent == [
         (4242, signal.SIGINT),
         (4242, signal.SIGTERM),
@@ -662,6 +665,8 @@ def test_interrupts_reach_the_process_group_and_escalate(tmp_path: Path) -> None
     and a grandchild in its group both ignore SIGINT and SIGTERM; the third interrupt
     kills the group, the report is saved with what was sent, and the wrapper dies of
     the same signal as the command."""
+    if sys.platform == "win32":  # what mypy narrows; POSIX_ONLY alone it does not read
+        pytest.skip("process groups, setsid and POSIX signals")
     ready = tmp_path / "ready"
     grandchild_pid = tmp_path / "grandchild"
     child = (

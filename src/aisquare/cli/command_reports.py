@@ -145,7 +145,8 @@ def exec_command(
         # footer and the exit status still tell the truth.
         with suppress(OSError):
             _emit_footer(report, raw=raw, stream="both")
-    if report.signal is not None and hasattr(signal, "SIGKILL"):
+    # sys.platform rather than hasattr: it is what mypy narrows, on the Windows leg too.
+    if sys.platform != "win32" and report.signal is not None:
         # Die the way the command died, for a caller that reads the signal rather than
         # 128 + N. The report is already saved.
         if report.signal not in {signal.SIGKILL, signal.SIGSTOP}:

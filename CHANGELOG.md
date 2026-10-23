@@ -354,6 +354,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads in the background and only repaints on the UI thread: with four projects
   of three agents each, a tick holds the UI for about 2 ms, where it held it for
   about 117 ms.
+- **`aisquare persona` and the Personas tab read the project layer spawn and
+  launch read.** They asked git for it, so a project that is not a git repository
+  (a folder marked with `.aisquare`) listed none of the project personas its spawns
+  used, and a project added at a repository's subdirectory showed the repository's.
+  Every place that looks a persona up now takes the project layer from one rule;
+  outside any project there is still none, and `persona new --project` there still
+  refuses.
+- **Opening a project in `asq` no longer reads the persona catalogue.** The
+  Personas tab is built, and reads the personas, when you first open it.
 
 ## [0.8.2] - 2026-10-19
 

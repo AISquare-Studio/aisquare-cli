@@ -11,7 +11,7 @@ hub's. The file still resolved at the board's root:
 - a persona of the same name in the hub's layer too went into the system prompt, while the
   hook briefed the repository's: two personas, one in each channel.
 
-Both now resolve where the check does (``launch._persona_root``). A persona that cannot be
+Both now resolve where the check does (``personas.project_root``). A persona that cannot be
 resolved by then costs the file, never the launch.
 """
 
@@ -100,7 +100,7 @@ def test_a_persona_gone_after_the_check_costs_the_file_never_the_launch(
     runner: CliRunner, repo: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Removed between the check and the file (or broken since): one dim line, the hook alone."""
-    monkeypatch.setattr(launch_cli, "_check_persona", lambda name, project: None)
+    monkeypatch.setattr(launch_cli, "_check_persona", lambda name, root: None)
 
     result = runner.invoke(app, ["launch", "coder", "--persona", "tempo"])
 

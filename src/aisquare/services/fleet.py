@@ -3624,7 +3624,7 @@ def _chosen_persona(
     if not name:
         return None
     try:
-        found = personas.resolve(name, project.root)
+        found = personas.resolve(name, personas.project_root(project))
     except personas.PersonaError as exc:
         if flag is not None:
             raise FleetError(exc.rule) from exc
@@ -5048,7 +5048,7 @@ def attach_persona(
     session start briefs it first. The receipt says that instead of a delivery.
     """
     try:
-        persona = personas.resolve(name, project.root)
+        persona = personas.resolve(name, personas.project_root(project))
     except personas.PersonaError as exc:
         raise FleetError(exc.rule) from exc
     with store_session() as store:
@@ -7216,7 +7216,7 @@ def _persona_for_replay(
     if not agent.persona:
         return ""
     try:
-        personas.resolve(agent.persona, project.root)
+        personas.resolve(agent.persona, personas.project_root(project))
     except personas.PersonaError as exc:
         gone = f"persona {agent.persona} no longer resolves ({exc.rule})"
     else:
@@ -7226,7 +7226,7 @@ def _persona_for_replay(
         notes.append(f"{gone} — started without a persona")
         return ""
     try:
-        personas.resolve(fallback, project.root)
+        personas.resolve(fallback, personas.project_root(project))
     except personas.PersonaError as exc:
         notes.append(
             f"{gone}, and the role's default {fallback} does not either ({exc.rule}) — "

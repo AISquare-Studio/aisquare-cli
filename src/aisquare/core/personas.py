@@ -11,6 +11,9 @@ PyYAML is imported inside :func:`parse_skill` and :func:`render` only. Every
 command imports this module to register the ``persona`` group, and the hook path
 must not pay for a YAML parser it never runs
 (``tests/test_import_cost_of_the_integration.py`` doctrine).
+
+The one question asked outside the layers is :func:`project_root`'s, which project a
+directory is in, and it imports what answers it when it is asked.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from pydantic import BaseModel, ValidationError
 
 from aisquare.core import experimental, paths
 from aisquare.core.injection import sanitise_text
+from aisquare.models import ProjectInfo
 
 SKILL_NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 """The open Agent Skills name rule; matched with ``fullmatch``, 1 to 64 characters."""
@@ -378,6 +382,41 @@ def layer_dirs(root: Path | None) -> list[tuple[Layer, Path]]:
     dirs.append(("user", user))
     dirs.append(("bundled", BUNDLED_DIR))
     return dirs
+
+
+def project_root(where: ProjectInfo | Path | None = None) -> Path | None:
+    """The root of the project layer (``<root>/.aisquare/personas``), by the one rule
+    every lookup, check, picker and write takes it by: a persona one of them finds, the
+    others find too. It was worked out in seven places, and four findings were one of them
+    out of step (review of #201: F1, F6 and F8, then R1-F6 and R1-F7).
+
+    A project (a fleet row's, a spawn's, the one a view shows) is its own root, as stored.
+    A directory (a launch's, a hand-launched session's, a ``persona`` command's; ``None``
+    is the working directory) is the root of the project it is in,
+    ``orchestrator.directory_project``'s. That is never the board's, which under
+    ``AISQUARE_TEAM_HUB`` is the hub's, and is not only a git repository's: the
+    ``persona`` command and the Personas tab asked git alone, so a project that is not a
+    repository had no project layer there, though spawn and launch read it (R1-F6).
+
+    ``None`` — the user and bundled layers only — for a directory in no project: no git
+    repository and no marker on the way up, where that walk names the directory itself.
+    Its layer could not exist (``<dir>/.aisquare`` would mark it), so no read changes, and
+    ``persona new --project`` there still refuses rather than make a folder a project.
+    ``None`` too when the directory cannot be read (a symlink loop on the way to it).
+
+    No project at all is ``None`` handed to :func:`catalogue` itself: App settings' role
+    default, which is machine-wide.
+    """
+    if isinstance(where, ProjectInfo):
+        return where.root
+    # Imported when asked: a git call and the store's module, which no other read here needs.
+    from aisquare.core import orchestrator, workspace
+
+    try:
+        root = orchestrator.directory_project(where).root
+        return root if workspace.marks_project_root(root) else None
+    except OSError:
+        return None
 
 
 def hidden(layer: Layer, name: str) -> bool:

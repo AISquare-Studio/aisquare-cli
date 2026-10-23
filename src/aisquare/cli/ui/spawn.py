@@ -104,7 +104,6 @@ from aisquare.core import codenames, experimental, harness, personas
 from aisquare.core.config import FleetRoleSettings, load_config
 from aisquare.core.personas import Persona
 from aisquare.core.store import store_session
-from aisquare.core.workspace import git_common_root
 from aisquare.models import (
     AccountsOverview,
     ClaudeAccountStatus,
@@ -412,9 +411,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         return [task for task in tasks if task.status in OPEN_TASK_STATUSES], None
 
     def _read_personas(self) -> tuple[list[Persona], str | None]:
-        """The personas ``spawn`` accepts here: ``catalogue(project.root)``, winners only."""
+        """The personas ``spawn`` accepts here: the project's catalogue, winners only."""
         try:
-            found, _invalid = personas.catalogue(self.project.root)
+            found, _invalid = personas.catalogue(personas.project_root(self.project))
         except Exception as exc:  # a layer we cannot read costs the list, never the dialog
             return [], f"personas unavailable — {type(exc).__name__}: {exc}"
         return found, None
@@ -1084,7 +1083,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     @on(Button.Pressed, "#spawn-import")
     def _import_persona(self) -> None:
         self.app.push_screen(
-            ImportPersonaScreen(git_common_root(self.project.root)), callback=self._imported
+            ImportPersonaScreen(personas.project_root(self.project)), callback=self._imported
         )
 
     def _imported(self, result: personas_service.ImportResult | None) -> None:

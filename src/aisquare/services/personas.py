@@ -647,7 +647,7 @@ def _is_skill_name(name: str) -> bool:
 
 
 def importable_skills(root: Path | None) -> list[SkillRef]:
-    """Every skill in ``<config dir>/skills`` and ``<repo>/.claude/skills`` —
+    """Every skill in ``<config dir>/skills`` and ``<project>/.claude/skills`` —
     personal first, as Claude Code ranks them. ``imported`` is provenance, not a
     name match: some user or project persona — shadowed or not, under any name —
     was copied from the skill. ``taken_by`` names the layer whose persona holds the
@@ -850,7 +850,7 @@ def export(
     force: bool,
 ) -> ExportResult | str:
     """The SKILL.md text (no destination), or the directory written — ``to/<name>/``,
-    ``<config dir>/skills/<name>/`` or ``<repo>/.claude/skills/<name>/`` — with the
+    ``<config dir>/skills/<name>/`` or ``<project>/.claude/skills/<name>/`` — with the
     symbolic links the copy left out: a link is never followed. A persona whose SKILL.md
     is itself a link is not written anywhere (``symlink_refused``).
     """
@@ -866,7 +866,8 @@ def export(
     elif skill == "project":
         if root is None:
             raise PersonaError(
-                "--skill --project needs a git repository around the working directory",
+                "--skill --project needs a project around the working directory: a git "
+                "repository, or a folder marked as one",
                 code="no_project",
             )
         base = root / ".claude" / "skills"
@@ -933,8 +934,11 @@ def _layer_dir(layer: Layer, root: Path | None) -> Path:
         )
     dirs = dict(core.layer_dirs(root))
     if layer not in dirs:
+        # ``root`` is None (``core.project_root``: no project, or one that could not be
+        # read), or its project layer is the user layer (``core.layer_dirs``).
         raise PersonaError(
-            "the project layer needs a git repository around the working directory",
+            "the project layer needs a project around the working directory: a git "
+            "repository, or a folder marked as one",
             code="no_project",
         )
     return dirs[layer]

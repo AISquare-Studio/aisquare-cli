@@ -2,10 +2,8 @@
 
 docs/plans/spawn-personas.md §4.2 (this tab) and §4.3 to §4.5 (the dialogs it opens,
 in ``cli/ui/persona_dialogs.py``). Personas live where the fleet they serve
-lives: the tab's project supplies the project layer the way ``aisquare persona``
-takes it — the git repository around the directory (``git_common_root``) — so a
-project that is not a git repository shows the user and bundled layers only,
-exactly what the CLI shows from there.
+lives: the tab's project supplies the project layer (``core.project_root``), the one
+``fleet spawn`` checks and ``aisquare persona`` reads from the project's directory.
 
 **The tab holds no state the disk does not.** Every action ends by re-reading
 ``core.personas.catalogue``, and the selection is kept by row key (``layer:name``),
@@ -54,7 +52,6 @@ from aisquare.cli.ui.attach import (
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
 from aisquare.core import personas as core
 from aisquare.core.personas import Layer, Persona, PersonaError
-from aisquare.core.workspace import git_common_root
 from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
@@ -204,8 +201,10 @@ class PersonasTab(Vertical):
     def __init__(self, project: ProjectInfo, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.project = project
-        self.root: Path | None = git_common_root(project.root)
-        """The project layer's root — ``None`` outside a git repository, as the CLI has it."""
+        self.root: Path | None = core.project_root(project)
+        """The project layer's root: the project's own, as spawn checks it (review of #201,
+        R1-F6). Asked of git, it hid a project that is not a repository's personas, and it
+        cost every project view a subprocess on the UI thread (R1-F10)."""
         self.entries: list[Entry] = []
         self.selected_key: str | None = None
         self.unavailable: str | None = None

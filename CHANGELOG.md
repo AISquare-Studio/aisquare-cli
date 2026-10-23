@@ -312,6 +312,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--disallowedTools` on the line is merged into one sorted token. On Claude Code
   2.1.309, `/context` in a fresh coder read 9.9k tokens where it read 26.9k (tools
   21.6k → 7.4k, skills 2.5k → 100), and every request of the session carries that.
+  A launch at `ultracode` effort keeps Workflow, which ultracode orchestrates with.
   `aisquare doctor` has a `<role> tools` row for each role. The config file moves
   to version 3, once: a reviewer whose `extra_args` are exactly 0.8.2's default
   loses them, since the deny is the role's own now. Moving back with `aisquare

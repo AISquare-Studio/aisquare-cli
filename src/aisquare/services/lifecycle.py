@@ -31,6 +31,7 @@ from aisquare.core import credentials as credentials_store
 from aisquare.core import harness, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import (
+    LAST_ARGS_ONLY_DENY,
     AppConfig,
     ExplainabilitySettings,
     defaults_a_whole_file_reader_lacks,
@@ -1151,9 +1152,6 @@ FIRST_REFRESH_HOOKS = "0.8.0"
 LAST_WHOLE_CONFIG = "0.8.0"
 #: The first release that reads ``env_files`` (``team bind --env-file``): 0.8.0 ignores it.
 FIRST_ENV_FILES = "0.8.1"
-#: The last release that denies a role only the tools its ``extra_args`` name: the
-#: reviewer's Edit/Write deny was its ``extra_args`` default, now its own (#280).
-LAST_ARGS_ONLY_DENY = "0.8.2"
 
 
 def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:

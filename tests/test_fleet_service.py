@@ -69,6 +69,7 @@ from aisquare.models import (
     CheckStatus,
     FleetAgent,
     FleetAgentStatus,
+    LaunchSpec,
     ProjectInfo,
     TeamEvent,
     TeamSession,
@@ -16621,6 +16622,33 @@ def test_a_reviewer_restarted_from_a_spec_0_7_0_recorded_gets_its_shell_back(
     fleet_service.restart(project, chosen.label)
 
     assert "--restricted" in _command(tmux)
+
+
+@pytest.mark.parametrize(
+    ("recorded_by", "replayed"),
+    [
+        ("0.8.2", ["--model", "opus"]),
+        ("0.8.0", ["--model", "opus"]),
+        ("0.8.3", [*REVIEWER_ARGS, "--model", "opus"]),
+    ],
+    ids=["0.8.2", "0.8.0", "since"],
+)
+def test_a_reviewer_spec_0_8_recorded_replays_without_its_default_deny(
+    recorded_by: str, replayed: list[str]
+) -> None:
+    """Review of #311: 0.8.0 to 0.8.2 recorded the reviewer's default deny first in its
+    spec. Replayed as typed, `allow_tools = ["Edit"]` could never hand Edit back; the deny
+    is the role's own now, so `launch` still denies the editing tools without it."""
+    spec = LaunchSpec(
+        binary="claude", extra_args=[*REVIEWER_ARGS, "--model", "opus"], recorded_by=recorded_by
+    )
+    assert fleet_service._replayed_args("reviewer", spec, FleetSettings()) == replayed
+    assert fleet_service._replayed_args("coder", spec, FleetSettings()) == spec.extra_args
+    fleet = FleetSettings()
+    fleet.roles["reviewer"] = fleet.roles["reviewer"].model_copy(update={"allow_tools": ["Edit"]})
+    policy = harness.tool_policy("reviewer", binary="claude", args=replayed, fleet=fleet)
+    assert ("Edit" in policy.denied) is (recorded_by == "0.8.3")
+    assert {"Write", "NotebookEdit"} <= set(policy.denied)
 
 
 @pytest.mark.parametrize(

@@ -376,6 +376,11 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
 #: set`` splits a list on commas and ``config get`` joins one with them.
 REVIEWER_ARGS = ("--disallowedTools=Edit Write NotebookEdit",)
 
+#: The last release that denies a role only what its ``extra_args`` say, :data:`REVIEWER_ARGS`
+#: being the reviewer's default there: what such a release recorded, or reads, lacks the
+#: role's own deny (``services.fleet._replayed_args``, ``services.lifecycle``).
+LAST_ARGS_ONLY_DENY = "0.8.2"
+
 
 #: The reviewer's built-in ``extra_args`` in 0.6.0 and 0.7.0, which left it no shell
 #: (see ``_default_fleet_roles``). ``aisquare config set`` and the Settings page write

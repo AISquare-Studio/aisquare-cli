@@ -272,7 +272,14 @@ class ToolPolicy(RoleDefaults):
         return split_denied_tools(args)[1] if self.applied else list(args)
 
 
-def tool_policy(role: str, *, binary: str, args: Sequence[str], fleet: FleetSettings) -> ToolPolicy:
+def tool_policy(
+    role: str,
+    *,
+    binary: str,
+    args: Sequence[str],
+    fleet: FleetSettings,
+    effort: str | None = None,
+) -> ToolPolicy:
     """The tools ``role`` launches without and the skill listing it gets, wherever it starts.
 
     The deny set is the role's safety list (:attr:`RoleProfile.denied_tools`), ``[fleet]
@@ -280,7 +287,10 @@ def tool_policy(role: str, *, binary: str, args: Sequence[str], fleet: FleetSett
     ``allow_tools``, plus every ``--disallowedTools`` already in ``args``: what the
     operator typed (or a fleet ``extra_args``) is never handed back. ``skill_listing``
     ``off`` adds ``Skill``; ``names`` passes :data:`SKILL_NAMES_SETTINGS` unless ``args``
-    already carry ``--settings``, which is never merged blindly.
+    already carry ``--settings``, which is never merged blindly. A launch at
+    :data:`ULTRACODE` effort (``effort``, as ``team spawn`` resolves it, or ``--effort`` in
+    ``args``) keeps ``Workflow``: ultracode IS xhigh plus workflow orchestration, which
+    the default deny would have turned off without a word (review of #311).
 
     The reviewer's deny lived in its ``extra_args`` alone, so ``launch reviewer`` and
     ``team spawn reviewer`` had none, and any ``extra_args`` an operator set replaced it
@@ -298,6 +308,13 @@ def tool_policy(role: str, *, binary: str, args: Sequence[str], fleet: FleetSett
     denied -= set(settings.allow_tools)
     if settings.skill_listing == "off":
         denied.add("Skill")
+    notes: list[str] = []
+    if "Workflow" in denied and ULTRACODE in (
+        _normal(effort),
+        _normal(_flag_value(args, "--effort")),
+    ):
+        denied.discard("Workflow")
+        notes.append("Workflow kept: effort ultracode orchestrates workflows")
     names = settings.skill_listing == "names"
     if not is_default_agent(binary):
         withheld = [f"--disallowedTools={' '.join(sorted(denied))}"] if denied else []
@@ -309,7 +326,6 @@ def tool_policy(role: str, *, binary: str, args: Sequence[str], fleet: FleetSett
         )
     denied |= asked
     flags = [f"--disallowedTools={' '.join(sorted(denied))}"] if denied else []
-    notes: list[str] = []
     if names and _flag_present(args, "--settings"):
         notes.append("skill_listing withheld: --settings already given")
     elif names:
@@ -321,6 +337,21 @@ def tool_policy(role: str, *, binary: str, args: Sequence[str], fleet: FleetSett
         skill_listing=settings.skill_listing,
         applied=True,
     )
+
+
+def _flag_value(args: Sequence[str], flag: str) -> str | None:
+    """The value ``args`` give ``flag`` (``--flag value`` or ``--flag=value``), the last one."""
+    found: str | None = None
+    for index, arg in enumerate(args):
+        if arg.startswith(f"{flag}="):
+            found = arg.partition("=")[2]
+        elif arg == flag and index + 1 < len(args):
+            found = args[index + 1]
+    return found
+
+
+def _normal(value: str | None) -> str | None:
+    return value.strip().lower() if value is not None else None
 
 
 #: A numbered SEAT: a first-class role with a crew index glued on (``coder1``).
@@ -1166,8 +1197,8 @@ def _role_cycle_core(
     if role == "reviewer":
         # §3.3 — reads the PR as the stranger who will maintain it; findings on the
         # PR through `gh pr review`. `--restricted` would remove the Bash every step
-        # below needs, so the fleet launches it denied Edit, Write and NotebookEdit
-        # instead (`config.REVIEWER_ARGS`); never push and never merge are this
+        # below needs, so it launches denied Edit, Write and NotebookEdit instead,
+        # wherever it starts (`RoleProfile.denied_tools`); never push and never merge are this
         # briefing's, and the credentials its shell runs with
         # (`config._default_fleet_roles` says why no allowlist holds it).
         return [

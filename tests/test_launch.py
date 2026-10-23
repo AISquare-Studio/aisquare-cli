@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import shutil
 import sqlite3
 import uuid
@@ -1151,3 +1152,16 @@ def test_another_agent_gets_no_deny_token_and_the_launch_says_why(
     assert result.exit_code == 0, result.output
     assert not any(arg.startswith("--disallowedTools") for arg in spy["argv"])
     assert "withheld" in result.output and "'aider' is not claude" in result.output
+
+
+def test_a_team_spawn_at_ultracode_keeps_workflow(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`team spawn` resolves the effort itself, so it hands it to the policy (#311)."""
+    monkeypatch.setenv("AISQUARE_EFFORT", "ultracode")
+    result = runner.invoke(app, ["--json", "team", "spawn", "coder", "--no-probe"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert "--effort ultracode" in payload["command"]
+    assert "Workflow" not in payload["denied_tools"]
+    assert "Workflow kept: effort ultracode orchestrates workflows" in payload["notes"]

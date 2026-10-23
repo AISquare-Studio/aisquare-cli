@@ -991,12 +991,17 @@ class TestBindEnvFile:
 
 
 def _policy(
-    role: str, args: Sequence[str] = (), *, binary: str = "claude", **role_keys: Any
+    role: str,
+    args: Sequence[str] = (),
+    *,
+    binary: str = "claude",
+    effort: str | None = None,
+    **role_keys: Any,
 ) -> harness.ToolPolicy:
     """``harness.tool_policy`` at the built-in config, with ``role_keys`` set on the role."""
     fleet = FleetSettings()
     fleet.roles[role] = fleet.roles.get(role, FleetRoleSettings()).model_copy(update=role_keys)
-    return harness.tool_policy(role, binary=binary, args=args, fleet=fleet)
+    return harness.tool_policy(role, binary=binary, args=args, fleet=fleet, effort=effort)
 
 
 def _denied_by(flags: Sequence[str]) -> list[str]:
@@ -1074,3 +1079,22 @@ class TestToolPolicy:
         policy = _policy("coder", skill_listing="off")
         assert "Skill" in policy.denied
         assert "--settings" not in policy.args
+
+    def test_ultracode_keeps_workflow_and_says_so(self) -> None:
+        """Ultracode is xhigh plus workflow orchestration: the default deny of Workflow
+        turned that half off without a word (review of #311)."""
+        for args, effort in (
+            (["--effort", "ultracode"], None),
+            (["--effort=ULTRACODE"], None),
+            ([], "ultracode"),
+        ):
+            policy = _policy("coder", args, effort=effort)
+            assert "Workflow" not in policy.denied, (args, effort)
+            assert "Workflow kept: effort ultracode orchestrates workflows" in policy.notes
+
+    def test_xhigh_still_denies_workflow(self) -> None:
+        assert "Workflow" in _policy("coder", ["--effort", "xhigh"], effort="xhigh").denied
+
+    def test_a_typed_deny_of_workflow_holds_under_ultracode(self) -> None:
+        policy = _policy("coder", ["--effort", "ultracode", "--disallowedTools=Workflow"])
+        assert "Workflow" in policy.denied

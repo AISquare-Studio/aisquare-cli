@@ -493,7 +493,11 @@ def spawn(
         fleet = FleetSettings()
         typer.echo(f"tool policy: config unreadable ({exc}) — the built-in deny list", err=True)
     policy = harness.tool_policy(
-        role_name, binary=binary.binary, args=launch_profile.args, fleet=fleet
+        role_name,
+        binary=binary.binary,
+        args=launch_profile.args,
+        fleet=fleet,
+        effort=resolution.effort if resolution is not None else None,
     )
     role_args = [*defaults.args, *policy.args]
     spawn_args = policy.strip(launch_profile.args)

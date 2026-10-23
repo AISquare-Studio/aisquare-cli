@@ -434,7 +434,7 @@ def launch(
             "--remote-control/--no-remote-control",
             help="Start Claude Code with its Remote Control, titled '<project> · <label>', "
             "so claude.ai/code and the Claude app can continue the session (default: the "
-            "role's [fleet.roles.<role>] remote_control).",
+            "role's \\[fleet.roles.<role>] remote_control).",
             show_default=False,
         ),
     ] = None,

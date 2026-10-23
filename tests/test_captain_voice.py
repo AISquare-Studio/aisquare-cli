@@ -227,6 +227,21 @@ def _until(connection: Any, kind: str) -> dict[str, Any]:
     raise AssertionError(f"no {kind!r} frame in 50 frames")
 
 
+def _until_each(connection: Any, kinds: set[str]) -> dict[str, dict[str, Any]]:
+    """Frames until one of each of ``kinds`` arrived, in any order; the first of each, by kind.
+
+    For frames the server does not order between themselves: ``_until`` for one of them
+    reads past the other, and a wait for that one after it then never ends."""
+    found: dict[str, dict[str, Any]] = {}
+    for _ in range(50):
+        frame = json.loads(_text(connection))
+        if frame["t"] in kinds and frame["t"] not in found:
+            found[frame["t"]] = dict(frame)
+            if found.keys() == kinds:
+                return found
+    raise AssertionError(f"not every one of {sorted(kinds)} in 50 frames: {sorted(found)}")
+
+
 def _authed(client: TestClient) -> Iterator[Any]:
     with client.websocket_connect("/ws") as connection:
         connection.send_text(json.dumps({"t": "auth", "token": TOKEN}))
@@ -1225,9 +1240,11 @@ def test_switching_modes_flushes_an_open_utterance_and_the_hello_says_which_mode
         final = _until(connection, "stt")
         assert final["text"] == "half a sentence" and final["final"]
         # The switch lands at once (coderp's S1): the mode frame does not wait behind the
-        # flushed utterance's turn, which answers after it.
-        assert _until(connection, "mode") == {"t": "mode", "mode": "focus", "listening": False}
-        _until(connection, "reply")
+        # flushed utterance's turn. Which comes first is the scheduler's: `_until(…, "mode")`
+        # read past a reply that beat it, and the next wait for "reply" saw none (py3.13 on
+        # rc/p0's run 40032253943), so both are read in whichever order they come.
+        frames = _until_each(connection, {"mode", "reply"})
+        assert frames["mode"] == {"t": "mode", "mode": "focus", "listening": False}
         connection.send_text(json.dumps({"t": "mode", "mode": "sideways"}))
         assert _until(connection, "error")["code"] == "bad_message"
     assert harness.deliveries.texts == ["half a sentence"]

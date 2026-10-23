@@ -146,7 +146,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `$AISQUARE_HOME/personas/.drafts/` before anything else, shown and confirmed
   (`--yes` skips; `--json` or no terminal keeps the draft and exits
   `needs_confirmation` with its path), and saved with engine, model and
-  `condensed` in `.persona.json`. New flags `--llm/--no-llm`, `--condense`,
+  `condensed` in `.persona.json`. A skill sent through an engine with `--llm` or
+  `--condense` keeps its own name (`--name`, else its directory's, else the name a
+  copy would take), checked before any engine runs; only a source with no name of
+  its own is named by the engine. New flags `--llm/--no-llm`, `--condense`,
   `--engine`, `--model`, `--yes`; new config `[persona.import]` (`engine =
   "auto" | "manager" | "api" | "off"`, `api_model`). The headless run is a ruled
   spawn seam that strips the tracing identity, and `anthropic` and the engine
@@ -410,6 +413,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A spawn's "written for other roles" note counts a numbered seat as its role
   only for the built-in roles**, as the board and the model ladder do: `coder2` is a
   coder, and a declared role such as `bot7` is its own.
+- **Importing a kept draft again no longer writes over it.** The retry after
+  `import_invalid` (`persona import ~/.aisquare/personas/.drafts/<name> --condense`)
+  replaced the draft it read with the new one; the new draft now goes to
+  `.drafts/retry/<name>/`.
+- **The soft-cap warning names a command that works:** `persona import <its folder>
+  --condense --force`, with `--project` for a project persona. `--condense` alone
+  keeps the persona's name, which the persona itself holds, and was refused.
 
 ## [0.8.2] - 2026-10-19
 

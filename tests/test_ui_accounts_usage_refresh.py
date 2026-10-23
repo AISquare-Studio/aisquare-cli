@@ -571,3 +571,36 @@ def test_a_refresh_that_fails_inside_the_window_keeps_the_figure_and_says_the_tr
     said, row, calls = seen["aged"]
     assert said == "last refreshed 5m ago · last try failed 4m ago"
     assert "503" in row and calls == 2, row
+
+
+def test_the_page_says_the_fleets_share_left_now_and_of_the_week(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path
+) -> None:
+    """#287 slice 2a: under the usage bar, the fleet in one line, from the readings shown."""
+
+    def usage(account: ClaudeAccount) -> ClaudeUsage:
+        return ClaudeUsage(
+            available=True,
+            session_percent=30.0,
+            week_percent=20.0,
+            week_resets_at=NOW + timedelta(days=2),
+            fetched_at=clock(),
+        )
+
+    no_network["usage"] = usage
+    frame = _signed_in(2, tmp_path, "tok-two")
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        empty = shown(view.query_one("#fleet-summary", Static))
+        await settle_until(app, lambda: len(no_network["usage_calls"]) >= 1)
+        await settle(app)
+        return empty, shown(view.query_one("#fleet-summary", Static))
+
+    before, after = drive(go, overview=frame)
+    assert before == "", "nothing read yet: no line"
+    reset = core.format_reset(NOW + timedelta(days=2), now=NOW)
+    assert after == (
+        f"Fleet: 70% left now · week: 0.8 of 1 accounts left · next weekly reset {reset} (account 2)"
+    ), after

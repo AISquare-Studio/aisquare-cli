@@ -43,8 +43,10 @@ from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import (
     ClaudeAccount,
+    ClaudeUsage,
     FleetAgent,
     FleetAgentStatus,
+    HeadroomSummary,
     ProjectInfo,
     TeamSession,
     TurnMetric,
@@ -2186,3 +2188,93 @@ def test_a_switch_by_hand_never_falls_back_to_a_marked_account(
     assert any("account 3 skipped — weekly limit until " in note for note in by_hand.notes)
     named = service.choose_for_handover("3", role="coder", project=work, exclude=(2,))
     assert named.account is not None and named.account.slot == 3  # --to is the operator's
+
+
+# --- the weekly aggregate (P3-W2a, #287) ------------------------------------------------
+
+
+def _two(week_resets: tuple[datetime, datetime]) -> HeadroomSummary:
+    """The handoff's readings: 5h 10% / week 90% on slot 2, 5h 30% / week 20% on slot 3."""
+    accounts = [
+        ClaudeAccount(slot=2, config_dir=Path("/accounts/2"), managed=True),
+        ClaudeAccount(slot=3, config_dir=Path("/accounts/3"), managed=True),
+    ]
+    readings = {
+        2: ClaudeUsage(available=True, session_percent=10.0, week_percent=90.0,
+                       week_resets_at=week_resets[0], fetched_at=NOW),
+        3: ClaudeUsage(available=True, session_percent=30.0, week_percent=20.0,
+                       week_resets_at=week_resets[1], fetched_at=NOW),
+    }  # fmt: skip
+    return service.fleet_headroom(accounts, readings)
+
+
+def test_the_summary_says_how_much_of_the_week_is_left_across_the_fleet() -> None:
+    """The failing-first case (#287 slice 2a): the fields did not exist."""
+    soon, late = NOW + timedelta(days=1), NOW + timedelta(days=4)
+    summary = _two((late, soon))
+    assert summary.week_left_by_slot == {2: 10.0, 3: 80.0}
+    assert summary.week_percent_left == 45.0
+    assert summary.weeks_left == pytest.approx(0.9)
+    assert summary.week_resets_soonest == (3, soon)
+    # The now-figure is unchanged: the fuller window decides it.
+    assert summary.percent_left == pytest.approx(((100 - 90) + (100 - 30)) / 2)
+
+
+def test_an_account_without_a_week_reading_is_left_out_of_the_week_figures() -> None:
+    accounts = [ClaudeAccount(slot=2, config_dir=Path("/accounts/2"), managed=True)]
+    reading = ClaudeUsage(available=True, session_percent=10.0, fetched_at=NOW)
+    summary = service.fleet_headroom(accounts, {2: reading})
+    assert summary.week_left_by_slot == {}
+    assert summary.week_percent_left is None and summary.weeks_left is None
+    assert summary.week_resets_soonest is None
+
+
+def test_the_sentence_says_now_the_week_and_the_soonest_reset() -> None:
+    soon = NOW + timedelta(days=2, hours=4)
+    summary = _two((NOW + timedelta(days=5), soon))
+    sentence = service.summary_sentence(summary, {3: "work"}, now=NOW)
+    reset = core.format_reset(soon, now=NOW)
+    assert sentence == (
+        f"Fleet: 40% left now · week: 0.9 of 2 accounts left · next weekly reset {reset} (work)"
+    )
+    assert service.summary_sentence(HeadroomSummary(level="unknown"), {}) is None
+
+
+def _usage_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    second, third = _slot("two@x.dev", "tok-2"), _slot("three@x.dev", "tok-3")
+    readings = {
+        second.slot: ClaudeUsage(available=True, session_percent=10.0, week_percent=90.0,
+                                 week_resets_at=NOW + timedelta(days=4), fetched_at=NOW),
+        third.slot: ClaudeUsage(available=True, session_percent=30.0, week_percent=20.0,
+                                week_resets_at=NOW + timedelta(days=1), fetched_at=NOW),
+    }  # fmt: skip
+    monkeypatch.setattr(service, "cached_usage", lambda accounts, force=False, **_: readings)
+
+
+def test_accounts_usage_ends_with_the_fleets_row_and_line(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _usage_cli(monkeypatch)
+    result = runner.invoke(app, ["accounts", "usage"])
+    assert result.exit_code == 0, result.output
+    [all_row] = [line for line in result.stdout.splitlines() if line.startswith("all")]
+    assert "2 usable" in all_row and "20%" in all_row and "55%" in all_row  # mean used
+    assert "Fleet: 40% left now · week: 0.9 of 2 accounts left · next weekly reset" in (
+        result.stdout
+    )
+    assert "(account 3)" in result.stdout
+
+
+def test_accounts_usage_json_stays_a_list_and_summary_adds_the_aggregate(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _usage_cli(monkeypatch)
+    plain = json.loads(runner.invoke(app, ["--json", "accounts", "usage"]).stdout)
+    assert isinstance(plain, list), "consumers of the list do not break"
+    both = json.loads(runner.invoke(app, ["--json", "accounts", "usage", "--summary"]).stdout)
+    assert [row["account"]["slot"] for row in both["accounts"]] == [
+        row["account"]["slot"] for row in plain
+    ]
+    summary = HeadroomSummary.model_validate(both["summary"])
+    assert summary.week_percent_left == 45.0 and summary.weeks_left == pytest.approx(0.9)
+    assert summary.week_resets_soonest is not None and summary.week_resets_soonest[0] == 3

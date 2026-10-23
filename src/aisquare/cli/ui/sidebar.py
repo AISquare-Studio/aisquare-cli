@@ -409,12 +409,13 @@ def headroom_dot(
 def status_line_text(
     aisquare: bool | None, headroom: HeadroomSummary | None, *, every_needs_login: bool = False
 ) -> Text:
-    """``● aisquare  ● 3x claude`` (the x a multiplication sign) — the line under *⚙ Settings*.
+    """``● aisquare  ● 3x claude 58%`` (the x a multiplication sign), under *⚙ Settings*.
 
     The AISquare dot is green signed in, red signed out, grey while unknown. The
-    Claude dot is :func:`headroom_dot`; the count is how many accounts are usable,
-    and a ``⚠`` follows when an account needs a login. ``headroom`` is ``None`` until
-    the first summary lands.
+    Claude dot is :func:`headroom_dot`; the count is how many accounts are usable;
+    the figure is the fleet's share LEFT (``HeadroomSummary.percent_left``, #287), in
+    the dot's colour, and absent until a reading; a ``⚠`` follows when an account
+    needs a login. ``headroom`` is ``None`` until the first summary lands.
     """
     text = Text(no_wrap=True, overflow="ellipsis")
     colour = "grey50" if aisquare is None else GREEN if aisquare else RED
@@ -426,6 +427,9 @@ def status_line_text(
     if headroom is not None:
         text.append(f"{headroom.usable}{TIMES} ", style="dim")
     text.append("claude", style="dim")
+    if headroom is not None and headroom.percent_left is not None:
+        # The figure the dot's band stands for (#287): percent LEFT, in the dot's colour.
+        text.append(f" {round(headroom.percent_left)}%", style=colour)
     if headroom is not None and headroom.needs_login:
         text.append(" ⚠", style="yellow")
     return text

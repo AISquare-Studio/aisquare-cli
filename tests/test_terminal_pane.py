@@ -6358,3 +6358,50 @@ def test_real_tmux_pane_delivers_a_forwarded_click_to_a_program_that_tracks_the_
 
     shown = run(drive())
     assert "[<0;5;3M" in shown and "[<0;5;3m" in shown, shown
+
+
+# --- a Windows path pasted under WSL (#288) -------------------------------------------------
+
+
+class _Wslpath:
+    """``wslpath -u`` as ``terminal_module.subprocess.run``: ``C:\\x`` → ``<root>/c/x``."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str], **_kwargs: Any) -> Any:
+        self.calls.append(list(argv))
+        windows = argv[-1]
+        linux = self.root / windows[0].lower() / windows[3:].replace("\\", "/")
+        return SimpleNamespace(returncode=0, stdout=f"{linux}\n", stderr="")
+
+
+def test_a_lone_windows_path_under_wsl_becomes_its_linux_path_in_its_quotes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows Terminal hands a file dropped on WSL over as `C:\\…`, which the Linux side
+    cannot open: an existing file's path is rewritten with `wslpath -u`, in the quotes it
+    came in. A path that is not one file, or off WSL, reaches the agent as it was sent."""
+    shot = tmp_path / "c" / "Users" / "me" / "my shot.png"
+    shot.parent.mkdir(parents=True)
+    shot.write_bytes(b"png")
+    wslpath = _Wslpath(tmp_path)
+    monkeypatch.setattr("aisquare.cli.ui.terminal.subprocess.run", wslpath)
+
+    bare = terminal_module.wsl_path("C:\\Users\\me\\my shot.png", under_wsl=True)
+    quoted = terminal_module.wsl_path('"C:\\Users\\me\\my shot.png"', under_wsl=True)
+    missing = terminal_module.wsl_path("C:\\Users\\me\\gone.png", under_wsl=True)
+    off_wsl = terminal_module.wsl_path("C:\\Users\\me\\my shot.png", under_wsl=False)
+    two = terminal_module.wsl_path("C:\\a.png\nD:\\b.png", under_wsl=True)
+    posix = terminal_module.wsl_path("/tmp/shot.png", under_wsl=True)
+
+    assert bare == str(shot)
+    assert quoted == f'"{shot}"'
+    assert missing == "C:\\Users\\me\\gone.png"
+    assert (off_wsl, two, posix) == (
+        "C:\\Users\\me\\my shot.png",
+        "C:\\a.png\nD:\\b.png",
+        "/tmp/shot.png",
+    )
+    assert len(wslpath.calls) == 3, "asked only for a lone Windows path under WSL"

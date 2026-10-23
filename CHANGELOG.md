@@ -303,6 +303,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Every first message reaches its agent and starts a turn, or `fleet ls` says it
+  did not.** A spawn's `--prompt`, the line `fleet restart` and `fleet switch` start
+  a replacement with, a fresh hand-off and the usage-limit hand-over's were typed
+  with one Enter about two seconds after the agent started. An Enter that reaches
+  Claude Code before it draws its input box is dropped while the text stays in the
+  box, so the agent sat idle with its message unsent, and the board read it
+  `working`. A Claude Code agent now gets its first message on its command line
+  (`claude -- "<message>"`), in a file only you can read that its launch deletes,
+  so the row's recorded launch never holds it and a restart replays no old message.
+  Any other binary, and every agent under `[fleet] first_prompt = "type"`, has it
+  typed once Claude Code's input box is drawn, checked in the box, and sent again
+  only while the text is provably still waiting there. The row reads `pending` until
+  the agent's `UserPromptSubmit` takes it. `fleet spawn`, `restart` and `switch` wait
+  `[fleet] prompt_ack_seconds` (45) for that and say so, and their `--json` adds
+  `prompt_delivery` and `prompt_acked`. A message still pending past that wait at an
+  idle input box reads `attention` ("first prompt not taken — `aisquare fleet tell
+  <label> …` or restart it"), and the board gets one `prompt_unsent`, which wakes the
+  manager. `aisquare doctor` gains a `fleet-delivery` row: the last week's first
+  messages acknowledged, N of M, and how long agents took to start their first turn.
+  The store migrates to schema v34, which adds three nullable columns:
+  `team_session.prompted_at`, `fleet_agent.first_prompt` and
+  `fleet_agent.first_prompt_at`. A row from before them reads as "not tracked".
+  (#122)
+- **`fleet spawn coder --task <id>` gives the coder its task.** With no `--prompt`
+  it typed nothing, and the coder waited at an empty prompt. Its first message is
+  now a kickoff that names the task as its ASSIGNED TO YOU block does; a `--prompt`
+  beside `--task` follows it. The manager's cycle says `--task` delivers the task.
+  (#122)
 - **A coder that claims a task sees its contract.** `task claim` and `task next
   --claim` printed the title line alone, and the contract (`--detail`) was a
   separate `task show` that nothing named, so people pasted contracts into coders'

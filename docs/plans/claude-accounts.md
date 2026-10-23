@@ -340,12 +340,15 @@ for the long ones.
   resets), `claude-account-headroom` (`--live`, every window against
   `switch_at`; warns when all are over the line or none can be read).
 
-**Unverified, and said so.** Resuming a transcript written under one
-`CLAUDE_CONFIG_DIR` from another. The path form is documented and the id is
-kept, but this machine holds one login, so the cross-account leg has not been
-run; a resume that fails leaves a pane whose error is visible, and `--fresh` is
-the documented way around it. Copying transcripts between config directories
-was not done, per the issue.
+**Verified on 2026-10-23 (P0-W0).** Resuming a transcript written under one
+`CLAUDE_CONFIG_DIR` from another works on Claude Code 2.1.309 and 2.1.223: the
+session keeps its id and its history, and a prompt passed with the resume runs
+(`docs/plans/handoff-p0-reliability.md`, "W0 results" §2). Claude Code keeps
+appending to the ORIGINAL file under the first account's `projects/`; nothing is
+written under the second. Its `SessionStart` hook is handed a `transcript_path`
+under the second account that is never created, which the fleet now records as
+the real one (P0-W3b). Copying transcripts between config directories was not
+done, per the issue.
 
 ## 11. The macOS Keychain (2026-10-15)
 

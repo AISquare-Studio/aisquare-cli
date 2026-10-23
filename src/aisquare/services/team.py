@@ -143,6 +143,9 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
         # wait), and the hand-over that moved one is news the manager acts on.
         "limited",
         "switched",
+        # P0-W1a (#122): an agent whose first message never started a turn sits idle
+        # until someone tells it again or restarts it.
+        "prompt_unsent",
     }
 )
 
@@ -2005,6 +2008,12 @@ def hook_prompt_heartbeat(
     A session unknown to the orchestrator but prompting inside an *active* project
     joins right here (the orchestrator may have been activated after it started) and
     receives the full board + protocol instead of a delta.
+
+    Every prompt stamps the session's ``prompted_at`` and takes its fleet row's first
+    message (``store.mark_prompted``, P0-W1a): the acknowledgement ``fleet spawn``,
+    ``restart`` and ``switch`` wait for, and a typed delivery asks before it presses Enter
+    again. The row is the window's own (``AISQUARE_FLEET_AGENT``), else the one bound to the
+    session. One indexed update, no tmux call.
     """
     if not orchestrator.team_enabled():
         return ""
@@ -2034,8 +2043,10 @@ def hook_prompt_heartbeat(
                     account=session_account(transcript_path),
                     model=harness.clean_model_id(model),
                     effort=harness.clean_effort(effort),
+                    prompted_at=now,
                 )
             )
+            store.mark_prompted(session.id, now, agent_id=orchestrator.env_fleet_agent())
             # This door binds a fleet row too (an agent that started before the
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
@@ -2066,6 +2077,7 @@ def hook_prompt_heartbeat(
         briefing += _owed_persona_briefing(store, session)
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         store.renew_leases(session.id, lease)
+        store.mark_prompted(session.id, _now(), agent_id=orchestrator.env_fleet_agent())
         # The board's newest seq, read BEFORE the delta: with nothing to deliver the
         # cursor moves there, past the rows the query left out. Read first, it cannot
         # pass an event the delta did not see — whatever is written after has a later seq.
@@ -3488,6 +3500,34 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
         f"It is already {task.status}{holder}. Do not take another task on your own:",
         f'ask the manager — `aisquare note "…" --kind question --to manager --as {sid}`.',
     ]
+
+
+def kickoff_prompt(
+    task: TeamTask,
+    *,
+    role: str,
+    label: str,
+    session_id: str | None,
+    statuses: Mapping[str, str],
+) -> str:
+    """The first message of an agent spawned for ``task`` (P0-W1a, #122): ``You are
+    <label>.``, then the lines its ASSIGNED TO YOU block carries (:func:`_assignment_lines`),
+    worked out as the block works them out at its session start (:func:`_resolve_assignment`),
+    so the kickoff and the block never disagree. A context block starts no turn; this does.
+    ``statuses`` are the board's task statuses, for what a ``todo`` task still waits on."""
+    now = _now()
+    me = TeamSession(
+        id=session_id or label,
+        project_id=task.project_id,
+        role=role,
+        started_at=now,
+        last_seen_at=now,
+    )
+    mine = task.claimed_by is not None and task.claimed_by == session_id
+    waiting_on = unmet_needs(task, statuses) if task.status == "todo" else []
+    expired = task.claim_expires_at is not None and task.claim_expires_at < now
+    assignment = Assignment(task, mine, waiting_on, task.status == "doing" and not mine and expired)
+    return "\n".join([f"You are {label}.", *_assignment_lines(assignment, me)])
 
 
 def _role_cycle(me: TeamSession, project: ProjectInfo | None) -> list[str]:

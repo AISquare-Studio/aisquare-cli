@@ -1039,6 +1039,7 @@ def _role_cycle_core(
             "acceptance · boundaries>\"`, `--needs` for ordering; the coder's claim prints the",
             "contract, so put it in `--detail`, not the prompt. Help comes only from",
             f"`{spawn} coder --label coder-<purpose> --task <id> --as {sid}` —",
+            "`--task` delivers the task; add `--prompt` only for extra instructions —",
             f"one per parallelisable task, within the agent cap; `{spawn} tester` once work",
             f'reaches review — `{spawn} ui-tester --prompt "<branch or worktree to check +',
             'the URL to open>"` for tasks titled "UI: …", which it verifies in a real browser',

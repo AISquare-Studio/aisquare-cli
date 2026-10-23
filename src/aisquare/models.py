@@ -689,6 +689,11 @@ class TeamSession(BaseModel):
     persona: str | None = None
     """The persona the session was launched as (``AISQUARE_PERSONA``), recorded at start —
     what was ASKED, even when it could not be loaded (docs/plans/spawn-personas.md §3.7)."""
+    prompted_at: datetime | None = None
+    """When its last prompt started a turn (``UserPromptSubmit``), however the prompt came:
+    typed, on the command line, or from another session's inbox. ``None`` before the first,
+    and on rows from before schema 34. What a typed delivery's acknowledgement asks
+    (``services.delivery``)."""
 
 
 class TeamTask(BaseModel):
@@ -911,6 +916,9 @@ class AgentConnection(BaseModel):
 
 
 FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]
+
+FirstPromptState = Literal["pending", "acked", "unsent"]
+"""Where a fleet agent's first message stands (:attr:`FleetAgent.first_prompt`)."""
 """What a fleet agent is doing, DERIVED at read time and never stored: a fresh
 ``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
 pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
@@ -1124,6 +1132,16 @@ class FleetAgent(BaseModel):
     persona: str | None = None
     """The persona the agent was spawned with: ``--persona``, else the role's
     ``[fleet.roles.<role>].persona``, else none."""
+    first_prompt: FirstPromptState | None = None
+    """Whether the first message it was given started a turn (P0-W1a, #122): ``pending``
+    from the spawn until its ``UserPromptSubmit``, then ``acked``; ``unsent`` once a
+    listing found it still pending past ``[fleet] prompt_ack_seconds`` at an idle input
+    box, or a typed delivery left it in the box. ``None`` when it was given none, and on
+    rows from before schema 34 ("not tracked")."""
+    first_prompt_at: datetime | None = None
+    """When ``first_prompt`` last changed: given (``pending``), taken (``acked``), found
+    not taken (``unsent``). An ``acked`` row's ``first_prompt_at - created_at`` is how long
+    the agent took to start its first turn (doctor's ``fleet-delivery`` row)."""
 
 
 class FleetAgentStatus(BaseModel):

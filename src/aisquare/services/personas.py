@@ -21,8 +21,8 @@ anyone is asked, and only a confirmed draft becomes a persona (§3.9).
 from __future__ import annotations
 
 import hashlib
+import os
 import re
-import secrets
 import shutil
 import sys
 import tempfile
@@ -1099,7 +1099,7 @@ def _staging_dir(parent: Path, prefix: str) -> Path:
     0700, and the rename published the persona so: other accounts and tools that read the
     user's files could not read a persona the user had shared."""
     while True:
-        staged = parent / f"{prefix}{secrets.token_hex(6)}"
+        staged = parent / f"{prefix}{os.urandom(6).hex()}"
         try:
             staged.mkdir()
         except FileExistsError:

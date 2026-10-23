@@ -1739,9 +1739,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     def _agent_view(self, status: FleetAgentStatus, view_id: str) -> AgentView:
         """The view for one agent's row: the captain's has its own bar (T4)."""
+        # Off, the frame reads no home (``_read_frame``), so no row is the home's.
         if (
-            self.captain_on
-            and self.snapshot is not None
+            self.snapshot is not None
             and self.snapshot.is_home(status.agent.project_id)
             and status.agent.role == fleet_service.CAPTAIN_ROLE
         ):

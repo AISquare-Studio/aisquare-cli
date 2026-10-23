@@ -1590,3 +1590,24 @@ def test_a_declared_captain_role_shows_the_label_it_sends_and_gives_the_typed_on
         return [*seen, label_input(dialog).value]
 
     assert drive(git_project, scenario) == ["captain", True, "coder-auth"]
+
+
+def test_off_the_spawn_dialog_preset_to_a_declared_captain_is_an_ordinary_spawn(
+    git_project: ProjectInfo, spawns: SpawnRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #240, R2-m3: ``_label_fixed`` and ``self._captain`` off."""
+    from aisquare.core.config import AppConfig, RoleLaunchProfile, TeamSettings
+
+    monkeypatch.delenv(experimental.CAPTAIN_ENV, raising=False)
+    save_config(AppConfig(team=TeamSettings(profiles={"captain": RoleLaunchProfile(bin="echo")})))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        label = label_input(dialog)
+        seen: list[Any] = [label.disabled, select(dialog, "role").disabled]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    seen = drive(git_project, scenario, presets={"role": "captain"})
+    assert seen == [False, False], "a label of its own and a role that can change"
+    assert [call[1] for call in spawns.calls] == ["captain"], "through fleet.spawn"

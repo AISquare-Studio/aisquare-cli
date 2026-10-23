@@ -322,9 +322,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the agent's `UserPromptSubmit` takes it. `fleet spawn`, `restart` and `switch` wait
   `[fleet] prompt_ack_seconds` (45) for that and say so, and their `--json` adds
   `prompt_delivery` and `prompt_acked`. A message still pending past that wait at an
-  idle input box reads `attention` ("first prompt not taken — `aisquare fleet tell
-  <label> …` or restart it"), and the board gets one `prompt_unsent`, which wakes the
-  manager. `aisquare doctor` gains a `fleet-delivery` row: the last week's first
+  idle input box reads `attention` ("first prompt not taken", with the `fleet tell`
+  and `fleet restart` that take it on), and the board gets one `prompt_unsent`, which
+  wakes the manager. `aisquare doctor` gains a `fleet-delivery` row: the last week's first
   messages acknowledged, N of M, and how long agents took to start their first turn.
   The store migrates to schema v34, which adds three nullable columns:
   `team_session.prompted_at`, `fleet_agent.first_prompt` and

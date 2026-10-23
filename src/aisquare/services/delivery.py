@@ -179,10 +179,6 @@ def overdue(agent: FleetAgent, now: datetime, seconds: float) -> bool:
     )
 
 
-UNSENT_DETAIL = "first prompt not taken — `aisquare fleet tell {label} …` or restart it"
-"""What a listing says of an agent whose first message never started a turn."""
-
-
 # --- typed, acknowledged -------------------------------------------------------------------
 
 

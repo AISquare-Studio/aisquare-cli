@@ -157,6 +157,7 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "_exited_note"): "each exited row's own ``project_id``",
     ("services/fleet.py", "_tell"): _FLEET_OP,
     ("services/fleet.py", "_send_it_later"): _FLEET_OP,
+    ("services/fleet.py", "unsent_detail"): "the project the listing reads, whose agent it is",
     ("services/fleet.py", "_past_trust_prompt"): _FLEET_OP,
     ("services/fleet.py", "_forget"): (
         _FLEET_OP + ", or each stranded row's own (``_refuse_a_freed_socket``)"

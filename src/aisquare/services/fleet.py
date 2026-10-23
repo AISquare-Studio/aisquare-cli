@@ -2449,6 +2449,7 @@ def _with_trust_prompts(
 
 def _with_first_prompts(
     statuses: list[FleetAgentStatus],
+    project: ProjectInfo,
     config: FleetSettings,
     addresses: Mapping[str, _Address] | None = None,
 ) -> list[FleetAgentStatus]:
@@ -2481,11 +2482,19 @@ def _with_first_prompts(
                 update={
                     "agent": agent,
                     "state": "attention",
-                    "detail": delivery.UNSENT_DETAIL.format(label=agent.label),
+                    "detail": unsent_detail(project, agent.label),
                 }
             )
         shown.append(status)
     return shown
+
+
+def unsent_detail(project: ProjectInfo, label: str) -> str:
+    """What a listing says of an agent whose first message never started a turn: the two ways
+    on, each naming ``project`` (``project_service.fleet_command``)."""
+    tell = project_service.fleet_command("tell", project, label)
+    restart = project_service.fleet_command("restart", project, label)
+    return f"first prompt not taken — `{tell} …` or `{restart}`"
 
 
 def _unsent_if_idle(
@@ -4747,7 +4756,7 @@ def list_agents(
         for agent in agents
     ]
     return _with_first_prompts(
-        _with_trust_prompts(statuses, config, by_id, addresses), config, addresses
+        _with_trust_prompts(statuses, config, by_id, addresses), project, config, addresses
     )
 
 

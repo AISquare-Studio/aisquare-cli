@@ -323,8 +323,9 @@ with, a fresh hand-off, the usage-limit hand-over's — either starts a turn, or
   (`✓ first message taken`); their `--json` adds `prompt_delivery` (`argv` or
   `typed`) and `prompt_acked`. A message still pending past that wait, with the
   agent at an idle input box, is not going to be taken: the agent reads
-  `attention` — "first prompt not taken — `aisquare fleet tell <label> …` or
-  restart it" — and the board gets one `prompt_unsent`, which wakes the manager.
+  `attention` — "first prompt not taken", with the `fleet tell` and `fleet
+  restart` commands that take it on, each naming the project — and the board
+  gets one `prompt_unsent`, which wakes the manager.
   `aisquare doctor`'s `fleet-delivery` row counts the last week's: acknowledged N
   of M, and how long the agents took to start their first turn.
 

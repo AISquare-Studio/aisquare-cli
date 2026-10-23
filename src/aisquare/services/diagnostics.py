@@ -1488,8 +1488,8 @@ def _check_fleet_delivery(now: datetime | None = None) -> list[DoctorCheck]:
         _warn(
             "fleet-delivery",
             f"{detail}; {len(unsent)} never taken ({labels})",
-            "`aisquare fleet ls` shows each one still live as attention: "
-            "`aisquare fleet tell <label> …` sends the message again, or restart it",
+            "each one still live reads attention in its project's fleet listing, which names "
+            "the tell that sends the message again and the restart that starts it over",
         )
     ]
 

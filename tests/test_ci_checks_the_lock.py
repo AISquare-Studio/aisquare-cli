@@ -31,6 +31,11 @@ def test_ci_checks_the_lock_with_a_pinned_uv() -> None:
     steps = _steps("lock")
     setup = [step for step in steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")]
     assert len(setup) == 1, "the lock job installs uv with astral-sh/setup-uv"
+    ref = str(setup[0]["uses"]).split("@", 1)[1]
+    assert re.fullmatch(r"[0-9a-f]{40}|v\d+\.\d+\.\d+", ref), (
+        f"setup-uv@{ref}: a commit or a full tag; it publishes no floating major past v7, "
+        "so a bare major does not resolve and the job fails at 'Set up job'"
+    )
     assert re.fullmatch(r"\d+\.\d+\.\d+", str(setup[0].get("with", {}).get("version", ""))), (
         "uv itself is pinned, so a uv release cannot turn the check red on its own"
     )

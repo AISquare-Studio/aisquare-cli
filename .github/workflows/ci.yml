@@ -121,8 +121,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Pinned to a commit, not a major: astral-sh/setup-uv publishes no floating
+      # major tags past v7, so `@v10` does not resolve and the job dies at "Set up
+      # job" (review of #307).
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
         with:
           version: "0.13.0"
           enable-cache: false

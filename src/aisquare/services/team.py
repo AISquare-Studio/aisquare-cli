@@ -1535,6 +1535,29 @@ def stopped_because(task: TeamTask) -> str | None:
     return text[len(prefix) :] if text.startswith(prefix) else None
 
 
+def last_feedback(task: TeamTask) -> str | None:
+    """The reason given at the task's newest ``task reopen``, whatever its status now (#74).
+
+    :func:`stopped_because` answers for the CURRENT status only, which is right for
+    ``task show`` and wrong for a claim: a reopened task is ``doing`` once claimed, and
+    the reason it bounced was gone exactly when the coder picking it up needed it.
+    ``None`` when it was never reopened, or reopened with no reason. Fails open, as
+    :func:`stopped_because` does: a claim never fails for its decoration.
+    """
+    try:
+        with store_session() as store:
+            events = store.filtered_events(
+                task.project_id, kind="task_reopened", task_id=task.id, limit=1
+            )
+    except Exception:
+        return None
+    if not events:
+        return None
+    prefix = f"{task.title} — "
+    text = events[-1].text
+    return text[len(prefix) :] if text.startswith(prefix) else None
+
+
 def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     """Atomically claim a task; exactly one concurrent claimer wins.
 

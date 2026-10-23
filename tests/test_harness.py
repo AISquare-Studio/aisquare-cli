@@ -1640,3 +1640,14 @@ def test_the_checking_roles_name_the_memory_gate_only_when_it_is_set(role: str) 
         harness.role_cycle(role, "abcd1234", fleet=unscoped)
     )
     assert "fleet gate" not in " ".join(harness.role_cycle("coder", "abcd1234", fleet=unscoped))
+
+
+def test_the_coder_cycle_names_task_show_and_the_manager_puts_the_contract_in_detail() -> None:
+    """#74: the coder was told to read a contract no command it ran had printed, and nothing
+    named `task show`; the manager pasted contracts into spawn prompts instead."""
+    coder = " ".join(harness.role_cycle("coder", "abcd1234", fleet=unscoped))
+    assert "the claim prints both; `aisquare task show <id>` is the whole task" in coder
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
+    assert "the coder's claim prints the contract, so put it in `--detail`, not the prompt" in (
+        manager
+    )

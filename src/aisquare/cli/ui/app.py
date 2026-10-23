@@ -320,13 +320,15 @@ def _read_fleet(show_captured: bool, *, captain: bool = False) -> _FleetRead:
     capturing = project_service.capture_on()
     try:
         with store_session() as store:
-            # The home is captured, never onboarded, so only `a` lists it — and
-            # it is still no project: the captain's section shows its board (T2).
-            # As a card it doubled the captain's row, whose repeated selection
-            # key sent ↓ round a loop above every project, and it offered a
-            # spawn row onto the home board.
+            # The home is hidden by default: captured for the captain, it is still no
+            # project, and `a` does not list it (T2). Onboarded on purpose (`init`,
+            # `project onboard`, `+`), it is one, with its own card (the owner's
+            # decision D5); the captain's row stays in the captain's section and out
+            # of that card, where it doubled the row and its selection key.
             projects = [
-                p for p in store.list_projects(all=show_captured and capturing) if p.id != home_id
+                p
+                for p in store.list_projects(all=show_captured and capturing)
+                if p.id != home_id or p.onboarded_at is not None
             ]
             groups = store.project_groups()
             home = store.get_project(home_id) if captain else None
@@ -336,7 +338,10 @@ def _read_fleet(show_captured: bool, *, captain: bool = False) -> _FleetRead:
     notices: dict[str, str] = {}
     for project in projects:
         try:
-            agents[project.id] = fleet_service.list_agents(project)
+            statuses = fleet_service.list_agents(project)
+            if project.id == home_id:  # the captain is the captain section's, never the card's
+                statuses = [s for s in statuses if not fleet_service.is_the_captains_row(s.agent)]
+            agents[project.id] = statuses
         except Exception as exc:  # a bug in the fleet path must not take the view down
             agents[project.id] = []
             notices[project.id] = f"agents unavailable — {_why_unread(exc)}"

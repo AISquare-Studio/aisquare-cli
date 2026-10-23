@@ -1264,7 +1264,7 @@ class ContextStore(Protocol):
     def promote(self, entry_id: str) -> ContextEntry: ...
     def ensure_project(self, project: ProjectInfo) -> None: ...
     def onboard_project(
-        self, project: ProjectInfo, *, codename: str | None = None
+        self, project: ProjectInfo, *, codename: str | None = None, explicit: bool = False
     ) -> ProjectInfo: ...
     def list_projects(
         self, *, all: bool = False, include_forgotten: bool = False
@@ -1983,7 +1983,9 @@ class SqliteStore:
         )
         self._conn.commit()
 
-    def onboard_project(self, project: ProjectInfo, *, codename: str | None = None) -> ProjectInfo:
+    def onboard_project(
+        self, project: ProjectInfo, *, codename: str | None = None, explicit: bool = False
+    ) -> ProjectInfo:
         """Register the project ON PURPOSE: shown from now on, and revived if forgotten.
 
         ``init``, ``project onboard`` / ``link`` / ``switch``, the sidebar's
@@ -1999,8 +2001,12 @@ class SqliteStore:
         whose session and branch were named by it before anything was written. A row's own
         codename is kept; one another project holds raises ``sqlite3.IntegrityError`` and
         writes nothing.
+
+        ``explicit`` is the owner's own "add this folder": ``init`` (the TUI's ``+`` runs it)
+        and ``project onboard``. Only that makes the aisquare home one of their projects
+        (the owner's decision D5, 2026-10-23); a forget hides it again, as any project.
         """
-        if is_the_home(project.root):
+        if is_the_home(project.root) and not explicit:
             # The aisquare home's row is the captain's HOME BOARD (services.captain):
             # captured so it can hold the captain's row and events, never one of the
             # owner's projects — a spawn, a codename, a rename or a launch's

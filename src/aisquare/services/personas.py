@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import secrets
 import shutil
 import sys
 import tempfile
@@ -35,6 +36,7 @@ from pydantic import BaseModel
 
 from aisquare.core import personas as core
 from aisquare.core.agents import _claude_home
+from aisquare.core.atomic import write_replacing
 from aisquare.core.config import PersonaImportSettings, load_config
 from aisquare.core.editor import edit_text
 from aisquare.core.personas import Layer, Persona, PersonaError, Provenance
@@ -1069,7 +1071,7 @@ def _publish(dest: Path, fill: Callable[[Path], object]) -> bool:
     ``.<name>.old-*`` directory, the persona was gone from every catalogue (review of
     #201, R1-F4)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    staged = Path(tempfile.mkdtemp(dir=dest.parent, prefix=f".{dest.name}.new-"))
+    staged = _staging_dir(dest.parent, f".{dest.name}.new-")
     try:
         fill(staged)
         replaced = _occupied(dest)
@@ -1091,16 +1093,24 @@ def _publish(dest: Path, fill: Callable[[Path], object]) -> bool:
     return replaced
 
 
+def _staging_dir(parent: Path, prefix: str) -> Path:
+    """A new, empty directory in ``parent``, made as any directory the user makes: its mode
+    is the umask's (review of #267, item (e); the owner's decision D6). ``mkdtemp`` made it
+    0700, and the rename published the persona so: other accounts and tools that read the
+    user's files could not read a persona the user had shared."""
+    while True:
+        staged = parent / f"{prefix}{secrets.token_hex(6)}"
+        try:
+            staged.mkdir()
+        except FileExistsError:
+            continue
+        return staged
+
+
 def _replace_file(path: Path, data: bytes) -> None:
-    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    staged = Path(name)
-    try:
-        with open(fd, "wb") as handle:
-            handle.write(data)
-        staged.replace(path)
-    except BaseException:
-        staged.unlink(missing_ok=True)
-        raise
+    """Replace ``path`` in one rename. A new file takes the umask's mode, as any the user
+    creates (``mkstemp`` made it 0600); an existing one keeps its own (item (e), D6)."""
+    write_replacing(path, data)
 
 
 def _discard(path: Path) -> None:

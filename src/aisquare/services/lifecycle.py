@@ -154,9 +154,11 @@ def initialize(
 
     project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
     with store_session() as store:
-        store.onboard_project(project)  # init is the deliberate add (#139)
+        _, warning = project_service.onboard_on_purpose(store, project)  # deliberate (#139)
 
     notes: list[str] = []
+    if warning is not None:
+        notes.append(f"Warning: {warning}.")
     if unreadable is not None:
         notes.append(f"reset replaced a config.toml it could not read ({unreadable})")
     if discarded:

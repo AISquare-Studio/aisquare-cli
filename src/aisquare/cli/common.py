@@ -694,6 +694,9 @@ def emit_onboard(report: OnboardReport) -> None:
         typer.echo(report.model_dump_json())
         return
     console = stdout_console()
+    if report.warning is not None:
+        # The one line adding the aisquare home says (D5): a warning, never a refusal.
+        stderr_console().print(f"warning: {report.warning}", style="yellow", markup=False)
     snapshot = report.snapshot
     if report.snapshot_note is not None:
         # Nothing packed: off, a pack that failed and why, or a --refresh that kept

@@ -303,6 +303,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A coder that claims a task sees its contract.** `task claim` and `task next
+  --claim` printed the title line alone, and the contract (`--detail`) was a
+  separate `task show` that nothing named, so people pasted contracts into coders'
+  panes. A claim now prints the contract, the reason the task was last reopened
+  (which was lost the moment a reopened task was claimed again) and `aisquare task
+  show <ref>`. `task next` without `--claim` says when a task has a contract. The
+  coder's cycle names `task show`, the manager's says the contract belongs in
+  `--detail`, and `--detail`'s help says it is the contract. `--json` is unchanged.
+  (#74)
+
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for
   every other spawn: a seat reads the board of the hub its spawner honours, and its

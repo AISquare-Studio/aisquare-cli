@@ -33,7 +33,7 @@ import sys
 import threading
 import tomllib
 from collections.abc import Callable, Coroutine, Iterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -61,6 +61,7 @@ from aisquare.cli.ui.board import COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, BoardPane
 from aisquare.cli.ui.divider import Divider
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import project as project_view_module
+from aisquare.cli.ui.views import settings as settings_view_module
 from aisquare.cli.ui.views.agent import AgentView
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.cli.ui.views.explainability import ExplainabilityView
@@ -503,7 +504,7 @@ def test_the_manager_pane_asks_its_server_at_the_path_its_row_recorded(
     named the row's server by its socket's name (``tmux -L``). From a shell under another
     ``TMUX_TMPDIR`` that is another server, and its ``%7`` — another agent — was shown and
     typed into. A row recorded elsewhere is asked at its path (``tmux -S``); one from before
-    v25, by its name.
+    v25, by its name. The attach line has since moved to the Settings tab, with its rule.
 
     Where, the listed status says (``socket_at``, worked out with the listing's config): each
     frame asked ``fleet_service.socket_at``, which reloaded config.toml on the UI thread for
@@ -533,7 +534,7 @@ def test_the_manager_pane_asks_its_server_at_the_path_its_row_recorded(
         status = FleetAgentStatus(
             agent=agent, state="waiting", tmux_session="asq-amber-otter", socket_at=socket_at
         )
-        return project_view_module.manager_text(status).plain
+        return settings_view_module.attach_line([status]).plain
 
     assert isinstance(server, ScriptedServer) and server.path == elsewhere, server
     assert server.captures, "the frame came from the server at the recorded path"
@@ -551,7 +552,7 @@ def test_the_attach_line_quotes_the_path_and_the_socket_name_it_prints(
     """Round 29 of #257: the Manager tab pasted the recorded socket path into its attach line
     as it was, so a ``TMUX_TMPDIR`` with a space or a ``$`` gave a line that failed or named
     another path, and so did a free-form ``[fleet] tmux_socket``. Quoted for this shell, it
-    reads back as the command it names."""
+    reads back as the command it names — on the Settings tab, where the line now is."""
     odd = tmp_path / "my $HOME" / "tmux-1000" / "asq one"
     recorded = fake_agent(project, pane_id="%7").model_copy(
         update={"socket_path": odd, "tmux_socket": "asq one"}
@@ -561,12 +562,133 @@ def test_the_attach_line_quotes_the_path_and_the_socket_name_it_prints(
         status = FleetAgentStatus(
             agent=recorded, state="waiting", tmux_session="asq-amber-otter", socket_at=socket_at
         )
-        header = project_view_module.manager_text(status).plain.splitlines()[0]
-        return install_route.split_line(header.split("  ·  ", 1)[1])
+        line = settings_view_module.attach_line([status]).plain
+        assert line.startswith("Attach in a terminal: "), line
+        return install_route.split_line(line.removeprefix("Attach in a terminal: "))
 
     session = ["attach", "-t", "=asq-amber-otter"]
     assert attach_argv(odd) == ["tmux", "-S", str(odd), *session]
     assert attach_argv(None) == ["tmux", "-L", "asq one", *session]
+
+
+def test_the_settings_tab_shows_how_to_attach_and_says_so_when_there_is_nothing_to(
+    project: ProjectInfo, tmp_path: Path
+) -> None:
+    """The tmux attach command moved off the Manager tab's line to the project's Settings
+    tab: a labelled read-only row, from the shell's frames. The manager's session first; a
+    ``lost`` row or one held as another server's is no session to attach to, and with none
+    the row is a dim note. Before any frame it says nothing: "no live tmux session" there
+    may be false (review of #267, 7)."""
+    manager = fake_agent(project, pane_id="%11")
+    coder = fake_agent(project, pane_id="%12", label="coder-auth")
+    elsewhere = tmp_path / "tmux 1000" / "$asq"
+
+    def row(agent: FleetAgent, state: str = "working", **update: Any) -> FleetAgentStatus:
+        return FleetAgentStatus.model_validate(
+            {"agent": agent, "state": state, "tmux_session": "asq-amber-otter", **update}
+        )
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
+        view = host.query_one(ProjectView)
+        view.active = "tab-settings"
+        await pilot.pause()
+        line = host.query_one("#attach-line", Static)
+        seen = [shown(line)]
+        for frame in (
+            [row(coder), row(manager, "waiting", socket_at=elsewhere)],
+            [row(coder, socket_at=elsewhere)],
+            [row(coder, "lost"), row(manager, held=True)],
+            [],
+        ):
+            view.refresh_status(frame)
+            await pilot.pause()
+            seen.append(shown(line))
+        return seen
+
+    before, manager_first, coder_only, none_live, no_rows = drive(project, scenario)
+    attach = ["attach", "-t", "=asq-amber-otter"]
+    command = "Attach in a terminal: "
+    for plain in (manager_first, coder_only):
+        assert plain.startswith(command)
+        assert install_route.split_line(plain.removeprefix(command)) == [
+            "tmux",
+            "-S",
+            str(elsewhere),
+            *attach,
+        ]
+    assert before == "", "no frame yet: nothing said"
+    for note in (none_live, no_rows):
+        assert "no live tmux session" in note and "tmux -" not in note
+    assert settings_view_module.attach_line([row(manager)]).plain == (
+        f"{command}tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter"
+    )
+    nothing = settings_view_module.attach_line([])
+    assert str(nothing.style) == "dim"
+
+
+def test_the_attach_line_repaints_only_when_it_changes(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #267, 6: every two-second frame repainted the attach line of every open
+    project, with a layout pass, though the command had not changed. A frame that names the
+    same command repaints nothing, a new state on the row included; the frame that ends the
+    session repaints once, and the next one, which says the same, does not."""
+    manager = fake_agent(project, pane_id="%11")
+    live = FleetAgentStatus(agent=manager, state="waiting", tmux_session="asq-amber-otter")
+    painted: list[str] = []
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
+        view = host.query_one(ProjectView)
+        line = host.query_one("#attach-line", Static)
+        real = line.update
+
+        def update(content: Any = "", *, layout: bool = True) -> None:
+            painted.append(str(content))
+            real(content, layout=layout)
+
+        monkeypatch.setattr(line, "update", update)
+        for frame in ([live], [live], [live.model_copy(update={"state": "working"})], [], []):
+            view.refresh_status(frame)
+            await pilot.pause()
+        return painted
+
+    seen = drive(project, scenario)
+    assert len(seen) == 2, seen  # the first frame, then the one that ended the session
+    assert "attach -t =asq-amber-otter" in seen[0] and "no live tmux session" in seen[1]
+
+
+def test_the_settings_tab_attaches_where_fleet_attach_does_live_rows_before_ended_ones(
+    project: ProjectInfo, tmp_path: Path
+) -> None:
+    """Review of #267, 1: an ENDED manager is listed while its window stands (#138), and
+    ranked by its label alone the Settings tab named its server ahead of a live coder's — not
+    the server ``aisquare fleet attach`` reaches (``services.fleet.attach_argv``: the rows
+    that have not ended, the manager first, then the ended ones, the latest to end first)."""
+    now = datetime.now(tz=UTC)
+    old, new, older = tmp_path / "old" / "asq", tmp_path / "new" / "asq", tmp_path / "older"
+    manager = fake_agent(project, pane_id="%11")
+    coder = fake_agent(project, pane_id="%12", label="coder-auth")
+    tester = fake_agent(project, pane_id="%13", label="tester-1")
+
+    def row(agent: FleetAgent, at: Path, ended: datetime | None = None) -> FleetAgentStatus:
+        ended_row = agent.model_copy(update={"ended_at": ended, "exit_status": 0})
+        return FleetAgentStatus(
+            agent=ended_row if ended is not None else agent,
+            state="exited" if ended is not None else "working",
+            tmux_session="asq-amber-otter",
+            socket_at=at,
+        )
+
+    def server(rows: list[FleetAgentStatus]) -> str:
+        line = settings_view_module.attach_line(rows).plain
+        return install_route.split_line(line.removeprefix("Attach in a terminal: "))[2]
+
+    exited_manager = row(manager, old, ended=now)
+    assert server([exited_manager, row(coder, new)]) == str(new)  # the live coder's
+    assert server([row(coder, new), row(manager, old)]) == str(old)  # a live manager's first
+    # No live row: the latest to end, as the 💤 row's attach stands for.
+    early = row(tester, older, ended=now - timedelta(minutes=5))
+    assert server([early, exited_manager]) == str(old)
 
 
 def test_no_button_and_no_spawn_when_a_manager_already_runs(
@@ -631,7 +753,9 @@ def test_refresh_status_pushes_the_managers_state(project: ProjectInfo) -> None:
     manager = fake_agent(project, pane_id="%11")
     coder = fake_agent(project, pane_id="%12", label="coder-auth")
 
-    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, str | None, bool, bool]:
+    async def scenario(
+        pilot: Pilot[None], host: Host
+    ) -> tuple[str, str, str | None, bool, bool, str]:
         view = host.query_one(ProjectView)
         view.refresh_status(
             [
@@ -642,15 +766,54 @@ def test_refresh_status_pushes_the_managers_state(project: ProjectInfo) -> None:
         await pilot.pause()
         pane = host.query_one("#manager-pane", TerminalPane)
         header = str(host.query_one("#manager-header").render())
+        attach = shown(host.query_one("#attach-line", Static))
         attached = pane.pane_id
         view.refresh_status([FleetAgentStatus(agent=coder, state="working")])  # coder only
         await pilot.pause()
-        return header, attached, host.query_one("#start-manager", Button).display, pane.display
+        return (
+            header,
+            attach,
+            attached,
+            host.query_one("#start-manager", Button).display,
+            pane.display,
+            shown(host.query_one("#attach-line", Static)),
+        )
 
-    header, attached, button_back, pane_after = drive(project, scenario)
-    assert "NEEDS YOU" in header and "asq-ruby-fox" in header
+    header, attach, attached, button_back, pane_after, attach_after = drive(project, scenario)
+    assert "🔔 attention" in header and "asq-ruby-fox" not in header  # no tmux command here…
+    assert "attach -t =asq-ruby-fox" in attach  # …the Settings tab has it, from the same push
     assert attached == "%11"  # the manager's pane, not the coder's
     assert button_back is True and pane_after is False  # no manager in the snapshot → button
+    assert "no live tmux session" in attach_after  # the coder has no session to attach to
+
+
+def test_a_resize_after_the_manager_leaves_keeps_the_no_manager_text(
+    project: ProjectInfo,
+) -> None:
+    """Review of #267 (2b1d37a3): the Manager tab's header refits the info line on every
+    resize (``InfoLine``), and once the manager has left it shows the no-manager prose
+    instead. The line it last fitted must be forgotten then: kept, the next resize painted
+    the departed manager's line back over "has no manager yet"."""
+    manager = fake_agent(project, pane_id="%11")
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, str, str]:
+        view = host.query_one(ProjectView)
+        view.refresh_status([FleetAgentStatus(agent=manager, state="working")])
+        await settle(pilot)
+        header = host.query_one("#manager-header", Static)
+        shown_manager = shown(header)
+        view.refresh_status([])  # the manager leaves the frame
+        await settle(pilot)
+        left = shown(header)
+        await pilot.resize_terminal(100, 40)  # …and the window is resized
+        await settle(pilot)
+        return shown_manager, left, shown(header)
+
+    shown_manager, left, resized = drive(project, scenario)
+    assert "🧭 manager" in shown_manager and "▶ working" in shown_manager  # not vacuous
+    for text in (left, resized):
+        assert "has no manager yet" in text, text
+        assert "🧭 manager" not in text and "%11" not in text, text  # no stale info line
 
 
 def test_the_manager_tab_says_the_manager_exited_and_how_to_bring_it_back(
@@ -751,7 +914,7 @@ def test_refresh_routes_a_snapshot_and_a_bare_refresh_only_repaints(project: Pro
     header, attached, after_bare, early_header = drive(project, scenario)
     assert "working" in header and attached == "%21"  # routed to the manager tab
     assert after_bare == "%21"  # a bare refresh() changed nothing
-    assert "NEEDS YOU" in early_header  # the pre-mount push landed at mount
+    assert "🔔 attention" in early_header  # the pre-mount push landed at mount
 
 
 # --- the Board tab --------------------------------------------------------------------------

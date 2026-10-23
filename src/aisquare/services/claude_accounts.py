@@ -1467,6 +1467,8 @@ def fleet_headroom(
       accounts, and **usable** is how many there are;
     - **needs login** counts the accounts whose token has expired or was
       rejected (``ClaudeUsage.needs_login``);
+    - **session by slot** is each usable account's five-hour window, percent
+      USED, as read — what the agent rows show beside an agent's account;
     - the **level**: ``good`` over 50 % left, ``fair`` 25-50 %, ``low`` 5-25 %,
       ``critical`` under 5 % (but above 0), ``empty`` at 0 % or with no usable
       account, ``unknown`` while no enabled account has been read yet.
@@ -1483,13 +1485,15 @@ def fleet_headroom(
     if not read:
         return HeadroomSummary(level="unknown")
     left_by_slot: dict[int, float] = {}
+    session_by_slot: dict[int, float] = {}
     taken: list[datetime] = []
     for account in enabled:
         reading = readings.get(account.slot)
         left = percent_left(reading) if reading is not None else None
-        if reading is None or left is None:
+        if reading is None or left is None or reading.session_percent is None:
             continue
         left_by_slot[account.slot] = left
+        session_by_slot[account.slot] = reading.session_percent
         if reading.fetched_at is not None:
             taken.append(reading.fetched_at)
     if not left_by_slot:
@@ -1501,6 +1505,7 @@ def fleet_headroom(
         usable=len(left_by_slot),
         needs_login=needs_login,
         left_by_slot=left_by_slot,
+        session_by_slot=session_by_slot,
         fetched_at=min(taken, default=None),
     )
 

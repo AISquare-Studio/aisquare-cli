@@ -729,6 +729,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._headroom_due = True
         """Read the headroom once the next accounts frame lands: the first frame at start,
         and the one after the Accounts page changed something (``AccountsChanged``)."""
+        self.session_usage: dict[int, float] = {}
+        """Slot → five-hour window percent USED from the last headroom read
+        (``HeadroomSummary.session_by_slot``): what the agent rows and info lines show. It
+        is the slow read's, handed on when it lands — the two-second tick reads no usage."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
@@ -1253,6 +1257,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.state is WorkerState.SUCCESS and isinstance(result, tuple):
             summary, every_needs_login = result
             self.sidebar.show_headroom(summary, every_needs_login=every_needs_login)
+            # The per-slot session use rides this read to every open info line; the views
+            # never read usage themselves, and the two-second tick never asks for it. Asked
+            # of the switcher that holds the views, as `_forget_views` does, whatever screen
+            # is on top (review of #267, 2).
+            self.session_usage = summary.session_by_slot
+            content = self.content
+            for view in content.query(AgentView):
+                view.show_usage(self.session_usage)
+            for project_view in content.query(ProjectView):
+                project_view.show_usage(self.session_usage)
         if event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self._headroom_owed:
             self.refresh_headroom()
 
@@ -1475,10 +1489,21 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify("that project is no longer listed", severity="warning", timeout=4)
             return
         view_id = f"project-{project.id}"
-        await self._show(view_id, lambda: ProjectView(project, id=view_id))
+        await self._show(view_id, lambda: self._project_view(project, view_id))
         self.sidebar.select(f"project:{project.id}")
         self.doctor_scope = project.id
         self._remember_selection(f"project:{project.id}")
+
+    def _project_view(self, project: ProjectInfo, view_id: str) -> ProjectView:
+        """A new Project view, handed the frame already read: its Settings tab names the
+        session to attach to at once, not "no live tmux session" until the next tick
+        (review of #267, 7). Not a frame whose fleet read failed open, as
+        :meth:`_feed_open_views` does not push one."""
+        view = ProjectView(project, id=view_id, usage=self.session_usage)
+        snapshot = self.snapshot
+        if snapshot is not None and snapshot.notices.get(project.id) is None:
+            view.refresh_status(snapshot.agents.get(project.id, []))
+        return view
 
     async def on_agent_selected(self, event: AgentSelected) -> None:
         status = self.snapshot.agent(event.project_id, event.agent_id) if self.snapshot else None
@@ -1509,8 +1534,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             and self.snapshot.is_home(status.agent.project_id)
             and status.agent.role == fleet_service.CAPTAIN_ROLE
         ):
-            return CaptainView(status, id=view_id)
-        return AgentView(status, id=view_id)
+            return CaptainView(status, usage=self.session_usage, id=view_id)
+        return AgentView(status, usage=self.session_usage, id=view_id)
 
     def on_captain_requested(self, event: CaptainRequested) -> None:
         """The insignia: the captain's view when it is live, else the Spawn dialog preset to it.

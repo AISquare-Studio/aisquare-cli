@@ -271,6 +271,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   presence pass (`_converge_by_presence`), which re-applies any step from v15 on whose
   products a store lacks. Every such store reaches v33 with its rows, as pinned in
   `tests/test_store.py`, and 0.8.2 still opens a v33 store.
+- In `asq`, every agent has one info line, the same on the Manager tab and in the
+  agent's own view: its label, its state, the Claude account it runs on (by name)
+  with how much of that account's five-hour session is used, the model and the
+  effort it runs at, and its pane, as in
+  `🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4`. A line too long
+  for its row shortens the agent's label first (to six characters at least), then is
+  cut at its end, so the account and its use stay. The figure is
+  green below 70 %, yellow from 70 % and red from 90 %. The agent view no longer
+  shows the role, the task or the working directory there.
+- The sidebar's agent rows show the account's slot and its session use after the
+  state chip, as in `▶ #3·87%`. A long label is shortened to make room, never the
+  figure. The figures come from the usage read the status line already makes, so
+  nothing more is asked of the network.
+- The command that attaches a terminal to the project's tmux session moved from
+  the Manager tab to the project's Settings tab.
 
 ### Fixed
 

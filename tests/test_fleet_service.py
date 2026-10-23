@@ -7662,28 +7662,32 @@ def test_reaping_a_dead_pane_releases_what_its_session_still_held(
     assert "the task this coder is for (agent exited)" in _events(project, "task_released")
 
 
-def test_a_closed_assignment_leaves_the_header_chip_and_keeps_the_label(
+def test_a_closed_assignment_leaves_the_row_and_keeps_the_label(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Finding 7 of the second #135 review. ``retire_fleet_assignments`` claimed
-    "nothing the operator sees changes", but the agent header renders its
-    ``task 01k…`` chip from ``task_id``. The chip goes — the agent is no longer
-    on that task — and the docstring now says so; the label, named after the
-    task at spawn, is what keeps the tie visible."""
-    from aisquare.cli.ui.views.agent import header_text
+    "nothing the operator sees changes", but the agent header rendered a
+    ``task 01k…`` chip from ``task_id``. The assignment goes — the agent is no
+    longer on that task — and the docstring says so; the label, named after the
+    task at spawn, is what keeps the tie visible. The info line that replaced the
+    header shows no task at all, before or after: the label is the tie there."""
+    from aisquare.cli.ui.views.agent import info_line
 
     mine = _task(project, "the task this coder is for")
     agent, first = _spawned(project, "coder", mine.id, tmux, monkeypatch)
     short = mine.id.removeprefix("tsk_")[: fleet_service.TASK_SHORT]
-    before = header_text(FleetAgentStatus(agent=agent)).plain
-    assert f"task {mine.id[-8:]}" in before and agent.label == f"coder-{short}"
+    before = info_line(FleetAgentStatus(agent=agent)).plain
+    assert agent.task_id == mine.id and agent.label == f"coder-{short}"
+    assert "task " not in before and mine.id[-8:] not in before
+    assert f"coder-{short}" in before
 
     team_service.hook_session_start(first, project.root, "startup")
     team_service.claim_task(mine.id, session_ref=first)
     team_service.finish_task(mine.id, note="shipped", session_ref=first)
 
-    after = header_text(FleetAgentStatus(agent=_row(agent.id))).plain
-    assert "task " not in after, "the chip goes with the assignment"
+    retired = _row(agent.id)
+    assert retired.task_id is None, "the assignment goes with the task"
+    after = info_line(FleetAgentStatus(agent=retired)).plain
     assert f"coder-{short}" in after, "the label still names the task the agent was spawned for"
 
 

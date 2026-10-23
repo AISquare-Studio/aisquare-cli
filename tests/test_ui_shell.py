@@ -44,7 +44,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui import app as ui_app
-from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HelpScreen, Panes
+from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HeadroomReader, HelpScreen, Panes
 from aisquare.cli.ui.autosave import Autosave
 from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
@@ -90,7 +90,17 @@ from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import update_state
 from aisquare.core.store import ContextStore, SqliteStore, store_session
 from aisquare.core.tmux import Completed
-from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
+from aisquare.models import (
+    CheckStatus,
+    ClaudeAccount,
+    DoctorCheck,
+    FleetAgent,
+    FleetAgentStatus,
+    HeadroomSummary,
+    ProjectInfo,
+    TeamSession,
+)
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
@@ -193,12 +203,14 @@ def drive(
     doctor: Callable[[], list[DoctorCheck]] | None = None,
     notifications: bool = False,
     size: tuple[int, int] = SIZE,
+    headroom: HeadroomReader | None = None,
 ) -> T:
     """Run ``fn`` against a mounted ``FleetApp`` (no timer refresh; a stub doctor).
 
     ``notifications`` opts the screen's ``ToastRack`` in — ``run_test`` leaves it
     out by default, and without it a ``notify`` goes nowhere to be read.
     ``size`` is the terminal's; a test about a laptop passes a narrow one.
+    ``headroom`` stands in for the slow usage read; the app's own when not given.
 
     The start-up doctor run has been painted before ``fn`` starts. It is a thread
     worker, and a test that ended before its result was handled had that result
@@ -208,7 +220,11 @@ def drive(
     """
 
     async def run() -> T:
-        app = FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []))
+        app = (
+            FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []))
+            if headroom is None
+            else FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []), headroom=headroom)
+        )
         async with app.run_test(size=size, notifications=notifications) as pilot:
             await pilot.pause()
             await settle(app)
@@ -419,6 +435,335 @@ def test_agent_rows_show_role_icon_state_chip_and_exit_status(
     assert "🔔" not in manager and "▶" not in manager
     # The card's chips: three alive (the exited one is not), one needing the user.
     assert chips.rstrip().endswith("3 · 🔔1")
+
+
+def on_screen(row: AgentRow) -> str:
+    """The strip a row composites across its whole width, its padding included.
+
+    :func:`composited` crops to ``size``, the content area: a padded row loses as many cells
+    off its end as its padding is wide — the end being what these tests are about.
+    """
+    (strip,) = row.render_lines(Region(0, 0, row.outer_size.width, 1))
+    return strip.text
+
+
+def on_slot(row: FleetAgentStatus, slot: int) -> FleetAgentStatus:
+    """``row`` spawned on account ``slot`` (``FleetAgent.account_slot``)."""
+    return row.model_copy(update={"agent": row.agent.model_copy(update={"account_slot": slot})})
+
+
+def session_use(*by_slot: tuple[int, float]) -> Callable[..., HeadroomSummary]:
+    """A headroom read answering ``by_slot`` as each account's five-hour window USED."""
+
+    def read(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
+        return HeadroomSummary(level="good", percent_left=50.0, session_by_slot=dict(by_slot))
+
+    return read
+
+
+def test_an_agent_row_gives_way_in_its_label_never_in_its_account_and_session_use(
+    tmp_path: Path, script: Script
+) -> None:
+    """The owner's option C: ``#<slot>·<pct>%`` after the state chip — the slot number here,
+    for want of room. At the default width of 30 a long label is ellipsised so the suffix is
+    whole; with no figure the slot alone, with no slot nothing, and an exited row keeps its
+    ``💤 exited(N)``."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [
+        on_slot(status("prj_a", "manager", "manager", "waiting"), 1),
+        on_slot(status("prj_a", "coder-01k8zq7mab", "coder", "working", minute=1), 3),
+        on_slot(status("prj_a", "coder-auth", "coder", "working", minute=2), 4),
+        status("prj_a", "scout-1", "scout", "attention", minute=3),
+        on_slot(status("prj_a", "tester-1", "tester", "exited", minute=4, exit_status=3), 3),
+    ]
+
+    async def go(pilot: Pilot[None]) -> tuple[int, list[str]]:
+        app = fleet_app(pilot)
+        await settle(app)  # the headroom read follows the first accounts frame
+        rows = [on_screen(row) for row in card_for(app, "prj_a").query(AgentRow)]
+        return app.sidebar.size.width, rows
+
+    width, rows = drive(go, headroom=session_use((1, 42.0), (3, 87.0)))
+    assert width == 30
+    manager, long, coder, scout, tester = (row.strip() for row in rows)
+    assert manager.startswith("🧭 manager") and manager.endswith("⏸ #1·42%")
+    assert long.endswith("▶ #3·87%"), long  # the whole suffix…
+    assert "…" in long and "coder-01k8zq7mab" not in long  # …and the label gave way
+    assert long.startswith("🔨 coder-01k8")
+    assert coder.endswith("▶ #4") and "%" not in coder  # no figure for slot 4: the slot alone
+    assert "#" not in scout and scout.endswith("🔔")  # no slot: nothing
+    assert tester.endswith("💤 exited(3)") and "#" not in tester
+
+
+def as_persona(row: FleetAgentStatus, persona: str) -> FleetAgentStatus:
+    """``row`` spawned as ``persona`` (``FleetAgent.persona``)."""
+    return row.model_copy(update={"agent": row.agent.model_copy(update={"persona": persona})})
+
+
+@pytest.mark.parametrize("size", [(90, 40), (120, 40)])
+def test_a_persona_badge_never_takes_the_session_figure_off_an_agent_row(
+    tmp_path: Path, script: Script, size: tuple[int, int]
+) -> None:
+    """Review of #267's merge, M-F1: at the default sidebar width a row with both a slot and a
+    persona read ``⏸ #1·42…`` — the badge pushed the figure under the row's ellipsis and was
+    never seen itself. The owner's order: the label's padding gives way first, then the badge
+    is cut (``…``), and the chip and ``#<slot>·<pct>%`` are never cut."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [
+        as_persona(on_slot(status("prj_a", "manager", "manager", "waiting"), 1), "skeptic"),
+        as_persona(
+            on_slot(status("prj_a", "coder-auth", "coder", "working", minute=1), 3),
+            "a-very-long-persona-name",
+        ),
+    ]
+
+    async def go(pilot: Pilot[None]) -> tuple[int, list[str]]:
+        app = fleet_app(pilot)
+        await settle(app)
+        rows = [on_screen(row) for row in card_for(app, "prj_a").query(AgentRow)]
+        return app.sidebar.size.width, rows
+
+    width, rows = drive(go, headroom=session_use((1, 42.0), (3, 87.0)), size=size)
+    assert width == 30
+    manager, coder = (row.strip() for row in rows)
+    assert manager.startswith("🧭 manager") and "⏸ #1·42% · sk" in manager, manager
+    assert "#1·42…" not in manager
+    assert coder.startswith("🔨 coder-auth"), coder
+    assert coder.endswith("▶ #3·87%") or "▶ #3·87% · " in coder, coder
+    assert "a-very-long-persona-name" not in coder
+
+
+def test_the_session_use_rides_the_slow_headroom_read_never_the_tick(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance (e): the figures on the rows and the info lines are the headroom read's
+    (``HeadroomSummary.session_by_slot``), handed to the widgets when it lands. Ticks of the
+    two-second clock read no usage, and any other usage read is recorded — not raised: every
+    usage read runs in a thread worker that does not exit on error, where a raise only marks
+    the worker failed (review of #267, 3). A view opened between two reads shows the last
+    figure at once; one already open takes the next read's figure as it lands, a modal on
+    top or not (review of #267, 2 and 5). The manager's Agent view and the Manager tab show
+    the same line (acceptance (a), mounted)."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    script["prj_a"] = [
+        on_slot(status("prj_a", "manager", "manager", "waiting"), 2),
+        on_slot(status("prj_a", "coder-auth", "coder", "working", minute=1), 2),
+    ]
+    reads: list[float] = []
+    figure = [71.0]
+
+    def headroom(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
+        reads.append(figure[0])
+        return session_use((2, figure[0]))(accounts)
+
+    elsewhere: list[str] = []
+
+    def reader(name: str) -> Callable[..., object]:
+        def read(*args: object, **kwargs: object) -> object:
+            elsewhere.append(name)
+            raise AssertionError(f"usage was read outside the headroom read: {name}")
+
+        return read
+
+    for name in ("cached_usage", "cached_usage_with_trends", "read_usage", "usage"):
+        monkeypatch.setattr(accounts_service, name, reader(name))
+    monkeypatch.setattr(accounts_service, "read_fleet_headroom", reader("read_fleet_headroom"))
+
+    def headers(app: FleetApp) -> tuple[str, str]:
+        agent = shown(app.query_one("#agent-agt_a_manager #agent-header", Static))
+        manager = shown(app.query_one("#project-prj_a #manager-header", Static))
+        return agent, manager.splitlines()[0]
+
+    async def go(pilot: Pilot[None]) -> tuple[list[float], tuple[str, str], tuple[str, str], str]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await settle(app)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        for _ in range(3):
+            app.refresh_data()
+            await settle(app)
+        opened = headers(app)
+        # The next slow read, with both views open and a modal over them.
+        figure[0] = 64.0
+        app.action_help()
+        await settle(app)
+        assert isinstance(app.screen, HelpScreen)
+        app.refresh_headroom()
+        await settle(app)
+        app.pop_screen()
+        await settle(app)
+        return list(reads), opened, headers(app), on_screen(row_for(app, "agt_a_coder-auth"))
+
+    seen, opened, after, row = drive(go, headroom=headroom)
+    assert seen == [71.0, 64.0], "one read at start, one asked for: the ticks read no usage"
+    assert elsewhere == [], f"usage read outside the headroom read: {elsewhere}"
+    agent_header, manager_first = opened
+    assert "account 2 · 71%" in agent_header
+    assert manager_first == agent_header
+    assert "account 2 · 64%" in after[0] and "71%" not in after[0], after
+    assert after[1] == after[0]
+    assert row.rstrip().endswith("▶ #2·64%")
+
+
+def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's rulings 2 and 3 on #267, in the real app in a 90-column terminal: the Agent
+    view's info line gets about 37 cells. The account and its use come right after the state,
+    and when the line does not fit, the LABEL gives way first — the labels ``fleet spawn``
+    gives (``<role>-<task id[:8]>``) pushed ``work · 42%`` off the line — so ``<icon>
+    <label…>  <chip> <state>  <account> · <pct>%`` stays whole and the rest is cut after it.
+    The label keeps six characters; beside an unaliased ``plain claude · 42%`` or
+    ``account 4 · 42%`` even that is too wide, and the line is cut at its end. At 140
+    columns the label is whole again."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    session = TeamSession(
+        id="s-1",
+        project_id="prj_a",
+        role="coder",
+        started_at=T0,
+        last_seen_at=T0,
+        model="claude-opus-5-5",
+        effort="high",
+    )
+
+    def row(
+        project_id: str, label: str, role: str, state: str, slot: int, minute: int
+    ) -> FleetAgentStatus:
+        spawned = on_slot(status(project_id, label, role, state, minute=minute), slot)
+        return spawned.model_copy(update={"session": session})
+
+    script["prj_a"] = [
+        row("prj_a", "coder-01k8zq7m", "coder", "working", 3, 1),
+        row("prj_a", "coder-01m5d34v", "coder", "working", 1, 2),
+        row("prj_a", "tester-01m5d34v", "tester", "waiting", 4, 3),
+    ]
+    script["prj_b"] = [row("prj_b", "coder-01m5d34v", "coder", "attention", 2, 1)]
+    # Slots 1 and 4 unaliased: the registry's built-in names, "plain claude" and "account 4".
+    monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work", 3: "max"})
+
+    async def bar(pilot: Pilot[None], agent_id: str) -> tuple[int, str]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, agent_id))
+        await settle(app)
+        header = app.query_one(f"#agent-{agent_id} #agent-header", Static)
+        (strip,) = header.render_lines(Region(0, 0, header.outer_size.width, 1))
+        return header.content_size.width, strip.text.strip()
+
+    async def go(pilot: Pilot[None]) -> dict[str, tuple[int, str]]:
+        app = fleet_app(pilot)
+        await settle(app)
+        seen = {
+            agent_id: await bar(pilot, agent_id)
+            for agent_id in (
+                "agt_a_coder-01k8zq7m",
+                "agt_a_coder-01m5d34v",
+                "agt_a_tester-01m5d34v",
+                "agt_b_coder-01m5d34v",
+            )
+        }
+        await pilot.resize_terminal(140, 30)
+        await settle(app)
+        seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
+        return seen
+
+    seen = drive(
+        go, headroom=session_use((1, 42.0), (2, 42.0), (3, 42.0), (4, 42.0)), size=(90, 30)
+    )
+    widths = {width for agent_id, (width, _) in seen.items() if agent_id != "wide"}
+    assert widths == {37}, seen  # about 38 cells, as the owner measured
+    assert seen["agt_a_coder-01k8zq7m"][1] == "🔨 coder-01k8…  ▶ working  max · 42%…"
+    assert seen["agt_b_coder-01m5d34v"][1] == "🔨 coder-…  🔔 attention  work · 42%…"
+    # Too narrow even at the label's floor: the floor, then the line cut at its end.
+    assert seen["agt_a_coder-01m5d34v"][1] == "🔨 coder-…  ▶ working  plain claude …"
+    assert seen["agt_a_tester-01m5d34v"][1] == "🧪 tester…  ⏸ waiting  account 4 · 4…"
+    width, wide = seen["wide"]
+    assert width > 60 and wide.startswith("🔨 coder-01k8zq7m  ▶ working  max · 42%  claude"), wide
+
+
+def test_at_90_columns_the_manager_tab_cuts_its_info_line_and_shows_its_hint_whole(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's ruling on #267, in the real app in a 90-column terminal (a 57-cell header):
+    the Manager tab's info line is cut on its one row with ``…``, as the Agent view's is — a
+    long detail (the folder-trust prompt's) used to wrap it over two to four rows — while the
+    dim hint under it shows whole. Under one nowrap rule for both, the hint was cut before
+    "F12 returns to the sidebar" (review of #267). With the manager gone, the prose that says
+    so wraps and nothing is cut. Acceptance (a), mounted: the Manager tab's line is the
+    manager's Agent view line, text and styles."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    row = on_slot(status("prj_a", "manager", "manager", "attention"), 2)
+    session = TeamSession(
+        id="s-manager",
+        project_id="prj_a",
+        role="manager",
+        started_at=T0,
+        last_seen_at=T0,
+        model="claude-opus-5-5",
+        effort="xhigh",
+    )
+    detail = fleet_service.trust_prompt_detail(tmp_path / "a [deep] folder" / "repo")
+    script["prj_a"] = [row.model_copy(update={"session": session, "detail": detail})]
+    monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work"})
+
+    def rows(widget: Widget) -> list[str]:
+        width, height = widget.outer_size
+        lines = widget.render_lines(Region(0, 0, width, height))
+        return [strip.text.strip() for strip in lines]
+
+    async def go(pilot: Pilot[None]) -> tuple[int, list[str], list[str], bool, list[str], bool]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await settle(app)
+        agent_header = app.query_one("#agent-agt_a_manager #agent-header", Static)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        app.refresh_data()
+        await settle(app)
+        header = app.query_one("#project-prj_a #manager-header", Static)
+        hint = app.query_one("#project-prj_a #manager-hint", Static)
+        same = header.content == agent_header.content  # plain and spans alike
+        seen = header.content_size.width, rows(header), rows(hint), same
+        script["prj_a"] = []
+        app.refresh_data()
+        await settle(app)
+        return *seen, rows(header), hint.display
+
+    width, line, hint, same, gone, hint_after = drive(
+        go, headroom=session_use((2, 42.0)), size=(90, 30)
+    )
+    assert width == 57, width  # a 90-column terminal, the default sidebar
+    assert len(line) == 1, line  # the info line on one row…
+    assert line[0].startswith("🧭 manager  🔔 attention  work · 42%  claude"), line
+    assert line[0].endswith("…"), line  # …cut at its end, and the cut is said
+    assert same, "the Manager tab's line is the Agent view's, text and styles"
+    assert "F12 returns to the sidebar" in " ".join(hint), hint  # the hint, whole
+    assert " ".join(hint).startswith("type to the manager as you would to any Claude session")
+    assert len(gone) > 2 and not any(r.endswith("…") for r in gone), gone  # prose wraps
+    assert "has no manager yet" in " ".join(gone) and hint_after is False
+
+
+def test_a_project_opened_between_two_ticks_names_its_session_at_once(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review of #267, 7: a new Project view waited for the next tick for its rows, and its
+    Settings tab said "no live tmux session" until then while the frame the app already
+    held named one. The view is handed that frame as it is built."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    manager = status("prj_a", "manager", "manager", "waiting")
+    script["prj_a"] = [manager.model_copy(update={"tmux_session": "asq-amber-otter"})]
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)  # no tick: the app refreshes every hour here
+        return shown(app.query_one("#project-prj_a #attach-line", Static))
+
+    line = drive(go)
+    assert line == f"Attach in a terminal: tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter"
 
 
 def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apart(

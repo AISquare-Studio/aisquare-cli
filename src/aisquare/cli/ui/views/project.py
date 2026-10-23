@@ -23,7 +23,7 @@ is how the tests drive it.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import ClassVar, Self
 
 from rich.text import Text
@@ -36,60 +36,21 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
-from aisquare.cli.ui.views.agent import shown_pane
+from aisquare.cli.ui.views.agent import InfoLine, SlotLabels, shown_pane
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.settings import SettingsView
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
-from aisquare.services import install_route
 from aisquare.services import project as project_service
 
 SPAWN_WORKER = "spawn-manager"
 """Name of the worker that starts the manager; how its result is told apart."""
 
-_STATE_CHIP: dict[str, tuple[str, str]] = {
-    "working": ("▶", "green"),
-    "waiting": ("⏸", "yellow"),
-    "attention": ("🔔 NEEDS YOU", "bold red"),
-    "limited": ("⏳ LIMITED", "magenta"),
-    "exited": ("💤", "dim"),
-    "lost": ("✗", "red"),
-    "unknown": ("·", "dim"),
-}
-
-
-def manager_text(status: FleetAgentStatus) -> Text:
-    """The Manager tab's header: who is running, in what state, where."""
-    agent = status.agent
-    text = Text()
-    text.append("🧭 manager", style="bold")
-    chip, style = _STATE_CHIP.get(status.state, ("·", "dim"))
-    text.append(f"  {chip} {status.state}", style=style)
-    if status.state == "exited" and agent.exit_status is not None:
-        text.append(f"({agent.exit_status})", style=style)
-    if status.detail:
-        text.append(f"  {status.detail}", style="dim")
-    if status.session is not None and status.session.model:
-        text.append(f"  {status.session.model}", style="dim cyan")
-    text.append(f"  {agent.pane_id}", style="dim")
-    if status.tmux_session:
-        # Where the fleet asks its server: from a shell under another TMUX_TMPDIR, `-L`
-        # by the name reaches another server, and attaches to its session. Quoted as every
-        # printed path is: a TMUX_TMPDIR or `[fleet] tmux_socket` with a space or a `$` in
-        # it pasted as another command, or another path (round 29 of #257).
-        path = status.socket_at
-        where = ["-L", agent.tmux_socket] if path is None else ["-S", str(path)]
-        line = install_route.command_line(
-            ["tmux", *where, "attach", "-t", f"={status.tmux_session}"]
-        )
-        text.append(f"  ·  {line}", style="dim")
-    text.append(
-        "\ntype to the manager as you would to any Claude session · F12 returns to the sidebar",
-        style="dim",
-    )
-    return text
+MANAGER_HINT = "type to the manager as you would to any Claude session · F12 returns to the sidebar"
+"""The dim line under the manager's info line: how to use the tab. The tmux attach command is
+not here: it is the project's, and the Settings tab shows it."""
 
 
 def no_manager_text(
@@ -147,21 +108,44 @@ def exited_manager(agents: Sequence[FleetAgentStatus]) -> FleetAgentStatus | Non
 class ManagerTab(Vertical):
     """The manager's live session — or the button that starts one."""
 
+    # ``-info``: the header shows the manager's info line
+    # (:class:`~aisquare.cli.ui.views.agent.InfoLine`, the Agent view's) and is fitted as the
+    # Agent view's header is — one row, its label giving way first, then cut at its end with
+    # ``…``, so a long detail gives way rather than wrapping the line onto two or three rows.
+    # The hint is a widget of its own and wraps: under the one rule, a 57-cell header (a
+    # 90-column terminal) cut it before "F12 returns to the sidebar" (review of #267). The
+    # prose that says there is no manager wraps, as it always did.
     DEFAULT_CSS = """
     ManagerTab { height: 1fr; }
     ManagerTab #manager-header { height: auto; padding: 0 1; }
+    ManagerTab #manager-header.-info { text-wrap: nowrap; text-overflow: ellipsis; }
+    ManagerTab #manager-hint { height: auto; padding: 0 1; }
     ManagerTab #start-manager { margin: 1 1; }
     ManagerTab #manager-pane { height: 1fr; }
     """
 
-    def __init__(self, project: ProjectInfo, *, escape_key: str, id: str | None = None) -> None:
+    def __init__(
+        self,
+        project: ProjectInfo,
+        *,
+        escape_key: str,
+        usage: Mapping[int, float] | None = None,
+        id: str | None = None,
+    ) -> None:
         super().__init__(id=id)
         self.project = project
         self.escape_key = escape_key
         self.status: FleetAgentStatus | None = None
+        self.labels = SlotLabels()
+        """The manager's account named as the Agent view names it, read off the UI thread."""
+        self.usage: Mapping[int, float] = usage or {}
+        """Slot → session percent USED, as the shell's slow headroom read last handed it."""
 
     def compose(self) -> ComposeResult:
-        yield Static(id="manager-header")
+        yield InfoLine(id="manager-header")
+        hint = Static(Text(MANAGER_HINT, style="dim"), id="manager-hint")
+        hint.display = False
+        yield hint
         yield Button("Start manager", id="start-manager", variant="primary")
         yield TerminalPane(
             None, escape_key=self.escape_key, placeholder=PANE_GONE, id="manager-pane"
@@ -169,6 +153,23 @@ class ManagerTab(Vertical):
 
     def on_mount(self) -> None:
         self.refresh_from_service()
+
+    def show_usage(self, usage: Mapping[int, float]) -> None:
+        """The accounts' session use from the shell's headroom read — never the 2 s tick."""
+        if usage != self.usage:
+            self.usage = usage
+            self._paint_manager()
+
+    @on(Worker.StateChanged)
+    def _labels_answered(self, event: Worker.StateChanged) -> None:
+        if self.labels.answered(event):
+            self._paint_manager()
+
+    def _paint_manager(self) -> None:
+        """Repaint the header for the manager on show — the no-manager text is left as it is."""
+        if self.status is not None and self.is_mounted:
+            header = self.query_one("#manager-header", InfoLine)
+            header.show_line(self.status, self.labels.labels, self.usage)
 
     def refresh_from_service(self) -> None:
         """Ask the fleet service who the manager is (the standalone path)."""
@@ -203,17 +204,20 @@ class ManagerTab(Vertical):
         manager, and this tab showed that one and typed into it.
         """
         self.status = status
-        header = self.query_one("#manager-header", Static)
+        header = self.query_one("#manager-header", InfoLine)
         button = self.query_one("#start-manager", Button)
         pane = self.query_one("#manager-pane", TerminalPane)
+        header.set_class(status is not None, "-info")
+        self.query_one("#manager-hint", Static).display = status is not None
         if status is None:
-            header.update(no_manager_text(self.project, unavailable, exited=exited))
+            header.show_text(no_manager_text(self.project, unavailable, exited=exited))
             button.display = True
             pane.display = False
             if pane.pane_id is not None:
                 pane.attach(None)
             return
-        header.update(manager_text(status))
+        header.show_line(status, self.labels.labels, self.usage)
+        self.labels.ask(self)
         button.display = False
         pane.display = True
         if (wanted := shown_pane(status)) != pane.pane_id:
@@ -291,7 +295,11 @@ class ManagerTab(Vertical):
 
 
 class ProjectView(TabbedContent):
-    """One project: its manager's pane first, then the board, AISquare and settings."""
+    """One project: its manager's pane first, then the board, AISquare and settings.
+
+    ``usage`` is the shell's last per-slot session use (``HeadroomSummary.session_by_slot``),
+    so a view opened between two headroom reads shows the figure at once.
+    """
 
     TAB_IDS: ClassVar[tuple[str, ...]] = (
         "tab-manager",
@@ -307,6 +315,7 @@ class ProjectView(TabbedContent):
         *,
         id: str | None = None,
         refresh_seconds: float = 2.0,
+        usage: Mapping[int, float] | None = None,
     ) -> None:
         super().__init__(id=id)
         self.project = project
@@ -318,7 +327,7 @@ class ProjectView(TabbedContent):
         panes = (
             TabPane(
                 "Manager",
-                ManagerTab(project, escape_key=escape_key, id="manager-tab"),
+                ManagerTab(project, escape_key=escape_key, usage=usage, id="manager-tab"),
                 id="tab-manager",
             ),
             TabPane(
@@ -357,13 +366,21 @@ class ProjectView(TabbedContent):
     def refresh_status(self, agents: Sequence[FleetAgentStatus]) -> None:
         """Take the shell's fresh snapshot of this project's agents.
 
-        Safe before mount: the snapshot waits for the tabs and lands then.
+        The Manager tab shows the manager; the Settings tab, the tmux attach command. Safe
+        before mount: the snapshot waits for the tabs and lands then.
         """
         tabs = self.query(ManagerTab)
         if not tabs:
             self._pending = list(agents)
             return
         tabs.first().show(manager_status(agents), exited=exited_manager(agents))
+        for settings in self.query(SettingsView):
+            settings.show_agents(agents)
+
+    def show_usage(self, usage: Mapping[int, float]) -> None:
+        """The accounts' session use from the shell's slow headroom read, for the Manager tab."""
+        for tab in self.query(ManagerTab):
+            tab.show_usage(usage)
 
     def on_mount(self) -> None:
         if self._pending is not None:

@@ -272,8 +272,8 @@ context for its GATE note — nothing to claim, work or verify. `task next` puts
 the assigned task first — for the agent's own session, and for a verifier's
 cycle or the MCP server's `task_next` running under the same window (the order
 only; a claim needs the session). The assignment ends when its task is done or
-dropped: nothing is said about it afterwards, and the agent header's `task …`
-chip goes with it — the label and the branch keep the task's short id. The
+dropped: nothing is said about it afterwards, and the row no longer names the
+task — the label and the branch keep the task's short id. The
 row is written after the window starts, so `aisquare launch` inside the window
 waits for it (ten seconds at most) before it starts the agent: the first hook
 always finds the row.
@@ -593,7 +593,7 @@ Replaces this terminal with `tmux attach` on the project's fleet session — the
 full-fidelity escape hatch. Under `--json` it prints the command it would run
 instead of running it. The session is found on the server the project's live
 agents are on, at the socket their spawns recorded (`tmux -S`), the line the
-Manager tab prints, so it works from a shell under another `TMUX_TMPDIR`. With
+project's Settings tab prints, so it works from a shell under another `TMUX_TMPDIR`. With
 no live agent, the servers its ended agents were on are asked, the latest to
 end first: an ended manager's window lingers there and holds the session, the
 screen behind the 💤 row. Last, the socket this shell's tmux looks at, but
@@ -820,7 +820,8 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   machine default, which with one login only is whatever `claude` the shell
   already has — exactly what it ran on before any of this existed; with several,
   the one with room comes before it (*Headroom*, below). The
-  agent's header and `fleet ls` show the slot it was resolved to.
+  agent's info line and `fleet ls` name the account it was resolved to, and its
+  sidebar row shows the slot (`#2`).
 - **Headroom.** By default — `[accounts] pick = "headroom"`, *launches pick* in
   App settings — the machine default gives way to the account with room
   (`aisquare config set accounts.pick default` keeps it): every enabled, signed-in account's
@@ -1395,7 +1396,7 @@ asq` looks from the asking shell. Under another `TMUX_TMPDIR`, `-L` reaches
 another server on the same name, or none, and every server numbers its panes
 from `%0`, so its panes would answer for the agents' ids: a dead one there read
 as a running agent's exit and ended its row. A row from before 0.8.0 recorded
-no socket and is asked by name. The Manager tab's attach line names the
+no socket and is asked by name. The Settings tab's attach line names the
 server the same way.
 
 **Under a hub: one board, many fleet projects.** With `AISQUARE_TEAM_HUB` set,

@@ -65,7 +65,7 @@ from aisquare.cli.ui.terminal import (
     route_gesture_start,
     route_selection_gesture,
 )
-from aisquare.cli.ui.views.agent import AgentView, header_text
+from aisquare.cli.ui.views.agent import AgentView, info_line
 from aisquare.core.keys import Drop
 from aisquare.core.tmux import BUNDLED_CONF, PASTE_BUFFER, TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
@@ -4106,19 +4106,17 @@ def _status(
     return FleetAgentStatus.model_validate({"agent": agent, "state": state, "held": held})
 
 
-def test_header_text_carries_every_field_as_data() -> None:
-    text = str(header_text(_status(label="[coder-1]", exit_status=1, state="exited")))
+def test_the_info_line_carries_every_field_as_data() -> None:
+    text = str(info_line(_status(label="[coder-1]", exit_status=1, state="exited")))
     assert "[coder-1]" in text  # brackets survive: appended as text, never markup
-    assert "coder" in text and "exited" in text
-    assert "task 89abcdef" in text
-    # `str(Path(...))`, not the literal: the header renders the path the
-    # platform's way, and the point of this assertion is the BRACKETS
-    # surviving as text rather than becoming markup — not the separator.
-    assert str(_CWD) in text
-    assert "exited 1" in text
+    assert "💤 exited(1)" in text  # the exit status as the manager line always showed it
+    # The info line is the Manager tab's shape: no task, no working directory (the path
+    # with brackets in it), and no separate "exited N" beside the chip.
+    assert "task" not in text and "89abcdef" not in text
+    assert str(_CWD) not in text and "exited 1" not in text
     # The negative: absent facts leave no trace.
-    bare = str(header_text(_status(task_id=None, exit_status=None)))
-    assert "task " not in bare and "exited" not in bare
+    bare = str(info_line(_status(task_id=None, exit_status=None)))
+    assert "exited" not in bare and "(" not in bare
 
 
 def test_agent_view_reads_the_account_labels_off_the_ui_thread_and_repaints(
@@ -4168,6 +4166,62 @@ def test_agent_view_reads_the_account_labels_off_the_ui_thread_and_repaints(
     assert "account 2" in first or "work" in first  # the built-in name until the worker answers
     assert "work" in painted and "account 2" not in painted
     assert reads == 1 and asked[0] != "MainThread"  # once, off the event loop
+
+
+def test_a_long_detail_is_what_the_agent_view_cuts_never_the_account_or_its_use(
+    fake: FakeTmux, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's ruling on #267: the detail comes after ``account · pct%``, and the header
+    cuts a line too long for its one-row bar at its end, with an ellipsis. The folder-trust
+    prompt's detail names a command and a path; at 90 columns the bar shows the account, its
+    use, the model and the effort whole, then the detail's start and ``…``. Before, the
+    header word-wrapped onto a second row its height clipped: what did not fit vanished,
+    with no ``…`` to say so."""
+    from aisquare.cli.ui.views import agent as agent_view
+    from aisquare.models import TeamSession
+    from aisquare.services import fleet as fleet_service
+
+    monkeypatch.setattr("aisquare.services.claude_accounts.slot_labels", lambda: {3: "dev"})
+    server = fake.server(tmp_path)
+    base = _status(state="attention")
+    status = base.model_copy(
+        update={
+            "agent": base.agent.model_copy(update={"account_slot": 3}),
+            "detail": fleet_service.trust_prompt_detail(_CWD),
+            "session": TeamSession(
+                id="s-1",
+                project_id="prj_1",
+                role="coder",
+                started_at=base.agent.created_at,
+                last_seen_at=base.agent.created_at,
+                model="claude-opus-5-5",
+                effort="high",
+            ),
+        }
+    )
+
+    class ViewHost(App[None]):
+        def compose(self) -> ComposeResult:
+            yield agent_view.AgentView(
+                status, server=server, escape_key="f12", usage={3: 87.0}, id="view"
+            )
+
+    async def drive() -> tuple[str, str]:
+        host = ViewHost()
+        async with host.run_test(size=(90, 8)) as pilot:
+            header = host.query_one("#agent-header", Static)
+            await wait_until(pilot, lambda: "dev" in str(header.content))
+            await pilot.pause()
+            (strip,) = header.render_lines(Region(0, 0, header.outer_size.width, 1))
+            return strip.text, str(header.content)
+
+    shown, whole = run(drive())
+    assert whole.endswith("  %1") and "folder trust" in whole  # the line itself is all there
+    assert "🔔 attention  dev · 87%  claude-opus-5-5 high  " in shown, shown  # all whole
+    assert shown.rstrip().endswith("…"), shown  # the cut is said, and it falls in the detail
+    detail_start = shown.index("claude-opus-5-5 high") + len("claude-opus-5-5 high  ")
+    assert shown[detail_start:].startswith("waiting"), shown
+    assert "%1" not in shown and "trust <" not in shown
 
 
 def test_agent_view_refreshes_its_header_and_reattaches_on_a_new_pane(

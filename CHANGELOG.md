@@ -21,7 +21,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refresh 0.03 s. Python is parsed with the standard library; TypeScript and
   JavaScript need the new optional extra `aisquare-cli[code]` (tree-sitter and the
   grammars' own wheels, so nothing is downloaded); other languages are listed as not
-  indexed. `aisquare doctor` has a `code index` row. `[code] enabled` and
+  indexed. Where a project has an index, the session-start directive names the
+  commands in two lines and starts a detached incremental refresh, at most once a
+  minute per project. `aisquare doctor` has a `code index` row. `[code] enabled` and
   `max_file_kb` (1024) are the keys.
 
 - **The captain** — the home-level voice-and-text agent that runs every

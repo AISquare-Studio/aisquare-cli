@@ -137,7 +137,10 @@ same as one tool, `code_lookup(query, mode, limit)`, once the project has an
 index. `similar` also takes `path:line` of a definition.
 
 The index is built when a project is onboarded (`init`, `project onboard`,
-`--refresh` rebuilds it), and `aisquare code index` brings it up to date: only
+`--refresh` rebuilds it). Where one exists, each session start names the commands
+in its directive (two lines) and starts an incremental refresh in the background,
+at most once a minute per project, never on the hook's own time.
+`aisquare code index` brings it up to date by hand: only
 files whose size, time or content moved are read again, deleted files are
 dropped, and a change of parser rebuilds it all. On aisquare-cli itself (500
 Python files) a full build takes about 4 s and a one-file refresh 0.03 s. It

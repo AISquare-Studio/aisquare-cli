@@ -1534,3 +1534,59 @@ def test_account_set_to_this_shells_is_sent_as_this_shells(
     [(_, _, sent)] = hand_offs.calls
     assert sent["mode"] == ("take_over" if take_over else "fork")
     assert sent["account"] == fleet_service.THIS_SHELL_ACCOUNT
+
+
+# --- review of #240, R2-m5: the captain's label in the dialog ---------------------------------
+
+
+@pytest.mark.needs_captain
+def test_on_the_label_captain_is_refused_in_the_dialog_as_the_fleet_refuses_it(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spawn was enabled for a coder labelled ``captain``, and the fleet then refused it. The
+    dialog keeps the switch it opened with: flipped off while it is open, it still refuses."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        monkeypatch.setenv(experimental.CAPTAIN_ENV, "0")
+        label_input(dialog).value = "captain"
+        await pilot.pause()
+        return [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
+
+    disabled, rule = drive(git_project, scenario)
+    assert disabled is True and rule is not None and "reserved for the captain" in rule
+
+
+def test_off_the_label_captain_is_a_label_like_any_in_the_dialog(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(experimental.CAPTAIN_ENV, raising=False)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        label_input(dialog).value = "captain"
+        await pilot.pause()
+        return [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
+
+    assert drive(git_project, scenario) == [False, None]
+
+
+@pytest.mark.needs_captain
+def test_a_declared_captain_role_shows_the_label_it_sends_and_gives_the_typed_one_back(
+    git_project: ProjectInfo,
+) -> None:
+    """``_relabel`` kept the typed label for any role but the manager's, so picking a
+    declared ``captain`` showed the typed label in a locked field, and sent none of it."""
+    from aisquare.core.config import AppConfig, RoleLaunchProfile, TeamSettings
+
+    save_config(AppConfig(team=TeamSettings(profiles={"captain": RoleLaunchProfile(bin="echo")})))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        label_input(dialog).value = "coder-auth"
+        await pilot.pause()
+        select(dialog, "role").value = "captain"
+        await pilot.pause()
+        seen: list[Any] = [label_input(dialog).value, label_input(dialog).disabled]
+        select(dialog, "role").value = "coder"
+        await pilot.pause()
+        return [*seen, label_input(dialog).value]
+
+    assert drive(git_project, scenario) == ["captain", True, "coder-auth"]

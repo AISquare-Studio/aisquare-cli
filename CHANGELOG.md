@@ -394,6 +394,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it is on screen. It ran the agent view's own handlers a second time, so a
   restart that failed was said twice, and its one-second read of the captain's
   state went on behind every other view.
+- **The Spawn dialog keeps the label `captain` for the captain while it is on,**
+  as the fleet does: a coder labelled `captain` no longer gets an enabled Spawn
+  that the fleet then refuses, a declared `captain` role shows the label it sends,
+  and the dialog keeps the switch it opened with. `aisquare captain` no longer
+  attaches to a declared `captain` role spawned into the home while it was off.
 - **`aisquare persona` and the Personas tab read the project layer spawn and
   launch read.** They asked git for it, so a project that is not a git repository
   (a folder marked with `.aisquare`) listed none of the project personas its spawns

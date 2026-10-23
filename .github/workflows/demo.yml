@@ -9,14 +9,16 @@ name: demo
 # The walkthrough runs most of the package (asq's entry point, init and doctor
 # through core/selfcli.py, the store, the workspace resolver, the manager's
 # spawn and launch), so it renders on any change to the package, the demo or
-# the dependencies: on pull requests, on pushes to main and rc/** (merges
+# the dependencies: on pull requests into main, on pushes to main and rc/** (merges
 # included), on every published release (the artifact holds the GIF and the
 # still for the release notes), and by hand. The static half of the test,
 # tests/test_demo_tape.py, is part of the suite and runs on every leg of ci.yml.
 
 on:
+  # Not on a sub-PR into rc/** (lean CI, ci.yml's header): its merge renders on the
+  # push to rc/**, and the train's PR into main renders again.
   pull_request:
-    branches: [main, "rc/**"]
+    branches: [main]
     paths:
       - docs/demo.tape
       - docs/demo/**

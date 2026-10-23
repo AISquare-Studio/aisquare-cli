@@ -323,6 +323,25 @@ def test_config_set_takes_the_snapshot_ignore_list_comma_separated(runner: CliRu
     assert load_config().snapshot.ignore == []
 
 
+def test_config_get_and_set_cover_the_ui_preference(runner: CliRunner) -> None:
+    """``[ui] always_show_project_path`` — App settings ▸ User preferences — is off by
+    default, and ``config get`` and ``config set`` reach it as they reach every other key."""
+    assert AppConfig().ui.always_show_project_path is False
+    shown = runner.invoke(app, ["config", "get", "ui.always_show_project_path"])
+    assert shown.stdout.strip() == "ui.always_show_project_path = false"
+
+    result = runner.invoke(app, ["config", "set", "ui.always_show_project_path", "true"])
+    assert result.exit_code == 0, result.output
+    assert load_config().ui.always_show_project_path is True
+    assert tomllib.loads(config_path().read_text(encoding="utf-8"))["ui"] == {
+        "always_show_project_path": True
+    }
+
+    rejected = runner.invoke(app, ["config", "set", "ui.always_show_project_path", "maybe"])
+    assert rejected.exit_code != 0
+    assert load_config().ui.always_show_project_path is True, "a rejected value must not land"
+
+
 def test_experiment_is_off_by_default() -> None:
     """The state every existing user is in. ``prompt_submit`` runs
     synchronously in front of a developer who has just hit enter, so off has to

@@ -1025,9 +1025,10 @@ Three places to change one:
 - **in config** — `aisquare config set fleet.max_agents_per_project 6`, or
   `aisquare config set fleet.roles.coder.permission_mode acceptEdits`, or edit
   the file directly;
-- **in the UI** — *⚙ Settings ▸ App settings* writes the same config, and its
-  *Reset all settings to default* is `config reset`. Its *Save* writes only the
-  settings changed on the page, so one changed in a shell while it was open is
+- **in the UI** — *⚙ Settings ▸ App settings* writes the same config: its *Agent
+  settings* tab holds these, and *User preferences* how `asq` shows things (`[ui]`).
+  Its *Reset all settings to default* is `config reset`. Its *Save* writes only the
+  settings changed on either tab, so one changed in a shell while it was open is
   kept. A project's own *Settings* tab holds only that project's nickname.
 
 **Your file holds your changes and nothing else.** The defaults are built in, and
@@ -1184,7 +1185,9 @@ display name for people and a slug-safe token for machines.
 **Project display name.** Its nickname when you have given it one, else the
 directory's basename — `aisquare-cli` — for git repos and plain directories
 alike. Two projects sharing a basename also show their parent as a dim subtitle
-(`~/work/api`, `~/oss/api`).
+(`~/work/api`, `~/oss/api`). To see every project's directory under its name, turn
+on *Always show project directory* in *⚙ Settings ▸ App settings ▸ User
+preferences* (`aisquare config set ui.always_show_project_path true`).
 
 **Nickname.** Free text on one line, up to 255 characters — `API: auth rewrite
 🚀` — like naming a browser tab for what you are doing there. Emoji are fine,

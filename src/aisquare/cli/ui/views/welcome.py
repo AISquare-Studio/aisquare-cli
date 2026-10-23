@@ -1056,16 +1056,23 @@ class WelcomeView(VerticalScroll):
         chain = self.screen.focus_chain
         if focused is not None and focused in chain:
             return
-        target = next((widget for widget in chain if self in widget.ancestors), None)
+        target = self.next_button()
         if target is not None:
             target.focus()
 
     def next_button(self) -> Widget | None:
-        """The first widget Tab reaches on this page: the next thing to do."""
-        for widget in self.screen.focus_chain:
-            if self in widget.ancestors:
-                return widget
-        return None
+        """The first widget Tab reaches on this page: the next thing to do.
+
+        Step 2's *Sign in* on a done card is a stop Tab keeps, not the next thing to do,
+        so it is passed over while anything else is left.
+        """
+        mine = [widget for widget in self.screen.focus_chain if self in widget.ancestors]
+        claude = self.claude
+        aside = claude is not None and claude.ready
+        return next(
+            (widget for widget in mine if not (aside and widget.id == "claude-sign-in")),
+            mine[0] if mine else None,
+        )
 
     def _card(self, card_id: str, *, done: bool, waiting: bool, keep_keys: bool = False) -> None:
         card = self.query_one(f"#{card_id}", Vertical)
@@ -1134,11 +1141,11 @@ class WelcomeView(VerticalScroll):
             and claude.hooks_off is None
             and claude.refused is None
         )
-        self.query_one("#claude-sign-in", Button).display = (
-            found and claude is not None and claude.signed_in is False
-        )
+        sign_in = found and claude is not None and claude.signed_in is False
+        self.query_one("#claude-sign-in", Button).display = sign_in
         self.query_one("#claude-check", Button).display = claude is not None and not claude.found
-        self._card("step-claude", done=done, waiting=waiting)
+        # Step 3 does not wait on a sign-in, so a done card can still offer one: Tab keeps it.
+        self._card("step-claude", done=done, waiting=waiting, keep_keys=sign_in)
         return done
 
     def _paint_fleet(self, *, waiting: bool) -> None:

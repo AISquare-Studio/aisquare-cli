@@ -79,7 +79,9 @@ tmux can see and its row says so (`no hooks`).
    the left and a Welcome page on the right that walks you to a fleet in three
    steps: pick a project, connect Claude Code (it names the install command
    when Claude Code is missing), then start the manager and two coders. Press
-   `w` in the sidebar to come back to it. Step 2's *Sign in* opens Accounts, and
+   `w` in the sidebar to come back to it. Step 2 is ✓ once Claude Code is
+   connected, signed in or not (it asks when it first starts), and *Sign in*
+   stays a Shift+Tab back from step 3 until you are. It opens Accounts, and
    once that sign-in lands Welcome is shown again with the keyboard on the next
    step, *Start manager* when the sign-in was all it waited for; a sign-in that
    lands from nowhere in particular names the next step under the notice

@@ -530,6 +530,54 @@ def test_sign_in_opens_the_accounts_page() -> None:
     assert hosted(Machine(claude=[READY]), go) == (False, [])
 
 
+def test_sign_in_is_on_the_keyboard_when_step_two_is_done_but_signed_out(tmp_path: Path) -> None:
+    """Step 2 is ✓ once Claude Code is connected, signed in or not, and a finished card
+    left the Tab order with its *Sign in* still showing: no key reached it (#324's walk).
+    It is a Shift+Tab back from step 3 now, and step 3 keeps the keyboard's first stop."""
+    signed_out = dataclasses.replace(READY, signed_in=False)
+    machine, _ = _ready_machine(tmp_path, claude=[signed_out])
+
+    async def go(
+        pilot: Pilot[None], page: WelcomeView, host: Host
+    ) -> tuple[bool, bool, str | None, str | None, list[str]]:
+        done = "✓" in card(page, "claude-title")
+        sign_in = page.query_one("#claude-sign-in", Button)
+        reachable = visible(page, "claude-sign-in") and sign_in in host.screen.focus_chain
+        first = page.next_button()
+        page.query_one("#fleet-manager", Button).focus()
+        await pilot.press("shift+tab")
+        back = host.focused.id if host.focused is not None else None
+        await pilot.press("enter")
+        await settle_page(host)
+        received = [type(message).__name__ for message in host.received]
+        return done, reachable, first.id if first is not None else None, back, received
+
+    done, reachable, first, back, received = hosted(machine, go)
+    assert done, "the premise: step 2 is done, signed out"
+    assert reachable, "Sign in shows on a done card: Tab reaches it"
+    assert first == "fleet-manager", "the next thing to do is still step 3"
+    assert back == "claude-sign-in"
+    assert "AccountsSelected" in received
+
+
+def test_with_the_fleet_up_and_signed_out_the_keyboard_still_goes_to_the_manager(
+    tmp_path: Path,
+) -> None:
+    """Step 3 done keeps its own buttons on the keyboard; the sign-in Tab now reaches is
+    still not what the keyboard is handed to."""
+    machine, _ = _ready_machine(tmp_path, claude=[dataclasses.replace(READY, signed_in=False)])
+
+    async def go(pilot: Pilot[None], page: WelcomeView, host: Host) -> tuple[str, str | None]:
+        for button in ("fleet-manager", "fleet-open", "fleet-coders"):
+            await press(pilot, page, button)
+        first = page.next_button()
+        return card(page, "fleet-title"), first.id if first is not None else None
+
+    title, first = hosted(machine, go)
+    assert "✓" in title, "the premise: the fleet is up"
+    assert first == "fleet-open"
+
+
 # --------------------------------------------------------------------------- step 1
 
 

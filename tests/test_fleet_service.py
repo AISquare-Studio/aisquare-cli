@@ -8154,7 +8154,11 @@ def test_shutdown_records_rows_lost_with_a_reason_when_the_server_was_killed_by_
 def _socket_file(name: str, *, listening: bool) -> Iterator[Path]:
     """A real socket file at ``<short dir>/tmux-<uid>/<name>``, the shape tmux makes:
     listening, or stale, as tmux leaves it when its server exits. Under ``/tmp``, as an
-    AF_UNIX path is small (about 100 bytes). Skips where tmux cannot run."""
+    AF_UNIX path is small (about 100 bytes). Skips where tmux cannot run.
+
+    A listening one accepts every connect, as tmux's server does. One that only listened
+    kept each probe in its backlog, and macOS refuses a connect once the backlog is full
+    (Linux queues it): a plan's probe and then the run's read a live socket as stale."""
     import tempfile
 
     if not hasattr(socket, "AF_UNIX") or not hasattr(os, "getuid"):
@@ -8163,13 +8167,27 @@ def _socket_file(name: str, *, listening: bool) -> Iterator[Path]:
     path = base / f"tmux-{os.getuid()}" / name
     path.parent.mkdir()
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    done = threading.Event()
+
+    def accept() -> None:
+        while not done.is_set():
+            with suppress(TimeoutError):
+                server.accept()[0].close()
+
+    acceptor = threading.Thread(target=accept, daemon=True)
     try:
         server.bind(str(path))
         server.listen(1)
         if not listening:
             server.close()
+        else:
+            server.settimeout(0.05)
+            acceptor.start()
         yield path
     finally:
+        done.set()
+        if acceptor.is_alive():
+            acceptor.join()
         server.close()
         shutil.rmtree(base, ignore_errors=True)
 

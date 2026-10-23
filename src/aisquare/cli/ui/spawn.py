@@ -783,8 +783,15 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self.query_one("#spawn-dice", Button).disabled = locked
 
     @on(Select.Changed, "#spawn-role")
-    def _role_changed(self, event: Select.Changed) -> None:
-        role = event.value
+    def _role_changed(self) -> None:
+        """The role the field holds now, not the one the message carries.
+
+        A ``Select.Changed`` can arrive after a later change to the field: the role
+        switched to tester and back to coder, and the tester one landed last. Read from
+        the message, the form switched to tester under a field that showed coder, and
+        spawned a tester. From the field, a late one finds its role already the form's.
+        """
+        role = self.query_one("#spawn-role", Select).value
         if not isinstance(role, str) or role == self._role:
             self._validate()
             return
@@ -803,20 +810,42 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         )
         mode.set_options(permission_options(keep))
         mode.value = keep
+        if self._persona_value() != self._persona_shown:
+            # Not what the form put there: the owner's pick, its Changed still on the way.
+            self._persona_touched = True
+            self._persona_shown = self._persona_value()
         if not self._persona_touched:
             # Every role default is already an option (_persona_options, and
             # _offer_role_personas for a role that joined the list since), so this
-            # never needs set_options — which would post a Changed for "(none)".
-            self._persona_shown = self._persona_default(role)
-            self.query_one("#spawn-persona", Select).value = self._persona_shown
+            # never needs set_options — which would put "(none)" in the field first.
+            self._put_persona(self._persona_default(role))
         self.query_one("#spawn-binary", Input).placeholder = self._binary_hint(role)
         self._validate()
 
     @on(Select.Changed, "#spawn-persona")
     def _persona_changed(self, event: Select.Changed) -> None:
-        if isinstance(event.value, str) and event.value != self._persona_shown:
-            self._persona_touched = True  # a value the form did not put there: the user's pick
-            self._persona_shown = event.value
+        """The owner's pick: a value the field still holds that the form did not put there.
+
+        The form puts its own values in silently (``_put_persona``). One that is no longer
+        the field's is late, overtaken by a later change, and is nobody's pick: the role
+        switched to tester and back to coder, and the ``""`` of the tester switch arrived
+        after the coder one, so the coder's own persona, untouched, was sent as a choice.
+        """
+        value = self._persona_value()
+        if event.value == value and value != self._persona_shown:
+            self._persona_touched = True
+            self._persona_shown = value
+        self._describe_persona()
+
+    def _put_persona(self, name: str, *, rebuild: bool = False) -> None:
+        """Put ``name`` in the Persona field as the form's own value, rebuilding its options
+        first if asked: no ``Select.Changed`` leaves, so none can be read as a pick."""
+        self._persona_shown = name
+        field = self.query_one("#spawn-persona", Select)
+        with self.prevent(Select.Changed):
+            if rebuild:
+                field.set_options(self._persona_options())
+            field.value = name
         self._describe_persona()
 
     def _describe_persona(self) -> None:
@@ -895,18 +924,13 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             self._roles.append(agent.role)
             self._offer_roles()
         self.query_one("#spawn-role", Select).value = agent.role
-        persona = agent.persona or NO_PERSONA
         self._persona_touched = True
-        self._persona_shown = persona
-        field = self.query_one("#spawn-persona", Select)
-        field.set_options(self._persona_options())
-        field.value = persona
+        self._put_persona(agent.persona or NO_PERSONA, rebuild=True)
         own = str(agent.account_slot) if agent.account_slot is not None else THIS_SHELL
         self._preset_account = own or None
         accounts = self.query_one("#spawn-account", Select)
         accounts.set_options(self._account_options(self._account_statuses))
         accounts.value = own
-        self._describe_persona()
 
     def _plain_fields(self) -> PlainFields:
         """The three fields a teammate fills, as the form holds them now."""
@@ -936,12 +960,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         accounts.set_options(options)
         if plain.account in {value for _, value in options}:
             accounts.value = plain.account
-        self._persona_touched, self._persona_shown = plain.persona_touched, plain.persona
-        field = self.query_one("#spawn-persona", Select)
-        with self.prevent(Select.Changed):
-            field.set_options(self._persona_options())
-            field.value = plain.persona
-        self._describe_persona()
+        self._persona_touched = plain.persona_touched
+        self._put_persona(plain.persona, rebuild=True)
         self.query_one("#spawn-role", Select).value = plain.role
 
     def _apply_handoff(self) -> None:
@@ -1166,11 +1186,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         name = result.persona.name
         self._personas, self._personas_unavailable = self._read_personas()
         self._persona_touched = True
-        self._persona_shown = name
-        field = self.query_one("#spawn-persona", Select)
-        field.set_options(self._persona_options())
-        field.value = name
-        self._describe_persona()
+        self._put_persona(name, rebuild=True)
 
     # --- spawn --------------------------------------------------------------------------
 

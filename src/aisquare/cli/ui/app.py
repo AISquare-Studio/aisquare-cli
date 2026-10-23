@@ -1001,8 +1001,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         kind, _, ident = remembered.partition(":")
         if kind == "agent":
             project_id, _, agent_id = ident.partition("/")
-            if self.snapshot.agent(project_id, agent_id) is not None:
-                self.doctor_scope = self._doctor_scope_of(project_id)
+            restored = self.snapshot.agent(project_id, agent_id)
+            if restored is not None:
+                self.doctor_scope = self._doctor_scope_of(restored.agent)
                 self.post_message(AgentSelected(project_id, agent_id))
                 return False
             if self.snapshot.project(project_id) is not None:
@@ -1371,7 +1372,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         kept = last.home if last is not None else None
         rows = last.agents.get(kept.id, []) if last is not None and kept is not None else []
         # Not asked: begun before Settings switched the captain on, and the next read asks.
-        return kept, next(iter(rows), None), read.captain_error or CAPTAIN_READING
+        # By role: the home, added as a project (D5), holds its own agents beside it.
+        captain = next((r for r in rows if fleet_service.is_the_captains_row(r.agent)), None)
+        return kept, captain, read.captain_error or CAPTAIN_READING
 
     def refresh_accounts(self) -> None:
         """Re-read the Claude accounts OFF the UI thread; the status line and the page follow.
@@ -1771,27 +1774,32 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view_id = f"agent-{status.agent.id}"
         await self._show(view_id, lambda: self._agent_view(status, view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
-        self.doctor_scope = self._doctor_scope_of(event.project_id)
+        self.doctor_scope = self._doctor_scope_of(status.agent)
         self._remember_selection(f"agent:{event.project_id}/{status.agent.id}")
         self._focus_pane(view_id)
 
-    def _doctor_scope_of(self, project_id: str) -> str | None:
-        """The Doctor's scope for an agent of ``project_id``: its project, or ``None`` (the
-        global checks) for the captain's, whose board is no project (T2). Scoped to the
-        home, the Doctor ran the per-project checks with ``cwd=$AISQUARE_HOME`` and armed
-        their fixes there."""
-        if self.snapshot is not None and self.snapshot.is_home(project_id):
+    def _doctor_scope_of(self, agent: FleetAgent) -> str | None:
+        """The Doctor's scope for ``agent``: its project, or ``None`` (the global checks)
+        for the captain, whose board is no project (T2). Scoped to the home, the Doctor ran
+        the per-project checks with ``cwd=$AISQUARE_HOME`` and armed their fixes there. A
+        home added as a project (D5) holds its own agents too: theirs is that project."""
+        if self._is_the_captain(agent):
             return None
-        return project_id
+        return agent.project_id
+
+    def _is_the_captain(self, agent: FleetAgent) -> bool:
+        """Whether ``agent`` is the captain's row, not merely one on the home's board: the
+        home, added as a project (D5), holds its own agents beside it."""
+        # Off, the frame reads no home (``_read_frame``), so no row is the home's.
+        return (
+            self.snapshot is not None
+            and self.snapshot.is_home(agent.project_id)
+            and fleet_service.is_the_captains_row(agent)
+        )
 
     def _agent_view(self, status: FleetAgentStatus, view_id: str) -> AgentView:
         """The view for one agent's row: the captain's has its own bar (T4)."""
-        # Off, the frame reads no home (``_read_frame``), so no row is the home's.
-        if (
-            self.snapshot is not None
-            and self.snapshot.is_home(status.agent.project_id)
-            and fleet_service.is_the_captains_row(status.agent)
-        ):
+        if self._is_the_captain(status.agent):
             return CaptainView(status, usage=self.session_usage, id=view_id)
         return AgentView(status, usage=self.session_usage, id=view_id)
 
@@ -1907,7 +1915,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view_id = f"agent-{status.agent.id}"
         await self._show(view_id, lambda: self._agent_view(status, view_id))
         self.sidebar.select(f"agent:{status.agent.id}")
-        self.doctor_scope = self._doctor_scope_of(started.project_id)
+        self.doctor_scope = self._doctor_scope_of(status.agent)
         self._remember_selection(f"agent:{started.project_id}/{status.agent.id}")
         self._focus_pane(view_id)
 
@@ -2271,7 +2279,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         view = self.current_view()
         if not (isinstance(view, AgentView) and view.status.agent.id == agent.id):
             return
-        if self.snapshot is not None and self.snapshot.is_home(agent.project_id):
+        if self._is_the_captain(agent):
             self.content.current = "welcome"
             self.sidebar.select(None)
             self._remember_selection(None)

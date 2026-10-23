@@ -332,6 +332,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A stale `ANTHROPIC_BASE_URL` is found wherever it hides, and one command removes
+  it** (#51). Tracing's proxy can outlive Disable in a Claude `settings.json` `env`
+  block (the plain claude's, a managed slot's, a project's shared or local file), a
+  role binding's `env` or `env_files`, the fleet tmux server's global environment or
+  the shell, and once that proxy is gone every agent launched with it fails at its
+  first model call. `aisquare doctor` has an `anthropic routing` row that reads them
+  all, with or without the team active: a proxy of ours (a target's, the shipped
+  default, or one carrying our identity headers) with tracing off or on another
+  target warns, naming each place and its fix; a URL the agent cannot parse warns;
+  your own gateway is information and is never changed. No header value is printed,
+  JSON included. `aisquare explainability reset [--dry-run] [--yes] [--json]` turns
+  tracing off (targets kept), removes the two keys from settings files (a
+  `settings.json.bak-<stamp>` copy kept, written under Claude Code's own lock), from
+  bindings and from the tmux server, prints the shell's `unset` line and the rc files
+  that mention them (never edited), and a second run says "nothing to reset".
+  `explainability disable` and the Explainability tab's Disable name the leftovers;
+  the tab then offers **Reset routing**.
+- **`doctor --fix` no longer undoes a Disable.** It turned tracing on whenever it was
+  off; it now does so only with `--target <name>`, and otherwise says how.
+- **A traced launch no longer waits on the gateway** (#129 (e)). The Run's root was
+  posted inline between the proxy probe and the agent's exec, a WAN write with a 3 s
+  budget that #129 measured over budget on 2 of 11 launches. A detached
+  `explainability post-root` worker makes the post now, with the key on its stdin,
+  and retries a transport failure or a 5xx; the agent starts on the `traceparent`
+  path at once, and the gateway holds its first spans until the root lands. A
+  gateway URL that cannot be parsed still falls back to `X-Pipeline-Id` before
+  anything starts; a post that fails in the worker leaves its reason in
+  `~/.aisquare/log/explainability-root.log`.
+
 - **A coder that claims a task sees its contract.** `task claim` and `task next
   --claim` printed the title line alone, and the contract (`--detail`) was a
   separate `task show` that nothing named, so people pasted contracts into coders'

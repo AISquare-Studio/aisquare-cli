@@ -28,8 +28,13 @@ dashboard Run share one identifier. Usually that id *is* the session id:
 longer share a key.
 
 The dashboard's Run id is derived from that pipeline id (SHA-256) **when the
-launcher owns the Run**, which is the default: it posts the Run's root span
-first and hands the proxy a `traceparent` naming it. Then `aisquare launch`
+launcher owns the Run**, which is the default: it hands the proxy a
+`traceparent` naming the Run's root span, and a detached worker posts that
+root as the agent starts. The window does not wait for the post (it used to: a
+WAN write with a 3 s budget, over it on 2 of 11 launches measured in #129); the
+gateway holds the first model spans until the root lands. A post that fails in
+the worker is retried, and what still fails is written to
+`~/.aisquare/log/explainability-root.log`. Then `aisquare launch`
 prints the id — `traced as … (pipeline <session>, run <trace_id>)` — and
 `~/.aisquare/explainability/joins.jsonl` records it as `trace_id`, so a Run can
 be found from its board row without reading anything back. If that root could
@@ -513,6 +518,8 @@ the line says `credits unavailable` with the reason and nothing else changes.
 | `proxy … no gateway is configured for target` | **Amber.** Tracing is on and there is nothing to compare the proxy against — set `--gateway-url`. If the proxy reports where it ships, the line names that gateway and the command that adopts it |
 | `proxy … the gateway configured for target … is unusable` / `explainability config: … gateway needs a scheme` | The stored gateway is not a URL (`stg.example`, no scheme). `enable` and the form refuse this now; a hand-edited config or `EXPLAINABILITY_GATEWAY_URL` can still carry one. Store a full `https://` URL |
 | Everything green, nothing on the dashboard | The spool is not being drained — step 10 |
+| Every model call fails with an API error after tracing was turned off; `doctor` warns `anthropic routing` | A stale `ANTHROPIC_BASE_URL`: the proxy is still set in a Claude `settings.json`, a role binding, an env file or the fleet tmux server. `aisquare explainability reset` removes it — see the next section |
+| A traced agent's model spans are missing, and `~/.aisquare/log/explainability-root.log` has a line for its pipeline | The Run's root could not be posted, so the gateway is holding its child batches. The line is the gateway's answer (`409`: step 5; `401`: the key) |
 | `… is temporarily unavailable (server error), so auto mode cannot determine the safety of Bash` on every tool call, while the chat itself keeps answering | Auto mode's **classifier** request failing behind the proxy — see the next section |
 
 `aisquare explainability status --json` is the machine-readable view, and the one
@@ -520,6 +527,48 @@ to script a check against. Its exit code is non-zero when tracing is on and the
 proxy lane is **red** — the proxy would not take a session, or it is alive and
 reports that it ships to another deployment; amber exits 0, and
 `probe_severity` says which.
+
+### A stale proxy after Disable: `explainability reset`
+
+Tracing sets `ANTHROPIC_BASE_URL` (and the identity headers) for each traced
+launch. The same variable can also live where `disable` never looked: a Claude
+`settings.json` `env` block (Claude Code applies it however `claude` is
+started), a role binding (`team bind --env` or `--env-file`), the fleet tmux
+server's global environment, or your shell. Once that proxy is gone, every
+agent launched with it fails at its first model call.
+
+`aisquare doctor` reads all of them in its `anthropic routing` row, whether or
+not the team is active: it warns about a proxy of ours (any target's, the
+shipped default, or one carrying our `X-Agent-Name`/`X-Pipeline-Id` headers)
+while tracing is off or on another target, and about a URL the agent cannot
+parse. Your own gateway is listed as information and never changed. Header
+values are never printed.
+
+```bash
+aisquare explainability reset --dry-run
+aisquare explainability reset --yes
+```
+
+`reset` turns tracing off (targets kept), removes the two keys from each
+settings file (a `settings.json.bak-<stamp>` copy kept beside it, written under
+Claude Code's own lock), from the bindings, and from the fleet tmux server. A
+shell cannot be changed from here: it prints the `unset` line and the rc files
+that mention the variables, and edits neither. A second run says "nothing to
+reset". `disable` (the button and the command) names the leftovers it finds,
+and the Explainability tab then offers **Reset routing**.
+
+`doctor --fix` turns tracing on only with `--target <name>`; without it, a fix
+run leaves a Disable in place.
+
+### What tracing costs a session
+
+The proxy buffers each request and re-uploads it, which #129 measured at
+`68 ms + 1450 ms × body_MB`: about 2.4 s a call at a 1.6 MB request, late in a
+long session. The launch itself no longer waits on the gateway (the root post
+is off the launch path). `[explainability] roles` is the roster `register`
+enrolls, not a filter: every role launched while tracing is on goes through the
+proxy, so removing `coder` from it does not untrace the coders. Today the
+switch is per machine; a long coder session pays the per-call cost for as long as it runs.
 
 ### Auto mode refuses every tool call behind the proxy
 
@@ -583,7 +632,8 @@ the bell and the line; restarted in a mode that needs no classifier, neither.
   MCP connectors; their tool schemas are the bulk of the baseline — and check
   the new size with `aisquare doctor`;
 - run agents untraced: `aisquare explainability disable` (you lose the proxy
-  lane; the client lane still ships).
+  lane; the client lane still ships), then `aisquare explainability reset` if
+  it names leftovers.
 
 ---
 

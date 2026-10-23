@@ -33,8 +33,6 @@ empty model as ``None``, so ``import_source`` — which owns the ladder — deci
 from __future__ import annotations
 
 import contextlib
-import secrets
-import shlex
 import shutil
 import threading
 from dataclasses import dataclass
@@ -767,6 +765,8 @@ def editor_unavailable() -> str | None:
 
 def _write_draft(name: str, text: str) -> Path:
     """A copy of the SKILL.md for the editor to work on, under the cache."""
+    import secrets  # kept off the module's import, as the CLI's start-up rule asks
+
     folder = paths.cache_dir() / "persona-edits"
     folder.mkdir(parents=True, exist_ok=True)
     draft = folder / f"{name}-{secrets.token_hex(4)}.md"
@@ -821,7 +821,7 @@ class EditorPaneScreen(_Dialog):
                 f"  {self.persona_layer} · {self.directory / core.SKILL_FILE}", style="dim"
             )
             header.append(
-                f"\n{shlex.join(editor_command())} on a copy: save and quit, and it is checked "
+                f"\n{' '.join(editor_command())} on a copy: save and quit, and it is checked "
                 f"and saved. {escape.upper()} leaves the pane.",
                 style="dim",
             )
@@ -892,7 +892,7 @@ class EditorPaneScreen(_Dialog):
         self._editor_exited(facts.dead_status if facts is not None else None)
 
     def _editor_exited(self, status: int | None) -> None:
-        self._close_window()
+        self._close_editor_window()
         if status not in (None, 0):
             self._finish(False, f"the editor exited {status}: nothing saved")
             return
@@ -917,7 +917,7 @@ class EditorPaneScreen(_Dialog):
             self.notify(f"{self.persona_name}: {notice}", timeout=5, markup=False)
         self.dismiss(saved)
 
-    def _close_window(self) -> None:
+    def _close_editor_window(self) -> None:
         if self._timer is not None:
             self._timer.stop()
             self._timer = None
@@ -948,7 +948,7 @@ class EditorPaneScreen(_Dialog):
     def action_cancel(self) -> None:
         """Esc (off the pane) or Cancel: the editor's window closed, the draft dropped, and
         nothing saved."""
-        self._close_window()
+        self._close_editor_window()
         self._discard_draft()
         self.dismiss(False)
 

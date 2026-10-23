@@ -219,7 +219,7 @@ def _one(session: TeamSession, *, since: datetime | None, until: datetime | None
             if in_wake:
                 row.wake_input += tokens
                 wake_requests += 1
-        elif kind == "user" and entry.get("isMeta") and WAKE_MARKER in _text(entry):
+        elif kind == "user" and entry.get("isMeta") and WAKE_MARKER in _entry_text(entry):
             if in_wake and not wake_acted:
                 row.no_action_wakes += 1
             row.wakes += 1
@@ -286,7 +286,7 @@ def _int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
-def _text(entry: dict[str, Any]) -> str:
+def _entry_text(entry: dict[str, Any]) -> str:
     """A ``user`` entry's text: its string content, or its text blocks joined."""
     message = entry.get("message")
     content = message.get("content") if isinstance(message, dict) else None

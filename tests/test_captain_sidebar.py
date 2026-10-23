@@ -27,7 +27,7 @@ from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import state as captain_state
 from tests import test_ui_shell as ui_suite
-from tests.test_ui_shell import Script, drive, fleet_app, row_for, seed, shown, status
+from tests.test_ui_shell import Script, drive, fleet_app, refreshed, row_for, seed, shown, status
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
 # (``no_real_tmux`` is autouse there: every tmux call held to a private socket).
@@ -84,8 +84,7 @@ def test_the_captain_row_sits_under_a_home_heading_not_inside_a_project(
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         section = app.query_one("#captain-section")
         row = row_for(app, captain.agent.id)
         assert section in row.ancestors, "the captain's row is in the home-level section"
@@ -132,8 +131,7 @@ def test_with_no_captain_the_section_says_how_to_start_one(tmp_path: Path, scrip
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         section = app.query_one("#captain-section")
         assert not section.query(AgentRow)
         assert "aisquare captain" in shown(app.query_one("#captain-empty"))  # type: ignore[arg-type]
@@ -186,7 +184,7 @@ def test_with_the_captured_directories_shown_the_home_is_still_no_card(
         await pilot.pause()
         if shown_by == "the a key":
             await pilot.press("a")
-            await pilot.pause()
+            await ui_suite.settle(app)  # `a` re-reads the fleet, in a thread: its frame first
         cards = [card.project.id for card in app.query(ProjectCard)]
         copies = [
             type(row.parent).__name__
@@ -426,12 +424,10 @@ def test_a_captain_read_that_failed_keeps_the_captain_row_and_says_why(
 
         first = state()  # the mount's read failed: nothing to keep, and it is not "none"
         failure.clear()
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         answered = state()
         failure.append(sqlite3.OperationalError("database is locked"))
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         failed = state()
         snapshot = app.snapshot
         kept = (
@@ -443,8 +439,7 @@ def test_a_captain_read_that_failed_keeps_the_captain_row_and_says_why(
         # The control: the fleet answers, and its answer is that there is none.
         failure.clear()
         live.clear()
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         return first, answered, failed, kept, state()
 
     first, answered, failed, kept, none = drive(body)

@@ -276,6 +276,20 @@ async def settle(app: FleetApp) -> None:
     await settle_page(app)
 
 
+async def refreshed(app: FleetApp) -> None:
+    """A refresh, as the two-second timer runs it, and its frame painted.
+
+    ``refresh_data`` reads the fleet in a thread worker, and one ``pilot.pause()``
+    after it can return before that read has painted: on windows-latest the
+    captain's quick action was still offered after its row had turned ``exited``
+    (CI run 39863195249). The test went on reading the frame before. Only the fleet
+    read is waited for, so a worker a test holds on purpose (the captain view's bar)
+    does not hold this up.
+    """
+    app.refresh_data()
+    await settle_page(app, group=app_mod.FLEET_WORKER)
+
+
 async def _toast_list(app: FleetApp) -> list[str]:
     """Every toast on screen once the app has gone quiet, oldest first.
 
@@ -3353,8 +3367,7 @@ def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
         view = app.current_view()
         assert isinstance(view, AgentView)
         failing.append(fleet_service.FleetUnavailable("database is locked"))
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         real = click_guard.clock
         click_guard.clock = lambda: real() + click_guard.CLICK_GUARD + 1
         try:

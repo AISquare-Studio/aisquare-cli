@@ -32,7 +32,7 @@ from tests import test_ui_shell as ui_suite
 from tests.captain_screens import INPUT_BOX, REAL_IDLE_AFTER_STOP, REAL_TRUST, REAL_WORKING
 from tests.test_captain_say import Captain, Clock
 from tests.test_captain_sidebar import agent_opened, quiet, until
-from tests.test_ui_shell import Script, fleet_app, row_for, seed, shown, status
+from tests.test_ui_shell import Script, fleet_app, refreshed, row_for, seed, shown, status
 from tests.ui_workers import settle_page
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
@@ -110,8 +110,7 @@ def test_the_insignia_is_lit_while_the_captain_row_is_live_and_dim_otherwise(
         script[captain_state.home_project().id] = [_captain(state)]
 
     async def body(pilot: Pilot[None]) -> None:
-        fleet_app(pilot).refresh_data()
-        await pilot.pause()
+        await refreshed(fleet_app(pilot))
         assert _insignia(pilot).has_class("live") is lit
 
     drive(body)
@@ -123,16 +122,13 @@ def test_the_insignia_follows_the_row_from_frame_to_frame(tmp_path: Path, script
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         assert not _insignia(pilot).has_class("live")
         script[home.id] = [_captain("working")]
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         assert _insignia(pilot).has_class("live")
         script[home.id] = []
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         assert not _insignia(pilot).has_class("live")
 
     drive(body)
@@ -147,8 +143,7 @@ def test_the_lit_insignia_opens_the_captain_view_over_its_pane(
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         await _open_view(pilot)
         view = app.current_view()
         assert isinstance(view, CaptainView)
@@ -165,8 +160,7 @@ def test_the_dim_insignia_opens_the_spawn_dialog_preset_to_the_captain(
 ) -> None:
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         await pilot.click("#captain-button")
         await pilot.pause()
         dialog = app.screen
@@ -191,8 +185,7 @@ def test_a_dim_insignia_over_an_exited_captain_offers_a_start_not_its_dead_pane(
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         await pilot.click("#captain-button")
         await pilot.pause()
         assert isinstance(app.screen, SpawnDialog)
@@ -232,8 +225,7 @@ def test_the_captain_dialog_starts_the_captain_through_its_own_launch(
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         await pilot.click("#captain-button")
         await pilot.pause()
         dialog = app.screen
@@ -264,8 +256,7 @@ def test_selecting_the_captain_row_opens_the_captain_view(tmp_path: Path, script
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         row_for(app, captain.agent.id).activate()
         await until(pilot, agent_opened(pilot, captain.agent.id), what="the captain selected")
         assert isinstance(app.current_view(), CaptainView)
@@ -300,8 +291,7 @@ captain_door = say_suite.captain
 async def _whats_up(pilot: Pilot[None]) -> list[str]:
     """Click What's up, let its worker answer, and return what the shell said."""
     app = fleet_app(pilot)
-    app.refresh_data()
-    await pilot.pause()
+    await refreshed(app)
     await _open_view(pilot)
     await pilot.click("#captain-whats-up")
     await pilot.pause()
@@ -363,15 +353,13 @@ def test_the_quick_action_is_offered_to_any_live_captain_and_withheld_from_a_dea
 
     async def body(pilot: Pilot[None]) -> list[bool]:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         await _open_view(pilot)
         button = app.query_one("#captain-whats-up", Button)
         seen = [button.disabled]
         for state in ("waiting", "exited", "lost", "working"):
             script[home.id] = [_captain(state)]
-            app.refresh_data()
-            await pilot.pause()
+            await refreshed(app)
             seen.append(button.disabled)
         return seen
 
@@ -425,8 +413,7 @@ def test_the_thinking_indicator_follows_the_busy_flag(tmp_path: Path, script: Sc
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         await _open_view(pilot)
         view = app.current_view()
         assert isinstance(view, CaptainView)
@@ -450,13 +437,11 @@ def test_the_thinking_indicator_reads_a_working_pane_as_thinking(
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         await _open_view(pilot)
         assert "idle" in _thinking(pilot)
         script[home.id] = [_captain("working")]
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         assert "thinking" in _thinking(pilot)
 
     drive(body)
@@ -470,8 +455,7 @@ def test_the_view_ticks_the_flag_on_its_own(tmp_path: Path, script: Script) -> N
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         await _open_view(pilot)
         view = app.current_view()
         assert isinstance(view, CaptainView)
@@ -488,8 +472,7 @@ def test_the_captain_row_is_still_an_ordinary_agent_row(tmp_path: Path, script: 
 
     async def body(pilot: Pilot[None]) -> None:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         rows = list(app.query_one("#captain-section").query(AgentRow))
         assert [row.status.agent.id for row in rows] == [captain.agent.id]
 
@@ -501,8 +484,7 @@ def test_the_captain_row_is_still_an_ordinary_agent_row(tmp_path: Path, script: 
 
 async def _captain_view(pilot: Pilot[None]) -> CaptainView:
     app = fleet_app(pilot)
-    app.refresh_data()
-    await pilot.pause()
+    await refreshed(app)
     view = await _open_view(pilot)
     # The mount's first read lands before the test acts: a switch clicked while the bar
     # is not read yet writes nothing, by design (``_known``), and a slow thread lost that

@@ -69,7 +69,7 @@ _PYTEST_END = re.compile(
     r"(?:, | in |$))"
 )
 _GIT_HINT = re.compile(
-    r'^  \(use "git (?:add|restore|reset|rm|checkout) [^\r\n]*" to [^\r\n]*\)\n?$'
+    r'^  \(use "git (?:add|restore|reset|rm|checkout) [^\r\n]*" to [^\r\n]*\)(?:\r?\n)?$'
 )
 _GIT_HEADINGS = frozenset(
     {"Changes to be committed:", "Changes not staged for commit:", "Untracked files:"}
@@ -375,11 +375,18 @@ def prune_reports(
 
 
 def safe_text(data: bytes) -> str:
-    """Terminal-safe text: controls escaped literally. The saved bytes are untouched."""
+    """Terminal-safe text: controls escaped literally. The saved bytes are untouched.
+
+    A CR that ends a line (CRLF, every text line on Windows) is a line ending and is kept;
+    a lone CR moves the cursor back over what was printed, and is escaped."""
     text = data.decode("utf-8", errors="backslashreplace")
     return "".join(
-        ch if ch in "\n\t" or (ord(ch) >= 32 and not 127 <= ord(ch) <= 159) else f"\\x{ord(ch):02x}"
-        for ch in text
+        ch
+        if ch in "\n\t"
+        or (ch == "\r" and text[index + 1 : index + 2] == "\n")
+        or (ord(ch) >= 32 and not 127 <= ord(ch) <= 159)
+        else f"\\x{ord(ch):02x}"
+        for index, ch in enumerate(text)
     )
 
 
@@ -397,7 +404,10 @@ def compact_stdout(argv: Sequence[str], data: bytes, *, truncated: bool) -> tupl
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         return "passthrough", data
-    if _ANSI.search(text) or any(ord(ch) < 32 and ch not in "\n\t" for ch in text):
+    # CRLF is a line ending (Windows); a lone CR is an overwrite and passes through.
+    if _ANSI.search(text) or any(
+        ord(ch) < 32 and ch not in "\n\t" for ch in text.replace("\r\n", "\n")
+    ):
         return "passthrough", data
     name = Path(argv[0]).name.lower().removesuffix(".exe")
     lines = text.splitlines(keepends=True)
@@ -462,11 +472,33 @@ def _pytest_without_progress(lines: Sequence[str]) -> Iterator[str]:
 
 
 class _Interrupts:
-    """What the operator sent while the command ran."""
+    """What the operator sent while the command ran, and the command to pass it to.
+
+    The handlers go in BEFORE the command is spawned, so an interrupt that lands while
+    ``Popen`` is still starting it is held here and passed on by :meth:`attach`, rather
+    than reaching the wrapper with Python's default handler."""
 
     def __init__(self) -> None:
         self.first: int | None = None
         self.count = 0
+        self._delivered = 0
+        self._child: subprocess.Popen[bytes] | None = None
+
+    def received(self, number: int) -> None:
+        self.count += 1
+        if self.first is None:
+            self.first = number
+        self._deliver()
+
+    def attach(self, child: subprocess.Popen[bytes]) -> None:
+        self._child = child
+        self._deliver()
+
+    def _deliver(self) -> None:
+        while self._child is not None and self._delivered < self.count:
+            self._delivered += 1
+            assert self.first is not None
+            _escalate(self._child, self.first, self._delivered)
 
 
 def _escalate(child: subprocess.Popen[bytes], number: int, count: int) -> None:
@@ -492,7 +524,7 @@ def _interrupt_signals() -> list[int]:
 
 
 @contextmanager
-def _forward_signals(child: subprocess.Popen[bytes], seen: _Interrupts) -> Iterator[None]:
+def _forward_signals(seen: _Interrupts) -> Iterator[None]:
     """While the command runs, an interrupt goes to it, escalating (:func:`_escalate`).
 
     A command that ignores Ctrl-C would otherwise hold the terminal until the wrapper
@@ -503,10 +535,7 @@ def _forward_signals(child: subprocess.Popen[bytes], seen: _Interrupts) -> Itera
     if threading.current_thread() is threading.main_thread():
 
         def forward(number: int, frame: FrameType | None) -> None:
-            seen.count += 1
-            if seen.first is None:
-                seen.first = number
-            _escalate(child, number, seen.count)
+            seen.received(number)
 
         for number in _interrupt_signals():
             previous[number] = signal.signal(number, forward)
@@ -633,7 +662,7 @@ class _Reader:
 
 
 def _capture(
-    child: subprocess.Popen[bytes], directory: Path, limit: int, seen: _Interrupts
+    child: subprocess.Popen[bytes], directory: Path, limit: int
 ) -> tuple[dict[str, StreamRecord], bool]:
     """Stream both pipes to disk; return the records and whether a pipe was held open.
 
@@ -649,22 +678,21 @@ def _capture(
             readers[name] = _Reader(pipe, _create(directory / f"{name}.bin"), limit)
         for reader in readers.values():
             reader.start()
-        with _forward_signals(child, seen):
-            while True:
-                try:
-                    child.wait(timeout=_POLL_WHILE_RUNNING)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
-            exited = time.monotonic()
-            while any(reader.is_alive() for reader in readers.values()):
-                now = time.monotonic()
-                last = max(exited, *(reader.last_data for reader in readers.values()))
-                remaining = min(_DRAIN_AFTER_EXIT - (now - last), _DRAIN_MAX - (now - exited))
-                if remaining <= 0:
-                    break
-                for reader in readers.values():
-                    reader.join(timeout=min(0.05, remaining))
+        while True:
+            try:
+                child.wait(timeout=_POLL_WHILE_RUNNING)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        exited = time.monotonic()
+        while any(reader.is_alive() for reader in readers.values()):
+            now = time.monotonic()
+            last = max(exited, *(reader.last_data for reader in readers.values()))
+            remaining = min(_DRAIN_AFTER_EXIT - (now - last), _DRAIN_MAX - (now - exited))
+            if remaining <= 0:
+                break
+            for reader in readers.values():
+                reader.join(timeout=min(0.05, remaining))
     except BaseException:
         # A failed storage write must not leave an invisible command running.
         _kill_tree(child)
@@ -765,32 +793,34 @@ def run_command(
         seen = _Interrupts()
         started = datetime.now(UTC)
         launch_error = None
-        try:
-            child = subprocess.Popen(
-                list(argv),
-                cwd=working_dir,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=sys.platform != "win32",
-            )
-        except OSError as exc:
-            launch_error = str(exc)[:4096]
-            returncode = 127 if isinstance(exc, FileNotFoundError) else 126
-            message = f"Unable to execute {argv[0]}: {exc}\n".encode()
-            _write_file(pending / "stdout.bin", b"")
-            _write_file(pending / "stderr.bin", message[:max_output_bytes])
-            records = {
-                "stdout": StreamRecord(observed_bytes=0, retained_bytes=0, truncated=False),
-                "stderr": StreamRecord(
-                    observed_bytes=len(message),
-                    retained_bytes=min(len(message), max_output_bytes),
-                    truncated=len(message) > max_output_bytes,
-                ),
-            }
-            held_open = False
-        else:
-            records, held_open = _capture(child, pending, max_output_bytes, seen)
-            returncode = child.returncode
+        with _forward_signals(seen):
+            try:
+                child = subprocess.Popen(
+                    list(argv),
+                    cwd=working_dir,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=sys.platform != "win32",
+                )
+            except OSError as exc:
+                launch_error = str(exc)[:4096]
+                returncode = 127 if isinstance(exc, FileNotFoundError) else 126
+                message = f"Unable to execute {argv[0]}: {exc}\n".encode()
+                _write_file(pending / "stdout.bin", b"")
+                _write_file(pending / "stderr.bin", message[:max_output_bytes])
+                records = {
+                    "stdout": StreamRecord(observed_bytes=0, retained_bytes=0, truncated=False),
+                    "stderr": StreamRecord(
+                        observed_bytes=len(message),
+                        retained_bytes=min(len(message), max_output_bytes),
+                        truncated=len(message) > max_output_bytes,
+                    ),
+                }
+                held_open = False
+            else:
+                seen.attach(child)
+                records, held_open = _capture(child, pending, max_output_bytes)
+                returncode = child.returncode
         with _defer_interrupts() as deferred:
             draft = CommandReport(
                 id=report_id,

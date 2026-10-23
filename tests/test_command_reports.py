@@ -21,7 +21,7 @@ from collections.abc import Collection
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import typer
@@ -180,7 +180,7 @@ def test_standard_input_is_inherited() -> None:
             DRIVER,
             "exec",
             "--",
-            *python("import sys;sys.stdout.write(sys.stdin.read())"),
+            *python("import sys;sys.stdout.buffer.write(sys.stdin.buffer.read())"),
         ],
         input=b"input bytes\n",
         capture_output=True,
@@ -347,7 +347,7 @@ def test_git_status_loses_its_hints_and_machine_formats_pass_through(tmp_path: P
 
 
 def test_standard_error_is_never_shortened() -> None:
-    noisy = "import sys;sys.stderr.write('... [100%]\\n1 passed in 1s\\n')"
+    noisy = "import sys;sys.stderr.buffer.write(b'... [100%]\\n1 passed in 1s\\n')"
     report = reports.run_command(python(noisy))
     assert reports.read_stream(report.id, "stderr") == b"... [100%]\n1 passed in 1s\n"
 
@@ -960,3 +960,40 @@ def test_an_interrupt_while_the_report_is_saved_still_names_it(
     with pytest.raises(reports.InterruptedAfterSave) as caught:
         reports.run_command(python("print('again')"))
     assert reports.load_report(caught.value.report.id).returncode == 0
+
+
+def test_crlf_is_a_line_ending_and_a_lone_cr_is_escaped() -> None:
+    """windows-latest: every text line there ends in CRLF, and escaping each CR made
+    ``--json`` output unreadable and every Windows pytest run pass through unshortened."""
+    assert reports.safe_text(b"a\r\nb\r\n") == "a\r\nb\r\n"
+    assert reports.safe_text(b"50%\r100%\r\n") == "50%\\x0d100%\r\n"
+    progress = b"tests/test_a.py ... [100%]\r\n3 passed in 1s\r\n"
+    name, shown = reports.compact_stdout(["pytest"], progress, truncated=False)
+    assert (name, shown) == ("pytest", b"3 passed in 1s\r\n")
+    lone = b"tests/test_a.py ... [100%]\r3 passed in 1s\r\n"
+    assert reports.compact_stdout(["pytest"], lone, truncated=False) == ("passthrough", lone)
+    status = (
+        b"On branch main\r\nUntracked files:\r\n"
+        b'  (use "git add <file>..." to include in what will be committed)\r\n'
+        b"\tnew.py\r\n"
+    )
+    name, shown = reports.compact_stdout(["git", "status"], status, truncated=False)
+    assert name == "git-status" and b"git add" not in shown and b"\tnew.py\r\n" in shown
+
+
+def test_an_interrupt_while_the_command_is_spawned_is_held_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """windows-latest/3.12 race: the handlers went in only after ``Popen`` returned, so an
+    interrupt that landed while the command was starting reached the wrapper with
+    Python's default handler and lost the report. It is now held and passed on."""
+    real = subprocess.Popen
+
+    def interrupted_spawn(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        signal.raise_signal(signal.SIGINT)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", interrupted_spawn)
+    report = reports.run_command(python("import time; time.sleep(0.2)"))
+    assert report.interrupted_by == signal.SIGINT
+    assert reports.load_report(report.id).interrupted_by == signal.SIGINT

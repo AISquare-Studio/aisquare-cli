@@ -634,14 +634,22 @@ def launch(
     # the row records, never holds the text, and a replay of that command finds no file and
     # starts without one: a restart is given a line of its own.
     if first_prompt_file is not None:
-        first = delivery.take_prompt_file(first_prompt_file)
+        try:
+            first = delivery.take_prompt_file(first_prompt_file)
+        except delivery.NotAPromptFile as exc:
+            stderr_console().print(
+                f"first prompt: {exc} — not read, not deleted; starting without one",
+                style="dim",
+                markup=False,
+            )
+            first = ""
         if first is None:
             stderr_console().print(
                 f"first prompt: {first_prompt_file} is not there (read by an earlier launch) "
                 "— starting without one",
                 style="dim",
             )
-        else:
+        elif first:
             argv += delivery.argv_tail(first)
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a

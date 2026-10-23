@@ -916,13 +916,13 @@ class AgentConnection(BaseModel):
 
 
 FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited", "lost", "unknown"]
-
-FirstPromptState = Literal["pending", "acked", "unsent"]
-"""Where a fleet agent's first message stands (:attr:`FleetAgent.first_prompt`)."""
 """What a fleet agent is doing, DERIVED at read time and never stored: a fresh
 ``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
 pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
 when neither source can answer."""
+
+FirstPromptState = Literal["pending", "acked", "unsent"]
+"""Where a fleet agent's first message stands (:attr:`FleetAgent.first_prompt`)."""
 
 
 class ProjectGroup(BaseModel):

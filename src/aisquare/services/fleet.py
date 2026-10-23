@@ -2476,7 +2476,7 @@ def _with_first_prompts(
             and status.state in ("waiting", "working")
         )
         if live and delivery.overdue(agent, now, config.prompt_ack_seconds):
-            agent = _unsent_if_idle(agent, config, addresses)
+            agent = _unsent_if_idle(agent, status.session, config, addresses)
         if live and agent.first_prompt == "unsent":
             status = status.model_copy(
                 update={
@@ -2499,13 +2499,27 @@ def unsent_detail(project: ProjectInfo, label: str) -> str:
 
 def _unsent_if_idle(
     agent: FleetAgent,
+    session: TeamSession | None,
     config: FleetSettings,
     addresses: Mapping[str, _Address] | None,
 ) -> FleetAgent:
     """``agent`` as it stands once its overdue first message was looked at: moved to
     ``unsent`` when its pane shows Claude Code's idle input box, and read again when another
     reader moved it first (or a prompt took it meanwhile). A screen that cannot be read
-    says nothing, and the row stays ``pending``."""
+    says nothing, and the row stays ``pending``.
+
+    A prompt the session has had since the message was given (``prompted_at``) took it:
+    its ``UserPromptSubmit`` stamped the session and could not move the row (a store locked
+    for that write), and it is taken here instead of read as not taken (review of #330,
+    round 1). A ``Stop`` takes it too (``team.hook_stop``); a turn whose hooks both failed
+    leaves nothing to tell it by."""
+    prompted = session.prompted_at if session is not None else None
+    given = agent.first_prompt_at
+    if session is not None and prompted is not None and given is not None and prompted >= given:
+        with contextlib.suppress(Exception), store_session() as store:
+            store.take_first_prompt(prompted, session_id=session.id, agent_id=agent.id)
+            return store.get_fleet_agent(agent.id) or agent
+        return agent
     try:
         server = _server_at(_where(agent, config, addresses), config)
         lines = server.capture(agent.pane_id).lines

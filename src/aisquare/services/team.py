@@ -2216,6 +2216,11 @@ def hook_stop(
         # of an agent `fleet switch` is exiting, whose SessionEnd must still park
         # the claims (review of the #205 fold, round 1).
         store.touch_session(session.id, state="waiting")
+        # A turn ended, and only a prompt starts one: the first message was taken even if its
+        # UserPromptSubmit could not record it (P0-W1a; review of #330, round 1).
+        store.take_first_prompt(
+            _now(), session_id=session.id, agent_id=orchestrator.env_fleet_agent()
+        )
     if deferred is not None and manager is not None:
         # After the row says waiting, never before: nudge_manager refuses every
         # other state. Outside the `with` too — it opens its own connection.

@@ -98,6 +98,7 @@ from aisquare.models import (
     FleetAgent,
     FleetAgentStatus,
     HeadroomSummary,
+    LaunchSpec,
     ProjectInfo,
     TeamSession,
 )
@@ -146,7 +147,13 @@ def status(
     minute: int = 0,
     exit_status: int | None = None,
 ) -> FleetAgentStatus:
-    """A scripted agent; the id is derived so a test can address its row."""
+    """A scripted agent; the id is derived so a test can address its row. A ``captain`` row
+    is launched as the captain's start launches it (``fleet.is_the_captains_row``)."""
+    spec = (
+        LaunchSpec(binary="claude", extra_args=["--strict-mcp-config", "--tools", ""])
+        if role == "captain"
+        else None
+    )
     agent = FleetAgent(
         id=f"agt_{project_id.removeprefix('prj_')}_{label}",
         project_id=project_id,
@@ -158,6 +165,7 @@ def status(
         created_at=T0 + timedelta(minutes=minute),
         ended_at=T0 + timedelta(minutes=minute + 1) if exit_status is not None else None,
         exit_status=exit_status,
+        launch_spec=spec,
     )
     return FleetAgentStatus(agent=agent, state=state)
 

@@ -367,7 +367,9 @@ def _read_captain(read: _FleetRead) -> _FleetRead:
         statuses = fleet_service.list_agents(home)
     except Exception as exc:  # a bug in the fleet path must not take the view down
         return replace(read, captain_error=f"captain unavailable — {_why_unread(exc)}")
-    captain = next((s for s in statuses if s.agent.role == fleet_service.CAPTAIN_ROLE), None)
+    # The captain's own row, by how it was launched, as brain.find and the home's card ask
+    # (review of #274, m3): a role declared `captain` in the home is a plain agent.
+    captain = next((s for s in statuses if fleet_service.is_the_captains_row(s.agent)), None)
     return replace(read, home=home, captain=captain)
 
 
@@ -1762,7 +1764,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if (
             self.snapshot is not None
             and self.snapshot.is_home(status.agent.project_id)
-            and status.agent.role == fleet_service.CAPTAIN_ROLE
+            and fleet_service.is_the_captains_row(status.agent)
         ):
             return CaptainView(status, usage=self.session_usage, id=view_id)
         return AgentView(status, usage=self.session_usage, id=view_id)
@@ -1784,7 +1786,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         home = snapshot.home if snapshot is not None else None
         rows = snapshot.agents.get(home.id, []) if snapshot is not None and home else []
         # By role: the home, added as a project (D5), holds its own agents beside it.
-        captain = next((r for r in rows if r.agent.role == fleet_service.CAPTAIN_ROLE), None)
+        captain = next((r for r in rows if fleet_service.is_the_captains_row(r.agent)), None)
         if captain is not None and captain.state in ALIVE_STATES:
             self.post_message(AgentSelected(captain.agent.project_id, captain.agent.id))
             return

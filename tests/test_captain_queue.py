@@ -1439,6 +1439,26 @@ def test_a_queue_file_from_a_later_version_is_never_read_or_written(fx: Fixture)
     assert fx.path.read_bytes() == before
 
 
+@pytest.mark.parametrize("version", ["1", None, 1.0, True])
+def test_a_version_that_is_no_integer_is_said_and_the_rows_still_read(
+    fx: Fixture, caplog: pytest.LogCaptureFixture, version: object
+) -> None:
+    """Review of #274, m5: a hand-edited version read as 'newer than this aisquare reads …
+    upgrade aisquare' and stopped every queue read."""
+    _seed_three_projects(fx)
+    queue = fx.queue()
+    queue.refresh()
+    body = json.loads(fx.path.read_text(encoding="utf-8"))
+    body["version"] = version
+    fx.path.write_text(json.dumps(body), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.captain.queue"):
+        assert len(queue.items()) == 3
+    assert any("unreadable version" in r.getMessage() for r in caplog.records)
+    queue.refresh()
+    assert json.loads(fx.path.read_text(encoding="utf-8"))["version"] == 1, "mended on write"
+
+
 # --- the default sources read the store ---------------------------------------------------------
 
 

@@ -47,7 +47,6 @@ from aisquare.core import experimental, harness, orchestrator, paths, personas
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
-from aisquare.core.workspace import project_id_for
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import explainability_ops
@@ -236,7 +235,7 @@ def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     os.execve(binary, argv, env)
 
 
-def _await_fleet_row() -> None:
+def _await_fleet_row(*, say: bool = True) -> None:
     """Under a fleet window, wait for the row ``AISQUARE_FLEET_AGENT`` names to exist.
 
     ``fleet spawn`` starts the window and writes the row after — the row
@@ -263,6 +262,8 @@ def _await_fleet_row() -> None:
     any other failure of the store ends the wait, never the launch. The
     deadline bounds the looks: one open that is itself waiting out a lock holds
     for the store's own retry budget first (:data:`FLEET_ROW_TIMEOUT`).
+    ``say=False`` is a caller that refuses on a missing row: its fail-open line, which
+    says the launch starts anyway, is not said.
     """
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is None:
@@ -279,15 +280,20 @@ def _await_fleet_row() -> None:
                     return
             except sqlite3.OperationalError as exc:
                 if not is_locked_error(exc):
-                    _starting_unbriefed(agent_id, f"the store could not be read ({exc})")
+                    if say:
+                        _starting_unbriefed(agent_id, f"the store could not be read ({exc})")
                     return
             except Exception as exc:  # an unreadable store costs the wait, never the launch
-                _starting_unbriefed(
-                    agent_id, f"the store could not be read ({type(exc).__name__}: {exc})"
-                )
+                if say:
+                    _starting_unbriefed(
+                        agent_id, f"the store could not be read ({type(exc).__name__}: {exc})"
+                    )
                 return
             if _monotonic() >= deadline:
-                _starting_unbriefed(agent_id, f"not recorded after {_monotonic() - started:.0f}s")
+                if say:
+                    _starting_unbriefed(
+                        agent_id, f"not recorded after {_monotonic() - started:.0f}s"
+                    )
                 return
             _sleep(FLEET_ROW_POLL)
 
@@ -301,14 +307,20 @@ def _in_the_captains_window() -> bool:
     agent_id = orchestrator.env_fleet_agent()
     if agent_id is None:
         return False
-    _await_fleet_row()
+    # Quiet: a row that never shows refuses the captain, so "starting anyway" would be
+    # wrong (review of #274, n1); the refusal is the one line said.
+    _await_fleet_row(say=False)
     try:
         with store_session() as store:
             row = store.get_fleet_agent(agent_id)
     except Exception:
         return False
-    home = project_id_for(paths.aisquare_home().resolve())
-    return row is not None and row.role == "captain" and row.project_id == home
+    # One test of what the captain's row is, the fleet's (review of #274, m4): on the home
+    # board AND launched as the captain's start launches it, so a role declared `captain`
+    # in the home added as a project (D5) is no captain's window.
+    from aisquare.services.fleet import is_the_captains_row  # lazy: launch stays lean
+
+    return row is not None and row.role == "captain" and is_the_captains_row(row)
 
 
 def _starting_unbriefed(agent_id: str, why: str) -> None:

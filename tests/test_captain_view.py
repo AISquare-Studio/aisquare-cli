@@ -888,3 +888,39 @@ def test_the_homes_card_shows_its_own_agents_and_the_captain_stays_in_its_sectio
     on_card, in_section = drive(body)
     assert on_card == [f"agent-row-{coder.agent.id}"], on_card
     assert f"agent-row-{captain.agent.id}" in in_section
+
+
+@pytest.mark.needs_captain
+def test_a_declared_captain_role_in_the_home_is_no_captain_in_the_ui(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review of #274, m3: ``_read_captain`` took any home row whose role was ``captain``,
+    so with the home added (D5) and a declared ``captain`` role spawned there while the
+    captain was off, the Captain section showed that plain agent, with the captain's view."""
+    from aisquare.core.store import store_session
+
+    home = captain_state.home_project()
+    with store_session() as store:
+        store.onboard_project(home, explicit=True)
+    declared = _captain()
+    declared = declared.model_copy(
+        update={"agent": declared.agent.model_copy(update={"launch_spec": None})}
+    )
+    script[home.id] = [declared]
+
+    async def body(pilot: Pilot[None]) -> tuple[list[str], list[str], type]:
+        app = fleet_app(pilot)
+        await refreshed(app)
+        card = app.query_one(f"#card-{home.id}")
+        section = app.query_one("#captain-section")
+        view = app._agent_view(declared, "view-x")
+        return (
+            [row.id or "" for row in card.query(AgentRow)],
+            [row.id or "" for row in section.query(AgentRow)],
+            type(view),
+        )
+
+    on_card, in_section, view = drive(body)
+    assert on_card == [f"agent-row-{declared.agent.id}"], "an agent of the home's own"
+    assert in_section == [], "no captain"
+    assert view is AgentView

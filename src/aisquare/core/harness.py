@@ -1099,7 +1099,8 @@ def _role_cycle_core(
         return [
             f"Your standing cycle (coder): `aisquare task next --role coder --claim --as {sid}`;",
             "if nothing is available, tell the user and stop. Read the task's contract and",
-            "any reopen feedback first — if the contract is missing or ambiguous, don't",
+            "any reopen feedback first — the claim prints both; `aisquare task show <id>` is",
+            "the whole task. If the contract is missing or ambiguous, don't",
             f'guess: `aisquare task block <id> --reason "needs spec: …" --as {sid}` and note',
             "it to the planner. Otherwise do the work, self-check against the acceptance",
             "criteria, then `aisquare task review <id> "
@@ -1149,7 +1150,8 @@ def _role_cycle_core(
             "Your standing cycle (manager): you run this project's fleet; you never do its",
             "work. Intake: ask until the acceptance criteria are executable. Contracts:",
             '`aisquare task add "<title>" --role coder --detail "<objective · why · known ·',
-            'acceptance · boundaries>"`, `--needs` for ordering. Help comes only from',
+            "acceptance · boundaries>\"`, `--needs` for ordering; the coder's claim prints the",
+            "contract, so put it in `--detail`, not the prompt. Help comes only from",
             f"`{spawn} coder --label coder-<purpose> --task <id> --as {sid}` —",
             f"one per parallelisable task, within the agent cap; `{spawn} tester` once work",
             f'reaches review — `{spawn} ui-tester --prompt "<branch or worktree to check +',

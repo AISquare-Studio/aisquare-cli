@@ -684,6 +684,15 @@ def test_codexs_tools_only_session_is_its_tool_features_off_and_one_approved_ser
         codex.tools_only_args("my.server", "python", [], {})
 
 
+def test_only_claude_code_is_told_to_keep_a_prompt_of_its_own_out_of_an_unwatched_pane() -> None:
+    """main's captain set ``CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1``: Claude Code's rating
+    survey drew in its pane. Codex's own dialogs are kept out by its fleet settings."""
+    assert dict(get_adapter("claude-code").unattended_env()) == {
+        "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1"
+    }
+    assert dict(codex.unattended_env()) == {}
+
+
 def test_a_resumed_codex_thread_keeps_its_first_developer_instructions() -> None:
     """Measured on 0.162.1 (M4): ``codex exec resume <id> -c developer_instructions=Y`` kept
     the thread's first value and dropped Y, and a later resume without ``-c`` still carried

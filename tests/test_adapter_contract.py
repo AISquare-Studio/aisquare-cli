@@ -606,6 +606,22 @@ def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_
         assert telemetry == []
 
 
+def test_the_unattended_environment_is_the_agents_own_variables(adapter: AgentAdapter) -> None:
+    """``unattended_env`` (a session nobody may be watching, the captain's): variables in the
+    agent's own name, never one that says which home, process or launch a session is, nor
+    one that keeping its native teams off already sets."""
+    import re
+
+    env = adapter.unattended_env()
+    assert all(isinstance(value, str) for value in env.values())
+    assert all(re.fullmatch(r"[A-Z][A-Z0-9_]*", name) for name in env), dict(env)
+    capabilities = adapter.capabilities
+    taken = {adapter.home_env, capabilities.pid_env, capabilities.tool_shell_env}
+    assert not taken & set(env), "never a variable that identifies a session"
+    assert not set(adapter.disable_native_teams()[1]) & set(env)
+    assert not any(name.startswith("AISQUARE_") for name in env), "AISquare's are the fleet's"
+
+
 def test_a_tools_only_session_names_its_server_and_leaves_no_built_in_tool(
     adapter: AgentAdapter, tmp_path: Path
 ) -> None:

@@ -1096,6 +1096,11 @@ class CodexAdapter:
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["-c", "agents.enabled=false"], {}
 
+    def unattended_env(self) -> Mapping[str, str]:
+        """None: the dialogs Codex opens in a running pane are kept out by
+        ``capabilities.fleet_settings`` (its model-switch offer and update notice)."""
+        return MappingProxyType({})
+
     def system_prompt_args(
         self, block: Path, text: str, args: Sequence[str], home: Path
     ) -> list[str] | None:

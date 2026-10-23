@@ -530,6 +530,9 @@ class FakeAgentAdapter:
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["--no-subagents"], {"FAKE_AGENT_TEAMS": "off"}
 
+    def unattended_env(self) -> Mapping[str, str]:
+        return {"FAKE_AGENT_NO_TIPS": "1"}  # its tip of the day waits for a key
+
     def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
         return []
 

@@ -590,7 +590,7 @@ class AgentAdapter(Protocol):
     :meth:`label_args`, :meth:`resume_args`, :meth:`fork_args`,
     ``exit_command``, ``dismiss_key``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`tools_only_args`, :meth:`context_files`,
-    :meth:`disable_native_teams`,
+    :meth:`disable_native_teams`, :meth:`unattended_env`,
     :meth:`telemetry_args`. Personas: :meth:`system_prompt_args`, :meth:`skill_dirs`,
     :meth:`headless_call` with :meth:`headless_answer`. Accounts: ``accounts``.
     Remote: ``transcript_reader``. ``capabilities`` says the rest.
@@ -814,6 +814,13 @@ class AgentAdapter(Protocol):
 
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         """Arguments and environment that keep the agent's own sub-agent teams off."""
+        ...
+
+    def unattended_env(self) -> Mapping[str, str]:
+        """Environment for a session nobody may be watching (the captain's, whose pane is
+        answered from a phone), which keeps out a prompt of the agent's own that would hold
+        its pane for the human and is no work's (Claude Code's session-rating survey);
+        empty where none is kept out this way."""
         ...
 
     def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:

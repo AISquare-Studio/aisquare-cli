@@ -438,6 +438,11 @@ class ClaudeCodeAdapter:
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return [], {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}
 
+    def unattended_env(self) -> Mapping[str, str]:
+        """No session-rating survey (``How is Claude doing this session?``), which drew in the
+        captain's pane mid-conversation, where nothing may type and no phone can answer."""
+        return MappingProxyType({"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1"})
+
     def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
         return []
 

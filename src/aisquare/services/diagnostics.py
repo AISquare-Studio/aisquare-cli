@@ -2695,6 +2695,9 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         return _warn(
             "snapshot", f"could not check the snapshot: {exc}", "Try: aisquare project onboard"
         )
+    if snapshot_core.is_the_homes(project.id):
+        # The aisquare home, added as a project, is never packed: no fix to offer.
+        return _ok("snapshot", snapshot_core.HOME_SKIPPED)
     # A stored pack is what agents get even where nothing can pack any more (Node
     # gone, or on PATH only for the installer's own run): it says so, rather than
     # "ready" beside a repomix row that reads off.

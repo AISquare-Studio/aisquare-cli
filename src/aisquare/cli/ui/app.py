@@ -373,7 +373,9 @@ def _read_captain(read: _FleetRead) -> _FleetRead:
         statuses = fleet_service.list_agents(home)
     except Exception as exc:  # a bug in the fleet path must not take the view down
         return replace(read, captain_error=f"captain unavailable — {_why_unread(exc)}")
-    captain = next((s for s in statuses if s.agent.role == fleet_service.CAPTAIN_ROLE), None)
+    # The captain's own row, by how it was launched, as brain.find and the home's card ask
+    # (review of #274, m3): a role declared `captain` in the home is a plain agent.
+    captain = next((s for s in statuses if fleet_service.is_the_captains_row(s.agent)), None)
     return replace(read, home=home, captain=captain)
 
 
@@ -1325,14 +1327,24 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 )
             return
         home, captain, captain_notice = self._captain(read)
+        # The cards show each board's own agents; the captain's row is the captain section's
+        # alone, never the home's card, which the owner can add as a project (D5). The frame
+        # holds both, so a lookup by the home's id still finds the captain.
+        cards = read.agents
         agents = read.agents
         if home is not None:
-            agents = {**read.agents, home.id: [captain] if captain is not None else []}
+            own = [
+                s
+                for s in read.agents.get(home.id, [])
+                if captain is None or s.agent.id != captain.agent.id
+            ]
+            cards = {**read.agents, home.id: own} if home.id in read.agents else read.agents
+            agents = {**read.agents, home.id: [*([captain] if captain is not None else []), *own]}
         self.store_error = None
         self.snapshot = FleetSnapshot(read.projects, agents, read.notices, read.taken_at, home=home)
         sidebar.show_notice(None)
         sidebar.show_captain(captain, notice=captain_notice)
-        sidebar.show_projects(read.projects, agents, notices=read.notices, groups=read.groups)
+        sidebar.show_projects(read.projects, cards, notices=read.notices, groups=read.groups)
         self._feed_open_views(self.snapshot)
         if asked is None or self._accounts_began < asked:
             self.refresh_accounts()
@@ -1778,7 +1790,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if (
             self.snapshot is not None
             and self.snapshot.is_home(status.agent.project_id)
-            and status.agent.role == fleet_service.CAPTAIN_ROLE
+            and fleet_service.is_the_captains_row(status.agent)
         ):
             return CaptainView(status, usage=self.session_usage, id=view_id)
         return AgentView(status, usage=self.session_usage, id=view_id)
@@ -1799,7 +1811,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         snapshot = self.snapshot
         home = snapshot.home if snapshot is not None else None
         rows = snapshot.agents.get(home.id, []) if snapshot is not None and home else []
-        captain = next(iter(rows), None)
+        # By role: the home, added as a project (D5), holds its own agents beside it.
+        captain = next((r for r in rows if fleet_service.is_the_captains_row(r.agent)), None)
         if captain is not None and captain.state in ALIVE_STATES:
             self.post_message(AgentSelected(captain.agent.project_id, captain.agent.id))
             return

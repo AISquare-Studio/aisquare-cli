@@ -20,7 +20,7 @@ from aisquare.core import paths, personas
 from aisquare.core.config import AppConfig, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, store_session
-from aisquare.models import FleetAgent
+from aisquare.models import FleetAgent, LaunchSpec
 from aisquare.services.explainability import join_records
 from tests import bundled_personas
 
@@ -306,7 +306,18 @@ def test_launch_captain_outside_the_fleet_is_refused(
     assert not spy, "nothing should be exec'd"
 
 
-def _seat(agent_id: str, *, role: str, project_id: str, cwd: Path) -> None:
+_CAPTAINS_LAUNCH = LaunchSpec(binary="claude", extra_args=["--strict-mcp-config", "--tools", ""])
+"""The captain's start launches it so (``brain.launch_args``): what ``is_the_captains_row`` asks."""
+
+
+def _seat(
+    agent_id: str,
+    *,
+    role: str,
+    project_id: str,
+    cwd: Path,
+    launch_spec: LaunchSpec | None = None,
+) -> None:
     with store_session() as store:
         store.upsert_fleet_agent(
             FleetAgent(
@@ -317,6 +328,7 @@ def _seat(agent_id: str, *, role: str, project_id: str, cwd: Path) -> None:
                 pane_id="%9",
                 cwd=cwd,
                 created_at=datetime.now(tz=UTC),
+                launch_spec=launch_spec,
             )
         )
 
@@ -324,7 +336,12 @@ def _seat(agent_id: str, *, role: str, project_id: str, cwd: Path) -> None:
 @pytest.mark.needs_captain
 @pytest.mark.parametrize(
     "seat",
-    ["a coder's window", "a captain row on a project", "a row that never shows"],
+    [
+        "a coder's window",
+        "a captain row on a project",
+        "a declared captain on the home board",
+        "a row that never shows",
+    ],
 )
 def test_launch_captain_in_a_window_that_is_not_the_captains_is_refused(
     seat: str,
@@ -340,12 +357,26 @@ def test_launch_captain_in_a_window_that_is_not_the_captains_is_refused(
     if seat == "a coder's window":
         _seat("agt_not_the_captain", role="coder", project_id="prj_launch", cwd=work_dir)
     elif seat == "a captain row on a project":
-        _seat("agt_not_the_captain", role="captain", project_id="prj_launch", cwd=work_dir)
+        _seat(
+            "agt_not_the_captain",
+            role="captain",
+            project_id="prj_launch",
+            cwd=work_dir,
+            launch_spec=_CAPTAINS_LAUNCH,
+        )
+    elif seat == "a declared captain on the home board":
+        # Review of #274, m4: the home added as a project (D5), a `captain` role declared
+        # and spawned there: on the home board, with no launch of the captain's.
+        from aisquare.core.workspace import project_id_for
+
+        home = project_id_for(paths.aisquare_home().resolve())
+        _seat("agt_not_the_captain", role="captain", project_id=home, cwd=work_dir)
 
     result = runner.invoke(app, ["launch", "captain"])
 
     assert result.exit_code == 1, result.output
     assert "`aisquare captain` starts it" in result.output
+    assert "starting anyway" not in result.output, "a refusal, never 'starting' (#274, n1)"
     assert not spy, "nothing should be exec'd"
 
 
@@ -361,7 +392,13 @@ def test_launch_captain_in_the_captains_own_window_starts_it(
 
     home = project_id_for(paths.aisquare_home().resolve())
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_the_captain")
-    _seat("agt_the_captain", role="captain", project_id=home, cwd=work_dir)
+    _seat(
+        "agt_the_captain",
+        role="captain",
+        project_id=home,
+        cwd=work_dir,
+        launch_spec=_CAPTAINS_LAUNCH,
+    )
 
     result = runner.invoke(app, ["launch", "captain"])
 

@@ -27,6 +27,7 @@ from aisquare.cli.ui.sidebar import (
     StartCaptain,
 )
 from aisquare.cli.ui.spawn import SpawnDialog
+from aisquare.cli.ui.views.captain import WHAT_IS_UP
 from aisquare.cli.ui.views.settings_captain import ABOUT, CaptainToggle
 from aisquare.core import experimental
 from aisquare.core.config import load_config
@@ -258,3 +259,21 @@ def test_a_send_the_door_refuses_is_said_and_the_line_comes_back_into_the_box(
     assert fake.typed == [] and fake.told == []
     assert any("nothing typed" in line and "trust its folder" in line for line in told), told
     assert left == "status please"
+
+
+@pytest.mark.needs_captain
+@pytest.mark.parametrize("door", ["sent", "refused"])
+def test_a_typed_what_is_up_is_a_message_like_any(
+    tmp_path: Path, script: Script, captain_door: tuple[Captain, Clock], door: str
+) -> None:
+    """Review of #274, n2: a typed line that was exactly the quick action's words was taken
+    for the quick action: its toast, and on a refusal it was not put back in the box."""
+    fake, _ = captain_door
+    fake.present()  # type: ignore[attr-defined]
+    fake.screen = list(INPUT_BOX if door == "sent" else REAL_TRUST)
+    script[captain_state.home_project().id] = [_captain("waiting")]
+    told, left = drive(lambda pilot: _say(pilot, WHAT_IS_UP))
+    if door == "sent":
+        assert f"sent to the captain: {WHAT_IS_UP}" in told, told
+    else:
+        assert left == WHAT_IS_UP, "back in the box to send again"

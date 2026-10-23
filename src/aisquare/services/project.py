@@ -1054,6 +1054,11 @@ def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> tuple[Snapshot |
     why in the packer's own words. A failed ``--refresh`` rewrites nothing, so a
     last pack agents still get is returned, with a sentence that says so.
     """
+    if snapshot_core.is_the_homes(project.id):
+        # Never packed, refresh or not, and a pack left from before is deleted: its
+        # login data must not sit in a file agents are pointed at (owner, 2026-10-23).
+        shutil.rmtree(snapshot_core.snapshot_dir(project.id), ignore_errors=True)
+        return None, snapshot_core.HOME_SKIPPED
     if snapshot_core.exists(project.id) and not refresh:
         return snapshot_core.load(project.id), None
     settings = snapshot_settings()

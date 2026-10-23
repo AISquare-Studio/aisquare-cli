@@ -58,7 +58,9 @@ leave it alone: it is the captain's home board. You can add it on purpose with
 its own card, which leaves out the captain's row (the captain stays in its own
 section), and the add warns once that this folder holds aisquare's settings, the
 fleet database and every Claude account's login data, which agents working there
-can read and change. Removing it from the fleet hides it again.
+can read and change. It is never packed into a codebase snapshot (`init`,
+`project onboard` and `--refresh` skip it, and doctor says so), so agents there
+get no packed overview. Removing it from the fleet hides it again.
 
 Turn it on for this home in `asq`: *⚙ Settings ▸ Captain*, tick *Captain
 (experimental)*. The ★ beside Fleet and the Captain section above the projects

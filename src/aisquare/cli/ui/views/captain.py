@@ -276,6 +276,9 @@ class CaptainView(AgentView):
         """The last read of state.json; ``None`` until the first one answers."""
         self._telling: str | None = None
         """The line the tell in flight types: What's up's, or the message box's."""
+        self._typed = False
+        """Whether that line was typed in the box. By the door it came through, never by
+        its words: a typed "what is up" is a message like any (review of #274, n2)."""
 
     def compose_bars(self) -> ComposeResult:
         with Horizontal(id="captain-bar"):
@@ -382,7 +385,7 @@ class CaptainView(AgentView):
     @on(Button.Pressed, "#captain-whats-up")
     def _whats_up(self, event: Button.Pressed) -> None:
         event.stop()
-        self._tell(WHAT_IS_UP, _send_whats_up)
+        self._tell(WHAT_IS_UP, _send_whats_up, typed=False)
 
     @on(Input.Submitted, "#captain-say")
     def _say(self, event: Input.Submitted) -> None:
@@ -401,10 +404,10 @@ class CaptainView(AgentView):
             )
             return
         event.input.value = ""
-        self._tell(line, functools.partial(_send_line, line))
+        self._tell(line, functools.partial(_send_line, line), typed=True)
 
-    def _tell(self, line: str, send: Any) -> None:
-        self._telling = line
+    def _tell(self, line: str, send: Any, *, typed: bool) -> None:
+        self._telling, self._typed = line, typed
         self.run_worker(
             send,
             name=TELL_WORKER,
@@ -496,9 +499,10 @@ class CaptainView(AgentView):
         from aisquare.services.captain import brain
 
         line, self._telling = self._telling or WHAT_IS_UP, None
+        typed, self._typed = self._typed, False
         error = event.worker.error
         failed = event.state is not WorkerState.SUCCESS
-        if failed and line != WHAT_IS_UP:
+        if failed and typed:
             box = self.query_one("#captain-say", Input)
             if not box.value:  # unless something else was typed there meanwhile
                 box.value = line
@@ -509,7 +513,7 @@ class CaptainView(AgentView):
             self.notify(
                 f"could not ask the captain: {error}", severity="error", timeout=8, markup=False
             )
-        elif event.state is WorkerState.SUCCESS and line == WHAT_IS_UP:
+        elif event.state is WorkerState.SUCCESS and not typed:
             self.notify(f"asked the captain: {WHAT_IS_UP}", timeout=4, markup=False)
         elif event.state is WorkerState.SUCCESS:
             self.notify(f"sent to the captain: {line}", timeout=4, markup=False)

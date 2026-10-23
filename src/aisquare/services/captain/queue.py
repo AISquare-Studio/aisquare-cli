@@ -878,7 +878,14 @@ class AttentionQueue:
         except ValueError as exc:
             self._report_corrupt(exc)
             return _State()
-        if not isinstance(version, int) or version > FILE_VERSION:
+        if not isinstance(version, int) or isinstance(version, bool):
+            # Not a version this code ever wrote ("1", null, 1.0: a hand edit): reported,
+            # and the rows are read as they parse, as main read a file whatever its field
+            # said — never taken for a newer aisquare's (review of #274, m5).
+            self._report_corrupt(
+                ValueError(f"version {version!r}"), what="has an unreadable version"
+            )
+        elif version > FILE_VERSION:
             # A later aisquare's file: this one reads it wrong and would write it back
             # in its own format, so it stops, as an unreadable file does.
             raise QueueError(

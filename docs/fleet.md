@@ -727,8 +727,8 @@ so `aisquare ui --help` exists. Without an interactive terminal it refuses with
 the reason (`not_a_tty`) rather than starting a full-screen app into a pipe.
 
 *⚙ Settings ▸ Remote control* turns Remote on: the fleet on your phone through
-your own ngrok tunnel, with the link, a QR code and the passphrase, and a checklist
-first when ngrok or the remote extra is missing. `R` opens the same Remote in one
+your own ngrok tunnel, with the link, a QR code and the passphrase; the first time,
+it asks for your ngrok token. `R` opens the same Remote in one
 panel — see [Phone control](remote.md). *⚙ Settings ▸ Captain* switches the
 experimental captain on and off with no restart; `AISQUARE_EXPERIMENTAL_CAPTAIN`,
 when set, wins over it ([docs/captain.md](captain.md)).

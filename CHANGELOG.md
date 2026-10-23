@@ -307,10 +307,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   until you stop, and an echo that takes longer than 50 ms no longer waits half a
   second to show.
 - Remote control is in `asq`'s *⚙ Settings* now, as well as behind `R`.
-  *Turn on remote control* starts it. If the remote extra, ngrok or an ngrok
-  authtoken is missing, a checklist comes first, each line with its command and
-  a Copy button. On, the section shows the link and copies it by itself once
-  ngrok's link arrives, and shows the QR code, the passphrase and *Turn off*.
+  *Turn on remote control* starts it. The first time, it asks for your ngrok
+  token instead (*Paste your ngrok token*, with the link to get a free one) and
+  saves it to ngrok's own config. It never shows the token again, and a token
+  ngrok refuses is reported beside the field. On, the section shows the link and
+  copies it by itself once ngrok's link arrives, and shows the QR code, the
+  passphrase and *Turn off*.
   The write switch, auto-off, a new passphrase and the connected devices sit
   under a folded *Advanced*. It is the same Remote the `R` panel shows. The
   footer shows `R remote` again (the sidebar's ↓ and ↑ share one entry,

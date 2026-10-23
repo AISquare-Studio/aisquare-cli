@@ -72,11 +72,12 @@ uses it for the links in notifications.
 ## Start
 
 **From the fleet UI's Settings.** Run `aisquare ui` and open *⚙ Settings*: its
-*Remote control* section has *Turn on remote control*. If something Remote needs
-is missing, a checklist comes first, each line with its command and a Copy
-button: the remote extra (the install line above), ngrok, and an ngrok authtoken
-(`ngrok config add-authtoken <token>`). Without the extra nothing can start; with
-it, *Turn on anyway* serves this machine until ngrok is there. On, the section
+*Remote control* section has *Turn on remote control*. The first time, it asks
+for your ngrok token instead: paste the one from
+https://dashboard.ngrok.com/get-started/your-authtoken (a free account has one)
+and Save. It goes into ngrok's own config, as `ngrok config add-authtoken` puts it
+there, and it is never shown again. An install without ngrok says so in one line,
+with *Check again*. On, the section
 shows the link, copies it by itself once ngrok's link arrives (a toast says so),
 and shows a Copy button, the QR code, the passphrase and *Turn off*. *Advanced*,
 folded until clicked, has the rest of the panel's controls: a new passphrase,

@@ -2559,6 +2559,7 @@ def _writing_workers() -> dict[str, str]:
         personas_tab,
         project,
         settings,
+        settings_remote,
         welcome,
     )
 
@@ -2577,6 +2578,7 @@ def _writing_workers() -> dict[str, str]:
         personas_tab.ATTACH_WORKER: "a persona's attachment",
         captain.TELL_WORKER: "a line to the captain",
         captain.VOICE_WORKER: "the captain's speaker switch",
+        settings_remote.TOKEN_WORKER: "Settings ▸ Remote's save of the ngrok token",
         agent.RESTART_WORKER: "an agent's restart",
         fleet_bulk.BULK_WORKER: "Settings ▸ Fleet's restart or stop of every agent",
         explainability.SAVE_WORKER: "Explainability's setup",

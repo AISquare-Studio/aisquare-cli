@@ -16,23 +16,32 @@ from typing import Any
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Button, Checkbox, Collapsible, DataTable, Select, Static, Switch
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Collapsible,
+    DataTable,
+    Input,
+    Select,
+    Static,
+    Switch,
+)
 from textual.widgets._collapsible import CollapsibleTitle
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import SettingsRow
-from aisquare.cli.ui.views import settings_remote
 from aisquare.cli.ui.views.remote import LOCAL_ONLY, RemotePanel, qr_text
 from aisquare.cli.ui.views.settings_remote import (
-    AUTHTOKEN_COMMAND,
+    AUTHTOKEN_FROM,
+    NGROK_MISSING,
+    TOKEN_TITLE,
     RemoteChip,
     RemoteSection,
     has_authtoken,
-    ngrok_install_command,
 )
 from aisquare.services import remote_server
-from aisquare.services.ngrok_tunnel import NgrokTunnel, build_public_url
-from aisquare.services.remote_server import remote_install_hint
+from aisquare.services.ngrok_tunnel import NgrokTunnel, build_public_url, ngrok_default_config
+from tests.fake_clipboard import NEEDS_POSIX
 from tests.test_remote_control import FakeTunnel
 from tests.test_ui_remote import (  # noqa: F401 — the autouse fixtures, applied by import
     PUBLIC,
@@ -64,18 +73,11 @@ def path_with(tmp_path: Path, *tools: str) -> None:
 
 @pytest.fixture
 def ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Everything Remote needs: the extra (this install has it), ngrok and its authtoken."""
+    """Everything Remote needs from the owner: an ngrok to start and its token."""
+    own_home(tmp_path, monkeypatch)
     monkeypatch.setenv("PATH", os.environ.get("PATH", ""))  # restored after the test
     path_with(tmp_path, "ngrok")
     monkeypatch.setenv("NGROK_AUTHTOKEN", "a-token")
-
-
-@pytest.fixture
-def nothing_of_ngrok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """No ngrok on PATH and no authtoken anywhere: the extra alone is there."""
-    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
-    path_with(tmp_path)
-    monkeypatch.delenv("NGROK_AUTHTOKEN", raising=False)
 
 
 def late(tunnels: list[FakeTunnel]) -> Any:
@@ -119,70 +121,166 @@ def copies(app: FleetApp) -> list[str]:
     return copied
 
 
-# --- Off: the checklist ---------------------------------------------------------------------
+# --- Off: the token, and nothing to install --------------------------------------------------
+
+NOT_ON_THE_NORMAL_PATH = ("pip install", "uv ", "[remote]", "not installed", "ngrok config", "brew")
+"""What Settings' Remote never tells the owner to do (the owner, 2026-10-23, #34)."""
 
 
-def test_off_with_ngrok_and_its_token_missing_shows_the_checklist_with_each_command(
-    nothing_of_ngrok: None,
+def said_in(section: RemoteSection) -> str:
+    """Every sentence the section shows now, one per line."""
+    return "\n".join(
+        shown(static)
+        for static in section.query(Static).results(Static)
+        if not isinstance(static, Button) and all(node.display for node in _chain(static))
+    )
+
+
+def _chain(widget: Any) -> list[Any]:
+    return [widget, *(node for node in widget.ancestors if hasattr(node, "display"))]
+
+
+def own_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A home of the test's own, where ngrok's config is looked for and written: the suite
+    isolates the aisquare home, not ``~``, which holds the developer's real ngrok config."""
+    home = tmp_path / "user"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("NGROK_AUTHTOKEN", raising=False)
+
+
+def fake_ngrok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, refuse: str = "") -> Path:
+    """An ``ngrok`` on PATH whose ``config add-authtoken <token>`` writes ngrok's own config as
+    ngrok 3 does, in the test's own home, or, with ``refuse``, says it on stderr (the token in
+    it) and fails."""
+    own_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    path_with(tmp_path)
+    config = ngrok_default_config()
+    assert str(tmp_path) in str(config), f"ngrok's config must be the test's own: {config}"
+    monkeypatch.setenv("FAKE_NGROK_CONFIG", str(config))
+    monkeypatch.setenv("FAKE_NGROK_DIR", str(config.parent))
+    tool = Path(os.environ["PATH"]) / "ngrok"
+    if refuse:
+        body = f'echo "{refuse} $3" >&2\nexit 1\n'
+    else:  # PATH holds nothing but this: the tools it runs are named in full
+        body = (
+            '/bin/mkdir -p "$FAKE_NGROK_DIR"\n'
+            'printf \'version: "3"\\nagent:\\n  authtoken: %s\\n\' "$3" > "$FAKE_NGROK_CONFIG"\n'
+        )
+    tool.write_text("#!/bin/sh\n" + body)
+    tool.chmod(0o755)
+    return config
+
+
+async def paste(pilot: Pilot[None], section: RemoteSection, token: str) -> None:
+    """Paste ``token`` into the slot and Save, and let the save answer."""
+    section.query_one("#settings-remote-token-field", Input).value = token
+    section.query_one("#settings-remote-token-save", Button).press()
+    await pilot.pause()
+    await settle_page(pilot.app)
+    await pilot.pause()
+
+
+@NEEDS_POSIX
+def test_off_with_no_ngrok_token_shows_only_the_token_field_and_its_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """What is missing is a line each, its command beside a Copy that copies it; what is
-    there (the extra) is no line. With the extra, *Turn on anyway* stays: Remote serves this
-    machine without ngrok, and a token kept where the check does not look still works."""
+    """No token yet: *Paste your ngrok token*, where a free one comes from, and *Save*, in the
+    place of *Turn on*; nothing to install and no command to run."""
+    fake_ngrok(tmp_path, monkeypatch)
 
-    async def go(pilot: Pilot[None]) -> tuple[dict[str, bool], str, str, str, list[str]]:
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, bool, str]:
+        section = await opened(pilot)
+        return (
+            displayed(section, "#settings-remote-token-field"),
+            displayed(section, "#settings-remote-turn-on"),
+            displayed(section, "#settings-remote-ngrok-missing"),
+            said_in(section),
+        )
+
+    field, turn_on, missing, said = drive(go, tunnel=missing_ngrok)
+    assert field and not turn_on and not missing
+    assert TOKEN_TITLE in said and AUTHTOKEN_FROM in said, said
+    assert not [hint for hint in NOT_ON_THE_NORMAL_PATH if hint in said], said
+
+
+@NEEDS_POSIX
+def test_a_saved_token_brings_turn_on_back_and_turn_on_reaches_the_tunnel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Save hands the token to ngrok's own config; the slot goes, *Turn on* is there, and a
+    press of it starts the tunnel. The token is in no toast."""
+    config = fake_ngrok(tmp_path, monkeypatch)
+    token = "2abcDEF_0123456789abcdefghijklmnopqrstuvwxyzAB"
+    tunnels: list[FakeTunnel] = []
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, list[str], int]:
         app = pilot.app
         assert isinstance(app, FleetApp)
         section = await opened(pilot)
-        lines = {
-            key: displayed(section, f"#settings-remote-need-{key}")
-            for key in ("extra", "ngrok", "authtoken")
-        }
-        copied = copies(app)
-        section.query_one("#settings-remote-need-authtoken-copy", Button).press()
-        await pilot.pause()
-        return (
-            lines,
-            shown(section.query_one("#settings-remote-need-ngrok-text", Static)),
-            shown(section.query_one("#settings-remote-need-authtoken-text", Static)),
-            str(section.query_one("#settings-remote-turn-on", Button).label),
-            copied,
+        told = record(app)
+        await paste(pilot, section, token)
+        slot, turn_on = (
+            displayed(section, "#settings-remote-token"),
+            displayed(section, "#settings-remote-turn-on"),
         )
+        section.query_one("#settings-remote-turn-on", Button).press()
+        await written(pilot)
+        return slot, turn_on, told, len(tunnels)
 
-    lines, ngrok, token, turn_on, copied = drive(go, tunnel=missing_ngrok)
-    assert lines == {"extra": False, "ngrok": True, "authtoken": True}
-    assert ngrok_install_command() in ngrok
-    assert AUTHTOKEN_COMMAND in token
-    assert turn_on == "Turn on anyway"
-    assert copied == [AUTHTOKEN_COMMAND]
+    slot, turn_on, told, started = drive(go, tunnel=late(tunnels))
+    assert token in config.read_text(encoding="utf-8")
+    assert not slot and turn_on
+    assert "✓ ngrok token saved" in told and not [line for line in told if token in line]
+    assert started == 1, "Turn on started the tunnel"
 
 
-def test_off_without_the_remote_extra_shows_its_install_command_and_no_turn_on(
-    ready: None, monkeypatch: pytest.MonkeyPatch
+@NEEDS_POSIX
+def test_a_token_ngrok_refuses_is_said_beside_the_field_without_the_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Without the extra nothing can start: the checklist's line is the command that adds it
-    to the install that runs (``remote_install_hint``), and it stands in for *Turn on*."""
-    monkeypatch.setitem(sys.modules, "websockets", None)  # find_spec: not installed
+    fake_ngrok(tmp_path, monkeypatch, refuse="ERROR: the token is malformed:")
+    token = "2abc-not-a-real-token"
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, str]:
+        section = await opened(pilot)
+        await paste(pilot, section, token)
+        problem = section.query_one("#settings-remote-token-problem", Static)
+        first = shown(problem) if problem.display else ""
+        await paste(pilot, section, "two words")
+        return first, displayed(section, "#settings-remote-token"), shown(problem)
+
+    first, slot, spaced = drive(go, tunnel=missing_ngrok)
+    assert first == "ngrok did not take it: ERROR: the token is malformed: …", first
+    assert token not in first and slot
+    assert spaced == "that is not one token: it has spaces in it"
+
+
+def test_a_missing_ngrok_is_one_line_with_a_fix_in_the_app_never_a_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    own_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+    path_with(tmp_path)
+    monkeypatch.setenv("NGROK_AUTHTOKEN", "a-token")
 
     async def go(pilot: Pilot[None]) -> tuple[bool, str, bool]:
         section = await opened(pilot)
-        return (
-            displayed(section, "#settings-remote-need-extra"),
-            shown(section.query_one("#settings-remote-need-extra-text", Static)),
-            displayed(section, "#settings-remote-turn-on"),
-        )
+        missing = displayed(section, "#settings-remote-ngrok-missing")
+        said = said_in(section)
+        path_with(tmp_path, "ngrok")  # what the fix brings back
+        section.query_one("#settings-remote-ngrok-fix", Button).press()
+        await pilot.pause()
+        return missing, said, displayed(section, "#settings-remote-ngrok-missing")
 
-    line, text, turn_on = drive(go, tunnel=missing_ngrok)
-    assert line and remote_install_hint() in text
-    assert not turn_on
-
-
-def test_off_with_everything_there_offers_turn_on_and_no_checklist(ready: None) -> None:
-    async def go(pilot: Pilot[None]) -> tuple[bool, str]:
-        section = await opened(pilot)
-        button = section.query_one("#settings-remote-turn-on", Button)
-        return displayed(section, "#settings-remote-checklist"), str(button.label)
-
-    assert drive(go, tunnel=missing_ngrok) == (False, "Turn on remote control")
+    missing, said, after = drive(go, tunnel=missing_ngrok)
+    assert missing and NGROK_MISSING in said
+    assert not [hint for hint in NOT_ON_THE_NORMAL_PATH if hint in said], said
+    assert not after
 
 
 # --- On, and off again ----------------------------------------------------------------------
@@ -372,9 +470,3 @@ def test_the_authtoken_is_found_where_ngrok_config_add_authtoken_writes_it(
 def test_the_authtoken_in_the_environment_signs_ngrok_in_too(tmp_path: Path) -> None:
     assert has_authtoken({"NGROK_AUTHTOKEN": "2abc"}, [tmp_path / "none.yml"])
     assert not has_authtoken({"NGROK_AUTHTOKEN": "  "}, [tmp_path / "none.yml"])
-
-
-def test_the_ngrok_install_command_is_this_platforms() -> None:
-    assert settings_remote.ngrok_install_command("darwin") == "brew install ngrok"
-    assert "winget" in settings_remote.ngrok_install_command("win32")
-    assert "snap install ngrok" in settings_remote.ngrok_install_command("linux")

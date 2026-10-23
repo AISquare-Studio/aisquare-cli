@@ -36,6 +36,18 @@ concurrency-tested against racing parallel sessions):
 └── log/          # capture and diagnostic logs
 ```
 
+Every `[fleet]` key, with its default, is in
+[fleet.md](fleet.md#permission-modes-and-every-default-you-can-change). The keys that
+decide which Claude Code tools and how much of the skill listing a role launches with,
+wherever it starts ([Tools and skills per role](fleet.md#tools-and-skills-per-role)):
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `fleet.deny_tools` | the eight tools no role uses | denied for every role |
+| `fleet.roles.<role>.deny_tools` | `[]` | denied for this role too |
+| `fleet.roles.<role>.allow_tools` | `[]` | taken back out, safety list included; never a `--disallowedTools` on the line |
+| `fleet.roles.<role>.skill_listing` | `full` for manager, `names` for the rest | `full`, `names` (descriptions cut) or `off` (`Skill` denied) |
+
 Ids everywhere are time-sortable and prefix-addressable (git-style: any
 unambiguous prefix works). Every command takes a global `--json` flag for
 machine-readable output — global flags go before the command:

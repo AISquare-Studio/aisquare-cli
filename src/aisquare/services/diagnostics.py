@@ -167,6 +167,7 @@ def doctor(
         # fleet terminal row (#147) can warn too, about a running server's kept
         # prefix, so it waits here with them rather than beside tmux.
         _check_browser_tools(cwd),
+        *_check_role_tools(),
         _check_fleet_terminal(),
         # Beside the fleet terminal row, which reads the same running server (fix 4 of the
         # fleet-board card): it can warn, so it waits with the other late rows.
@@ -2644,6 +2645,34 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
         "`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp`, or install the "
         "Claude in Chrome extension (claude.ai/chrome)",
     )
+
+
+def _check_role_tools() -> list[DoctorCheck]:
+    """``<role> tools``: one row per fleet role, the tools it launches without and its skill
+    listing, as ``harness.tool_policy`` gives them to a launch that asks nothing itself (#280).
+
+    Ok, always: the rows say what each role's prefix carries, and nothing in them is a
+    defect. Not a warning for a name Claude Code does not have either, because Claude Code
+    does not say: 2.1.309 starts with ``--disallowedTools=NoSuchTool`` silently, so a
+    typo in ``deny_tools`` denies nothing, which is what the row shows. A role bound to
+    another agent gets no deny token, and its row says why.
+    """
+    try:
+        fleet = load_config().fleet
+    except Exception:  # `_check_config` reports the config; this row is about roles
+        return []
+    rows: list[DoctorCheck] = []
+    for role in fleet.roles:
+        binary = harness.resolve_binary(role).binary
+        policy = harness.tool_policy(role, binary=binary, args=[], fleet=fleet)
+        listing = f"skill listing {policy.skill_listing}"
+        if not policy.applied:
+            reason = f"{os.path.basename(binary)!r} is not {harness.DEFAULT_AGENT_BINARY}"
+            rows.append(_ok(f"{role} tools", f"no deny token: {reason}; {listing}"))
+            continue
+        denied = ", ".join(policy.denied) if policy.denied else "nothing"
+        rows.append(_ok(f"{role} tools", f"denies {denied}; {listing}"))
+    return rows
 
 
 def _short_path(path: PurePath, home: PurePath | None = None) -> str:

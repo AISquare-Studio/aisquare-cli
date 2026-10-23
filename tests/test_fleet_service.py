@@ -1304,7 +1304,11 @@ def test_the_built_in_reviewer_is_launched_with_a_shell(
     fleet_service.spawn(project, "reviewer", worktree=False)
     command = _command(tmux)
     assert "--restricted" not in command
-    assert "--disallowedTools=Edit Write NotebookEdit" in command, "and no editing tools"
+    # No editing tools either: the deny is the role's own, which the window's `launch`
+    # adds (`harness.tool_policy`), so the command it is handed need not carry it.
+    tail = command[command.index("reviewer") + 1 :]
+    policy = harness.tool_policy("reviewer", binary="claude", args=tail, fleet=FleetSettings())
+    assert {"Edit", "Write", "NotebookEdit"} <= set(policy.denied), "and no editing tools"
 
 
 def test_spawn_respects_a_caller_supplied_session_id(
@@ -12875,8 +12879,10 @@ def test_spawn_and_stop_on_a_real_tmux_server(
         assert "fake claude:" in screen, screen
         # The control behind the "gone" hunts: this server must keep dead panes.
         assert real.run("show-options", "-gv", "remain-on-exit").strip() == "on"
-        assert f"--session-id {receipt.agent.session_id}" in screen, screen
-        assert "--name coder-1" in screen and "--permission-mode auto" in screen, screen
+        # The argv wraps at the pane's width: read it with the wrapped rows joined.
+        said = "".join(real.capture(pane).lines)
+        assert f"--session-id {receipt.agent.session_id}" in said, screen
+        assert "--name coder-1" in said and "--permission-mode auto" in said, screen
         # ``#{window_activity}`` must be the time of the last OUTPUT, not the
         # window's creation time: it is the whole working/waiting distinction for
         # an agent with no hooks (ACTIVITY_WINDOW), and a creation-only stamp —

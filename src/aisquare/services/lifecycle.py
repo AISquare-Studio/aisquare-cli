@@ -28,7 +28,7 @@ from typing import Any
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import credentials as credentials_store
-from aisquare.core import paths
+from aisquare.core import harness, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import (
     AppConfig,
@@ -36,6 +36,7 @@ from aisquare.core.config import (
     defaults_a_whole_file_reader_lacks,
     load_config,
     save_config,
+    split_denied_tools,
 )
 from aisquare.core.store import store_session
 from aisquare.core.tmux import (
@@ -353,6 +354,10 @@ class UpgradePlan:
     """The roles bound to a file (``RoleLaunchProfile.env_files``) that a move back to a
     release before :data:`FIRST_ENV_FILES` ignores, each with its variables:
     ``reviewer (GH_TOKEN)``."""
+    tools_regained: tuple[str, ...] = ()
+    """The roles a move back to a release up to :data:`LAST_ARGS_ONLY_DENY` launches with
+    tools their safety list denies here, each with those tools:
+    ``reviewer (Edit, NotebookEdit, Write)``."""
 
     @property
     def runnable(self) -> bool:
@@ -442,6 +447,31 @@ class UpgradePlan:
             "launching shell has, such as a GH_TOKEN that can push. The "
             f"{'binding stays' if one else 'bindings stay'} in config.toml, read again from "
             f"{FIRST_ENV_FILES} on"
+        )
+
+    @property
+    def tools_warning(self) -> str | None:
+        """What a move back costs the roles whose safety list denies tools, or ``None``.
+
+        Here a role's safety list is its own (``harness.RoleProfile.denied_tools``: the
+        reviewer's Edit, Write and NotebookEdit), and the config leaves the reviewer's
+        ``extra_args`` empty. A release up to :data:`LAST_ARGS_ONLY_DENY` denies a role only
+        what those ``extra_args`` say, so its reviewer would launch able to edit the tree it
+        reviews (#280). Said, as :attr:`env_files_warning` is, rather than refused: the fix
+        is one ``config set``, which reads the same in both.
+        """
+        if not self.tools_regained:
+            return None
+        one = len(self.tools_regained) == 1
+        role, _, tools = self.tools_regained[0].partition(" (")
+        names = " ".join(tools.rstrip(")").split(", "))
+        whose = "its" if one else "each role's"
+        return (
+            f"{self.target} denies a role only the tools its extra_args name, which your "
+            f"config leaves without them: {', '.join(self.tools_regained)} would launch there "
+            f"with {'those tools' if one else 'theirs'}. To keep them denied there, add the "
+            f"deny to {whose} extra_args before the move (`aisquare config set "
+            f"fleet.roles.{role}.extra_args '--disallowedTools={names}'`)"
         )
 
     @property
@@ -557,6 +587,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     fleet_error: str | None = None
     remote: str | None = None
     lost: tuple[str, ...] = ()
+    regained: tuple[str, ...] = ()
     if reason is None:
         refresh, left = refresh_sites(route.facts)
         if target is not None and lacks_refresh_hooks(target):
@@ -570,6 +601,8 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
             lost = _config_defaults_lost()
         if target is not None and lacks_env_files(target):
             dropped = _env_file_bindings()
+        if target is not None and denies_by_extra_args_only(target):
+            regained = _tools_regained()
         live, _unlistened, fleet_error = running_fleet()
         remote = running_remote()
     return UpgradePlan(
@@ -589,6 +622,7 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
         remote=remote,
         config_defaults_lost=lost,
         env_files_dropped=dropped,
+        tools_regained=regained,
     )
 
 
@@ -638,6 +672,34 @@ def _config_defaults_lost() -> tuple[str, ...]:
         f"{key} {theirs} (here {ours})"
         for key, ours, theirs in defaults_a_whole_file_reader_lacks(config)
     )
+
+
+def denies_by_extra_args_only(release: str) -> bool:
+    """Whether ``release`` denies a role only the tools its ``extra_args`` name, with no
+    safety list of the role's own: :data:`LAST_ARGS_ONLY_DENY` and earlier."""
+    return install_route.is_newer(release, LAST_ARGS_ONLY_DENY) is False
+
+
+def _tools_regained() -> tuple[str, ...]:
+    """Each role whose safety-listed tools a release that :func:`denies_by_extra_args_only`
+    hands back, with those tools (:attr:`UpgradePlan.tools_regained`): what the role denies
+    here as its own, less ``allow_tools`` and less what its ``extra_args`` deny, which that
+    release denies too. None when the config cannot be read, which says nothing either way.
+    """
+    try:
+        fleet = load_config().fleet
+    except Exception:
+        return ()
+    regained: list[str] = []
+    for role, settings in sorted(fleet.roles.items()):
+        profile = harness.ROLE_PROFILES.get(harness.base_role(role))
+        if profile is None:
+            continue
+        kept, _rest = split_denied_tools(settings.extra_args)
+        tools = set(profile.denied_tools) - set(settings.allow_tools) - kept
+        if tools:
+            regained.append(f"{role} ({', '.join(sorted(tools))})")
+    return tuple(regained)
 
 
 def lacks_env_files(release: str) -> bool:
@@ -1089,6 +1151,9 @@ FIRST_REFRESH_HOOKS = "0.8.0"
 LAST_WHOLE_CONFIG = "0.8.0"
 #: The first release that reads ``env_files`` (``team bind --env-file``): 0.8.0 ignores it.
 FIRST_ENV_FILES = "0.8.1"
+#: The last release that denies a role only the tools its ``extra_args`` name: the
+#: reviewer's Edit/Write deny was its ``extra_args`` default, now its own (#280).
+LAST_ARGS_ONLY_DENY = "0.8.2"
 
 
 def _refresh(site: HookSite, found: install_route.Facts) -> HookRefresh:

@@ -36,7 +36,7 @@ from aisquare.cli import install as install_cli
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
 from aisquare.core import paths, selfcli, spawn
-from aisquare.core.config import RoleLaunchProfile, load_config, save_config
+from aisquare.core.config import REVIEWER_ARGS, RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer
@@ -2031,6 +2031,39 @@ def test_a_move_back_before_env_files_names_the_roles_whose_file_bindings_it_ign
     assert warning in ran.stdout, "--yes skips the plan, not what it costs"
     assert back["env_files_dropped"] == ["reviewer (GH_TOKEN)"], back
     assert across["env_files_dropped"] == forward["env_files_dropped"] == [], "they read it"
+
+
+def test_a_move_back_to_a_deny_by_extra_args_release_names_the_tools_a_role_regains(
+    runner: CliRunner, tool: Tool, machine: Machine
+) -> None:
+    """#280: the reviewer's Edit/Write deny is its own here, so this build's config leaves its
+    extra_args empty, and writes the table whole. 0.8.1 and 0.8.2 deny a role only what its
+    extra_args say: after `upgrade --version 0.8.1` the reviewer launched able to edit the
+    tree it reviews. The plan names it, under --yes and in --json, with the one command
+    that keeps the deny there; a move forward does not, nor a deny the extra_args hold."""
+    save_config(load_config())
+    warning = (
+        "⚠ 0.8.1 denies a role only the tools its extra_args name, which your config leaves "
+        "without them: reviewer (Edit, NotebookEdit, Write) would launch there with those "
+        "tools. To keep them denied there, add the deny to its extra_args before the move "
+        "(`aisquare config set fleet.roles.reviewer.extra_args "
+        "'--disallowedTools=Edit NotebookEdit Write'`)"
+    )
+
+    planned = runner.invoke(app, ["upgrade", "--version", "0.8.1"])
+    back = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.2"]).stdout)
+    machine.new_version = "0.8.1"
+    ran = runner.invoke(app, ["upgrade", "--version", "0.8.1", "--yes"])
+    machine.new_version = "0.9.0"
+    forward = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.9.1"]).stdout)
+
+    assert warning in planned.stdout, planned.stdout
+    assert warning in ran.stdout, "--yes skips the plan, not what it costs"
+    assert back["tools_regained"] == ["reviewer (Edit, NotebookEdit, Write)"], back
+    assert forward["tools_regained"] == [], "a release with the role's own deny keeps it"
+    settings_service.set_value("fleet.roles.reviewer.extra_args", REVIEWER_ARGS[0])
+    kept = _one_object(runner.invoke(app, ["--json", "upgrade", "--version", "0.8.1"]).stdout)
+    assert kept["tools_regained"] == [], "its extra_args deny them there too"
 
 
 def _live_fleet_agent(root: Path, label: str = "coder-1") -> None:

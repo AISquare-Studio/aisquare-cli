@@ -1113,11 +1113,19 @@ spool access and reports the most recent receiver failure.
 ## Adding a terminal agent
 
 `src/aisquare/core/agent_adapters/` is the one place a terminal agent (Gemini CLI,
-Grok, ...) is implemented. The shared services (hooks, board, launch, fleet, doctor)
-ask its adapter and never compare its name: `tests/test_no_agent_literals.py` fails on
-`== "codex"`, `in (..., "claude-code")` or a `match` case on either name anywhere
-outside that package. Keep unsupported capabilities explicit instead of copying
-another agent's flags or claiming hookless detection is integration.
+Grok, ...) is implemented. The shared services (hooks, board, launch, fleet, doctor,
+Welcome, upgrade and uninstall) ask its adapter and never compare its name:
+`tests/test_no_agent_literals.py` fails on `== "codex"`, `in (..., "claude-code")` or a
+`match` case on either name anywhere outside that package, and holds a ratchet on the
+rest of the agent-specific shapes there: a comparison with a constant naming an agent
+(`AGENT`, `CODEX`, `DEFAULT_AGENT`, `DEFAULT_AGENT_BINARY` and any module constant set to
+an agent's id or binary), a call of `harness.is_default_agent` outside `core/harness.py`,
+and a string constant that is an agent's binary, one of its variables, files or folders,
+or one of its flags. Its `BASELINE` counts each per file; a new one fails with its
+`file:line`, and a change that removes one lowers the count (aisquare's own options, prose
+naming a variable and a provider's API key are not counted). Keep unsupported capabilities
+explicit instead of copying another agent's flags or claiming hookless detection is
+integration.
 
 ### The files
 
@@ -1125,14 +1133,19 @@ another agent's flags or claiming hookless detection is integration.
 |---|------|------|
 | 1 | `src/aisquare/core/agent_adapters/<agent>.py` | A class implementing `AgentAdapter` (`types.py`), with its `AgentCapabilities`. |
 | 2 | `src/aisquare/core/agent_adapters/__init__.py` | One line: `register(<Agent>Adapter())`. |
-| 3 | `tests/fixtures/agent_events/<id>.json` | `events`: a recorded payload for every hook event it installs, with the `AgentEvent` fields it must decode to; `version_output`/`version`; `hooks_off` (the file and text that switch its hooks off); with account slots, `accounts`: the files a `login` leaves in a slot's home, and a `relogin` (the same login after a new sign-in). |
+| 3 | `tests/fixtures/agent_events/<id>.json` | `events`: a recorded payload for every hook event it installs, with the `AgentEvent` fields it must decode to; `version_output`/`version`; `hooks_off` (the file and text that switch its hooks off); `lasting`: the `files` of a home that keeps aisquare's MCP server run through uvx (beside one that is not aisquare's) and the `[kind, name, fetches]` its `lasting_installs` must read; with account slots, `accounts`: the files a `login` leaves in a slot's home (in the config dir its accounts' `config_dir` names there), and a `relogin` (the same login after a new sign-in). |
 | 4 | `tests/test_adapter_contract.py` | Its row in `EXPECTED_PERMISSIONS` (a coder's and a reviewer's flags), in `EXPECTED_HEADLESS` and `RECORDED_HEADLESS` (its headless call's session and hook switches, and an answer it gave), and in `EXPECTED_TOOLS_OFF` (what leaves its tools-only session no built-in tool). |
 | 4a | `tests/fixtures/agent_transcripts/<id>.json` | `moments`: its transcript as it stood at a permission prompt, a question, an interruption and a turn ended on a question (`records`, or the first `lines` of a recorded session file beside it), with what `transcript_reader` must read of each. |
 | 4b | `tests/fixtures/agent_screens/<id>.json` | With `capabilities.dialog_on_screen` or `screen_prompt` only: `dialogs`, its screens at each dialog of its own (`rows`, as `capture-pane -p` gives them) with the `words` `dialog_on_screen` must read of each and, optionally, the `prompt` (`[shape, yes_key, no_key]`) `screen_prompt` must, and `not_dialogs`, screens with none (its empty prompt, a draft, a turn), each with `"ready": true` where `ready_on_screen` (or its default) reads it ready for a typed line; a `modal` on either, where given, is what `modal_on_screen` (or its default) must name on it (`null`: nothing). |
 | 5 | `tests/test_<agent>_native.py`, `tests/run_<agent>_native.py` | The opt-in test against the real binary (`AISQUARE_TEST_<AGENT>=1`), as `test_codex_native.py` and its CI job do for Codex. |
 | 6 | `docs/coding-agents.md` | Its setup and native settings. |
 
-Nothing else, and no new `aisquare hook` subcommand. The project paths its own start
+Nothing else, and no new `aisquare hook` subcommand: Welcome offers its `install_routes`,
+`agents connect <id>` is the doctor's one-click fix for it (`onboarding.KNOWN_FIXES`' one
+agent row), `core.agents.install_hooks` writes its `hook_entry`, and upgrade and uninstall
+find its homes (the ones it was connected in, its default, its `~/<home_name>*` siblings and
+its account slots, each as its accounts' `config_dir`), take its hooks out and name what
+its `lasting_installs` keep. The project paths its own start
 reads and runs code from (its project settings, hooks, MCP servers: Claude Code's
 `.claude` and `.mcp.json`, Codex's `.codex` and `.agents`) go in its
 `capabilities.launch_inputs`, and every sandboxed agent's profile holds every registered
@@ -1155,9 +1168,12 @@ attributes and config layers, which a second telemetry agent extends there).
 | Slot | What it answers |
 |------|-----------------|
 | `id`, `label`, `binary`, `install_hint` | The board's and config's name; what the UI says; the executable (`adapter_for_binary` knows a wrapper by this name). |
-| `home_env`, `home_name`, `config_dir(home, env, explicit)` | The config dir the binary reads: explicit, else `$home_env`, else `~/home_name`. |
+| `install_routes` | Every way to install it, best first (`types.InstallRoute`: how, the command, and the platforms it is offered on, every one when empty); at least one. Welcome's step 2 offers those for the platform, and on Windows the first, run inside WSL2 (`first_run.install_routes`). Claude Code: its installer, Homebrew on macOS, npm. Codex: the same three of its own. |
+| `home_env`, `home_name`, `config_dir(home, env, explicit)` | The config dir the binary reads: explicit, else `$home_env` (through its accounts' `config_dir`, where the variable names the folder the config dir is in: Gemini CLI's `GEMINI_CLI_HOME`, its `.gemini` inside), else `~/home_name`. |
+| `lasting_installs(home)` | What config dir `home` keeps of aisquare's in the agent's own files, which uninstall lists and never edits, each a `types.LastingInstall`: an MCP server that runs aisquare (`mcp`) or the aisquare plugin enabled (`plugin`), the file that records it, the agent's own command that removes it (aimed at that home, and for a project's entry run inside the project), and whether it starts aisquare once the package is gone (`fetches`: a uvx runner, a plugin), which refuses a purge until it is removed. `core.agent_adapters.lasting` reads whether an `{"command", "args"}` entry runs aisquare and fetches it. Claude Code: the `.claude.json` the dir uses (user and local scope) and the `.mcp.json` of each project it lists, `claude mcp remove --scope …`, and its plugin, `claude plugin uninstall`. Codex: `config.toml`'s `[mcp_servers.*]` and `[plugins."aisquare@…"]`, `codex mcp remove` and `codex plugin remove`. |
 | `version_args` | The arguments that print its version; `types.version_in` reads the output. |
-| `settings_name`, `capabilities.hooks` | The hooks file in that dir, and each event installed with its subcommand, timeout and matcher. `core.agents.install_hooks`/`remove_hooks` merge it, keeping every foreign entry. |
+| `settings_name`, `capabilities.hooks` | The hooks file in that dir, and each event installed with its subcommand, timeout (seconds) and matcher. `core.agents.install_hooks`/`remove_hooks` merge it, keeping every foreign entry. |
+| `hook_entry(spec, command)` | The handler `install_hooks` writes for `spec`, running `command`, in the agent's own shape and its timeout in its own unit, with the `command` key the shared reader finds; an operator's longer `timeout` is kept. Claude Code and Codex: `types.command_entry`, `{"type": "command", "command": …, "timeout": <seconds>}`; Gemini CLI's would be milliseconds. |
 | `hooks_off_setting`, `hooks_switch(home, settings, args)` | The setting that silences every hook, and whether the dir or the launch arguments set it. |
 | `plugin` | The aisquare plugin route, or `None`. |
 | `decode_event(payload)` | The payload as an `AgentEvent` of one kind: `session_start`, `prompt`, `stop`, `session_end`, `interrupt`, `attention`, `tool_done`, `turn_failed`, `notification`; `None` for one AISquare ignores. Its `model` and `effort` are what the session runs with, wherever the agent records them: Claude Code's payloads carry both; Codex's carry no effort and its `Stop` no model, so its `prompt` and `stop` take them from the rollout's newest `turn_context` (`codex.turn_settings`, measured on 0.162.1). |
@@ -1180,7 +1196,7 @@ attributes and config layers, which a second telemetry agent extends there).
 | `unattended_env()` | Environment for a session nobody may be watching (the captain's, answered from a phone) that keeps out a prompt of the agent's own which would hold its pane and is no work's. Claude Code: `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1` (its session-rating survey). Codex: none; its dialogs in a running pane are kept out by `fleet_settings`. |
 | `tools_only_args(server, command, args, env, *, inherit, home, cwd, launch_args)` | The arguments that leave the session no tool but those of the one MCP server `server` (run as `command` with `args` and `env`, keeping the session's own values of the variables `inherit` names), each allowed without asking, and no other MCP server loaded, the operator's own included: the captain's session, launched from config dir `home` in `cwd` with `launch_args`. `None` for an agent that cannot be confined so, which cannot be the captain; `ValueError` for a server its arguments cannot name. Claude Code: `--strict-mcp-config --mcp-config <the server> --tools "" --allowedTools mcp__<server>__*`, its servers inheriting the whole environment. Codex: `--disable` for each tool feature (`codex.TOOL_FEATURES`), `-c web_search="disabled"`, the server as `-c mcp_servers.<server>.*` with `env_vars` for `inherit` and `default_tools_approval_mode="approve"`, and `-c mcp_servers.<name>.enabled=false` for every other server the launch's config layers name (only those: on a name Codex does not have, it refuses its config); measured on 0.162.1, the request then offers the server's tools, `request_user_input` (Plan mode only) and the MCP-resource readers. |
 | `transcript_reader` | An `AgentTranscript` (`types.py`, the shapes and helpers in `agent_adapters/transcripts.py`), which Remote's needs-you scan and Transcript tab ask of the row's agent (`services.transcript.reader_of`), or `None`. Its `speaker` is how a page names the agent's turns (`* <speaker>`); `tail_facts(file, size, budget, written)` reads the end of the transcript, backwards and within `budget` bytes (`transcripts.lines_backwards`), into a `TranscriptTail`: the calls still waiting for their result, the newest record's kind, the agent's last words, and `cut_at` for a walk that ran out inside the newest model response of a turn still running (Codex's: a rollout's `function_call` without its `function_call_output`, `turn_aborted`, `task_complete`, the response's `token_count` as its end); `page_lines(record, width)` renders one record as the page's lines (`transcripts.YOU`, `speaker_line`, `wrap`, `dim_note`, `question_lines`); `call_asks(tool)` says what a pending call waits on the human for (`question`, its questions in `input["questions"]` as `AskUserQuestion` holds them, `plan`, `subagent` or `tool`); `call_mark(tool)` what its prompt shows of it, to tell several pending calls apart on screen; `answer_keys(kind, options)` the quick answers of a `permission`, `question` or `plan` card on its dialog (every key one of `remote_needs.NEEDS_ANSWER_KEYS`); `reply_since(file, since)` the agent's words since the newest prompt of the human's, which the captain reads back (`""` an answer without words; `None` with no prompt, nothing of the agent's after it yet, or a prompt older than `since`). Claude Code's reads its session JSONL (`claude_transcript.py`, its reply main's `core.transcripts.last_reply`), Codex's its rollout (`codex_transcript.py`, its reply the assistant `message` records after the newest `user` one that is not its own context). |
-| `accounts` | Numbered login slots, an `AgentAccounts` (`types.py`), or `None`: the home's variables and the slots' directory name, the plain slot's number and name, `sign_in_args`, `identity`, `signed_in`, `subscription`, `token_state`, `usage`, `limit_from_transcript`, `failed_turn`; `login_fingerprint(account)`, a digest of the login stored in a slot (never a token), which a *Log in* over a login still on disk waits to see change, `None` with none stored, raising `LoginUnreadable` when the store would not say; and `trust`, a `FolderTrust`, or `None` for an agent that asks nothing per folder: `file_name` (the file in a home that holds it), `scope(base)` (the folder and the key a yes there records, from `core.claude_sharing.trust_scope`, in the agent's own rules: its `covering` entries in the order it reads them), `read(account)` (`{key: trusted}`; `False` is a no that no share overrides; `SharingError`, or `NotStartedYet` with nothing to add to yet) and `grant(account, *keys)` (a yes for each, nothing else in the file changed). `types.trusted_by(records, scope)` is the entry that decides. `share_for_launch`, `accounts trust` and `--sync` copy trust only between accounts of one agent. |
+| `accounts` | Numbered login slots, an `AgentAccounts` (`types.py`), or `None`: the home's variables and the slots' directory name, the plain slot's number and name, `sign_in_args`, `identity`, `signed_in`, `subscription`, `token_state`, `usage`, `limit_from_transcript`, `failed_turn`; `login_fingerprint(account)`, a digest of the login stored in a slot (never a token), which a *Log in* over a login still on disk waits to see change, `None` with none stored, raising `LoginUnreadable` when the store would not say; and `trust`, a `FolderTrust`, or `None` for an agent that asks nothing per folder: `file_name` (the file in a home that holds it), `scope(base)` (the folder and the key a yes there records, from `core.claude_sharing.trust_scope`, in the agent's own rules: its `covering` entries in the order it reads them), `read(account)` (`{key: trusted}`; `False` is a no that no share overrides; `SharingError`, or `NotStartedYet` with nothing to add to yet) and `grant(account, *keys)` (a yes for each, nothing else in the file changed). `types.trusted_by(records, scope)` is the entry that decides. `share_for_launch`, `accounts trust` and `--sync` copy trust only between accounts of one agent. And `config_dir(slot_dir)`: the config dir the agent reads in a home its `home_env` names, where a slot's sign-in connects aisquare (`core.claude_accounts.agent_config_dir`) and the uninstall plan finds its hooks: the slot itself for Claude Code and Codex, `<slot>/.gemini` for Gemini CLI. |
 | `telemetry_args(endpoint, keep_out=)` | Its OpenTelemetry exporter, with `native_telemetry`. The receiver's `Authorization` is never an argument: it reaches the agent in `OTEL_EXPORTER_OTLP_LOGS_HEADERS`, and `keep_out` (the variable, with the operator's own patterns) is what the agent keeps out of its tools' shells (Codex: `shell_environment_policy.exclude`). |
 | `system_prompt_args(block, text, args, home)` | The launch arguments that add a persona's briefing (`text`, which the file `block` holds) to the agent's system prompt beside its own, for a launch with `args` from config dir `home`; `None` where `args` already set that seam or the agent has none, and the session-start hook alone briefs the persona. Claude Code: `--append-system-prompt-file <block>`. Codex: `-c developer_instructions=…`, the operator's own value from its config layers first, then a blank line and `text`, as the `-c` replaces theirs (measured on 0.162.1). |
 | `skill_dirs(home, repo)` | Where a session of config dir `home` reads skills (`<name>/SKILL.md` folders), as a `types.SkillDirs`: `user` dirs, and `project` dirs in `repo` (`()` outside one), absolute and in the agent's order. The first of each is where `persona export --skill` writes, and `persona import --list` reads them all. Claude Code: `<home>/skills` and `<repo>/.claude/skills`. Codex: `~/.agents/skills` (read under every Codex home, so one export reaches every account) and `$CODEX_HOME/skills`, then `<repo>/.agents/skills` and `<repo>/.codex/skills` (measured on 0.162.1). |
@@ -1249,8 +1265,11 @@ telemetry's lane, and with neither it reads untraced), `positional_prompt`, `fir
 the store), `redraws_while_asking` (its UI redraws while it waits on the human, so an
 attention row holds until a hook moves it or `working_on_screen` reads a turn running),
 `working_on_screen` (whether its screen shows a turn running unblocked: Codex's status
-line, right above its composer), `legacy_fleet_args`, `value_options`,
-`switch_options`.
+line, right above its composer), `hookless_through` (the last aisquare release that writes
+none of its hooks, Codex's 0.8.2: an upgrade or move back to it leaves them and says so),
+`legacy_fleet_args`, `value_options` (its options that take a value; one that is also a short
+option of `aisquare launch`'s, Codex's `-a`, is named in launch's refusal of a value that is
+none of launch's), `switch_options`.
 
 A `PermissionIntent` is a write scope (`read_only`, `workspace`, `full`) and an
 approvals policy (`ask`, `auto`, `never`), written `workspace:auto`. A reviewer's seats
@@ -1274,13 +1293,19 @@ The store profile is [the sandbox and the store](#the-sandbox-and-the-aisquare-s
 ### What the conformance suite fails on
 
 `tests/test_adapter_contract.py` runs every case for every registered adapter and for
-`tests/fake_agent.py`, a synthetic third agent registered only there. It fails when:
+two synthetic ones registered only there: `tests/fake_agent.py` and
+`tests/gemini_shaped_agent.py`. It fails when:
 
 - the fixture file or the `EXPECTED_PERMISSIONS` row is missing;
+- it names no `install_routes`, or Welcome would offer none on Linux, macOS or Windows;
+- its `lasting_installs` find something in a home that keeps nothing, misread the
+  fixture's `lasting` home, name an entry in another home or of another agent, or a
+  removal that its own binary does not run;
 - an installed event has no recorded payload, or decodes to another kind or other fields;
 - the adapters together no longer decode every event kind;
 - installing twice doubles a hook, removing leaves the file other than it was before,
-  a foreign entry is lost, or the installed command is not `hook_args`'s;
+  a foreign entry is lost, the installed command is not `hook_args`'s, or a handler is not
+  its `hook_entry`;
 - the fixture's hooks-off switch does not make a complete install read as not connected;
 - the installed command, run as `aisquare hook ...` with the recorded payloads, does not
   put the session on the board under this agent and then mark it `waiting`;
@@ -1300,6 +1325,9 @@ The store profile is [the sandbox and the store](#the-sandbox-and-the-aisquare-s
   read-only scope or not under a workspace one; or one without a sandbox answers it;
 - an agent declares no `launch_inputs`, a name there is not one path component, or the
   profile's protected set (`store_broker.launch_inputs`) leaves one out;
+- an agent with account slots does not connect aisquare, at a slot's sign-in, in its
+  accounts' `config_dir` of the slot, or `managed_slot` does not map that dir back to the
+  slot;
 - an agent with account slots has no `accounts` fixture; its `login_fingerprint` is
   `None` for a login, differs between two reads of one login, holds what the login file
   holds, or stays the same after a `relogin` (`claude_accounts.sign_in_landed` must
@@ -1367,3 +1395,12 @@ shared service. Its transcript is a log of its own (`heard`, `said`, `run`, `pic
 `ran`, `halt`, `over` records), and its dialogs take `y`/`n` and arrows, never digits. A
 dialog of its own asks on a `?? ` row and ends its screen on `(y/n)`, which its
 `dialog_on_screen` reads, and its `screen_prompt` reads as a yes/no on `y` and `n`.
+
+The Gemini-shaped adapter has Gemini CLI's shapes as its docs give them (nothing of it is
+installed or measured): `GEMINI_CLI_HOME` names the folder its config dir `.gemini` is in,
+its hook timeouts are milliseconds, every hook reply is JSON, and a call's result reaches
+its log in a later `$patch` line. Both, through `tests/test_third_agent_seams.py`, are
+connected and disconnected in their own handler shape, named by the uninstall plan with
+their own removals (a purge their uvx server would undo refused, their account homes
+counted), offered by Welcome with their own installers, and found, connected and read by
+first run, with no edit to a shared file.

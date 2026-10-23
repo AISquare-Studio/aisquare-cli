@@ -538,3 +538,18 @@ def test_a_skill_md_with_windows_line_endings_parses_to_the_same_persona(tmp_pat
         lf.description,
         lf.frontmatter,
     )
+
+
+def test_a_resume_note_says_codex_keeps_its_first_persona_and_claude_code_needs_none() -> None:
+    """SCOPE #113 0.8.2 A3 (M4): a Codex thread keeps its first ``developer_instructions``
+    across ``codex resume``, so a restart of a row whose persona was attached since says
+    the persona reaches it through the briefing; Claude Code takes its file again."""
+    from aisquare.services import personas as service
+
+    note = service.resume_seam_note("codex", "mentor")
+    assert note is not None
+    assert note.startswith("persona mentor: Codex resumes the thread")
+    assert "keeps its first persona" in note and "session-start briefing" in note
+    assert service.resume_seam_note("claude-code", "mentor") is None
+    assert service.resume_seam_note("codex", None) is None
+    assert service.resume_seam_note("no-such-agent", "mentor") is None

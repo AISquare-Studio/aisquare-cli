@@ -719,6 +719,28 @@ def skill_roots(root: Path | None) -> list[SkillRoot]:
     return list(found.values())
 
 
+def resume_seam_note(agent: str, persona: str | None) -> str | None:
+    """The receipt line for a launch that RESUMES a session of ``agent`` as ``persona``
+    when the agent's resumed thread keeps the system prompt it began with
+    (``capabilities.resume_keeps_system_prompt``: Codex's, measured on 0.162.1 — ``codex
+    resume`` ignores a new ``developer_instructions``): the persona passed now reaches the
+    agent through the session-start briefing alone. ``None`` for an agent that takes its
+    system prompt again at every launch (Claude Code), an unknown agent, or no persona.
+    The caller asks it for a row whose persona changed since the thread began (``persona
+    attach``, a take-over's)."""
+    try:
+        adapter = get_adapter(agent)
+    except ValueError:
+        return None
+    if not persona or not adapter.capabilities.resume_keeps_system_prompt:
+        return None
+    return (
+        f"persona {persona}: {adapter.label} resumes the thread with the system prompt it "
+        "began with, so its system seam keeps its first persona — "
+        f"{persona} reaches it through the session-start briefing"
+    )
+
+
 def importable_skills(root: Path | None) -> list[SkillRef]:
     """Every skill in every coding agent's skill directories
     (``AgentAdapter.skill_dirs``) — personal first, as the agents rank them, each

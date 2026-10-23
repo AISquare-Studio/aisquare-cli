@@ -105,6 +105,23 @@ def _toplevel(start: Path) -> Path | None:
     return Path(text).resolve() if text else None
 
 
+def git_common_dir(path: Path) -> Path | None:
+    """The repository ``path`` belongs to, as git's common directory: the same for a
+    checkout and every worktree of it, different for an unrelated repository. None
+    when ``path`` is in no git repository or git cannot answer."""
+    try:
+        result = _git(path, "rev-parse", "--git-common-dir", timeout=10)
+    except ValueError:
+        return None
+    if result.returncode != 0:
+        return None
+    text = result.stdout.decode("utf-8", "replace").strip()
+    if not text:
+        return None
+    common = Path(text)
+    return (common if common.is_absolute() else path / common).resolve()
+
+
 def source_root_for(project_root: Path, cwd: Path | None = None) -> Path:
     """The checkout to fingerprint for a command run in ``cwd`` under ``project_root``.
 

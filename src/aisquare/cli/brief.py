@@ -65,6 +65,8 @@ def _out(text: str) -> None:
 def _errors(as_session: str | None) -> Iterator[None]:
     try:
         yield
+    except service.SourceRootError as exc:
+        fail(str(exc), error="invalid_source_root", exit_code=2)
     except service.BriefNotFound as exc:
         fail(str(exc), error="not_found", ref=exc.ref)
     except BriefChangedError as exc:

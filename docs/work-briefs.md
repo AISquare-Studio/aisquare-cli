@@ -168,8 +168,9 @@ stays as it is and each requirement is named with its state, `missing`, `failed`
 
 With `--json`, the refusal is `{"error": "task_not_proven", "requirements": [{"brief",
 "requirement", "state", "reason"}, …]}`. A task is gated only by the briefs that link
-it: an unrelated or damaged brief elsewhere on the board never blocks it, and a damaged
-one that names it refuses with that reason. The check and the status write are one
+it: an unrelated or damaged brief elsewhere on the board never blocks it. A damaged one
+that names it refuses with a fifth state, `unreadable`, and the reason it cannot be
+read. The check and the status write are one
 store transaction, so a correction that lands while `task done` runs fails it
 (`brief_changed`: run it again). A task no brief links is done exactly as before.
 
@@ -185,7 +186,10 @@ source now, and exits 1 while anything is missing, failed, blocked or stale; 0 m
 the brief is proven. By default each pass is compared with the checkout it was
 recorded in. `--source-root` compares every pass with that one checkout instead,
 which is the check a validator runs on the assembled work. It must be this project's
-directory or one of its worktrees: anything else is an error, not a page of `stale`.
+directory or one of its worktrees (the same repository), or a checkout one of its
+checks was recorded in. Anything else, an unrelated repository included even under
+`AISQUARE_TEAM_HUB`, is a usage error with exit code 2, not a page of `stale`, so a
+script can tell a typo from NOT PROVEN.
 Passes that rest on manual evidence are listed for the validator to judge.
 
 ## At session start

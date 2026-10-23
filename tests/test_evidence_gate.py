@@ -213,15 +213,20 @@ def test_a_report_from_another_board_cannot_back_a_check(tmp_path: Path) -> None
 
 def test_a_pass_is_judged_against_the_reports_own_source_root(repo: Path) -> None:
     """Trap: a pass was judged against the recorder's checkout, not the report's. A check
-    run in a worktree and recorded from the principal checkout is about the worktree."""
+    run in a worktree and recorded from the principal checkout is about the worktree, both
+    when it is recorded and when it is checked. The principal moves on BEFORE the record:
+    judged against the recorder's checkout, the record itself is refused (review of #341,
+    finding 1: with the two still identical, that half was never exercised)."""
     worktree = repo.parent / "wt-answer"
     _git(repo, "worktree", "add", "-q", str(worktree), "-b", "answer")
     brief, task = _linked()
     report = _run(_py("print('ok')"), task=task, cwd=worktree)
     assert report.source_root is not None and Path(report.source_root).samefile(worktree)
+    (repo / "app.py").write_text("def answer():\n    return 0\n")  # the principal moves on
+
     _record(brief, task, report)  # recorded from the principal checkout (the cwd)
 
-    (repo / "app.py").write_text("def answer():\n    return 0\n")  # the principal moves on
+    assert Path.cwd().samefile(repo)
     assert _check(brief) == {"R1": "pass"}, "the principal's edit is not the worktree's"
     (worktree / "app.py").write_text("def answer():\n    return 0\n")
     assert _check(brief) == {"R1": "stale"}
@@ -237,6 +242,22 @@ def test_a_report_changed_or_gone_since_it_was_recorded_is_stale() -> None:
 
     shutil.rmtree(reports.reports_dir() / report.id)
     assert _check(brief) == {"R1": "stale"}
+
+
+def test_a_report_serialized_differently_by_a_later_build_still_backs_its_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #341, finding 3: the digest is of the report's bytes on disk, not of the
+    model re-serialized, so a schema or pydantic change does not stale every pass."""
+    brief, task = _linked()
+    _record(brief, task, _run(_py("print('ok')"), task=task))
+    original = reports.CommandReport.model_dump_json
+
+    def reserialized(self: reports.CommandReport, **kw: Any) -> str:
+        return original(self, **kw).replace('"schema_version":1', '"schema_version": 1')
+
+    monkeypatch.setattr(reports.CommandReport, "model_dump_json", reserialized)
+    assert _check(brief) == {"R1": "pass"}
 
 
 # --- manual evidence keeps the whole-tree fingerprint --------------------------------------
@@ -392,6 +413,59 @@ def test_each_linked_task_proves_its_own_part() -> None:
         team.finish_task(helper.id)
 
 
+def test_mcp_task_update_done_carries_the_refusal_and_the_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #341, finding 5: both refusals reach an MCP client as the stable
+    ``error: …`` tool error, the race (a RuntimeError) included."""
+    pytest.importorskip("mcp", reason="the [serve] extra is not installed")
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    from aisquare.services import mcp_server
+
+    brief, task = _linked()
+    with pytest.raises(ToolError, match=r"^error: .* is not proven: B1 R1 missing"):
+        mcp_server.task_update(task.id, "done")
+    _record(brief, task, _run(_py("print('ok')"), task=task))
+    real_gate = briefs.gate
+
+    def gate_then_correct(store: Any, gated: TeamTask) -> dict[str, int]:
+        read = real_gate(store, gated)
+        briefs.update(brief.id, checks={"R1": "pytest -q"})
+        return read
+
+    monkeypatch.setattr(briefs, "gate", gate_then_correct)
+    with pytest.raises(ToolError, match=r"^error: brief .* changed .*run task_update done"):
+        mcp_server.task_update(task.id, "done")
+    assert _status(task) == "todo"
+
+
+def test_remote_task_done_answers_409_for_the_refusal_and_the_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aisquare.services import remote_server
+
+    brief, task = _linked()
+    done = remote_server.live_writes().handlers["task/done"]
+    with pytest.raises(remote_server.RequestError) as refused:
+        done({"ref": task.id})
+    assert (refused.value.status, refused.value.error) == (409, "task_not_proven")
+    assert "B1 R1 missing" in str(refused.value.message)
+    _record(brief, task, _run(_py("print('ok')"), task=task))
+    real_gate = briefs.gate
+
+    def gate_then_correct(store: Any, gated: TeamTask) -> dict[str, int]:
+        read = real_gate(store, gated)
+        briefs.update(brief.id, checks={"R1": "pytest -q"})
+        return read
+
+    monkeypatch.setattr(briefs, "gate", gate_then_correct)
+    with pytest.raises(remote_server.RequestError) as raced:
+        done({"ref": task.id})
+    assert (raced.value.status, raced.value.error) == (409, "brief_changed")
+    assert _status(task) == "todo"
+
+
 # --- brief check --------------------------------------------------------------------------
 
 
@@ -424,6 +498,8 @@ def test_brief_check_against_one_assembled_checkout(repo: Path, runner: CliRunne
 def test_a_source_root_outside_the_projects_checkouts_is_an_error(
     tmp_path: Path, repo: Path, runner: CliRunner
 ) -> None:
+    """A usage error, exit 2, so a validator's script tells a typo from NOT PROVEN (exit 1)
+    (review of #341, nit 8)."""
     _linked()
     stranger = tmp_path / "stranger"
     stranger.mkdir()
@@ -432,11 +508,49 @@ def test_a_source_root_outside_the_projects_checkouts_is_an_error(
         (repo / "sub", "not a directory"),
     ):
         result = runner.invoke(app, ["brief", "check", "B1", "--source-root", str(path)])
-        assert result.exit_code == 1 and why in result.output, result.output
+        assert result.exit_code == 2 and why in result.output, result.output
         assert "stale" not in result.output
     (repo / "sub").mkdir()
     inside = runner.invoke(app, ["brief", "check", "B1", "--source-root", str(repo / "sub")])
     assert "not a checkout" in inside.output, "a sub-directory is not a checkout either"
+    assert inside.exit_code == 2
+
+
+def test_under_a_hub_an_unrelated_repository_is_still_no_source_root(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #341, finding 4: with AISQUARE_TEAM_HUB set, every directory maps to the
+    hub's board, so any git toplevel passed as --source-root and read as a page of
+    "stale". It must share the project's repository; a worktree of it still does."""
+    worktree = repo.parent / "wt-hubbed"
+    _git(repo, "worktree", "add", "-q", str(worktree), "-b", "hubbed")
+    brief, task = _linked()
+    _record(brief, task, _run(_py("print('ok')"), task=task))
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    _git(unrelated, "init", "-q")
+    (unrelated / "app.py").write_text("something else\n")
+    monkeypatch.setenv("AISQUARE_TEAM_HUB", str(repo))
+    from aisquare.core import orchestrator
+
+    assert orchestrator.team_project(unrelated).id == brief.project_id, "the hub's premise"
+    with pytest.raises(briefs.SourceRootError, match="not a checkout of this brief's project"):
+        briefs.check(brief.id, source_root=unrelated)
+    assert _check(brief, source_root=worktree) == {"R1": "pass"}
+
+
+def test_evidence_needs_exactly_one_backing(runner: CliRunner, tmp_path: Path) -> None:
+    _, task = _linked()
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"x")
+    report = _run(_py("print('ok')"), task=task)
+    base = ["brief", "evidence", "B1", "R1", "--task", task.id, "--verdict", "pass",
+            "--summary", "x"]  # fmt: skip
+    for extra in ([], ["--artifact", str(shot), "--report", report.id]):
+        result = runner.invoke(app, [*base, *extra])
+        assert result.exit_code == 1, result.output
+        assert "exactly one of --report or --artifact" in result.output
+    assert briefs.show("B1").brief.evidence == []
 
 
 # --- the session start --------------------------------------------------------------------
@@ -509,6 +623,43 @@ def test_the_block_is_clipped_and_the_session_start_fits_the_hook_cap(
     assert "More are linked" in block
     assert len(block) <= briefs.REQUIREMENTS_BUDGET + 600, len(block)
     assert len(started) <= 10_000, len(started)
+    # The clip is what keeps it under the cap WITH requirements in it (review of #341,
+    # finding 2): unclipped, no 4,000-character line fits, and the block shows none.
+    shown = [line for line in block.splitlines() if line.startswith("  R")]
+    assert len(shown) >= 3, block
+    assert shown[0].startswith("  R1 [missing] Requirement 0 x")
+    text, _, check = shown[0].partition(" — check: ")
+    assert text.endswith("…") and check.startswith("c") and check.endswith("…"), shown[0]
+    assert len(shown[0]) < 400
+
+
+def test_no_header_in_the_block_is_left_without_a_requirement(
+    monkeypatch: pytest.MonkeyPatch, repo: Path
+) -> None:
+    """Review of #341, nit 7: every line is budgeted, a header too, and a brief whose
+    first requirement does not fit leaves no header behind. The budget is set where a
+    header fits and a requirement under it does not."""
+    _start(monkeypatch, repo)
+    task, _ = team.add_task("Two briefs", role="coder")
+    for n in range(2):
+        brief = briefs.create(f"Brief {n}", [f"B{n} requirement " + "y" * 300])
+        briefs.link(brief.id, task.id, ["R1"])
+    team.claim_task(task.id, session_ref=CODER)
+    with store_session() as store:
+        session = store.get_session(CODER)
+        assert session is not None
+        full = briefs.session_requirements(store, session, None).splitlines()
+        header, requirement = full[2], full[3]
+        assert " is linked to B1" in header and requirement.startswith("  R1")
+        # The first brief whole, and the second's header, but not its requirement.
+        budget = sum(len(line) + 1 for line in full[2:4]) + len(full[4]) + 1 + 10
+        assert " is linked to B2" in full[4]
+        monkeypatch.setattr(briefs, "REQUIREMENTS_BUDGET", budget)
+        block = briefs.session_requirements(store, session, None).splitlines()
+
+    assert header in block and requirement in block
+    assert not any(" is linked to B2" in line for line in block), block
+    assert "More are linked: `asq brief show` has them all." in block
 
 
 # --- report retention ----------------------------------------------------------------------

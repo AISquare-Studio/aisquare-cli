@@ -39,6 +39,7 @@ from aisquare.core.ids import new_brief_id, new_event_id, new_evidence_id
 from aisquare.core.source_revision import (
     _toplevel,
     fingerprint_of,
+    git_common_dir,
     source_file_hashes,
     source_root_for,
     source_unchanged,
@@ -262,10 +263,11 @@ class _Sources:
 
 
 def _report_digest(report_id: str) -> str:
-    """One digest of a saved report: its metadata and both streams' originals. A report
-    changed after its evidence was recorded no longer backs it."""
-    report = command_reports.load_report(report_id)
-    digest = hashlib.sha256(report.model_dump_json().encode())
+    """One digest of a saved report: its ``report.json`` and both streams' originals, the
+    bytes on disk. A report changed after its evidence was recorded no longer backs it;
+    a later build that serializes the same report differently changes nothing."""
+    command_reports.load_report(report_id)  # it must still be a readable report
+    digest = hashlib.sha256(command_reports.saved_report_bytes(report_id))
     streams: tuple[Literal["stdout", "stderr"], ...] = ("stdout", "stderr")
     for stream in streams:
         digest.update(b"\0" + stream.encode() + b"\0")
@@ -550,17 +552,37 @@ def check(
     )
 
 
+class SourceRootError(ValueError):
+    """``brief check --source-root`` named something that is not a checkout of the
+    brief's project: a usage error, never a page of "stale"."""
+
+
 def _checkout_of(path: Path, brief: WorkBrief, project_root: Path | None) -> Path:
-    """``--source-root`` resolved, when it is a checkout of the brief's project."""
+    """``--source-root`` resolved, when it is a checkout of the brief's project: its
+    directory, or the top of a worktree of the same repository (the same git common
+    directory), or of a repository a check of this brief was recorded in.
+
+    The board alone cannot say: under ``AISQUARE_TEAM_HUB`` every directory maps to the
+    hub's board, so an unrelated repository passed, and every pass read "stale"
+    against it (review of #341, finding 4).
+    """
     resolved = path.expanduser().resolve()
     if not resolved.is_dir():
-        raise ValueError(f"--source-root {path} is not a directory")
-    same_board = orchestrator.team_project(resolved).id == brief.project_id
-    whole = resolved == (project_root.resolve() if project_root else None) or (
-        _toplevel(resolved) == resolved
-    )
-    if not (same_board and whole):
-        raise ValueError(
+        raise SourceRootError(f"--source-root {path} is not a directory")
+    root = project_root.resolve() if project_root is not None else None
+    ours = resolved == root
+    if not ours and orchestrator.team_project(resolved).id == brief.project_id:
+        common = git_common_dir(resolved) if _toplevel(resolved) == resolved else None
+        if common is not None:
+            known = {
+                git_common_dir(Path(recorded))
+                for recorded in {e.source_root for e in brief.evidence if e.source_root}
+                | ({str(root)} if root is not None else set())
+                if Path(recorded).is_dir()
+            }
+            ours = common in known
+    if not ours:
+        raise SourceRootError(
             f"--source-root {resolved} is not a checkout of this brief's project"
             + (f" ({project_root})" if project_root else "")
             + ": name the project's directory or one of its worktrees"
@@ -691,6 +713,14 @@ def session_requirements(store: ContextStore, session: TeamSession, task: TeamTa
     def size() -> int:
         return sum(len(line) + 1 for line in lines)
 
+    def add(line: str) -> bool:
+        """Append ``line`` if it fits the budget; every line is checked, headers too."""
+        lines.append(line)
+        if size() > REQUIREMENTS_BUDGET:
+            lines.pop()
+            return False
+        return True
+
     for own_task in wanted:
         for row in rows:
             if own_task.id not in row.data:
@@ -698,27 +728,34 @@ def session_requirements(store: ContextStore, session: TeamSession, task: TeamTa
             try:
                 brief = _parse(row)
             except ValidationError:
-                lines.append(f"B{row.number} names #{own_task.number} but cannot be read here.")
+                if not add(f"B{row.number} names #{own_task.number} but cannot be read here."):
+                    omitted = True
+                    break
                 continue
             linked = [r for r in brief.requirements if own_task.id in r.task_ids]
             if not linked:
                 continue
             states = {s.id: s for s in status_of(_own_part(brief, linked, own_task.id), tasks)}
-            lines.append(
+            header = (
                 f"{team.task_label(own_task)} is linked to {brief.label} r{brief.revision} "
                 f'"{_clip(brief.title, 80)}": `task done` needs a fresh pass from it for each.'
             )
+            if not add(header):
+                omitted = True
+                break
+            shown = 0
             for requirement in linked:
                 status = states[requirement.id]
                 state = "pass, as recorded" if status.state == "pass" else status.state
                 line = f"  {requirement.id} [{state}] {_clip(requirement.text)}"
                 if requirement.check:
                     line += f" — check: {_clip(requirement.check)}"
-                lines.append(line)
-                if size() > REQUIREMENTS_BUDGET:
-                    lines.pop()
+                if not add(line):
                     omitted = True
                     break
+                shown += 1
+            if shown == 0:
+                lines.remove(header)  # a header with nothing under it says nothing
             if omitted:
                 break
         if omitted:
@@ -1034,7 +1071,10 @@ def record_evidence(
     own checkout (:func:`_pass_refusals`).
     """
     if (artifact is None) == (report_id is None):
-        raise ValueError("back the check with exactly one of --artifact or --report")
+        # A refusal of the body, exit 1, not a usage error: the configured-home sweep fills
+        # only required options, and an exit 2 here would hold `brief evidence` to
+        # argument parsing alone (review of #341, nit 8, kept for --source-root only).
+        raise ValueError("back the check with exactly one of --report or --artifact")
     return _record(
         ref,
         requirement_id,

@@ -226,6 +226,12 @@ def load_report(report_id: str) -> CommandReport:
     return report
 
 
+def saved_report_bytes(report_id: str) -> bytes:
+    """A report's ``report.json`` exactly as saved: what evidence digests, so a later
+    schema or serializer change never reads as the report having changed."""
+    return _read_file(_directory(report_id) / "report.json", _REPORT_JSON_LIMIT)
+
+
 def load_source_files(report_id: str) -> SourceFiles | None:
     """The per-file maps of a ``--project`` report, or None when none were saved."""
     if not load_report(report_id).source_files_saved:

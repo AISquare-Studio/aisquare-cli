@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Exact token usage per session** — `aisquare metrics tokens [--session S]
+  [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
+  read only the bytes the session's transcript gained since the last record, plus its
+  subagent files, count each API request once per `message.id`, and store a turn row
+  and a running session row. The summary gives raw tokens (input, cache write, cache
+  read, output), cost-weighted tokens (input + 1.25 x cache write + 0.1 x cache read +
+  output at the model's output/input price ratio) and the list price in USD from a
+  dated price table; a model the table does not have is reported apart, never guessed.
+  Recording can never fail a hook: a failure is one line in `log/metrics.log`. On this
+  Mac the Stop hook's recording takes 1.5-3.3 ms at p95.
+
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in
@@ -261,6 +272,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dialog's flag is `_spawning`.
 
 ### Changed
+- **Less per-request context from aisquare.** A solo session (no role, no fleet row,
+  nobody else on the board: no open task, no live fleet agent, no other live session)
+  gets no `<aisquare-team>` block, and the MCP server's instructions are one line where
+  there is no team; `serve` over HTTP keeps the full text. The session is still on the
+  board, and its first prompt after a team forms brings the board, once. A check that
+  fails keeps the board. Session start no longer points agents at the Repomix snapshot
+  (it told them to read the pack FIRST, often ~110k tokens, and on some repos the
+  "skeleton" and "full pack" lines named the same file) and no longer adds the
+  "Past user prompts … aisquare log" line. A `Your preferences` entry whose text a
+  `CLAUDE.md` Claude Code loads this session already holds (`~/.claude/CLAUDE.md`, or
+  the project's chain from the cwd up) is not injected again: `agents connect` imported
+  those sections, so they reached every session twice. Preferences from anywhere else
+  stay. For a solo onboarded repo, SessionStart output plus MCP instructions go from
+  about 2,400 characters to about 130.
+- `init` no longer packs the codebase with Repomix: no agent reads the pack, and it
+  cost a minute on a large repo. `aisquare project onboard` packs one on demand, as it
+  did; doctor's snapshot row reads `none — opt-in: aisquare project onboard packs one`
+  instead of warning.
+- The store migrates to schema v34: two tables, `usage_session` and `usage_turn`, for
+  `aisquare metrics tokens`.
 - The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
   adds the two persona columns, `team_session.persona` (the persona a session was
   launched as) and `fleet_agent.persona` (the one an agent was spawned with or given

@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import contextlib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from aisquare.core import paths
 from aisquare.models import ContextEntry, InjectionRecord, ProjectInfo
@@ -33,6 +35,60 @@ def build_block(entries: list[ContextEntry], project: ProjectInfo) -> str:
     if not user and not project_entries:
         lines += ["_No saved context yet._", ""]
     return "\n".join(lines).rstrip("\n") + "\n"
+
+
+#: The memory files Claude Code reads in each directory from the session's cwd up to the
+#: filesystem root, beside the user's own ``CLAUDE.md`` in its config directory.
+_PROJECT_MEMORY_FILES = ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md")
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+def claude_md_files(cwd: Path | None) -> list[Path]:
+    """The ``CLAUDE.md`` files Claude Code loads into a session started in ``cwd``: the
+    user's (``CLAUDE_CONFIG_DIR`` or ``~/.claude``) and the project chain, cwd upwards."""
+    from aisquare.core import agents as agent_core  # lazy: injection is imported early
+
+    files = [agent_core.claude_home() / "CLAUDE.md"]
+    if cwd is not None:
+        start = cwd.resolve()
+        for directory in (start, *start.parents):
+            files += [directory / name for name in _PROJECT_MEMORY_FILES]
+    return files
+
+
+def _normalised(text: str) -> str:
+    return _WHITESPACE.sub(" ", text).strip()
+
+
+def without_loaded_preferences(
+    entries: list[ContextEntry], loaded: Iterable[Path]
+) -> list[ContextEntry]:
+    """``entries`` less the user-pool ones whose text Claude Code already loads this
+    session from one of the ``loaded`` files (:func:`claude_md_files`).
+
+    ``agents connect`` imports ``~/.claude/CLAUDE.md`` into the user pool section by
+    section, so every session saw those sections twice: once from Claude Code, once
+    under "Your preferences". An entry whose text a file still holds is dropped (by
+    content, whitespace aside); one the file no longer holds, and every entry from any
+    other source, stays. A file that cannot be read is simply not loaded.
+    """
+    texts: list[str] = []
+    for path in loaded:
+        try:
+            texts.append(_normalised(path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeError):
+            continue
+    texts = [text for text in texts if text]
+    if not texts:
+        return entries
+    return [
+        entry
+        for entry in entries
+        if entry.pool != "user"
+        or not (wanted := _normalised(entry.text))
+        or not any(wanted in text for text in texts)
+    ]
 
 
 def _bullet(text: str) -> str:

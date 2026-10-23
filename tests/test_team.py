@@ -609,8 +609,11 @@ def test_running_session_auto_joins_on_prompt_after_activation(
 ) -> None:
     # Session starts BEFORE the orchestrator is active: silent, unregistered.
     assert _start(runner, CODER, work_dir).stdout.strip() == ""
-    # The orchestrator activates afterwards (e.g. someone ran `team on`).
+    # The orchestrator activates afterwards (e.g. someone ran `team on`), and a
+    # teammate is on the board: alone, the session would join unbriefed and silent
+    # (tests/test_team_block_needs_a_team.py).
     runner.invoke(app, ["team", "on"])
+    _start(runner, PLANNER, work_dir)
     # Its next prompt registers it and delivers the full board + protocol.
     first = _prompt(runner, CODER, work_dir)
     assert "<aisquare-team>" in first.stdout

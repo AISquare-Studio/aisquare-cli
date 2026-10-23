@@ -1,9 +1,8 @@
 """Runtime handlers for the Claude Code hooks installed by ``agents connect``.
 
 - ``session_start_context`` builds what aisquare injects when a session starts:
-  the curated context block, a directive pointing Claude at the codebase
-  snapshot and prompt history (route, don't dump) — and, when the orchestrator is
-  active for the project, the team board plus protocol.
+  the curated context block — and, when the orchestrator is active for the
+  project and the session has a team, the team board plus protocol.
 - ``prompt_submitted`` records how the user prompts (``aisquare log``),
   heartbeats the session on the orchestrator, and returns the teammate delta to
   inject (empty when the team has been quiet).
@@ -20,21 +19,18 @@ default agent does.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import insights, selfcli
-from aisquare.core import snapshot as snapshot_core
 from aisquare.core import spawn as spawn_core
-from aisquare.core.injection import build_block
+from aisquare.core.injection import build_block, claude_md_files, without_loaded_preferences
 from aisquare.core.store import store_session
-from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project
 from aisquare.models import ProjectInfo
-from aisquare.services import auto_mode, ci_augment, install_route
+from aisquare.services import auto_mode, ci_augment
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
@@ -89,10 +85,11 @@ def session_start_context(
     with store_session() as store:
         project = active_project(store, cwd)
         entries = store.entries(project_id=project.id)
-        has_prompts = bool(store.recent_prompts(project.id, limit=1))
         recorded = project_service.tracked(store, project)
         stored = store.get_project(project.id) is not None
-    directive = _directive(project.id, has_prompts=has_prompts)
+    # Not what Claude Code loads itself: a CLAUDE.md section `agents connect` imported
+    # rode every request twice.
+    entries = without_loaded_preferences(entries, claude_md_files(cwd))
     block = build_block(entries, project) if entries else ""
     team_block = (
         team_service.hook_session_start(
@@ -111,9 +108,7 @@ def session_start_context(
         if recorded
         else ("", "")
     )
-    return "\n\n".join(
-        part for part in (directive, block, team_block, instruction, retrieved) if part
-    )
+    return "\n\n".join(part for part in (block, team_block, instruction, retrieved) if part)
 
 
 def _session_start_ci(
@@ -526,87 +521,3 @@ def capture_prompt(prompt: str | None, cwd: Path | None, *, session_id: str | No
     except Exception:  # recording may never cost the agent its context
         return block
     return block
-
-
-def _directive(project_id: str, *, has_prompts: bool) -> str:
-    lines: list[str] = []
-    snap = snapshot_core.load(project_id)
-    if snap is not None and snap.status == "ready" and snap.pack_path.exists():
-        skeleton = snap.skeleton_path if snap.skeleton_path.exists() else snap.pack_path
-        lines += [
-            "aisquare has a packed snapshot of this codebase — use it to understand the",
-            "project fast and cheaply instead of grepping or listing files:",
-            f"- Skeleton (structure + signatures, read this FIRST): {skeleton}",
-            f"- Full pack (every file's contents, open on demand): {snap.pack_path}",
-            f"- Per-file index (char offsets + token counts): {snap.index_path}",
-            "Orient from the skeleton; open the full pack only for implementation detail.",
-        ]
-    elif snap is not None and snap.status == "skeleton_only" and snap.skeleton_path.exists():
-        # Over budget even compressed: the skeleton and its index are still the
-        # cheapest orientation there is. No full pack to offer, so none is named.
-        lines += [
-            "aisquare has a packed skeleton of this codebase (structure + signatures; the",
-            "full pack was skipped as over budget) — use it to understand the project fast",
-            "and cheaply instead of grepping or listing files:",
-            f"- Skeleton (read this FIRST): {snap.skeleton_path}",
-            f"- Per-file index into the skeleton (char offsets + token counts): {snap.index_path}",
-            "Orient from the skeleton; open source files directly for implementation detail.",
-        ]
-    if has_prompts:
-        lines.append(
-            f"Past user prompts here are captured — run `{_log_command()}` to see how the "
-            "user tends to ask, and honour that intent."
-        )
-    if not lines:
-        return ""
-    return "<aisquare-context>\n" + "\n".join(lines) + "\n</aisquare-context>"
-
-
-#: The uvx the plugin's launcher ran this hook with, by the path it found
-#: (plugins/claude-code/scripts/aisquare-hook): ``~/.local/bin/uvx`` where PATH has none.
-PLUGIN_UVX_ENV = "AISQUARE_PLUGIN_UVX"
-
-#: What the plugin's launcher runs in place of the release it pins, when set: a wheel or a
-#: checkout, for testing a build not on PyPI yet. The hook inherits it from the launcher.
-PLUGIN_FROM_ENV = "AISQUARE_PLUGIN_FROM"
-
-
-def _log_command() -> str:
-    """``aisquare log`` as the agent's own shell can run it.
-
-    The plugin's launcher runs the hooks through ``uvx`` only where no aisquare is
-    installed, so there "run `aisquare log`" was command not found, and on that
-    route it was often the only thing session start said (review of #257). uvx
-    puts its environment's ``bin`` on the HOOK's PATH, not the agent's, so the
-    route is asked before PATH is. Elsewhere: the bare name when PATH has one, else
-    this interpreter (hooks that name a virtualenv that is not on PATH).
-
-    On that route, the uvx the launcher ran and the Python this hook runs on
-    (round 20). The launcher finds uvx in ``~/.local/bin`` or ``~/.cargo/bin`` when
-    PATH has none, the desktop app's case, where a bare ``uvx`` is command not found
-    too; and uv resolves a command with no ``--python`` on its default Python, which
-    may be outside the range the launcher asked for (3.14 on Fedora 43), so it built
-    another environment where the hook's is cached, or failed. And the requirement it ran:
-    with ``AISQUARE_PLUGIN_FROM`` set, the agent was told the pinned release, which PyPI
-    does not have before it is published, or is another build than the hooks' (round 21).
-    """
-    if install_route.runs_from_uv_cache():
-        python = f"{sys.version_info.major}.{sys.version_info.minor}"
-        requirement = os.environ.get(PLUGIN_FROM_ENV) or f"{DISTRIBUTION}=={__version__}"
-        argv = [_plugin_uvx(), "--python", python, "--from", requirement, "aisquare", "log"]
-    elif shutil.which("aisquare") is not None:
-        return "aisquare log"
-    else:
-        argv = selfcli.argv_for(["log"])
-    return install_route.command_line(argv)
-
-
-def _plugin_uvx() -> str:
-    """The uvx the launcher ran: ``uvx`` when that is the one PATH finds, else its path."""
-    ran = os.environ.get(PLUGIN_UVX_ENV, "")
-    if not ran:
-        return "uvx"
-    found = shutil.which("uvx")
-    if found is not None and os.path.realpath(found) == os.path.realpath(ran):
-        return "uvx"
-    return ran

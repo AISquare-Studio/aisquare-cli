@@ -988,13 +988,17 @@ def typed_root(path: Path | None) -> Path:
         raise NotAFolder(f"{start} cannot be looked at ({exc.strerror or exc})") from exc
 
 
-def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
+def onboard(path: Path | None, *, refresh: bool, pack: bool = True) -> OnboardReport:
     """Pack the codebase into a snapshot and seed facts from ecosystem markers.
 
     Generates the Repomix snapshot (full pack + skeleton + index) on first run,
     or when ``refresh`` is set, and seeds one fact per detected marker. Existing
     facts are never duplicated; the snapshot is reused unless ``refresh``. ``path`` is
     the user's, refused unless it is a folder (:func:`typed_root`).
+
+    ``pack=False`` (``init``) packs nothing and reports the pack already there, if
+    any: no agent is pointed at a pack any more, so it is ``project onboard``'s, on
+    demand, and not a minute of every ``init``.
     """
     root = typed_root(path)
     project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
@@ -1012,6 +1016,8 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
                 seeded.append(
                     store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
                 )
+    if not pack:
+        return OnboardReport(seeded=seeded, snapshot=snapshot_core.load(project.id))
     snapshot, note = _ensure_snapshot(project, refresh=refresh)
     return OnboardReport(seeded=seeded, snapshot=snapshot, snapshot_note=note)
 
@@ -1031,7 +1037,7 @@ def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> tuple[Snapshot |
     sentence :mod:`snapshot_core` words: the optional feature being off (no Node, or
     a Node with no packer) is not a pack that failed, and a pack that failed says
     why in the packer's own words. A failed ``--refresh`` rewrites nothing, so a
-    last pack agents still get is returned, with a sentence that says so.
+    last pack is returned, with a sentence that says so.
     """
     if snapshot_core.exists(project.id) and not refresh:
         return snapshot_core.load(project.id), None

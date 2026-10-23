@@ -1410,6 +1410,7 @@ class ContextStore(Protocol):
     def turn_usages(self, session_id: str) -> list[TurnUsage]: ...
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
+    def delete_meta(self, key: str) -> None: ...
     def list_meta(self, prefix: str) -> dict[str, str]: ...
     def add_signal_events(
         self, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
@@ -2400,7 +2401,7 @@ class SqliteStore:
         ).rowcount
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
-            keys = [f"nudge:{sid}" for sid in batch]
+            keys = [f"nudge:{sid}" for sid in batch] + [f"unbriefed:{sid}" for sid in batch]
             globs = [f"continuations:{_glob_escape(sid)}:*" for sid in batch]
             clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
             removed += self._conn.execute(
@@ -3352,6 +3353,10 @@ class SqliteStore:
             "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+        self._conn.commit()
+
+    def delete_meta(self, key: str) -> None:
+        self._conn.execute("DELETE FROM team_meta WHERE key = ?", (key,))
         self._conn.commit()
 
     def list_meta(self, prefix: str) -> dict[str, str]:

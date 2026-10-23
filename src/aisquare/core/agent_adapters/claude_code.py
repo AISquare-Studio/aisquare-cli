@@ -307,11 +307,22 @@ class ClaudeCodeAdapter:
         ]
 
     def tools_only_args(
-        self, server: str, command: str, args: list[str], env: dict[str, str]
+        self,
+        server: str,
+        command: str,
+        args: list[str],
+        env: dict[str, str],
+        *,
+        inherit: Sequence[str],
+        home: Path,
+        cwd: Path,
+        launch_args: Sequence[str],
     ) -> list[str] | None:
         """main's captain flags: the one server (``--strict-mcp-config``, so no other MCP
-        server of the operator's loads), no built-in tool (``--tools ""``), and every tool of
-        the server allowed (``--allowedTools mcp__<server>__*``)."""
+        server of the operator's loads, from any file), no built-in tool (``--tools ""``),
+        and every tool of the server allowed (``--allowedTools mcp__<server>__*``). Its MCP
+        servers inherit the session's environment whole, ``inherit`` included, so neither
+        it nor ``home``, ``cwd`` or ``launch_args`` changes the answer."""
         import json
 
         config = {"mcpServers": {server: {"command": command, "args": args, "env": env}}}

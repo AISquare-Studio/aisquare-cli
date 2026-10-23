@@ -632,7 +632,10 @@ def test_a_tools_only_session_names_its_server_and_leaves_no_built_in_tool(
     every session gets."""
     command, args = "/opt/python", ["-m", "aisquare.services.captain", "--stdio"]
     env = {"AISQUARE_HOME": str(tmp_path / "aisquare home")}
-    only = adapter.tools_only_args("captain", command, args, env)
+    home = _home(adapter, tmp_path)
+    only = adapter.tools_only_args(
+        "captain", command, args, env, inherit=(), home=home, cwd=tmp_path, launch_args=[]
+    )
     if only is None:
         return  # it cannot be confined so: it cannot be the captain
     assert only and all(isinstance(arg, str) for arg in only)
@@ -643,6 +646,74 @@ def test_a_tools_only_session_names_its_server_and_leaves_no_built_in_tool(
         assert _runs_within(switch, only), f"{adapter.id} leaves a built-in tool: {switch}"
     assert "--enable" not in only
     assert only != adapter.mcp_args(command, args, list(env))
+
+
+def _operator_server(adapter: AgentAdapter, home: Path, cwd: Path) -> None:
+    """An MCP server named ``operator`` where the operator keeps one for the agent: Codex's
+    ``config.toml`` in its home, Claude Code's ``.mcp.json`` in the project."""
+    server = {"command": "/opt/operator-server", "args": []}
+    if adapter.id == "codex":
+        (home / "config.toml").write_text(
+            '[mcp_servers.operator]\ncommand = "/opt/operator-server"\n', encoding="utf-8"
+        )
+    elif adapter.id == "claude-code":
+        (cwd / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"operator": server}}), encoding="utf-8"
+        )
+
+
+#: What keeps the operator's own MCP server (:func:`_operator_server`) out of each adapter's
+#: tools-only session: Claude Code's ``--strict-mcp-config`` (main's captain), Codex's
+#: ``enabled=false`` for it (measured on 0.162.1: the request then carried the captain's
+#: server alone).
+EXPECTED_OPERATOR_OFF: dict[str, list[str]] = {
+    "claude-code": ["--strict-mcp-config"],
+    "codex": ["-c", "mcp_servers.operator.enabled=false"],
+}
+
+
+def _inherits(
+    adapter: AgentAdapter, only: list[str], env: dict[str, str], inherit: tuple[str, ...]
+) -> set[str]:
+    """The variables a tools-only session's server keeps from the session, as its arguments
+    say: Codex's ``env_vars`` (its servers start with ``HOME``, ``LC_CTYPE``, ``PATH`` and
+    their ``env`` alone, measured on 0.162.1); every name for Claude Code, whose servers
+    inherit the session's environment, the ``env`` of its ``--mcp-config`` being exactly the
+    one asked for, so it overwrites none of them."""
+    if adapter.id == "codex":
+        (kept,) = [
+            tomllib.loads(f"v = {item.partition('=')[2]}")["v"]
+            for item in only
+            if item.startswith("mcp_servers.captain.env_vars=")
+        ]
+        return set(kept)
+    (config,) = [json.loads(arg) for arg in only if arg.startswith("{")]
+    assert config["mcpServers"]["captain"]["env"] == env, "its server inherits the rest"
+    assert not set(env) & set(inherit)
+    return set(inherit)
+
+
+def test_a_tools_only_session_loads_no_server_of_the_operators_and_keeps_what_it_inherits(
+    adapter: AgentAdapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The captain's session loads no MCP server but its own: one the operator keeps where the
+    agent reads servers (:func:`_operator_server`) is kept out (:data:`EXPECTED_OPERATOR_OFF`)
+    and the captain's is never switched off; and the variables ``inherit`` names reach the
+    server (:func:`_inherits`). An adapter that cannot be confined so answers ``None``."""
+    monkeypatch.setattr(codex_adapter, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_adapter, "MANAGED_CONFIG", tmp_path / "managed.toml")
+    home, cwd = _home(adapter, tmp_path), tmp_path / "brain"
+    cwd.mkdir()
+    _operator_server(adapter, home, cwd)
+    env, inherit = {"AISQUARE_HOME": "/srv/home"}, ("TMUX_TMPDIR", "XDG_RUNTIME_DIR")
+    only = adapter.tools_only_args(
+        "captain", "/opt/python", [], env, inherit=inherit, home=home, cwd=cwd, launch_args=[]
+    )
+    if only is None:
+        return
+    assert _runs_within(EXPECTED_OPERATOR_OFF[adapter.id], only), only
+    assert not any("captain" in arg and "enabled=false" in arg for arg in only)
+    assert set(inherit) <= _inherits(adapter, only, env, inherit)
 
 
 def test_a_fork_names_the_session_it_forks_and_is_no_resume(

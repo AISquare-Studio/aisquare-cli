@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents
+from aisquare.core.agent_adapters import codex as codex_module
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters import get_adapter as _get_adapter
 from aisquare.core.agent_adapters.codex import TOOL_FEATURES, CodexAdapter
@@ -662,28 +663,121 @@ def test_a_fork_is_codexs_fork_subcommand_and_its_hook_names_the_new_thread(
     )
 
 
-def test_codexs_tools_only_session_is_its_tool_features_off_and_one_approved_server() -> None:
-    """Measured on 0.162.1 (M11): with these features off and ``web_search`` disabled the
-    request offered the server's tools, ``request_user_input`` and the MCP-resource readers;
-    ``default_tools_approval_mode="approve"`` let ``exec`` run the server's tool unasked."""
-    only = codex.tools_only_args("captain", "C:\\py\\python.exe", ["-m", "x ✓"], {"K": 'v "1"'})
-    assert only is not None
-    settings = {
+def _settings(only: list[str]) -> dict[str, object]:
+    """Each ``-c KEY=VALUE`` of ``only``, its value read as TOML."""
+    return {
         item.partition("=")[0]: tomllib.loads(f"v = {item.partition('=')[2]}")["v"]
         for flag, item in pairwise(only)
         if flag == "-c"
     }
-    assert settings == {
+
+
+@pytest.fixture
+def layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Codex's system and managed layers, under ``tmp_path`` (none there yet); returns a
+    Codex home beside them."""
+    monkeypatch.setattr(codex_module, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
+    monkeypatch.setattr(codex_module, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    return home
+
+
+def test_codexs_tools_only_session_is_its_tool_features_off_and_one_approved_server(
+    layers: Path, tmp_path: Path
+) -> None:
+    """Measured on 0.162.1 (M11): with these features off and ``web_search`` disabled the
+    request offered the server's tools, ``request_user_input`` and the MCP-resource readers;
+    ``default_tools_approval_mode="approve"`` let ``exec`` run the server's tool unasked. Its
+    server starts with ``HOME``, ``LC_CTYPE``, ``PATH`` and its ``env`` alone, so what it
+    inherits goes in as ``env_vars`` (measured: ``TMUX_TMPDIR`` reached it so)."""
+    only = codex.tools_only_args(
+        "captain", "C:\\py\\python.exe", ["-m", "x ✓"], {"K": 'v "1"'},
+        inherit=("TMUX_TMPDIR",), home=layers, cwd=tmp_path, launch_args=[],
+    )  # fmt: skip
+    assert only is not None
+    assert _settings(only) == {
         "web_search": "disabled",
         "mcp_servers.captain.command": "C:\\py\\python.exe",
         "mcp_servers.captain.args": ["-m", "x ✓"],
         "mcp_servers.captain.env": {"K": 'v "1"'},
+        "mcp_servers.captain.env_vars": ["TMUX_TMPDIR"],
         "mcp_servers.captain.default_tools_approval_mode": "approve",
     }
     disabled = [item for flag, item in pairwise(only) if flag == "--disable"]
     assert disabled == list(TOOL_FEATURES)
     with pytest.raises(ValueError, match="bare key"):
-        codex.tools_only_args("my.server", "python", [], {})
+        codex.tools_only_args(
+            "my.server", "python", [], {}, inherit=(), home=layers, cwd=tmp_path, launch_args=[]
+        )
+
+
+def _server(path: Path, *names: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tables = "".join(f'[mcp_servers.{name}]\ncommand = "/opt/{name}"\n' for name in names)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(tables)
+
+
+def _trust(home: Path, folder: Path) -> None:
+    with (home / "config.toml").open("a", encoding="utf-8") as handle:
+        handle.write(f'[projects.{json.dumps(str(folder.resolve()))}]\ntrust_level = "trusted"\n')
+
+
+def _switched_off(only: list[str]) -> list[str]:
+    return [
+        key.split(".")[1]
+        for key, value in _settings(only).items()
+        if key.endswith(".enabled") and value is False
+    ]
+
+
+def test_every_server_of_the_operators_that_codex_would_load_is_switched_off(
+    layers: Path, tmp_path: Path
+) -> None:
+    """Codex has no ``--strict-mcp-config``: every server this launch's layers name is
+    ``enabled=false`` for the captain's session, each once and the captain's never. The
+    layers, as measured on 0.162.1: the system's, the home's ``config.toml``, the ``-p``
+    profile's file, the managed one, a ``-c`` override, and a TRUSTED project's own: in a git
+    checkout its root's ``.codex/config.toml`` and each folder's down to ``cwd`` (never one
+    above the root), outside git ``cwd``'s alone. A server no layer of this launch names is
+    not, since ``enabled=false`` on a name Codex does not have makes it refuse its config
+    ("invalid transport")."""
+    _server(codex_module.SYSTEM_CONFIG, "system")
+    _server(layers / "config.toml", "home", "captain")
+    _server(layers / "work.config.toml", "profiled")
+    _server(layers / "other.config.toml", "unselected")
+    _server(codex_module.MANAGED_CONFIG, "managed", "home")
+    top = tmp_path / "top"
+    repo, cwd = top / "repo", top / "repo" / "mid" / "cwd"
+    cwd.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    _server(top / ".codex" / "config.toml", "above")
+    _server(repo / ".codex" / "config.toml", "root")
+    _server(repo / "mid" / ".codex" / "config.toml", "mid")
+    launch = ["-p", "work", "-c", "mcp_servers.flagged.command=x", "-c", "mcp_servers={inline={}}"]
+
+    def off(where: Path, args: list[str]) -> list[str]:
+        only = codex.tools_only_args(
+            "captain", "py", [], {}, inherit=(), home=layers, cwd=where, launch_args=args
+        )
+        assert only is not None
+        return _switched_off(only)
+
+    user = ["system", "home", "profiled", "managed", "flagged", "inline"]
+    assert off(cwd, launch) == user, "an untrusted project's layers are not read"
+    _trust(layers, repo)
+    assert off(cwd, launch) == [*user[:4], "root", "mid", *user[4:]]
+    assert off(tmp_path, ["-C", str(cwd)]) == ["system", "home", "managed", "root", "mid"]
+    plain = tmp_path / "plain" / "cwd"
+    _server(plain.parent / ".codex" / "config.toml", "parent")
+    _server(plain / ".codex" / "config.toml", "own")
+    _trust(layers, plain)
+    assert off(plain, []) == ["system", "home", "managed", "own"], "outside git, cwd's alone"
+    with (layers / "config.toml").open("a", encoding="utf-8") as handle:
+        handle.write('[mcp_servers."my server"]\ncommand = "/opt/mine"\n')
+    with pytest.raises(ValueError, match="'my server'"):
+        off(plain, [])
 
 
 def test_only_claude_code_is_told_to_keep_a_prompt_of_its_own_out_of_an_unwatched_pane() -> None:

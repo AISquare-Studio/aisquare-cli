@@ -750,23 +750,42 @@ class CodexAdapter:
         ]
 
     def tools_only_args(
-        self, server: str, command: str, args: list[str], env: dict[str, str]
+        self,
+        server: str,
+        command: str,
+        args: list[str],
+        env: dict[str, str],
+        *,
+        inherit: Sequence[str],
+        home: Path,
+        cwd: Path,
+        launch_args: Sequence[str],
     ) -> list[str] | None:
         """Every tool feature off (:data:`TOOL_FEATURES`, ``web_search="disabled"``), then
         the server as ``-c mcp_servers.<server>.*``, :meth:`mcp_args`' shape, with
-        ``default_tools_approval_mode="approve"``. Measured on 0.162.1 through these
-        arguments: the request offered the server's tools, ``request_user_input`` and the
-        MCP-resource readers, and ``exec`` ran a call of the server's tool unasked, which
-        without that key it declined ("MCP tool call requires approval, but approval policy
-        is never"). Codex has no ``--strict-mcp-config``: an ``mcp_servers`` table of the
-        operator's config loads beside the server (a ``-c mcp_servers={…}`` inline table
-        merges into it, measured), its tools asking as their own approval mode says.
-        ``ValueError`` for a server name that is not a bare TOML key, which a ``-c`` key
-        cannot hold."""
-        if not _BARE_KEY.fullmatch(server):
-            raise ValueError(
-                f"an MCP server's name in a Codex -c key is a bare key, not {server!r}"
-            )
+        ``default_tools_approval_mode="approve"``, and every other server its config layers
+        name for this launch switched off. Measured on 0.162.1 through these arguments: the
+        request offered the server's tools, ``request_user_input`` and the MCP-resource
+        readers, and ``exec`` ran a call of the server's tool unasked, which without that key
+        it declined ("MCP tool call requires approval, but approval policy is never").
+
+        Codex has no ``--strict-mcp-config``: an operator's ``mcp_servers`` table loads beside
+        the server (a ``-c mcp_servers={…}`` inline table merges into it, measured), so each
+        server :func:`_mcp_servers` finds in this launch's layers gets ``-c mcp_servers.
+        <name>.enabled=false`` (measured: with one in ``home``'s ``config.toml`` and one in a
+        trusted project's ``.codex/config.toml``, the request carried the server's tools
+        alone). Only the layers' own: ``enabled=false`` on a name no layer defines makes
+        Codex refuse its config ("invalid transport", measured). A Codex MCP server starts
+        with ``HOME``, ``LC_CTYPE``, ``PATH`` and its ``env`` table alone (measured), so the
+        names in ``inherit`` go in as its ``env_vars``, which hands it the session's values.
+        ``ValueError`` for a server name, the server's or an operator's, that is not a bare
+        TOML key, which a ``-c`` key cannot hold."""
+        others = [name for name in _mcp_servers(home, launch_args, cwd) if name != server]
+        for name in (server, *others):
+            if not _BARE_KEY.fullmatch(name):
+                raise ValueError(
+                    f"an MCP server's name in a Codex -c key is a bare key, not {name!r}"
+                )
         table = f"mcp_servers.{server}"
         pairs = ", ".join(f"{json.dumps(name)} = {_toml_string(v)}" for name, v in env.items())
         return [
@@ -780,7 +799,10 @@ class CodexAdapter:
             "-c",
             f"{table}.env={{{pairs}}}",
             "-c",
+            f"{table}.env_vars=[{', '.join(map(_toml_string, inherit))}]",
+            "-c",
             f'{table}.default_tools_approval_mode="approve"',
+            *(arg for name in others for arg in ("-c", f"mcp_servers.{name}.enabled=false")),
         ]
 
     def context_files(self, home: Path) -> tuple[Path, ...]:
@@ -1284,23 +1306,85 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
-def _developer_instructions(home: Path, args: Sequence[str]) -> str | None:
-    """The operator's own ``developer_instructions``, as Codex layers its config for a session
-    launched with ``args`` from ``home``: the system's :data:`SYSTEM_CONFIG`, ``config.toml``
-    in ``home``, the profile ``-p`` selects (``<name>.config.toml`` beside it), then the
-    administrator's :data:`MANAGED_CONFIG`, the last that sets it a string winning; ``None``
-    when none does."""
+def _user_layers(home: Path, args: Sequence[str]) -> list[Path]:
+    """The config files Codex layers for a session launched with ``args`` from ``home``,
+    lowest first, but its project's: the system's :data:`SYSTEM_CONFIG`, ``config.toml`` in
+    ``home``, the profile ``-p`` selects (``<name>.config.toml`` beside it), then the
+    administrator's :data:`MANAGED_CONFIG`."""
     files = [SYSTEM_CONFIG, home / "config.toml"]
     profile = next(reversed(option_values(args, "-p", "--profile")), None)
     if profile and Path(profile).name == profile and profile not in {".", ".."}:
         files.append(home / f"{profile}.config.toml")
     files.append(MANAGED_CONFIG)
+    return files
+
+
+def _developer_instructions(home: Path, args: Sequence[str]) -> str | None:
+    """The operator's own ``developer_instructions``, as Codex layers its config for a session
+    launched with ``args`` from ``home`` (:func:`_user_layers`), the last that sets it a
+    string winning; ``None`` when none does."""
     found = None
-    for path in files:
+    for path in _user_layers(home, args):
         value = _read_toml(path).get("developer_instructions")
         if isinstance(value, str):
             found = value
     return found
+
+
+def _project_layers(
+    trust: Sequence[Mapping[str, Any]], args: Sequence[str], cwd: Path
+) -> list[Path]:
+    """The project's own config files Codex layers for a session in ``cwd`` (``-C``/``--cd``
+    in ``args`` moved from it), outermost first, as measured on 0.162.1: only for a project
+    ``trust`` (its user layers, :func:`_user_layers`) says ``trust_level = "trusted"`` of, by
+    the real path of its root; in a git checkout ``.codex/config.toml`` in its root and in
+    every folder from there down to ``cwd`` (none above the root, none for a trusted ``cwd``
+    under an untrusted root), outside one in ``cwd`` alone (none in its parents)."""
+    for value in option_values(args, "-C", "--cd"):
+        cwd = cwd / value
+    here = Path(os.path.realpath(cwd))
+    walk = [here, *here.parents]
+    root = next((folder for folder in walk if (folder / ".git").exists()), here)
+    trusted = False
+    for table in trust:
+        projects = table.get("projects")
+        entry = projects.get(str(root)) if isinstance(projects, dict) else None
+        level = entry.get("trust_level") if isinstance(entry, dict) else None
+        if isinstance(level, str):
+            trusted = level == "trusted"
+    if not trusted:
+        return []
+    return [folder / ".codex" / "config.toml" for folder in reversed(walk[: walk.index(root) + 1])]
+
+
+def _mcp_servers(home: Path, args: Sequence[str], cwd: Path) -> list[str]:
+    """The MCP servers Codex's config hands a session launched with ``args`` from ``home`` in
+    ``cwd``, by name, in the order its layers first name them: every ``mcp_servers`` table of
+    its user layers (:func:`_user_layers`), its project's (:func:`_project_layers`), then its
+    ``-c`` overrides in ``args`` (``mcp_servers.<name>.…``, or a whole ``mcp_servers``
+    inline table)."""
+    user = [_read_toml(path) for path in _user_layers(home, args)]
+    tables = [*user, *map(_read_toml, _project_layers(user, args, cwd))]
+    names: dict[str, None] = {}
+    for table in tables:
+        servers = table.get("mcp_servers")
+        if isinstance(servers, dict):
+            names.update(
+                dict.fromkeys(name for name, it in servers.items() if isinstance(it, dict))
+            )
+    for item in option_occurrences(args, "-c", "--config"):
+        key, sep, value = item.value.partition("=")
+        path = key.strip().split(".")
+        if not sep or path[0] != "mcp_servers":
+            continue
+        if len(path) > 1:
+            names[path[1]] = None
+            continue
+        with suppress(ValueError, RecursionError):
+            servers = tomllib.loads(f"servers = {value}")["servers"]
+            if isinstance(servers, dict):
+                names.update(dict.fromkeys(servers))
+    return list(names)
 
 
 def _codex_home(config_dir: Path | None) -> Path:

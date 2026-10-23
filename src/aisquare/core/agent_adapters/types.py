@@ -893,12 +893,25 @@ class AgentAdapter(Protocol):
         ...
 
     def tools_only_args(
-        self, server: str, command: str, args: list[str], env: dict[str, str]
+        self,
+        server: str,
+        command: str,
+        args: list[str],
+        env: dict[str, str],
+        *,
+        inherit: Sequence[str],
+        home: Path,
+        cwd: Path,
+        launch_args: Sequence[str],
     ) -> list[str] | None:
         """Launch arguments that leave the session no tool but those of the one MCP server
-        ``server`` (run as ``command`` with ``args`` and ``env``), each of its tools allowed
-        without asking: the captain's session. ``None`` for an agent that cannot be confined
-        so, which then cannot be the captain."""
+        ``server`` (run as ``command`` with ``args`` and ``env``, keeping the session's own
+        values of the variables ``inherit`` names), each of its tools allowed without asking,
+        and no other MCP server loaded, the operator's own included: the captain's session,
+        launched from config dir ``home`` in ``cwd`` with ``launch_args``. ``None`` for an
+        agent that cannot be confined so, which then cannot be the captain. ``ValueError``
+        for a server (``server``, or one of the operator's to keep out) its arguments cannot
+        name."""
         ...
 
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:

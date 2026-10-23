@@ -43,6 +43,7 @@ from aisquare.core.workspace import project_id_for
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo, Snapshot
 from aisquare.services import diagnostics
 from aisquare.services import fleet as fleet_service
+from aisquare.services import install_route
 from aisquare.services import team as team_service
 from aisquare.services.onboarding import fix_commands
 from tests.fsperms import can_symlink
@@ -1722,7 +1723,8 @@ def test_doctor_warns_on_a_binding_whose_claude_dir_has_no_hooks(tmp_path: Path)
     assert "coder" in row.detail and str(bare) in row.detail and "no aisquare hooks" in row.detail
     assert "reviewer" not in row.detail, "a connected binding is not a problem"
     assert row.fix is not None and "aisquare team bind coder" in row.fix
-    assert f"CLAUDE_CONFIG_DIR={bare} aisquare agents connect claude-code" in row.fix
+    connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir", str(bare)]
+    assert install_route.command_line(connect) in row.fix, "a fix any shell can paste"
 
 
 def test_doctor_warns_on_a_binding_whose_tmpdir_cannot_be_written(tmp_path: Path) -> None:

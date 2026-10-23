@@ -7,7 +7,6 @@ import importlib.util
 import json
 import os
 import re
-import shlex
 import shutil
 import string
 import sys
@@ -2019,24 +2018,25 @@ def _check_role_bindings() -> list[DoctorCheck]:
     fine: list[str] = []
     problems: list[str] = []
     fixes: list[str] = []
+    line = install_route.command_line  # a fix is pasted: quoted for this shell, Windows too
     for role, profile in sorted(bindings.items()):
-        quoted = shlex.quote(role)
+
+        def unset(key: str, role: str = role) -> str:
+            return line(["aisquare", "team", "bind", role, "--unset", key])
+
         raw = profile.env.get(_BOUND_CONFIG_DIR)
         if raw is not None:
             path = Path(harness.expand_value(raw))
-            shown = shlex.quote(str(path))
             if not path.is_dir():
                 problems.append(f"{role}: {_BOUND_CONFIG_DIR} {path} is not a directory")
-                fixes.append(f"aisquare team bind {quoted} --unset {_BOUND_CONFIG_DIR}")
+                fixes.append(unset(_BOUND_CONFIG_DIR))
             elif not agents_service.claude_code_connected(path):
                 problems.append(
                     f"{role}: {_BOUND_CONFIG_DIR} {path} has no aisquare hooks, so its "
                     "sessions never reach the board"
                 )
-                fixes.append(
-                    f"{_BOUND_CONFIG_DIR}={shown} aisquare agents connect claude-code "
-                    f"(or aisquare team bind {quoted} --unset {_BOUND_CONFIG_DIR})"
-                )
+                connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir"]
+                fixes.append(f"{line([*connect, str(path)])} (or {unset(_BOUND_CONFIG_DIR)})")
             else:
                 fine.append(f"{role} → {path}")
         raw = profile.env.get(_BOUND_TMPDIR)
@@ -2046,10 +2046,7 @@ def _check_role_bindings() -> list[DoctorCheck]:
                 fine.append(f"{role} temp → {path}")
             else:
                 problems.append(f"{role}: {_BOUND_TMPDIR} {path} is not writable")
-                fixes.append(
-                    f"mkdir -p {shlex.quote(str(path))} (or aisquare team bind {quoted} "
-                    f"--unset {_BOUND_TMPDIR})"
-                )
+                fixes.append(f"{line(['mkdir', '-p', str(path)])} (or {unset(_BOUND_TMPDIR)})")
     if problems:
         return [_warn("role bindings", "; ".join(problems), "; ".join(dict.fromkeys(fixes)))]
     if fine:

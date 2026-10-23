@@ -978,9 +978,9 @@ machine no longer has. A `role bindings` line checks every binding that points a
 role at another Claude Code directory: its `CLAUDE_CONFIG_DIR` must hold aisquare's
 hooks (the same "connected" Welcome asks), or its sessions never reach the board,
 and its `CLAUDE_CODE_TMPDIR` must be a writable directory. Each value is expanded as
-a launch expands it (`$VAR`, `~`). The line warns with the fix (`agents connect` for
-that directory, or `team bind <role> --unset KEY`) and is absent when no binding sets
-either variable. Accounts laid
+a launch expands it (`$VAR`, `~`). The line warns with the fix, quoted for your shell
+(`aisquare agents connect claude-code --config-dir <dir>`, or `aisquare team bind <role>
+--unset KEY`), and is absent when no binding sets either variable. Accounts laid
 out some other way — a wrapper, a proxy, a directory of your own — still bind
 to a role as a launch profile (`aisquare team bind coder1 --env …`, see
 [Several accounts, one team](orchestration.md#several-accounts-one-team)).

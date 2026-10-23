@@ -2656,6 +2656,7 @@ def _waited_reads() -> dict[str, str]:
         doctor,
         explainability,
         fleet_bulk,
+        settings_remote,
         welcome,
     )
 
@@ -2682,6 +2683,7 @@ def _waited_reads() -> dict[str, str]:
         persona_dialogs.SKILLS_WORKER: "the Import dialog's skill list",
         captain.BAR_WORKER: "the captain's bar",
         captain.MIC_WORKER: "the captain's microphone check",
+        settings_remote.CHECK_WORKER: "what Remote needs",
     }
 
 

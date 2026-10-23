@@ -543,6 +543,19 @@ def _build_index(pack_text: str) -> list[IndexEntry]:
     return entries
 
 
+def _index_json(entries: Sequence[IndexEntry]) -> str:
+    """The per-file index as ``index.json`` holds it: a JSON array, one entry per line.
+
+    One line per file, so an agent can Grep for one path and get one line, and page the
+    index with Read; it was one line, which a Read returned whole and a Grep matched
+    whole (P1-WS3 measured agents reading a 34k-char index of 402 files from the top).
+    Still one JSON array, so every reader that parses it parses it unchanged.
+    """
+    if not entries:
+        return "[]\n"
+    return "[\n" + ",\n".join(json.dumps(entry) for entry in entries) + "\n]\n"
+
+
 def generate(
     project_id: str,
     root: Path,
@@ -583,12 +596,16 @@ def generate(
             meta.skeleton_path.write_text(skeleton_text, encoding="utf-8")
             meta.skeleton_token_count = _total_tokens(skeleton_text, skeleton_stdout)
         except (subprocess.SubprocessError, OSError):
-            pass
+            # The last run's skeleton must not stay beside a pack it no longer matches.
+            meta.skeleton_path.unlink(missing_ok=True)
     else:
         compressed_text, compressed_stdout = _run_repomix(root, compress=True, ignore=excluded)
         compressed_tokens = _total_tokens(compressed_text, compressed_stdout)
         if compressed_tokens <= max_tokens:
             _write_pack(meta, compressed_text, tokens=compressed_tokens, compressed=True)
+            # The pack IS the skeleton here, and none is written: one an earlier, smaller
+            # run left would sit beside a pack it no longer matches (P1-WS3's finding).
+            meta.skeleton_path.unlink(missing_ok=True)
         else:
             _write_skeleton_only(meta, compressed_text, tokens=compressed_tokens)
 
@@ -646,7 +663,7 @@ def _write_skeleton_only(meta: Snapshot, skeleton_text: str, *, tokens: int) -> 
     """
     meta.skeleton_path.write_text(skeleton_text, encoding="utf-8")
     index = _build_index(skeleton_text)
-    meta.index_path.write_text(json.dumps(index), encoding="utf-8")
+    meta.index_path.write_text(_index_json(index), encoding="utf-8")
     meta.pack_path.unlink(missing_ok=True)
     meta.token_count = tokens
     meta.skeleton_token_count = tokens
@@ -658,7 +675,7 @@ def _write_skeleton_only(meta: Snapshot, skeleton_text: str, *, tokens: int) -> 
 def _write_pack(meta: Snapshot, pack_text: str, *, tokens: int, compressed: bool) -> None:
     meta.pack_path.write_text(pack_text, encoding="utf-8")
     index = _build_index(pack_text)
-    meta.index_path.write_text(json.dumps(index), encoding="utf-8")
+    meta.index_path.write_text(_index_json(index), encoding="utf-8")
     meta.token_count = tokens
     meta.compressed = compressed
     meta.file_count = len(index)

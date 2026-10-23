@@ -293,7 +293,11 @@ def test_a_skeleton_left_by_an_earlier_pack_is_not_measured_or_named(
     stale = snapshot.generate(project_id, work_dir).skeleton_path
     _pack_measuring(monkeypatch, full=200_000, compressed=90_000)
     meta = snapshot.generate(project_id, work_dir)
-    assert meta.status == "ready" and meta.compressed and stale.exists()
+    assert meta.status == "ready" and meta.compressed
+    # Removed at the source since P2-W5x; a snapshot directory a build before it packed
+    # still has one, which the directive must not name either.
+    assert not stale.exists()
+    stale.write_text("<files>skeleton of an older tree</files>", encoding="utf-8")
 
     result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
     assert result.exit_code == 0, result.output

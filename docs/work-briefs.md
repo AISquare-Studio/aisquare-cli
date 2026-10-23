@@ -55,8 +55,13 @@ says, so only the validator can judge it, and it is labelled manual everywhere: 
 `brief show` (`pass (manual)`, `[manual]`), in the board event, and as `"kind":
 "manual"` in `--json`.
 
-The artifact's SHA-256 is recorded with it. If the file changes or goes away, the
-check reads `stale`.
+The artifact is **copied** when the check is recorded, into
+`~/.aisquare/briefs/<project>/<brief>/` (or under `$AISQUARE_HOME`), readable by
+you only, and its SHA-256 is kept. The check stands on that copy. The original's
+path is kept as provenance only, so a screenshot in a temporary directory, or in a
+worktree the fleet later reaps, can be deleted without the check changing. If the
+*copy* changes or goes away, a pass reads `stale`. A finding, or any failed check,
+stays a failure whatever happens to its file. An artifact over 16 MiB is refused.
 
 ## Findings
 
@@ -135,6 +140,7 @@ is read.
 ## Limits
 
 A brief holds up to 64 requirements and 1,024 evidence records; a requirement or a
-check is up to 2,000 characters, a summary up to 4,000, and an artifact up to 20 MB.
-Briefs live in the board's store (`context.db`), and `project forget --purge` deletes
-them with the rest of the project's rows.
+check is up to 2,000 characters, a summary up to 4,000, and an artifact up to 16 MiB.
+Briefs live in the board's store (`context.db`) and their artifacts' copies under
+`briefs/`, and `project forget --purge` deletes both with the rest of the project's
+rows.

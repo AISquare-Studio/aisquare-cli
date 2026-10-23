@@ -28,7 +28,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from aisquare.core import insights
+from aisquare.core import atomic, insights, paths
 from aisquare.core.ids import new_brief_id, new_event_id, new_evidence_id
 from aisquare.core.store import BriefRow, ContextStore, TaskTransition, store_session
 from aisquare.models import (
@@ -52,8 +52,9 @@ from aisquare.services import team
 #: the task, so the manager re-plans instead of the task looping through review.
 FAILURES_TO_BLOCK = 3
 
-#: The largest artifact a check may name. Its digest is read on every ``brief show``.
-MAX_ARTIFACT_BYTES = 20_000_000
+#: The largest artifact a check may name: it is copied into the store's home, and the
+#: copy's digest is read on every ``brief show``.
+MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
 
 #: Worst first: a requirement reads as the worst of its live linked tasks' proofs.
 _SEVERITY: tuple[RequirementState, ...] = ("blocked", "fail", "stale", "missing", "pass")
@@ -144,31 +145,61 @@ def _linked_task(store: ContextStore, board_id: str, ref: str) -> TeamTask:
     return task
 
 
-def _artifact(path: Path) -> tuple[str, str]:
-    """The artifact's resolved path and SHA-256. A regular file, and not too big: a FIFO
-    or a device would block or never end the read."""
+@dataclass(frozen=True)
+class _Artifact:
+    """An artifact as read for recording: where it was, its bytes, their SHA-256."""
+
+    source: Path
+    body: bytes
+    sha256: str
+
+
+def _read_artifact(path: Path) -> _Artifact:
+    """The artifact named on the command line. A regular file, and at most
+    :data:`MAX_ARTIFACT_BYTES`: a FIFO or a device would block or never end the read."""
     try:
         resolved = path.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise ValueError(f"artifact {path} cannot be read ({exc})") from None
     if not resolved.is_file():
         raise ValueError(f"artifact {path} is not a regular file")
+    limit = MAX_ARTIFACT_BYTES // (1024 * 1024)
     if resolved.stat().st_size > MAX_ARTIFACT_BYTES:
-        raise ValueError(f"artifact {path} is over {MAX_ARTIFACT_BYTES // 1_000_000} MB")
-    digest = hashlib.sha256()
+        raise ValueError(f"artifact {path} is over the {limit} MiB limit; record a smaller one")
     with resolved.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return str(resolved), digest.hexdigest()
+        body = handle.read(MAX_ARTIFACT_BYTES + 1)
+    if len(body) > MAX_ARTIFACT_BYTES:  # it grew between the stat and the read
+        raise ValueError(f"artifact {path} is over the {limit} MiB limit; record a smaller one")
+    return _Artifact(source=resolved, body=body, sha256=hashlib.sha256(body).hexdigest())
 
 
-def _artifact_unchanged(evidence: BriefEvidence) -> bool:
+def _keep_copy(brief: WorkBrief, evidence_id: str, artifact: _Artifact) -> Path:
+    """Copy the artifact under the store's home, owner-only, and return the copy's path.
+
+    The record cites the copy, so a check stays what it was when the original goes:
+    a temporary directory cleaned, a worktree reaped. The original's path is kept as
+    provenance only.
+    """
+    directory = paths.brief_evidence_dir(brief.project_id, brief.id)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    suffix = artifact.source.suffix
+    if not (len(suffix) <= 16 and suffix[1:].isalnum()):
+        suffix = ""
+    copy = directory / f"{evidence_id}{suffix}"
+    atomic.write_replacing(copy, artifact.body, keep_mode=False, owner_only=True)
+    return copy
+
+
+def _copy_unchanged(evidence: BriefEvidence) -> bool:
+    """Whether the kept copy of a check's artifact is still the bytes recorded."""
     if evidence.artifact is None:
         return True
     try:
-        return _artifact(Path(evidence.artifact))[1] == evidence.artifact_sha256
-    except ValueError:
+        with Path(evidence.artifact).open("rb") as handle:
+            body = handle.read(MAX_ARTIFACT_BYTES + 1)
+    except OSError:
         return False
+    return hashlib.sha256(body).hexdigest() == evidence.artifact_sha256
 
 
 def _event(brief: WorkBrief, write: _Write, session: TeamSession | None) -> TeamEvent:
@@ -291,8 +322,10 @@ def status_of(brief: WorkBrief, tasks: Sequence[TeamTask]) -> list[RequirementSt
                         f"checked at r{latest.requirement_revision}, "
                         f"the requirement is now r{requirement.revision}"
                     )
-                elif not _artifact_unchanged(latest):
-                    proof.state, proof.reason = "stale", "its artifact changed or is gone"
+                elif latest.verdict == "pass" and not _copy_unchanged(latest):
+                    # Only a pass rests on its artifact. A failure stays a failure
+                    # whatever becomes of the file that showed it.
+                    proof.state, proof.reason = "stale", "its kept artifact changed or is gone"
                 else:
                     proof.state, proof.reason = latest.verdict, latest.summary
             if task.status == "blocked":
@@ -473,7 +506,10 @@ def update(
                 setattr(brief, field, new)
                 for requirement in brief.requirements:
                     supersede(requirement)
-        added = _clean(add)
+        existing = {r.text.casefold() for r in brief.requirements}
+        # A requirement already there is not added again: re-sending an identical
+        # `--add` is a no-op, like every other identical correction.
+        added = [text for text in dict.fromkeys(_clean(add)) if text.casefold() not in existing]
         for text in added:
             new_id = f"R{max(int(r.id[1:]) for r in brief.requirements) + 1}"
             brief.requirements.append(BriefRequirement(id=new_id, text=text))
@@ -648,7 +684,8 @@ def _record(
     if not summary.strip():
         raise ValueError("say what the check found (--summary)")
     # Read before the store opens: a large artifact is hashed outside the transaction.
-    path, digest = _artifact(artifact) if artifact is not None else (None, None)
+    read = _read_artifact(artifact) if artifact is not None else None
+    digest = read.sha256 if read is not None else None
     team._DELIVERY.set(None)
     with store_session() as store:
         session = _session(store, session_ref)
@@ -675,8 +712,10 @@ def _record(
             and latest.finding == finding
         ):
             return brief, latest, False
+        evidence_id = new_evidence_id()
+        copy = _keep_copy(brief, evidence_id, read) if read is not None else None
         evidence = BriefEvidence(
-            id=new_evidence_id(),
+            id=evidence_id,
             requirement_id=requirement.id,
             requirement_revision=requirement.revision,
             task_id=task.id,
@@ -684,7 +723,8 @@ def _record(
             kind="manual",
             finding=finding,
             summary=summary.strip(),
-            artifact=path,
+            artifact=str(copy) if copy is not None else None,
+            artifact_source=str(read.source) if read is not None else None,
             artifact_sha256=digest,
             recorded_at=_now(),
             session_id=session.id if session else None,
@@ -712,11 +752,16 @@ def _record(
                 transitions.append((task.id, "reopen", _reopen_text(task, brief, why)))
         kind = "brief_finding" if finding else "brief_evidence"
         text = f"{requirement.id} {verdict} [manual] by {team.task_label(task)}: {summary.strip()}"
-        stored = _write_brief(
-            store,
-            brief,
-            _Write(kind, text if len(text) <= 500 else text[:497] + "…", task.id, transitions),
-            session,
-        )
+        try:
+            stored = _write_brief(
+                store,
+                brief,
+                _Write(kind, text if len(text) <= 500 else text[:497] + "…", task.id, transitions),
+                session,
+            )
+        except BaseException:
+            if copy is not None:  # nothing cites it: the write did not happen
+                copy.unlink(missing_ok=True)
+            raise
     _publish(stored, board, session.id if session else None, cwd)
     return brief, evidence, True

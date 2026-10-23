@@ -826,7 +826,11 @@ class BriefEvidence(BaseModel):
     """Recorded by ``asq brief finding``: a failure someone found, not a check run."""
     summary: str = Field(min_length=1, max_length=4000)
     artifact: str | None = None
-    """The artifact's resolved path, for ``manual`` evidence."""
+    """The kept copy of the artifact, for ``manual`` evidence: under the store's home
+    (``briefs/<project>/<brief>/``), owner-only. What the check is judged against."""
+    artifact_source: str | None = None
+    """Where the artifact was when it was recorded. Provenance only: the original may
+    go, and the check stands on its copy."""
     artifact_sha256: str | None = None
     report_id: str | None = None
     """The command report behind ``report`` evidence."""

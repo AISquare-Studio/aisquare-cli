@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import stat
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -227,16 +229,96 @@ def test_the_same_check_sent_again_writes_nothing(shot: Path) -> None:
     assert briefs.show(brief.id).brief == before
 
 
-def test_an_artifact_that_changed_or_went_makes_its_pass_stale(shot: Path) -> None:
+def _copy_of(brief: WorkBrief) -> Path:
+    recorded = briefs.show(brief.id).brief.evidence[-1]
+    assert recorded.artifact is not None
+    return Path(recorded.artifact)
+
+
+def test_a_pass_stands_on_its_kept_copy_not_on_the_original(shot: Path) -> None:
+    """Manager's decision on #306: a manual pass must not go stale because its original
+    went (a temporary directory, a reaped worktree). The record cites a copy under the
+    store's home and keeps the original's path as provenance only."""
     brief = _brief()
     task = _task()
     briefs.link(brief.id, task.id, ["R1"])
     _pass(brief, task, "R1", shot)
-    assert _state(brief, "R1") == "pass"
+    recorded = briefs.show(brief.id).brief.evidence[-1]
+    copy = _copy_of(brief)
+
+    assert recorded.artifact_source == str(shot.resolve())
+    assert copy.parent == paths.brief_evidence_dir(brief.project_id, brief.id)
+    assert copy.is_relative_to(paths.aisquare_home() / "briefs")
+    assert copy.read_bytes() == b"a screenshot"
+    assert copy.name == f"{recorded.id}.png"
+
     shot.write_bytes(b"another screenshot")
-    assert _state(brief, "R1") == "stale"
+    assert _state(brief, "R1") == "pass", "the original changing is not the record changing"
     shot.unlink()
+    assert _state(brief, "R1") == "pass", "nor is the original going"
+
+    copy.write_bytes(b"tampered")
     assert _state(brief, "R1") == "stale"
+    copy.unlink()
+    assert _state(brief, "R1") == "stale"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_the_kept_copy_is_owner_only(shot: Path) -> None:
+    brief = _brief()
+    task = _task()
+    briefs.link(brief.id, task.id, ["R1"])
+    _pass(brief, task, "R1", shot)
+    copy = _copy_of(brief)
+    assert stat.S_IMODE(copy.stat().st_mode) == 0o600
+    assert stat.S_IMODE(copy.parent.stat().st_mode) & 0o077 == 0
+
+
+def test_an_artifact_over_16_mib_is_refused_and_leaves_nothing(work: Path) -> None:
+    brief = _brief()
+    task = _task()
+    briefs.link(brief.id, task.id, ["R1"])
+    big = work / "big.log"
+    big.write_bytes(b"x" * (16 * 1024 * 1024 + 1))
+    with pytest.raises(ValueError, match="over the 16 MiB limit"):
+        briefs.record_evidence(
+            brief.id, "R1", task_ref=task.id, verdict="pass", summary="x", artifact=big
+        )
+    assert briefs.show(brief.id).brief.evidence == []
+    assert not paths.brief_evidence_dir(brief.project_id, brief.id).exists()
+    exactly = work / "exact.log"
+    exactly.write_bytes(b"x" * (16 * 1024 * 1024))
+    _pass(brief, task, "R1", exactly)
+    assert _state(brief, "R1") == "pass"
+
+
+def test_a_finding_whose_artifact_is_gone_stays_a_fail(shot: Path) -> None:
+    """Review of #306: only a pass rests on its artifact. A failure whose file went,
+    kept copy and all, is still a failure, never 'stale'."""
+    brief = _brief()
+    task = _task()
+    briefs.finding(brief.id, "R1", task_ref=task.id, summary="clipped", artifact=shot)
+    shot.unlink()
+    _copy_of(brief).unlink()
+    assert _state(brief, "R1") == "fail"
+
+
+def test_a_write_that_loses_its_race_leaves_no_copy_behind(
+    shot: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    brief = _brief()
+    task = _task()
+    briefs.link(brief.id, task.id, ["R1"])
+
+    def lose(*args: Any, **kwargs: Any) -> Any:
+        raise BriefChangedError(brief.id)
+
+    monkeypatch.setattr(briefs, "_write_brief", lose)
+    with pytest.raises(BriefChangedError):
+        _pass(brief, task, "R1", shot)
+    directory = paths.brief_evidence_dir(brief.project_id, brief.id)
+    assert directory.is_dir(), "the copy was made before the write"
+    assert list(directory.iterdir()) == []
 
 
 def test_an_artifact_must_be_a_regular_file(work: Path) -> None:
@@ -441,6 +523,20 @@ def test_an_identical_update_changes_nothing(shot: Path, nudges: list[tuple[str,
     assert _status(task).status == "done"
     assert len(_events("brief_updated")) == events
     assert nudges == []
+
+
+def test_re_sending_an_identical_add_is_a_no_op(runner: CliRunner) -> None:
+    """Review of #306: the second identical `--add` was refused as 'R3 repeats R2'."""
+    _brief("R one", "R two")
+    first = runner.invoke(app, ["brief", "update", "B1", "--add", "Logout works"])
+    again = runner.invoke(app, ["brief", "update", "B1", "--add", "Logout works"])
+
+    assert first.exit_code == 0 and "corrected" in first.stdout, first.output
+    assert again.exit_code == 0, again.output
+    assert "unchanged" in again.stdout
+    brief = briefs.show("B1").brief
+    assert [r.id for r in brief.requirements] == ["R1", "R2", "R3"]
+    assert len(brief.corrections) == 1
 
 
 def test_a_correction_that_duplicates_another_requirement_is_refused() -> None:

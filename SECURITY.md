@@ -31,7 +31,11 @@ setting it comes from.
 - `context.db` holds your memory entries, the board, and every prompt you
   submit, verbatim. Claude Code's `UserPromptSubmit` hook captures them.
   It also holds the board's work briefs (`aisquare brief`): their text, and for
-  each recorded check the artifact's path and SHA-256, never the artifact itself.
+  each recorded check the artifact's SHA-256 and where it was.
+- `briefs/<project>/<brief>/` holds a **copy of every artifact** a brief check
+  recorded (`aisquare brief evidence|finding --artifact`, up to 16 MiB each),
+  restricted to your user. A screenshot of a secret is kept here until the
+  project is purged (`aisquare project forget <id> --purge`).
 - `credentials` (from `aisquare login`, `aisquare init --api-key` and
   `aisquare serve`) and the Explainability keys (`explainability-key`,
   `projects/<id>/explainability-key`) are restricted to your user. The CLI

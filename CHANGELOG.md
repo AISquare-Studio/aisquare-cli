@@ -14,7 +14,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   …) are stable for the brief's life; one task can cover several requirements and
   one requirement can need several tasks, each proving its own part. `brief
   evidence --artifact` records a check as **manual** evidence, labelled so in
-  `show`, the board event and `--json`. `brief finding` sends a task in review or
+  `show`, the board event and `--json`. The artifact is copied, owner-only, under
+  `~/.aisquare/briefs/` (16 MiB at most) and the check stands on the copy: the
+  original's path is provenance only, so deleting it (a temp dir, a reaped
+  worktree) leaves the check as it was. A changed or missing copy makes a pass
+  stale; a failure stays a failure. `brief finding` sends a task in review or
   done back to todo, keeps an in-progress task's owner, leaves a dropped task
   dropped, and blocks a task at its third distinct failure on one revision of a
   requirement. A correction keeps every id: a changed requirement or check makes

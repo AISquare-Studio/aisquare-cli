@@ -11,8 +11,9 @@ terminal agent"): a recorded-payload fixture for every hook event it installs
 its hooks off), a row in :data:`EXPECTED_PERMISSIONS`, and its transcript at four moments
 (``tests/fixtures/agent_transcripts/<id>.json``: a permission prompt up, a question, an
 interruption, a turn ended on a question) for its ``transcript_reader``; and with
-``capabilities.dialog_on_screen``, its screens (``tests/fixtures/agent_screens/<id>.json``:
-each dialog of its own with the words it reads, and screens that show none).
+``capabilities.dialog_on_screen`` or ``screen_prompt``, its screens
+(``tests/fixtures/agent_screens/<id>.json``: each dialog of its own with the words it reads
+and, where it says, the prompt, and screens that show none).
 """
 
 from __future__ import annotations
@@ -1137,11 +1138,13 @@ def test_send_keys_asks_before_the_keys_that_end_the_agent_on_one_press(
 
 def _screens(adapter: AgentAdapter) -> dict[str, Any] | None:
     """The adapter's screens (``tests/fixtures/agent_screens/<id>.json``): each dialog of its
-    own with the words it reads, and screens with none. ``None`` for an adapter that reads no
-    dialog off its screen, which brings none."""
+    own with the words it reads (with ``dialog_on_screen``) and the prompt it reads (with
+    ``screen_prompt``, where a ``prompt`` says), and screens with none. ``None`` for an
+    adapter that reads neither off its screen, which brings none."""
     path = SCREENS / f"{adapter.id}.json"
-    if adapter.capabilities.dialog_on_screen is None:
-        assert not path.exists(), f"{adapter.id} reads no dialog off its screen: {path.name}"
+    capabilities = adapter.capabilities
+    if capabilities.dialog_on_screen is None and capabilities.screen_prompt is None:
+        assert not path.exists(), f"{adapter.id} reads nothing off its screen: {path.name}"
         return None
     assert path.is_file(), f"add {path.relative_to(SCREENS.parents[1])} for {adapter.id}"
     screens: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
@@ -1153,10 +1156,9 @@ def test_an_agent_reads_its_own_dialogs_off_its_screen(adapter: AgentAdapter) ->
     """``capabilities.dialog_on_screen`` on the agent's recorded screens: each dialog's words,
     and ``None`` for a screen with no dialog on it (its empty prompt, a draft, a turn)."""
     screens = _screens(adapter)
-    if screens is None:
-        return
     read = adapter.capabilities.dialog_on_screen
-    assert read is not None
+    if screens is None or read is None:
+        return
     for shown in screens["dialogs"]:
         assert read(shown["rows"]) == shown["words"], shown["what"]
     for shown in screens["not_dialogs"]:
@@ -1195,7 +1197,7 @@ def test_a_dialog_no_hook_reports_is_a_card_naming_no_agent_with_no_quick_answer
         )
 
     screens = _screens(adapter)
-    if screens is None:
+    if screens is None or adapter.capabilities.dialog_on_screen is None:
         assert cards(None) == []
         return
     for shown in screens["dialogs"]:
@@ -1206,3 +1208,34 @@ def test_a_dialog_no_hook_reports_is_a_card_naming_no_agent_with_no_quick_answer
         assert card.push_after == now + timedelta(seconds=30)
     for shown in screens["not_dialogs"]:
         assert cards(shown["rows"]) == [], shown["what"]
+
+
+def test_a_prompt_on_the_agents_screen_is_read_with_keys_a_phone_may_send(
+    adapter: AgentAdapter,
+) -> None:
+    """``capabilities.screen_prompt`` (the captain's press and paste ask it of the pane's own
+    agent) on the agent's recorded screens: every dialog of its own is a prompt, a ``trust``
+    or ``dialog`` one with no keys (the owner's to answer) and a ``chooser`` or ``yn`` one with
+    its No, each key one a quick answer may send; ``None`` on every screen with none; and the
+    shape and keys a dialog's ``prompt`` names, where it names them."""
+    from aisquare.core.agent_adapters.types import ScreenShape
+    from aisquare.services import remote_needs
+
+    read = adapter.capabilities.screen_prompt
+    screens = _screens(adapter)
+    if read is None or screens is None:
+        return
+    for shown in screens["dialogs"]:
+        prompt = read(shown["rows"])
+        assert prompt is not None, f"{adapter.id} reads no prompt on {shown['what']}"
+        assert prompt.shape in get_args(ScreenShape) and prompt.question and prompt.whole
+        keys = {key for key in (prompt.yes_key, prompt.no_key) if key is not None}
+        assert keys <= remote_needs.NEEDS_ANSWER_KEYS, (shown["what"], keys)
+        if prompt.shape in ("trust", "dialog"):
+            assert not keys, f"{shown['what']}: the owner's to answer"
+        else:
+            assert prompt.no_key is not None, shown["what"]
+        if "prompt" in shown:
+            assert [prompt.shape, prompt.yes_key, prompt.no_key] == shown["prompt"], shown["what"]
+    for shown in screens["not_dialogs"]:
+        assert read(shown["rows"]) is None, shown["what"]

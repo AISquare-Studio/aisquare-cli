@@ -693,6 +693,46 @@ def test_only_claude_code_is_told_to_keep_a_prompt_of_its_own_out_of_an_unwatche
     assert dict(codex.unattended_env()) == {}
 
 
+# --- the captain's reading of a Codex pane -------------------------------------------
+
+
+#: Each of Codex's recorded dialogs (tests/fixtures/agent_screens/codex.json) as its
+#: ``screen_prompt`` reads it: ``[shape, yes_key, no_key]``.
+CODEX_PROMPTS = {
+    "folder trust, asked in a git checkout no trust covers": ["trust", None, None],
+    "the hook review": ["dialog", None, None],
+    "the hook review, its highlight moved by a 2": ["dialog", None, None],
+    "Switch to gpt-6-luna, after a turn's Stop near the limit": ["dialog", None, None],
+    "Implement this plan?, after a Plan-mode turn's Stop": ["dialog", None, None],
+    "an approval view": ["chooser", "1", "Escape"],
+    "an approval view in a 60x8 pane, its second option chosen": ["chooser", "1", "Escape"],
+    "a question view (request_user_input, --no-alt-screen)": ["dialog", None, None],
+}
+
+
+def test_codexs_trust_dialog_is_the_owners_and_its_approval_a_chooser_on_1_and_esc() -> None:
+    """Measured on 0.162.1 (SCOPE #113 A1c): main's reader knew only Claude Code's shapes, so
+    the captain's paste at Codex's folder trust was not refused, and its Enter picked ``1.
+    Trust and continue``. Codex's own reader: the trust question is ``trust``, the approval a
+    chooser (``1. Yes, proceed``; Esc is No, as Remote's quick answers send), every other
+    dialog the owner's; a prompt redrawn with its highlight moved reads the same."""
+    screens = json.loads(
+        (Path(__file__).parent / "fixtures" / "agent_screens" / "codex.json").read_text("utf-8")
+    )
+    read = CODEX.capabilities.screen_prompt
+    assert read is not None
+    assert {shown["what"] for shown in screens["dialogs"]} == set(CODEX_PROMPTS)
+    wholes = {}
+    for shown in screens["dialogs"]:
+        prompt = read(shown["rows"])
+        assert prompt is not None
+        assert [prompt.shape, prompt.yes_key, prompt.no_key] == CODEX_PROMPTS[shown["what"]]
+        assert prompt.question == shown["words"] and "\u203a" not in prompt.whole
+        wholes[shown["what"]] = prompt.whole
+    moved = wholes["the hook review, its highlight moved by a 2"]
+    assert moved == wholes["the hook review"], "the highlight moved: the same prompt"
+
+
 def test_a_resumed_codex_thread_keeps_its_first_developer_instructions() -> None:
     """Measured on 0.162.1 (M4): ``codex exec resume <id> -c developer_instructions=Y`` kept
     the thread's first value and dropped Y, and a later resume without ``-c`` still carried

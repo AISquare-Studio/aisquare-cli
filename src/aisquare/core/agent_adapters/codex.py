@@ -26,6 +26,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionIntent,
     PluginInstall,
     SandboxWrites,
+    ScreenPrompt,
     SkillDirs,
     WriteScope,
     block_reply,
@@ -363,6 +364,48 @@ def dialog_on_screen(rows: Sequence[str]) -> str | None:
     above): ``Trust this folder? Codex can read, edit, and run files here, …``, ``Hooks need
     review 8 hooks are new or changed. …``, ``Approaching rate limits Switch to gpt-6-luna
     for lower credit usage?``, ``Implement this plan?``."""
+    found = _dialog(rows)
+    return found[0] if found is not None else None
+
+
+#: The question Codex's folder-trust dialog opens with, in a git checkout no trust covers.
+_TRUST_QUESTION = "Trust this folder?"
+#: The key hint of Codex's approval view alone (a command, an edit, a permission), whose
+#: options take their digit and Esc says No (0.162.1, measured under tmux).
+_APPROVAL_KEYS = re.compile(r"\bPress enter to confirm or esc to cancel\b")
+#: A dialog's option: its digit and its label, the chosen one behind U+203A.
+_OPTION = re.compile(r"\s*(?:\u203a )?(\d{1,2})\. (.*)")
+
+
+def screen_prompt(rows: Sequence[str]) -> ScreenPrompt | None:
+    """The prompt a dialog of Codex's own on ``rows`` shows (``AgentCapabilities.
+    screen_prompt``), read where :func:`dialog_on_screen` reads one; ``None`` with none up.
+
+    Measured on 0.162.1 under tmux: its folder-trust question (``Trust this folder?``) is
+    ``trust``, the owner's to answer. Its approval view (``Would you like to run the following
+    command?`` and the rest that end on ``Press enter to confirm or esc to cancel``) is a
+    ``chooser``: ``1. Yes, proceed (y)`` takes its digit (the first option that says Yes)
+    and Esc answers No (``3. No, and tell Codex what to do differently (esc)``), as Remote's
+    quick answers send them. Every other (the hook review, ``Switch to gpt-6-luna for lower
+    credit usage?``, ``Implement this plan?``, a question's view) is a ``dialog`` whose keys
+    are the owner's. ``whole`` is the dialog from its words down, the highlight dropped."""
+    found = _dialog(rows)
+    if found is None:
+        return None
+    words, region = found
+    whole = " ".join(" ".join(region).replace(_CHEVRON.strip(), " ").split())
+    if words.startswith(_TRUST_QUESTION):
+        return ScreenPrompt("trust", words, None, None, whole)
+    if _APPROVAL_KEYS.search(region[-1]):
+        options = [match for match in map(_OPTION.match, region) if match is not None]
+        yes = next((m.group(1) for m in options if m.group(2).startswith("Yes")), None)
+        return ScreenPrompt("chooser", words, yes, "Escape", whole)
+    return ScreenPrompt("dialog", words, None, None, whole)
+
+
+def _dialog(rows: Sequence[str]) -> tuple[str, list[str]] | None:
+    """A dialog of Codex's own on ``rows`` (:func:`dialog_on_screen`): its words, and its rows
+    from them down to its key hint, each stripped, blank rows dropped; ``None`` with none."""
     lines = [row.rstrip() for row in rows]
     while lines and not lines[-1].strip():
         lines.pop()
@@ -388,7 +431,7 @@ def dialog_on_screen(rows: Sequence[str]) -> str | None:
     while top >= 0 and lines[top].strip() and lines[top].startswith(" "):
         words.insert(0, lines[top].strip())
         top -= 1
-    return " ".join(words)
+    return " ".join(words), [line.strip() for line in lines[top + 1 :] if line.strip()]
 
 
 def _past(
@@ -456,6 +499,7 @@ class CodexAdapter:
         idle_on_screen=idle_on_screen,
         one_press_exits=frozenset({"C-c", "C-d"}),
         dialog_on_screen=dialog_on_screen,
+        screen_prompt=screen_prompt,
         fleet_settings=(
             "notice.hide_rate_limit_model_nudge=true",
             "check_for_update_on_startup=false",

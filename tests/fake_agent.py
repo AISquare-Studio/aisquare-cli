@@ -46,6 +46,7 @@ from aisquare.core.agent_adapters.types import (
     NativeChoice,
     PermissionIntent,
     SandboxWrites,
+    ScreenPrompt,
     SkillDirs,
     WriteScope,
     config_home,
@@ -191,6 +192,15 @@ def dialog_on_screen(rows: Sequence[str]) -> str | None:
     return asked[-1] if asked else ""
 
 
+def screen_prompt(rows: Sequence[str]) -> ScreenPrompt | None:
+    """Its dialogs, as :func:`dialog_on_screen` reads them, each a yes/no on ``y`` and ``n``."""
+    asked = dialog_on_screen(rows)
+    if asked is None:
+        return None
+    whole = " ".join(row.strip() for row in rows if row.strip().startswith(("?? ", "(y/n)")))
+    return ScreenPrompt("yn", asked or "(y/n)", "y", "n", whole)
+
+
 class FakeTrust:
     """Its folder trust: ``trusted.json`` in the home, ``{"yes": [...], "no": [...]}``. A yes
     records the folder itself and covers that folder alone, its repository root nothing:
@@ -315,6 +325,7 @@ class FakeAgentAdapter:
         # empty prompt is not read off its screen, so Remote asks before every Ctrl-D.
         one_press_exits=frozenset({"C-d"}),
         dialog_on_screen=dialog_on_screen,
+        screen_prompt=screen_prompt,
         value_options=frozenset(
             {
                 "--model",

@@ -6,6 +6,7 @@ from types import MappingProxyType
 from typing import Any
 
 from aisquare.core import harness, paths
+from aisquare.core.agent_adapters.claude_screen import prompt_showing
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
@@ -119,6 +120,7 @@ class ClaudeCodeAdapter:
         reads_pane_readiness=True,
         starts_at_its_prompt=True,
         start_dialog_mark="Enter to confirm",
+        screen_prompt=prompt_showing,
         resumes_across_homes=True,
         pid_env="CLAUDE_PID",
         exports_home_env=False,

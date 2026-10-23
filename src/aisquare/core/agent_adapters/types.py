@@ -44,6 +44,32 @@ class HookSpec:
     matcher: str | None = None
 
 
+ScreenShape = Literal["trust", "chooser", "yn", "dialog"]
+
+
+@dataclass(frozen=True)
+class ScreenPrompt:
+    """A prompt at the bottom of the agent's screen, and the keys that answer it
+    (``AgentCapabilities.screen_prompt``): what the captain's press and paste ask of a pane
+    before a key or a line goes into it."""
+
+    shape: ScreenShape
+    """``chooser`` (a numbered menu: its yes is the digit of its first option that says Yes,
+    never a blind ``1``), ``yn`` (a ``[y/N]`` line), ``trust`` (the agent's folder-trust
+    question: trusting a folder is the owner's, so no keys) or ``dialog`` (any other of the
+    agent's own, whose keys mean something new each time: the owner's too, no keys)."""
+    question: str
+    yes_key: str | None
+    """The tmux key that answers yes; ``None`` where none may (``trust``, ``dialog``) or the
+    options hold no Yes."""
+    no_key: str | None
+    whole: str
+    """Everything the prompt shows (what its question is about, the question, the options,
+    the key hint) as one line, whitespace collapsed and the highlight dropped: the same
+    prompt redrawn (the highlight moved, the pane resized) reads the same, and the next one,
+    asking the same about another command, does not."""
+
+
 #: The ``aisquare hook`` subcommand any adapter can install: ``event --agent <id> --event
 #: <native event>`` (:func:`hook_args`), decoded by that adapter.
 GENERIC_HOOK = "event"
@@ -234,6 +260,14 @@ class AgentCapabilities:
     shows (``services.remote_needs._needs_screen_dialog_item``). ``None`` here for an agent
     whose dialogs each reach the board through a hook (Claude Code's ``Notification``): its
     screen is not read for one."""
+    screen_prompt: Callable[[Sequence[str]], ScreenPrompt | None] | None = None
+    """The prompt at the bottom of the agent's screen (its visible rows, as ``capture-pane``
+    gives them), read by its structure, or ``None`` for a screen with none
+    (:class:`ScreenPrompt`): what the captain asks of the pane's own agent before it presses
+    a key there (``press yes`` sends ``yes_key``) or pastes a line (refused at a ``trust``
+    prompt, whose answer is the owner's). Claude Code's input box, chooser and trust dialog
+    (``claude_screen.prompt_showing``); Codex's dialogs as ``dialog_on_screen`` reads them,
+    its approval a chooser. ``None`` here for an agent whose screen is not read for one."""
     legacy_fleet_args: bool = False
     """``fleet.roles.<role>.extra_args`` and ``permission_mode`` are in this agent's
     vocabulary (they predate adapters and are Claude Code's); another agent takes only

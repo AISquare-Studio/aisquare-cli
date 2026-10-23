@@ -1,0 +1,245 @@
+{
+  "about": "Claude Code's screens (capture-pane -p -J), from main's tests/captain_screens.py and tests/screens/: runner2's captures of a real Claude Code 2.1.282 (board 13265, PR #224) and the shapes the captain's reader is pinned on. Each dialog's prompt is [shape, yes_key, no_key] as capabilities.screen_prompt reads it; on its permission chooser and trust dialog the letter y does nothing, the digit 1 (Yes) does.",
+  "dialogs": [
+    {
+      "what": "the real permission chooser",
+      "rows": [
+        "❯ Create a file named probe2.txt in this folder containing the word again",
+        "",
+        " Do you want to create probe2.txt?",
+        " ❯ 1. Yes",
+        "   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)",
+        "   3. No",
+        "",
+        " Esc to cancel · Tab to amend"
+      ],
+      "prompt": [
+        "chooser",
+        "1",
+        "Escape"
+      ]
+    },
+    {
+      "what": "the real trust dialog",
+      "rows": [
+        " Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source",
+        " ❯ No, exit",
+        "   Yes, I trust this folder",
+        "",
+        " Enter to confirm · Esc to cancel"
+      ],
+      "prompt": [
+        "trust",
+        null,
+        null
+      ]
+    },
+    {
+      "what": "a [y/N] line",
+      "rows": [
+        "Installing 3 packages.",
+        "Proceed? [y/N] "
+      ],
+      "prompt": [
+        "yn",
+        "y",
+        "n"
+      ]
+    },
+    {
+      "what": "a chooser whose first option is No",
+      "rows": [
+        " Allow this?",
+        " ❯ 1. No",
+        "   2. Yes",
+        " Esc to cancel"
+      ],
+      "prompt": [
+        "chooser",
+        "2",
+        "Escape"
+      ]
+    }
+  ],
+  "not_dialogs": [
+    {
+      "what": "a real idle pane, its finished turn's line above the box",
+      "rows": [
+        "● Created probe2.txt in the working directory containing the word again.",
+        "✻ Cooked for 5s · done 10:17 AM",
+        "───────────────────────────────────────────────────────────────────────────────────────────────────────── screen-coder ─",
+        "❯ ",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ⏸ manual mode on · ? for shortcuts · ← for agents"
+      ]
+    },
+    {
+      "what": "a real idle box after the first Stop, its top rule named",
+      "rows": [
+        "",
+        " ▐▛███▛█   Claude Code v2.1.282                             ",
+        "▝▜██████▀  Fable 5.1 · Claude Team                          ",
+        " ▝▝   ▝▝   ~/…/-home-work-work-aisquare-cli/932fe5e9-3582-42ad-a393-3176c1e81203/scratchpad/fixture/proj-a              ",
+        "",
+        "",
+        "❯ Without using any tools, write the numbers one to fifteen in words, one per line, slowly, then the word done          ",
+        "",
+        "● one                         ",
+        "  two                         ",
+        "  three                       ",
+        "  four                        ",
+        "  five                        ",
+        "  six                         ",
+        "  seven                       ",
+        "  eight                       ",
+        "  nine                        ",
+        "  ten                         ",
+        "  eleven                      ",
+        "  twelve                      ",
+        "  thirteen                    ",
+        "  fourteen                    ",
+        "  fifteen                     ",
+        "  done                        ",
+        "",
+        "✻ Baked for 2s · done 1:34 PM ",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "                                                                                                      ● high · /effort  ",
+        "───────────────────────────────────────────────────────────────────────────────────────────────────────── screen-coder ─",
+        "❯                                                                                                                       ",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ⏸ manual mode on · ? for shortcuts · ← for agents         ",
+        ""
+      ]
+    },
+    {
+      "what": "a real box drawn mid-turn, its top rule named",
+      "rows": [
+        "",
+        " ▐▛███▛█   Claude Code v2.1.282                             ",
+        "▝▜██████▀  Fable 5.1 · Claude Team                          ",
+        " ▝▝   ▝▝   ~/…/-home-work-work-aisquare-cli/932fe5e9-3582-42ad-a393-3176c1e81203/scratchpad/fixture/proj-a              ",
+        "",
+        "",
+        "❯ Without using any tools, write the numbers one to fifteen in words, one per line, slowly, then the word done          ",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "✽ Sautéing… (running UserPromptSubmit hook · 0s)            ",
+        "                                                                                                      ● high · /effort  ",
+        "───────────────────────────────────────────────────────────────────────────────────────────────────────── screen-coder ─",
+        "❯                                                                                                                       ",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ⏸ manual mode on · esc to interrupt · ← for agents        ",
+        ""
+      ]
+    },
+    {
+      "what": "a chooser quoted above the box",
+      "rows": [
+        "● coder-2 is stuck at this prompt:",
+        "  Do you want to create probe2.txt?",
+        "  ❯ 1. Yes",
+        "    2. No",
+        "  Esc to cancel · Tab to amend",
+        "───────────────────────────────────────────────────────────────────────────────────────────────────────── screen-coder ─",
+        "❯ ",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ⏸ manual mode on · ? for shortcuts"
+      ]
+    },
+    {
+      "what": "a box whose footer names Esc",
+      "rows": [
+        "● coder-2 is stuck at this prompt:",
+        "  Do you want to create probe2.txt?",
+        "  ❯ 1. Yes",
+        "    2. No",
+        "  Esc to cancel · Tab to amend",
+        "───────────────────────────────────────────────────────────────────────────────────────────────────────── screen-coder ─",
+        "❯ ",
+        "────────────────────────────────────────────────────────────────────────────────────────────────────",
+        "  ⏸ manual mode on · Esc to cancel a draft"
+      ]
+    },
+    {
+      "what": "a highlighted list mid-turn, no footer",
+      "rows": [
+        "Here are the options:",
+        " ❯ 1. Yes",
+        "   2. No",
+        "✻ Thinking… (esc to interrupt)"
+      ]
+    },
+    {
+      "what": "a working pane quoting dialog words",
+      "rows": [
+        "Reading coder-1's pane: ❯ 1. Yes / Esc to cancel",
+        "· Thinking…"
+      ]
+    },
+    {
+      "what": "the trust sentence quoted mid-turn, no footer",
+      "rows": [
+        "The owner must choose Yes, I trust this folder in the captain's own window.",
+        "✻ Thinking… (esc to interrupt)"
+      ]
+    },
+    {
+      "what": "the session-rating survey above the box: no prompt to answer (the captain's say refuses it by claude_screen.modal_showing; unattended_env keeps it out)",
+      "rows": [
+        "How is Claude doing this session? (optional)",
+        "1: Bad  2: Fine  3: Good  0: Dismiss",
+        "────────────────────────────────────────────────── captain ─",
+        "❯ ",
+        "────────────────────────────────────────────────────────────",
+        "  ⏵⏵ accept edits on (shift+tab to cycle)"
+      ]
+    },
+    {
+      "what": "a model picker: no prompt to answer (say refuses it by modal_showing)",
+      "rows": [
+        "Select a model",
+        "Enter to confirm · Esc to cancel"
+      ]
+    },
+    {
+      "what": "a shell",
+      "rows": [
+        "$ ",
+        "ready"
+      ]
+    }
+  ]
+}

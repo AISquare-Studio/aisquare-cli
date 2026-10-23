@@ -28,11 +28,13 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import threading
-from collections.abc import Callable, Mapping
+import time
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, TypeVar
 
 from aisquare.core import paths
 from aisquare.core.atomic import write_replacing
@@ -71,6 +73,13 @@ CHECK_SECONDS = 10.0
 """How long Settings' *Save* waits for ngrok to say whether it takes a token."""
 SDK_MISSING = "ngrok is missing from this install, so a phone cannot reach Remote yet"
 """Why there is no tunnel in an install the SDK cannot be imported from (a damaged one)."""
+RECONNECT_SECONDS = 20.0
+"""How long a session ngrok's service let go may keep failing to sign in again before the
+tunnel ends, for the watchdog to start a new one (:meth:`SdkTunnel._disconnected`)."""
+SESSION_LOST = "ngrok lost its session and could not sign in again — Remote starts it again"
+"""What a tunnel says that ended so: the new one's sign-in says why, ngrok's code with it."""
+
+_T = TypeVar("_T")
 
 
 # --- the SDK ------------------------------------------------------------------------------
@@ -91,6 +100,12 @@ def error_code(exc: BaseException) -> str | None:
         if isinstance(arg, str) and arg.startswith("ERR_NGROK_"):
             return arg
     return None
+
+
+def code_in(said: str) -> str | None:
+    """The ``ERR_NGROK_<n>`` a sentence of ngrok's names, if any."""
+    found = re.search(r"\bERR_NGROK_\d+\b", said)
+    return found.group(0) if found else None
 
 
 def failure_sentence(exc: BaseException, token: str) -> str:
@@ -211,7 +226,7 @@ class SdkTunnel:
 
     :meth:`start_tunnel` signs in and opens the tunnel on a thread of its own, which runs an
     event loop for the SDK until :meth:`stop_tunnel`; the URL is announced from there.
-    ``module`` and ``token`` are seams: tests hand a fake SDK.
+    ``module``, ``token`` and ``ticks`` (the monotonic clock) are seams: tests hand a fake SDK.
     """
 
     api_warning: str | None = None
@@ -223,10 +238,14 @@ class SdkTunnel:
         *,
         module: Callable[[], ModuleType | None] = sdk,
         token: Callable[[], str | None] = find_authtoken,
+        ticks: Callable[[], float] = time.monotonic,
     ) -> None:
         self.port = port
         self._module = module
         self._token = token
+        self._ticks = ticks
+        self._lost_at: float | None = None
+        """When ngrok's service let this session go, while the SDK signs in again."""
         self.public_url: str | None = None
         self.error: str | None = None
         self.on_announce: Callable[[str], None] | None = None
@@ -268,21 +287,81 @@ class SdkTunnel:
         self._loop, self._stop = asyncio.get_running_loop(), asyncio.Event()
         if self._stopping.is_set():
             return
-        session = await asyncio.wait_for(
-            module.SessionBuilder().authtoken(token).connect(), CONNECT_SECONDS
+        builder = module.SessionBuilder().authtoken(token)
+        builder = builder.handle_disconnection(self._disconnected)
+        session = await self._unless_stopped(
+            asyncio.wait_for(builder.connect(), CONNECT_SECONDS), self._stop
         )
+        if session is None:
+            return
         try:
+            if self._stopping.is_set():
+                return
             endpoint = session.http_endpoint()
             if self.static_host:
                 endpoint = endpoint.domain(self.static_host)
-            listener = await endpoint.listen_and_forward(f"http://{UPSTREAM_HOST}:{self.port}")
-            if self._stopping.is_set():
+            listener = await self._unless_stopped(
+                endpoint.listen_and_forward(f"http://{UPSTREAM_HOST}:{self.port}"), self._stop
+            )
+            if listener is None or self._stopping.is_set():
                 return
             self._announce(str(listener.url()))
             await self._stop.wait()
         finally:
             with contextlib.suppress(Exception):
                 await session.close()
+
+    @staticmethod
+    async def _unless_stopped(step: Awaitable[_T], stop: asyncio.Event) -> _T | None:
+        """``step``'s result, or ``None`` once :meth:`stop_tunnel` asked before it ended: the
+        step is cancelled then, which ends the SDK's sign-in (its socket closed). A stop during
+        the ≤20 s connect was waited for only until :data:`~ngrok_tunnel.STOP_SECONDS`, and the
+        sign-in went on, then bound the endpoint (the static domain) a moment: a quick off and
+        on met it (ERR_NGROK_108, the domain in use; review of #274, m2)."""
+        doing = asyncio.ensure_future(step)
+        stopped = asyncio.ensure_future(stop.wait())
+        try:
+            await asyncio.wait((doing, stopped), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stopped.cancel()
+        if doing.done():
+            return doing.result()
+        doing.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await doing
+        return None
+
+    def _disconnected(self, addr: str, said: str) -> None:
+        """ngrok's service let the session go (the SDK's disconnection handler, on its thread).
+
+        The SDK signs in again by itself, which outlasts a network that drops for a moment,
+        but a sign-in the service refuses (a token reset on the dashboard meanwhile) is
+        retried for ever, further apart each time, with the old token: the thread lived on,
+        ``running``, so the watchdog never started a new tunnel, and nothing said why the
+        link was dead (review of #274, m1). So the tunnel ends, for the watchdog to start a
+        new one with the token there is now, whose sign-in says why (:data:`BAD_TOKEN`): at
+        once for a sentence that names a token ngrok will not take, else once signing in
+        again has failed for :data:`RECONNECT_SECONDS`. ``said`` is the SDK's sentence for
+        why the last connection ended: for a sign-in again that failed, only "reconnect
+        error", without ngrok's code.
+        """
+        now = self._ticks()
+        if code_in(said) in TOKEN_CODES:
+            why = BAD_TOKEN
+        elif self._lost_at is None or said != "reconnect error":
+            self._lost_at = now  # the session dropped: the SDK signs in again
+            return
+        elif now - self._lost_at < RECONNECT_SECONDS:
+            return
+        else:
+            why = SESSION_LOST
+        with self._lock:
+            if self.error is None and not self._stopping.is_set():
+                self.error = why
+        loop, stop = self._loop, self._stop
+        if loop is not None and stop is not None:
+            with contextlib.suppress(RuntimeError):  # its loop has ended already
+                loop.call_soon_threadsafe(stop.set)
 
     def _announce(self, url: str) -> None:
         with self._lock:

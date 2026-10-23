@@ -236,6 +236,8 @@ class RemoteController:
         self.state = state if state is not None else load_remote_state()
         self.info: remote_server.RemoteInfo | None = None
         self.tunnel: Tunnel | None = None
+        self._last_tunnel_error: str | None = None
+        """What the last Remote's tunnel said as it was turned off (:meth:`tunnel_error`)."""
         self.public_origin: str | None = None
         """``https://<ngrok-host>`` once the tunnel announced itself; the link is that and the
         token ``remote.json`` holds now (:meth:`remote_link`)."""
@@ -615,6 +617,8 @@ class RemoteController:
             if serving is not None and self.info is not serving:
                 return False  # turned off, or on again, since: that one is not this to stop
             served, tunnel = self.info is not None, self.tunnel
+            if tunnel is not None:
+                self._last_tunnel_error = tunnel.error
             self.info = None
             self.tunnel = None
             self.public_origin = None
@@ -1118,6 +1122,24 @@ class RemoteController:
         )
         return "\n".join(line for line in lines if line)
 
+    def tunnel_error(self) -> str | None:
+        """Why this Remote's tunnel ended or never started, as it says (``Tunnel.error``), or,
+        while Remote is off, why the last one's did as it was turned off; ``None`` from a token
+        saved since (:meth:`token_saved`). Settings → Remote offers the token field on it (a
+        token ngrok refused, none at all), on as off (review of #274, F-1): off, the status
+        line said nothing of it any more, and the field showed only while there was no token
+        at all."""
+        tunnel = self.tunnel
+        return tunnel.error if tunnel is not None else self._last_tunnel_error
+
+    def token_saved(self) -> bool:
+        """A new ngrok token was saved in Settings → Remote: what the last tunnel said of the
+        old one is forgotten, and a tunnel of this Remote's that is not up starts again now,
+        signed in with the new one (:meth:`revive_tunnel_if_dead`, which leaves one that ended
+        for want of a token to its error, and waits for its minute); whether one started."""
+        self._last_tunnel_error = None
+        return self.revive_tunnel_if_dead(retry=True)
+
     def served_elsewhere(self) -> bool:
         """Whether another process serves Remote from this home (``asq remote serve``, another
         fleet UI), as last found; ``False`` while this one serves.
@@ -1336,8 +1358,9 @@ class RemoteController:
     """The tunnel a start could not start (no ngrok on PATH, a spawn that failed): its first
     start is the watchdog's, and says so, since it never stopped."""
 
-    def revive_tunnel_if_dead(self) -> bool:
+    def revive_tunnel_if_dead(self, *, retry: bool = False) -> bool:
         """Start ngrok again when it died under a Remote that is still on; ``True`` when it did.
+        ``retry``: a new token was saved (:meth:`token_saved`), so at once, whatever it died of.
 
         The app runs this every 30 s. Without it, a tunnel that died in the night
         left the server up and unreachable, and the phone's link dead until
@@ -1365,13 +1388,18 @@ class RemoteController:
         if not self.running or dead is None or dead.running:
             return False
         if (
-            dead is not self._revived_tunnel
+            not retry
+            and dead is not self._revived_tunnel
             and dead.public_url is None
             and dead.error in LASTING_TUNNEL_ERRORS
         ):
             return False
         now = self._ticks()
-        if self._revived_at is not None and now - self._revived_at < self.REVIVE_SECONDS:
+        if (
+            not retry
+            and self._revived_at is not None
+            and now - self._revived_at < self.REVIVE_SECONDS
+        ):
             return False
         self._revived_at = now
         tunnel = self._watched_tunnel()
@@ -1388,7 +1416,7 @@ class RemoteController:
                 self._origin_before_revive = self.public_origin
             self.tunnel = self._revived_tunnel = tunnel
             self.public_origin = None  # the modal shows the local link until ngrok announces one
-            if dead is self._unstarted:  # it never ran: nothing stopped
+            if dead is self._unstarted or retry:  # it never ran, or a new token: nothing stopped
                 self.message = STARTING_NGROK
             else:
                 self.message = "ngrok stopped — restarting it…"

@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -30,18 +32,27 @@ from textual.widgets._collapsible import CollapsibleTitle
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import SettingsRow
+from aisquare.cli.ui.views import settings_remote
 from aisquare.cli.ui.views.remote import LOCAL_ONLY, RemotePanel, qr_text
 from aisquare.cli.ui.views.settings_remote import (
     AUTHTOKEN_FROM,
+    ENV_TOKEN,
     NGROK_MISSING,
+    REPLACE_TITLE,
     TOKEN_TITLE,
     RemoteChip,
     RemoteSection,
     has_authtoken,
 )
 from aisquare.services import remote_server
-from aisquare.services.ngrok_sdk import REFUSED_TOKEN, bundled_ngrok, saved_token
-from aisquare.services.ngrok_tunnel import NgrokTunnel, build_public_url
+from aisquare.services.ngrok_sdk import (
+    BAD_TOKEN,
+    REFUSED_TOKEN,
+    bundled_ngrok,
+    save_token,
+    saved_token,
+)
+from aisquare.services.ngrok_tunnel import AUTHTOKEN_HINT, NgrokTunnel, build_public_url
 from tests.fake_clipboard import NEEDS_POSIX
 from tests.fake_ngrok_sdk import Script, fake_sdk
 from tests.test_remote_control import FakeTunnel
@@ -249,6 +260,160 @@ def test_a_token_ngrok_refuses_is_said_beside_the_field_without_the_token(
     assert token not in first and slot
     assert saved_token() is None, "a token ngrok refuses is not kept"
     assert spaced == "that is not one token: it has spaces in it"
+
+
+OLD_TOKEN = "2oldTOKEN_0123456789abcdefghijklmnopqrstuvwxy"
+NEW_TOKEN = "2newTOKEN_9876543210zyxwvutsrqponmlkjihgfedcb"
+
+
+async def until(pilot: Pilot[None], done: Callable[[], bool], *, what: str) -> None:
+    """Pause until ``done()`` holds: ngrok's answer comes on a thread of its own."""
+    for _ in range(500):
+        if done():
+            return
+        await pilot.pause(0.01)
+    raise AssertionError(f"never: {what}")
+
+
+def slot_seen(section: RemoteSection) -> tuple[bool, str, bool]:
+    """The token field shown, its title, and the ``NGROK_AUTHTOKEN`` line shown."""
+    return (
+        displayed(section, "#settings-remote-token-field"),
+        shown(section.query_one("#settings-remote-token-title", Static)),
+        displayed(section, "#settings-remote-token-env"),
+    )
+
+
+@NEEDS_POSIX
+def test_a_saved_token_ngrok_refuses_can_be_replaced_on_and_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #274, F-1: ngrok refused the saved token, and Remote said to paste a new one
+    in Settings → Remote, whose field showed only while there was no token at all: on, it
+    was not there, and off, the line saying why was gone too. It shows on and off as *Replace
+    your ngrok token*, and a new one saved and turned on signs in with it."""
+    script = bundled_ngrok_with(tmp_path, monkeypatch)
+    save_token(OLD_TOKEN)
+
+    async def go(pilot: Pilot[None]) -> dict[str, Any]:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        section = await opened(pilot)
+        seen: dict[str, Any] = {"before": slot_seen(section)[0]}
+        script.refuse = "ERR_NGROK_107"  # reset on ngrok's dashboard since it was saved
+        section.query_one("#settings-remote-turn-on", Button).press()
+        await written(pilot)
+        await until(pilot, lambda: app.remote.status_line() == BAD_TOKEN, what="ngrok refused")
+        section.repaint()
+        seen["on"] = slot_seen(section)
+        section.query_one("#settings-remote-turn-off", Button).press()
+        await pilot.pause()
+        assert app.remote.wait_until_off(10)
+        section.repaint()
+        await settle_page(app)  # the look again, back at Off
+        seen["off"] = (*slot_seen(section), displayed(section, "#settings-remote-turn-on"))
+        script.refuse = None
+        await paste(pilot, section, NEW_TOKEN)
+        seen["saved"] = slot_seen(section)[0]
+        section.query_one("#settings-remote-turn-on", Button).press()
+        await written(pilot)
+        await until(pilot, lambda: app.remote.public_origin is not None, what="signed in")
+        return seen
+
+    seen = drive(go, tunnel=bundled_ngrok)
+    assert seen["before"] is False, "a token ngrok took asks for nothing"
+    assert seen["on"] == (True, REPLACE_TITLE, False)
+    assert seen["off"] == (True, REPLACE_TITLE, False, True), "Replace, and Turn on"
+    assert seen["saved"] is False
+    assert saved_token() == NEW_TOKEN
+    assert script.calls.tokens == [OLD_TOKEN, NEW_TOKEN, NEW_TOKEN], "on, Save's check, on"
+
+
+@NEEDS_POSIX
+def test_a_remote_turned_on_with_no_token_shows_the_field_and_a_save_brings_ngrok_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turned on with ``R`` and no token anywhere, Remote said to paste one in Settings →
+    Remote, which showed its On view with no field. The field is there, and the token saved
+    starts the tunnel at once, with no off and on (``RemoteController.token_saved``)."""
+    script = bundled_ngrok_with(tmp_path, monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, tuple[bool, str, bool], bool]:
+        app = pilot.app
+        assert isinstance(app, FleetApp)
+        app.remote.turn_on(wait=False)  # what R's switch does
+        await written(pilot)
+        said = app.remote.status_line()
+        section = await opened(pilot)
+        on, slot = displayed(section, "#settings-remote-on"), slot_seen(section)
+        await paste(pilot, section, NEW_TOKEN)
+        await until(pilot, lambda: app.remote.public_origin is not None, what="ngrok up")
+        section.repaint()
+        return said, on, slot, slot_seen(section)[0]
+
+    said, on, slot, after = drive(go, tunnel=bundled_ngrok)
+    assert said == AUTHTOKEN_HINT
+    assert on and slot == (True, TOKEN_TITLE, False)
+    assert script.calls.tokens == [NEW_TOKEN, NEW_TOKEN], "Save's check, then the sign-in"
+    assert not after
+
+
+@NEEDS_POSIX
+@pytest.mark.parametrize("environment", [False, True], ids=["saved", "NGROK_AUTHTOKEN"])
+def test_change_ngrok_token_under_advanced_opens_the_field_and_says_when_the_env_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environment: bool
+) -> None:
+    bundled_ngrok_with(tmp_path, monkeypatch)
+    save_token(OLD_TOKEN)
+    if environment:
+        monkeypatch.setenv("NGROK_AUTHTOKEN", "2envTOKEN_0123456789")
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, tuple[bool, str, bool], str, bool]:
+        section = await opened(pilot)
+        before = slot_seen(section)[0]
+        section.query_one("#settings-remote-advanced", Collapsible).collapsed = False
+        await pilot.pause()
+        section.query_one("#settings-remote-change-token", Button).press()
+        await pilot.pause()
+        opened_up = slot_seen(section)
+        env_line = shown(section.query_one("#settings-remote-token-env", Static))
+        await paste(pilot, section, NEW_TOKEN)
+        return before, opened_up, env_line, slot_seen(section)[0]
+
+    before, opened_up, env_line, after = drive(go, tunnel=missing_ngrok)
+    assert not before
+    assert opened_up == (True, REPLACE_TITLE, environment)
+    assert env_line == ENV_TOKEN
+    assert saved_token() == NEW_TOKEN and not after
+
+
+def test_what_remote_needs_is_looked_at_off_the_ui_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #274, m6: Settings' first open, and each turn-off, imported ngrok's native
+    library and parsed ngrok's configs on Textual's thread. A thread worker looks now."""
+    bundled_ngrok_with(tmp_path, monkeypatch)
+    looked_on: list[int] = []
+    found, token = settings_remote.ngrok_found, settings_remote.has_authtoken
+
+    def ngrok_found() -> bool:
+        looked_on.append(threading.get_ident())
+        return found()
+
+    def has_authtoken() -> bool:
+        looked_on.append(threading.get_ident())
+        return token()
+
+    monkeypatch.setattr(settings_remote, "ngrok_found", ngrok_found)
+    monkeypatch.setattr(settings_remote, "has_authtoken", has_authtoken)
+
+    async def go(pilot: Pilot[None]) -> tuple[int, bool]:
+        section = await opened(pilot)
+        return threading.get_ident(), displayed(section, "#settings-remote-token-field")
+
+    ui, field = drive(go, tunnel=missing_ngrok)
+    assert len(looked_on) == 2 and ui not in looked_on, (ui, looked_on)
+    assert field, "its answer painted: no token, so the field"
 
 
 def test_a_missing_ngrok_is_one_line_with_a_fix_in_the_app_never_a_command(

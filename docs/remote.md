@@ -71,12 +71,19 @@ for your ngrok token instead: paste the one from
 https://dashboard.ngrok.com/get-started/your-authtoken (a free account has one)
 and Save. ngrok is asked whether it takes the token; one it refuses is said
 beside the field, in plain words, and not kept. A kept one is never shown again.
+If ngrok later refuses the token Remote signed in with (one reset on ngrok's
+dashboard, say), or Remote was turned on with none, the field comes back, on or
+off, as *Replace your ngrok token*; *Change ngrok token* under *Advanced* opens it
+at any time. A token saved while Remote is on starts ngrok again at once. While
+`NGROK_AUTHTOKEN` is set, ngrok signs in with it rather than with a token saved
+here, and a line under the field says so.
 Only a damaged install, without the bundled ngrok, says so in one line, with
 *Check again*. On, the section
 shows the link, copies it by itself once ngrok's link arrives (a toast says so),
 and shows a Copy button, the QR code, the passphrase and *Turn off*. *Advanced*,
-folded until clicked, has the rest of the panel's controls: a new passphrase,
-the write switch, auto-off and the connected devices with Revoke. It is the same
+folded until clicked, has *Change ngrok token* and the rest of the panel's
+controls: a new passphrase, the write switch, auto-off and the connected devices
+with Revoke. It is the same
 Remote as the `R` panel's below, and while it is on the sidebar shows
 `📡 remote · N devices`, which opens the panel.
 
@@ -91,7 +98,9 @@ ngrok that has not let go of it yet, say); not a Remote's first ngrok that
 stopped for want of a token, or for one ngrok refused, which the panel says how to
 fix. A restart that stopped so is tried each minute all the same: a token pasted
 again while Remote is on brings the phones back with no off and on, which would
-sign every one out. An ngrok missing when Remote came on is looked
+sign every one out. The bundled ngrok signs in again by itself after the network
+drops; a session it cannot sign in again within 20 seconds (a token reset meanwhile)
+ends, and the restart says why. An ngrok missing when Remote came on is looked
 for each minute too, so one installed meanwhile starts within the minute. A link
 ngrok announces late (a network still coming up) is shown, and used for
 notifications, as soon as it comes. A Remote that was on when the UI last

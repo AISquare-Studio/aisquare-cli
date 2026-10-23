@@ -251,6 +251,38 @@ def test_a_large_transcript_streams_in_bounded_memory(tmp_path: Path) -> None:
     assert peak < 4_000_000, f"read {path.stat().st_size} bytes holding {peak} at once"
 
 
+@pytest.mark.parametrize(
+    ("command", "reads"),
+    [
+        ("aisquare board --as x", True),
+        ("aisquare team log --since-seq 5", True),  # the board pipe, a manager's main read
+        ("aisquare --json team log", True),
+        ("aisquare team status", True),
+        ("aisquare team signals", True),
+        ("aisquare task next --status review --as x", True),  # a read without --claim
+        ("aisquare --json task show 3 | jq .status", True),
+        ("aisquare task list && aisquare board", True),
+        ("cd /r && aisquare board", True),
+        ("aisquare board 2>/dev/null | head -40", True),
+        ("asq fleet ls", True),
+        ("/srv/.venv/bin/aisquare fleet status", True),
+        ("aisquare log", False),  # the PROMPT log, not the board
+        ("aisquare team show", False),  # no such command
+        ("aisquare task next --role coder --claim --as x", False),
+        ("aisquare note 'merged #12'", False),
+        ("aisquare task list && aisquare note x", False),
+        ("aisquare board > board.txt", False),
+        ("aisquare task done 1", False),
+        ("cd /r", False),
+        ("git status", False),
+    ],
+)
+def test_a_board_read_is_what_the_fleet_reads_the_board_with(command: str, reads: bool) -> None:
+    """Review of #319: the rule behind every no-action wake missed `team log`, `task next`
+    and reads behind a `cd`, and took the prompt log for the board."""
+    assert token_ledger.is_board_read(command) is reads
+
+
 def test_latest_context_reads_the_last_request_from_the_tail(tmp_path: Path) -> None:
     path = _fixture(tmp_path / "t.jsonl")
     assert transcripts.latest_context_tokens(path) == 2001  # not the synthetic zeros after it

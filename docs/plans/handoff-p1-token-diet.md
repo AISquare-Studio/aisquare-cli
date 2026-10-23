@@ -101,7 +101,9 @@ The counts keep the order. Measured on 106 requests and 5,666,363 input tokens
   under `-p`. Over these 106 requests that is about 0.75M–1.8M tokens, 13–32% of the
   run's input. It is still the largest per-request saving: High.
 - **WS-2:** the manager took 4 wakes. They cost 346,949 input tokens, 17% of the
-  manager's 2.01M, and 2 of the 4 took no action. 20 delta blocks (21,723 characters)
+  manager's 2.01M, and 2 of the 4 took no action. Two made no tool call at all; the
+  other two each ran `fleet tell`, a write. That holds under the board-read rule as
+  fixed in review (`team log`, `task next` without `--claim`, a read behind `cd`). 20 delta blocks (21,723 characters)
   were carried for 311,384 characters across later requests. High.
 - **WS-3:** this fixture's skeleton is 715 tokens, below the read-first limit, so it
   cost nothing here, by design. It stays Medium: none on small repos, severe on large
@@ -217,6 +219,13 @@ lands, a PR may use a throwaway script that applies the same definitions.
     a note, because the board read the idle manager as `working` (#123, P0).
   - Ledger: `aisquare --json metrics tokens --all` over that home, counts only, is
     attached to the WS-0 PR. The store's `continuations:` key agrees with its 4 wakes.
+  - **Known gaps; do not compare against this run for them:**
+    - No request came after a gap longer than the cache TTL, so it shows no
+      cache-expiry wake.
+    - It has no compaction, so it is not a baseline for WS-4's quiet-point compaction
+      or its context sawtooth.
+    - WS-4 measures against the full run, or a manager run of its own long enough to
+      compact.
 
 ---
 

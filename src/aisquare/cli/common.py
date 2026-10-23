@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import errno
 import json
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -801,6 +802,22 @@ def emit_metrics_summary(summary: MetricsSummary) -> None:
 
 def _counts(bucket: dict[str, int]) -> str:
     return ", ".join(f"{key} {count}" for key, count in sorted(bucket.items()))
+
+
+def parse_since(value: str) -> datetime:
+    """``--since`` accepts a relative span (15m, 2h, 3d) or an ISO timestamp."""
+    span = re.fullmatch(r"(\d+)([smhd])", value.strip())
+    if span:
+        unit = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}[span.group(2)]
+        return datetime.now(tz=UTC) - timedelta(**{unit: int(span.group(1))})
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        raise typer.BadParameter(
+            f"{value!r} is neither a span (15m, 2h) nor an ISO timestamp"
+        ) from None
+    # A naive timestamp means the user's local clock.
+    return moment if moment.tzinfo is not None else moment.astimezone()
 
 
 def emit_token_ledger(rows: list[SessionLedger], summed: SessionLedger) -> None:

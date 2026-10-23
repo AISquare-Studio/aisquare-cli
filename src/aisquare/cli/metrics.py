@@ -11,9 +11,9 @@ from aisquare.cli.common import (
     emit_metrics_summary,
     emit_token_ledger,
     emit_turn_metrics,
+    parse_since,
     refuse_conflicting_scope,
 )
-from aisquare.cli.team import _parse_since
 from aisquare.services import metrics as metrics_service
 from aisquare.services import token_ledger
 
@@ -85,6 +85,6 @@ def tokens(
     project_id = _scope(project, all_projects, session)
     rows = token_ledger.ledger(
         token_ledger.sessions(project_id, session=session, role=role),
-        since=_parse_since(since) if since is not None else None,
+        since=parse_since(since) if since is not None else None,
     )
     emit_token_ledger(rows, token_ledger.total(rows))

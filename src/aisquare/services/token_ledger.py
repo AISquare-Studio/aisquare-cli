@@ -9,11 +9,13 @@ way and can be compared and summed (``docs/plans/handoff-p1-token-diet.md`` §1.
   cache_creation_input_tokens + cache_read_input_tokens``, which is also the context
   size at that request; output is counted apart.
 - **baseline** — the session's first request (``transcripts.first_turn_tokens``).
+- **board read** — a shell call (:func:`is_board_read`) made of board reads
+  (:data:`BOARD_READ`), a ``cd`` and filters of their output, and nothing else.
 - **wake** — a Stop-hook continuation: the ``isMeta`` user entry that starts
   "Stop hook feedback:" with :data:`WAKE_MARKER`. Claude Code writes it before the
   blocked Stop's own ``stop_hook_summary``; its window runs from there to the next turn
   end (``stop_hook_summary``), prompt or wake; a **no-action wake** is one whose window
-  makes no tool call but a board read (:data:`BOARD_READ`). ``wake_input`` sums the
+  makes no tool call but a board read. ``wake_input`` sums the
   input of the requests in those windows.
 - **delta** — each ``<aisquare-team-delta>`` block a hook injected, its characters, and
   its **carried** characters: each block's size times the requests after it, up to the
@@ -46,11 +48,25 @@ WAKE_MARKER = "board update(s) from your fleet arrived while you were finishing 
 
 DELTA_OPEN, DELTA_CLOSE = "<aisquare-team-delta>", "</aisquare-team-delta>"
 
-#: A shell call that only reads the board: what a wake that changed nothing still runs.
+#: One command that only reads the board, as the fleet's cycles run them: ``board``,
+#: ``team log|status|signals|verify``, ``task list|show|next`` (``next`` without
+#: ``--claim``) and ``fleet ls|status``, after any global flag (``--json``). Not ``aisquare
+#: log``, which is the PROMPT log, and nothing that writes.
 BOARD_READ = re.compile(
-    r"^\s*(?:aisquare|asq)(?:\s+--json)?\s+"
-    r"(?:board|log|task\s+(?:list|show)|team\s+(?:show|status)|fleet\s+(?:ls|status))\b"
+    r"^(?:\S*/)?(?:aisquare|asq)(?:\s+(?:--json|--no-color|--quiet|-q|--verbose|-v))*\s+"
+    r"(?:board|team\s+(?:log|status|signals|verify)|task\s+(?:list|show|next)"
+    r"|fleet\s+(?:ls|status))(?:\s|$)"
 )
+
+#: What may stand beside a board read in one shell call: moving to a directory, and
+#: filtering the read's output.
+_READ_ONLY = re.compile(r"^(?:cd|head|tail|grep|jq|wc|sort|uniq|cut|tr|cat|echo|sed\s+-n)(?:\s|$)")
+
+#: Where a shell call splits into commands: ``&&``, ``||``, ``;``, ``|``, a newline.
+_COMMANDS = re.compile(r"&&|\|\||;|\||\n")
+
+#: A redirect that writes nothing: ``2>/dev/null``, ``2>&1``.
+_HARMLESS_REDIRECT = re.compile(r"\d?>\s*/dev/null|\d?>&\d")
 
 
 class SessionLedger(BaseModel):
@@ -308,6 +324,19 @@ def _is_prompt(entry: dict[str, Any]) -> bool:
     return False
 
 
+def is_board_read(command: str) -> bool:
+    """Whether a shell ``command`` only reads the board: at least one board read
+    (:data:`BOARD_READ`, ``task next`` without ``--claim``), and every other command in it
+    a ``cd`` or a filter of their output, with no redirect into a file."""
+    if ">" in _HARMLESS_REDIRECT.sub("", command):
+        return False
+    parts = [part.strip() for part in _COMMANDS.split(command) if part.strip()]
+    reads = [part for part in parts if BOARD_READ.match(part)]
+    if not reads or any("--claim" in part for part in reads):
+        return False
+    return all(BOARD_READ.match(part) or _READ_ONLY.match(part) for part in parts)
+
+
 def _board_read(block: dict[str, Any]) -> bool:
     """Whether a ``tool_use`` block only reads the board."""
     if block.get("name") != "Bash":
@@ -315,7 +344,7 @@ def _board_read(block: dict[str, Any]) -> bool:
     command = (
         block.get("input", {}).get("command") if isinstance(block.get("input"), dict) else None
     )
-    return isinstance(command, str) and BOARD_READ.match(command) is not None
+    return isinstance(command, str) and is_board_read(command)
 
 
 def _deltas(entry: dict[str, Any]) -> list[str]:

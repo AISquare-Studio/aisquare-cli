@@ -1953,7 +1953,9 @@ prints one row per session and a total. The columns are:
 - the baseline, the session's first request: system prompt, tool schemas, skills;
 - the peak context;
 - wakes, and how many of them took no action: a Stop-hook continuation whose turn
-  made no tool call but a board read;
+  made no tool call but a board read (`board`, `team log|status|signals`, `task
+  list|show`, `task next` without `--claim`, `fleet ls|status`, alone or behind a `cd`
+  and piped through a filter; `aisquare log` is the prompt log, not the board);
 - the characters of the `<aisquare-team-delta>` blocks it was given;
 - compactions.
 

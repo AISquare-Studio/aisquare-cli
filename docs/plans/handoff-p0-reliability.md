@@ -1053,6 +1053,10 @@ Status 2026-10-23 is given in **bold** after each item.
   configuration section), `docs/memory.md`, `docs/plans/claude-accounts.md`,
   `CONTRIBUTING.md`. `tests/test_documented_commands.py` and
   `tests/test_fleet_docs_are_true.py` green. **Done in each workstream; both guards run on the train head.**
+- Release evidence: the full-matrix CI run on this branch's final head (its push run)
+  and the train PR's own run, both linked from the train PR. **No full local `make
+  check` (manager's rule, 2026-10-23: the build box is shared); locally `make lint
+  typecheck` and targeted tests only.**
 - Soak before tagging: a multi-agent fleet with several accounts runs a day on the
   branch; `fleet-delivery` shows every first prompt acknowledged. **Deferred (owner
   decision 2026-10-23): the full as-written run, this soak included, happens once after

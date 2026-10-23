@@ -572,22 +572,34 @@ def _record_delivery(event: TeamEvent, board: _Board) -> TeamEvent:
     return stored
 
 
-def session_account(transcript_path: str | None) -> str | None:
+def session_account(transcript_path: str | None, row: FleetAgent | None = None) -> str | None:
     """Which agent config dir (account) a session runs under, or ``None``.
 
-    Derived from the transcript path in the hook payload
-    (``<config-dir>/projects/<slug>/<session>.jsonl``) rather than from
-    ``CLAUDE_CONFIG_DIR``: the variable only reaches us if the agent happens to
-    export it to hook subprocesses, whereas the transcript path is always in
-    the payload and names the directory unambiguously. Falls back to the
-    variable when the path has an unexpected shape.
+    Asked in the order that cannot be fooled by a shared directory (P2-W7, #198):
+
+    1. the fleet ``row``'s ``account_slot``: the account the launch chose, recorded;
+    2. ``CLAUDE_CONFIG_DIR`` in the hook's environment, which the launch sets for that
+       account;
+    3. the transcript path in the payload (``<config-dir>/projects/<slug>/<id>.jsonl``),
+       for a session nothing launched: under a shared root (a slot's ``projects/``
+       linked to the plain claude's, #198's workaround) it names the shared directory,
+       not the account.
     """
+    if row is not None and row.account_slot is not None:
+        from aisquare.core import claude_accounts as accounts_core  # lazy: no import cycle
+
+        account = accounts_core.find_account(row.account_slot)
+        if account is not None:
+            return str(account.config_dir)
+    env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if env:
+        return env
     if transcript_path:
         path = Path(transcript_path)
         # …/<config-dir>/projects/<project-slug>/<session-id>.jsonl
         if len(path.parents) >= 3 and path.parents[1].name == "projects":
             return str(path.parents[2])
-    return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or None
+    return None
 
 
 def slot_labels_via(store: ContextStore) -> Mapping[int, str]:
@@ -1966,9 +1978,10 @@ def hook_session_start(
         project_service.capture(store, project)
         known = store.get_session(session_id)
         now = _now()
-        # The account the session runs on is the reported path's, even where the
-        # transcript recorded is the original file (`_transcript_to_keep`).
-        account = session_account(transcript_path)
+        asked_persona, persona_note, named = _asked_persona(store, project.id)
+        # The account the session runs on: its fleet row's first (P2-W7), else the reported
+        # path's, even where the transcript recorded is the original file (`_transcript_to_keep`).
+        account = session_account(transcript_path, named)
         transcript_path = _transcript_to_keep(known, transcript_path)
         # Computed before upsert_session(), which overwrites transcript_path.
         collision = _shared_row_banner(known, transcript_path, now)
@@ -1976,7 +1989,6 @@ def hook_session_start(
         # other session's injected context.
         model = harness.clean_model_id(model)
         effort = harness.clean_effort(effort)
-        asked_persona, persona_note, named = _asked_persona(store, project.id)
         session = store.upsert_session(
             TeamSession(
                 id=session_id,
@@ -2077,6 +2089,8 @@ def hook_prompt_heartbeat(
             # `capture_prompt` had captured already (review of #259, round 19).
             project_service.capture(store, project)
             now = _now()
+            # Read before the row is written, for its account (P2-W7) as for the binding.
+            named = _hook_named_row(store)
             session = store.upsert_session(
                 TeamSession(
                     id=session_id,
@@ -2086,7 +2100,7 @@ def hook_prompt_heartbeat(
                     last_seen_at=now,
                     cursor=store.latest_seq(project.id),
                     transcript_path=transcript_path,
-                    account=session_account(transcript_path),
+                    account=session_account(transcript_path, named),
                     model=harness.clean_model_id(model),
                     effort=harness.clean_effort(effort),
                     prompted_at=now,
@@ -2096,8 +2110,7 @@ def hook_prompt_heartbeat(
             # This door binds a fleet row too (an agent that started before the
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
-            # under its old holder on this very board (review of #135).
-            named = _hook_named_row(store)
+            # under its old holder on this very board (review of #135). Read above.
             assigned = _assignment(store, session.id, project.id, named=named)
             return _render_board(
                 project,

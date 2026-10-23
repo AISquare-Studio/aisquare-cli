@@ -184,22 +184,43 @@ def prompt_submitted(
 
 
 def session_ended(
-    cwd: Path | None, *, session_id: str | None = None, reason: str | None = None
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    reason: str | None = None,
+    transcript_path: str | None = None,
 ) -> None:
     """Retire the session from the orchestrator and, unless it is a fleet agent's
-    ``/clear`` (``reason``), release its claims — see ``team.hook_session_end``."""
-    if session_id is not None:
+    ``/clear`` (``reason``), release its claims — see ``team.hook_session_end``.
+
+    Then the session's last stretch of usage — whatever followed its last Stop,
+    an ``/exit`` mid-turn included — and its row marked ended.
+    """
+    if session_id is None:
+        return
+    try:
         team_service.hook_session_end(session_id, cwd, reason=reason)
+    finally:
+        metrics_service.record_usage(
+            session_id, transcript_path, cwd, trigger="session_end", ended=True
+        )
 
 
 def turn_stopped(
-    cwd: Path | None, *, session_id: str | None = None, stop_hook_active: bool = False
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    stop_hook_active: bool = False,
+    transcript_path: str | None = None,
 ) -> team_service.StopDecision | None:
     """Mark the session as waiting for input, and close this turn's metrics row.
 
     A manager with fresh board decisions gets a :class:`~aisquare.services.team.StopDecision`
     back instead, which the hook prints so Claude Code keeps its turn going
     (docs/plans/fleet-tui.md §7.3). Everyone else: ``None``, as before.
+
+    The turn's token usage is read off ``transcript_path`` from where the last
+    record stopped, and lands on the row ``close_turn`` closed.
     """
     if session_id is None:
         return None
@@ -210,8 +231,12 @@ def turn_stopped(
         # board its state change (or the manager its decisions), and close_turn
         # swallows its own errors. In a finally: a manager's failed wake-up raises
         # after the row says waiting, and the turn is over all the same (review
-        # of the #205 fold, round 1; see turn_failed).
-        metrics_service.close_turn(session_id)
+        # of the #205 fold, round 1; see turn_failed). record_usage swallows its own
+        # errors too.
+        trace_id = metrics_service.close_turn(session_id)
+        metrics_service.record_usage(
+            session_id, transcript_path, cwd, trigger="stop", trace_id=trace_id
+        )
     # Last, and it swallows its own errors too: auto-mode refusals in the
     # transcript's tail put the row in attention with one board line (#150).
     auto_mode.record_refusals(session_id)
@@ -238,6 +263,8 @@ def turn_failed(
     error: str | None = None,
     message: str | None = None,
     details: str | None = None,
+    transcript_path: str | None = None,
+    cwd: Path | None = None,
 ) -> None:
     """The turn ended on an API error (Claude Code's ``StopFailure``), not a Stop (#146).
 
@@ -268,7 +295,10 @@ def turn_failed(
             session_id, error=error, message=message, details=details
         )
     finally:
-        metrics_service.close_turn(session_id)
+        trace_id = metrics_service.close_turn(session_id)
+        metrics_service.record_usage(
+            session_id, transcript_path, cwd, trigger="stop_failure", trace_id=trace_id
+        )
     if failure is not None and failure.limited and not failure.already_limited:
         # A re-fire for the same window (Claude Code does that) is not a second
         # hand-over: the first worker is at work, or has already moved the agent.

@@ -361,6 +361,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `stop` and `restart` do, naming the agent, its role or its project, or a yes to
   the captain's own question. And a `paste` is refused while a prompt shows on the
   pane, as `tell` is: its Enter picked the highlighted "1. Yes".
+- **One bad row no longer empties the captain's attention queue.** A row the
+  running version cannot read (a newer kind after a downgrade, a hand edit), a byte
+  that is not UTF-8 or a bad cursor made the whole `queue.json` read as empty, and
+  the next write replaced it, losing every resolution, snooze and cursor. Each is
+  now dropped or kept alone, an unreadable row written back as it was, and a
+  `queue.json` from a later version is refused, never rewritten.
 
 ## [0.8.2] - 2026-10-19
 

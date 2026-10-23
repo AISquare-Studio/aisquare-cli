@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import string
 import sys
@@ -149,6 +150,7 @@ def doctor(
         _check_claude_code(cwd),
         *_planned_agent_checks(),
         *_claude_accounts_checks(),
+        *_check_role_bindings(),
         _check_tmux(),
         _check_gh(),
         _check_snapshot(cwd),
@@ -1989,6 +1991,70 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
             )
         )
     return checks
+
+
+#: A binding's variables that point Claude Code at a directory: its config directory,
+#: whose ``settings.json`` must carry aisquare's hooks, and its temp directory.
+_BOUND_CONFIG_DIR, _BOUND_TMPDIR = "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_TMPDIR"
+
+
+def _check_role_bindings() -> list[DoctorCheck]:
+    """``role bindings``: each role a binding points at another Claude Code directory runs
+    one that works (#98).
+
+    Only bindings that name an account were checked (:func:`_claude_account_default_checks`).
+    One whose ``env`` sets ``CLAUDE_CONFIG_DIR`` to a directory without aisquare's hooks
+    runs sessions the board never hears of, and one whose ``CLAUDE_CODE_TMPDIR`` cannot be
+    written starts a Claude Code that cannot keep its temp files. Each value is expanded as
+    a launch expands it (``harness.expand_value``), and "has the hooks" is the one shared
+    answer (``agents.claude_code_connected``), so this row and Welcome never disagree. A
+    variable bound to a file (``env_files``) holds a secret, not a path, and is not read.
+    No row at all when no binding sets either variable: a machine that never bound one
+    keeps the doctor output it had.
+    """
+    try:
+        bindings = settings_service.role_bindings()
+    except Exception:  # `_check_config` says why the file cannot be read
+        return []
+    fine: list[str] = []
+    problems: list[str] = []
+    fixes: list[str] = []
+    for role, profile in sorted(bindings.items()):
+        quoted = shlex.quote(role)
+        raw = profile.env.get(_BOUND_CONFIG_DIR)
+        if raw is not None:
+            path = Path(harness.expand_value(raw))
+            shown = shlex.quote(str(path))
+            if not path.is_dir():
+                problems.append(f"{role}: {_BOUND_CONFIG_DIR} {path} is not a directory")
+                fixes.append(f"aisquare team bind {quoted} --unset {_BOUND_CONFIG_DIR}")
+            elif not agents_service.claude_code_connected(path):
+                problems.append(
+                    f"{role}: {_BOUND_CONFIG_DIR} {path} has no aisquare hooks, so its "
+                    "sessions never reach the board"
+                )
+                fixes.append(
+                    f"{_BOUND_CONFIG_DIR}={shown} aisquare agents connect claude-code "
+                    f"(or aisquare team bind {quoted} --unset {_BOUND_CONFIG_DIR})"
+                )
+            else:
+                fine.append(f"{role} → {path}")
+        raw = profile.env.get(_BOUND_TMPDIR)
+        if raw is not None:
+            path = Path(harness.expand_value(raw))
+            if path.is_dir() and os.access(path, os.W_OK | os.X_OK):
+                fine.append(f"{role} temp → {path}")
+            else:
+                problems.append(f"{role}: {_BOUND_TMPDIR} {path} is not writable")
+                fixes.append(
+                    f"mkdir -p {shlex.quote(str(path))} (or aisquare team bind {quoted} "
+                    f"--unset {_BOUND_TMPDIR})"
+                )
+    if problems:
+        return [_warn("role bindings", "; ".join(problems), "; ".join(dict.fromkeys(fixes)))]
+    if fine:
+        return [_ok("role bindings", "; ".join(fine) + " — hooks connected, temp dirs writable")]
+    return []
 
 
 # --- system tools the fleet needs (docs/plans/fleet-tui.md §5 "Doctor", §8.2) ---------

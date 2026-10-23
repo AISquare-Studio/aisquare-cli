@@ -1683,3 +1683,69 @@ def test_the_fleet_server_row_warns_about_a_seats_identity_on_the_server(tmp_pat
 def test_the_fleet_server_row_reaches_the_real_doctor_after_the_fleet_terminal() -> None:
     names = [check.name for check in diagnostics.doctor()]
     assert names.index("fleet terminal") < names.index("fleet server env"), names
+
+
+# --- role bindings (#98) -----------------------------------------------------------------
+
+
+def _bound(role: str, **env: str) -> None:
+    from aisquare.services import settings as settings_service
+
+    settings_service.bind_role(role, env=dict(env))
+
+
+def test_doctor_says_nothing_of_bindings_with_no_environment() -> None:
+    """Silent when no binding sets a Claude Code directory: a machine that never bound
+    one keeps the doctor output it had."""
+    from aisquare.services import settings as settings_service
+
+    assert diagnostics._check_role_bindings() == []
+    settings_service.bind_role("coder", args=["--model", "opus"])
+    assert diagnostics._check_role_bindings() == []
+
+
+def test_doctor_warns_on_a_binding_whose_claude_dir_has_no_hooks(tmp_path: Path) -> None:
+    """#98: a seat bound to a config dir without aisquare's hooks runs sessions the board
+    never hears of; only bindings that name an account were checked."""
+    from aisquare.core import agents as agent_core
+
+    bare, hooked = tmp_path / "claude-bare", tmp_path / "claude-hooked"
+    bare.mkdir()
+    hooked.mkdir()
+    agent_core.install_hooks("claude-code", hooked)
+    _bound("coder", CLAUDE_CONFIG_DIR=str(bare))
+    _bound("reviewer", CLAUDE_CONFIG_DIR=str(hooked))
+
+    (row,) = diagnostics._check_role_bindings()
+    assert row.name == "role bindings"
+    assert row.status == CheckStatus.warn
+    assert "coder" in row.detail and str(bare) in row.detail and "no aisquare hooks" in row.detail
+    assert "reviewer" not in row.detail, "a connected binding is not a problem"
+    assert row.fix is not None and "aisquare team bind coder" in row.fix
+    assert f"CLAUDE_CONFIG_DIR={bare} aisquare agents connect claude-code" in row.fix
+
+
+def test_doctor_warns_on_a_binding_whose_tmpdir_cannot_be_written(tmp_path: Path) -> None:
+    missing = tmp_path / "no-such-tmp"
+    _bound("tester", CLAUDE_CODE_TMPDIR=str(missing))
+    (row,) = diagnostics._check_role_bindings()
+    assert row.status == CheckStatus.warn
+    assert "tester" in row.detail and "CLAUDE_CODE_TMPDIR" in row.detail
+    assert str(missing) in row.detail and "not writable" in row.detail
+
+
+def test_doctor_reads_a_binding_as_a_launch_expands_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`$VAR` and `~` expand as `harness.expand_value` does at launch, so the row judges
+    the directory the session will really use."""
+    from aisquare.core import agents as agent_core
+
+    hooked = tmp_path / "claude-2"
+    hooked.mkdir()
+    agent_core.install_hooks("claude-code", hooked)
+    monkeypatch.setenv("SECOND_CLAUDE", str(hooked))
+    _bound("coder", CLAUDE_CONFIG_DIR="$SECOND_CLAUDE", CLAUDE_CODE_TMPDIR=str(tmp_path))
+    (row,) = diagnostics._check_role_bindings()
+    assert row.status == CheckStatus.ok, row.detail
+    assert "coder" in row.detail and str(hooked) in row.detail

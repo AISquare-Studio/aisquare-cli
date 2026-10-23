@@ -736,3 +736,168 @@ def test_the_form_says_why_it_lists_no_personas_when_they_cannot_be_read(
         "'/h/.aisquare/personas'"
     )
     assert prompts == ["(none)"]  # no names, and the form is still up
+
+
+# --- role bindings (#98) -----------------------------------------------------------------
+
+
+def _bind_cli(*argv: str) -> None:
+    from typer.testing import CliRunner
+
+    from aisquare.cli.app import app
+
+    result = CliRunner().invoke(app, ["team", "bind", *argv])
+    assert result.exit_code == 0, result.output
+
+
+def _after_cli(*argv: str) -> bytes:
+    """The bytes ``team bind <argv>`` would leave, the file put back as it was after."""
+    before = paths.config_path().read_bytes()
+    _bind_cli(*argv)
+    after = paths.config_path().read_bytes()
+    paths.config_path().write_bytes(before)
+    return after
+
+
+def test_role_bindings_list_each_binding_with_its_claude_dirs_called_out() -> None:
+    """#98: nothing in the UI showed a binding. Each bound role is listed with its binary,
+    its args, CLAUDE_CONFIG_DIR and CLAUDE_CODE_TMPDIR with their values, and any other
+    variable by name only, since its value may be a token."""
+    _bind_cli(
+        "coder",
+        "--bin",
+        "claude2",
+        "--env",
+        "CLAUDE_CONFIG_DIR=/srv/claude-2",
+        "--env",
+        "CLAUDE_CODE_TMPDIR=/srv/tmp",
+        "--env",
+        "GH_TOKEN=ghp_secret",
+        "--arg",
+        "--model",
+        "--arg",
+        "opus",
+    )
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> str:
+        await settle(pilot)
+        row = host.query_one("#binding-row-coder")
+        return "\n".join(str(widget.render()) for widget in row.query(Static))
+
+    shown = drive(scenario)
+    assert "coder" in shown and "claude2" in shown
+    assert "CLAUDE_CONFIG_DIR = /srv/claude-2" in shown
+    assert "CLAUDE_CODE_TMPDIR = /srv/tmp" in shown
+    assert "GH_TOKEN" in shown and "ghp_secret" not in shown
+    assert "args --model opus" in shown
+
+
+def test_no_binding_shows_how_to_make_one() -> None:
+    async def scenario(pilot: Pilot[None], host: AppHost) -> str:
+        await settle(pilot)
+        return str(host.query_one("#bindings-empty", Static).render())
+
+    assert "aisquare team bind" in drive(scenario)
+
+
+def test_edit_opens_the_bind_form_on_the_binding_and_writes_what_team_bind_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Edit is the bind form on the binding as it is; Save replaces it, exactly as
+    `team bind --clear` then `team bind` with the new values would."""
+    from textual.widgets import TextArea
+
+    from aisquare.cli.ui.attach import NewBindScreen
+
+    monkeypatch.setattr(
+        "aisquare.cli.ui.attach.shutil.which", lambda name: f"/usr/local/bin/{name}"
+    )
+    _bind_cli("coder", "--bin", "claude2", "--env", "A=1", "--arg", "--model", "--arg", "opus")
+    expected = _after_cli("coder", "--clear")
+    paths.config_path().write_bytes(expected)
+    expected = _after_cli("coder", "--bin", "claude2", "--env", "B=3", "--arg", "-v")
+    paths.config_path().unlink()
+    _bind_cli("coder", "--bin", "claude2", "--env", "A=1", "--arg", "--model", "--arg", "opus")
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> dict[str, object]:
+        await settle(pilot)
+        host.query_one("#binding-edit-coder", Button).press()
+        await settle(pilot)
+        screen = host.screen
+        seen: dict[str, object] = {"form": isinstance(screen, NewBindScreen)}
+        seat = screen.query_one("#bind-seat", Input)
+        seen["prefilled"] = (
+            seat.value,
+            seat.disabled,
+            screen.query_one("#bind-binary", Input).value,
+            screen.query_one("#bind-env", TextArea).text,
+            screen.query_one("#bind-args", Input).value,
+        )
+        screen.query_one("#bind-env", TextArea).load_text("B=3")
+        screen.query_one("#bind-args", Input).value = "-v"
+        await settle(pilot)
+        screen.query_one("#bind-save", Button).press()
+        await settle(pilot)
+        seen["shown"] = str(host.query_one("#binding-row-coder").query(Static).first().render())
+        return seen
+
+    seen = drive(scenario)
+    assert seen["form"] is True
+    assert seen["prefilled"] == ("coder", True, "claude2", "A=1", "--model opus")
+    assert paths.config_path().read_bytes() == expected
+    assert "args -v" in str(seen["shown"]), "the section shows what the file holds now"
+
+
+def test_unset_key_and_clear_write_what_team_bind_writes() -> None:
+    from aisquare.cli.ui.views.app_settings import ConfirmClearBinding, UnsetKeyScreen
+
+    _bind_cli("tester", "--env", "A=1", "--env", "B=2", "--arg", "-v")
+    after_unset = _after_cli("tester", "--unset", "B")
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> dict[str, object]:
+        seen: dict[str, object] = {}
+        await settle(pilot)
+        host.query_one("#binding-unset-tester", Button).press()
+        await settle(pilot)
+        seen["asked"] = isinstance(host.screen, UnsetKeyScreen)
+        host.screen.query_one("#unset-key", Select).value = "B"
+        host.screen.query_one("#unset-confirm", Button).press()
+        await settle(pilot)
+        seen["unset"] = paths.config_path().read_bytes()
+        seen["after_clear"] = _after_cli("tester", "--clear")
+        host.query_one("#binding-clear-tester", Button).press()
+        await settle(pilot)
+        seen["confirm"] = isinstance(host.screen, ConfirmClearBinding)
+        host.screen.query_one("#clear-cancel", Button).press()
+        await settle(pilot)
+        seen["cancelled"] = paths.config_path().read_bytes()
+        host.query_one("#binding-clear-tester", Button).press()
+        await settle(pilot)
+        host.screen.query_one("#clear-confirm", Button).press()
+        await settle(pilot)
+        seen["cleared"] = paths.config_path().read_bytes()
+        seen["empty"] = bool(host.query("#bindings-empty"))
+        return seen
+
+    seen = drive(scenario)
+    assert seen["asked"] is True and seen["unset"] == after_unset
+    assert seen["confirm"] is True and seen["cancelled"] == after_unset, "Cancel writes nothing"
+    assert seen["cleared"] == seen["after_clear"]
+    assert seen["empty"] is True
+
+
+def test_the_role_bindings_section_fits_80_columns() -> None:
+    """The fleet UI runs in an 80-column tmux pane as often as not: a binding's row, its
+    called-out paths and its three buttons stay inside it."""
+    _bind_cli("reviewer", "--env", "CLAUDE_CONFIG_DIR=/srv/claude-accounts/2", "--arg", "-v")
+
+    async def run() -> tuple[int, list[int]]:
+        host = AppHost()
+        async with host.run_test(size=(80, 40)) as pilot:
+            await settle(pilot)
+            row = host.query_one("#binding-row-reviewer")
+            buttons = [button.region.right for button in row.query(Button)]
+            return row.region.right, buttons
+
+    right, buttons = asyncio.run(run())
+    assert right <= 80 and buttons and max(buttons) <= 80, (right, buttons)

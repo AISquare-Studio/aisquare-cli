@@ -394,28 +394,42 @@ class AttachTargetScreen(ModalScreen[Target | None]):
 
 
 class NewBindScreen(ModalScreen[str | None]):
-    """``aisquare team bind`` as a form; dismisses with the seat it saved, or ``None``."""
+    """``aisquare team bind`` as a form; dismisses with the seat it saved, or ``None``.
+
+    ``editing`` opens it on an existing seat's binding (App settings' *Edit*, #98): the
+    seat is fixed, the fields hold what the binding holds, and Save writes them whole
+    through ``services.settings.replace_role_binding``, not merged as a new bind is.
+    """
 
     DEFAULT_CSS = _BOX_CSS.format(name="NewBindScreen") + "NewBindScreen #bind-env { height: 4; }"
     BINDINGS: ClassVar = [Binding("escape", "cancel", "cancel")]
 
-    def __init__(self, accounts: list[ClaudeAccountStatus]) -> None:
+    def __init__(
+        self,
+        accounts: list[ClaudeAccountStatus],
+        *,
+        editing: tuple[str, RoleLaunchProfile] | None = None,
+    ) -> None:
         super().__init__()
         self._statuses = accounts
+        self._editing = editing
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            header = Text("New bind", style="bold")
+            seat, bound = self._editing or ("", RoleLaunchProfile())
+            header = Text("Edit bind" if self._editing else "New bind", style="bold")
             header.append(
                 " — a seat `aisquare team bind` pins: binary, environment, args", style="dim"
             )
             yield Static(header, classes="picker-header")
             with Horizontal(classes="picker-row"):
                 yield Label("Seat")
-                yield Input(placeholder="coder2", id="bind-seat")
+                yield Input(
+                    seat, placeholder="coder2", id="bind-seat", disabled=self._editing is not None
+                )
             with Horizontal(classes="picker-row"):
                 yield Label("Binary")
-                yield Input(value=DEFAULT_BINARY, id="bind-binary")
+                yield Input(value=bound.bin or DEFAULT_BINARY, id="bind-binary")
             with Horizontal(classes="picker-row"):
                 yield Label("Account")
                 yield Select(
@@ -427,10 +441,17 @@ class NewBindScreen(ModalScreen[str | None]):
                 )
             with Horizontal(classes="picker-row"):
                 yield Label("Env (KEY=VALUE)")
-                yield TextArea(id="bind-env")
+                yield TextArea(
+                    "\n".join(f"{key}={value}" for key, value in bound.env.items()), id="bind-env"
+                )
+            if bound.env_files:
+                # Their values are secrets read at launch: named, never shown, kept as bound.
+                kept = Text("kept, bound to a file: ", style="dim")
+                kept.append(", ".join(sorted(bound.env_files)))
+                yield Static(kept, id="bind-env-files", classes="picker-note")
             with Horizontal(classes="picker-row"):
                 yield Label("Extra args")
-                yield Input(placeholder="--model opus", id="bind-args")
+                yield Input(shlex.join(bound.args), placeholder="--model opus", id="bind-args")
             yield Static(id="bind-rule", classes="picker-note")
             yield Static(id="bind-status", classes="picker-note")
             with Horizontal(classes="picker-buttons"):
@@ -503,7 +524,18 @@ class NewBindScreen(ModalScreen[str | None]):
             return
         seat, kwargs = self.bind_kwargs()
         try:
-            settings_service.bind_role(seat, **kwargs)
+            if self._editing is None:
+                settings_service.bind_role(seat, **kwargs)
+            else:
+                binary = kwargs["agent_bin"]
+                was = self._editing[1].bin
+                settings_service.replace_role_binding(
+                    seat,
+                    # A binding that named no binary still names none at the default.
+                    agent_bin=None if was is None and binary == DEFAULT_BINARY else binary,
+                    env=kwargs["env"],
+                    args=kwargs["args"],
+                )
         except Exception as exc:  # the config could not be written: say so, stay open
             status = self.query_one("#bind-status", Static)
             status.update(Text(f"{type(exc).__name__}: {exc}", style="bold red"))

@@ -308,8 +308,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   second to show.
 - Remote control is in `asq`'s *⚙ Settings* now, as well as behind `R`.
   *Turn on remote control* starts it. The first time, it asks for your ngrok
-  token instead (*Paste your ngrok token*, with the link to get a free one) and
-  saves it to ngrok's own config. It never shows the token again, and a token
+  token instead (*Paste your ngrok token*, with the link to get a free one),
+  checks it with ngrok and keeps it. It never shows the token again, and a token
   ngrok refuses is reported beside the field. On, the section shows the link and
   copies it by itself once ngrok's link arrives, and shows the QR code, the
   passphrase and *Turn off*.
@@ -329,6 +329,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The captain's view in `asq` has a one-line message box. Enter types the line into
   the captain's pane the way *What's up* does and clears the box. If the send is
   refused, a notice says why and the line comes back.
+- Remote control works out of the box: there is nothing to install. Its web
+  server (starlette, uvicorn, websockets), `cryptography` for Web Push and the
+  ngrok agent are core dependencies now, so the one-line install and `asq upgrade`
+  bring them; the agent is the official ngrok Python SDK, bundled, which runs
+  inside `asq` with no traffic inspector and no local API on `127.0.0.1:4040`.
+  The one setup step left is pasting your free ngrok token once, in *⚙ Settings ▸
+  Remote control*; it is checked with ngrok and kept owner-only in
+  `~/.aisquare/ngrok-authtoken`. An ngrok you already signed in
+  (`NGROK_AUTHTOKEN`, or your own `ngrok.yml`) keeps working with nothing to
+  paste. Remote no longer answers "not installed" with a pip, uv or pipx command,
+  or tells you to run `ngrok config`; only a damaged install gets one line with
+  the command that repairs it. `aisquare-cli[remote]` still resolves, and adds
+  nothing.
 
 ### Fixed
 

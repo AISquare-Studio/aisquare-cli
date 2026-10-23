@@ -40,8 +40,10 @@ from aisquare.cli.ui.views.settings_remote import (
     has_authtoken,
 )
 from aisquare.services import remote_server
-from aisquare.services.ngrok_tunnel import NgrokTunnel, build_public_url, ngrok_default_config
+from aisquare.services.ngrok_sdk import REFUSED_TOKEN, bundled_ngrok, saved_token
+from aisquare.services.ngrok_tunnel import NgrokTunnel, build_public_url
 from tests.fake_clipboard import NEEDS_POSIX
+from tests.fake_ngrok_sdk import Script, fake_sdk
 from tests.test_remote_control import FakeTunnel
 from tests.test_ui_remote import (  # noqa: F401 — the autouse fixtures, applied by import
     PUBLIC,
@@ -152,28 +154,15 @@ def own_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NGROK_AUTHTOKEN", raising=False)
 
 
-def fake_ngrok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, refuse: str = "") -> Path:
-    """An ``ngrok`` on PATH whose ``config add-authtoken <token>`` writes ngrok's own config as
-    ngrok 3 does, in the test's own home, or, with ``refuse``, says it on stderr (the token in
-    it) and fails."""
+def bundled_ngrok_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, refuse: str | None = None
+) -> Script:
+    """The bundled ngrok (#34), answering as ngrok's service would: every sign-in taken, or,
+    with ``refuse``, refused with that code; in the test's own home, with no token anywhere."""
     own_home(tmp_path, monkeypatch)
-    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
-    path_with(tmp_path)
-    config = ngrok_default_config()
-    assert str(tmp_path) in str(config), f"ngrok's config must be the test's own: {config}"
-    monkeypatch.setenv("FAKE_NGROK_CONFIG", str(config))
-    monkeypatch.setenv("FAKE_NGROK_DIR", str(config.parent))
-    tool = Path(os.environ["PATH"]) / "ngrok"
-    if refuse:
-        body = f'echo "{refuse} $3" >&2\nexit 1\n'
-    else:  # PATH holds nothing but this: the tools it runs are named in full
-        body = (
-            '/bin/mkdir -p "$FAKE_NGROK_DIR"\n'
-            'printf \'version: "3"\\nagent:\\n  authtoken: %s\\n\' "$3" > "$FAKE_NGROK_CONFIG"\n'
-        )
-    tool.write_text("#!/bin/sh\n" + body)
-    tool.chmod(0o755)
-    return config
+    script = Script(url=PUBLIC, refuse=refuse)
+    monkeypatch.setitem(sys.modules, "ngrok", fake_sdk(script))
+    return script
 
 
 async def paste(pilot: Pilot[None], section: RemoteSection, token: str) -> None:
@@ -191,7 +180,7 @@ def test_off_with_no_ngrok_token_shows_only_the_token_field_and_its_link(
 ) -> None:
     """No token yet: *Paste your ngrok token*, where a free one comes from, and *Save*, in the
     place of *Turn on*; nothing to install and no command to run."""
-    fake_ngrok(tmp_path, monkeypatch)
+    bundled_ngrok_with(tmp_path, monkeypatch)
 
     async def go(pilot: Pilot[None]) -> tuple[bool, bool, bool, str]:
         section = await opened(pilot)
@@ -212,13 +201,13 @@ def test_off_with_no_ngrok_token_shows_only_the_token_field_and_its_link(
 def test_a_saved_token_brings_turn_on_back_and_turn_on_reaches_the_tunnel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Save hands the token to ngrok's own config; the slot goes, *Turn on* is there, and a
-    press of it starts the tunnel. The token is in no toast."""
-    config = fake_ngrok(tmp_path, monkeypatch)
+    """Save checks the token with ngrok and keeps it, owner-only; the slot goes, *Turn on* is
+    there, and a press of it starts the bundled tunnel, signed in with that token (#34). The
+    token is in no toast."""
+    script = bundled_ngrok_with(tmp_path, monkeypatch)
     token = "2abcDEF_0123456789abcdefghijklmnopqrstuvwxyzAB"
-    tunnels: list[FakeTunnel] = []
 
-    async def go(pilot: Pilot[None]) -> tuple[bool, bool, list[str], int]:
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, list[str]]:
         app = pilot.app
         assert isinstance(app, FleetApp)
         section = await opened(pilot)
@@ -230,20 +219,21 @@ def test_a_saved_token_brings_turn_on_back_and_turn_on_reaches_the_tunnel(
         )
         section.query_one("#settings-remote-turn-on", Button).press()
         await written(pilot)
-        return slot, turn_on, told, len(tunnels)
+        await settle_page(app)
+        return slot, turn_on, told
 
-    slot, turn_on, told, started = drive(go, tunnel=late(tunnels))
-    assert token in config.read_text(encoding="utf-8")
+    slot, turn_on, told = drive(go, tunnel=bundled_ngrok)
+    assert saved_token() == token
     assert not slot and turn_on
     assert "✓ ngrok token saved" in told and not [line for line in told if token in line]
-    assert started == 1, "Turn on started the tunnel"
+    assert script.calls.tokens == [token, token], "checked on Save, then signed in on Turn on"
+    assert len(script.calls.forwards) == 1, "Turn on started the tunnel"
 
 
-@NEEDS_POSIX
 def test_a_token_ngrok_refuses_is_said_beside_the_field_without_the_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fake_ngrok(tmp_path, monkeypatch, refuse="ERROR: the token is malformed:")
+    bundled_ngrok_with(tmp_path, monkeypatch, refuse="ERR_NGROK_105")
     token = "2abc-not-a-real-token"
 
     async def go(pilot: Pilot[None]) -> tuple[str, bool, str]:
@@ -255,15 +245,18 @@ def test_a_token_ngrok_refuses_is_said_beside_the_field_without_the_token(
         return first, displayed(section, "#settings-remote-token"), shown(problem)
 
     first, slot, spaced = drive(go, tunnel=missing_ngrok)
-    assert first == "ngrok did not take it: ERROR: the token is malformed: …", first
+    assert first == REFUSED_TOKEN, first
     assert token not in first and slot
+    assert saved_token() is None, "a token ngrok refuses is not kept"
     assert spaced == "that is not one token: it has spaces in it"
 
 
 def test_a_missing_ngrok_is_one_line_with_a_fix_in_the_app_never_a_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Only a damaged install, whose bundled ngrok cannot be imported, with none on PATH."""
     own_home(tmp_path, monkeypatch)
+    monkeypatch.setitem(sys.modules, "ngrok", None)
     monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
     path_with(tmp_path)
     monkeypatch.setenv("NGROK_AUTHTOKEN", "a-token")

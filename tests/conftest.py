@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as metadata_version
@@ -222,6 +222,9 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_REMOTE_PORT",
     "AISQUARE_REMOTE_AUTO_OFF",
     "AISQUARE_REMOTE_NGROK_URL",
+    # The token Remote's bundled ngrok signs in with first (`services.ngrok_sdk`). Left
+    # set by a developer who uses ngrok, a test that starts a tunnel had it to sign in with.
+    "NGROK_AUTHTOKEN",
     "AISQUARE_TEAM_HUB",
     "AISQUARE_TEAM_DELTA",
     "AISQUARE_TEAM_LEASE_MIN",
@@ -684,6 +687,46 @@ def project_capture(monkeypatch: pytest.MonkeyPatch) -> None:
     from aisquare.services import project as project_service
 
     monkeypatch.setattr(project_service, "capture_on", lambda: True)
+
+
+@pytest.fixture(autouse=True)
+def no_real_ngrok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reaches ngrok's service, or reads the developer's own ngrok config (#34).
+
+    - **the bundled ngrok is a stand-in** (``tests/fake_ngrok_sdk``) that refuses every
+      sign-in: Remote's tunnel, and Settings' token check, are the SDK's, in this process. A
+      test that wants a tunnel puts its own stand-in in ``sys.modules["ngrok"]``.
+    - **ngrok's own configs are the test's**: ``~/.config/ngrok/ngrok.yml`` (or macOS's, or
+      ``%LocalAppData%``'s) and ``~/.ngrok2/ngrok.yml`` hold the developer's authtoken, and a
+      tunnel's start reads them. Asked for with the developer's home in force, they are looked
+      for in a folder of the test's; a test that names a home of its own (``HOME``, or
+      ``home=``) gets that one's, as ever.
+    """
+    from aisquare.services import ngrok_sdk, ngrok_tunnel
+    from tests.fake_ngrok_sdk import Script, fake_sdk
+
+    monkeypatch.setitem(sys.modules, "ngrok", fake_sdk(Script(refuse="ERR_NGROK_TEST")))
+    stand_in = tmp_path / "ngrok-home"
+    real_config, real_ngrok2 = ngrok_tunnel.ngrok_default_config, ngrok_sdk.ngrok2_config
+
+    def config(
+        *,
+        platform: str = sys.platform,
+        environ: Mapping[str, str] = os.environ,
+        home: Path | None = None,
+    ) -> Path:
+        if home is None and Path.home() == _DEVELOPERS_HOME:
+            home = stand_in
+            environ = {k: v for k, v in environ.items() if k not in ("LOCALAPPDATA",)}
+        return real_config(platform=platform, environ=environ, home=home)
+
+    def ngrok2() -> Path:
+        return (
+            stand_in / ".ngrok2" / "ngrok.yml" if Path.home() == _DEVELOPERS_HOME else real_ngrok2()
+        )
+
+    monkeypatch.setattr(ngrok_tunnel, "ngrok_default_config", config)
+    monkeypatch.setattr(ngrok_sdk, "ngrok2_config", ngrok2)
 
 
 @pytest.fixture(autouse=True)

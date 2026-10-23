@@ -48,10 +48,11 @@ from typing import Any
 
 from aisquare.core.state_file import StateUnwritableError, read_state, update_state
 from aisquare.services import remote_server
+from aisquare.services.ngrok_sdk import BAD_TOKEN, bundled_ngrok
 from aisquare.services.ngrok_tunnel import (
     AUTHTOKEN_HINT,
     TOO_OLD_HINT,
-    NgrokTunnel,
+    Tunnel,
     build_public_url,
     end_every_tunnel_now,
     ngrok_origin,
@@ -113,25 +114,18 @@ AUTO_OFF_MISSED = "Remote stayed off — its auto-off time passed while asq was 
 """What a TUI start says of a Remote left on whose auto-off time has passed meanwhile
 (:meth:`RemoteController._auto_off_missed`)."""
 
-LASTING_TUNNEL_ERRORS = (AUTHTOKEN_HINT, TOO_OLD_HINT)
+LASTING_TUNNEL_ERRORS = (AUTHTOKEN_HINT, BAD_TOKEN, TOO_OLD_HINT)
 """Why an ngrok ended before it announced a URL that a restart would hit again, until the
-human acts (an authtoken added, ngrok updated) and turns Remote on again, as each says: that
-tunnel is left to its error (:meth:`RemoteController.revive_tunnel_if_dead`)."""
+human acts (a token pasted in Settings, ngrok updated) and turns Remote on again, as each
+says: that tunnel is left to its error (:meth:`RemoteController.revive_tunnel_if_dead`)."""
 
-TunnelFactory = Callable[[int], NgrokTunnel]
+TunnelFactory = Callable[[int], Tunnel]
 CallBack = Callable[[Callable[[], None]], object]
 """Runs a step on the thread that drives the controller (:attr:`RemoteController.call_back`)."""
 
 
 def _call_now(step: Callable[[], None]) -> None:
     step()
-
-
-def ngrok_without_its_api(port: int) -> NgrokTunnel:
-    """The panel's ngrok, for ``port``: its agent API off, which any user of the machine could
-    otherwise use to start a tunnel of their own in it, or stop Remote's and start it again
-    with the inspector on (``ngrok_tunnel``)."""
-    return NgrokTunnel(port, api_off=True)
 
 
 NewsListener = Callable[[str, bool], None]
@@ -224,7 +218,7 @@ class RemoteController:
         self,
         *,
         server: ModuleType = remote_server,
-        tunnel_factory: TunnelFactory = ngrok_without_its_api,
+        tunnel_factory: TunnelFactory = bundled_ngrok,
         dist_dir: Path | None = None,
         port: int | None = None,
         now: Callable[[], datetime] | None = None,
@@ -241,7 +235,7 @@ class RemoteController:
         self._url_timeout = url_timeout
         self.state = state if state is not None else load_remote_state()
         self.info: remote_server.RemoteInfo | None = None
-        self.tunnel: NgrokTunnel | None = None
+        self.tunnel: Tunnel | None = None
         self.public_origin: str | None = None
         """``https://<ngrok-host>`` once the tunnel announced itself; the link is that and the
         token ``remote.json`` holds now (:meth:`remote_link`)."""
@@ -272,7 +266,7 @@ class RemoteController:
         and must not land on a Remote turned off, or on a tunnel replaced, meanwhile."""
         self._stopper: threading.Thread | None = None
         """The thread that stops the server and ngrok after :meth:`turn_off`, the latest one."""
-        self._stopping_tunnel: NgrokTunnel | None = None
+        self._stopping_tunnel: Tunnel | None = None
         """The ngrok that thread stops once the server has, for :meth:`stop_tunnel_now`."""
         self.save_switch: SwitchSaver = update_state
         """How a switch that changed reaches ``state.json``: that one key, at once, on the
@@ -379,7 +373,7 @@ class RemoteController:
             return False
         try:
             info = self._server.start_remote_server(self._dist_dir, port=self._port)
-        except Exception as exc:  # the remote extra is missing, or the port is taken
+        except Exception as exc:  # a damaged install, or the port is taken
             # RemoteUnavailable / RemoteError carry the sentence to show; Remote stays
             # off, and a press saves its switch off, so a restart does not retry blindly.
             self.info = None
@@ -507,14 +501,14 @@ class RemoteController:
         if self.info is info:
             self._set_state(remote_enabled=True, remote_auto_off_at=self.auto_off_at)
 
-    def _watched_tunnel(self) -> NgrokTunnel:
+    def _watched_tunnel(self) -> Tunnel:
         """A tunnel for this Remote's port that hands every URL it announces to
         :meth:`_adopt_tunnel_url`, however late it comes."""
         tunnel = self._tunnel_factory(self._port)
         tunnel.on_announce = functools.partial(self._adopt_tunnel_url, tunnel)
         return tunnel
 
-    def _await_url(self, tunnel: NgrokTunnel) -> None:
+    def _await_url(self, tunnel: Tunnel) -> None:
         """Wait for the tunnel's URL; past :attr:`_url_timeout`, say why there is none yet.
 
         The wait ends there, the watching does not: ngrok retries a session it could not
@@ -538,7 +532,7 @@ class RemoteController:
             self.message = tunnel.error or "ngrok did not announce a tunnel in time"
             self._unreachable(self.message)
 
-    def _adopt_tunnel_url(self, tunnel: NgrokTunnel, url: str) -> None:
+    def _adopt_tunnel_url(self, tunnel: Tunnel, url: str) -> None:
         """Show ``url`` as the link and note it for push links, while ``tunnel`` is this
         Remote's: one turned off, or replaced by a restart, speaks for no Remote now.
 
@@ -652,7 +646,7 @@ class RemoteController:
     def _stop_remote(
         self,
         served: bool,
-        tunnel: NgrokTunnel | None,
+        tunnel: Tunnel | None,
         persist: bool,
         reason: str,
         status: str | None,
@@ -1106,10 +1100,10 @@ class RemoteController:
 
     def status_line(self) -> str:
         """The status line: what Remote is doing or why it is not, then what ngrok's agent API
-        allows while it is on (:attr:`NgrokTunnel.api_warning`), :data:`SAVING` while a write
-        of ``remote.json`` a control asked for waits, one that did not land
-        (:attr:`save_problem`), why the file could not be read (:attr:`read_problem`) and a
-        switch ``state.json`` refused, each on a line of its own."""
+        allows while it is on (:attr:`~aisquare.services.ngrok_tunnel.Tunnel.api_warning`),
+        :data:`SAVING` while a write of ``remote.json`` a control asked for waits, one that did
+        not land (:attr:`save_problem`), why the file could not be read (:attr:`read_problem`)
+        and a switch ``state.json`` refused, each on a line of its own."""
         tunnel = self.tunnel
         api = tunnel.api_warning if tunnel is not None else None
         since = self._writing_since
@@ -1332,13 +1326,13 @@ class RemoteController:
     """When :meth:`revive_tunnel_if_dead` last started ngrok, in ``ticks``: on the wall clock,
     one stepped back two hours held every revive for those two hours, the server up and no
     phone able to reach it (review of #259, round 8, 4/9)."""
-    _revived_tunnel: NgrokTunnel | None = None
+    _revived_tunnel: Tunnel | None = None
     """The tunnel the last revive started: its URL says ngrok was restarted, and whether the
     link changed (:meth:`_adopt_tunnel_url`)."""
     _origin_before_revive: str | None = None
     """ngrok's address when the Remote's tunnel died, so the message can say whether the new
     one differs, however many restarts it took to get one."""
-    _unstarted: NgrokTunnel | None = None
+    _unstarted: Tunnel | None = None
     """The tunnel a start could not start (no ngrok on PATH, a spawn that failed): its first
     start is the watchdog's, and says so, since it never stopped."""
 
@@ -1360,13 +1354,12 @@ class RemoteController:
         (:data:`LASTING_TUNNEL_ERRORS`: no authtoken, an ngrok too old for ``--url``),
         which the status line says, with what to do. A restart that ended so is tried
         again each minute, as any restart is: its Remote had a tunnel up, phones on it,
-        and an authtoken revoked meanwhile and put back with ``ngrok config
-        add-authtoken`` brings them back at the next minute, where turning Remote off and
-        on signs every one out. The new link is shown, and noted for push links, as soon
-        as ngrok announces it. A tunnel that could not start at all is tried each minute
-        too, a look on PATH until ngrok is there: one installed while Remote is on comes up
-        within the minute, where it waited for an off and on that nothing asked for (sweep
-        5 of #243).
+        and a token revoked meanwhile and pasted again in Settings → Remote brings them
+        back at the next minute, where turning Remote off and on signs every one out. The
+        new link is shown, and noted for push links, as soon as ngrok announces it. A tunnel
+        that could not start at all is tried each minute too, a look on PATH until ngrok is
+        there: one installed while Remote is on comes up within the minute, where it waited
+        for an off and on that nothing asked for (sweep 5 of #243).
         """
         dead = self.tunnel
         if not self.running or dead is None or dead.running:

@@ -14654,7 +14654,7 @@ def test_a_listing_still_lists_when_the_store_will_not_take_the_exit(
     tmux.die(coder.pane_id, 3)
 
     def locked(
-        self: SqliteStore, agent_id: str, *, exit_status: int | None = None
+        self: SqliteStore, agent_id: str, *, exit_status: int | None = None, ended_by: str = "died"
     ) -> FleetAgent | None:
         raise sqlite3.OperationalError("database is locked")
 

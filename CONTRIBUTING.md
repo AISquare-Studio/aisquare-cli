@@ -66,6 +66,12 @@ fixtures is safe in parallel; one that shares a fixed path, port or socket name 
 another is not. Run a single file as usual (`pytest tests/test_x.py`), and the whole
 suite serially with `pytest -p no:xdist` when a failure looks order-dependent.
 
+- **A venv from before xdist** stops with `unrecognized arguments: -n auto`: run
+  `make install` again after pulling.
+- **On a box shared by several runs** (a fleet of agents each running `make check`),
+  a worker per core per run oversubscribes the CPU and stretches the suite's timed
+  waits. Cap each run's workers with `PYTEST_XDIST_AUTO_NUM_WORKERS=4 make test`.
+
 A run that is killed runs no teardown, so the tmux servers its tests started outlive it.
 The next run ends them: the suite's private folders under `/tmp` are named
 `asqtx<pid>-…`, and a run starts by removing every one whose process is gone, with the

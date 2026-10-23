@@ -59,10 +59,11 @@ def test_the_ci_check_job_runs_pytest_on_every_core() -> None:
     assert re.search(r"run: pytest -n auto\b", step), step[:200]
 
 
-def test_probe_writes_outside_its_own_home(home_outside_a_test: Path) -> None:
-    """Not a check on its own: the child run below sets the switch."""
+def test_probe_writes_outside_its_own_home(home_outside_a_test: Path, isolated_home: Path) -> None:
+    """The child run below sets the switch; the report it makes is what that test checks."""
     if os.environ.get(_PROBE) != "1":
         pytest.skip("runs only inside test_a_parallel_run_still_reports_a_write_outside_a_home")
+    assert not home_outside_a_test.is_relative_to(isolated_home), "the write must leave its home"
     (home_outside_a_test / "left-by-the-probe").write_text("", encoding="utf-8")
 
 

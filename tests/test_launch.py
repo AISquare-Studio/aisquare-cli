@@ -306,6 +306,69 @@ def test_launch_captain_outside_the_fleet_is_refused(
     assert not spy, "nothing should be exec'd"
 
 
+def _seat(agent_id: str, *, role: str, project_id: str, cwd: Path) -> None:
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=agent_id,
+                project_id=project_id,
+                label=role,
+                role=role,
+                pane_id="%9",
+                cwd=cwd,
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+
+
+@pytest.mark.needs_captain
+@pytest.mark.parametrize(
+    "seat",
+    ["a coder's window", "a captain row on a project", "a row that never shows"],
+)
+def test_launch_captain_in_a_window_that_is_not_the_captains_is_refused(
+    seat: str,
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #240, R1-F6: any fleet window carries AISQUARE_FLEET_AGENT, so ``launch
+    captain`` in a coder's started a full-tool claude briefed as the captain."""
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_not_the_captain")
+    if seat == "a coder's window":
+        _seat("agt_not_the_captain", role="coder", project_id="prj_launch", cwd=work_dir)
+    elif seat == "a captain row on a project":
+        _seat("agt_not_the_captain", role="captain", project_id="prj_launch", cwd=work_dir)
+
+    result = runner.invoke(app, ["launch", "captain"])
+
+    assert result.exit_code == 1, result.output
+    assert "`aisquare captain` starts it" in result.output
+    assert not spy, "nothing should be exec'd"
+
+
+@pytest.mark.needs_captain
+def test_launch_captain_in_the_captains_own_window_starts_it(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aisquare.core.workspace import project_id_for
+
+    home = project_id_for(paths.aisquare_home().resolve())
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_the_captain")
+    _seat("agt_the_captain", role="captain", project_id=home, cwd=work_dir)
+
+    result = runner.invoke(app, ["launch", "captain"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"][0] == "claude"
+
+
 def test_launch_reports_a_missing_agent_binary(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -66,7 +66,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   each command above reads it when it runs. Whatever it says, the home's own row is
   never added as a project, and `project prune` and doctor's captured row leave it
   alone (Fixed, below). Every other role, fleet row and board, and the store
-  (schema v33), are the same either way.
+  (schema v33), are the same either way. Four fleet changes that came with it are
+  not behind the switch, on or off: a tmux server the fleet starts holds no team
+  variable, doctor's `fleet server env` row, the board each delta and wake-up line
+  names, and `serve --stdio`'s idle clock (all under Fixed, below).
 - **The persona rides the system prompt too, and a replay keeps it.** For Claude
   Code the launch appends the persona block to the default system prompt
   (`--append-system-prompt-file`, a file under `~/.aisquare/cache/persona-prompts/`;
@@ -143,7 +146,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `$AISQUARE_HOME/personas/.drafts/` before anything else, shown and confirmed
   (`--yes` skips; `--json` or no terminal keeps the draft and exits
   `needs_confirmation` with its path), and saved with engine, model and
-  `condensed` in `.persona.json`. New flags `--llm/--no-llm`, `--condense`,
+  `condensed` in `.persona.json`. A skill sent through an engine with `--llm` or
+  `--condense` keeps its own name (`--name`, else its directory's, else the name a
+  copy would take), checked before any engine runs; only a source with no name of
+  its own is named by the engine. New flags `--llm/--no-llm`, `--condense`,
   `--engine`, `--model`, `--yes`; new config `[persona.import]` (`engine =
   "auto" | "manager" | "api" | "off"`, `api_model`). The headless run is a ruled
   spawn seam that strips the tracing identity, and `anthropic` and the engine
@@ -332,7 +338,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing, so a call longer than the deadline was killed mid-flight and its answer
   lost. The clock now stands still while a call runs and counts from the end of
   the last one; an abandoned server still closes itself. Found gating the captain's
-  Actions server (#217), which shares the runner.
+  Actions server (#217), which shares the runner. A call still running counts for
+  at most 15 minutes, so a hung one cannot keep an abandoned server alive.
 - **The documented-commands guard no longer fails the checkout that runs the
   fleet.** `test_the_document_list_has_not_gone_stale` walks the whole
   repository for markdown with commands in a fenced block, and a root checkout
@@ -369,6 +376,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `stop` and `restart` do, naming the agent, its role or its project, or a yes to
   the captain's own question. And a `paste` is refused while a prompt shows on the
   pane, as `tell` is: its Enter picked the highlighted "1. Yes".
+- **One bad row no longer empties the captain's attention queue.** A row the
+  running version cannot read (a newer kind after a downgrade, a hand edit), a byte
+  that is not UTF-8 or a bad cursor made the whole `queue.json` read as empty, and
+  the next write replaced it, losing every resolution, snooze and cursor. Each is
+  now dropped or kept alone, an unreadable row written back as it was, and a
+  `queue.json` from a later version is refused, never rewritten.
+- **`aisquare launch captain` starts the captain only in the captain's own
+  window.** With the captain on, it asked only that the window be a fleet window,
+  so typed in a coder's window it started a claude with every tool, briefed as the
+  captain, and bound the coder's row to it. The window's fleet row must now be the
+  captain's, on the home board.
+- **A fork of an ended teammate whose worktree was removed starts at its work.**
+  The fork's branch was cut at the checkout's HEAD while it resumed a conversation
+  about commits it did not have. It is now cut at the tip of the branch the
+  teammate's row recorded, and when that is gone too, the hand-off's notes say the
+  fork starts without the teammate's commits.
+- **Turning the captain on never leaves an agent named `captain` stopped.** A
+  coder labelled `captain`, or a declared `captain` role on a project, started
+  while the captain was off; once it was on, `fleet restart` and `fleet switch`
+  stopped it and then refused to start it again. They now refuse first, and
+  nothing is stopped. Off, a declared `captain` in the aisquare home restarts like
+  any other role.
 - **`aisquare persona` and the Personas tab read the project layer spawn and
   launch read.** They asked git for it, so a project that is not a git repository
   (a folder marked with `.aisquare`) listed none of the project personas its spawns
@@ -392,6 +421,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A spawn's "written for other roles" note counts a numbered seat as its role
   only for the built-in roles**, as the board and the model ladder do: `coder2` is a
   coder, and a declared role such as `bot7` is its own.
+- **Importing a kept draft again no longer writes over it.** The retry after
+  `import_invalid` (`persona import ~/.aisquare/personas/.drafts/<name> --condense`)
+  replaced the draft it read with the new one; the new draft now goes to
+  `.drafts/retry/<name>/`.
+- **The soft-cap warning names a command that works:** `persona import <its folder>
+  --condense --force`, with `--project` for a project persona. `--condense` alone
+  keeps the persona's name, which the persona itself holds, and was refused.
 
 ## [0.8.2] - 2026-10-19
 

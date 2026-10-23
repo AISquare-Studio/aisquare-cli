@@ -251,7 +251,7 @@ def parse_skill(text: str, *, name: str, path: Path, layer: Layer) -> Persona:
             path=where,
             code="too_large",
         )
-    _check_name(name, where)
+    check_name(name, where, what="the directory name")
     metadata = frontmatter.get("metadata")
     return Persona(
         name=name,
@@ -295,7 +295,11 @@ def _print_integers(data: object) -> None:
                 pending.extend(item.values())
 
 
-def _check_name(name: str, where: Path) -> None:
+def check_name(name: str, where: Path | str, *, what: str = "the name") -> None:
+    """Refuse a name the skill-name rule or Claude Code's reserved names forbid. ``what``
+    says whose name it is: a loaded persona's is its directory's, and an import's may be a
+    ``--name``, a file's or a page's (review of #201, R2-F5: an import of ``!!!.md`` was told
+    of "the directory name '!!!'")."""
     if name.lower() in RESERVED_NAMES:
         raise PersonaError(
             f"'{name}' is reserved — Claude Code keeps claude.ai's skills under skills/{name}/",
@@ -304,7 +308,7 @@ def _check_name(name: str, where: Path) -> None:
         )
     if len(name) > SKILL_NAME_MAX or not SKILL_NAME.fullmatch(name):
         raise PersonaError(
-            f"the directory name '{name}' breaks the skill-name rule: lowercase letters, "
+            f"{what} '{name}' breaks the skill-name rule: lowercase letters, "
             f"digits and single hyphens, 1 to {SKILL_NAME_MAX} characters",
             path=where,
             code="invalid_name",
@@ -532,10 +536,13 @@ def warnings(persona: Persona) -> list[str]:
     not document, a label that differs from the directory."""
     found: list[str] = []
     if len(persona.body) > BODY_SOFT_CAP:
+        # The command that does it: --condense keeps the persona's name, which this persona
+        # holds, so without --force it is refused (review of #201, R2-F6).
+        layer = " --project" if persona.layer == "project" else ""
         found.append(
             f"the body is {len(persona.body):,} characters, over the {BODY_SOFT_CAP:,} soft "
-            "cap — it is always-injected context; `persona import --condense` rewrites it "
-            "shorter"
+            f"cap — it is always-injected context; `aisquare persona import {persona.path} "
+            f"--condense --force{layer}` rewrites it shorter"
         )
     label = persona.frontmatter.get("name")
     if label is not None and label != persona.name:

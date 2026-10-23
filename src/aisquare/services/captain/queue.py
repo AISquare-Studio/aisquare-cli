@@ -52,7 +52,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -733,6 +733,9 @@ class _State:
     """When the newest committed fold observed its sources (gate 1, item 7)."""
     raw: str | None = None
     """The file's text as read, so an unchanged fold writes nothing (gate 1, item 13)."""
+    unread: list[Any] = field(default_factory=list)
+    """Rows this version could not read — a newer kind after a downgrade, a hand edit —
+    written back as they were, so a write never loses them (review of #240, R1-F5)."""
 
 
 class AttentionQueue:
@@ -849,14 +852,18 @@ class AttentionQueue:
             return _State()
         except OSError as exc:
             raise QueueError(f"{self.path} exists but could not be read: {exc}") from exc
+        # One bad byte costs its character, never the file (review of #240, R1-F5): read
+        # past it, and what is still a queue keeps every row.
+        mangled: UnicodeDecodeError | None = None
         try:
-            # Windows writes text mode, so the file holds \r\n; the unchanged check
-            # in _write compares this against LF-serialised text, and without the
-            # normalisation every fold rewrote identical content there (13147).
-            raw = data.decode("utf-8-sig").replace("\r\n", "\n")
+            text = data.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
-            self._report_corrupt(exc)
-            return _State(raw=None)
+            mangled = exc
+            text = data.decode("utf-8-sig", errors="replace")
+        # Windows writes text mode, so the file holds \r\n; the unchanged check in
+        # _write compares this against LF-serialised text, and without the
+        # normalisation every fold rewrote identical content there (13147).
+        raw = text.replace("\r\n", "\n")
         if not raw.strip(_BLANK):
             return _State()  # nothing in it to protect: a fresh file, or a crash's NULs
         try:
@@ -867,31 +874,65 @@ class AttentionQueue:
             cursors_raw = body.get("cursors", {})
             if not isinstance(items_raw, list) or not isinstance(cursors_raw, dict):
                 raise ValueError("items is not a list or cursors is not an object")
-            items = [QueueItem.model_validate(row) for row in items_raw]
-            cursors = {str(key): int(value) for key, value in cursors_raw.items()}
-            folded_raw = body.get("folded_at")
-            folded_at = datetime.fromisoformat(folded_raw) if isinstance(folded_raw, str) else None
-        except (ValueError, TypeError, ValidationError) as exc:
+            version = body.get("version", FILE_VERSION)
+        except ValueError as exc:
             self._report_corrupt(exc)
             return _State()
+        if not isinstance(version, int) or version > FILE_VERSION:
+            # A later aisquare's file: this one reads it wrong and would write it back
+            # in its own format, so it stops, as an unreadable file does.
+            raise QueueError(
+                f"{self.path} is version {version!r}, newer than this aisquare reads "
+                f"({FILE_VERSION}): left as it is — upgrade aisquare"
+            )
+        if mangled is not None:
+            self._report_corrupt(mangled, what="holds bytes that are not UTF-8; read past them")
+        # A cursor or a fold time that does not read is dropped alone: the next fold
+        # reads that board from its start again, which folding twice makes harmless.
+        cursors: dict[str, int] = {}
+        for key, value in cursors_raw.items():
+            with contextlib.suppress(ValueError, TypeError):
+                cursors[str(key)] = int(value)
+        folded_raw = body.get("folded_at")
+        folded_at: datetime | None = None
+        if isinstance(folded_raw, str):
+            with contextlib.suppress(ValueError):
+                folded_at = datetime.fromisoformat(folded_raw)
+        items: list[QueueItem] = []
+        unread: list[Any] = []
+        for row in items_raw:
+            try:
+                items.append(QueueItem.model_validate(row))
+            except ValidationError as exc:
+                self._report_corrupt(
+                    exc, what="holds a row this version cannot read; it is kept as it is"
+                )
+                unread.append(row)
         return _State(
-            items={item.key: item for item in items}, cursors=cursors, folded_at=folded_at, raw=raw
+            items={item.key: item for item in items},
+            cursors=cursors,
+            folded_at=folded_at,
+            raw=raw,
+            unread=unread,
         )
 
-    def _report_corrupt(self, exc: Exception) -> None:
+    def _report_corrupt(
+        self, exc: Exception, *, what: str = "is not a queue file, starting empty"
+    ) -> None:
         # Said, never silent: a corrupt queue costs the owner its history, and the
         # file is rewritten whole on the next write. Once per path per process:
         # reads cannot mend the file and would say it forever.
         if self.path not in _REPORTED_CORRUPT:
             _REPORTED_CORRUPT.add(self.path)
-            log.warning("captain queue: %s is not a queue file, starting empty: %s", self.path, exc)
+            log.warning("captain queue: %s %s: %s", self.path, what, exc)
 
     def _write(self, state: _State) -> None:
         body = {
             "version": FILE_VERSION,
             "cursors": dict(sorted(state.cursors.items())),
             "folded_at": state.folded_at.isoformat() if state.folded_at is not None else None,
-            "items": [item.model_dump(mode="json") for item in rank(state.items.values())],
+            "items": [item.model_dump(mode="json") for item in rank(state.items.values())]
+            + state.unread,
         }
         text = json.dumps(body, indent=1, sort_keys=True) + "\n"
         if text == state.raw:

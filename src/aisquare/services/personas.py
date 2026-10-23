@@ -55,6 +55,8 @@ _PROBE_NAME = "persona"
 """A valid name to run the recognised test under before the real name is known."""
 DRAFTS_DIR = ".drafts"
 """Under the user layer: every LLM draft, kept before anyone is asked (§3.7)."""
+_RETRY_DIR = "retry"
+"""Under ``DRAFTS_DIR``: the draft of a kept draft, beside its source (:func:`_keep_draft`)."""
 _ENGINES = ("auto", "manager", "api", "off")
 _FETCH_TIMEOUT_SECONDS = 20.0
 _FETCH_MAX_BYTES = 2 * 1024 * 1024
@@ -213,14 +215,15 @@ def import_source(
             raise PersonaError(
                 "not UTF-8 text — an import engine reads text", path=where, code="not_recognised"
             )
+        original = probe or _over_the_cap(text, refusal, base=base, layer=layer)
         return _import_with_llm(
             src,
             text,
-            original=probe or _over_the_cap(text, refusal, base=base, layer=layer),
+            original=original,
             where=where,
             base=base,
             layer=layer,
-            name=name,
+            name=_import_name(src, name, original, where=where),
             force=force,
             condense=condense,
             engine=engine,
@@ -230,12 +233,11 @@ def import_source(
         )
     assert text is not None
 
-    chosen = name or _implied_name(src, probe)
-    try:
-        core.parse_skill(text, name=chosen, path=base / chosen, layer=layer)
-    except PersonaError as exc:
-        hint = "" if name else " — pass --name"
-        raise PersonaError(f"{exc.rule}{hint}", path=where, code=exc.code) from None
+    chosen = _import_name(src, name, probe, where=where)
+    if chosen is None:
+        raise PersonaError(
+            "stdin carries no usable frontmatter name — pass --name", code="invalid_name"
+        )
     dest = base / chosen
     if _occupied(dest) and not force:
         raise PersonaError(
@@ -277,6 +279,41 @@ def import_source(
         warnings=core.warnings(persona),
         skipped_links=skipped,
     )
+
+
+def _import_name(
+    src: _Source, name: str | None, recognised: Persona | None, *, where: Path | str
+) -> str | None:
+    """The name an import saves under, resolved once for both paths, before anything is
+    copied or drafted (review of #201, R2-F4: the recognised path and the LLM path each
+    worked it out, and differed).
+
+    ``name`` (``--name``); else a skill directory's own name, whether its SKILL.md is
+    recognised or not (R2-F1: an unrecognised one was named by the engine); else, for a
+    recognised file (``recognised``, a probe or a skill over the cap), the name a copy
+    takes (:func:`_implied_name`). ``None`` is a source with no name of its own (text, a
+    page, stdin whose frontmatter names nothing usable), which the engine names.
+
+    Every name is held to the skill-name rule here, ``--name``'s too (R2-F2): the engine
+    cannot fix a name it is not asked for, so a bad one spent two drafts and ended
+    ``import_invalid``.
+    """
+    chosen = name
+    if chosen is None and src.directory is not None:
+        chosen = src.directory.name
+    elif chosen is None and recognised is not None:
+        try:
+            chosen = _implied_name(src, recognised)
+        except PersonaError:
+            return None  # stdin with no usable frontmatter name: there is no name to keep
+    if chosen is None:
+        return None
+    try:
+        core.check_name(chosen, where)
+    except PersonaError as exc:
+        hint = "" if name is not None else " — pass --name"
+        raise PersonaError(f"{exc.rule}{hint}", path=where, code=exc.code) from None
+    return chosen
 
 
 def _over_the_cap(
@@ -337,24 +374,13 @@ def _import_with_llm(
     directory, its supporting files, copied without links as the recognised path copies
     them. Both were dropped (review of #240, "also confirmed").
 
-    Such a source keeps its name too: ``name``, else the one the recognised path would
-    copy it under (``_implied_name``), fixed before any engine runs. The draft's own
-    ``name`` renamed the skill, so no persona of its name existed, and under ``--force``
-    the invented name could replace an unrelated persona (review of #201, R1-F1). Only
-    a source with no name of its own — text, a page, stdin whose frontmatter names
-    nothing usable — is named by the engine."""
+    ``name`` is the source's own, resolved and checked before any engine runs
+    (:func:`_import_name`): the draft's own ``name`` renamed the skill, so no persona of
+    its name existed, and under ``--force`` the invented name could replace an unrelated
+    persona (review of #201, R1-F1). ``None`` only for a source with no name of its own,
+    which the engine names."""
     from aisquare.services import persona_import
 
-    if name is None and original is not None:
-        try:
-            name = _implied_name(src, original)
-        except PersonaError:
-            pass  # stdin with no usable frontmatter name: there is no name to keep
-        else:
-            try:
-                core._check_name(name, base / name)
-            except PersonaError as exc:
-                raise PersonaError(f"{exc.rule} — pass --name", path=where, code=exc.code) from None
     if name is not None and _occupied(base / name) and not force:
         raise PersonaError(
             f"a {layer} persona named '{name}' already exists at {base / name} — --force "
@@ -499,9 +525,18 @@ def _keep_draft(
     condensed: bool,
 ) -> Path:
     """``$AISQUARE_HOME/personas/.drafts/<name>/SKILL.md`` — written before anyone is
-    asked, so nothing an engine produced is lost (§3.7). Returns the SKILL.md."""
+    asked, so nothing an engine produced is lost (§3.7). Returns the SKILL.md.
+
+    A kept draft drafted again (``persona import .drafts/<name> --condense``, the retry
+    after ``import_invalid``) is the source, and keeps its name: its new draft goes to
+    ``.drafts/retry/<name>/``, never over it. Written in place, it replaced the earlier
+    engine output it was read from (review of #201, R2-F3).
+    """
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[: core.SKILL_NAME_MAX].rstrip("-")
-    dest = dict(core.layer_dirs(None))["user"] / DRAFTS_DIR / (slug or "draft")
+    drafts = dict(core.layer_dirs(None))["user"] / DRAFTS_DIR
+    dest = drafts / (slug or "draft")
+    if src.directory is not None and dest.resolve() == src.directory.resolve():
+        dest = drafts / _RETRY_DIR / dest.name
 
     def fill(staged: Path) -> None:
         (staged / core.SKILL_FILE).write_text(rendered, encoding="utf-8")

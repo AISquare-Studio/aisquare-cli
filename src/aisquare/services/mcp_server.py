@@ -59,6 +59,12 @@ DEFAULT_PORT = 8747
 DEFAULT_CLOSE_AFTER = 300
 """Idle seconds before a stdio server closes itself (0 = run forever)."""
 
+CALL_CAP_S = 900.0
+"""How long one tool call still in flight keeps a stdio server awake (review of #240,
+R1-F4): longer than any tool either server answers (the captain's ``ask_manager`` waits at
+most 600 s), so a real call is never cut, and a hung one plus an orphaned client no longer
+keeps the process alive for ever: its deadline runs from the cap on."""
+
 LOOPBACK_BINDS = ("127.0.0.1", "localhost", "::1")
 """The exact three spellings mcp 2's ``streamable_http_app`` keys on.
 
@@ -522,30 +528,46 @@ class IdleClock:
     on a worker thread while the loop reads nothing, so a call longer than the
     deadline — the captain's ``ask_manager(timeout=400)`` under the default 300 —
     was killed mid-flight, its answer orphaned. A call in flight is activity, and
-    so is the answer going out. Touched only from the event loop (the stdin reader
-    and the ``tools/call`` handler both run there), so it needs no lock.
+    so is the answer going out — for at most ``cap`` seconds a call (:data:`CALL_CAP_S`).
+    Touched only from the event loop (the stdin reader and the ``tools/call`` handler
+    both run there), so it needs no lock.
     """
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self, clock: Callable[[], float] = time.monotonic, *, cap: float = CALL_CAP_S
+    ) -> None:
         self._clock = clock
+        self._cap = cap
         self._last = clock()
-        self.in_flight = 0
+        self._running: list[float] = []
+
+    @property
+    def in_flight(self) -> int:
+        return len(self._running)
 
     def heard(self) -> None:
         """The client said something."""
         self._last = self._clock()
 
-    def started(self) -> None:
-        self.in_flight += 1
+    def started(self) -> float:
+        """A call began; returns its start, for :meth:`finished`."""
         self._last = self._clock()
+        self._running.append(self._last)
+        return self._last
 
-    def finished(self) -> None:
-        self.in_flight = max(0, self.in_flight - 1)
+    def finished(self, started_at: float | None = None) -> None:
+        """A call ended: the one started at ``started_at``, or the oldest."""
+        if started_at in self._running:
+            self._running.remove(started_at)
+        elif self._running:
+            self._running.pop(0)
         self._last = self._clock()
 
     def idle_for(self) -> float:
-        """Seconds of idleness — zero while any call is still running."""
-        return 0.0 if self.in_flight else self._clock() - self._last
+        """Seconds of idleness — zero while any call is still running, up to its cap."""
+        now = self._clock()
+        busy = max((min(now, start + self._cap) for start in self._running), default=self._last)
+        return now - max(self._last, busy)
 
 
 def track_tool_calls(server: MCPServer, idle: IdleClock) -> None:
@@ -562,11 +584,11 @@ def track_tool_calls(server: MCPServer, idle: IdleClock) -> None:
     inner = entry.handler
 
     async def tracked(ctx: Any, params: Any) -> Any:
-        idle.started()
+        started_at = idle.started()
         try:
             return await inner(ctx, params)
         finally:
-            idle.finished()
+            idle.finished(started_at)
 
     low.add_request_handler("tools/call", entry.params_type, tracked)
 
@@ -600,8 +622,9 @@ async def _serve_stdio_until_idle(
     """Run the stdio transport with an idle deadline (#19).
 
     The deadline counts seconds since the last inbound client message or the
-    end of the last tool call, and does not run while a call is in flight
-    (:class:`IdleClock`); any protocol traffic (handshake included) resets it.
+    end of the last tool call, and does not run while a call is in flight, up to
+    :data:`CALL_CAP_S` a call (:class:`IdleClock`); any protocol traffic (handshake
+    included) resets it.
     A busy server never exits; an abandoned one — including a client killed
     mid-handshake with the pipe write end still open, so EOF never comes —
     always does.

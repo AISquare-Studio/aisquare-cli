@@ -1369,6 +1369,76 @@ def test_a_bom_is_read_and_invalid_utf8_is_corrupt_said_once(
     assert len(queue.items()) == 3, "the next write replaces the bad file"
 
 
+def _with_a_row_from_a_later_version(fx: Fixture) -> tuple[AttentionQueue, str]:
+    """Three rows written, one resolved, and a fourth of a kind this version has never heard of
+    (a downgrade, a hand edit). Returns the queue and the resolved row's id."""
+    _seed_three_projects(fx)
+    queue = fx.queue()
+    queue.refresh()
+    (question,) = (item for item in queue.attention() if item.kind == "question")
+    queue.resolve(question.id, "told beta's manager")
+    body = json.loads(fx.path.read_text(encoding="utf-8"))
+    alien = {**body["items"][0], "id": "qzzzzzzzz", "key": "later:1", "kind": "a_later_kind"}
+    body["items"].append(alien)
+    fx.path.write_text(json.dumps(body), encoding="utf-8")
+    return queue, question.id
+
+
+def test_one_row_this_version_cannot_read_never_costs_the_others(
+    fx: Fixture, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review of #240, R1-F5: one bad row read the whole queue as empty, and the next write
+    replaced queue.json, losing every resolution, snooze and cursor."""
+    queue, resolved = _with_a_row_from_a_later_version(fx)
+    with caplog.at_level(logging.WARNING, logger="aisquare.services.captain.queue"):
+        assert len(queue.items()) == 3
+    assert any("cannot read; it is kept" in r.getMessage() for r in caplog.records)
+    assert queue.get(resolved).status == "resolved"
+    fx.clock.now += timedelta(minutes=1)
+    queue.refresh()
+    queue.snooze(next(item.id for item in queue.attention()), 5)
+    body = json.loads(fx.path.read_text(encoding="utf-8"))
+    assert [row["kind"] for row in body["items"]].count("a_later_kind") == 1, "kept as it was"
+    assert body["cursors"][fx.beta.id] == 10
+    assert queue.get(resolved).status == "resolved" and len(queue.items()) == 3
+
+
+def test_a_byte_that_is_not_utf8_costs_its_character_never_the_queue(fx: Fixture) -> None:
+    _seed_three_projects(fx)
+    queue = fx.queue()
+    queue.refresh()
+    data = fx.path.read_bytes().replace(b"Merge the release", b"Merge th\xe9 release")
+    fx.path.write_bytes(data)
+    assert len(queue.items()) == 3
+    queue.refresh()
+    assert json.loads(fx.path.read_text(encoding="utf-8"))["cursors"][fx.beta.id] == 10
+
+
+def test_a_cursor_that_does_not_read_is_dropped_alone(fx: Fixture) -> None:
+    _seed_three_projects(fx)
+    queue = fx.queue()
+    queue.refresh()
+    body = json.loads(fx.path.read_text(encoding="utf-8"))
+    body["cursors"][fx.alpha.id] = "not a seq"
+    fx.path.write_text(json.dumps(body), encoding="utf-8")
+    assert len(queue.items()) == 3
+
+
+def test_a_queue_file_from_a_later_version_is_never_read_or_written(fx: Fixture) -> None:
+    _seed_three_projects(fx)
+    queue = fx.queue()
+    queue.refresh()
+    body = json.loads(fx.path.read_text(encoding="utf-8"))
+    body["version"] = captain_queue.FILE_VERSION + 1
+    fx.path.write_text(json.dumps(body), encoding="utf-8")
+    before = fx.path.read_bytes()
+    with pytest.raises(QueueError, match="newer than this aisquare reads"):
+        queue.items()
+    with pytest.raises(QueueError, match="newer than this aisquare reads"):
+        queue.refresh()
+    assert fx.path.read_bytes() == before
+
+
 # --- the default sources read the store ---------------------------------------------------------
 
 

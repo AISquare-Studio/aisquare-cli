@@ -6930,6 +6930,10 @@ def switch(
     # line every captain refusal says is the answer, not "unknown role" (review of #240, F2).
     _refuse_the_captain_while_off(agent)
     _require_role(agent.role)  # `spawn`'s first refusal, before the stop as the task's
+    try:
+        _refuse_a_replay_spawn_refuses(project, agent)
+    except FleetError as exc:
+        raise FleetError(f"cannot switch {label!r}: {exc}") from exc
     current = _account_slot_of(agent, session)
     notes: list[str] = []
     failures: list[str] = []  # the notes that say what did not happen (`SwitchReceipt`)
@@ -7166,7 +7170,11 @@ def _respawn(
         # Code whatever its binary is called, resumed or `--fresh`.
         claude_code=session is not None,
         takes_over=session.id if takes_over and resume is None and session is not None else None,
-        cwd=None if agent.worktree else agent.cwd,
+        # The captain's own folder (its brain, under the home) is replayed; every other
+        # non-worktree agent starts at its project's root, as on main (review of #240,
+        # R1-F10): a row records the root it was spawned at, and a project re-rooted since
+        # would have restarted its agents in the old folder.
+        cwd=agent.cwd if not agent.worktree and experimental.captain_role(agent.role) else None,
         onboard=onboard,
         # Asked again here, after a stop that can outlast the binary (a relink in the
         # grace): the refusal names no `--bin`, which no command that gets here takes.
@@ -7247,15 +7255,46 @@ def _refuse_the_captain_while_off(agent: FleetAgent) -> None:
     and without its rules. Asked before anything is stopped, and said in the one line
     every captain refusal says (review of #240, finding 13).
     """
-    # Only the captain's own row, on the home board: off, a role the owner declared as
-    # `captain` restarts like any other (review of #240, R1-F2).
-    home = project_id_for(paths.aisquare_home().resolve())
+    # Only the captain's own row: on the home board, launched as the captain is. Off, a
+    # role the owner declared as `captain` restarts like any other, on a project (review
+    # of #240, R1-F2) or in the home added as one (R2-m2), and no row is its role alone.
     if (
         agent.role == CAPTAIN_ROLE
-        and agent.project_id == home
         and not experimental.captain_enabled()
+        and _is_the_captains_row(agent)
     ):
         raise FleetError(experimental.CAPTAIN_OFF)
+
+
+def _is_the_captains_row(agent: FleetAgent) -> bool:
+    """Whether ``agent``'s row is one the captain's start made: on the home board, launched
+    with the captain's folder and no tool but its server (:func:`_is_the_captains_launch`)."""
+    args = agent.launch_spec.extra_args if agent.launch_spec is not None else None
+    home = paths.aisquare_home().resolve()
+    return agent.project_id == project_id_for(home) and _is_the_captains_launch(agent.cwd, args)
+
+
+def _refuse_a_replay_spawn_refuses(project: ProjectInfo, agent: FleetAgent) -> None:
+    """Raise now what :func:`spawn` refuses about ``agent``'s label and board — BEFORE it is
+    stopped (review of #240, R2-m1).
+
+    The captain switch can be flipped between a row's start and its restart: off, ``captain``
+    is a label and a role like any other, so a coder labelled ``captain`` and a declared
+    ``captain`` on a project both start; on, ``spawn`` refuses both, and a restart that
+    stopped them first left the row exited. Asked here, as the take-over asks its own
+    (:func:`_refuse_a_take_over_that_would_move`), so a running agent is left running.
+    """
+    keep = "nothing was stopped: stop it and spawn it again under another label"
+    try:
+        _fixed_label(agent.role, agent.label)
+    except FleetError as exc:
+        raise FleetError(f"{exc} — {keep}") from exc
+    if experimental.captain_role(agent.role) and not _is_home_project(project):
+        raise FleetError(
+            "the captain lives on the home board, one per home — `aisquare captain` starts "
+            f"it; {agent.label!r} cannot be started again in {_name(project)}, so nothing "
+            "was stopped"
+        )
 
 
 def _refuse_a_replay_that_cannot_start(
@@ -7513,6 +7552,7 @@ def restart(
     try:
         _require_role(runs_as)
         if runs_as == agent.role:
+            _refuse_a_replay_spawn_refuses(project, agent)
             _refuse_a_replay_that_cannot_start(agent, session, project=current)
         else:
             # What else `spawn` asks of another role, and the take-over's own rule: it
@@ -7837,7 +7877,7 @@ def hand_off(
             _persona_for_replay(project, agent, notes, role=runs_as) if persona is None else persona
         ),
         claude_code=session is not None,
-        start_point=_head_of(Path(agent.cwd)) if own else None,
+        start_point=_fork_point(project, agent, notes) if own else None,
         fork=True,
     )
     resumed = resume is not None
@@ -7910,6 +7950,35 @@ def _head_of(tree: Path) -> str | None:
     """The commit ``tree``'s checkout is on, or ``None`` when git cannot say."""
     done = _git(tree, "rev-parse", "--verify", "--quiet", "HEAD")
     return (done.stdout.strip() or None) if done.returncode == 0 else None
+
+
+def _fork_point(project: ProjectInfo, source: FleetAgent, notes: list[str]) -> str | None:
+    """Where a fork's branch is cut: the commit its source's tree is on, else the tip of the
+    branch its row recorded (review of #240, R1-F7: an exited source whose worktree was
+    removed gave ``None``, and the fork was cut at the checkout's HEAD while it resumed a
+    conversation about commits it lacked). Neither there, the fork starts at the checkout's
+    HEAD, and its receipt says so."""
+    head = _head_of(Path(source.cwd)) if Path(source.cwd).is_dir() else None
+    if head is not None:
+        return head
+    if source.branch is not None:
+        done = _git(
+            project.root,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{source.branch}^{{commit}}",
+        )
+        if done.returncode == 0 and done.stdout.strip():
+            notes.append(
+                f"{source.label}'s worktree is gone — the fork is cut at its branch {source.branch}"
+            )
+            return done.stdout.strip()
+    notes.append(
+        f"{source.label}'s worktree and branch are gone — the fork starts at "
+        f"{project.root.name}'s HEAD, without any commit {source.label} made there"
+    )
+    return None
 
 
 def _fork_prompt(

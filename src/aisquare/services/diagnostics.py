@@ -1414,8 +1414,10 @@ def _claude_accounts_sharing_check(managed: Sequence[ClaudeAccount]) -> DoctorCh
                     problems.append(f"slot {account.slot}'s {entry.name} is a broken link")
                 elif state == "elsewhere":
                     problems.append(f"slot {account.slot}'s {entry.name} links elsewhere")
-                elif state != "shared":
+                elif state == "own":
                     problems.append(f"slot {account.slot}'s {entry.name} is its own")
+                elif state == "none":
+                    problems.append(f"slot {account.slot} has no {entry.name} linked yet")
         memory = (
             f"; memory in {claude_accounts_service.shared_memory_root()}"
             if "memory" in knobs.share

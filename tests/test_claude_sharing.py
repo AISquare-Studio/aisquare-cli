@@ -992,3 +992,27 @@ def test_share_cli_json_status_enable_disable(
     assert bad.exit_code == 2 and "parts are memory" in bad.output
     off = runner.invoke(app, ["--json", "accounts", "share", "--disable", "agents"])
     assert json.loads(off.output)["share"] == ["memory"]
+
+
+def test_the_doctor_row_warns_on_a_part_a_slot_does_not_share_and_a_linked_projects(
+    skilled: tuple[ClaudeAccount, ...], tmp_path: Path
+) -> None:
+    from aisquare.services import diagnostics
+
+    _plain, second, third = skilled
+    managed = core.managed_accounts()
+    assert diagnostics._claude_accounts_sharing_check(managed) is None, "nothing shared: no row"
+
+    service.enable_share(["skills", "memory"], now=NOW)
+    row = diagnostics._claude_accounts_sharing_check(managed)
+    assert row is not None and row.status.value == "ok"
+    assert row.detail.startswith("sharing skills, memory; memory in ")
+
+    sharing.unlink_part(third.config_dir, "skills", core.default_account().config_dir)
+    (second.config_dir / "projects").symlink_to(
+        core.default_account().config_dir, target_is_directory=True
+    )
+    row = diagnostics._claude_accounts_sharing_check(managed)
+    assert row is not None and row.status.value == "warn"
+    assert "slot 3 has no skills linked yet" in row.detail
+    assert "slot 2's projects/ is a symlink" in row.detail

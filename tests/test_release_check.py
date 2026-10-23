@@ -174,13 +174,14 @@ def test_an_install_asq_does_not_update_still_gets_the_row_with_no_restart(
     assert offer is not None and offer.version == "0.9.1" and offer.runnable is False
 
 
-def test_the_row_says_restart_only_where_the_dialogs_plan_runs(
+def test_the_row_says_restart_only_where_the_route_runs(
     running: Tool,
     machine: Machine,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``Offer.runnable`` is the plan's ``runnable``, the dialog's own rule: a uv tool whose
-    uv is gone from PATH is offered how, not a restart (review of #301)."""
+    """``Offer.runnable`` is the route's own word (``install_route.not_automated``), the rule
+    the dialog's plan reads too: a uv tool whose uv is gone from PATH is offered how, not a
+    restart. The dialog's plan has the last word as it opens (test_ui_update_row.py)."""
     monkeypatch.setattr(install_route, "find_uv", lambda: None)
 
     offer = updates.check_for_release(NOW)
@@ -189,34 +190,39 @@ def test_the_row_says_restart_only_where_the_dialogs_plan_runs(
     assert lifecycle.upgrade_plan().runnable is False, "the plan agrees"
 
 
-def test_the_update_is_pinned_to_the_release_offered_and_asks_pypi_nothing(
-    running: Tool,
-    machine: Machine,  # noqa: F811
-) -> None:
-    """The version the dialog names is the one installed: a uv tool's plan is pinned to it,
-    which needs no lookup, so a newer release out since is not what the press installs."""
-    machine.latest = LatestRelease("0.9.2")
-
-    plan = updates.update_plan("0.9.1")
-
-    assert plan.target == "0.9.1" and plan.runnable
-    assert plan.argv[-1].endswith("@0.9.1"), plan.argv
-    assert machine.lookups == 0
-
-
-def test_where_brew_cannot_pin_the_update_is_the_newest_and_names_no_number(
+def test_the_hourly_ask_decides_the_row_from_the_route_and_builds_no_plan(
     running: Tool,
     machine: Machine,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    route = install_route.InstallRoute(install_route.HOMEBREW, running.facts, formula="aisquare")
-    monkeypatch.setattr(install_route, "detect", lambda: route)
+    """The plan behind the dialog reads tmux and the Remote's lock: built only when the dialog
+    opens, never by an hourly ask, which needs the route's word alone (review of #301)."""
 
-    plan = updates.update_plan("0.9.1")
+    def no_plan(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the hourly ask built a plan")
 
-    assert plan.target is None, "Homebrew installs its formula's version, not one asq names"
-    assert plan.command == "brew upgrade aisquare" and not plan.runnable
-    assert machine.lookups == 0, "the newest release's plan is built on the check's answer"
+    monkeypatch.setattr(lifecycle, "upgrade_plan", no_plan)
+
+    offer = updates.check_for_release(NOW)
+
+    assert offer is not None and offer.runnable is True
+
+
+def test_the_dialogs_ask_records_what_pypi_answers_and_nothing_when_it_cannot(
+    running: Tool,
+    machine: Machine,  # noqa: F811
+) -> None:
+    """``refresh_latest``: the dialog's ask as it opens. An answer is a check, recorded as one;
+    a lookup that fails returns nothing and records nothing."""
+    machine.latest = LatestRelease("0.9.2")
+    answered = updates.refresh_latest(NOW)
+    machine.latest = LatestRelease(None, "could not reach PyPI (offline)")
+    failed = updates.refresh_latest(NOW + timedelta(hours=1))
+
+    assert (answered, failed) == ("0.9.2", None)
+    assert machine.lookups == 2
+    assert _state(updates.LATEST_KEY) == "0.9.2"
+    assert _state(updates.CHECKED_KEY) == NOW.isoformat(), "the failed ask moved nothing"
 
 
 # --- what is offered, and announced -----------------------------------------------------------

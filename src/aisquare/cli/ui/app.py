@@ -111,6 +111,7 @@ from aisquare.cli.ui.update import (
     PLAN_WORKER,
     PRESS_WORKER,
     REATTACH_WORKER,
+    REFRESH_WORKER,
     UpdateScreen,
 )
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, UsageRead, read_session
@@ -163,20 +164,9 @@ production (PyPI at most once a day), a stub in tests."""
 
 UPDATE_HAND_OFF = ("upgrade", "--one-click")
 """What the ⬆ dialog's *Restart & update* hands the terminal to, as Doctor's Update hands it
-``upgrade --reopen``: no question, and asq back at once on the new version (``--one-click``),
-with ``--version`` and the release the dialog named when its plan is pinned
-(:func:`update_hand_off`)."""
-
-
-def update_hand_off(plan: lifecycle_service.UpgradePlan) -> tuple[str, ...]:
-    """:data:`UPDATE_HAND_OFF` for ``plan``: pinned to its release when it has one, so what
-    the dialog names is what is installed (``services.updates.update_plan``)."""
-    return (*UPDATE_HAND_OFF, "--version", plan.target) if plan.target else UPDATE_HAND_OFF
-
-
-def _is_update(hand_off: tuple[str, ...] | None) -> bool:
-    """Whether ``hand_off`` is the ⬆ update's, pinned or not."""
-    return hand_off is not None and hand_off[: len(UPDATE_HAND_OFF)] == UPDATE_HAND_OFF
+``upgrade --reopen``: no question, and asq back at once on the new version (``--one-click``).
+Unpinned, as ``aisquare upgrade`` installs: a pinned receipt would hold every later ``uv tool
+upgrade`` back (review of #301)."""
 
 
 _DoctorReport = tuple[Path | None, list[DoctorCheck]]
@@ -827,7 +817,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         headroom: HeadroomReader | None = accounts_service.read_fleet_headroom,
         headroom_seconds: float = HEADROOM_SECONDS,
         remote: RemoteController | None = None,
-        release_check: ReleaseCheck | None = updates_service.check_for_release,
+        release_check: ReleaseCheck | None = None,
         after_update: bool = False,
     ) -> None:
         super().__init__()
@@ -857,8 +847,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """The newer release the ⬆ row offers; ``None`` while none is (``check_release``)."""
         self.after_update = after_update
         """Opened by ``upgrade --one-click``: reattach the agents the press recorded."""
-        self._update_plan: lifecycle_service.UpgradePlan | None = None
-        """The plan the open update dialog shows: the one *Restart & update* hands over."""
+        self._refreshed: tuple[str | None] | None = None
+        """PyPI's answer to the update dialog's own ask (``updates.refresh_latest``), once it
+        has landed: ``(None,)`` when the lookup found none. ``None`` while it is out."""
         self._press_worker: Worker[updates_service.Press] | None = None
         """*Restart & update*'s read and record of the agents alive at the press: only its
         answer hands over (:meth:`_update_pressed`)."""
@@ -1670,6 +1661,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if event.worker.name == PRESS_WORKER:
             self._update_pressed(event)
             return
+        if event.worker.name == REFRESH_WORKER:
+            self._update_refreshed(event)
+            return
         if event.worker.name == REATTACH_WORKER:
             self._reattached(event)
             return
@@ -2337,18 +2331,48 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.on_doctor_view_hand_off(DoctorView.HandOff(self.hand_off))
             return
         offer = self.release
-        if offer is None or any(
-            worker.name == PLAN_WORKER and not worker.is_finished for worker in self.workers
+        busy = {PLAN_WORKER, PRESS_WORKER}
+        if (
+            offer is None
+            or isinstance(self.screen, UpdateScreen)
+            or any(worker.name in busy and not worker.is_finished for worker in self.workers)
         ):
+            # One dialog at a time, and none once a press is writing down the agents: a
+            # second dialog opened then would hand over twice (review of #301).
             return
-        version = offer.version
+        known = install_route.LatestRelease(offer.version)
+        self._refreshed = None
         self.run_worker(
-            lambda: updates_service.update_plan(version),
+            lambda: lifecycle_service.upgrade_plan(known_latest=known),
             name=PLAN_WORKER,
             group=PLAN_WORKER,
             thread=True,
             exit_on_error=False,
         )
+        self.run_worker(
+            updates_service.refresh_latest,
+            name=REFRESH_WORKER,
+            group=REFRESH_WORKER,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _update_refreshed(self, event: Worker.StateChanged) -> None:
+        """PyPI's answer to the dialog's ask: the number the dialog and the row show. An ask
+        that failed leaves the last check's number, said as unconfirmed."""
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR):
+            return
+        found = event.worker.result if event.state is WorkerState.SUCCESS else None
+        if found is not None and not isinstance(found, str):
+            return
+        self._refreshed = (found,)
+        offer = self.release
+        if found is not None and offer is not None and found != offer.version:
+            newer = lifecycle_service.newer_release(found, offer.current) is True
+            self.release = replace(offer, version=found) if newer else None
+            self.sidebar.show_update(found if newer else None, runnable=offer.runnable)
+        if isinstance(self.screen, UpdateScreen):
+            self.screen.show_latest(found)
 
     def _live_agents(self) -> list[FleetAgent]:
         """Every agent alive in the frame on screen (``ALIVE_STATES``): the ones an update keeps."""
@@ -2378,12 +2402,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         if not isinstance(plan, lifecycle_service.UpgradePlan):
             return
         if plan.runnable != offer.runnable:
-            # The install changed since the check (uv gone from PATH, say): the row says
-            # what the dialog will, as both read one plan's rule (review of #301).
-            self.release = replace(offer, runnable=plan.runnable)
+            # The row was decided from the install's route alone; the dialog's plan has the
+            # last word (uv gone from PATH since, say), and the row says what it says.
+            self.release = offer = replace(offer, runnable=plan.runnable)
             self.sidebar.show_update(offer.version, runnable=plan.runnable)
-        self._update_plan = plan
-        self.push_screen(UpdateScreen(plan, len(self._live_agents())), self._update_answered)
+        screen = UpdateScreen(plan, len(self._live_agents()), offer.version)
+        if self._refreshed is not None:
+            screen.show_latest(self._refreshed[0])  # PyPI answered before the plan was read
+        self.push_screen(screen, self._update_answered)
 
     def _update_answered(self, confirmed: bool | None) -> None:
         """*Restart & update*: read the agents alive now and write them down, off the UI
@@ -2434,12 +2460,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         if event.state is not WorkerState.SUCCESS:
             return
-        plan = self._update_plan
-        if not isinstance(event.worker.result, updates_service.Press) or plan is None:
+        if not isinstance(event.worker.result, updates_service.Press):
             return
-        hand_off = update_hand_off(plan)
-        self.on_doctor_view_hand_off(DoctorView.HandOff(hand_off))
-        if self.hand_off != hand_off:
+        self.on_doctor_view_hand_off(DoctorView.HandOff(UPDATE_HAND_OFF))
+        if self.hand_off != UPDATE_HAND_OFF:
             self._forget_press()
 
     def _forget_press(self) -> None:
@@ -2687,7 +2711,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         waited = _hand_off_clock() - self._hand_off_since
         if not self._hand_off_overdue and waited >= _HAND_OFF_PATIENCE:
             self._hand_off_overdue = True
-            again = "the ⬆ row" if _is_update(self.hand_off) else "Update or Uninstall"
+            again = "the ⬆ row" if self.hand_off == UPDATE_HAND_OFF else "Update or Uninstall"
             self.notify(
                 f"Still waiting for {_in_words(running)} after {waited:.0f} s. Press {again} "
                 "again to stay in asq; quit, and it runs once they end.",
@@ -2709,7 +2733,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """
         if self._hand_off_poll is not None:
             self._hand_off_poll.stop()
-        if _is_update(self.hand_off):
+        if self.hand_off == UPDATE_HAND_OFF:
             self._forget_press()  # the ⬆ update that recorded it will not run
         self.hand_off = None
         self._hand_off_overdue = False
@@ -2855,6 +2879,7 @@ def _waited_reads() -> dict[str, str]:
         FLEET_WORKER: "the sidebar's read of the fleet",
         CHECK_WORKER: "the release check",
         PLAN_WORKER: "how aisquare updates here",
+        REFRESH_WORKER: "the update dialog's ask of PyPI",
         ACCOUNTS_WORKER: "the accounts' read",
         HEADROOM_WORKER: "the accounts' headroom",
         doctor.ROUTE_WORKER: "how aisquare was installed",
@@ -2948,7 +2973,10 @@ def run_ui(**options: Any) -> None:
     """
     from aisquare.services import remote_server
 
-    app = FleetApp(**options)
+    # The release check runs in the asq a person opens, never in an app a test builds unless
+    # the test passes one: each FleetApp started a check worker and an hourly ask, one more
+    # thread worker beside the reads the UI tests time (Windows CI on bff5c05e).
+    app = FleetApp(**{"release_check": updates_service.check_for_release, **options})
     with ngrok_ends_with():
         app.run()
         # Read with getattr so an app still needs only `run()`, `unsaved` and `remote` to be

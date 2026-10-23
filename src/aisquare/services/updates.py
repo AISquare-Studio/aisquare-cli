@@ -136,35 +136,37 @@ def check_for_release(now: datetime | None = None) -> Offer | None:
                 store.set_ui_state(LATEST_KEY, found)
     if latest is None or lifecycle_service.newer_release(latest, __version__) is not True:
         return None
-    # The dialog's own plan, built offline, decides whether the row says "restart to update":
-    # one rule for both, so the two cannot disagree (review of #301).
-    plan = update_plan(latest)
     with store_session() as store:
         announce = store.ui_state(ANNOUNCED_KEY) != latest
         if announce:
             store.set_ui_state(ANNOUNCED_KEY, latest)
+    # Whether the row says "restart to update" is the route's alone, read offline: the plan
+    # behind the dialog reads tmux and the Remote's lock, which an hourly ask has no use for
+    # (review of #301). The dialog's plan has the last word; the row follows it as it opens.
     return Offer(
         version=latest,
         current=__version__,
-        runnable=plan.runnable,
+        runnable=install_route.not_automated(route) is None,
         announce=announce,
     )
 
 
-def update_plan(version: str) -> lifecycle_service.UpgradePlan:
-    """The upgrade asq's ⬆ update runs and its dialog shows: pinned to ``version``, the release
-    the row offers, wherever the route can pin one; otherwise the newest release.
+def refresh_latest(now: datetime | None = None) -> str | None:
+    """The newest release, asked of PyPI now (:func:`lookup_latest`), for the update dialog
+    to show as it opens; ``None`` when the lookup fails. A lookup that answers is a check,
+    and recorded as one: the row and the next start then offer what it found.
 
-    Pinned (``upgrade --version``), the release the dialog names is the one installed: asked
-    for the newest, uv took 0.8.4 for a dialog that said 0.8.3 once 0.8.4 was out (review
-    of #301). A pin needs no lookup. Homebrew installs the version its formula has
-    (``install_route.pin_refusal``), so there the plan is the newest release's, built on the
-    check's answer (``known_latest``) and offline, and the dialog names no number.
+    The dialog opens on the release the last check found, which can be a day old; the
+    update itself installs uv's newest, as ``aisquare upgrade`` does, so the number the
+    dialog names is the one asked for here (review of #301).
     """
-    pinned = lifecycle_service.upgrade_plan(version)
-    if not pinned.pin_refused:
-        return pinned
-    return lifecycle_service.upgrade_plan(known_latest=install_route.LatestRelease(version))
+    found = lookup_latest()
+    if found is not None:
+        when = now or datetime.now(UTC)
+        with store_session() as store:
+            store.set_ui_state(CHECKED_KEY, when.isoformat())
+            store.set_ui_state(LATEST_KEY, found)
+    return found
 
 
 # --- the press, and the reopen ----------------------------------------------------------------

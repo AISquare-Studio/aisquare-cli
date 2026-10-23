@@ -32,6 +32,7 @@ from tests.test_ui_update_row import (
     _open_by_keyboard,
     _toasts,
     _two_alive,
+    fresh,  # noqa: F401 — autouse: the dialog's ask of PyPI as it opens, stood in for
     planned,  # noqa: F401
 )
 from tests.ui_workers import settle_page

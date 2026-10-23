@@ -202,18 +202,16 @@ def _fleet_lines(plan: lifecycle_service.UpgradePlan, *, one_click: bool = False
     it reads otherwise in config.toml, said before anything is installed: in the plan, and
     under --yes.
 
-    Under ``--one-click`` the fleet is said as a fact, not with the advice to stop it first:
-    keeping the agents running is what asq's ⬆ update is for (review of #301)."""
-    if plan.fleet_warning is not None and one_click:
-        count = len(plan.live_agents)
-        keeps = f"{count} agent{'s keep' if count != 1 else ' keeps'} running"
-        fires = "they fire" if count != 1 else "it fires"
-        _say(f"· {keeps}; a hook {fires} during the install is lost")
+    Under ``--one-click`` the fleet and a Remote on elsewhere are said as facts, with no advice
+    to stop, shut down or turn off anything: keeping the agents running is what asq's ⬆ update
+    is for, and its dialog said so before the press (review of #301)."""
+    if one_click:
+        _one_click_lines(plan)
     elif plan.fleet_warning is not None:
         _say(f"⚠ {plan.fleet_warning}")
     elif plan.fleet_error is not None:
         _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
-    if plan.remote_warning is not None:
+    if plan.remote_warning is not None and not one_click:
         _say(f"⚠ {plan.remote_warning}")
     if plan.env_files_warning is not None:
         _say(f"⚠ {plan.env_files_warning}")
@@ -294,6 +292,25 @@ def _by_hand(version: str | None) -> str:
 ONE_CLICK_REOPEN = ("ui", "--after-update")
 
 
+def _one_click_lines(plan: lifecycle_service.UpgradePlan) -> None:
+    """The fleet and a Remote on elsewhere, as ``--one-click`` says them: facts only."""
+    if plan.live_agents:
+        count = len(plan.live_agents)
+        keeps = f"{count} agent{'s keep' if count != 1 else ' keeps'} running"
+        fires = "they fire" if count != 1 else "it fires"
+        _say(f"· {keeps}; a hook {fires} during the install is lost")
+    elif plan.fleet_error is not None:
+        _say(
+            f"· the fleet's agents could not be counted ({plan.fleet_error}); whatever runs "
+            "keeps running"
+        )
+    if plan.remote is not None:
+        _say(
+            f"· Remote is on ({plan.remote}): it can fail while the install is replaced, and "
+            f"runs {plan.current} until it is started again"
+        )
+
+
 def _reopen(reopen: bool, *, one_click: bool = False, failed: bool = False) -> None:
     """Hand the terminal back to asq (``--reopen``: what asq's Update and Uninstall run).
 
@@ -316,7 +333,24 @@ def _reopen(reopen: bool, *, one_click: bool = False, failed: bool = False) -> N
             input("Press Enter to go back to asq ")
         except (EOFError, KeyboardInterrupt):
             return
-    selfcli.exec_self(list(ONE_CLICK_REOPEN) if one_click else ["ui"])
+    if one_click:
+        _reopen_after_one_click(failed=failed)
+    else:
+        selfcli.exec_self(["ui"])
+
+
+def _reopen_after_one_click(*, failed: bool) -> None:
+    """Open asq again as :data:`ONE_CLICK_REOPEN`. A reopen that cannot start says so as itself:
+    after a run that worked the update is done and only the reopen failed, which an error
+    raised from here reported as the upgrade's own (review of #301)."""
+    try:
+        selfcli.exec_self(list(ONE_CLICK_REOPEN))
+    except OSError as exc:
+        done = "the update is done, but " if not failed else ""
+        stderr_console().print(
+            f"✗ {done}asq could not be opened again ({exc}). Type `asq` to open it.",
+            markup=False,
+        )
 
 
 def _fallback(plan: lifecycle_service.UpgradePlan) -> str:

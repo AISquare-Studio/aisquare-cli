@@ -7165,7 +7165,11 @@ def _respawn(
         # Code whatever its binary is called, resumed or `--fresh`.
         claude_code=session is not None,
         takes_over=session.id if takes_over and resume is None and session is not None else None,
-        cwd=None if agent.worktree else agent.cwd,
+        # The captain's own folder (its brain, under the home) is replayed; every other
+        # non-worktree agent starts at its project's root, as on main (review of #240,
+        # R1-F10): a row records the root it was spawned at, and a project re-rooted since
+        # would have restarted its agents in the old folder.
+        cwd=agent.cwd if not agent.worktree and experimental.captain_role(agent.role) else None,
         onboard=onboard,
         # Asked again here, after a stop that can outlast the binary (a relink in the
         # grace): the refusal names no `--bin`, which no command that gets here takes.

@@ -49,6 +49,7 @@ from aisquare.cli.ui.attach import (
     AttachTargetScreen,
     ConfirmAttachScreen,
     NewAccountRequested,
+    ReturnTo,
     Target,
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
@@ -364,18 +365,32 @@ class PersonasTab(Vertical):
 
     def on_attach_requested(self, event: AttachRequested) -> None:
         """The second step — who runs it: the target picker, ordered by the intent."""
-        persona = event.persona
+        self.open_picker(event.persona, event.intent)
+
+    def open_picker(
+        self,
+        persona: str,
+        intent: AttachIntent,
+        *,
+        select: str | None = None,
+        filter_text: str = "",
+    ) -> None:
+        """The target picker for ``persona``. The shell opens it again, through here, once a
+        sign-in its *+ New account* started has landed, with that account highlighted
+        (``select``) and the filter as it was (#215): what it is chosen for stays this tab's."""
         self.app.push_screen(
             AttachTargetScreen(
                 self.project,
                 persona=persona,
-                intent=event.intent,
+                intent=intent,
                 accounts=accounts_service.overview,
+                select=select,
+                filter_text=filter_text,
             ),
-            callback=lambda target: self._target_chosen(persona, target),
+            callback=lambda target: self._target_chosen(persona, intent, target),
         )
 
-    def _target_chosen(self, persona: str, target: Target | None) -> None:
+    def _target_chosen(self, persona: str, intent: AttachIntent, target: Target | None) -> None:
         if target is None:
             return
         if target.kind == "agent":
@@ -385,7 +400,8 @@ class PersonasTab(Vertical):
                 callback=lambda yes: self._attach_persona(persona, label) if yes else None,
             )
         elif target.kind == "new-account":
-            self.post_message(NewAccountRequested())
+            form = {"persona": persona, "intent": intent, "filter": target.key}
+            self.post_message(NewAccountRequested(ReturnTo("picker", self.project.id, form)))
         else:
             self.app.push_screen(
                 SpawnDialog(

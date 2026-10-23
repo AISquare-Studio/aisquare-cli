@@ -381,6 +381,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   about commits it did not have. It is now cut at the tip of the branch the
   teammate's row recorded, and when that is gone too, the hand-off's notes say the
   fork starts without the teammate's commits.
+- **Turning the captain on never leaves an agent named `captain` stopped.** A
+  coder labelled `captain`, or a declared `captain` role on a project, started
+  while the captain was off; once it was on, `fleet restart` and `fleet switch`
+  stopped it and then refused to start it again. They now refuse first, and
+  nothing is stopped. Off, a declared `captain` in the aisquare home restarts like
+  any other role.
 
 ## [0.8.2] - 2026-10-19
 

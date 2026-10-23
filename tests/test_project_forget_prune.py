@@ -552,6 +552,7 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         "team_session": 1,
         "fleet_agent": 1,
         "metric": 1,
+        "brief": 0,
         "project_setting": 0,
         "project_explainability": 0,
         "project_destination": 0,
@@ -575,6 +576,30 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
     assert _raw("SELECT COUNT(*) FROM entry WHERE project_id = ?", (beta,)) == [(1,)]
     assert _raw("SELECT value FROM team_meta WHERE key = ?", (f"distill_seq:{beta}",)) == [("7",)]
     assert _raw("SELECT COUNT(*) FROM metric WHERE project_id = ?", (beta,)) == [(1,)]
+
+
+def test_forget_purge_deletes_brief_rows(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``project forget --purge`` deletes the project's work briefs, counted, and leaves a
+    bystander's. The table carries no foreign key, so the purge has to name it."""
+    from aisquare.services import briefs
+
+    alpha = _register(runner, monkeypatch, work_dir / "alpha")
+    beta = _register(runner, monkeypatch, work_dir / "beta")
+    for directory in ("alpha", "alpha", "beta"):
+        monkeypatch.chdir(work_dir / directory)
+        assert runner.invoke(app, ["team", "on"]).exit_code == 0
+        briefs.create(f"{directory} brief", ["a requirement"])
+    monkeypatch.chdir(work_dir)
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (alpha,)) == [(2,)]
+
+    result = runner.invoke(app, ["--json", "project", "forget", "alpha", "--purge"])
+
+    assert result.exit_code == 0, result.output
+    assert _json(result.stdout)["removed"]["brief"] == 2
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (alpha,)) == [(0,)]
+    assert _raw("SELECT COUNT(*) FROM brief WHERE project_id = ?", (beta,)) == [(1,)]
 
 
 def test_purge_copes_with_hundreds_of_recorded_sessions(

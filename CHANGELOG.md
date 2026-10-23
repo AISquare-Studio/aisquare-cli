@@ -8,6 +8,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Work briefs** (`docs/work-briefs.md`): a request as numbered requirements
+  linked to the board's own tasks. `aisquare brief create | show | list | update |
+  link | evidence | finding`, every write with `--as`. Requirement ids (`R1`, `R2`,
+  …) are stable for the brief's life; one task can cover several requirements and
+  one requirement can need several tasks, each proving its own part. `brief
+  evidence --artifact` records a check as **manual** evidence, labelled so in
+  `show`, the board event and `--json`. `brief finding` sends a task in review or
+  done back to todo, keeps an in-progress task's owner, leaves a dropped task
+  dropped, and blocks a task at its third distinct failure on one revision of a
+  requirement. A correction keeps every id: a changed requirement or check makes
+  its evidence stale, a changed assumption or boundary makes all of it stale, and
+  linked tasks in review or done go back to todo, with the old text and checks
+  kept. An identical update changes nothing, a dropped or vanished duplicate task
+  is ignored while a live linked task remains, and a session's own writes do not
+  wake it. Store v34 adds the `brief` table (not #136's `work_brief`, which a store
+  that ran a #136 build keeps, unread); `project forget --purge` deletes its rows.
+  The gate on `task done`, `brief check` and report-backed evidence are the next
+  part (#275).
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in

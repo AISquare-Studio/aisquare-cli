@@ -774,6 +774,140 @@ class TeamEvent(BaseModel):
         )
 
 
+EvidenceVerdict = Literal["pass", "fail"]
+"""What a recorded check found (``asq brief evidence --verdict``)."""
+
+EvidenceKind = Literal["manual", "report"]
+"""What backs a check. ``manual``: an artifact, such as a screenshot, that only the
+validator can judge, and labelled so everywhere. ``report``: a saved command report
+(``asq exec``), checked against the source it ran on; recorded by a later build."""
+
+RequirementState = Literal["pass", "fail", "stale", "missing", "blocked", "unlinked"]
+"""Where one requirement, or one linked task's part of it, stands (``asq brief show``)."""
+
+
+class RequirementVersion(BaseModel):
+    """A requirement as it read before a correction superseded it: kept, never rewritten."""
+
+    revision: int
+    text: str
+    check: str | None = None
+    superseded_at: datetime
+    superseded_by: str | None = None
+    """The session (``--as``) whose correction superseded it."""
+
+
+class BriefRequirement(BaseModel):
+    """One numbered requirement of a brief. ``id`` (``R1``, ``R2``, …) is stable for the
+    brief's life; ``revision`` counts the corrections that changed what it asks, and a
+    check recorded against an older revision is stale."""
+
+    id: str
+    text: str = Field(min_length=1, max_length=2000)
+    check: str | None = Field(default=None, max_length=2000)
+    """The expected check, as the brief's author wrote it: what proves this one."""
+    revision: int = 1
+    task_ids: list[str] = Field(default_factory=list)
+    """The board tasks linked to it, each of which proves its own contribution."""
+    history: list[RequirementVersion] = Field(default_factory=list)
+
+
+class BriefEvidence(BaseModel):
+    """One recorded check of one requirement by one linked task. Appended, never edited."""
+
+    id: str
+    requirement_id: str
+    requirement_revision: int
+    """The requirement's revision when this was recorded: a correction makes it stale."""
+    task_id: str
+    verdict: EvidenceVerdict
+    kind: EvidenceKind = "manual"
+    finding: bool = False
+    """Recorded by ``asq brief finding``: a failure someone found, not a check run."""
+    summary: str = Field(min_length=1, max_length=4000)
+    artifact: str | None = None
+    """The artifact's resolved path, for ``manual`` evidence."""
+    artifact_sha256: str | None = None
+    report_id: str | None = None
+    """The command report behind ``report`` evidence."""
+    source_root: str | None = None
+    """The checkout the check ran in, for ``report`` evidence."""
+    source_fingerprint: str | None = None
+    """That checkout's source identity when the check ran, for ``report`` evidence."""
+    recorded_at: datetime
+    session_id: str | None = None
+
+
+class BriefCorrection(BaseModel):
+    """One write that changed what a brief asks: what changed, and what it made stale."""
+
+    revision: int
+    """The brief revision this correction produced."""
+    changes: list[str]
+    stale: list[str] = Field(default_factory=list)
+    """The requirement ids whose recorded checks it made stale."""
+    at: datetime
+    session_id: str | None = None
+
+
+class WorkBrief(BaseModel):
+    """One user request as numbered requirements, linked to ordinary board tasks.
+
+    ``revision`` counts every write, which is how two writers never overwrite each other
+    (the store compares it). ``number`` is its number on its board (``B1``), given by the
+    store at insert, and not part of the stored document.
+    """
+
+    id: str
+    project_id: str
+    number: int | None = None
+    title: str = Field(min_length=1, max_length=500)
+    revision: int = 1
+    requirements: list[BriefRequirement] = Field(min_length=1, max_length=64)
+    assumptions: list[str] = Field(default_factory=list)
+    boundaries: list[str] = Field(default_factory=list)
+    evidence: list[BriefEvidence] = Field(default_factory=list, max_length=1024)
+    corrections: list[BriefCorrection] = Field(default_factory=list)
+    created_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @property
+    def label(self) -> str:
+        """``B1`` once stored; the id before."""
+        return f"B{self.number}" if self.number is not None else self.id
+
+
+class TaskProof(BaseModel):
+    """One live linked task's part of a requirement: its latest check, and what it is worth."""
+
+    task_id: str
+    task_number: int | None = None
+    task_status: TaskStatus
+    state: RequirementState
+    reason: str
+    evidence_id: str | None = None
+    kind: EvidenceKind | None = None
+
+
+class RequirementStatus(BaseModel):
+    """Where a requirement stands: the worst of its live linked tasks' proofs."""
+
+    id: str
+    state: RequirementState
+    reason: str
+    manual: bool = False
+    """A pass here rests on manual evidence, which only the validator can judge."""
+    tasks: list[TaskProof] = Field(default_factory=list)
+
+
+class BriefView(BaseModel):
+    """A brief with each requirement's standing, as ``asq brief show`` reads it."""
+
+    brief: WorkBrief
+    requirements: list[RequirementStatus]
+
+
 class Snapshot(BaseModel):
     """A packed snapshot of a project's codebase (Repomix full pack + skeleton)."""
 

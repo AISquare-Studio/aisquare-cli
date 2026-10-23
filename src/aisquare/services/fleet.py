@@ -944,6 +944,26 @@ def resolve_project(ref: str | None = None, *, cwd: Path | None = None) -> Proje
         return only_project(ref, store.find_projects(ref))
 
 
+def ui_scope(projects: Sequence[str] = (), groups: Sequence[str] = ()) -> frozenset[str] | None:
+    """The project ids ``aisquare ui --project … --group …`` shows, or ``None`` for every one.
+
+    Each ``--project`` is one project (:func:`resolve_project`'s refs), each ``--group`` its
+    members as they stand now, pinned ones included. For an operator with many projects
+    who works in a few (#83): the sidebar reads only those on every tick.
+    """
+    if not projects and not groups:
+        return None
+    scope = {resolve_project(ref).id for ref in projects}
+    with store_session() as store:
+        listed = store.list_projects(all=True)
+        for name in groups:
+            group = store.find_project_group(name)
+            if group is None:
+                raise NoSuchProject(f"no project group named {name!r}")
+            scope.update(p.id for p in listed if p.group_id == group.id)
+    return frozenset(scope)
+
+
 def only_project(ref: str, matches: list[ProjectInfo]) -> ProjectInfo:
     """The one project of ``matches``, those ``ref`` names; :class:`NoSuchProject` for none
     or several, the message naming them."""
@@ -2271,11 +2291,41 @@ def _on_another_server(
     return booted_at is None or agent.created_at >= booted_at
 
 
+class _Tick:
+    """One read's server-wide answer per server (:meth:`TmuxServer.every_window`), asked once.
+
+    For a reader of many projects (:func:`list_agents_many`, ``asq``'s tick, #83): each
+    project's :func:`_observe` asked its server for its session's windows and for every
+    pane's output time, two tmux processes per project per tick, the second the same
+    answer each time. A server that could not be asked raises for every project on it,
+    as it did when each asked on its own.
+    """
+
+    def __init__(self) -> None:
+        self._answers: dict[object, tuple[dict[str, list[WindowInfo]], dict[str, datetime]]] = {}
+        self._failed: dict[object, TmuxError] = {}
+
+    def every_window(
+        self, srv: TmuxServer
+    ) -> tuple[dict[str, list[WindowInfo]], dict[str, datetime]]:
+        key = (srv.socket, srv.path)
+        if key in self._failed:
+            raise self._failed[key]
+        if key not in self._answers:
+            try:
+                self._answers[key] = srv.every_window()
+            except TmuxError as exc:
+                self._failed[key] = exc
+                raise
+        return self._answers[key]
+
+
 def _observe(
     srv: TmuxServer,
     tmux_session: str | None,
     agents: Sequence[FleetAgent],
     reads: tmux_core.SocketReads | None = None,
+    tick: _Tick | None = None,
 ) -> _Observed | None:
     """Row id → the facts of that row's pane, or ``None`` when tmux cannot be asked at all.
 
@@ -2311,13 +2361,18 @@ def _observe(
     answers ``None`` for it, as for a server that could not be asked.
     """
     try:
-        windows = (
-            {window.pane_id: window for window in srv.list_windows(tmux_session)}
-            if tmux_session
-            else {}
-        )
         live = [agent for agent in agents if agent.ended_at is None]
-        output_at = _activity_times(srv) if live else {}
+        if tick is not None:  # the server's one answer for every project of this read
+            every, times = tick.every_window(srv)
+            windows = {w.pane_id: w for w in every.get(tmux_session, [])} if tmux_session else {}
+            output_at = times if live else {}
+        else:
+            windows = (
+                {window.pane_id: window for window in srv.list_windows(tmux_session)}
+                if tmux_session
+                else {}
+            )
+            output_at = _activity_times(srv) if live else {}
         said = [w.server_started for w in windows.values() if w.server_started is not None]
         seen: dict[str, _PaneView] = {}
         for agent in agents:
@@ -2369,6 +2424,7 @@ def _observe_sockets(
     config: FleetSettings | None = None,
     addresses: Mapping[str, _Address] | None = None,
     reads: tmux_core.SocketReads | None = None,
+    tick: _Tick | None = None,
 ) -> dict[_Address, _Observed | None]:
     """Server → what THAT server says about the live agents recorded on it.
 
@@ -2389,7 +2445,7 @@ def _observe_sockets(
     for agent in agents:
         groups.setdefault(_where(agent, config, addresses), []).append(agent)
     return {
-        address: _observe(_server_at(address, config), tmux_session, group, reads)
+        address: _observe(_server_at(address, config), tmux_session, group, reads, tick)
         for address, group in groups.items()
     }
 
@@ -4597,29 +4653,63 @@ def list_agents(
       ``fleet ls`` shows the same rows, so the two never disagree.
     """
     with store_session() as store:
-        current = store.get_project(project.id) or project
-        agents = store.fleet_agents(project.id, live_only=False)
-        sessions = {session.id: session for session in store.team_sessions(project.id)}
-        # A live row's session another board keeps (under AISQUARE_TEAM_HUB, every one):
-        # read by its id here, in this one store session, for the folder-trust question
-        # (`_with_trust_prompts`), and for a caller that derives those rows again with it.
-        by_id = {
-            agent.session_id: store.get_session(agent.session_id)
-            for agent in agents
-            if agent.ended_at is None and agent.session_id and agent.session_id not in sessions
-        }
+        listing = _listing(store, project)
     if looked_up is not None:
-        looked_up.update(by_id)
+        looked_up.update(listing.by_id)
+    return _statuses(listing, live_only=live_only)
+
+
+@dataclass(frozen=True)
+class _Listing:
+    """What a listing of one project read in the store (:func:`_listing`)."""
+
+    project: ProjectInfo
+    agents: list[FleetAgent]
+    sessions: dict[str, TeamSession]
+    by_id: dict[str, TeamSession | None]
+
+
+def _listing(store: ContextStore, project: ProjectInfo) -> _Listing:
+    """The project's rows and sessions, as :func:`list_agents` reads them, in ``store``."""
+    current = store.get_project(project.id) or project
+    agents = store.fleet_agents(project.id, live_only=False)
+    sessions = {session.id: session for session in store.team_sessions(project.id)}
+    # A live row's session another board keeps (under AISQUARE_TEAM_HUB, every one):
+    # read by its id here, in this one store session, for the folder-trust question
+    # (`_with_trust_prompts`), and for a caller that derives those rows again with it.
+    by_id = {
+        agent.session_id: store.get_session(agent.session_id)
+        for agent in agents
+        if agent.ended_at is None and agent.session_id and agent.session_id not in sessions
+    }
+    return _Listing(current, agents, sessions, by_id)
+
+
+def _statuses(
+    listing: _Listing,
+    *,
+    live_only: bool = True,
+    config: FleetSettings | None = None,
+    tick: _Tick | None = None,
+) -> list[FleetAgentStatus]:
+    """:func:`list_agents`'s answer for what :func:`_listing` read: tmux asked, dead rows
+    ended, each row's state derived. ``tick`` shares each server's answer across projects."""
+    current, agents, sessions, by_id = (
+        listing.project,
+        listing.agents,
+        listing.sessions,
+        listing.by_id,
+    )
     now = _now()
     if live_only:
         cutoff = now - RECENTLY_ENDED
         agents = [a for a in agents if a.ended_at is None or a.ended_at >= cutoff]
     tmux_session = session_name(current.codename) if current.codename else None
-    config = settings()
+    config = config or settings()
     # Each row's address once for this read (`_where`): asked about five times per row
     # otherwise, each resolving two paths, on asq's tick (follow-up of #257).
     addresses = {agent.id: _address(agent, config) for agent in agents}
-    views = _observe_sockets(agents, tmux_session, config, addresses)
+    views = _observe_sockets(agents, tmux_session, config, addresses, tick=tick)
     ended = {
         row.id: row
         for row in _end_dead_rows(
@@ -4643,6 +4733,64 @@ def list_agents(
         for agent in agents
     ]
     return _with_trust_prompts(statuses, config, by_id, addresses)
+
+
+@dataclass(frozen=True)
+class Listings:
+    """What one read of many projects found in the store (:func:`read_listings`)."""
+
+    listings: dict[str, _Listing]
+    """Project id → its rows and sessions, for every project a listing can show a row of."""
+    live: dict[str, int]
+    """Project id → its live rows, for every project read or skipped that has any."""
+
+
+@dataclass(frozen=True)
+class ManyAgents:
+    """:func:`list_agents_many`'s answer: each project's agents, or why they are missing."""
+
+    agents: dict[str, list[FleetAgentStatus]]
+    errors: dict[str, Exception]
+
+
+def read_listings(
+    store: ContextStore, projects: Sequence[ProjectInfo], *, skip: Collection[str] = ()
+) -> Listings:
+    """The store half of :func:`list_agents_many`, in the caller's ``store`` session.
+
+    Only a project with a live row, or one that ended within :data:`RECENTLY_ENDED`, is
+    read: any other lists nothing (:func:`list_agents` keeps no older row), and with 305
+    listed projects every ``asq`` tick read each one's rows and sessions and asked its tmux
+    server, for no agent at all (#83). ``skip`` (a collapsed group's hidden members) is not
+    read either; :attr:`Listings.live` still counts its live rows.
+    """
+    live = store.fleet_live_counts(_now() - RECENTLY_ENDED)
+    listings = {
+        project.id: _listing(store, project)
+        for project in projects
+        if project.id in live and project.id not in skip
+    }
+    return Listings(listings, live)
+
+
+def list_agents_many(listings: Listings) -> ManyAgents:
+    """:func:`list_agents` for every project :func:`read_listings` read, with tmux asked once
+    per server for all of them (:class:`_Tick`) instead of twice per project.
+
+    The same statuses per project as :func:`list_agents` (``live_only``), dead rows ended the
+    same way. A project whose read failed is in ``errors`` and nowhere else, so one broken
+    project costs its own rows, not the listing.
+    """
+    config = settings()
+    tick = _Tick()
+    agents: dict[str, list[FleetAgentStatus]] = {}
+    errors: dict[str, Exception] = {}
+    for project_id, listing in listings.listings.items():
+        try:
+            agents[project_id] = _statuses(listing, config=config, tick=tick)
+        except Exception as exc:  # one project's failure is that project's: said, not raised
+            errors[project_id] = exc
+    return ManyAgents(agents, errors)
 
 
 def _end_dead_rows(

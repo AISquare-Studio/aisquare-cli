@@ -79,6 +79,7 @@ from aisquare.services.transcript import (
     TranscriptTail,
     read_transcript_tail,
 )
+from tests.fleet_fakes import list_agents_as
 from tests.remote_kit_helpers import base, make_client, make_runtime, receive_within, unlock
 
 _LIVE_NEEDS_SOURCES = remote_needs.live_needs_sources
@@ -3796,7 +3797,7 @@ def _alone_of(
         for status in fleet.agents:
             store.upsert_fleet_agent(status.agent)
     monkeypatch.setattr(fleet_service, "status_of", lambda row: statuses[row.id])
-    monkeypatch.setattr(fleet_service, "list_agents", _never)
+    list_agents_as(monkeypatch, _never)
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
     tails = _TailOnly(read or fleet.tails.get)
     monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: tails)
@@ -3936,7 +3937,7 @@ def test_the_agent_alone_is_derived_on_its_own_server_and_its_transcript_alone_i
     tmux = FakeTmux(reference=NOW)
     monkeypatch.setattr(fleet_service, "_now", lambda: NOW)
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
-    monkeypatch.setattr(fleet_service, "list_agents", _never)
+    list_agents_as(monkeypatch, _never)
     monkeypatch.setattr(remote_needs, "live_needs_sources", lambda: _TailOnly(cached_tail))
     snap = needs_single_agent_now(PROJECT, "coder-1", now=NOW)
     assert snap.status is not None
@@ -6262,9 +6263,11 @@ def test_under_a_team_hub_a_projects_rows_are_derived_again_in_one_look_at_tmux(
     looks: list[list[str]] = []
     observe = fleet_service._observe
 
-    def looked(srv: Any, tmux_session: str | None, agents: Any, reads: Any = None) -> Any:
+    def looked(
+        srv: Any, tmux_session: str | None, agents: Any, reads: Any = None, tick: Any = None
+    ) -> Any:
         looks.append(sorted(agent.label for agent in agents))
-        return observe(srv, tmux_session, agents, reads)
+        return observe(srv, tmux_session, agents, reads, tick)
 
     tmux = FakeTmux()
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)

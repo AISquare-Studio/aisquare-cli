@@ -24,9 +24,9 @@ from textual.widgets import Input, OptionList
 from aisquare.cli.ui.attach import AttachTargetScreen
 from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.models import ProjectInfo
-from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
 from tests import test_ui_spawn as spawn_suite
+from tests.fleet_fakes import list_agents_as
 from tests.test_ui_spawn import (
     Host,
     SpawnRecorder,
@@ -69,7 +69,7 @@ def test_a_role_pick_brings_in_shows_its_missing_default_persona_and_the_app_kee
     seat is bound after the dialog opened, so the role list (and the Persona select built
     from it) never knew the role."""
     configure_role("coder2", persona="ghost")
-    monkeypatch.setattr(fleet_service, "list_agents", lambda project, *, live_only=True: [])
+    list_agents_as(monkeypatch, lambda project, *, live_only=True: [])
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = [
@@ -110,7 +110,7 @@ def test_the_missing_default_is_shown_from_a_form_that_was_showing_another_roles
     field ends on the new role's default all the same, a value it offers."""
     configure_role("coder", persona="minimalist")
     configure_role("coder2", persona="ghost")
-    monkeypatch.setattr(fleet_service, "list_agents", lambda project, *, live_only=True: [])
+    list_agents_as(monkeypatch, lambda project, *, live_only=True: [])
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = [select(dialog, "persona").value]
@@ -143,7 +143,7 @@ def test_a_role_pick_brings_in_does_not_stop_the_persona_following_the_role(
     did), so nothing but the persona rebuild could have touched the field."""
     for role in ("coder", "manager", "coder2"):
         configure_role(role, persona="minimalist")
-    monkeypatch.setattr(fleet_service, "list_agents", lambda project, *, live_only=True: [])
+    list_agents_as(monkeypatch, lambda project, *, live_only=True: [])
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         settings_service.bind_role("coder2", agent_bin="claude2")
@@ -167,7 +167,7 @@ def test_a_persona_the_owner_picked_stays_picked_when_pick_brings_in_a_role(
     """The other side of the rebuild: it keeps the field's value, so a pick is not lost to
     it, and a picked persona never followed a role anyway."""
     configure_role("coder2", persona="ghost")
-    monkeypatch.setattr(fleet_service, "list_agents", lambda project, *, live_only=True: [])
+    list_agents_as(monkeypatch, lambda project, *, live_only=True: [])
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         select(dialog, "persona").value = "skeptic"

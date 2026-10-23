@@ -1403,6 +1403,7 @@ class ContextStore(Protocol):
     def live_fleet_agents(self) -> list[FleetAgent]: ...
     def fleet_label_heads(self) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
+    def fleet_live_counts(self, since: datetime) -> dict[str, int]: ...
     def fleet_agent_boards(self, project_id: str, *, live_only: bool = False) -> list[str]: ...
     def fleet_board(self, project_id: str) -> str | None: ...
     def fleet_manager_board(self, project_id: str) -> str | None: ...
@@ -4002,6 +4003,22 @@ class SqliteStore:
             "FROM fleet_agent) WHERE ended_at IS NULL OR newest = 1) ORDER BY created_at, id"
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
+
+    def fleet_live_counts(self, since: datetime) -> dict[str, int]:
+        """Project id → its live rows, for every project with a live row or one that ended at
+        or after ``since`` (``0`` for one with only the latter); no other project is a key.
+
+        The projects a listing of recent rows can show anything for (``services.fleet``'s
+        ``read_listings``, ``asq``'s tick, #83): with 305 listed projects every tick read
+        every one's rows and sessions, and asked its tmux server, for no agent at all.
+        One pass over the table, grouped in SQL.
+        """
+        rows = self._conn.execute(
+            "SELECT project_id, SUM(ended_at IS NULL) FROM fleet_agent "
+            "WHERE ended_at IS NULL OR ended_at >= ? GROUP BY project_id",
+            (since.astimezone(UTC).isoformat(),),
+        ).fetchall()
+        return {row[0]: int(row[1]) for row in rows}
 
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]:
         """The project's rows that ended at or after ``since``, oldest first.

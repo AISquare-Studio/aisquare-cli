@@ -58,6 +58,12 @@ Individual targets:
 | Lint | `make lint` |
 | Type-check (mypy strict) | `make typecheck` |
 | Tests | `make test` |
+| Lock matches `pyproject.toml` | `make lockcheck` |
+
+**Changed a dependency? Relock.** After editing `dependencies` or an extra in
+`pyproject.toml`, run `uv lock` and commit `uv.lock` with the change. `make check`
+runs `uv lock --check` when `uv` is on your PATH, and CI's `lock` job always does:
+a `pyproject.toml` change without its relock fails CI.
 
 `make test` runs `pytest -n auto`: one [pytest-xdist](https://pytest-xdist.readthedocs.io/)
 worker per core, as CI's `check` job does. Every test already gets a home, a tmux folder
@@ -78,8 +84,9 @@ The next run ends them: the suite's private folders under `/tmp` are named
 servers in it (`tests/private_fleets.py`).
 
 CI (`.github/workflows/ci.yml`) runs lint, format-check, mypy and pytest on
-Python 3.11–3.13, plus a packaging job that builds the wheel and smoke-tests the
-`aisquare` / `asq` console scripts. All jobs must pass before a PR can merge.
+Python 3.11–3.13, a `lock` job that runs `uv lock --check`, plus a packaging job
+that builds the wheel and smoke-tests the `aisquare` / `asq` console scripts. All
+jobs must pass before a PR can merge.
 
 **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and the
 suite on one Linux leg (Python 3.12, captain on), the Linux package job and every

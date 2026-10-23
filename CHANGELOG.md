@@ -272,6 +272,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a `claude` stand-in of its own. What a test left running wrote outside every home is
   still reported under workers: each worker hands its notes to the controller, which
   prints the summary. Run serially with `pytest -p no:xdist`.
+- **CI checks that `uv.lock` matches `pyproject.toml` (#278).** A new `lock` job
+  runs `uv lock --check` on a pinned uv, and `make check` runs it too where `uv` is
+  on PATH (`make lockcheck`). The lock had drifted unseen: CI installs with pip, so
+  nothing read it, and `uv run --frozen` failed on every persona path for want of
+  `pyyaml`. The `voice` extra had drifted the same way since (the xdist change
+  relocked it). A dependency change without its relock now fails CI.
 - The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
   adds the two persona columns, `team_session.persona` (the persona a session was
   launched as) and `fleet_agent.persona` (the one an agent was spawned with or given

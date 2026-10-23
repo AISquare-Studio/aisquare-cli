@@ -1,5 +1,5 @@
 {
-  "about": "The fake agent's own screens (tests/fake_agent.py dialog_on_screen): a dialog asks on a `?? ` row and ends on its keys, `(y/n)`.",
+  "about": "The fake agent's own screens (tests/fake_agent.py dialog_on_screen): a dialog asks on a `?? ` row and ends on its keys, `(y/n)`. A screen marked ready is one capabilities.ready_on_screen (or its default) reads as ready for a typed line; every other is not.",
   "dialogs": [
     {
       "what": "a dialog of its own",

@@ -1124,7 +1124,7 @@ another agent's flags or claiming hookless detection is integration.
 | 3 | `tests/fixtures/agent_events/<id>.json` | `events`: a recorded payload for every hook event it installs, with the `AgentEvent` fields it must decode to; `version_output`/`version`; `hooks_off` (the file and text that switch its hooks off); with account slots, `accounts`: the files a `login` leaves in a slot's home, and a `relogin` (the same login after a new sign-in). |
 | 4 | `tests/test_adapter_contract.py` | Its row in `EXPECTED_PERMISSIONS` (a coder's and a reviewer's flags), in `EXPECTED_HEADLESS` and `RECORDED_HEADLESS` (its headless call's session and hook switches, and an answer it gave), and in `EXPECTED_TOOLS_OFF` (what leaves its tools-only session no built-in tool). |
 | 4a | `tests/fixtures/agent_transcripts/<id>.json` | `moments`: its transcript as it stood at a permission prompt, a question, an interruption and a turn ended on a question (`records`, or the first `lines` of a recorded session file beside it), with what `transcript_reader` must read of each. |
-| 4b | `tests/fixtures/agent_screens/<id>.json` | With `capabilities.dialog_on_screen` or `screen_prompt` only: `dialogs`, its screens at each dialog of its own (`rows`, as `capture-pane -p` gives them) with the `words` `dialog_on_screen` must read of each and, optionally, the `prompt` (`[shape, yes_key, no_key]`) `screen_prompt` must, and `not_dialogs`, screens with none (its empty prompt, a draft, a turn). |
+| 4b | `tests/fixtures/agent_screens/<id>.json` | With `capabilities.dialog_on_screen` or `screen_prompt` only: `dialogs`, its screens at each dialog of its own (`rows`, as `capture-pane -p` gives them) with the `words` `dialog_on_screen` must read of each and, optionally, the `prompt` (`[shape, yes_key, no_key]`) `screen_prompt` must, and `not_dialogs`, screens with none (its empty prompt, a draft, a turn), each with `"ready": true` where `ready_on_screen` (or its default) reads it ready for a typed line. |
 | 5 | `tests/test_<agent>_native.py`, `tests/run_<agent>_native.py` | The opt-in test against the real binary (`AISQUARE_TEST_<AGENT>=1`), as `test_codex_native.py` and its CI job do for Codex. |
 | 6 | `docs/coding-agents.md` | Its setup and native settings. |
 
@@ -1217,6 +1217,12 @@ owner's with no keys; `None` for none. The captain asks it of the pane's own age
 `press` sends a key or a paste types a line: Claude Code's input box, chooser and trust
 dialog, `claude_screen.prompt_showing`; Codex's dialogs as `dialog_on_screen` reads them,
 its approval view a chooser on `1` and `Escape`),
+`ready_on_screen` (whether its screen shows its prompt drawn with no turn running at it and
+nothing over it, so a typed line lands as a prompt, a draft allowed: the captain's word over
+a `working` read for its `say`, `press` and `paste`, `types.screen_ready`. Claude Code's
+input box drawn and idle, `claude_screen.box_idle`; `None` takes its empty prompt,
+`idle_on_screen` else `idle_prompt_mark`, with no turn on it by `working_on_screen`, which is
+Codex's. Remote never reads it),
 `fleet_settings` (`-c` settings a fleet window's agent launches with unless the
 operator's config sets the key: Codex's `notice.hide_rate_limit_model_nudge=true` and
 `check_for_update_on_startup=false`),
@@ -1335,6 +1341,9 @@ The store profile is [the sandbox and the store](#the-sandbox-and-the-aisquare-s
   dialogs, keys on a `trust` or `dialog` one, a `chooser` or `yn` one without its No, a key
   a quick answer may not send (`remote_needs.NEEDS_ANSWER_KEYS`), another shape or keys than
   a dialog's `prompt` names, or a prompt on a screen with none.
+- its screens read ready (`types.screen_ready`) at a dialog of its own, or otherwise than
+  their `ready` says; or the default, for an agent with no `ready_on_screen`, reads ready
+  where its empty prompt does not show or a turn runs on it.
 
 The fake adapter was written from this section alone. Besides the cases above it is
 spawned through `services.fleet.spawn` with a stub binary, its window's `aisquare

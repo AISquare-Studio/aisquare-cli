@@ -1265,3 +1265,43 @@ def test_a_prompt_on_the_agents_screen_is_read_with_keys_a_phone_may_send(
             assert [prompt.shape, prompt.yes_key, prompt.no_key] == shown["prompt"], shown["what"]
     for shown in screens["not_dialogs"]:
         assert read(shown["rows"]) is None, shown["what"]
+
+
+def test_a_line_is_typed_only_where_the_agents_screen_reads_ready(adapter: AgentAdapter) -> None:
+    """``screen_ready`` (``capabilities.ready_on_screen``, else its default; the captain's
+    word over a ``working`` read) on the agent's recorded screens: no dialog of its own is
+    ready, and of the screens with none, exactly those marked ``ready`` are (Claude Code's
+    idle box with a finished turn above it, not one mid-turn; Codex's empty composer, not
+    a turn running nor a draft)."""
+    from aisquare.core.agent_adapters.types import screen_ready
+
+    screens = _screens(adapter)
+    if screens is None:
+        assert not screen_ready(adapter.capabilities, ["$ "])
+        return
+    for shown in screens["dialogs"]:
+        assert not screen_ready(adapter.capabilities, shown["rows"]), shown["what"]
+    for shown in screens["not_dialogs"]:
+        ready = screen_ready(adapter.capabilities, shown["rows"])
+        assert ready is shown.get("ready", False), shown["what"]
+
+
+def test_an_agent_that_declares_no_ready_screen_is_ready_at_its_empty_prompt_alone() -> None:
+    """The default an adapter gets with no ``ready_on_screen`` (the fake's): its empty prompt
+    (``idle_on_screen``, else ``idle_prompt_mark`` starting its last line) with no turn
+    running on it (``working_on_screen``), and never ready with none of them declared."""
+    from aisquare.core.agent_adapters.types import screen_ready
+
+    plain = FakeAgentAdapter().capabilities
+    assert plain.ready_on_screen is None
+    idle, busy, draft = ["done", "fake> "], ["running it", "fake> "], ["fake> ?? deploy it"]
+    assert not any(screen_ready(plain, rows) for rows in (idle, busy, draft))
+    marked = replace(plain, idle_prompt_mark="fake>")
+    assert screen_ready(marked, idle) and screen_ready(marked, draft), "the mark alone"
+    read = replace(
+        marked,
+        idle_on_screen=lambda rows: rows[-1].strip() == "fake>",
+        working_on_screen=lambda rows: "running it" in rows,
+    )
+    assert screen_ready(read, idle) and not screen_ready(read, draft), "its own reading"
+    assert not screen_ready(read, busy), "a turn running on it"

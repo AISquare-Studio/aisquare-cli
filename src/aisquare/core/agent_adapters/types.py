@@ -268,12 +268,39 @@ class AgentCapabilities:
     prompt, whose answer is the owner's). Claude Code's input box, chooser and trust dialog
     (``claude_screen.prompt_showing``); Codex's dialogs as ``dialog_on_screen`` reads them,
     its approval a chooser. ``None`` here for an agent whose screen is not read for one."""
+    ready_on_screen: Callable[[Sequence[str]], bool] | None = None
+    """Whether the agent's screen (its visible rows) shows its prompt drawn, with no turn
+    running at it and nothing drawn over it, so a line typed there and its Enter land as a
+    prompt (a draft may sit in it): the captain's evidence that a pane the fleet still reads
+    ``working`` is ready (a fresh Claude Code reads working until its first ``Stop``), for
+    its ``say`` and its ``press`` and ``paste`` (:func:`screen_ready`). Claude Code's input
+    box drawn and idle (``claude_screen.box_idle``). ``None`` takes the agent's empty prompt
+    (:attr:`idle_on_screen`, else :attr:`idle_prompt_mark` on its last line) with no turn
+    running on it (:attr:`working_on_screen`): Codex's. Remote never reads it, its own
+    reads being :attr:`idle_on_screen`'s."""
     legacy_fleet_args: bool = False
     """``fleet.roles.<role>.extra_args`` and ``permission_mode`` are in this agent's
     vocabulary (they predate adapters and are Claude Code's); another agent takes only
     an explicitly passed mode and its ``agent_args``."""
     value_options: frozenset[str] = frozenset()
     switch_options: frozenset[str] = frozenset()
+
+
+def screen_ready(capabilities: AgentCapabilities, rows: Sequence[str]) -> bool:
+    """Whether ``rows``, an agent's screen, show it ready for a typed line: its
+    :attr:`~AgentCapabilities.ready_on_screen`, else its empty prompt (``idle_on_screen``,
+    else ``idle_prompt_mark`` starting its last line) with no turn running on it
+    (``working_on_screen``); ``False`` for an agent that reads none of them off its screen."""
+    if capabilities.ready_on_screen is not None:
+        return capabilities.ready_on_screen(rows)
+    if capabilities.idle_on_screen is not None:
+        idle = capabilities.idle_on_screen(rows)
+    else:
+        mark = capabilities.idle_prompt_mark
+        last = next((row.strip() for row in reversed(rows) if row.strip()), "")
+        idle = bool(mark) and last.startswith(mark or "")
+    working = capabilities.working_on_screen
+    return idle and not (working is not None and working(rows))
 
 
 # --- events: one vocabulary for every agent's lifecycle hooks -----------------------------

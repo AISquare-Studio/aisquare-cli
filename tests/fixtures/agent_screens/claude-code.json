@@ -1,5 +1,5 @@
 {
-  "about": "Claude Code's screens (capture-pane -p -J), from main's tests/captain_screens.py and tests/screens/: runner2's captures of a real Claude Code 2.1.282 (board 13265, PR #224) and the shapes the captain's reader is pinned on. Each dialog's prompt is [shape, yes_key, no_key] as capabilities.screen_prompt reads it; on its permission chooser and trust dialog the letter y does nothing, the digit 1 (Yes) does.",
+  "about": "Claude Code's screens (capture-pane -p -J), from main's tests/captain_screens.py and tests/screens/: runner2's captures of a real Claude Code 2.1.282 (board 13265, PR #224) and the shapes the captain's reader is pinned on. Each dialog's prompt is [shape, yes_key, no_key] as capabilities.screen_prompt reads it; on its permission chooser and trust dialog the letter y does nothing, the digit 1 (Yes) does. A screen marked ready is one capabilities.ready_on_screen (or its default) reads as ready for a typed line; every other is not.",
   "dialogs": [
     {
       "what": "the real permission chooser",
@@ -71,7 +71,8 @@
         "❯ ",
         "────────────────────────────────────────────────────────────────────────────────────────────────────",
         "  ⏸ manual mode on · ? for shortcuts · ← for agents"
-      ]
+      ],
+      "ready": true
     },
     {
       "what": "a real idle box after the first Stop, its top rule named",
@@ -117,7 +118,8 @@
         "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
         "  ⏸ manual mode on · ? for shortcuts · ← for agents         ",
         ""
-      ]
+      ],
+      "ready": true
     },
     {
       "what": "a real box drawn mid-turn, its top rule named",
@@ -177,7 +179,8 @@
         "❯ ",
         "────────────────────────────────────────────────────────────────────────────────────────────────────",
         "  ⏸ manual mode on · ? for shortcuts"
-      ]
+      ],
+      "ready": true
     },
     {
       "what": "a box whose footer names Esc",
@@ -191,7 +194,8 @@
         "❯ ",
         "────────────────────────────────────────────────────────────────────────────────────────────────────",
         "  ⏸ manual mode on · Esc to cancel a draft"
-      ]
+      ],
+      "ready": true
     },
     {
       "what": "a highlighted list mid-turn, no footer",
@@ -225,7 +229,8 @@
         "❯ ",
         "────────────────────────────────────────────────────────────",
         "  ⏵⏵ accept edits on (shift+tab to cycle)"
-      ]
+      ],
+      "ready": true
     },
     {
       "what": "a model picker: no prompt to answer (say refuses it by modal_showing)",

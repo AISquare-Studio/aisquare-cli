@@ -3200,8 +3200,14 @@ def spawn(
     # word, which a restart (#144) or a hand-over (#146) reads. An account the
     # ladder names and the machine does not have refuses the spawn now, with
     # the rung named, rather than starting a window that dies on its first line.
+    # The family the agent will run, for the pick's per-family weeks (#277).
+    family = (
+        harness.launch_family(role, [*role_config.extra_args, *agent_args])
+        if account is None
+        else None
+    )
     try:
-        choice = claude_accounts_service.choose(account, role=role, project=project)
+        choice = claude_accounts_service.choose(account, role=role, project=project, family=family)
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
 
@@ -6953,8 +6959,15 @@ def switch(
     agent_id: str | None = None,
     before_stop: Callable[[], None] | None = None,
     ack_wait: float = 0.0,
+    force: bool = False,
 ) -> SwitchReceipt:
     """Move a running agent to another Claude account — the hand-over of #146.
+
+    One switch per limit (#277): a row the automatic hand-over spawned less than
+    ``hooks.HANDOVER_COOLDOWN`` ago is refused without ``force`` — the hand-over has
+    just moved it, and a manager woken by the same limit moved the replacement again.
+    The pick knows the agent's model family (its session's model), so an account
+    whose week for that family is spent is no target.
 
     The target is ``to`` (a slot, alias or email) or, without it, HEADROOM
     FIRST among the enabled, signed-in accounts that are NOT the one the agent
@@ -7021,6 +7034,7 @@ def switch(
             # own row, and its take-back wrote a stale state over the second's mark
             # (review of #163, round 2).
             raise _in_hand_over(project, "switch", label)
+        _refuse_a_fresh_replacement(agent, automatic=automatic, force=force)
         # `spawn`'s refusal for the task (done, dropped, gone from the board), asked
         # before anything is stopped, as `restart` asks it. After the stop it left the
         # agent stopped and nothing started: a row spawned before rule 3 still names
@@ -7058,6 +7072,7 @@ def switch(
             project=project,
             exclude=() if current is None else (current,),
             automatic=automatic,
+            family=harness.model_family(session.model if session is not None else None),
         )
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
@@ -7187,6 +7202,26 @@ def switch(
         prompt_typed=typed,
         prompt_delivery=receipt.prompt_delivery,
         prompt_acked=receipt.prompt_acked,
+    )
+
+
+def _refuse_a_fresh_replacement(agent: FleetAgent, *, automatic: bool, force: bool) -> None:
+    """``switch``'s refusal of a row the usage-limit hand-over spawned within its cooldown,
+    unless ``force`` (#277). The automatic path has its own brake (``hooks.hand_over``)."""
+    if automatic or force:
+        return
+    from aisquare.services import hooks as hooks_service  # lazy: hooks imports this module
+
+    since = _now() - agent.created_at
+    if (
+        agent.spawned_by != hooks_service.HANDOVER_SPAWNER
+        or since >= hooks_service.HANDOVER_COOLDOWN
+    ):
+        return
+    minutes = max(1, int(since.total_seconds() // 60))
+    raise FleetError(
+        f"{agent.label!r} was moved {minutes} min ago by the usage-limit hand-over; "
+        "`--force` moves it again"
     )
 
 

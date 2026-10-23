@@ -18295,3 +18295,96 @@ def test_a_switch_after_a_cross_account_resume_resumes_the_real_transcript(
 
     assert receipt.resumed
     assert _flag(_command(tmux), "--resume") == str(real)
+
+
+# --- one switch per limit (P0-W3, #277) -------------------------------------------------------
+
+
+def _limit_handed_over_inline(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[FleetAgent, list[str]]:
+    """An agent on slot 2 hits a limit with ``on_limit = "switch"`` (the default); the hook's
+    detached worker is run inline. Returns the agent and every manager nudge."""
+    from aisquare.services import hooks as hooks_service
+
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    nudges: list[str] = []
+    monkeypatch.setattr(
+        team_service, "_nudge_manager", lambda project_id, *, reason, board: nudges.append(reason)
+    )
+
+    def worker(argv: list[str]) -> None:
+        session_id = argv[argv.index("hand-over") + 1]
+        hooks_service.hand_over(session_id, reason=argv[argv.index("--reason") + 1])
+
+    monkeypatch.setattr(hooks_service, "_detach", worker)
+    hooks_service.turn_failed(
+        session_id=agent.session_id,
+        error="rate_limit",
+        message="You've hit your session limit",
+    )
+    return agent, nudges
+
+
+def test_a_limit_with_on_limit_switch_moves_the_agent_once_and_wakes_no_manager(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+
+    agent, nudges = _limit_handed_over_inline(project, monkeypatch, tmp_path)
+
+    [limited] = _events(project, "limited")
+    assert "moving it to another account automatically" in limited
+    assert "fleet switch" not in limited  # the manager is not asked to do it too
+    assert len(_events(project, "switched")) == 1
+    assert nudges == []
+    with store_session() as store:
+        events = store.recent_events(project.id, limit=50)
+    assert not any(team_service._wakes_manager(event) for event in events)
+
+    # The manager's cycle used to switch the replacement again once the hand-over was done.
+    with pytest.raises(fleet_service.FleetError, match="usage-limit hand-over; `--force`"):
+        fleet_service.switch(project, agent.label)
+    assert len(_events(project, "switched")) == 1
+
+
+def test_force_moves_a_fresh_replacement_again(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _third_slot_with_usage(monkeypatch, work=95, personal=10, third=20)
+    agent, _nudges = _limit_handed_over_inline(project, monkeypatch, tmp_path)
+    [moved] = fleet_service.list_agents(project)
+    assert moved.agent.account_slot == 3
+
+    receipt = fleet_service.switch(project, agent.label, force=True)
+
+    assert (receipt.from_slot, receipt.to_slot) == (3, 4)
+    assert len(_events(project, "switched")) == 2
+
+
+def test_a_refused_hand_over_is_handover_failed_and_wakes_the_manager(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _two_slots_with_usage(monkeypatch, work=95, personal=99)  # nowhere under the line
+
+    _agent, nudges = _limit_handed_over_inline(project, monkeypatch, tmp_path)
+
+    assert _events(project, "switched") == []
+    [failed] = _events(project, "handover_failed")
+    assert "fleet switch" in failed
+    assert len(nudges) == 1

@@ -1843,3 +1843,30 @@ def test_two_live_agents_with_real_transcripts_are_still_warned(
 
     assert "aisquare-session-collision" in _start_tp(runner, sid, work_dir, str(other)).output
     assert "aisquare-session-collision" in _prompt_tp(runner, sid, work_dir, str(real)).output
+
+
+def test_the_limited_line_says_who_moves_the_agent() -> None:
+    """P0-W3 (#277): with the hand-over coming, the line names no `fleet switch` and wakes no
+    manager; without it, the manager is the one to move the agent, as before."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.models import ProjectInfo
+
+    project = ProjectInfo(id="prj_x", root=Path("/tmp/x"))
+    notice = accounts_core.LimitNotice("weekly", None)
+    by_hand = team_service._limited_text("coder-db", "msg", notice, project=project)
+    moving = team_service._limited_text(
+        "coder-db", "msg", notice, project=project, handing_over=True
+    )
+    assert "fleet switch" in by_hand and "automatically" not in by_hand
+    assert "fleet switch" not in moving
+    assert 'moving it to another account automatically (`on_limit = "switch"`)' in moving
+    now = datetime.now(tz=UTC)
+
+    def event(kind: str, text: str) -> Any:
+        from aisquare.models import TeamEvent
+
+        return TeamEvent(id="e", project_id="p", kind=kind, text=text, created_at=now)
+
+    assert team_service._wakes_manager(event("limited", by_hand))
+    assert not team_service._wakes_manager(event("limited", moving))
+    assert "handover_failed" in team_service.MANAGER_WAKE_KINDS

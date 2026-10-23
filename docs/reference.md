@@ -13,7 +13,7 @@ removes exactly them):
 | `Stop` | mark the session waiting; renew its task leases |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |
-| `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and wakes the manager, and with `[accounts] on_limit = "switch"` a fleet agent is handed to another account ([accounts](orchestration.md#several-accounts-one-team)); any other error marks it `waiting`, with a feed line naming the error |
+| `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and remembers the limit on the account until that reset, so no pick sends an agent back to it before then. With `[accounts] on_limit = "switch"` a fleet agent is handed to another account and the `limited` line wakes nobody; a hand-over that cannot go ahead posts `handover_failed`, which wakes the manager. Without a hand-over coming, `limited` wakes it ([accounts](orchestration.md#several-accounts-one-team)). Any other error marks it `waiting`, with a feed line naming the error |
 
 `SessionStart` and `UserPromptSubmit` get `"timeout": 120` (seconds): Claude
 Code stops a hook after 60 seconds by default, and these two can wait that
@@ -111,6 +111,21 @@ registered but hidden until they do something real.
 | `-v` / `-q` | verbose / quiet |
 | `--no-color` | disable coloured output |
 | `--profile NAME` | configuration profile |
+
+### Configuration keys
+
+Set with `aisquare config set <section>.<key> <value>`, or in *⚙ Settings ▸ App
+settings*. Every key is a default you can change.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `accounts.pick` | `headroom` | how a launch picks an account when nothing names one: `headroom` (the first under `switch_at`) or `default` (the machine default) |
+| `accounts.switch_at` | `85` | percent USED of the fuller window (and, for an agent of that family, its family week) at which an account counts as full |
+| `accounts.prefer` | `priority` | of the accounts under `switch_at`, `priority` takes the first in order; `reset-soonest` takes the one whose week resets first |
+| `accounts.on_limit` | `switch` | on a usage limit, `switch` hands a fleet agent to another account; `wait` leaves it parked |
+| `accounts.wait_if_reset_within_minutes` | `15` | with `switch`, wait instead when the limit lifts this soon |
+| `accounts.share_trust` | `true` | copy a folder's trust into the account a launch runs on |
+| `accounts.share_settings` | `false` | keep every managed account's `settings.json` a link to the plain claude's |
 
 ### Roadmap commands
 

@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`[accounts] prefer = "reset-soonest"`** (*under the line, prefer* in App
+  settings): of the accounts under `switch_at`, a spawn and a hand-over take the
+  one whose week resets first, priority breaking ties, so a week's allowance is
+  spent before it lapses. `priority`, the default, picks as before. `accounts
+  usage` shows each per-family week and its reset beside the week. **`fleet
+  switch --force`** moves an agent the usage-limit hand-over moved minutes ago,
+  which is otherwise refused. New event **`handover_failed`**: the automatic
+  hand-over could not move a limited agent, with the reason and the `fleet
+  switch` that would; it wakes the manager. (#277)
+
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in
@@ -383,6 +393,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   CI experiment, its own opt-in, still consults its endpoint. A config that cannot
   be read records no prompt and says so on stderr: privacy fails closed.
   `config set capture.enabled false` says in one line what stops and what does not.
+- **One usage limit moves an agent once, to an account that can take it.**
+  With `on_limit = "switch"` the `limited` line woke the manager with a `fleet
+  switch` while the hand-over was already moving the agent, and once that had
+  finished the manager's switch moved the replacement again: two `switched` for
+  one limit. The line now says *moving it to another account automatically* and
+  wakes nobody, the manager's cycle acts on `handover_failed` instead, a
+  replacement minutes old is refused without `--force`, and `switched` is news on
+  the next delta, not a wake-up. And a pick read only the five-hour and seven-day
+  windows: the per-family weeks (`seven_day_opus`, `seven_day_sonnet`), `limits[]`
+  and a window's `locked_reason` were dropped, so an Opus agent was moved onto an
+  account whose Opus week was spent and refused at once. They are read now, a
+  family week counting for an agent of that family, and every limit an agent hits
+  is remembered on its account until the reset it named, so no pick sends an
+  agent back before then. (#277)
 
 - **A killed test run no longer leaves its tmux servers running.** Teardown ends every
   server a test starts, but a run that is killed (a timeout, `kill`, an xdist worker that

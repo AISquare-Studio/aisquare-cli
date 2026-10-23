@@ -309,6 +309,14 @@ class ClaudeUsage(BaseModel):
     week_percent: float | None = None
     """The rolling seven-day window: percent USED (0-100)."""
     week_resets_at: datetime | None = None
+    family_week_percent: dict[str, float] = Field(default_factory=dict)
+    """The per-family weeks (``seven_day_opus`` → ``opus``…): percent USED (0-100). Such a
+    limit applies only to requests to that model family (#277), so a pick counts it for an
+    agent of that family alone (``services.claude_accounts.headroom_percent``). Live
+    readings only: the cache keeps the two shared windows, and a spent family week is
+    remembered as a limit mark instead (``remember_limit``)."""
+    family_week_resets_at: dict[str, datetime] = Field(default_factory=dict)
+    """When each family week resets, where the endpoint said."""
     fetched_at: datetime | None = None
     """When the reading was taken — or, when nothing could be read, when that was found out."""
     last_failed_at: datetime | None = None

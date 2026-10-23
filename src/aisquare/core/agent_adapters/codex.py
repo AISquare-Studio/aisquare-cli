@@ -40,7 +40,7 @@ from aisquare.core.agent_adapters.types import (
     store_dir,
     store_read_only,
 )
-from aisquare.core.codex_accounts import CodexAccounts, approvals_reviewer
+from aisquare.core.codex_accounts import CodexAccounts, _records_from_end, approvals_reviewer
 from aisquare.core.paths import expand_user
 
 #: ``model_reasoning_effort`` levels Codex names (0.162.1). Which of them a model
@@ -624,7 +624,11 @@ class CodexAdapter:
         (:func:`~aisquare.core.codex_accounts.approvals_reviewer`); one it cannot read
         rings the bell, as a request nobody answers is worse than a false one.
         Measured on 0.162.1: PreToolUse comes before it, and PostToolUse (allowed),
-        Interrupt (Esc) or Stop after."""
+        Interrupt (Esc) or Stop after.
+
+        A ``prompt`` and a ``stop`` carry the model and the reasoning effort the rollout's
+        newest turn ran with (:func:`turn_settings`): Codex's hooks carry no effort, and its
+        ``Stop`` no model (0.162.1). A model the payload names wins."""
         native = payload_text(payload, "session_id")
         event = payload_text(payload, "hook_event_name")
         kind = _EVENTS.get(event or "")
@@ -640,13 +644,18 @@ class CodexAdapter:
         ):
             return None
         asks = "your approval" if event == "PermissionRequest" else "user input"
+        model, effort = payload_text(payload, "model"), None
+        if kind in ("prompt", "stop") and transcript is not None:
+            ran, effort = turn_settings(Path(transcript))
+            model = model or ran
         return AgentEvent(
             kind,  # type: ignore[arg-type]
             native,
             cwd=payload_cwd(payload),
             prompt=payload_text(payload, "prompt") if kind == "prompt" else None,
             transcript_path=payload_text(payload, "transcript_path"),
-            model=payload_text(payload, "model"),
+            model=model,
+            effort=effort,
             source=payload_text(payload, "source") if kind == "session_start" else None,
             stop_hook_active=bool(payload.get("stop_hook_active")),
             turn_id=payload_text(payload, "turn_id"),
@@ -1245,6 +1254,27 @@ def _toml_features(path: Path) -> dict[str, Any]:
     except (OSError, ValueError, RecursionError):
         return {}
     return features if isinstance(features, dict) else {}
+
+
+def turn_settings(path: Path) -> tuple[str | None, str | None]:
+    """The model and the reasoning effort the rollout at ``path`` says its newest turn ran
+    with: its newest ``turn_context``, which opens each turn (measured on 0.162.1:
+    ``"model"``, and ``"effort"`` from ``model_reasoning_effort``, absent with none), read
+    back from the end as :func:`~aisquare.core.codex_accounts.approvals_reviewer` reads who
+    answers approvals. ``(None, None)`` when the rollout cannot be read or holds none; a
+    field that is not a non-empty string is ``None``."""
+    for record in _records_from_end(path):
+        if record.get("type") != "turn_context":
+            continue
+        context = record.get("payload")
+        if not isinstance(context, dict):
+            return None, None
+        model, effort = context.get("model"), context.get("effort")
+        return (
+            model if isinstance(model, str) and model else None,
+            effort if isinstance(effort, str) and effort else None,
+        )
+    return None, None
 
 
 def _toml_string(value: str) -> str:

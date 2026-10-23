@@ -769,6 +769,69 @@ def test_codexs_reply_is_its_messages_after_the_newest_prompt_of_the_humans(
     assert reader.reply_since(_rollout_head(tmp_path, 74), said_at + timedelta(seconds=1)) is None
 
 
+# --- the model and effort a turn ran with ------------------------------------------------
+
+#: A turn's ``turn_context`` as 0.162.1 wrote it under ``-c model_reasoning_effort="high"``
+#: (``model_args``), recorded against a loopback provider: its permission profile left out,
+#: its cwd sanitized.
+TURN_CONTEXT = json.dumps(
+    {
+        "timestamp": "2026-10-23T15:52:27.742Z",
+        "ordinal": 5,
+        "type": "turn_context",
+        "payload": {
+            "turn_id": "01a16976-acfa-7a63-9d9f-0d0e9f48267f",
+            "root_turn_id": "01a16976-acfa-7a63-9d9f-0d0e9f48267f",
+            "cwd": "/work/alpha",
+            "approval_policy": "never",
+            "approvals_reviewer": "user",
+            "model": "local-fixture",
+            "collaboration_mode": {
+                "mode": "default",
+                "settings": {
+                    "model": "local-fixture",
+                    "reasoning_effort": "high",
+                    "developer_instructions": None,
+                },
+            },
+            "multi_agent_version": "v1",
+            "realtime_active": False,
+            "effort": "high",
+            "summary": "none",
+        },
+    }
+)
+
+
+def test_codexs_prompt_and_stop_carry_the_model_and_effort_its_newest_turn_ran_with(
+    tmp_path: Path,
+) -> None:
+    """Measured on 0.162.1 (M8): Codex's hooks carry no effort and its ``Stop`` no model, while
+    the rollout's ``turn_context`` records both per turn; the info line shows them."""
+    rollout = _rollout_head(tmp_path, 74)
+    with rollout.open("a", encoding="utf-8") as handle:
+        handle.write(TURN_CONTEXT + "\n")
+    payloads = json.loads(
+        (Path(__file__).parent / "fixtures" / "agent_events" / "codex.json").read_text("utf-8")
+    )["events"]
+    decoded = {}
+    for event in ("Stop", "UserPromptSubmit", "SessionStart"):
+        payload = {**payloads[event]["payload"], "transcript_path": str(rollout)}
+        decoded[event] = codex.decode_event({**payload, "hook_event_name": event})
+    stop, prompt, start = decoded["Stop"], decoded["UserPromptSubmit"], decoded["SessionStart"]
+    assert stop is not None and (stop.model, stop.effort) == ("local-fixture", "high")
+    assert prompt is not None and (prompt.model, prompt.effort) == ("gpt-5.5-codex", "high")
+    assert start is not None and start.effort is None, "read at a prompt and a stop alone"
+    # The recorded rollout's own turns ran with no effort set: none to show.
+    stop = codex.decode_event(
+        {**payloads["Stop"]["payload"], "transcript_path": str(_rollout_head(tmp_path, 74))}
+    )
+    assert stop is not None and (stop.model, stop.effort) == ("local-fixture", None)
+    gone = {**payloads["Stop"]["payload"], "transcript_path": str(tmp_path / "gone.jsonl")}
+    stop = codex.decode_event(gone)
+    assert stop is not None and (stop.model, stop.effort) == (None, None)
+
+
 def test_a_resumed_codex_thread_keeps_its_first_developer_instructions() -> None:
     """Measured on 0.162.1 (M4): ``codex exec resume <id> -c developer_instructions=Y`` kept
     the thread's first value and dropped Y, and a later resume without ``-c`` still carried

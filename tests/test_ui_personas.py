@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import threading
 from collections.abc import Callable, Coroutine, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -813,6 +814,7 @@ def test_the_import_recorder_receives_exactly_the_chosen_options(
     for call in (first, second):
         assert callable(call.pop("confirm")) and callable(call.pop("progress"))
         assert callable(call.pop("cancelled"))  # the import's last question (review of #240)
+        assert isinstance(call.pop("cancel"), threading.Event)  # stops a running engine (#211)
     assert first == {
         "args": [],
         "source": "./skills/x",

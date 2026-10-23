@@ -1,18 +1,23 @@
 """Smart persona import: the engines, the ladder, validate → show → confirm.
 
 docs/plans/spawn-personas.md §3.7, §3.9, §7 "P5". NEVER a real model: the manager
-engine's ``subprocess.run`` is a recorder (the ``tests/test_harness.py`` probe
-pattern), the api engine talks to a fake ``anthropic`` module, and a fetch goes to
-a fake ``urlopen``. conftest's ``no_real_llm_import`` replaces both engines for
-every other test; this file captures the real functions at import, before any
-fixture runs, and puts them back only where they are the thing under test.
+engine's ``subprocess.Popen`` is a recorder that starts a stand-in Python child printing
+the scripted answer (so the engine's own wait, cancel and stop run for real, #211), the
+api engine talks to a fake ``anthropic`` module, and a fetch goes to a fake ``urlopen``.
+conftest's ``no_real_llm_import`` replaces both engines for every other test; this
+file captures the real functions at import, before any fixture runs, and puts them back
+only where they are the thing under test.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import sys
+import threading
+import time
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,9 +41,9 @@ from aisquare.services import personas as service
 #: The real engines, captured before conftest's autouse guard replaces them.
 _REAL_MANAGER = persona_import.draft_with_manager
 _REAL_API = persona_import.draft_with_api
-#: ``subprocess`` is one module object, so patching ``run`` for the engine patches it
+#: ``subprocess`` is one module object, so patching ``Popen`` for the engine patches it
 #: for everyone — the CLI's ``git rev-parse`` included. The recorder hands git to this.
-_REAL_RUN = subprocess.run
+_REAL_POPEN = subprocess.Popen
 
 DRAFT = {
     "name": "kind-reviewer",
@@ -55,8 +60,37 @@ class _Completed:
     stderr: str = ""
 
 
+class _Child(_REAL_POPEN):  # type: ignore[type-arg]
+    """A real child standing in for ``claude -p``: what the engine wrote to its stdin is
+    recorded, in the call's kwargs under ``input``, as ``subprocess.run`` recorded it."""
+
+    def __init__(self, argv: list[str], recorded: dict[str, Any], **kwargs: Any) -> None:
+        self.recorded = recorded
+        super().__init__(argv, **kwargs)
+
+    def communicate(self, input: str | None = None, timeout: float | None = None) -> Any:
+        if input is not None:
+            self.recorded["input"] = input
+        return super().communicate(input=input, timeout=timeout)
+
+
+def _stand_in(answer: _Completed | BaseException) -> list[str]:
+    """The Python child that answers as ``answer`` says: reads its stdin, prints, exits —
+    or, for a timeout, never answers."""
+    if isinstance(answer, subprocess.TimeoutExpired):
+        program = "import sys, time; sys.stdin.read(); time.sleep(60)"
+    else:
+        assert isinstance(answer, _Completed)
+        program = (
+            "import sys; sys.stdin.read(); "
+            f"sys.stdout.write({answer.stdout!r}); sys.stderr.write({answer.stderr!r}); "
+            f"sys.exit({answer.returncode})"
+        )
+    return [sys.executable, "-c", program]
+
+
 class _Runs:
-    """A recorder in place of ``subprocess.run`` for the engine; answers in order, the
+    """A recorder in place of ``subprocess.Popen`` for the engine; answers in order, the
     last repeats. ``git`` (the CLI finding the project root) runs for real, unrecorded."""
 
     def __init__(self, *answers: _Completed | BaseException) -> None:
@@ -65,12 +99,14 @@ class _Runs:
 
     def __call__(self, argv: list[str], **kwargs: Any) -> Any:
         if argv and argv[0] == "git":
-            return _REAL_RUN(argv, **kwargs)
-        self.calls.append((list(argv), kwargs))
+            return _REAL_POPEN(argv, **kwargs)
+        recorded = dict(kwargs)
+        self.calls.append((list(argv), recorded))
         answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
-        if isinstance(answer, BaseException):
+        if isinstance(answer, BaseException) and not isinstance(answer, subprocess.TimeoutExpired):
             raise answer
-        return answer
+        # The stand-in runs with this interpreter's environment: the engine's is recorded.
+        return _Child(_stand_in(answer), recorded, **{**kwargs, "env": None})
 
 
 def _envelope(**overrides: object) -> _Completed:
@@ -105,7 +141,9 @@ def no_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _runs(monkeypatch: pytest.MonkeyPatch, *answers: _Completed | BaseException) -> _Runs:
     recorder = _Runs(*answers)
-    monkeypatch.setattr("aisquare.services.persona_import.subprocess.run", recorder)
+    monkeypatch.setattr("aisquare.services.persona_import.subprocess.Popen", recorder)
+    if any(isinstance(answer, subprocess.TimeoutExpired) for answer in answers):
+        monkeypatch.setattr(persona_import, "MANAGER_TIMEOUT_SECONDS", 1.0)  # not 180 s
     return recorder
 
 
@@ -275,7 +313,7 @@ def test_a_draft_can_also_arrive_as_a_json_result_string(
     ("failure", "reason"),
     [
         (_Completed(1, "", "Invalid API key · Please run /login"), "exited 1 — Invalid API key"),
-        (subprocess.TimeoutExpired(["claude"], 180), "no answer within 180 s"),
+        (subprocess.TimeoutExpired(["claude"], 1), "no answer within 1 s"),
         (FileNotFoundError(), "is not on PATH"),
         (_Completed(0, "not json at all"), "the answer was not JSON"),
     ],
@@ -935,3 +973,146 @@ def test_a_kept_name_that_breaks_the_rule_is_refused_before_any_engine_runs(
     assert "'Long_Skill' breaks the skill-name rule" in str(caught.value)
     assert "pass --name" in str(caught.value)
     assert handed == []
+
+
+# --- a running import can be cancelled (#211) ----------------------------------------------
+
+
+def _stand_in_claude(tmp_path: Path) -> tuple[Path, Path]:
+    """A ``claude -p`` that never answers and starts a child of its own: a shell that
+    records its pid and its ``sleep 60``'s, then waits. Bound as the manager's binary,
+    the registered seam (``persona_import.py::draft_with_manager``) starts it."""
+    pids = tmp_path / "pids"
+    script = tmp_path / "fake-claude"
+    script.write_text(
+        f'#!/bin/sh\necho $$ > "{pids}"\nsleep 60 &\necho $! >> "{pids}"\nwait\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script, pids
+
+
+def _started(pids: Path) -> list[int]:
+    try:
+        return [int(line) for line in pids.read_text(encoding="utf-8").split()]
+    except (OSError, ValueError):
+        return []
+
+
+def _gone(pid: int, *, within: float = 1.0) -> bool:
+    """Whether ``pid`` has ended (a zombie is given ``within`` to be reaped by init)."""
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in is a POSIX shell script")
+def test_a_cancel_ends_the_manager_engines_claude_and_its_children_within_two_seconds(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#211: the engine's ``claude -p`` ran on to the 180-second timeout after a Cancel.
+    Now it, and what it started, end within two seconds of the cancel."""
+    script, pids = _stand_in_claude(tmp_path)
+    monkeypatch.setenv("AISQUARE_BIN_MANAGER", str(script))
+    cancel = threading.Event()
+    set_at: list[float] = []
+
+    def cancel_once_running() -> None:
+        deadline = time.monotonic() + 10
+        while len(_started(pids)) < 2 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        set_at.append(time.monotonic())
+        cancel.set()
+
+    canceller = threading.Thread(target=cancel_once_running)
+    canceller.start()
+    with pytest.raises(persona_import.ImportCancelled):
+        persona_import.draft_with_manager("Be kind in reviews.", condense=False, cancel=cancel)
+    ended_at = time.monotonic()
+    canceller.join()
+
+    started = _started(pids)
+    assert len(started) == 2, "the stand-in and its sleep were both running"
+    assert ended_at - set_at[0] <= 2.0, f"cancel to return: {ended_at - set_at[0]:.2f} s"
+    assert all(_gone(pid) for pid in started), f"left running: {started}"
+
+
+def test_a_cancel_already_set_starts_no_engine_and_an_api_answer_after_it_is_dropped(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = _runs(monkeypatch, _envelope())
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(persona_import.ImportCancelled):
+        persona_import.draft_with_manager("notes", condense=False, cancel=cancel)
+    assert runs.calls == [], "nothing was started"
+
+    calls = _fake_sdk(monkeypatch, persona_import.PersonaDraft.model_validate(DRAFT))
+    progress: list[str] = []
+    with pytest.raises(persona_import.ImportCancelled):
+        persona_import.draft_with_api(
+            "notes",
+            condense=False,
+            model="claude-opus-5",
+            progress=progress.append,
+            cancel=_SetDuringTheRequest(),
+        )
+    assert len(calls) == 1, "the request was made"
+    assert progress == [], "its answer was dropped: no usage said for a cancelled import"
+
+
+class _SetDuringTheRequest(threading.Event):
+    """Clear when the api engine asks before its request, set when it asks after."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.asked = 0
+
+    def is_set(self) -> bool:
+        self.asked += 1
+        return self.asked > 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the stand-in is a POSIX shell script")
+def test_ctrl_c_ends_the_import_and_its_claude_and_exits_130(tmp_path: Path) -> None:
+    """#211: the CLI had no Ctrl-C handling, and the engine's ``claude -p`` (in the
+    terminal's process group) was left to the signal. Now Ctrl-C ends it, and what it
+    started, writes nothing and exits 130. A real ``aisquare`` process, a real SIGINT."""
+    script, pids = _stand_in_claude(tmp_path)
+    notes = _notes(tmp_path)
+    env = {**os.environ, "AISQUARE_BIN_MANAGER": str(script)}
+    cli = subprocess.Popen(
+        [sys.executable, "-m", "aisquare", "persona", "import", str(notes), "--engine", "manager"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd=tmp_path,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while len(_started(pids)) < 2 and time.monotonic() < deadline and cli.poll() is None:
+            time.sleep(0.05)
+        assert len(_started(pids)) == 2, f"the stand-in never started: {cli.communicate()}"
+        interrupted_at = time.monotonic()
+        cli.send_signal(signal.SIGINT)
+        _out, err = cli.communicate(timeout=15)
+        took = time.monotonic() - interrupted_at
+    finally:
+        if cli.poll() is None:
+            cli.kill()
+
+    assert cli.returncode == 130, err
+    assert all(_gone(pid) for pid in _started(pids)), "the stand-in or its child ran on"
+    assert took <= 2.0, f"Ctrl-C to exit: {took:.2f} s"
+    assert "Import cancelled. Nothing was written." in err
+    assert not (_user_layer() / "kind-reviewer").exists()

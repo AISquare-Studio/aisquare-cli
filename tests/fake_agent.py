@@ -314,7 +314,16 @@ class FakeAgentAdapter:
         one_press_exits=frozenset({"C-d"}),
         dialog_on_screen=dialog_on_screen,
         value_options=frozenset(
-            {"--model", "--effort", "--title", "--write", "--approvals", "--writable", "--readonly"}
+            {
+                "--model",
+                "--effort",
+                "--title",
+                "--write",
+                "--approvals",
+                "--writable",
+                "--readonly",
+                "--preamble",
+            }
         ),
         switch_options=frozenset({"--no-subagents"}),
     )
@@ -513,3 +522,9 @@ class FakeAgentAdapter:
 
     def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
         return []
+
+    def system_prompt_args(
+        self, block: Path, text: str, args: Sequence[str], home: Path
+    ) -> list[str] | None:
+        # Its preamble takes the text itself; one in the launch arguments is the operator's.
+        return None if "--preamble" in args else ["--preamble", text]

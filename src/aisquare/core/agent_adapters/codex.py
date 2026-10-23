@@ -1025,6 +1025,28 @@ class CodexAdapter:
     def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
         return ["-c", "agents.enabled=false"], {}
 
+    def system_prompt_args(
+        self, block: Path, text: str, args: Sequence[str], home: Path
+    ) -> list[str] | None:
+        """``-c developer_instructions=<text>``: measured on 0.162.1 with a loopback provider
+        (``exec`` and the TUI alike), the value is the first part of the request's second
+        developer message, after Codex's own base prompt and before its skills list.
+        ``model_instructions_file`` would REPLACE that base prompt, so it is not the seam.
+
+        The ``-c`` replaces the operator's own ``developer_instructions`` (measured: theirs
+        was then absent from the request), so the value is theirs, from ``home``'s config
+        layers (:func:`_developer_instructions`), a blank line, then ``text``. ``None`` where
+        ``args`` set ``developer_instructions`` themselves. A thread keeps the value of its
+        first turn across ``codex resume`` and ignores a new one
+        (``capabilities.resume_keeps_system_prompt``)."""
+        for item in option_occurrences(args, "-c", "--config"):
+            parsed = config_assignment(item.value)
+            if parsed is not None and parsed[0] == "developer_instructions":
+                return None
+        own = _developer_instructions(home, args)
+        value = f"{own.rstrip()}\n\n{text}" if own and own.strip() else text
+        return ["-c", f"developer_instructions={_toml_string(value)}"]
+
     def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
         """Codex's own OTLP/HTTP log exporter (asynchronous; no model routing or auth
         change), without the user's prompts. Its headers come from the launch environment:
@@ -1055,6 +1077,32 @@ def _toml_features(path: Path) -> dict[str, Any]:
     except (OSError, ValueError, RecursionError):
         return {}
     return features if isinstance(features, dict) else {}
+
+
+def _toml_string(value: str) -> str:
+    """``value`` as a TOML basic string, for a ``-c`` value: JSON's escapes are TOML's, and
+    what JSON leaves bare and TOML refuses (DEL) is escaped too. Text beyond ASCII stays as
+    written: JSON's ``\\ud83d\\ude00`` pairs for one character are no TOML escape."""
+    return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+
+
+def _developer_instructions(home: Path, args: Sequence[str]) -> str | None:
+    """The operator's own ``developer_instructions``, as Codex layers its config for a session
+    launched with ``args`` from ``home``: the system's :data:`SYSTEM_CONFIG`, ``config.toml``
+    in ``home``, the profile ``-p`` selects (``<name>.config.toml`` beside it), then the
+    administrator's :data:`MANAGED_CONFIG`, the last that sets it a string winning; ``None``
+    when none does."""
+    files = [SYSTEM_CONFIG, home / "config.toml"]
+    profile = next(reversed(option_values(args, "-p", "--profile")), None)
+    if profile and Path(profile).name == profile and profile not in {".", ".."}:
+        files.append(home / f"{profile}.config.toml")
+    files.append(MANAGED_CONFIG)
+    found = None
+    for path in files:
+        value = _read_toml(path).get("developer_instructions")
+        if isinstance(value, str):
+            found = value
+    return found
 
 
 def _codex_home(config_dir: Path | None) -> Path:

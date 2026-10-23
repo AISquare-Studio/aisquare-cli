@@ -539,6 +539,59 @@ def test_the_hook_command_prints_nothing_for_an_unknown_event(
     assert result.output == ""
 
 
+def _developer_instructions(seam: list[str] | None) -> str:
+    """The ``developer_instructions`` value a ``-c`` seam sets, read as Codex reads it (TOML)."""
+    assert seam is not None and seam[0] == "-c"
+    key, _, value = seam[1].partition("=")
+    assert key == "developer_instructions"
+    decoded = tomllib.loads(f"v = {value}")["v"]
+    assert isinstance(decoded, str)
+    return decoded
+
+
+# --- personas: the system prompt ----------------------------------------------------
+
+
+def test_the_persona_is_codexs_developer_instructions_after_the_operators_own(
+    tmp_path: Path,
+) -> None:
+    """Measured on 0.162.1: ``-c developer_instructions`` sits in the request's developer
+    message after Codex's base prompt (M1), and it REPLACES the operator's own value from
+    config.toml (M3), so the seam carries theirs first, a blank line, then the persona; the
+    profile ``-p`` selects layers over config.toml."""
+    home = _home(tmp_path)
+    block = tmp_path / "block.md"
+    text = 'Persona "skeptic":\n\tline two \\ ✓ \x7f'
+    assert _developer_instructions(codex.system_prompt_args(block, text, [], home)) == text
+    (home / "config.toml").write_text(
+        'developer_instructions = """\nAlways answer in English.\n"""\n', encoding="utf-8"
+    )
+    seam = codex.system_prompt_args(block, text, [], home)
+    assert _developer_instructions(seam) == f"Always answer in English.\n\n{text}"
+    (home / "work.config.toml").write_text(
+        'developer_instructions = "Work rules."\n', encoding="utf-8"
+    )
+    seam = codex.system_prompt_args(block, text, ["-p", "work"], home)
+    assert _developer_instructions(seam) == f"Work rules.\n\n{text}"
+    assert str(block) not in " ".join(seam or []), "Codex takes the text, not the file"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-c", 'developer_instructions="mine"'],
+        ["--config=developer_instructions = 'mine'"],
+        ["-cdeveloper_instructions=mine"],
+    ],
+)
+def test_the_operators_own_developer_instructions_argument_wins(
+    args: list[str], tmp_path: Path
+) -> None:
+    assert codex.system_prompt_args(tmp_path / "b.md", "persona", args, _home(tmp_path)) is None
+    after_the_boundary = ["--", *args]
+    assert codex.system_prompt_args(tmp_path / "b.md", "p", after_the_boundary, tmp_path)
+
+
 def test_the_adapter_installs_its_event_set() -> None:
     events = {hook.event for hook in get_adapter("codex").capabilities.hooks}
     assert events == {

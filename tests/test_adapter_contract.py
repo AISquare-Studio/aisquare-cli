@@ -549,6 +549,30 @@ def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_
         assert telemetry == []
 
 
+# --- personas: the system prompt ------------------------------------------------------------
+
+
+def test_the_system_prompt_seam_names_the_block_and_stands_down_before_the_operators(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``system_prompt_args`` puts the persona's block in the agent's system prompt, by its
+    file or its text, and answers nothing where the launch arguments already set that seam:
+    the adapter's own answer, given back as the operator's, makes it stand down, wherever
+    in the arguments it sits."""
+    home = _home(adapter, tmp_path)
+    text = '## Persona: skeptic\nQuestion every claim, "quoted" or not. ✓'
+    block = tmp_path / "skeptic-0123456789ab.md"
+    block.write_text(text + "\n", encoding="utf-8")
+    seam = adapter.system_prompt_args(block, text, [], home)
+    if seam is None:
+        return  # no seam: the session-start hook alone briefs the persona
+    assert seam and all(isinstance(arg, str) for arg in seam)
+    named = _named(seam)
+    assert str(block) in named or text in named, f"{adapter.id}'s seam names neither"
+    assert adapter.system_prompt_args(block, text, seam, home) is None, "the operator's wins"
+    assert adapter.system_prompt_args(block, text, ["--verbose", *seam], home) is None
+
+
 # --- account slots: a login's fingerprint, folder trust shared between accounts ---------------
 
 

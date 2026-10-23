@@ -583,8 +583,8 @@ class AgentAdapter(Protocol):
     :meth:`label_args`, :meth:`resume_args`,
     ``exit_command``, ``dismiss_key``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`context_files`, :meth:`disable_native_teams`,
-    :meth:`telemetry_args`. Accounts: ``accounts``. Remote: ``transcript_reader``.
-    ``capabilities`` says the rest.
+    :meth:`telemetry_args`. Personas: :meth:`system_prompt_args`. Accounts: ``accounts``.
+    Remote: ``transcript_reader``. ``capabilities`` says the rest.
     """
 
     id: str
@@ -799,6 +799,18 @@ class AgentAdapter(Protocol):
         the shells the agent's tools run in must not inherit, that one among them. Whether
         the operator configured an exporter of their own, which is kept, is
         ``services.native_telemetry.operator_configured`` (Codex's config layers)."""
+        ...
+
+    def system_prompt_args(
+        self, block: Path, text: str, args: Sequence[str], home: Path
+    ) -> list[str] | None:
+        """Launch arguments that add ``text`` to the agent's system prompt for the session,
+        beside its own (``aisquare launch --persona``: the persona's briefing, which the file
+        ``block`` holds), for an agent launched with ``args`` from config dir ``home``.
+        ``None`` where ``args`` already set that seam, the operator's, or where the agent has
+        none: the session-start hook alone briefs the persona then. An agent that takes the
+        text itself rather than the file puts it in argv, which every local user can read:
+        a persona is no secret, and its 12,000-character cap sits far under ``ARG_MAX``."""
         ...
 
 

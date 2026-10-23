@@ -30,6 +30,10 @@ from aisquare.core.claude_accounts import ClaudeCodeAccounts
 #: ``--permission-mode`` for each approvals intent (``core.config.CLAUDE_PERMISSION_MODES``);
 #: ``never`` is ``bypassPermissions`` with a ``full`` write scope, else ``dontAsk``.
 _MODES = {"ask": "manual", "auto": "auto", "never": "dontAsk"}
+#: Claude Code's seam for appending to its default system prompt: a FILE, so the body never
+#: sits in argv, which ``ps`` shows. Either spelling in the launch arguments is the operator's.
+SYSTEM_PROMPT_FLAG = "--append-system-prompt-file"
+_SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
 
 
 def _effort_level(payload: Mapping[str, Any]) -> str | None:
@@ -404,3 +408,17 @@ class ClaudeCodeAdapter:
 
     def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
         return []
+
+    def system_prompt_args(
+        self, block: Path, text: str, args: Sequence[str], home: Path
+    ) -> list[str] | None:
+        """``--append-system-prompt-file <block>``, appended to Claude Code's default system
+        prompt for the life of the process (``/clear`` keeps it; a restart passes it again);
+        ``None`` where ``args`` carry ``--append-system-prompt`` of either spelling."""
+        if any(
+            arg == flag or arg.startswith(f"{flag}=")
+            for arg in args
+            for flag in _SYSTEM_PROMPT_FLAGS
+        ):
+            return None
+        return [SYSTEM_PROMPT_FLAG, str(block)]

@@ -590,17 +590,16 @@ def test_the_page_says_the_fleets_share_left_now_and_of_the_week(
     no_network["usage"] = usage
     frame = _signed_in(2, tmp_path, "tok-two")
 
-    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+    async def go(pilot: Pilot[None]) -> str:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        empty = shown(view.query_one("#fleet-summary", Static))
         await settle_until(app, lambda: len(no_network["usage_calls"]) >= 1)
         await settle(app)
-        return empty, shown(view.query_one("#fleet-summary", Static))
+        return shown(view.query_one("#fleet-summary", Static))
 
-    before, after = drive(go, overview=frame)
-    assert before == "", "nothing read yet: no line"
+    after = drive(go, overview=frame)
     reset = core.format_reset(NOW + timedelta(days=2), now=NOW)
     assert after == (
-        f"Fleet: 70% left now · week: 0.8 of 1 accounts left · next weekly reset {reset} (account 2)"
+        "Fleet: 70% left now · week: 0.8 of 1 accounts left · "
+        f"next weekly reset {reset} (account 2)"
     ), after

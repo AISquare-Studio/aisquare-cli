@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 import tomllib
 from importlib import metadata
@@ -28,8 +29,10 @@ from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.services import ngrok_sdk, ngrok_tunnel
 from aisquare.services.ngrok_sdk import (
     BAD_TOKEN,
+    RECONNECT_SECONDS,
     REFUSED_TOKEN,
     SDK_MISSING,
+    SESSION_LOST,
     SdkTunnel,
     bundled_ngrok,
     check_token,
@@ -38,7 +41,7 @@ from aisquare.services.ngrok_sdk import (
     saved_token,
     token_path,
 )
-from aisquare.services.ngrok_tunnel import AUTHTOKEN_HINT, INSTALL_HINT, NgrokTunnel
+from aisquare.services.ngrok_tunnel import AUTHTOKEN_HINT, INSTALL_HINT, STOP_SECONDS, NgrokTunnel
 from tests.fake_ngrok_sdk import Script, fake_sdk
 from tests.test_remote_control import fake_server
 
@@ -188,6 +191,75 @@ def test_a_token_ngrok_refuses_is_said_in_plain_words_without_the_token(
         time.sleep(0.01)
     assert tunnel.error == BAD_TOKEN and TOKEN not in BAD_TOKEN
     assert BAD_TOKEN in remote_control.LASTING_TUNNEL_ERRORS, "not retried every minute"
+
+
+def ended(tunnel: SdkTunnel, within: float = 5.0) -> bool:
+    """Whether the tunnel's thread ends within ``within`` seconds."""
+    deadline = time.monotonic() + within
+    while tunnel.running and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return not tunnel.running
+
+
+def test_a_session_that_cannot_sign_in_again_ends_for_the_watchdog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #274, m1: the SDK signs in again by itself after ngrok's service let the session
+    go, for ever, with the old token, and its sentence for a sign-in that failed is only
+    "reconnect error". A drop it rides out keeps the tunnel; one it cannot sign in again
+    after for :data:`RECONNECT_SECONDS` ends it, so the watchdog starts a new one."""
+    script = bundled(monkeypatch, Script(url="https://abc.ngrok-free.app"))
+    clock = [100.0]
+    tunnel = SdkTunnel(8750, token=lambda: TOKEN, ticks=lambda: clock[0])
+    assert tunnel.start_tunnel() is None
+    assert tunnel.wait_for_url(5) == "https://abc.ngrok-free.app"
+    script.disconnect("transport error")  # the network dropped: the SDK signs in again
+    clock[0] += 5
+    script.disconnect("reconnect error")
+    clock[0] += 60
+    script.disconnect("transport error")  # signed in again meanwhile, and dropped anew
+    clock[0] += RECONNECT_SECONDS - 1
+    script.disconnect("reconnect error")
+    assert tunnel.running and tunnel.error is None, "a drop the SDK rides out is its own"
+    clock[0] += 1
+    script.disconnect("reconnect error")
+    assert ended(tunnel), "a session that cannot sign in again ends"
+    assert tunnel.error == SESSION_LOST and script.calls.closed == 1
+
+
+def test_a_session_ngrok_says_the_token_of_is_refused_ends_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = bundled(monkeypatch, Script(url="https://abc.ngrok-free.app"))
+    tunnel = SdkTunnel(8750, token=lambda: TOKEN)
+    assert tunnel.start_tunnel() is None
+    assert tunnel.wait_for_url(5) is not None
+    script.disconnect("listener closed: The authtoken you specified has been reset, ERR_NGROK_107")
+    assert ended(tunnel)
+    assert tunnel.error == BAD_TOKEN
+
+
+def test_a_stop_during_the_sign_in_cancels_it_and_binds_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #274, m2: a stop during the sign-in (up to 20 s) was waited for only until
+    :data:`STOP_SECONDS`; the sign-in went on, then bound the endpoint, so a quick off and on
+    met it (ERR_NGROK_108, the domain in use). The sign-in is cancelled: the real SDK closes
+    its socket then (a cancelled ``connect()`` drops its future)."""
+    script = bundled(monkeypatch, Script(hold=threading.Event()))
+    tunnel = SdkTunnel(8750, token=lambda: TOKEN)
+    assert tunnel.start_tunnel() is None
+    assert script.signing_in.wait(5)
+    began = time.monotonic()
+    tunnel.stop_tunnel()
+    took = time.monotonic() - began
+    assert not tunnel.running and took < STOP_SECONDS / 2, took
+    assert script.calls.cancelled == 1
+    assert script.hold is not None
+    script.hold.set()  # a sign-in that went on would answer now
+    time.sleep(0.2)
+    assert script.calls.forwards == [] and tunnel.public_url is None
+    assert tunnel.error is None, "a stop is no failure"
 
 
 def test_any_other_failure_is_ngroks_own_words_with_the_token_cut_out() -> None:

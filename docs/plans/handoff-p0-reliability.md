@@ -999,11 +999,40 @@ themselves.
 
 #278. Related: #273 (fixed the contents).
 
+## Results (2026-10-23)
+
+Every live run was at **reduced scale** (owner decision 2026-10-23): at most 5 Claude
+sessions, at most 30 minutes, the account slot with the most headroom, a scratch
+`AISQUARE_HOME` and a scratch tmux socket, never the real `asq` socket, `~/.aisquare`
+or a working fleet. The full run as written above (20 agents, the day-long soak) happens
+once, after all four trains are on `main`.
+
+| Workstream | PR | Scale | Before | After |
+| --- | --- | --- | --- | --- |
+| W0 spike | #320 | ≤5 sessions, ~20 min, slots 2 and 3, Claude Code 2.1.309 and 2.1.223, sockets `w0spike`/`w0probe` | — | answers in "W0 results" under W0: the 30–50 s Enter-ignore is refuted; an Enter before the input box is dropped (10/10); argv first prompts work on both versions; the inbox socket is pinned for 2.1.309 and absent on 2.1.223; the per-family window is `limits[]` `weekly_scoped` |
+| W1a first messages | #330 | ≤5 sessions, ~15 min, slot 2, 2.1.309, socket `w0spike` | typed after a fixed 2.0 s; no acknowledgement; `--task` typed nothing (field report: 7/7 coders at an empty composer) | **19/19 first messages acknowledged**: 5 spawns 1.6–1.7 s each, 5 restarts 2.5 s, a `--task` kickoff 1.6 s, 3 typed (`first_prompt = "type"`) 1.8–1.9 s, 5 parallel spawns; no message text left in `run/prompts/` or any `launch_spec` |
+| W1b idle reads waiting | #315 | tests (fake clock) | a just-spawned idle agent read `working` for up to 30 min; an Esc-ended turn likewise | `waiting` from SessionStart; an Esc-ended turn reads `working` for `busy_quiet_seconds` (30 s), then one capture |
+| W1c contracts on claim | #313 | tests | a claim printed the title only | the claim prints the whole contract and the last reopen reason |
+| W2 delivery guards | #337 | ≤2 sessions, ~12 min, slot 2, 2.1.309, socket `w0spike` | a manager nudge was appended to a half-written draft and sent ("Your message got cut off"); a `fleet tell` to a busy coder was filed and never delivered (idle 45 s+ after its turn) | the draft stays intact and the nudge is deferred, then sent once the box was cleared; the tell is handed over at turn end, reply 31.9 s after the tell (~17 s of it the coder's own sleep) |
+| W3 account switches | #304, #308 | tests only: forcing a real usage limit is unsafe at reduced scale | one limit with `on_limit = "switch"`: 2 `switched` + 1 manager nudge; an Opus agent picked onto a slot whose `seven_day_opus` was 100 | 1 `switched`, 0 nudges (the manager's switch is refused); the Opus agent goes to slot 3. W3b: a cross-account resume keeps its real transcript (no false collision banner, no fresh restart) |
+| W4 capture off | #305 | test (the #268 repro through the CLI) | `1` prompt logged with capture off | `0` |
+| W5 lock check | #307 | CI | no step read `uv.lock`; it had drifted (the `voice` extra) | the `lock` job fails a dependency change without a relock ([red run](https://github.com/AISquare-Studio/aisquare-cli/actions/runs/40000167349/job/120573893291)) |
+| P1-WS5d xdist (landed via this train) | #309 | CI runners | `Test (pytest)` 42–56 min per Linux leg, serial | 16–22 min with `-n auto` (50–66 % saved) |
+| Lean CI for sub-PRs | #322 | CI | 10 jobs per sub-PR run | 2–3 (one Linux check leg, Linux package, the lock job) |
+
+**Not built in this train, and why.** The inbox-socket tier (W1a/W2 "if built"): W0
+pinned its schema for 2.1.309 only, 2.1.223 has no socket, and its migration collided
+with P1's reserved schema 35; follow-up behind `[fleet] inbox_delivery = false`. The
+per-family `weekly_scoped` window W0 found is #49 (P0-W3c); W1a's round-2 minors are #51.
+
 ## Release checklist
+
+Status 2026-10-23 is given in **bold** after each item.
+
 
 - Version: the next release cut from `main` after this train. `[Unreleased]` already
   carries the captain (#240) and personas (#201); with a store migration (schema
-  version 34) and new receipt fields, expect 0.9.0. The owner sets it.
+  version 34) and new receipt fields, expect 0.9.0. The owner sets it. **Owner.**
 - CHANGELOG `[Unreleased]`: `Fixed` — first prompts acknowledged (#122), idle agents
   read waiting (#123), claimed contracts (#74), drafts never overwritten (W2), tells
   delivered at turn end (W2), one switch per limit and per-family windows (W3),
@@ -1012,18 +1041,20 @@ themselves.
   `prompt_ack_seconds`, `busy_quiet_seconds`, `draft_quiet_seconds`,
   `deliver_notes_at_turn_end`, `inbox_delivery` (if built); `[accounts] prefer`;
   `fleet switch --force`; events `prompt_unsent`, `handover_failed`; doctor row
-  `fleet-delivery`.
+  `fleet-delivery`. **Done: one entry per workstream (P0-REL coherence pass); `inbox_delivery` not built.**
 - Migration notes: store schema version 34 adds `team_session.prompted_at`, `fleet_agent.first_prompt`,
   `fleet_agent.first_prompt_at` (nullable; old rows read NULL, meaning "not tracked").
-  No config migration; new keys default as above.
+  No config migration; new keys default as above. **Done: `docs/fleet.md` "Upgrading".**
 - Rollout defaults: command-line first prompts on for Claude Code agents; typed
-  fallback with acknowledgement for everything else; socket tier off.
+  fallback with acknowledgement for everything else; socket tier off. **As built; the socket tier is not built at all.**
 - Docs: `docs/fleet.md`, `docs/orchestration.md`, `docs/reference.md` (new
   configuration section), `docs/memory.md`, `docs/plans/claude-accounts.md`,
   `CONTRIBUTING.md`. `tests/test_documented_commands.py` and
-  `tests/test_fleet_docs_are_true.py` green.
+  `tests/test_fleet_docs_are_true.py` green. **Done in each workstream; both guards run on the train head.**
 - Soak before tagging: a multi-agent fleet with several accounts runs a day on the
-  branch; `fleet-delivery` shows every first prompt acknowledged.
+  branch; `fleet-delivery` shows every first prompt acknowledged. **Deferred (owner
+  decision 2026-10-23): the full as-written run, this soak included, happens once after
+  all four trains are on `main`.**
 
 ## Out of scope
 

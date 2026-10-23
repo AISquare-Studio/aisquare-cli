@@ -59,6 +59,7 @@ dev = [
     { name = "jsonschema" },
     { name = "mcp" },
     { name = "mypy" },
+    { name = "pyotp" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "textual" },
@@ -68,6 +69,10 @@ dev = [
 ]
 explainability = [
     { name = "aisquare", extra = ["explainability"] },
+]
+gate = [
+    { name = "pyotp" },
+    { name = "segno" },
 ]
 llm = [
     { name = "anthropic" },
@@ -107,11 +112,14 @@ requires-dist = [
     { name = "mcp", marker = "extra == 'serve'", specifier = ">=2.1,<3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
     { name = "pydantic", specifier = ">=2.13.4" },
+    { name = "pyotp", marker = "extra == 'dev'", specifier = ">=2.9" },
+    { name = "pyotp", marker = "extra == 'gate'", specifier = ">=2.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=14.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
     { name = "segno", specifier = ">=1.6" },
+    { name = "segno", marker = "extra == 'gate'", specifier = ">=1.6" },
     { name = "segno", marker = "extra == 'voice'", specifier = ">=1.6" },
     { name = "starlette", marker = "extra == 'remote'", specifier = ">=0.40" },
     { name = "starlette", marker = "extra == 'voice'", specifier = ">=0.37" },
@@ -129,7 +137,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'remote'", specifier = ">=12" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=12" },
 ]
-provides-extras = ["serve", "llm", "explainability", "voice", "remote", "tui", "experiment", "dev"]
+provides-extras = ["serve", "llm", "explainability", "voice", "gate", "remote", "tui", "experiment", "dev"]
 
 [[package]]
 name = "annotated-doc"
@@ -1629,6 +1637,15 @@ wheels = [
 [package.optional-dependencies]
 crypto = [
     { name = "cryptography" },
+]
+
+[[package]]
+name = "pyotp"
+version = "2.10.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2d/c6/c5d96a86fd0bf6fa1bbb5c5c341ff3208638b692727a683c8289068d9a11/pyotp-2.10.0.tar.gz", hash = "sha256:d01e9703443616b03c57c700b5cbffd56a1f929c1b0f8f03131bc78c1fca9d3f", size = 18625, upload-time = "2026-06-14T03:48:49.221Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/65/33/7b83bde70eddaaaaef487751a9c3a5cc0c0be54620ded0e120ebdc401ff9/pyotp-2.10.0-py3-none-any.whl", hash = "sha256:1df2f6a1bcc3bb0716172a5215ddc2f8c7c7fd26a13df9927d52e1746934836c", size = 13768, upload-time = "2026-06-14T03:48:47.831Z" },
 ]
 
 [[package]]

@@ -15,11 +15,11 @@ second one: what it turns on, the ``R`` modal shows on, and the other way round.
 - *On*: the link, copied by itself once ngrok's link (the one a phone can reach) arrives
   after a turn-on here, with a toast; *Copy*; the QR; the password; *Turn off*.
 
-**The hooks #34 fills** (ngrok bundled, its token kept where it chooses), in one place:
-:func:`ngrok_found` (is there an ngrok to start), :func:`has_authtoken` (is a token
-configured), :func:`store_ngrok_token` (save a pasted one, or raise :class:`TokenRefused`
-with why) and :meth:`NgrokMissing.fix` (the in-app fix for a missing ngrok). Each works
-today on its own: ngrok on PATH, its own config, ``ngrok config add-authtoken``.
+**What Remote needs** (#34: ngrok bundled, its token pasted here), in one place:
+:func:`ngrok_found` (is there an ngrok to start: the bundled SDK, else one on PATH),
+:func:`has_authtoken` (is a token configured), :func:`store_ngrok_token` (check a pasted one
+with ngrok and keep it, or raise :class:`TokenRefused` with why) and :meth:`NgrokMissing.fix`
+(look again, for a damaged install's ngrok). All of it is ``services.ngrok_sdk``'s.
 
 **Advanced**, collapsed until clicked: *Regenerate password*, *Allow write actions*,
 *Auto-off* and the connected devices with *Revoke*, as the modal has them.
@@ -36,9 +36,7 @@ opens the ``R`` modal.
 from __future__ import annotations
 
 import os
-import re
 import shutil
-import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -65,7 +63,8 @@ from aisquare.cli.ui.views.remote import (
     _link_text,
     qr_art,
 )
-from aisquare.services.ngrok_tunnel import ngrok_default_config
+from aisquare.services import ngrok_sdk
+from aisquare.services.ngrok_tunnel import AUTHTOKEN_FROM as AUTHTOKEN_FROM
 
 TICK_S = 1.0
 """How often the section repaints from the controller while it shows, as the modal does."""
@@ -74,20 +73,14 @@ CHIP_TICK_S = 2.0
 
 TOKEN_WORKER = "settings-remote-token"
 """The worker that saves a pasted ngrok token (:func:`store_ngrok_token`)."""
-TOKEN_SAVE_TIMEOUT_S = 15.0
-
-AUTHTOKEN_FROM = "https://dashboard.ngrok.com/get-started/your-authtoken"
-_AUTHTOKEN_LINE = re.compile(r"^\s*authtoken\s*:\s*['\"]?[^\s'\"#]", re.MULTILINE)
-"""A config line that sets an authtoken: ``authtoken: <value>``, top-level (v2) or under
-``agent:`` (v3)."""
 
 OFF_ABOUT = "the fleet on your phone: a link, its QR code and a password"
 TOKEN_TITLE = "Paste your ngrok token"
 TOKEN_ABOUT = "Remote reaches your phone through ngrok: a free account's token, once."
-NGROK_MISSING = "ngrok is missing from this install, so a phone cannot reach Remote yet"
+NGROK_MISSING = ngrok_sdk.SDK_MISSING
 
 
-# --- what Remote needs: the hooks #34 fills ---------------------------------------------------
+# --- what Remote needs (#34: services.ngrok_sdk) ---------------------------------------------
 
 
 class TokenRefused(Exception):
@@ -95,58 +88,39 @@ class TokenRefused(Exception):
 
 
 def ngrok_found() -> bool:
-    """Whether there is an ngrok to start. Today: ``ngrok`` on PATH, which the panel starts."""
-    return shutil.which("ngrok") is not None
+    """Whether there is an ngrok to start: the bundled one (``ngrok_sdk``), which every install
+    has but a damaged one, else an ``ngrok`` on PATH."""
+    return ngrok_sdk.sdk() is not None or shutil.which("ngrok") is not None
 
 
 def has_authtoken(
     environ: Mapping[str, str] = os.environ, configs: list[Path] | None = None
 ) -> bool:
-    """Whether ngrok has an authtoken to sign in with: ``NGROK_AUTHTOKEN``, or an
-    ``authtoken:`` in its own config, where ``ngrok config add-authtoken`` writes it, or in
-    the one ngrok 2 kept (``~/.ngrok2/ngrok.yml``)."""
-    if environ.get("NGROK_AUTHTOKEN", "").strip():
-        return True
-    if configs is None:
-        configs = [ngrok_default_config(environ=environ), Path.home() / ".ngrok2" / "ngrok.yml"]
-    for config in configs:
-        try:
-            text = config.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if _AUTHTOKEN_LINE.search(text):
-            return True
-    return False
+    """Whether ngrok has a token to sign in with (``ngrok_sdk.find_authtoken``):
+    ``NGROK_AUTHTOKEN``, the one pasted here, or an ``authtoken:`` in the human's own ngrok
+    config (``configs``: ngrok 3's and ngrok 2's when not given)."""
+    return ngrok_sdk.find_authtoken(environ, configs) is not None
 
 
 def store_ngrok_token(token: str) -> None:
-    """Save ``token`` where ngrok reads it, or raise :class:`TokenRefused` saying why.
+    """Save ``token`` where Remote's ngrok reads it, or raise :class:`TokenRefused` saying why.
 
-    Today through ngrok's own ``config add-authtoken``, which writes ngrok's config as ngrok
-    keeps it. The token is never said: not in a toast, a log or an error, where ngrok's own
-    words are passed on with it cut out. On a worker (:data:`TOKEN_WORKER`).
+    ngrok's service is asked first whether it takes the token (``ngrok_sdk.check_token``);
+    one it refuses is not kept. Kept in the aisquare home, owner-only. The token is never
+    said: not in a toast, a log or an error. On a worker (:data:`TOKEN_WORKER`).
     """
     token = token.strip()
     if not token:
         raise TokenRefused("paste the token first")
     if any(character.isspace() for character in token):
         raise TokenRefused("that is not one token: it has spaces in it")
-    binary = shutil.which("ngrok")
-    if binary is None:
-        raise TokenRefused(f"{NGROK_MISSING}, and the token has nowhere to go")
+    refused = ngrok_sdk.check_token(token)
+    if refused is not None:
+        raise TokenRefused(refused)
     try:
-        done = subprocess.run(
-            [binary, "config", "add-authtoken", token],
-            capture_output=True,
-            text=True,
-            timeout=TOKEN_SAVE_TIMEOUT_S,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise TokenRefused(f"ngrok could not save it: {type(exc).__name__}") from None
-    if done.returncode != 0:
-        said = (done.stderr or done.stdout or "").replace(token, "…").strip().splitlines()
-        raise TokenRefused(f"ngrok did not take it: {said[-1] if said else done.returncode}")
+        ngrok_sdk.save_token(token)
+    except OSError as exc:
+        raise TokenRefused(f"the token could not be saved: {type(exc).__name__}") from None
 
 
 def remote_shown(widget: Widget) -> bool:
@@ -561,8 +535,8 @@ class TokenSlot(Vertical):
 
 class NgrokMissing(Vertical):
     """The one line an install whose ngrok is missing gets, with its fix in the app: never a
-    command to run in a terminal. :meth:`fix` is the hook (#34: get the bundled ngrok back);
-    today it looks again, for an ngrok put on PATH meanwhile."""
+    command to run in a terminal. Only a damaged install gets it: the bundled ngrok is a core
+    dependency (#34). :meth:`fix` looks again, for an ngrok put back meanwhile."""
 
     DEFAULT_CSS = """
     NgrokMissing { height: auto; margin: 1 0 0 0; }

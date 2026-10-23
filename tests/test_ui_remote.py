@@ -46,7 +46,7 @@ from aisquare.core.tmux import Completed
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_page, remote_server
-from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, build_public_url
+from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, Tunnel, build_public_url
 from aisquare.services.remote_server import UNLOCK_GLOBAL_FAILURES, Runtime, UnlockBudget
 from tests import toast_log
 from tests.fake_clipboard import NEEDS_POSIX, TEXT, install
@@ -111,7 +111,7 @@ def no_agents(monkeypatch: pytest.MonkeyPatch) -> None:
 def drive(
     fn: Callable[[Pilot[None]], Awaitable[T]],
     *,
-    tunnel: Callable[[int], NgrokTunnel],
+    tunnel: Callable[[int], Tunnel],
     size: tuple[int, int] = SIZE,
 ) -> T:
     """Run ``fn`` against a mounted ``FleetApp`` whose Remote uses the stub server + ``tunnel``.
@@ -279,7 +279,9 @@ def test_shift_r_opens_the_remote_panel_and_the_switch_turns_remote_on_and_off()
     drive(go, tunnel=fake_tunnel_factory(url=PUBLIC))
 
 
-def test_with_ngrok_absent_the_modal_shows_the_install_hint_and_the_local_link() -> None:
+def test_with_ngrok_absent_the_modal_shows_why_and_the_local_link() -> None:
+    """Only a damaged install, without the bundled ngrok (#34): it says so, with no command."""
+
     async def go(pilot: Pilot[None]) -> None:
         app = pilot.app
         assert isinstance(app, FleetApp)
@@ -289,7 +291,9 @@ def test_with_ngrok_absent_the_modal_shows_the_install_hint_and_the_local_link()
         assert app.remote.running  # locally on, no tunnel: PLAN §6 fallback, no crash
         status = shown(modal.query_one("#remote-status", Static))
         assert status == INSTALL_HINT
-        assert "ngrok is not installed" in status and "ngrok config add-authtoken" in status
+        assert (
+            "damaged" in status and "not installed" not in status and "ngrok config" not in status
+        )
         link = shown(modal.query_one("#remote-link", Static))
         info = app.remote.info
         assert info is not None

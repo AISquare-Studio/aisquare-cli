@@ -1001,8 +1001,9 @@ CENSUS = {
     "docs/remote.md": (9, 2),
     # Measured 2026-10-23, the day it was written: eight fenced `aisquare brief …`
     # commands (create, two links, evidence, finding, three updates), no classified
-    # mentions. Re-measure when it grows.
-    "docs/work-briefs.md": (8, 0),
+    # mentions. Re-measured the same day at eleven when the evidence gate added
+    # `exec`, and `brief check` twice. Re-measure when it grows.
+    "docs/work-briefs.md": (11, 0),
 }
 
 

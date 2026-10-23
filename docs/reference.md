@@ -78,8 +78,10 @@ aisquare
 │                   update <brief> [-r R1=…] [--check R1=…] [--add TEXT] [--title T]
 │                                  [--assumption A]… [--boundary B]…
 │                                  [--clear-assumptions] [--clear-boundaries]
-│                   evidence <brief> R1 --task T --verdict pass|fail --summary S --artifact F
+│                   evidence <brief> R1 --task T --verdict pass|fail --summary S
+│                                    (--report ID | --artifact F)
 │                   finding <brief> R1 --task T --summary S [--artifact F]
+│                   check <brief> [--source-root PATH]   exit 1 until every requirement is proven
 │                   (all with [--as SESSION]; a brief is its id, or B1 / 1 — docs/work-briefs.md)
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>

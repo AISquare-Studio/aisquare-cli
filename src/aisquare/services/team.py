@@ -1596,7 +1596,16 @@ def _finish_task(
             if wakes
             else task.project_id
         )
-        updated = store.set_task_status(task.id, status)
+        if status == "done":
+            # The evidence gate (docs/work-briefs.md): a task linked to a requirement needs
+            # a fresh pass from it for each, and the check's briefs are compared again in
+            # the status write's own transaction. A task no brief links is not gated.
+            from aisquare.services import briefs as briefs_service  # lazy: it imports this
+
+            read = briefs_service.gate(store, task)
+            updated = store.complete_task_if_unchanged(task.id, read)
+        else:
+            updated = store.set_task_status(task.id, status)
         if status in CLOSED_STATUSES:
             # Rule 3 of the fleet-row section: the rows spawned for this task
             # have nothing left to be told about it.
@@ -1952,21 +1961,41 @@ def hook_session_start(
         fleet = _cycle_project(store, project, cwd, session.id, named=named)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
-        return collision + _render_board(
-            project,
-            store.team_sessions(project.id),
-            store.team_tasks(project.id),
-            _briefing_events(store, project.id),
-            me=session,
-            assigned=assigned,
-            briefing=True,
-            persona_note=persona_note,
-            # Asked only when the briefing needs it: one git call, which a session with no
-            # persona, or one whose cycle names its project, never pays.
-            persona_root=_directory_root(cwd) if session.persona and fleet is None else None,
-            labels=lambda: slot_labels_via(store),
-            fleet=fleet,
+        return (
+            collision
+            + _render_board(
+                project,
+                store.team_sessions(project.id),
+                store.team_tasks(project.id),
+                _briefing_events(store, project.id),
+                me=session,
+                assigned=assigned,
+                briefing=True,
+                persona_note=persona_note,
+                # Asked only when the briefing needs it: one git call, which a session with
+                # no persona, or one whose cycle names its project, never pays.
+                persona_root=_directory_root(cwd) if session.persona and fleet is None else None,
+                labels=lambda: slot_labels_via(store),
+                fleet=fleet,
+            )
+            + _requirements_block(store, session, assigned)
         )
+
+
+def _requirements_block(
+    store: ContextStore, session: TeamSession, assigned: Assignment | None
+) -> str:
+    """The requirements linked to this session's task, for its session start
+    (``briefs.session_requirements``). Fails open on its own, as :func:`_assignment`
+    does: an unreadable brief costs this block, never the board above it."""
+    try:
+        from aisquare.services import briefs as briefs_service  # lazy: it imports this
+
+        return briefs_service.session_requirements(
+            store, session, assigned.task if assigned is not None else None
+        )
+    except Exception:
+        return ""
 
 
 def hook_prompt_heartbeat(

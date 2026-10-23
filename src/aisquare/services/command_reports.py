@@ -268,13 +268,15 @@ def list_reports() -> list[CommandReport]:
 # --------------------------------------------------------------------------- retention
 
 
-def _no_protected_reports() -> Collection[str]:
-    return frozenset()
+def _evidence_reports() -> Collection[str]:
+    """The reports work-brief evidence cites (``briefs.referenced_report_ids``)."""
+    from aisquare.services import briefs  # lazy: briefs reads reports
+
+    return briefs.referenced_report_ids()
 
 
 #: Names the reports that back recorded evidence, which retention must never delete.
-#: Nothing records evidence yet; the evidence store replaces this with its own reader.
-protected_reports_provider: Callable[[], Collection[str]] = _no_protected_reports
+protected_reports_provider: Callable[[], Collection[str]] = _evidence_reports
 
 
 def protected_report_ids() -> set[str] | None:

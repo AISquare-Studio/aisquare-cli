@@ -50,8 +50,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is ignored while a live linked task remains, and a session's own writes do not
   wake it. Store v34 adds the `brief` table (not #136's `work_brief`, which a store
   that ran a #136 build keeps, unread); `project forget --purge` deletes its rows.
-  The gate on `task done`, `brief check` and report-backed evidence are the next
-  part (#275).
+
+- **The evidence gate** (`docs/work-briefs.md`). `aisquare task done` on a task
+  linked to a brief's requirements refuses unless that task recorded a fresh pass
+  for each, naming every requirement and its state (`missing`, `failed`, `blocked`
+  or `stale`) in text and as a list under `--json` (`task_not_proven`). The check
+  and the status write are one transaction, so a correction landing in between
+  fails the completion (`brief_changed`); a task is gated only by the briefs that
+  link it, and a task no brief links is done exactly as before. `brief evidence
+  --report ID` records a check backed by an `asq exec --project` report: a pass
+  needs exit 0, no interruption, both streams whole, no launch error, a known
+  source identity and the same identity before, after and now, compared file by
+  file in the report's own checkout; a report taken with `--task` backs only that
+  task. Manual `--artifact` passes keep their checkout's whole-tree fingerprint.
+  `aisquare brief check BRIEF [--source-root PATH]` re-checks every pass against
+  the source now and exits 1 while anything is missing, failed, blocked or stale;
+  `--source-root` compares every pass with one checkout of the project and refuses
+  any other path. A session whose task is linked sees those requirements at start,
+  clipped to 2,500 characters and failing open on its own. Reports that recorded
+  evidence cites are never pruned, and when the brief store cannot be read nothing
+  is.
 
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in

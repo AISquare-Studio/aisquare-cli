@@ -332,17 +332,24 @@ def evidence(
     verdict: Annotated[Verdict, typer.Option("--verdict", help="pass or fail.")],
     summary: Summary,
     artifact: Annotated[
-        Path,
+        Path | None,
         typer.Option(
             "--artifact", help="The file that shows it, such as a screenshot: manual evidence."
         ),
-    ],
+    ] = None,
+    report: Annotated[
+        str | None,
+        typer.Option("--report", help="The saved command report (`asq exec --project`)."),
+    ] = None,
     as_session: SessionRef = None,
 ) -> None:
-    """Record a check of a requirement by a linked task, backed by an artifact.
+    """Record a check of a requirement by a linked task, backed by one of --report or
+    --artifact.
 
-    Artifact-backed evidence is MANUAL: recorded as such and labelled so everywhere,
-    because only the validator can judge it. A fail has `brief finding`'s effect."""
+    A --report pass needs the run to have exited 0, uninterrupted, with its output kept
+    whole and its source unchanged before, after and now. Artifact-backed evidence is
+    MANUAL: recorded as such and labelled so everywhere, because only the validator can
+    judge it. A fail has `brief finding`'s effect."""
     narrowed: EvidenceVerdict = "pass" if verdict is Verdict.PASS else "fail"
     brief, recorded, changed = _call(
         as_session,
@@ -353,10 +360,51 @@ def evidence(
             verdict=narrowed,
             summary=summary,
             artifact=artifact,
+            report_id=report,
             session_ref=as_session,
         ),
     )
     _evidence_written(brief, recorded, changed)
+
+
+@app.command("check")
+def check(
+    ref: BriefRef,
+    source_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--source-root",
+            help="Compare every pass with this one checkout (the project's, or a worktree).",
+        ),
+    ] = None,
+    as_session: SessionRef = None,
+) -> None:
+    """Check every requirement against the source now. Exits 1 while any is missing,
+    failed, blocked or stale."""
+    result = _call(
+        as_session, lambda: service.check(ref, source_root=source_root, session_ref=as_session)
+    )
+    if get_state().json_output:
+        typer.echo(result.model_dump_json())
+    else:
+        brief = result.brief
+        verdict = "PROVEN" if result.complete else "NOT PROVEN"
+        against = f" against {result.source_root}" if result.source_root else ""
+        _out(f"{brief.label} r{brief.revision} {brief.title}: {verdict}{against}")
+        for status in result.requirements:
+            label = status.state + (" (manual)" if status.manual else "")
+            _out(f"  {status.id} [{label}] {status.reason}")
+            for proof in status.tasks:
+                if proof.state != status.state:
+                    _out(
+                        f"      {_task_ref(proof.task_id, proof.task_number)} {proof.state}: "
+                        f"{proof.reason}"
+                    )
+        manual = [status.id for status in result.requirements if status.manual]
+        if manual:
+            _out(f"Manual evidence, for the validator to judge: {', '.join(manual)}")
+    if not result.complete:
+        raise typer.Exit(1)
 
 
 @app.command("finding")

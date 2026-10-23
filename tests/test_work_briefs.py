@@ -55,8 +55,11 @@ def nudges(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
 
 
 @pytest.fixture
-def shot(work: Path) -> Path:
-    path = work / "shot.png"
+def shot(tmp_path: Path) -> Path:
+    """A screenshot outside the checkout, as one usually is: a manual pass keeps the
+    checkout's whole-tree fingerprint, so a file edited inside it would stale it."""
+    path = tmp_path / "artifacts" / "shot.png"
+    path.parent.mkdir()
     path.write_bytes(b"a screenshot")
     return path
 

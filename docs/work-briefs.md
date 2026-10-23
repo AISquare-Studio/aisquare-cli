@@ -33,19 +33,40 @@ aisquare brief link B1 12 -r R1 -r R2
 aisquare brief link B1 13 -r R2
 ```
 
-When a task's work is checked, record what the check found, with the file that shows
-it:
+When a task's work is checked, run the check through `aisquare exec`
+([command reports](command-reports.md)) with the project, so the run is saved with the
+source it ran on, and record it against the requirement with the report ID it prints:
 
 ```sh
+aisquare exec --project prj_… --task tsk_… -- pytest -q tests/test_login.py
 aisquare brief evidence B1 R1 --task 12 --verdict pass \
-  --summary "Signed in as a test user and the dashboard opened" \
-  --artifact dashboard.png
+  --summary "the login tests pass" --report 3f9c…
 ```
 
 Each linked task proves its own part: `R2` above stands at `missing` until both #12 and
 #13 have recorded a check of it. `aisquare brief show B1` prints every requirement's
 standing, the checks behind it, and the corrections the brief has had;
 `aisquare brief list` lists the board's briefs.
+
+## Checks backed by a command report
+
+A report backs a **pass** only if the run:
+
+- exited 0, could start, and was not interrupted (an interrupted run that still exited
+  0 is no pass);
+- kept both streams whole (nothing past the cap, no pipe held open after the exit);
+- has a known source identity, so it ran with `--project` for this brief's board;
+- saw the same source before it, after it, and now.
+
+The source is compared **file by file**, in the checkout the report ran in, not the one
+you record from: a check run in a worktree is about that worktree. A file the check
+wrote that did not exist before it (`--junitxml report.xml`) is new output and does not
+count; a file that existed and changed or went does. A report taken with `--task` backs
+only that task. A failed run can always back `--verdict fail`.
+
+A recorded pass goes `stale` when a file it covered changes, or when its report changes
+or is gone. Reports that recorded evidence cites are never pruned
+([retention](command-reports.md)).
 
 ## Manual evidence
 
@@ -62,6 +83,11 @@ path is kept as provenance only, so a screenshot in a temporary directory, or in
 worktree the fleet later reaps, can be deleted without the check changing. If the
 *copy* changes or goes away, a pass reads `stale`. A finding, or any failed check,
 stays a failure whatever happens to its file. An artifact over 16 MiB is refused.
+
+A manual pass also keeps the **whole-tree fingerprint** of the checkout it was recorded
+in, and any change there (an edit, a new untracked file) makes it `stale`. Nothing can
+say which files a screenshot covered, so every file counts. If that fingerprint cannot
+be taken, a pass is refused; a failure is recorded without it.
 
 ## Findings
 
@@ -126,16 +152,51 @@ back at its next Stop, while the same correction by a coder does.
 Two writers never overwrite each other. Each write compares the brief's revision, and
 one that lost the race is refused with `brief_changed`: read the brief and retry.
 
-## Not yet
+## Finishing a linked task
 
-These are the next part of the work (the evidence-gate handoff,
-[#275](https://github.com/AISquare-Studio/aisquare-cli/pull/275)), and are not
-in this build: checks backed by a saved command report (`asq exec`) and the source
-fingerprint they are compared against; `task done` refusing a linked task without a
-fresh passing check; `brief check`, the one command that says which requirements are
-proven; and an agent's linked requirements shown at session start. Until then, a
-linked task is marked done exactly as before, and `brief show` is where the standing
-is read.
+`aisquare task done` on a task linked to a requirement needs a **fresh pass recorded by
+that task** for every requirement it is linked to: fresh meaning against the
+requirement as it reads now and the source in its checkout now. Otherwise the task
+stays as it is and each requirement is named with its state, `missing`, `failed`,
+`blocked` or `stale`, and why:
+
+```text
+✗ #12 tsk_… cannot be done: it needs a fresh pass for each of
+  B1 R2 [stale] the source in /work/app changed since the check ran
+  B1 R3 [missing] no check recorded
+```
+
+With `--json`, the refusal is `{"error": "task_not_proven", "requirements": [{"brief",
+"requirement", "state", "reason"}, …]}`. A task is gated only by the briefs that link
+it: an unrelated or damaged brief elsewhere on the board never blocks it, and a damaged
+one that names it refuses with that reason. The check and the status write are one
+store transaction, so a correction that lands while `task done` runs fails it
+(`brief_changed`: run it again). A task no brief links is done exactly as before.
+
+## Checking a whole brief
+
+```sh
+aisquare brief check B1
+aisquare brief check B1 --source-root ../wt-assembled
+```
+
+`brief check` prints every requirement's standing, each pass checked against the
+source now, and exits 1 while anything is missing, failed, blocked or stale; 0 means
+the brief is proven. By default each pass is compared with the checkout it was
+recorded in. `--source-root` compares every pass with that one checkout instead,
+which is the check a validator runs on the assembled work. It must be this project's
+directory or one of its worktrees: anything else is an error, not a page of `stale`.
+Passes that rest on manual evidence are listed for the validator to judge.
+
+## At session start
+
+An agent whose task (the one it was spawned for, or one it holds) is linked to a
+brief sees those requirements when its session starts: each one's text and expected
+check, clipped, and its state **as recorded**. Reading a whole checkout costs a hook
+too much, so a pass is shown as recorded and `brief check` is what re-checks it. The
+block is held to 2,500 characters, inside Claude Code's 10,000-character limit for
+session-start output, and if it cannot be built only the block is lost, never the
+board.
 
 ## Limits
 

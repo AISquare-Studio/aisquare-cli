@@ -134,7 +134,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ),
     *(
         ("brief", command)
-        for command in ("create", "list", "show", "update", "link", "evidence", "finding")
+        for command in ("create", "list", "show", "update", "link", "evidence", "finding", "check")
     ),
     *(
         (group, command)

@@ -12,28 +12,40 @@ the brief compared on its revision and replaced, the tasks it sends back moved, 
 its board events written, each attributed to the ``--as`` session, so the session
 that wrote it is not woken by it.
 
-Only manual evidence is recorded here: an artifact, such as a screenshot, that only
-the validator can judge. Report-backed evidence and its source identity
-(``asq exec``) arrive with the evidence gate; :class:`~aisquare.models.BriefEvidence`
-already carries their fields.
+A check is backed by an artifact (``manual``: only the validator can judge it, and its
+checkout's whole-tree fingerprint is kept) or by a saved command report (``report``:
+``asq exec --project``, whose per-file source identity before and after the run is
+compared with the checkout now, file by file). :func:`gate` is what ``task done`` asks
+of a linked task, and :func:`check` what ``brief check`` asks of a whole brief.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import re
+import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import ValidationError
 
-from aisquare.core import atomic, insights, paths
+from aisquare.core import atomic, insights, orchestrator, paths
 from aisquare.core.ids import new_brief_id, new_event_id, new_evidence_id
+from aisquare.core.source_revision import (
+    _toplevel,
+    fingerprint_of,
+    source_file_hashes,
+    source_root_for,
+    source_unchanged,
+)
 from aisquare.core.store import BriefRow, ContextStore, TaskTransition, store_session
 from aisquare.models import (
+    BriefCheck,
     BriefCorrection,
     BriefEvidence,
     BriefRequirement,
@@ -48,7 +60,7 @@ from aisquare.models import (
     TeamTask,
     WorkBrief,
 )
-from aisquare.services import team
+from aisquare.services import command_reports, team
 
 #: Distinct failures by one task against one revision of a requirement that block
 #: the task, so the manager re-plans instead of the task looping through review.
@@ -221,6 +233,128 @@ def _copy_unchanged(evidence: BriefEvidence) -> bool:
     return hashlib.sha256(body).hexdigest() == evidence.artifact_sha256
 
 
+class _Sources:
+    """The source of each checkout a check names, as it is now: read once per root.
+
+    ``override`` is ``brief check --source-root``: every pass is then compared with that
+    one assembled checkout, not the one it was recorded in.
+    """
+
+    def __init__(self, override: Path | None = None) -> None:
+        self.override = override
+        self._files: dict[str, dict[str, str] | str] = {}
+
+    def root(self, recorded: str | None) -> str | None:
+        return str(self.override) if self.override is not None else recorded
+
+    def files(self, root: str) -> dict[str, str]:
+        """``root``'s per-file identity now; ``ValueError`` (with why) when unreadable."""
+        cached = self._files.get(root)
+        if cached is None:
+            try:
+                cached = source_file_hashes(Path(root))
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                cached = f"the source in {root} cannot be read ({exc})"
+            self._files[root] = cached
+        if isinstance(cached, str):
+            raise ValueError(cached)
+        return cached
+
+
+def _report_digest(report_id: str) -> str:
+    """One digest of a saved report: its metadata and both streams' originals. A report
+    changed after its evidence was recorded no longer backs it."""
+    report = command_reports.load_report(report_id)
+    digest = hashlib.sha256(report.model_dump_json().encode())
+    streams: tuple[Literal["stdout", "stderr"], ...] = ("stdout", "stderr")
+    for stream in streams:
+        digest.update(b"\0" + stream.encode() + b"\0")
+        digest.update(command_reports.read_stream(report_id, stream, raw=True))
+    return digest.hexdigest()
+
+
+def _source_stale(evidence: BriefEvidence, sources: _Sources) -> str | None:
+    """Why a recorded pass no longer describes the source in its checkout; None when it
+    still does.
+
+    Report evidence is judged against the REPORT's own source root, file by file: a file
+    the check wrote that did not exist before it (``--junitxml``) is new output and is
+    ignored, while a file that existed and changed or went makes the pass stale. Manual
+    evidence keeps the whole-tree fingerprint of the checkout it was recorded in, so any
+    change there does. ``sources.override`` replaces both roots.
+    """
+    if evidence.kind == "report":
+        report_id = evidence.report_id or ""
+        try:
+            report = command_reports.load_report(report_id)
+            if _report_digest(report_id) != evidence.report_sha256:
+                return f"its command report {report_id[:12]} changed since it was recorded"
+            saved = command_reports.load_source_files(report_id)
+        except (OSError, ValueError):
+            return f"its command report {report_id[:12]} is gone or unreadable"
+        root = sources.root(report.source_root)
+        if root is None:
+            return "its command report holds no source identity"
+        try:
+            current = sources.files(root)
+        except ValueError as exc:
+            return str(exc)
+        if saved is not None:
+            if source_unchanged(saved.before, current):
+                return None
+        elif fingerprint_of(current) == report.source_fingerprint_before:
+            return None
+        return f"the source in {root} changed since the check ran"
+    root = sources.root(evidence.source_root)
+    if root is None or evidence.source_fingerprint is None:
+        return "recorded without a source identity; check it again"
+    try:
+        current = sources.files(root)
+    except ValueError as exc:
+        return str(exc)
+    if fingerprint_of(current) == evidence.source_fingerprint:
+        return None
+    return f"the source in {root} changed since the check"
+
+
+def _pass_refusals(
+    report: command_reports.CommandReport, saved: command_reports.SourceFiles | None
+) -> list[str]:
+    """Why a saved command run cannot back a pass: every rule, each said."""
+    why: list[str] = []
+    if report.launch_error is not None:
+        why.append(f"it could not start ({report.launch_error})")
+    elif report.exit_code != 0:
+        why.append(f"it exited {report.exit_code}")
+    if report.interrupted_by is not None:
+        why.append(f"it was interrupted (signal {report.interrupted_by})")
+    if not report.output_complete:
+        why.append("its output was not kept whole")
+    if not report.source_known or report.source_root is None:
+        cause = report.source_capture_error or "run it with `asq exec --project`"
+        why.append(f"its source identity is unknown ({cause})")
+        return why
+    if saved is not None and saved.after is not None:
+        changed_while = not source_unchanged(saved.before, saved.after)
+    else:
+        changed_while = report.source_fingerprint_before != report.source_fingerprint_after
+    if changed_while:
+        why.append("the source changed while it ran")
+    try:
+        current = source_file_hashes(Path(report.source_root))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        why.append(f"the source in {report.source_root} cannot be read now ({exc})")
+        return why
+    unchanged = (
+        source_unchanged(saved.before, current)
+        if saved is not None
+        else fingerprint_of(current) == report.source_fingerprint_before
+    )
+    if not unchanged:
+        why.append(f"the source in {report.source_root} has changed since it ran; run it again")
+    return why
+
+
 def _event(brief: WorkBrief, write: _Write, session: TeamSession | None) -> TeamEvent:
     return TeamEvent(
         id=new_event_id(),
@@ -292,7 +426,9 @@ def _read_board(store: ContextStore, session_ref: str | None, cwd: Path | None) 
     return team._board_of(store, team._caller_board_id(store, session, cwd))
 
 
-def status_of(brief: WorkBrief, tasks: Sequence[TeamTask]) -> list[RequirementStatus]:
+def status_of(
+    brief: WorkBrief, tasks: Sequence[TeamTask], *, sources: _Sources | None = None
+) -> list[RequirementStatus]:
     """Each requirement's standing, from its live linked tasks' latest checks.
 
     A linked task that was dropped, or is gone from the board, is left out, so a dropped
@@ -302,6 +438,10 @@ def status_of(brief: WorkBrief, tasks: Sequence[TeamTask]) -> list[RequirementSt
     artifact changed or went since, is ``stale``; else its verdict. A blocked task is
     ``blocked`` whatever it recorded. The requirement reads as the worst of them, and a
     pass that rests on manual evidence says so.
+
+    With ``sources``, a pass is also checked against the source in its checkout now
+    (:func:`_source_stale`); without, it is the pass as recorded, which is what the
+    session start shows (reading a whole checkout costs a hook too much).
     """
     indexed = {task.id: task for task in tasks}
     statuses: list[RequirementStatus] = []
@@ -345,6 +485,12 @@ def status_of(brief: WorkBrief, tasks: Sequence[TeamTask]) -> list[RequirementSt
                     # Only a pass rests on its artifact. A failure stays a failure
                     # whatever becomes of the file that showed it.
                     proof.state, proof.reason = "stale", "its kept artifact changed or is gone"
+                elif (
+                    latest.verdict == "pass"
+                    and sources is not None
+                    and (why := _source_stale(latest, sources)) is not None
+                ):
+                    proof.state, proof.reason = "stale", why
                 else:
                     proof.state, proof.reason = latest.verdict, latest.summary
             if task.status == "blocked":
@@ -369,7 +515,243 @@ def show(ref: str, *, session_ref: str | None = None, cwd: Path | None = None) -
         board = _read_board(store, session_ref, cwd)
         brief = _load(store, board.id, board.name, ref)
         tasks = store.team_tasks(board.id)
-    return BriefView(brief=brief, requirements=status_of(brief, tasks))
+    return BriefView(brief=brief, requirements=status_of(brief, tasks, sources=_Sources()))
+
+
+def check(
+    ref: str,
+    *,
+    source_root: Path | None = None,
+    session_ref: str | None = None,
+    cwd: Path | None = None,
+) -> BriefCheck:
+    """Every requirement's standing with each pass checked against the source now; the
+    brief is ``complete`` only when every one is a pass.
+
+    By default a pass is compared with the checkout it was recorded in. ``source_root``
+    compares every pass with that one checkout, the assembled one a validator checks; it
+    must be this project's checkout or a worktree of it, since "everything is stale" is
+    the wrong answer to a typo.
+    """
+    with store_session() as store:
+        board = _read_board(store, session_ref, cwd)
+        brief = _load(store, board.id, board.name, ref)
+        tasks = store.team_tasks(board.id)
+        project = store.get_project(board.id, include_forgotten=True)
+    override = None
+    if source_root is not None:
+        override = _checkout_of(source_root, brief, project.root if project else None)
+    statuses = status_of(brief, tasks, sources=_Sources(override))
+    return BriefCheck(
+        brief=brief,
+        requirements=statuses,
+        complete=all(status.state == "pass" for status in statuses),
+        source_root=str(override) if override is not None else None,
+    )
+
+
+def _checkout_of(path: Path, brief: WorkBrief, project_root: Path | None) -> Path:
+    """``--source-root`` resolved, when it is a checkout of the brief's project."""
+    resolved = path.expanduser().resolve()
+    if not resolved.is_dir():
+        raise ValueError(f"--source-root {path} is not a directory")
+    same_board = orchestrator.team_project(resolved).id == brief.project_id
+    whole = resolved == (project_root.resolve() if project_root else None) or (
+        _toplevel(resolved) == resolved
+    )
+    if not (same_board and whole):
+        raise ValueError(
+            f"--source-root {resolved} is not a checkout of this brief's project"
+            + (f" ({project_root})" if project_root else "")
+            + ": name the project's directory or one of its worktrees"
+        )
+    return resolved
+
+
+# --- the gate ----------------------------------------------------------------------
+
+#: How ``task done`` names each requirement's state (docs/plans/evidence-gate.md, part 3).
+_GATE_WORDS: dict[RequirementState, str] = {
+    "missing": "missing",
+    "unlinked": "missing",
+    "fail": "failed",
+    "stale": "stale",
+    "blocked": "blocked",
+    "pass": "pass",
+}
+
+
+@dataclass(frozen=True)
+class GateItem:
+    """One requirement a task cannot be done without: where, what state, and why."""
+
+    brief: str
+    requirement: str
+    state: str
+    reason: str
+
+
+class TaskNotProven(ValueError):
+    """``task done`` on a linked task without a fresh pass from it for every requirement
+    it is linked to. Carries each requirement's state and reason."""
+
+    def __init__(self, task: TeamTask, items: Sequence[GateItem]) -> None:
+        self.task = task
+        self.items = list(items)
+        listed = "; ".join(f"{i.brief} {i.requirement} {i.state}: {i.reason}" for i in items)
+        super().__init__(f"{team.task_label(task)} is not proven: {listed}")
+
+
+def _own_part(brief: WorkBrief, linked: Sequence[BriefRequirement], task_id: str) -> WorkBrief:
+    """``brief`` as one task's part of it: only the requirements it is linked to, each as
+    if it were their only task. A task proves its own contribution; other tasks linked
+    to the same requirement are theirs to prove."""
+    return brief.model_copy(
+        update={"requirements": [r.model_copy(update={"task_ids": [task_id]}) for r in linked]}
+    )
+
+
+def gate(store: ContextStore, task: TeamTask) -> dict[str, int]:
+    """What ``task done`` asks first: every requirement ``task`` is linked to needs a fresh
+    pass recorded by ``task`` itself. Raises :class:`TaskNotProven` naming each one that
+    has none; returns the revision of each brief it read, which the status write compares
+    in its own transaction, so a correction between the two fails the completion.
+
+    Only the briefs that name the task are read, so a damaged brief elsewhere on the board
+    never blocks it; one that names it and cannot be read refuses, saying so. A task no
+    brief links is not gated at all.
+    """
+    snapshot: dict[str, int] = {}
+    items: list[GateItem] = []
+    tasks: list[TeamTask] | None = None
+    sources = _Sources()
+    for row in store.briefs(task.project_id):
+        if task.id not in row.data:
+            continue
+        try:
+            brief = _parse(row)
+        except ValidationError as exc:
+            snapshot[row.id] = row.revision
+            first = exc.errors()[0]["msg"] if exc.errors() else str(exc)
+            items.append(
+                GateItem(
+                    f"B{row.number}",
+                    "-",
+                    "unreadable",
+                    f"it names this task but cannot be read ({first})",
+                )
+            )
+            continue
+        linked = [r for r in brief.requirements if task.id in r.task_ids]
+        if not linked:
+            continue
+        snapshot[row.id] = row.revision
+        if tasks is None:
+            tasks = store.team_tasks(task.project_id)
+        for status in status_of(_own_part(brief, linked, task.id), tasks, sources=sources):
+            if status.state != "pass":
+                items.append(
+                    GateItem(brief.label, status.id, _GATE_WORDS[status.state], status.reason)
+                )
+    if items:
+        raise TaskNotProven(task, items)
+    return snapshot
+
+
+# --- the session start ---------------------------------------------------------------
+
+#: The most the requirements block may add to a session start. Claude Code cuts hook
+#: output at 10,000 characters, and the board and the role cycle come first.
+REQUIREMENTS_BUDGET = 2_500
+
+#: Each requirement's text and check is clipped to this in the block; `brief show` has
+#: them whole.
+_CLIP = 160
+
+
+def _clip(text: str, limit: int = _CLIP) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def session_requirements(store: ContextStore, session: TeamSession, task: TeamTask | None) -> str:
+    """The session start's block: the requirements linked to this session's task (its
+    assignment, and any task it holds), each with its state as recorded. Empty when
+    none is linked. Bounded by :data:`REQUIREMENTS_BUDGET`; the caller fails open.
+    """
+    tasks = store.team_tasks(session.project_id)
+    mine = [t for t in tasks if t.claimed_by == session.id and t.status == "doing"]
+    wanted = list({t.id: t for t in ([task] if task else []) + mine}.values())
+    if not wanted:
+        return ""
+    rows = store.briefs(session.project_id)
+    lines: list[str] = []
+    omitted = False
+
+    def size() -> int:
+        return sum(len(line) + 1 for line in lines)
+
+    for own_task in wanted:
+        for row in rows:
+            if own_task.id not in row.data:
+                continue
+            try:
+                brief = _parse(row)
+            except ValidationError:
+                lines.append(f"B{row.number} names #{own_task.number} but cannot be read here.")
+                continue
+            linked = [r for r in brief.requirements if own_task.id in r.task_ids]
+            if not linked:
+                continue
+            states = {s.id: s for s in status_of(_own_part(brief, linked, own_task.id), tasks)}
+            lines.append(
+                f"{team.task_label(own_task)} is linked to {brief.label} r{brief.revision} "
+                f'"{_clip(brief.title, 80)}": `task done` needs a fresh pass from it for each.'
+            )
+            for requirement in linked:
+                status = states[requirement.id]
+                state = "pass, as recorded" if status.state == "pass" else status.state
+                line = f"  {requirement.id} [{state}] {_clip(requirement.text)}"
+                if requirement.check:
+                    line += f" — check: {_clip(requirement.check)}"
+                lines.append(line)
+                if size() > REQUIREMENTS_BUDGET:
+                    lines.pop()
+                    omitted = True
+                    break
+            if omitted:
+                break
+        if omitted:
+            break
+    if not lines:
+        return ""
+    if omitted:
+        lines.append("More are linked: `asq brief show` has them all.")
+    lines.append(
+        "Record a check: `asq exec --project PROJECT --task TASK -- CMD`, then "
+        "`asq brief evidence BRIEF R1 --task TASK --verdict pass --summary … --report ID`. "
+        "`asq brief check BRIEF` re-checks each pass against the source."
+    )
+    return "\n<aisquare-requirements>\n" + "\n".join(lines) + "\n</aisquare-requirements>"
+
+
+# --- report retention ----------------------------------------------------------------
+
+_REPORT_ID_FIELD = re.compile(r'"report_id"\s*:\s*"([0-9a-f]{32})"')
+
+
+def referenced_report_ids() -> set[str]:
+    """Every command report recorded evidence cites, on every board, a forgotten project's
+    included: report retention never deletes one (``command_reports``). Read from the
+    stored documents' text, so a brief this build cannot parse still protects its
+    reports. Raises when the store cannot be read, which retention takes as unknown.
+    """
+    with store_session() as store:
+        return {
+            report_id
+            for data in store.all_brief_documents()
+            for report_id in _REPORT_ID_FIELD.findall(data)
+        }
 
 
 def list_briefs(
@@ -634,14 +1016,25 @@ def record_evidence(
     task_ref: str,
     verdict: EvidenceVerdict,
     summary: str,
-    artifact: Path,
+    artifact: Path | None = None,
+    report_id: str | None = None,
     session_ref: str | None = None,
     cwd: Path | None = None,
 ) -> tuple[WorkBrief, BriefEvidence, bool]:
-    """Record a check of one requirement by one linked task, backed by an artifact: manual
-    evidence, which only the validator can judge. The brief, the record, and whether it
-    was new: the same check sent again, identical to the task's latest record of the
-    requirement, writes nothing. A failure has :func:`finding`'s effect on the task."""
+    """Record a check of one requirement by one linked task. The brief, the record, and
+    whether it was new: the same check sent again, identical to the task's latest record
+    of the requirement, writes nothing. A failure has :func:`finding`'s effect on the task.
+
+    Backed by exactly one of an ``artifact`` (manual evidence, which only the validator
+    can judge, with its checkout's whole-tree fingerprint) or a saved command report
+    (``report_id``). A report must have been captured with ``--project`` for this board,
+    and one captured with ``--task`` backs only that task. A pass from a report needs
+    exit 0, no interruption, both streams kept whole, no launch error, a known source
+    identity, and the same identity before the run, after it and now, in the report's
+    own checkout (:func:`_pass_refusals`).
+    """
+    if (artifact is None) == (report_id is None):
+        raise ValueError("back the check with exactly one of --artifact or --report")
     return _record(
         ref,
         requirement_id,
@@ -649,6 +1042,7 @@ def record_evidence(
         verdict=verdict,
         summary=summary,
         artifact=artifact,
+        report_id=report_id,
         finding=False,
         session_ref=session_ref,
         cwd=cwd,
@@ -681,6 +1075,7 @@ def finding(
         verdict="fail",
         summary=summary,
         artifact=artifact,
+        report_id=None,
         finding=True,
         session_ref=session_ref,
         cwd=cwd,
@@ -695,6 +1090,7 @@ def _record(
     verdict: EvidenceVerdict,
     summary: str,
     artifact: Path | None,
+    report_id: str | None,
     finding: bool,
     session_ref: str | None,
     cwd: Path | None,
@@ -705,6 +1101,16 @@ def _record(
     # Read before the store opens: a large artifact is hashed outside the transaction.
     read = _read_artifact(artifact) if artifact is not None else None
     digest = read.sha256 if read is not None else None
+    report: command_reports.CommandReport | None = None
+    saved: command_reports.SourceFiles | None = None
+    report_sha256: str | None = None
+    if report_id is not None:
+        try:
+            report = command_reports.load_report(report_id.strip())
+            saved = command_reports.load_source_files(report.id)
+            report_sha256 = _report_digest(report.id)
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"no readable command report {report_id!r} ({exc})") from None
     team._DELIVERY.set(None)
     with store_session() as store:
         session = _session(store, session_ref)
@@ -718,6 +1124,41 @@ def _record(
                 f"{team.task_label(task)} is not linked to {requirement.id}: "
                 f"`asq brief link {brief.label} {task.id} -r {requirement.id}` first"
             )
+        source_root: str | None
+        fingerprint: str | None
+        if report is not None:
+            if report.project_id != brief.project_id:
+                raise ValueError(
+                    f"report {report.id[:12]} was not captured for this board: run the check "
+                    f"with `asq exec --project {brief.project_id} --task {task.id} -- …`"
+                )
+            if report.task_id is not None and report.task_id != task.id:
+                raise ValueError(
+                    f"report {report.id[:12]} was captured for task {report.task_id}: "
+                    "it backs only that task"
+                )
+            if verdict == "pass":
+                refusals = _pass_refusals(report, saved)
+                if refusals:
+                    raise ValueError(
+                        f"report {report.id[:12]} cannot back a pass: " + "; ".join(refusals)
+                    )
+            source_root, fingerprint = report.source_root, report.source_fingerprint_before
+        else:
+            project = store.get_project(brief.project_id, include_forgotten=True)
+            root = source_root_for(project.root, cwd) if project else None
+            try:
+                if root is None:
+                    raise ValueError("the project's directory is not known")
+                fingerprint = fingerprint_of(source_file_hashes(root))
+                source_root = str(root)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                if verdict == "pass":
+                    raise ValueError(
+                        f"a pass needs the source identity of the checkout, which cannot be "
+                        f"taken ({exc})"
+                    ) from None
+                source_root, fingerprint = (str(root) if root else None), None
         lane = [
             e for e in brief.evidence if e.requirement_id == requirement.id and e.task_id == task.id
         ]
@@ -728,6 +1169,8 @@ def _record(
             and latest.verdict == verdict
             and latest.summary == summary.strip()
             and latest.artifact_sha256 == digest
+            and latest.report_id == (report.id if report is not None else None)
+            and latest.source_fingerprint == fingerprint
             and latest.finding == finding
         ):
             return brief, latest, False
@@ -739,12 +1182,16 @@ def _record(
             requirement_revision=requirement.revision,
             task_id=task.id,
             verdict=verdict,
-            kind="manual",
+            kind="report" if report is not None else "manual",
             finding=finding,
             summary=summary.strip(),
             artifact=str(copy) if copy is not None else None,
             artifact_source=str(read.source) if read is not None else None,
             artifact_sha256=digest,
+            report_id=report.id if report is not None else None,
+            report_sha256=report_sha256,
+            source_root=source_root,
+            source_fingerprint=fingerprint,
             recorded_at=_now(),
             session_id=session.id if session else None,
         )
@@ -755,7 +1202,7 @@ def _record(
         transitions: list[TaskTransition] = []
         if verdict == "fail" and task.status != "dropped":
             failures = {
-                (e.summary, e.artifact_sha256)
+                (e.summary, e.artifact_sha256, e.report_id)
                 for e in brief.evidence
                 if e.requirement_id == requirement.id
                 and e.task_id == task.id
@@ -770,7 +1217,10 @@ def _record(
                 why = f"{label} failed: {summary.strip()}"
                 transitions.append((task.id, "reopen", _reopen_text(task, brief, why)))
         kind = "brief_finding" if finding else "brief_evidence"
-        text = f"{requirement.id} {verdict} [manual] by {team.task_label(task)}: {summary.strip()}"
+        text = (
+            f"{requirement.id} {verdict} [{evidence.kind}] by {team.task_label(task)}: "
+            f"{summary.strip()}"
+        )
         try:
             stored = _write_brief(
                 store,

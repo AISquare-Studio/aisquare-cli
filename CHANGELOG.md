@@ -23,7 +23,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/plans/captain.md`; the acceptance runbook in
   `docs/runbooks/captain-acceptance.md`). One Claude Code session per home, on
   the home board, with no tool but its own **Actions server** (`aisquare captain
-  serve --stdio`): 24 fixed tools, one `captain_action` audit event per call
+  serve --stdio`): 26 fixed tools, one `captain_action` audit event per call
   carrying the owner's words and the effect's receipt; `stop`, `spawn` and
   `restart` act only when the owner's words name the agent, its role or its
   project; otherwise the tool's refusal is its one-sentence question itself
@@ -77,6 +77,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never added as a project, and `project prune` and doctor's captured row leave it
   alone (Fixed, below). Every other role, fleet row and board, and the store
   (schema v33), are the same either way.
+- **The captain's owner gate** (#216). While the captain is on, the tools that act
+  as the owner — `press`, `paste`, `stop`, `spawn`, `restart`, `wololo`,
+  `attach_persona` and `act` — refuse outside an act-as-owner window. A code from
+  the owner's authenticator app opens one for 15 minutes. Say it to the captain
+  (its new `unlock` tool; `lock` closes the window), or type
+  `aisquare captain gate unlock <code>`. Reads, `tell`, the manager ask, notes,
+  tasks and the `bt` brake never need a code.
+  - The codes are RFC 6238 TOTP: 30-second steps, one step of drift either side,
+    and no code accepted twice. Three wrong codes in a row lock code entry for five
+    minutes (RFC 4226's throttle), audited on the home board.
+  - The window's id joins each gated call's `captain_action` event, and an
+    `unlock`'s audit masks the code.
+  - `aisquare captain gate enroll` writes the secret (mode 0600) and prints the QR.
+    `gate status` says whether the gate applies and why not.
+  - pyotp comes with the new `gate` extra (`pip install 'aisquare-cli[gate]'`),
+    never core. Without it, or before enrolment, the gate stays shut and says how
+    to fix it.
+  - `[captain] gate = false` turns the gate off. `docs/captain.md` says why a
+    spoken code can be overheard.
 - **The persona rides the system prompt too, and a replay keeps it.** For Claude
   Code the launch appends the persona block to the default system prompt
   (`--append-system-prompt-file`, a file under `~/.aisquare/cache/persona-prompts/`;

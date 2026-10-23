@@ -972,11 +972,21 @@ carry it: a test that fails with the captain off and is not about the captain is
 of the off path, to be fixed in the code (review of #240)."""
 
 
+CAPTAIN_GATE = "captain_gate"
+"""The marker of a test of the captain's owner gate (#216): it runs with ``[captain] gate``
+as the config says. Every other test runs with the gate off, as Phase 1 had none."""
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         f"{NEEDS_CAPTAIN}: needs the experimental captain on; skipped when "
         f"{SUITE_CAPTAIN_ENV}=off runs the suite with it off, as it ships",
+    )
+    config.addinivalue_line(
+        "markers",
+        f"{CAPTAIN_GATE}: the owner gate applies as the config says; every other test runs "
+        "with it off",
     )
 
 
@@ -1007,6 +1017,24 @@ def captain_on(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(experimental.CAPTAIN_ENV, raising=False)
         return
     monkeypatch.setenv(experimental.CAPTAIN_ENV, "1")
+
+
+@pytest.fixture(autouse=True)
+def captain_gate_off(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The captain's owner gate (#216) off, unless the test is marked :data:`CAPTAIN_GATE`.
+
+    The gate is on by default while the captain is, and the suite runs with the captain on
+    (:func:`captain_on`), so every Phase 1 pin of a privileged tool would meet a locked
+    gate. Phase 1 had no gate: those pins run as they were. The gate's own pins
+    (``tests/test_captain_gate.py``) read ``[captain] gate`` from the config like a user.
+    Patched here, never through the environment: the product has no variable that
+    switches the gate off.
+    """
+    if request.node.get_closest_marker(CAPTAIN_GATE) is not None:
+        return
+    from aisquare.services.captain import gate
+
+    monkeypatch.setattr(gate, "configured", lambda: False)
 
 
 @pytest.fixture

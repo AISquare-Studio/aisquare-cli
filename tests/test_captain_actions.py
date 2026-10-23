@@ -88,9 +88,12 @@ CONTRACT_TOOLS = frozenset(
         "thinking",
         "bt",
         "wololo",
+        "unlock",
+        "lock",
     }
 )
-"""The tool list posted on the T1 card (seq 13010) — the vocabulary T2..T7 build on."""
+"""The tool list posted on the T1 card (seq 13010) — the vocabulary T2..T7 build on — and
+the owner gate's ``unlock`` and ``lock`` (#216)."""
 
 
 # --- recorders --------------------------------------------------------------------------
@@ -880,6 +883,8 @@ EVERY_CALL: list[tuple[str, dict[str, Any]]] = [
     ("thinking", {"state": "on"}),
     ("bt", {}),
     ("wololo", {"project": "alpha", "label": "coder-3", "task": "tsk_nothing"}),
+    ("unlock", {"code": "000000"}),
+    ("lock", {}),
 ]
 
 

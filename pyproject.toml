@@ -133,6 +133,17 @@ voice = [
   "faster-whisper>=1.0",
   "segno>=1.6",
 ]
+gate = [
+  # The captain's owner gate (#216, services/captain/gate.py): RFC 6238 TOTP codes from the
+  # owner's authenticator open a 15-minute act-as-owner window. An extra, never core: the
+  # captain is experimental and off by default, and the gate imports pyotp only where it
+  # verifies or enrols. Without it the gate fails closed and names this extra. 2.9 is the
+  # release whose TOTP takes the interval and digits used here and whose provisioning_uri
+  # takes issuer_name. segno (the voice extra's QR, pure Python) draws the QR `gate enroll`
+  # prints for the authenticator to scan; without it only the URI is shown.
+  "pyotp>=2.9",
+  "segno>=1.6",
+]
 remote = [
   # `asq remote serve` and the fleet UI's Remote modal (services/remote_server.py):
   # one local HTTP+WebSocket port that ngrok exposes to a phone. starlette and
@@ -199,6 +210,9 @@ dev = [
   # against the real `messages.parse` signature (the `mcp`/`serve` precedent).
   # Tests never call it: they install a fake `anthropic` module.
   "anthropic>=1",
+  # The gate extra's TOTP, so tests/test_captain_gate.py verifies real codes and mypy
+  # --strict checks the verifier against pyotp's own hints.
+  "pyotp>=2.9",
   # The remote extra's one addition, so the dev env can run tests/test_remote_server.py
   # (starlette + uvicorn already arrive through mcp above).
   "websockets>=12",

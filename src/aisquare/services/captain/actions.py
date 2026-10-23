@@ -58,6 +58,7 @@ from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamEvent
 from aisquare.services import fleet
 from aisquare.services import project as project_service
 from aisquare.services import team as team_service
+from aisquare.services.captain import gate as captain_gate
 from aisquare.services.captain import queue as captain_queue
 from aisquare.services.captain import screen, words
 from aisquare.services.captain import state as captain_state
@@ -212,8 +213,27 @@ def _run(
     ran = _CALL_RAN.get()
     if ran is not None:
         ran[0] = True  # the tool body is reached: its own audit follows, not the rejection one
+    window = _WINDOW.set(None)
+    try:
+        return _gated(tool, args, utterance, body, project=project)
+    finally:
+        _WINDOW.reset(window)
+
+
+def _gated(
+    tool: str,
+    args: dict[str, Any],
+    utterance: str,
+    body: Callable[[ProjectInfo | None], Outcome],
+    *,
+    project: str | None,
+) -> str:
+    """:func:`_run`'s body: the owner gate first (#216), then the tool, audited either way."""
     target: ProjectInfo | None = None
     try:
+        # A privileged tool needs an open act-as-owner window while the gate is on; its id
+        # joins the audit event. A refusal here is audited like any other.
+        _WINDOW.set(captain_gate.admit(tool))
         if project is not None:
             try:
                 target = fleet.resolve_project(project)
@@ -285,6 +305,9 @@ def _audit(
         "said": said,
         "receipt": receipt,
     }
+    window = _WINDOW.get()
+    if window is not None:
+        record["window"] = window
     event = team_service.add_note(
         json.dumps(record, ensure_ascii=False, default=str),
         session_ref=captain_state.ensure_session(board),
@@ -2019,6 +2042,39 @@ def wololo(project: str, label: str, task: str, utterance: str = "") -> str:
     )
 
 
+def unlock(code: str, utterance: str = "") -> str:
+    """Open the owner gate with the code the owner just said or typed from their
+    authenticator: for 15 minutes the tools that act as the owner may run. The code is
+    never kept: the audit masks it, in the words too."""
+    return _run(
+        "unlock",
+        {"code": captain_gate.redact(code)},
+        captain_gate.redact(utterance),
+        lambda _: _unlock(code),
+    )
+
+
+def _unlock(code: str) -> Outcome:
+    window = captain_gate.unlock(code)
+    return Outcome(
+        {"window": window.id, "until": window.until.isoformat()},
+        said=f"unlocked until {window.until:%H:%M} UTC",
+    )
+
+
+def lock(utterance: str = "") -> str:
+    """Close the owner gate now: the tools that act as the owner refuse until the next code."""
+    return _run(
+        "lock",
+        {},
+        utterance,
+        lambda _: Outcome(
+            {"was_open": captain_gate.lock()},
+            said="locked",
+        ),
+    )
+
+
 TOOLS: tuple[tuple[str, Callable[..., str]], ...] = (
     ("projects", projects),
     ("board", board),
@@ -2044,6 +2100,8 @@ TOOLS: tuple[tuple[str, Callable[..., str]], ...] = (
     ("thinking", thinking),
     ("bt", bt),
     ("wololo", wololo),
+    ("unlock", unlock),
+    ("lock", lock),
 )
 """The whole vocabulary, by the name the captain calls it — nothing else is served."""
 
@@ -2055,7 +2113,10 @@ INSTRUCTIONS = (
     "confirm=true, and only when the owner's own words asked for that action or confirmed it, "
     "naming the agent, its role or its project; words that name nothing are refused: ask first "
     "the question the refusal gives, and their yes to your question confirms it. "
-    "Set thinking on before a long run of tools, off after."
+    "Set thinking on before a long run of tools, off after. "
+    "press, paste, stop, spawn, restart, wololo, attach_persona and act act as the owner: "
+    "while the owner gate is locked they refuse; when the owner says a six-digit code, pass "
+    "it to unlock as said and never repeat it; lock when the owner says so."
 )
 
 
@@ -2151,6 +2212,9 @@ _CALL_RAN: ContextVar[list[bool] | None] = ContextVar("captain_call_ran", defaul
 """Set per ``tools/call``: a one-item flag the tool body flips (:func:`_run`). A list, not a
 bool, because the body runs on a worker thread with a COPY of this context — the copy holds
 the same list, so the flip is seen here."""
+_WINDOW: ContextVar[str | None] = ContextVar("captain_gate_window", default=None)
+"""The act-as-owner window a privileged call ran in (``services.captain.gate``), set by
+:func:`_run` for its one call and written into that call's audit event as ``window``."""
 _VIA: ContextVar[str | None] = ContextVar("captain_call_via", default=None)
 """Where a call came from when it did not come over MCP: ``cli`` for the owner's own verbs
 (T5). Recorded in the audited ``args`` as ``via`` (13081), so ``log`` tells the owner's

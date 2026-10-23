@@ -363,6 +363,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to resume and started fresh. A session start no longer replaces a transcript
   on disk with one that is not, and a row an earlier build wrote heals at the next
   prompt. Found by the P0-W0 spike on Claude Code 2.1.309 and 2.1.223.
+- **`capture.enabled = false` stops prompt capture (#268).** The key was read by
+  nothing: with it off, `UserPromptSubmit` stored every prompt, `aisquare log`
+  listed it, and Explainability spooled it. Off, no prompt is stored or spooled;
+  the turn's metrics row (no text) and the teammate delta still arrive, and the
+  CI experiment, its own opt-in, still consults its endpoint. A config that cannot
+  be read records no prompt and says so on stderr: privacy fails closed.
+  `config set capture.enabled false` says in one line what stops and what does not.
 
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for

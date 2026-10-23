@@ -1088,6 +1088,9 @@ aisquare config list --overrides   # what you changed, and nothing else
 aisquare config reset              # every setting back to its default; asks first, --yes off a terminal
 ```
 
+The keys that need more than their name are listed in
+[reference: configuration keys](reference.md#configuration-keys).
+
 `config reset` moves the file aside to `config.toml.bak-<stamp>` beside it, so
 moving it back undoes the reset; through a symlink, the file it points at is
 copied there and emptied, and the link stays. With no file, or one that holds

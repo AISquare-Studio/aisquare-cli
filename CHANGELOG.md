@@ -260,6 +260,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pump's own flag and silently leaves every button of the screen dead; the
   dialog's flag is `_spawning`.
 
+- **`aisquare metrics tokens`: what each agent session spent in tokens.** It reads
+  each session's Claude Code transcript and prints one row per session and a total:
+  requests, input (fresh, cache write and cache read), output, the baseline (the
+  first request), peak and mean context, wakes and the ones that took no action,
+  the team-delta blocks with their characters and carried cost, compactions, and
+  tool calls by name. `--json` gives every field; `--role`, `--session` and
+  `--since` narrow it. It prints counts, never text, and streams a transcript of
+  any size a line at a time. This is the ruler the P1 workstreams report their
+  before/after numbers with (`docs/plans/handoff-p1-token-diet.md` §1.7).
+
 ### Changed
 - The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
   adds the two persona columns, `team_session.persona` (the persona a session was

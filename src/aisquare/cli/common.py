@@ -8,10 +8,11 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import tomli_w
 import typer
+from rich import box
 from rich.table import Table
 from rich.text import Text
 
@@ -40,6 +41,9 @@ from aisquare.models import (
     StatusReport,
     TurnMetric,
 )
+
+if TYPE_CHECKING:  # the ledger's model only, never loaded for another command
+    from aisquare.services.token_ledger import SessionLedger
 
 _DEFAULT_EMPTY = 'No context entries yet. Add one with: aisquare remember "…"'
 
@@ -797,6 +801,44 @@ def emit_metrics_summary(summary: MetricsSummary) -> None:
 
 def _counts(bucket: dict[str, int]) -> str:
     return ", ".join(f"{key} {count}" for key, count in sorted(bucket.items()))
+
+
+def emit_token_ledger(rows: list[SessionLedger], summed: SessionLedger) -> None:
+    """Render the token ledger — ``{"sessions": [...], "total": {...}}`` under ``--json``, a
+    table with a total row otherwise. Counts only: no path, no prompt, no text."""
+    if get_state().json_output:
+        typer.echo(
+            json.dumps({"sessions": [row.as_counts() for row in rows], "total": summed.as_counts()})
+        )
+        return
+    if not rows:
+        stdout_console().print("No agent sessions recorded for this scope.")
+        return
+    table = Table(show_header=True, header_style="bold", box=box.SIMPLE_HEAD)
+    for column in ("SESSION", "ROLE"):
+        table.add_column(column, no_wrap=True)
+    for column in ("REQ", "INPUT", "BASELINE", "PEAK", "WAKES", "DELTA CH", "COMPACT"):
+        table.add_column(column, justify="right", no_wrap=True)
+    for row in [*rows, summed]:
+        mine = row is not summed
+        table.add_row(
+            row.session_id[:8] if mine else "total",
+            (row.role or "") + (" (no transcript)" if mine and not row.transcript_found else ""),
+            f"{row.requests:,}",
+            f"{row.input_total:,}",
+            f"{row.baseline:,}" if row.baseline is not None else "—",
+            f"{row.peak_context:,}",
+            f"{row.wakes}/{row.no_action_wakes}",
+            f"{row.delta_chars:,}",
+            str(row.compactions),
+        )
+    console = stdout_console()
+    console.print(table)
+    console.print(
+        "INPUT is every request's input summed (fresh + cache write + cache read); "
+        "WAKES is wakes/no-action wakes. Every field: --json",
+        style="dim",
+    )
 
 
 def emit_turn_metrics(turns: list[TurnMetric]) -> None:

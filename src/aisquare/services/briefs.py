@@ -682,8 +682,10 @@ def gate(store: ContextStore, task: TeamTask) -> dict[str, int]:
 
 # --- the session start ---------------------------------------------------------------
 
-#: The most the requirements block may add to a session start. Claude Code cuts hook
-#: output at 10,000 characters, and the board and the role cycle come first.
+#: The most the requirements block may add to a session start, when there is room for
+#: it: the caller gives it less when the board already holds more (``team``'s
+#: ``HOOK_OUTPUT_CAP``). Claude Code cuts hook output at 10,000 characters, and the
+#: board and the role cycle come first.
 REQUIREMENTS_BUDGET = 2_500
 
 #: Each requirement's text and check is clipped to this in the block; `brief show` has
@@ -696,10 +698,33 @@ def _clip(text: str, limit: int = _CLIP) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def session_requirements(store: ContextStore, session: TeamSession, task: TeamTask | None) -> str:
+_OPEN = "\n<aisquare-requirements>\n"
+_CLOSE = "\n</aisquare-requirements>"
+_MORE = "More are linked: `asq brief show` has them all."
+_RECORD = (
+    "Record a check: `asq exec --project PROJECT --task TASK -- CMD`, then "
+    "`asq brief evidence BRIEF R1 --task TASK --verdict pass --summary … --report ID`. "
+    "`asq brief check BRIEF` re-checks each pass against the source."
+)
+
+
+def session_requirements(
+    store: ContextStore,
+    session: TeamSession,
+    task: TeamTask | None,
+    *,
+    budget: int = REQUIREMENTS_BUDGET,
+) -> str:
     """The session start's block: the requirements linked to this session's task (its
     assignment, and any task it holds), each with its state as recorded. Empty when
-    none is linked. Bounded by :data:`REQUIREMENTS_BUDGET`; the caller fails open.
+    none is linked. The caller fails open.
+
+    The WHOLE block, its tags and closing lines included, is at most ``budget``
+    characters: the caller gives it the room the session start has left under Claude
+    Code's 10,000-character cap, never more than :data:`REQUIREMENTS_BUDGET`. Lines are
+    dropped whole, never cut, and the closing tag always stays. With no room for even
+    one requirement, the block is a one-line pointer to ``asq brief show``, and with no
+    room for that, nothing.
     """
     tasks = store.team_tasks(session.project_id)
     mine = [t for t in tasks if t.claimed_by == session.id and t.status == "doing"]
@@ -708,15 +733,19 @@ def session_requirements(store: ContextStore, session: TeamSession, task: TeamTa
         return ""
     rows = store.briefs(session.project_id)
     lines: list[str] = []
+    linked_to: dict[str, str] = {}  # brief label → the first task of this session it links
     omitted = False
+    # Room for the lines themselves: the frame (tags, the "more" and "record" lines,
+    # their separators) is always reserved, so it can always be added.
+    room = budget - len(_OPEN) - len(_CLOSE) - len(_MORE) - len(_RECORD) - 2
 
     def size() -> int:
         return sum(len(line) + 1 for line in lines)
 
     def add(line: str) -> bool:
-        """Append ``line`` if it fits the budget; every line is checked, headers too."""
+        """Append ``line`` if it fits; every line is checked, headers too."""
         lines.append(line)
-        if size() > REQUIREMENTS_BUDGET:
+        if size() > room:
             lines.pop()
             return False
         return True
@@ -728,6 +757,7 @@ def session_requirements(store: ContextStore, session: TeamSession, task: TeamTa
             try:
                 brief = _parse(row)
             except ValidationError:
+                linked_to.setdefault(f"B{row.number}", team.task_label(own_task))
                 if not add(f"B{row.number} names #{own_task.number} but cannot be read here."):
                     omitted = True
                     break
@@ -735,6 +765,7 @@ def session_requirements(store: ContextStore, session: TeamSession, task: TeamTa
             linked = [r for r in brief.requirements if own_task.id in r.task_ids]
             if not linked:
                 continue
+            linked_to.setdefault(brief.label, team.task_label(own_task))
             states = {s.id: s for s in status_of(_own_part(brief, linked, own_task.id), tasks)}
             header = (
                 f"{team.task_label(own_task)} is linked to {brief.label} r{brief.revision} "
@@ -760,16 +791,21 @@ def session_requirements(store: ContextStore, session: TeamSession, task: TeamTa
                 break
         if omitted:
             break
-    if not lines:
+    if not linked_to:
         return ""
+    if not any(line.startswith("  R") for line in lines):
+        # No room for one requirement: point at them instead, or say nothing at all.
+        labels = ", ".join(linked_to)
+        first = next(iter(linked_to))
+        pointer = (
+            f"{_OPEN}{linked_to[first]} is linked to {labels}: "
+            f"`asq brief show {first}` has its requirements.{_CLOSE}"
+        )
+        return pointer if len(pointer) <= budget else ""
     if omitted:
-        lines.append("More are linked: `asq brief show` has them all.")
-    lines.append(
-        "Record a check: `asq exec --project PROJECT --task TASK -- CMD`, then "
-        "`asq brief evidence BRIEF R1 --task TASK --verdict pass --summary … --report ID`. "
-        "`asq brief check BRIEF` re-checks each pass against the source."
-    )
-    return "\n<aisquare-requirements>\n" + "\n".join(lines) + "\n</aisquare-requirements>"
+        lines.append(_MORE)
+    lines.append(_RECORD)
+    return _OPEN + "\n".join(lines) + _CLOSE
 
 
 # --- report retention ----------------------------------------------------------------

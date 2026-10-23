@@ -1876,6 +1876,15 @@ def _briefing_events(store: ContextStore, project_id: str) -> list[TeamEvent]:
     return store.recent_events(project_id, exclude_kinds=HUMAN_BOARD_KINDS, limit=_BOARD_EVENTS)
 
 
+#: What Claude Code keeps of a hook's output, in characters; it cuts the rest (see
+#: :class:`StopDecision`).
+HOOK_OUTPUT_CAP = 10_000
+
+#: Held back under :data:`HOOK_OUTPUT_CAP` for what joins the parts of a session start
+#: and the line ending ``hook session-start`` prints after them.
+_HOOK_MARGIN = 64
+
+
 def hook_session_start(
     session_id: str,
     cwd: Path | None,
@@ -1884,6 +1893,7 @@ def hook_session_start(
     transcript_path: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    reserve: int = 0,
 ) -> str:
     """Register this session with the orchestrator and return the board injection.
 
@@ -1961,38 +1971,43 @@ def hook_session_start(
         fleet = _cycle_project(store, project, cwd, session.id, named=named)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
-        return (
-            collision
-            + _render_board(
-                project,
-                store.team_sessions(project.id),
-                store.team_tasks(project.id),
-                _briefing_events(store, project.id),
-                me=session,
-                assigned=assigned,
-                briefing=True,
-                persona_note=persona_note,
-                # Asked only when the briefing needs it: one git call, which a session with
-                # no persona, or one whose cycle names its project, never pays.
-                persona_root=_directory_root(cwd) if session.persona and fleet is None else None,
-                labels=lambda: slot_labels_via(store),
-                fleet=fleet,
-            )
-            + _requirements_block(store, session, assigned)
+        board = collision + _render_board(
+            project,
+            store.team_sessions(project.id),
+            store.team_tasks(project.id),
+            _briefing_events(store, project.id),
+            me=session,
+            assigned=assigned,
+            briefing=True,
+            persona_note=persona_note,
+            # Asked only when the briefing needs it: one git call, which a session with
+            # no persona, or one whose cycle names its project, never pays.
+            persona_root=_directory_root(cwd) if session.persona and fleet is None else None,
+            labels=lambda: slot_labels_via(store),
+            fleet=fleet,
         )
+        # The block takes only the room the session start has left: ``reserve`` is what
+        # the caller puts before the board. Given a fixed share, it took a busy board's
+        # session start past the cap, and Claude Code cut the block's own tail.
+        room = HOOK_OUTPUT_CAP - _HOOK_MARGIN - reserve - len(board)
+        return board + _requirements_block(store, session, assigned, room)
 
 
 def _requirements_block(
-    store: ContextStore, session: TeamSession, assigned: Assignment | None
+    store: ContextStore, session: TeamSession, assigned: Assignment | None, room: int
 ) -> str:
     """The requirements linked to this session's task, for its session start
-    (``briefs.session_requirements``). Fails open on its own, as :func:`_assignment`
-    does: an unreadable brief costs this block, never the board above it."""
+    (``briefs.session_requirements``), in at most ``room`` characters. Fails open on its
+    own, as :func:`_assignment` does: an unreadable brief costs this block, never the
+    board above it."""
     try:
         from aisquare.services import briefs as briefs_service  # lazy: it imports this
 
+        budget = min(briefs_service.REQUIREMENTS_BUDGET, room)
+        if budget <= 0:
+            return ""
         return briefs_service.session_requirements(
-            store, session, assigned.task if assigned is not None else None
+            store, session, assigned.task if assigned is not None else None, budget=budget
         )
     except Exception:
         return ""

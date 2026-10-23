@@ -198,9 +198,11 @@ An agent whose task (the one it was spawned for, or one it holds) is linked to a
 brief sees those requirements when its session starts: each one's text and expected
 check, clipped, and its state **as recorded**. Reading a whole checkout costs a hook
 too much, so a pass is shown as recorded and `brief check` is what re-checks it. The
-block is held to 2,500 characters, inside Claude Code's 10,000-character limit for
-session-start output, and if it cannot be built only the block is lost, never the
-board.
+block takes at most 2,500 characters, and only the room the rest of the session start
+leaves under Claude Code's 10,000-character limit: on a busy board it shows fewer
+requirements, then only a one-line pointer to `asq brief show`, then nothing, and it
+never cuts a line or its closing tag. If it cannot be built, only the block is lost,
+never the board.
 
 ## Limits
 

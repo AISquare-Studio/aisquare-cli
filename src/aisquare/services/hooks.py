@@ -20,6 +20,7 @@ default agent does.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -94,9 +95,16 @@ def session_start_context(
         stored = store.get_project(project.id) is not None
     directive = _directive(project.id, has_prompts=has_prompts)
     block = build_block(entries, project) if entries else ""
+    before = "\n\n".join(part for part in (directive, block) if part)
     team_block = (
         team_service.hook_session_start(
-            session_id, cwd, source, transcript_path=transcript_path, model=model, effort=effort
+            session_id,
+            cwd,
+            source,
+            transcript_path=transcript_path,
+            model=model,
+            effort=effort,
+            reserve=len(before) + 2 if before else 0,
         )
         if session_id
         else ""
@@ -111,9 +119,19 @@ def session_start_context(
         if recorded
         else ("", "")
     )
-    return "\n\n".join(
+    joined = "\n\n".join(
         part for part in (directive, block, team_block, instruction, retrieved) if part
     )
+    if len(joined) > team_service.HOOK_OUTPUT_CAP:
+        # The CI parts come after the board and were not known when the requirements
+        # block was sized: if the whole goes over the cap, the block goes, rather than
+        # Claude Code cutting the tail. The board and the rest stay as main had them.
+        joined = _REQUIREMENTS_BLOCK.sub("", joined)
+    return joined
+
+
+#: The session start's requirements block (``briefs.session_requirements``), whole.
+_REQUIREMENTS_BLOCK = re.compile(r"\n<aisquare-requirements>\n.*?\n</aisquare-requirements>", re.S)
 
 
 def _session_start_ci(

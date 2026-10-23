@@ -32,6 +32,9 @@ from tests.projects import add_project
 
 CODER = "cccc3333-0000-0000-0000-000000000000"
 
+#: The real block builder, for a test that stubs it and puts it back.
+_REAL_SESSION_REQUIREMENTS = briefs.session_requirements
+
 
 def _git(root: Path, *args: str) -> None:
     subprocess.run(
@@ -661,6 +664,89 @@ def test_the_block_is_clipped_and_the_session_start_fits_the_hook_cap(
     assert len(shown[0]) < 400
 
 
+def _busy_board(monkeypatch: pytest.MonkeyPatch, repo: Path, runner: CliRunner) -> TeamTask:
+    """The tester's board on #341: 7 live coder sessions, 8 open tasks with long titles,
+    three 1,500-character results among the latest events, and a 64-requirement brief
+    at its limits linked to a task the coder holds."""
+    for n in range(6):
+        _start_as(monkeypatch, repo, runner, f"dddd{n:04d}-0000-0000-0000-000000000000")
+    _start_as(monkeypatch, repo, runner, CODER)
+    for n in range(8):
+        team.add_task(f"Task {n}: " + "a long title about the work " * 5, role="coder")
+    texts = [f"Requirement {n} " + "x" * 1_980 for n in range(64)]
+    brief = briefs.create("Everything", texts)
+    briefs.update(brief.id, checks={f"R{n}": "c" * 1_970 for n in range(1, 65)})
+    task, _ = team.add_task("The coder's own", role="coder")
+    briefs.link(brief.id, task.id, [f"R{n}" for n in range(1, 65)])
+    team.claim_task(task.id, session_ref=CODER)
+    # Last, so they are among the latest events the briefing shows.
+    for n in range(3):
+        team.add_note(f"result {n}: " + "r" * 1_500, kind="result", session_ref=CODER)
+    return task
+
+
+def _start_as(monkeypatch: pytest.MonkeyPatch, repo: Path, runner: CliRunner, session: str) -> str:
+    """``asq hook session-start`` as Claude Code runs it: the stdout it reads."""
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    payload = json.dumps({"cwd": str(repo), "session_id": session, "source": "startup"})
+    result = runner.invoke(app, ["hook", "session-start"], input=payload)
+    monkeypatch.delenv("AISQUARE_ROLE")
+    assert result.exit_code == 0, result.output
+    return result.stdout
+
+
+def test_on_a_busy_board_the_block_takes_only_the_room_left(
+    monkeypatch: pytest.MonkeyPatch, repo: Path, runner: CliRunner
+) -> None:
+    """Tester's finding on #341: a fixed 2,500-character block took a busy board's session
+    start to 10,309 characters, and Claude Code cut the tail (its last requirements, the
+    'Record a check' line, the closing tag). The block now takes the room left."""
+    _busy_board(monkeypatch, repo, runner)
+    monkeypatch.setattr(briefs, "session_requirements", lambda *a, **k: "")
+    without = len(_start_as(monkeypatch, repo, runner, CODER))
+    monkeypatch.setattr(briefs, "session_requirements", _REAL_SESSION_REQUIREMENTS)
+
+    started = _start_as(monkeypatch, repo, runner, CODER)
+
+    assert without < 10_000, "the board alone fits: the premise"
+    assert without + briefs.REQUIREMENTS_BUDGET > 10_000, "and a fixed share would not"
+    assert len(started) <= 10_000, len(started)
+    block = started[started.index("<aisquare-requirements>") :]
+    assert block.rstrip("\n").endswith("</aisquare-requirements>"), "the closing tag stays"
+    shown = [line for line in block.splitlines() if line.startswith("  R")]
+    assert shown, "some requirements still fit"
+    assert all(line.endswith("…") for line in shown), "no line is cut, only clipped"
+
+
+def test_with_no_room_for_a_requirement_the_block_is_a_pointer_or_nothing(
+    monkeypatch: pytest.MonkeyPatch, repo: Path, runner: CliRunner
+) -> None:
+    task = _busy_board(monkeypatch, repo, runner)
+    with store_session() as store:
+        session = store.get_session(CODER)
+        assert session is not None
+        pointer = briefs.session_requirements(store, session, task, budget=300)
+        nothing = briefs.session_requirements(store, session, task, budget=40)
+    assert pointer.startswith("\n<aisquare-requirements>\n")
+    assert pointer.endswith("</aisquare-requirements>") and len(pointer) <= 300
+    assert "`asq brief show B1`" in pointer and "  R1" not in pointer
+    assert nothing == ""
+
+
+def test_a_session_start_the_ci_parts_take_over_the_cap_drops_the_block(
+    monkeypatch: pytest.MonkeyPatch, repo: Path, runner: CliRunner
+) -> None:
+    """The CI parts come after the board and were not known when the block was sized: if
+    the whole goes over the cap, the block goes, and nothing else of main's changes."""
+    from aisquare.services import hooks
+
+    _busy_board(monkeypatch, repo, runner)
+    monkeypatch.setattr(hooks, "_session_start_ci", lambda *a, **k: ("", "z" * 4_000))
+    started = _start_as(monkeypatch, repo, runner, CODER)
+    assert "<aisquare-requirements>" not in started
+    assert "<aisquare-team>" in started and started.rstrip("\n").endswith("z")
+
+
 def test_no_header_in_the_block_is_left_without_a_requirement(
     monkeypatch: pytest.MonkeyPatch, repo: Path
 ) -> None:
@@ -679,11 +765,13 @@ def test_no_header_in_the_block_is_left_without_a_requirement(
         full = briefs.session_requirements(store, session, None).splitlines()
         header, requirement = full[2], full[3]
         assert " is linked to B1" in header and requirement.startswith("  R1")
-        # The first brief whole, and the second's header, but not its requirement.
-        budget = sum(len(line) + 1 for line in full[2:4]) + len(full[4]) + 1 + 10
+        # The frame, the first brief whole, and the second's header, not its requirement.
         assert " is linked to B2" in full[4]
-        monkeypatch.setattr(briefs, "REQUIREMENTS_BUDGET", budget)
-        block = briefs.session_requirements(store, session, None).splitlines()
+        frame = sum(
+            len(part) for part in (briefs._OPEN, briefs._CLOSE, briefs._MORE, briefs._RECORD)
+        )
+        budget = frame + 2 + sum(len(line) + 1 for line in full[2:5]) + 10
+        block = briefs.session_requirements(store, session, None, budget=budget).splitlines()
 
     assert header in block and requirement in block
     assert not any(" is linked to B2" in line for line in block), block

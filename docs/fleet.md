@@ -1954,5 +1954,8 @@ issue with your terminal's name.
   and no wake-ups, and its row would say `no hooks`. v1 is Claude Code only
   (plan §8.5); nothing in the schema blocks the rest.
 - **Auto-merge on green** as an opt-in policy. In v1 a human merges (plan §3.5).
-- **Remote or multi-machine fleets** — the cloud roadmap is unchanged.
+- **Remote or multi-machine fleets** — postponed (#293). Today a manager can
+  drive another box's fleet over SSH:
+  [docs/runbooks/multi-machine-ssh.md](runbooks/multi-machine-ssh.md); the
+  design is in [docs/plans/multi-machine-fleet.md](plans/multi-machine-fleet.md).
 - **A tmux-less backend** for hosts without tmux (plan §3.1, option A).

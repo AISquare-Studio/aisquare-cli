@@ -145,6 +145,8 @@ DOCUMENTED = (
     # Phase 2 commands stay inline or in `text` fences until they exist.
     "docs/captain.md",
     "docs/runbooks/captain-acceptance.md",
+    # A fleet across two machines over SSH (#293): the `sh` fences are box B's setup.
+    "docs/runbooks/multi-machine-ssh.md",
     # The CI test bed's smoke: `aisquare doctor` and `aisquare metrics list`
     # against the stub server, meant to be typed.
     "docs/ci-contract.md",
@@ -989,6 +991,9 @@ CENSUS = {
     # classified mention. Re-measure when the runbook's slots are filled.
     "docs/captain.md": (15, 0),
     "docs/runbooks/captain-acceptance.md": (13, 0),
+    # Measured 2026-10-23 on the day it was written (#293): box B's three setup commands.
+    # The `ssh boxb -- …` lines are `text`: the manager's brief, run on another machine.
+    "docs/runbooks/multi-machine-ssh.md": (3, 0),
     # Measured 2026-09-15 on the day the demo runbook was written: every Track A
     # command (setup, the persona verbs, the hook, launch, fleet spawn/ls/stop,
     # persona attach, board) and one classified mention (the `/tmp/aisquare-demo` path).

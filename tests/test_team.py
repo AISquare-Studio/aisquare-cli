@@ -118,6 +118,26 @@ def test_a_title_in_any_script_keys_by_its_own_words() -> None:
     assert rocket.startswith("t-") and len(rocket) == 14 and rocket != party
 
 
+def test_an_emoji_with_a_variation_selector_is_hashed_not_keyed_by_the_selector(
+    work_dir: Path,
+) -> None:
+    """Review of #314: U+FE0F, the selector after most text-default emoji, is a mark, and
+    every mark was kept, so `⚠️`, `✔️` and `❤️` all keyed the invisible selector alone and
+    the second `task add` answered with the first. A mark is kept only after a letter, a
+    digit or a mark it belongs to, as a Devanagari vowel sign or virama is."""
+    keys = [team_service.task_key(title) for title in ("⚠️", "✔️", "❤️", "☀️", "#️⃣")]
+    assert all(key.startswith("t-") and len(key) == 14 for key in keys), keys
+    assert len(set(keys)) == len(keys), keys
+    for title in ("Ship it ✔️", "Ship it ❤️", "Fix ☀️ mode"):
+        key = team_service.task_key(title)
+        assert "\ufe0f" not in key and key.isprintable(), (title, key)
+    assert team_service.task_key("Ship it ✔️") == "ship-it", "the emoji is not a word of it"
+
+    warned, made_warned = team_service.add_task("⚠️")
+    checked, made_checked = team_service.add_task("✔️")
+    assert made_warned and made_checked and warned.id != checked.id
+
+
 @pytest.mark.parametrize(
     ("title", "key"),
     [

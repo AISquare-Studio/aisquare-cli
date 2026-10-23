@@ -13,7 +13,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   answers "already tracked (idempotent)", found under its old key. A task added
   before the upgrade under a title with *no* ASCII letters was keyed `task` and
   is not looked up this way: re-adding its title adds a new task beside it, and
-  the old one can be dropped. Every ASCII title keys exactly as before.
+  the old one can be dropped. Every ASCII title keys exactly as before. A task
+  added before the upgrade keeps its old key both ways: with `Fix вход` stored as
+  `fix`, a later `task add "Fix"` still answers with it. Drop and re-add such a
+  task to give it its new key.
 
 ### Added
 

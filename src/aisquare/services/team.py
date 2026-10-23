@@ -623,15 +623,21 @@ def task_key(title: str) -> str:
     """Derive the idempotency key for a task: a slug of its title, in any script (#270).
 
     The title is NFKC-normalised and casefolded, and every run of characters that are not
-    letters, digits or marks (Unicode ``L*``, ``N*``, ``M*``: a mark is part of its word, so
-    Devanagari is not split at the virama) becomes one ``-``. ``[a-z0-9]`` alone keyed every
-    title with no ASCII letter ``task``, so the second such ``task add`` returned the first.
-    An ASCII title keys exactly as before (:func:`_legacy_task_key`); a title with nothing
+    letters, digits or marks (Unicode ``L*``, ``N*``, ``M*``) becomes one ``-``. A mark is
+    kept only after a letter, digit or mark it belongs to: Devanagari is not split at the
+    virama, and the variation selector after an emoji (U+FE0F) is not a key of its own, as
+    it was for ``⚠️`` and ``✔️`` alike (review of #314). ``[a-z0-9]`` alone keyed every title
+    with no ASCII letter ``task``, so the second such ``task add`` returned the first. An
+    ASCII title keys exactly as before (:func:`_legacy_task_key`); a title with nothing
     left to slug, only emoji, is keyed by a hash of it.
     """
     folded = unicodedata.normalize("NFKC", title).casefold()
-    kept = "".join(char if unicodedata.category(char)[0] in "LNM" else "-" for char in folded)
-    slug = re.sub(r"-+", "-", kept).strip("-")
+    kept: list[str] = []
+    for char in folded:
+        category = unicodedata.category(char)[0]
+        belongs = category in "LN" or (category == "M" and bool(kept) and kept[-1] != "-")
+        kept.append(char if belongs else "-")
+    slug = re.sub(r"-+", "-", "".join(kept)).strip("-")
     if slug:
         return slug[:64]
     if title.isascii():

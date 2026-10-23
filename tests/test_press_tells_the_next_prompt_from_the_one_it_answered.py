@@ -19,9 +19,9 @@ from collections.abc import Sequence
 
 import pytest
 
+from aisquare.core.agent_adapters import claude_screen as screen_reader
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services.captain import actions
-from aisquare.services.captain import screen as screen_reader
 from tests import captain_screens as shots
 from tests import test_captain_actions as actions_suite
 from tests.test_captain_actions import Clock, Fleet, Pane, audit, ok, refused

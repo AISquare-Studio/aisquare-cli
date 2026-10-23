@@ -1,9 +1,9 @@
 """``aisquare captain serve --stdio`` — the captain's Actions MCP server.
 
-The captain is a Claude Code session that runs every project's fleet for the
-owner. It never types into a pane itself: every effect is one of the tools
-here, each with ONE fixed meaning, and nothing outside this vocabulary is
-reachable through the server (default-deny). The contract — names, arguments,
+The captain is an agent session (Claude Code's; Codex's too, experimentally) that
+runs every project's fleet for the owner. It never types into a pane itself: every
+effect is one of the tools here, each with ONE fixed meaning, and nothing outside this
+vocabulary is reachable through the server (default-deny). The contract — names, arguments,
 result shapes — was posted on the T1 card (tsk_01m3bq0ymcbjbdbdpymts5vepn,
 seq 13010) before anything was built on it; change it there first.
 
@@ -68,7 +68,8 @@ if TYPE_CHECKING:
 
 AUDIT_KIND = "captain_action"
 SERVER_NAME = "captain"
-"""What Claude Code prefixes the tools with: ``mcp__captain__<tool>``."""
+"""What the captain's agent names the tools under: Claude Code's ``mcp__captain__<tool>``,
+Codex's ``mcp__captain`` namespace."""
 
 BOARD_EVENTS = 15
 SINCE_FIRST_LOOK = 50
@@ -102,12 +103,13 @@ digits are what Claude Code's numbered chooser takes (T1b: runner2-1 measured on
 claude that ``y`` does nothing there and ``1`` answers Yes, board 13265)."""
 
 ANSWERS = ("yes", "no")
-"""The semantic keys: read off the pane at the moment of the press (``screen.prompt_showing``)."""
+"""The semantic keys: read off the pane at the moment of the press, by the pane's own agent
+(``screen.prompt_showing``)."""
 
 ANSWERING_KEYS = frozenset({"yes", "no", "y", "n", "enter", "esc", *(str(d) for d in range(1, 10))})
 """Keys that answer a prompt: pressed while one shows, the pane is read back, and the SAME
 prompt still showing is a said failure — the captain never reports a press the prompt
-ignored. The same by the whole of it (``screen.Prompt.whole``): the next prompt in line
+ignored. The same by the whole of it (``ScreenPrompt.whole``): the next prompt in line
 often asks the very same question. The arrows, tab, space and ctrl-c move or interrupt;
 they only report what shows after."""
 
@@ -746,16 +748,23 @@ def _ready(
     overrides the activity window, never a stop: limited, exited and lost are refused.
 
     The trust dialog is refused for every caller (T1c, 13505): :func:`_no_trust_dialog`.
-    Returns what the pane showed, so a caller reads it once.
+    So is an agent whose screen is not read for a prompt at all: nothing would tell its
+    folder-trust dialog from its prompt. Returns what the pane showed, so a caller reads it
+    once.
     """
     agent = _live(target, label)
+    if not screen.reads_prompts(agent):
+        raise Refused(
+            f"{label}'s screen is not read for a prompt ({agent.agent or 'its agent'}), so its "
+            f"folder-trust dialog cannot be told from its prompt — nothing {verb}"
+        )
     status = fleet.status_of(agent)
     srv = fleet.server_of(agent)
     lines: list[str] = []
     if status.state in READY_STATES or status.state == "working":
         lines = _no_trust_dialog(srv, agent, label, verb)
     if status.state not in READY_STATES and not (
-        status.state == "working" and _asking_or_idle(lines)
+        status.state == "working" and _asking_or_idle(agent, lines)
     ):
         raise Refused(
             f"{label} is {status.state} — the captain types only into an agent that is "
@@ -774,15 +783,17 @@ def _screen(srv: TmuxServer, pane_id: str) -> list[str]:
 
 
 def _no_trust_dialog(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) -> list[str]:
-    """Read the agent's pane and refuse Claude Code's trust dialog by name (T1c, 13505).
+    """Read the agent's pane and refuse its folder-trust dialog by name (T1c, 13505), as the
+    pane's own agent reads it (``screen.prompt_showing``).
 
-    An agent spawned into a folder Claude Code has never trusted parks at its own trust
-    dialog, and anything typed there answers it: Enter picks "No, exit" and the agent dies
-    (the dry run's paste, 13504, which said success as it did). Every door that types into
-    an agent asks here first: press and paste through :func:`_ready`, and the doors that
-    end in ``fleet.tell`` through :func:`_no_prompt`. A pane that cannot be read is refused
-    too: nothing is typed blind. Returns what the pane shows, for the caller that reads it
-    next.
+    An agent spawned into a folder it has never trusted parks at its own trust dialog, and
+    anything typed there answers it: on Claude Code, Enter picks "No, exit" and the agent
+    dies (the dry run's paste, 13504, which said success as it did); on Codex, Enter picks
+    "1. Trust and continue", the owner's decision made by the captain. Every door that
+    types into an agent asks here first: press and paste through :func:`_ready`, and the
+    doors that end in ``fleet.tell`` through :func:`_no_prompt`. A pane that cannot be read
+    is refused too: nothing is typed blind. Returns what the pane shows, for the caller
+    that reads it next.
     """
     try:
         lines = _screen(srv, agent.pane_id)
@@ -790,7 +801,7 @@ def _no_trust_dialog(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) 
         raise Refused(
             f"{label}'s pane could not be read to see what is showing ({exc}) — nothing {verb}"
         ) from exc
-    showing = screen.prompt_showing(lines)
+    showing = screen.prompt_showing(agent, lines)
     if showing is not None and showing.shape == "trust":
         attach = project_service.fleet_command("attach", fleet.project_of(agent))
         raise Refused(
@@ -815,7 +826,7 @@ def _no_prompt(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) -> Non
     a prompt IS answered, so they do not ask here. The refusal sends the captain to the
     owner before it sends it to ``press``: the answer is theirs, as every confirm is.
     """
-    showing = screen.prompt_showing(_no_trust_dialog(srv, agent, label, verb))
+    showing = screen.prompt_showing(agent, _no_trust_dialog(srv, agent, label, verb))
     if showing is not None:
         raise Refused(
             f"a prompt is showing on {label}: {showing.question} — text typed there would "
@@ -837,17 +848,18 @@ def _before_telling(target: ProjectInfo, label: str, verb: str) -> None:
         _no_prompt(fleet.server_of(placed), placed, label, verb)
 
 
-def _asking_or_idle(lines: Sequence[str]) -> bool:
-    """Whether the pane is ready by its screen: a prompt showing, or the box drawn and idle
-    (13313)."""
-    return screen.prompt_showing(lines) is not None or screen.box_idle(lines)
+def _asking_or_idle(agent: FleetAgent, lines: Sequence[str]) -> bool:
+    """Whether the pane is ready by its screen, as its own agent reads it: a prompt showing,
+    or its prompt drawn with no turn running at it (13313: Claude Code's box drawn and idle;
+    Codex's empty composer)."""
+    return screen.prompt_showing(agent, lines) is not None or screen.ready(agent, lines)
 
 
 def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
     if key not in KEYS and key not in ANSWERS:
         raise Refused(f"key {key!r} is not one of {', '.join((*ANSWERS, *KEYS))}")
     agent, status, srv, lines = _ready(target, label, verb="pressed")
-    before = screen.prompt_showing(lines)  # never the trust dialog: _ready refused it
+    before = screen.prompt_showing(agent, lines)  # never the trust dialog: _ready refused it
     if key in ANSWERS:
         if before is None:
             raise Refused(f"no prompt is showing on {label} — nothing pressed")
@@ -873,7 +885,7 @@ def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
     for _ in range(READBACK_POLLS):
         _sleep(READBACK_POLL_S)
         try:
-            after = screen.prompt_showing(_screen(srv, agent.pane_id))
+            after = screen.prompt_showing(agent, _screen(srv, agent.pane_id))
         except TmuxError:
             continue
         # The WHOLE prompt, never its question line alone (review of #240, finding 10):
@@ -1958,9 +1970,10 @@ def note(project: str, text: str, kind: str = "note", utterance: str = "") -> st
 def press(project: str, label: str, key: str, utterance: str = "") -> str:
     """Press one key in an agent's pane: yes or no to the prompt showing, or a literal key.
 
-    ``yes``/``no`` are read off the pane: on Claude Code's numbered chooser yes is the
-    digit of its Yes option and no is Esc; on a [y/N] line, y and n; refused when no
-    prompt shows, and on the trust dialog (the owner's to answer). Literal keys: 1-9 y n
+    ``yes``/``no`` are read off the pane by its own agent: on a numbered chooser (Claude
+    Code's, Codex's approval view) yes is the digit of its Yes option and no is Esc; on a
+    [y/N] line, y and n; refused when no prompt shows, on the trust dialog and on any
+    other dialog of the agent's own (the owner's to answer). Literal keys: 1-9 y n
     enter esc up down left right tab space ctrl-c. After a key that answers, the pane is
     read back: the same prompt still showing is an error, never a success. Only into an
     agent that is waiting or asking — never a busy one.

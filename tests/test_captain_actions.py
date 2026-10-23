@@ -38,6 +38,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from aisquare.cli.app import app
 from aisquare.core import paths
+from aisquare.core.agent_adapters import claude_screen as screen_reader
 from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
 from aisquare.core.state_file import StateUnwritableError
 from aisquare.core.store import store_session
@@ -56,7 +57,6 @@ from aisquare.services import fleet, mcp_server
 from aisquare.services import team as team_service
 from aisquare.services.captain import actions
 from aisquare.services.captain import queue as captain_queue
-from aisquare.services.captain import screen as screen_reader
 from aisquare.services.captain import state as captain_state
 from aisquare.services.captain.errors import Failed, Refused
 from tests import captain_screens as shots

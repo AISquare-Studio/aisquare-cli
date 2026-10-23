@@ -429,23 +429,13 @@ def _pane_text(agent: FleetAgent, srv: TmuxServer) -> list[str]:
     return screen.strip_escapes(srv.capture(agent.pane_id).lines)
 
 
-def input_box_at(lines: list[str]) -> int | None:
-    """Where Claude Code's input box starts — ``services.captain.screen``'s reader (13278)."""
-    return screen.input_box_at(lines)
-
-
-def modal_showing(lines: list[str]) -> str | None:
-    """What the pane shows that ``say`` must not type into — ``services.captain.screen``'s
-    view of the one reader (13227, 13264, 13278)."""
-    return screen.modal_showing(lines)
-
-
-def _refuse_dialog(showing: str) -> NoReply:
+def _refuse_dialog(agent: FleetAgent, pane: list[str], showing: str) -> NoReply:
     """The refusal for a pane that shows a dialog: what shows, and the one thing to do."""
-    if showing == "the trust dialog":
+    prompt = screen.prompt_showing(agent, pane)
+    if prompt is not None and prompt.shape == "trust":
         return NoReply(
             f"the captain is waiting for you to trust its folder {brain_dir()}: run "
-            "`aisquare captain` and choose Yes, I trust this folder (once)",
+            "`aisquare captain` and trust it there (once)",
             timed_out=False,
         )
     return NoReply(
@@ -470,6 +460,11 @@ def _wait_until_ready(
     never raised. A fresh captain at the trust dialog has no session row yet, so the
     pane is read whatever the row says.
 
+    The pane is read by the captain's own agent (``services.captain.screen``): what is
+    drawn there that a line must not go into (``modal_on_screen``), and whether its prompt
+    is drawn and free (``ready_on_screen``): Claude Code's input box, Codex's empty
+    composer.
+
     One settle goes before the text, for a NEW box only: ``settle`` (this say started
     the captain), or a read here that found no box drawn. A box drawn from the first
     read is typed into at once — a settle there cost every voice turn 2 s (13294).
@@ -490,12 +485,15 @@ def _wait_until_ready(
                 "`aisquare captain` shows it",
                 timed_out=False,
             ) from exc
-        showing = modal_showing(pane)
+        showing = screen.modal_showing(agent, pane)
         if showing is not None:
-            raise _refuse_dialog(showing)
-        drawn = input_box_at(pane) is not None
-        ready = state == "waiting" or (state == "working" and screen.box_idle(pane))
-        if drawn and ready and fleet.pane_is_the_agent(srv, agent.pane_id):
+            raise _refuse_dialog(agent, pane, showing)
+        drawn = screen.ready(agent, pane)
+        if (
+            drawn
+            and state in ("waiting", "working")
+            and fleet.pane_is_the_agent(srv, agent.pane_id)
+        ):
             if settle:
                 _sleep(TYPE_SETTLE_S)
             return srv

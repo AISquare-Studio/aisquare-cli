@@ -617,7 +617,7 @@ def test_say_never_types_into_the_trust_dialog_and_says_how_to_answer_it(
         brain.say("what is up", timeout=60)
     message = str(caught.value)
     assert str(brain.brain_dir()) in message
-    assert "run `aisquare captain` and choose Yes, I trust this folder (once)" in message
+    assert "run `aisquare captain` and trust it there (once)" in message
     assert caught.value.timed_out is False
     assert fake.typed == [], "nothing was typed into the dialog"
     assert clock.slept == 0.0, "said at once"
@@ -896,7 +896,7 @@ def test_send_never_types_into_the_trust_dialog_and_says_how_to_answer_it(
     fake.screen = list(REAL_TRUST)
     with pytest.raises(brain.NoReply, match="trust its folder") as caught:
         brain.send("what is up")
-    assert "run `aisquare captain` and choose Yes, I trust this folder (once)" in str(caught.value)
+    assert "run `aisquare captain` and trust it there (once)" in str(caught.value)
     assert caught.value.timed_out is False and fake.typed == [] and clock.slept == 0.0
 
 

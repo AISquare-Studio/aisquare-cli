@@ -835,6 +835,21 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def roomy_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every spawn in the suite sees plenty of memory, whatever the runner has (#283).
+
+    ``min_free_mb`` is on by default, so a CI runner short of 2 GB would otherwise refuse
+    the spawn a test is about. A test of admission sets its own headroom; the probes'
+    own tests call ``linux_headroom`` / ``darwin_headroom`` with their fixtures.
+    """
+    from aisquare.core import memory
+
+    monkeypatch.setattr(
+        memory, "headroom", lambda: memory.Headroom(65_536, 131_072, "normal", None, "test")
+    )
+
+
+@pytest.fixture(autouse=True)
 def no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Never read the macOS Keychain of the machine the suite runs on.
 

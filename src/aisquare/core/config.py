@@ -508,6 +508,10 @@ _V1_DEFAULTS: dict[str, Any] = {
             "validator": {"permission_mode": "auto", "worktree": False, "extra_args": []},
             "ui-tester": {"permission_mode": "auto", "worktree": False, "extra_args": []},
         },
+        "max_agents_total": 0,
+        "min_free_mb": 2048,
+        "test_gate_mb": 0,
+        "test_gate_wait_minutes": 15,
     },
     "accounts": {
         "pick": "default",
@@ -621,6 +625,12 @@ class FleetSettings(BaseModel):
     ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0`` into fleet launches so a manager
     cannot spawn help the sidebar cannot see; ``max_continuations_per_hour`` caps
     how often the manager's Stop hook may keep it going on new board events.
+
+    Admission (#283): ``max_agents_total`` caps the live agents across every project,
+    the captain excluded (``0``: no budget); ``min_free_mb`` refuses a spawn below that
+    much available memory, or at critical memory pressure (``0``: off);
+    ``test_gate_mb`` is ``fleet gate``'s floor (``0``: ``min_free_mb``) and
+    ``test_gate_wait_minutes`` how long the gate waits for it.
     """
 
     tmux_socket: str = "asq"
@@ -630,6 +640,10 @@ class FleetSettings(BaseModel):
     disable_native_agent_teams: bool = True
     max_continuations_per_hour: int = 30
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
+    max_agents_total: int = 0
+    min_free_mb: int = 2048
+    test_gate_mb: int = 0
+    test_gate_wait_minutes: int = 15
 
 
 class SnapshotSettings(BaseModel):

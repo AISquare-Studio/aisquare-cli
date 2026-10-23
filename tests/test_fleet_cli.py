@@ -2268,3 +2268,115 @@ def test_ls_shows_the_persona_on_its_row_and_json_carries_it(
     assert "tester-1 tester ⏸ waiting %9" in out
     payload = json.loads(as_json.stdout)
     assert [entry["agent"]["persona"] for entry in payload["agents"]] == ["skeptic", None]
+
+
+# --- capacity and the test-run gate (#283) ---------------------------------------------
+
+
+def _headroom(monkeypatch: pytest.MonkeyPatch, *answers: int | None) -> list[float]:
+    """Each probe answers the next of ``answers`` (the last repeats); time passes only
+    when the gate sleeps, so a 15-minute wait is instant."""
+    from aisquare.core import memory
+
+    queue = list(answers)
+    slept: list[float] = []
+    clock = [0.0]
+
+    def probe() -> memory.Headroom:
+        value = queue.pop(0) if len(queue) > 1 else queue[0]
+        return memory.Headroom(value, 16_384, "normal", None, "test")
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(memory, "headroom", probe)
+    monkeypatch.setattr(fleet_service, "_sleep", sleep)
+    monkeypatch.setattr(fleet_service, "_monotonic", lambda: clock[0])
+    return slept
+
+
+def test_capacity_json_names_the_headroom_and_every_limit(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _headroom(monkeypatch, 1500)
+    result = runner.invoke(app, ["--json", "fleet", "capacity"])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["available_mb"] == 1500 and report["min_free_mb"] == 2048
+    assert report["admits"] is False and report["reason"] == "1500 MB available, 2048 MB needed"
+    assert report["live_total"] == 0 and report["max_agents_per_project"] == 4
+
+
+def test_gate_at_the_deadline_runs_nothing_and_exits_75(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    slept = _headroom(monkeypatch, 900)
+    marker = tmp_path / "ran"
+    result = runner.invoke(
+        app,
+        ["fleet", "gate", "--min-free-mb", "2048", "--wait", "12s", "--", "touch", str(marker)],
+    )
+    assert result.exit_code == 75, result.output
+    assert "not run: 900 MB available, 2048 MB needed for 12s" in result.output
+    assert not marker.exists()
+    assert slept == [5.0, 5.0, 2.0], "every 5 s, and no further than the deadline"
+
+
+def test_gate_with_headroom_returns_the_commands_exit_code(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    _headroom(monkeypatch, 900, 900, 4000)
+    result = runner.invoke(
+        app,
+        ["--json", "fleet", "gate", "--min-free-mb", "2048", "--wait", "1m", "--",
+         sys.executable, "-c", "raise SystemExit(3)"],
+    )  # fmt: skip
+    assert result.exit_code == 3, result.output
+    [line] = result.output.strip().splitlines()
+    report = json.loads(line)
+    assert report["passed"] is True and report["exit_code"] == 3
+    assert report["waited_seconds"] == 10.0
+
+
+def test_gate_json_at_the_deadline_is_one_object(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _headroom(monkeypatch, 900)
+    result = runner.invoke(app, ["--json", "fleet", "gate", "--wait", "1s"])
+    assert result.exit_code == 75
+    [line] = result.output.strip().splitlines()
+    assert json.loads(line) == {
+        "passed": False,
+        "ran": None,
+        "available_mb": 900,
+        "needed_mb": 2048,
+        "waited_seconds": 1.0,
+        "pressure": "normal",
+    }
+
+
+def test_gate_takes_test_gate_mb_over_min_free_mb(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core.config import FleetSettings
+
+    monkeypatch.setattr(fleet_service, "settings", lambda: FleetSettings(test_gate_mb=6000))
+    _headroom(monkeypatch, 4000)
+    result = runner.invoke(app, ["--json", "fleet", "gate", "--wait", "0s"])
+    assert json.loads(result.output)["needed_mb"] == 6000
+
+
+def test_a_capacity_refusal_carries_its_own_json_code(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise fleet_service.CapacityRefused("capacity_memory", "1500 MB available, 2048 MB needed")
+
+    monkeypatch.setattr(fleet_service, "spawn", refuse)
+    monkeypatch.setattr(fleet_cli, "_project", lambda _ref: None)
+    result = runner.invoke(app, ["--json", "fleet", "spawn", "coder"])
+    assert result.exit_code == 1
+    assert json.loads(result.output)["error"] == "capacity_memory"

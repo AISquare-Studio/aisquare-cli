@@ -171,6 +171,8 @@ def doctor(
         # Beside the fleet terminal row, which reads the same running server (fix 4 of the
         # fleet-board card): it can warn, so it waits with the other late rows.
         _check_fleet_server_env(cwd=cwd),
+        # Can warn (memory below the floor, pressure at warn), so it waits with the late rows.
+        _check_fleet_capacity(),
         *_experiment_checks(),
         # Only while the experimental captain is off: one ok row saying how to turn it
         # on. On, doctor is as it was before the switch.
@@ -2204,6 +2206,40 @@ def _stale_server_environment(srv: tmux_core.TmuxServer, env: Mapping[str, str])
     held = _server_environment(srv)
     current = tmux_core.desktop_environment(env)
     return [var for var, value in current.items() if held.get(var) != value]
+
+
+def _check_fleet_capacity() -> DoctorCheck:
+    """``fleet capacity``: memory headroom and live agents against admission's limits (#283).
+
+    What the next ``fleet spawn`` would meet, read as ``aisquare fleet capacity`` reads it:
+    ok with the numbers; warn when a spawn would be refused (below ``min_free_mb``,
+    critical pressure, the fleet at ``max_agents_total``) or memory pressure is at warn.
+    Read-only, and it does not bring a home into being.
+    """
+    name = "fleet capacity"
+    try:
+        if (uncreated := _uncreated_home(name)) is not None:
+            return uncreated
+        report = fleet_service.capacity()
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    head = report.headroom
+    memory = (
+        f"{head.available_mb} MB available" if head.available_mb is not None else "memory unread"
+    )
+    budget = f" of {report.max_agents_total}" if report.max_agents_total else ""
+    detail = (
+        f"{memory}, pressure {head.pressure}, floor {report.min_free_mb or 'off'}; "
+        f"{report.live_total}{budget} agents live — {report.reason}"
+    )
+    if not report.admits or head.pressure == "warn":
+        return _warn(
+            name,
+            detail,
+            "aisquare fleet capacity — stop an agent (`aisquare fleet stop <label>`), free "
+            "memory, or change max_agents_total / min_free_mb in [fleet]",
+        )
+    return _ok(name, detail)
 
 
 def _check_fleet_server_env(

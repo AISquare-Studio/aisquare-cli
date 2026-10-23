@@ -389,11 +389,24 @@ SEAMS: dict[str, Seam] = {
         "stripped, as every git seam is (`git_env()`)",
         strips_identity=True,
     ),
-    "aisquare/core/tmux.py::_sysctl": Seam(
+    "aisquare/core/memory.py::_sysctl": Seam(
         EXCLUDED,
         "`sysctl -n kern.bootsessionuuid` (macOS) or `kern.boottime` (macOS, the BSDs), at a "
         "fleet spawn and when uninstall, upgrade and fleet shutdown ask whether an agent may "
-        "still run; an identifier and a time, no model",
+        "still run; and `kern.memorystatus_vm_pressure_level` and `hw.memsize` (macOS) for "
+        "the fleet's admission (#283); identifiers, a time and numbers, no model",
+    ),
+    "aisquare/cli/fleet.py::gate": Seam(
+        EXCLUDED,
+        "`aisquare fleet gate -- CMD`: the agent's own heavy command (a test run, a build), "
+        "started once memory allows (#283). It is the agent's shell command, run in the "
+        "agent's own environment as if typed; no model process of ours",
+    ),
+    "aisquare/core/memory.py::_vm_stat": Seam(
+        EXCLUDED,
+        "`vm_stat` (macOS): the page counts the fleet's admission reads as available memory "
+        "(#283); no model",
+        strips_identity=True,
     ),
     "aisquare/services/ngrok_tunnel.py::popen_tied": Seam(
         EXCLUDED,

@@ -1624,3 +1624,19 @@ def test_spawn_printed_command_joins_each_paste_to_its_own_run(
     assert len(started) == 2, proc.stdout
     assert started == keyed, "the agent must start on the id its Run is keyed by"
     assert started[0] != started[1], "a second paste must not reuse the first session's id"
+
+
+@pytest.mark.parametrize("role", ["tester", "runner", "validator"])
+def test_the_checking_roles_name_the_memory_gate_only_when_it_is_set(role: str) -> None:
+    """#283: `fleet gate` is in the tester's and validator's cycle once `[fleet]
+    test_gate_mb` is set, and not before: a line naming a gate nobody configured is noise."""
+    from aisquare.core.config import load_config, save_config
+
+    assert "fleet gate" not in " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
+    config = load_config()
+    config.fleet.test_gate_mb = 4096
+    save_config(config)
+    assert "aisquare fleet gate -- <command>" in " ".join(
+        harness.role_cycle(role, "abcd1234", fleet=unscoped)
+    )
+    assert "fleet gate" not in " ".join(harness.role_cycle("coder", "abcd1234", fleet=unscoped))

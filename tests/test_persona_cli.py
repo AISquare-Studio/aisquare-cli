@@ -17,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import agents as agents_core
 from aisquare.core import personas as core
 from tests import bundled_personas
 
@@ -346,10 +347,97 @@ def test_export_skill_user_writes_into_claudes_skills(
     assert (claude_dir / "skills" / "skeptic" / "SKILL.md").read_bytes() == (
         core.BUNDLED_DIR / "skeptic" / "SKILL.md"
     ).read_bytes()
-    assert "/skeptic in Claude Code" in result.stdout
+    assert "a skill Claude Code reads now" in result.stdout
     assert project.exit_code == 0, project.output
     assert (repo / ".claude" / "skills" / "mentor" / "SKILL.md").is_file()
     assert (code, payload["error"]) == (1, "usage")
+
+
+def test_export_skill_user_for_codex_writes_into_the_skills_every_codex_home_reads(
+    runner: CliRunner, repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113 0.8.2 A2: Codex reads ``$HOME/.agents/skills`` under every CODEX_HOME, so
+    one user export reaches every Codex account; its project skills are
+    ``<repo>/.agents/skills``. The bytes are the persona's own."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    home = agents_core.home()
+
+    result = runner.invoke(
+        app, ["persona", "export", "skeptic", "--skill", "--user", "--agent", "codex"]
+    )
+    code, payload = _json(runner, "export", "mentor", "--skill", "--project", "--agent", "codex")
+    stray = runner.invoke(app, ["persona", "export", "skeptic", "--agent", "codex"])
+    unknown = runner.invoke(
+        app, ["persona", "export", "skeptic", "--skill", "--user", "--agent", "nope"]
+    )
+
+    assert result.exit_code == 0, result.output
+    written = home / ".agents" / "skills" / "skeptic" / "SKILL.md"
+    assert written.read_bytes() == (core.BUNDLED_DIR / "skeptic" / "SKILL.md").read_bytes()
+    assert "a skill Codex reads now" in result.stdout
+    assert not (tmp_path / "codex-home" / "skills").exists()
+    assert code == 0
+    assert (payload["agent"], payload["skill"]) == ("codex", "project")
+    assert Path(payload["path"]) == repo / ".agents" / "skills" / "mentor"
+    assert (repo / ".agents" / "skills" / "mentor" / "SKILL.md").is_file()
+    assert stray.exit_code == 1 and "add --skill" in stray.output
+    assert unknown.exit_code == 1 and "unknown terminal agent 'nope'" in unknown.output
+
+
+def test_import_list_reads_every_skill_directory_of_every_agent(
+    runner: CliRunner, repo: Path, claude_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113 0.8.2 A2: ``import --list`` reads each agent's ``skill_dirs``, the user's
+    first: Claude Code's two and Codex's four (measured on 0.162.1), each named with the
+    agents that read it, and a skill from any of them imports by its name."""
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    home = agents_core.home()
+    roots = {
+        "claude-user": (claude_dir / "skills", "user", ["claude-code"]),
+        "agents-user": (home / ".agents" / "skills", "user", ["codex"]),
+        "codex-user": (codex_home / "skills", "user", ["codex"]),
+        "claude-project": (repo / ".claude" / "skills", "project", ["claude-code"]),
+        "agents-project": (repo / ".agents" / "skills", "project", ["codex"]),
+        "codex-project": (repo / ".codex" / "skills", "project", ["codex"]),
+    }
+    for name, (base, _, _) in roots.items():
+        _skill(base, name)
+
+    code, payload = _json(runner, "import", "--list")
+    listed = runner.invoke(app, ["persona", "import", "--list"])
+    imported = runner.invoke(app, ["persona", "import", "codex-project"])
+
+    assert code == 0
+    assert [skill["name"] for skill in payload["skills"]] == list(roots)
+    for skill in payload["skills"]:
+        base, scope, agents = roots[skill["name"]]
+        assert (Path(skill["path"]).parent, skill["scope"], skill["agents"]) == (
+            base,
+            scope,
+            agents,
+        )
+    assert [(Path(root["path"]), root["scope"], root["agents"]) for root in payload["roots"]] == [
+        (base, scope, agents) for base, scope, agents in roots.values()
+    ]
+    rows = {row.split()[0]: row.split() for row in listed.stdout.splitlines()}
+    assert rows["agents-user"][1:3] == ["user", "codex"]
+    assert rows["claude-project"][1:3] == ["project", "claude-code"]
+    assert imported.exit_code == 0, imported.output
+    assert _tree(_user_layer() / "codex-project") == _tree(
+        roots["codex-project"][0] / "codex-project"
+    )
+
+
+def test_import_list_with_no_skills_names_where_it_looked(
+    runner: CliRunner, claude_dir: Path
+) -> None:
+    listed = runner.invoke(app, ["persona", "import", "--list"])
+
+    assert listed.exit_code == 0, listed.output
+    assert "No skills found" in listed.stdout
+    assert str(claude_dir / "skills") in listed.stdout
+    assert str(agents_core.home() / ".agents" / "skills") in listed.stdout
 
 
 def test_a_skill_imported_then_exported_is_byte_identical(

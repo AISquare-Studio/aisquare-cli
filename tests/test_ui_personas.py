@@ -749,7 +749,7 @@ def test_an_import_refusal_stays_in_the_dialog_and_import_re_enables(
 ) -> None:
     def refuse(source: str, **_: object) -> personas_service.ImportResult:
         raise PersonaError(
-            f"no such file, directory or Claude Code skill: {source}", code="source_not_found"
+            f"no such file, directory or agent skill: {source}", code="source_not_found"
         )
 
     importer = Recorder(refuse)
@@ -772,7 +772,7 @@ def test_an_import_refusal_stays_in_the_dialog_and_import_re_enables(
 
     screen, status, disabled = drive(scenario, dialog=dialog)
     assert screen == "ImportPersonaScreen"
-    assert status == "no such file, directory or Claude Code skill: nope"
+    assert status == "no such file, directory or agent skill: nope"
     assert disabled is False
     assert len(importer.calls) == 2  # re-enabled for real
 
@@ -951,17 +951,31 @@ def test_a_bundled_persona_opens_read_only_and_saves_as_a_copy_into_a_layer(
 
 
 @pytest.mark.parametrize(
-    ("destination", "expected", "claude_hint"),
+    ("destination", "expected", "reader"),
     [
-        ("#export-personal", {"to": None, "skill": "user"}, True),
-        ("#export-project", {"to": None, "skill": "project"}, True),
-        ("#export-directory", {"to": Path("/tmp/persona-copies"), "skill": None}, False),
+        (
+            "#export-personal-claude-code",
+            {"to": None, "skill": "user", "agent": "claude-code"},
+            "Claude Code",
+        ),
+        (
+            "#export-project-claude-code",
+            {"to": None, "skill": "project", "agent": "claude-code"},
+            "Claude Code",
+        ),
+        ("#export-personal-codex", {"to": None, "skill": "user", "agent": "codex"}, "Codex"),
+        ("#export-project-codex", {"to": None, "skill": "project", "agent": "codex"}, "Codex"),
+        (
+            "#export-directory",
+            {"to": Path("/tmp/persona-copies"), "skill": None, "agent": None},
+            None,
+        ),
     ],
 )
 def test_export_sends_each_destination_and_the_toast_names_the_path(
     destination: str,
     expected: dict[str, object],
-    claude_hint: bool,
+    reader: str | None,
     project: ProjectInfo,
     catalogue: dict[str, Path],
     repo: Path,
@@ -989,8 +1003,8 @@ def test_export_sends_each_destination_and_the_toast_names_the_path(
     assert blocked is (destination == "#export-directory")  # a directory needs a path first
     assert export.calls == [{"args": ["pair"], "root": repo, "force": False, **expected}]
     toast = f"✓ exported pair to {written}"
-    if claude_hint:
-        toast += " — it is /pair in Claude Code now"
+    if reader is not None:
+        toast += f" — a skill {reader} reads now"
     assert (toast, "information") in notices
 
 
@@ -1007,7 +1021,7 @@ def test_export_shows_a_bracketed_skills_path_verbatim(
         await select_row(pilot, host, "user:pair")
         await press(pilot, "#persona-export")
         dialog = await wait_for(pilot, ExportPersonaScreen)
-        return str(dialog.query_one("#export-personal", RadioButton).label)
+        return str(dialog.query_one("#export-personal-claude-code", RadioButton).label)
 
     label = drive(scenario, project=project)
     assert str(config_dir / "skills" / "pair") in label  # "[old]" is part of the path, not a tag
@@ -1118,10 +1132,53 @@ def test_a_remove_the_filesystem_refuses_is_an_error_toast_and_the_tab_stays_up(
 
 
 def test_export_offers_the_project_skills_only_inside_a_git_repository() -> None:
-    async def scenario(pilot: Pilot[None], host: Host) -> bool:
-        return host.screen.query_one("#export-project", RadioButton).disabled
+    async def scenario(pilot: Pilot[None], host: Host) -> list[bool]:
+        return [
+            host.screen.query_one(f"#export-project-{agent}", RadioButton).disabled
+            for agent in ("claude-code", "codex")
+        ]
 
-    assert drive(scenario, dialog=ExportPersonaScreen("pair", None)) is True
+    assert drive(scenario, dialog=ExportPersonaScreen("pair", None)) == [True, True]
+
+
+def test_export_offers_every_agents_skill_directories_by_its_adapter(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113 0.8.2 A2: each agent's first user and project skill directory, as its
+    adapter's ``skill_dirs`` names it, a third agent's included, with no agent named here;
+    the first agent's personal skills are chosen."""
+    from aisquare.core import agents as agents_core
+    from aisquare.core.agent_adapters import register, unregister
+    from tests.fake_agent import FakeAgentAdapter
+
+    fake = FakeAgentAdapter()
+    register(fake)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    monkeypatch.setenv(fake.home_env, str(tmp_path / "fake"))
+
+    async def scenario(pilot: Pilot[None], host: Host) -> dict[str, tuple[str, bool]]:
+        buttons = host.screen.query(RadioButton)
+        return {str(button.id): (str(button.label), button.value) for button in buttons}
+
+    try:
+        seen = drive(scenario, dialog=ExportPersonaScreen("pair", repo))
+    finally:
+        unregister(fake.id)
+    home = agents_core.home()
+    assert list(seen) == [
+        "export-personal-claude-code",
+        "export-personal-codex",
+        "export-personal-fake-agent",
+        "export-project-claude-code",
+        "export-project-codex",
+        "export-project-fake-agent",
+        "export-directory",
+    ]
+    assert seen["export-personal-claude-code"][1] is True
+    assert str(home / ".agents" / "skills" / "pair") in seen["export-personal-codex"][0]
+    assert str(tmp_path / "fake" / "personas" / "pair") in seen["export-personal-fake-agent"][0]
+    assert str(repo / ".agents" / "skills" / "pair") in seen["export-project-codex"][0]
+    assert str(repo / ".fakeagent" / "personas" / "pair") in seen["export-project-fake-agent"][0]
 
 
 def test_the_dialog_module_calls_the_service_by_attribute() -> None:

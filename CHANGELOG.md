@@ -400,6 +400,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that the fleet then refuses, a declared `captain` role shows the label it sends,
   and the dialog keeps the switch it opened with. `aisquare captain` no longer
   attaches to a declared `captain` role spawned into the home while it was off.
+- **A persona's folder and SKILL.md follow your umask,** as any file you make does.
+  A new persona was made 0700 and a saved SKILL.md 0600, so other accounts and
+  tools that read your files could not read it. A mode you set on a SKILL.md is
+  kept when it is saved.
 - **`aisquare persona` and the Personas tab read the project layer spawn and
   launch read.** They asked git for it, so a project that is not a git repository
   (a folder marked with `.aisquare`) listed none of the project personas its spawns

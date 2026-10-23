@@ -249,3 +249,48 @@ def test_status_says_what_it_holds_and_whether_it_is_behind(repo: Path) -> None:
 )
 def test_names_split_into_snake_and_camel_subtokens(name: str, tokens: list[str]) -> None:
     assert code_index.subtokens(name) == tokens
+
+
+def test_one_file_a_parser_cannot_handle_costs_that_file_not_the_index(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #327 (major): a 1,200-term expression passes ast.parse and then raised
+    RecursionError out of the build, which rolled every later build back, so the index
+    froze silently. One file's failure is that file's, in ``failed``, with its type."""
+    deep = "x = " + " + ".join(["1"] * 1200) + "\n"
+    (repo / "pkg" / "gen_big.py").write_text(deep, encoding="utf-8")
+    (repo / "pkg" / "new_helper.py").write_text("def other_now():\n    pass\n", encoding="utf-8")
+    report = code_index.build("p", repo)
+    assert code_index.find("p", "other_now")[0].path == "pkg/new_helper.py"
+    assert "pkg/gen_big.py" not in report.failed, "a deep expression is not an error at all"
+
+    def broken(path: str, source: str) -> tuple[list[code_index.Symbol], list[code_index.Ref]]:
+        if path.endswith("app.py"):
+            raise MemoryError("a parser blew up")
+        return [], []
+
+    monkeypatch.setattr(code_index, "python_symbols", broken)
+    (repo / "pkg" / "app.py").write_text(PYTHON + "\n# touched\n", encoding="utf-8")
+    report = code_index.build("p", repo)
+    assert report.failed["pkg/app.py"].startswith("MemoryError: a parser blew up")
+
+
+def test_a_walk_outside_git_never_enters_an_ignored_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #327 (nit): node_modules was walked whole and filtered afterwards."""
+    root = tmp_path / "plain"
+    (root / "node_modules" / "deep").mkdir(parents=True)
+    (root / "node_modules" / "deep" / "x.py").write_text("def vendored():\n    pass\n")
+    (root / "a.py").write_text("def mine():\n    pass\n", encoding="utf-8")
+    entered: list[str] = []
+    real_walk = code_index.os.walk
+
+    def spy(top: object, **kwargs: object) -> object:
+        for current, dirs, files in real_walk(top, **kwargs):  # type: ignore[call-overload]
+            entered.append(Path(current).name)
+            yield current, dirs, files
+
+    monkeypatch.setattr(code_index.os, "walk", spy)
+    assert code_index.listed_files(root) == ["a.py"]
+    assert "node_modules" not in entered and "deep" not in entered

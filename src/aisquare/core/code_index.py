@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import fnmatch
 import hashlib
 import os
 import re
@@ -318,9 +319,14 @@ def _git_files(root: Path) -> list[str] | None:
 
 
 def _walk_files(root: Path) -> list[str]:
+    """Every file under ``root`` outside git, never entering a directory the snapshot's
+    defaults leave out (``node_modules``, ``.venv``…): pruned as walked, not filtered after."""
+    stems = [p.removeprefix("**/").removesuffix("/**") for p in snapshot_core.DEFAULT_IGNORE]
     found: list[str] = []
     for current, dirs, files in os.walk(root, onerror=lambda _exc: None):
-        dirs[:] = [name for name in dirs if name != ".git"]
+        dirs[:] = [
+            name for name in dirs if not any(fnmatch.fnmatchcase(name, stem) for stem in stems)
+        ]
         here = Path(current)
         found += [(here / name).relative_to(root).as_posix() for name in files]
     return found
@@ -386,19 +392,21 @@ def python_symbols(path: str, source: str) -> Parsed:
     symbols: list[Symbol] = []
     refs: list[Ref] = []
 
-    def visit(node: ast.AST, scope: list[ast.AST]) -> None:
+    # A stack, not recursion: a generated 1,200-term expression parses, and a recursive
+    # walk of it raised RecursionError (review of #327).
+    stack: list[tuple[ast.AST, list[ast.AST]]] = [(tree, [])]
+    while stack:
+        node, scope = stack.pop()
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 symbols.append(_python_symbol(path, child, scope))
-                visit(child, [*scope, child])
+                stack.append((child, [*scope, child]))
                 continue
             if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
                 refs.append(Ref(child.id, path, child.lineno))
             elif isinstance(child, ast.Attribute) and isinstance(child.ctx, ast.Load):
                 refs.append(Ref(child.attr, path, child.lineno))
-            visit(child, scope)
-
-    visit(tree, [])
+            stack.append((child, scope))
     return symbols, refs
 
 
@@ -673,6 +681,9 @@ def _build(
                     symbols, refs = extra.symbols(lang, rel, data)
             except ParseError as exc:
                 report.failed[rel] = str(exc)
+                symbols, refs = [], []
+            except Exception as exc:  # one file's failure is that file's, never the build's
+                report.failed[rel] = f"{type(exc).__name__}: {exc}"
                 symbols, refs = [], []
             conn.execute(
                 "INSERT OR REPLACE INTO file (path, sha256, size, mtime_ns, lang, parser) "

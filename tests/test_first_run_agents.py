@@ -21,15 +21,16 @@ import pytest
 from aisquare.cli.ui.views.welcome import claude_text
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
+from aisquare.core.agent_adapters import codex as codex_adapter
 from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.core.selfcli import CliResult
 from aisquare.models import ProjectInfo
-from aisquare.services import agent_launch, first_run, onboarding
+from aisquare.services import agent_launch, first_run
 from aisquare.services import agents as agents_service
 from aisquare.services import claude_accounts as accounts_service
 from tests.test_codex_accounts import _sign_in
 from tests.test_codex_plugin_route import install as plugin_install
-from tests.test_first_run import Spawns
+from tests.test_first_run import Spawns, admitted
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -204,11 +205,11 @@ def test_claude_code_is_still_probed_its_own_way() -> None:
 def test_codex_install_routes_name_its_own_installer_first() -> None:
     linux = first_run.install_routes("linux", agent="codex")
     assert [route.command for route in linux] == [
-        first_run.CODEX_INSTALL_COMMAND,
+        codex_adapter.INSTALL_COMMAND,
         "npm install -g @openai/codex",
     ]
     mac = first_run.install_routes("darwin", agent="codex")
-    assert first_run.CODEX_BREW_COMMAND in [route.command for route in mac]
+    assert codex_adapter.BREW_COMMAND in [route.command for route in mac]
     windows = first_run.install_routes("win32", agent="codex")
     assert [route.how for route in windows] == ["inside WSL2"]
     # Control: Claude Code's routes are unchanged.
@@ -220,7 +221,7 @@ def test_codex_install_routes_name_its_own_installer_first() -> None:
 def test_the_codex_installer_is_the_one_install_sh_runs() -> None:
     script = (REPO / "install.sh").read_text(encoding="utf-8")
     url = re.search(r'^CODEX_INSTALLER_URL="([^"]+)"', script, re.MULTILINE)
-    assert url is not None and url.group(1) in first_run.CODEX_INSTALL_COMMAND
+    assert url is not None and url.group(1) in codex_adapter.INSTALL_COMMAND
 
 
 # --------------------------------------------------------------------------- Connect, sign-in
@@ -245,7 +246,7 @@ def test_connect_is_the_doctors_fix_for_the_agent_step_2_shows(
     # Another home than the shell's is named, and the doctor's table admits it.
     elsewhere = first_run.connect_fix("codex", tmp_path / "elsewhere")
     assert elsewhere.argv[-2:] == ("--config-dir", str(tmp_path / "elsewhere"))
-    assert any(known.argv == elsewhere.argv[:3] for known in onboarding.KNOWN_FIXES)
+    assert admitted(elsewhere)
     # Control: Claude Code's Connect is what it was.
     assert first_run.connect_fix().argv == first_run.CONNECT_ARGV
 

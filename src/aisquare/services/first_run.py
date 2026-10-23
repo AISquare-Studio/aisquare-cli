@@ -56,7 +56,7 @@ from aisquare.core import config as config_core
 from aisquare.core import harness, orchestrator, paths, selfcli
 from aisquare.core import tmux as tmux_core
 from aisquare.core.agent_adapters import adapters, get_adapter
-from aisquare.core.agent_adapters.types import AgentAdapter, executable_name
+from aisquare.core.agent_adapters.types import AgentAdapter, InstallRoute, executable_name
 from aisquare.core.store import store_session
 from aisquare.models import ClaudeAccount, FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import agent_launch, diagnostics, onboarding
@@ -76,16 +76,7 @@ CODER_ROLE = "coder"
 CANDIDATE_LIMIT = 4
 """How many registered projects step 1 offers beside the directory ``asq`` started in."""
 
-BREW_COMMAND = "brew install --cask claude-code"
-"""Claude Code's Homebrew cask, offered on macOS after the native installer."""
-
-CODEX_INSTALL_COMMAND = "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
-"""Codex's own installer, as ``install.sh --agent codex`` runs it (its ``CODEX_INSTALLER_URL``)."""
-
-CODEX_BREW_COMMAND = "brew install --cask codex"
-"""Codex's Homebrew cask, offered on macOS after its installer."""
-
-CONNECT_ARGV: tuple[str, ...] = ("agents", "connect", "claude-code")
+CONNECT_ARGV: tuple[str, ...] = ("agents", "connect", accounts_core.AGENT)
 """The doctor's one-click Connect, as ``onboarding.KNOWN_FIXES`` lists it."""
 
 CHOOSABLE_SOURCES = frozenset({"default", "user"})
@@ -101,48 +92,22 @@ def _why(exc: BaseException) -> str:
 # --------------------------------------------------------------------------- the coding agent
 
 
-@dataclass(frozen=True)
-class InstallRoute:
-    """One way to install an agent: how it is installed, and the command a terminal runs."""
-
-    how: str
-    command: str
-
-
-_INSTALLERS: dict[str, tuple[str, str | None, str]] = {
-    accounts_core.AGENT: (
-        accounts_core.INSTALL_COMMAND,
-        BREW_COMMAND,
-        accounts_core.INSTALL_ALTERNATIVE,
-    ),
-    "codex": (CODEX_INSTALL_COMMAND, CODEX_BREW_COMMAND, get_adapter("codex").install_hint),
-}
-"""Per agent: its native installer, its Homebrew cask, its npm package."""
-
-
 def install_routes(
     platform: str | None = None, *, agent: str = accounts_core.AGENT
 ) -> tuple[InstallRoute, ...]:
-    """``agent``'s install commands for ``platform`` (default: this one), best first.
+    """``agent``'s install commands for ``platform`` (default: this one), best first: its
+    adapter's ``install_routes``, those offered there.
 
-    The native installer comes first: it is what ``install.sh`` runs and the layout
-    ``diagnostics.claude_code_version`` (and the Accounts page, for Codex) reads
-    first. npm comes last everywhere, because it needs a Node.js the machine may
-    not have. On Windows the fleet runs inside WSL2, where tmux is, so the one route
-    is the installer run there. An agent with no entry here has its adapter's hint.
+    Each adapter lists its own installer first (what ``install.sh`` runs, and the layout
+    the version probes read first) and npm last, because it needs a Node.js the machine
+    may not have. On Windows the fleet runs inside WSL2, where tmux is, so the one route
+    is the adapter's best, run there.
     """
     where = platform if platform is not None else sys.platform
-    known = _INSTALLERS.get(agent)
-    if known is None:
-        return (InstallRoute("install", get_adapter(agent).install_hint),)
-    installer, brew, npm_command = known
-    native = InstallRoute("installer", installer)
-    npm = InstallRoute("npm", npm_command)
+    routes = get_adapter(agent).install_routes
     if where == "win32":
-        return (InstallRoute("inside WSL2", installer),)
-    if where == "darwin" and brew is not None:
-        return (native, InstallRoute("Homebrew", brew), npm)
-    return (native, npm)
+        return (InstallRoute("inside WSL2", routes[0].command),)
+    return tuple(route for route in routes if not route.platforms or where in route.platforms)
 
 
 def agent_label(agent: str) -> str:
@@ -223,11 +188,6 @@ class ClaudeState:
     @property
     def found(self) -> bool:
         return self.binary is not None
-
-    @property
-    def is_claude(self) -> bool:
-        """Whether the fleet launches Claude Code itself rather than a binary the user chose."""
-        return harness.is_default_agent(self.wanted)
 
     @property
     def native(self) -> bool:
@@ -362,7 +322,8 @@ def _probe_claude(
         problems.append(f"could not look for {resolution.binary}: {_why(exc)}")
         binary = None
     version = None
-    if binary is not None and harness.is_default_agent(resolution.binary):
+    own = executable_name(resolution.binary) == get_adapter(accounts_core.AGENT).binary
+    if binary is not None and own:  # its own binary, not a stand-in the user chose
         version = diagnostics.claude_code_version(binary)
     manager_only = False
     try:
@@ -700,18 +661,13 @@ def connect_fix(agent: str = accounts_core.AGENT, home: Path | None = None) -> F
     """The doctor's Connect for ``agent``, taken from ``onboarding.KNOWN_FIXES`` — what one
     click may run. ``home`` is named (``--config-dir``) when it is not the one a session
     from this shell reads: a role whose launch sets another ``CODEX_HOME``."""
-    wanted = ("agents", "connect", agent)
-    known = next(k for k in onboarding.KNOWN_FIXES if k.argv == wanted)
-    argv = known.argv
+    known = next(k for k in onboarding.KNOWN_FIXES if k.agent and k.argv == CONNECT_ARGV[:2])
+    argv: tuple[str, ...] = (*known.argv, agent)
+    source = f"aisquare {' '.join(argv)}"
     ambient = agent_core.ambient_hook_dir(agent)
     if home is not None and (ambient is None or not _same_dir(home, ambient)):
         argv = (*argv, "--config-dir", str(home))
-    return FixCommand(
-        check=agent,
-        argv=argv,
-        scope=known.scope,
-        source=f"aisquare {' '.join(known.argv)}",
-    )
+    return FixCommand(check=agent, argv=argv, scope=known.scope, source=source)
 
 
 def _same_dir(one: Path, other: Path) -> bool:

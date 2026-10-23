@@ -24,8 +24,8 @@ from aisquare.cli.ui.sidebar import AccountsSelected
 from aisquare.cli.ui.views.accounts import AccountsView
 from aisquare.cli.ui.views.welcome import WelcomeView, agent_button, claude_text
 from aisquare.core import claude_accounts as accounts_core
+from aisquare.core.agent_adapters import codex as codex_adapter
 from aisquare.models import FleetAgentStatus
-from aisquare.services import first_run
 from aisquare.services.first_run import ClaudeState
 from tests.test_ui_welcome import (  # noqa: F401  (fixtures: pytest finds them by name here)
     MISSING,
@@ -106,7 +106,7 @@ def test_codex_missing_names_its_installer_and_check_again() -> None:
 
     text, check, start = hosted(Machine(claude=[CODEX_MISSING]), go)
     assert "Codex is not installed" in text
-    assert text.index(first_run.CODEX_INSTALL_COMMAND) < text.index("npm install -g @openai/codex")
+    assert text.index(codex_adapter.INSTALL_COMMAND) < text.index("npm install -g @openai/codex")
     assert accounts_core.INSTALL_COMMAND not in text  # Claude Code's install is not offered
     assert check and not start
 
@@ -115,12 +115,12 @@ def test_with_neither_installed_both_install_commands_are_named() -> None:
     title, text = hosted(Machine(claude=[NEITHER]), _look)
     assert title.startswith("2  Coding agent")
     assert "No coding agent is installed" in text
-    assert accounts_core.INSTALL_COMMAND in text and first_run.CODEX_INSTALL_COMMAND in text
+    assert accounts_core.INSTALL_COMMAND in text and codex_adapter.INSTALL_COMMAND in text
     assert text.index("Claude Code:") < text.index(accounts_core.INSTALL_COMMAND)
-    assert text.index("Codex:") < text.index(first_run.CODEX_INSTALL_COMMAND)
+    assert text.index("Codex:") < text.index(codex_adapter.INSTALL_COMMAND)
     # Control: Claude Code chosen by name (not choosable) names its own install only.
     _title, claude_only = hosted(Machine(claude=[MISSING]), _look)
-    assert first_run.CODEX_INSTALL_COMMAND not in claude_only
+    assert codex_adapter.INSTALL_COMMAND not in claude_only
 
 
 def test_connect_runs_for_codex_and_opens_step_three(tmp_path: Path) -> None:

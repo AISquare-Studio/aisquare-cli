@@ -16,6 +16,8 @@ from aisquare.core.agent_adapters.types import (
     ForkArgs,
     HookSpec,
     HooksSwitch,
+    InstallRoute,
+    LastingInstall,
     NativeChoice,
     PermissionIntent,
     PluginInstall,
@@ -23,12 +25,17 @@ from aisquare.core.agent_adapters.types import (
     SkillDirs,
     WriteScope,
     block_reply,
+    command_entry,
     option_occurrences,
     option_values,
     payload_cwd,
     payload_text,
 )
-from aisquare.core.claude_accounts import ClaudeCodeAccounts
+from aisquare.core.claude_accounts import (
+    INSTALL_ALTERNATIVE,
+    INSTALL_COMMAND,
+    ClaudeCodeAccounts,
+)
 
 #: ``--permission-mode`` for each approvals intent (``core.config.CLAUDE_PERMISSION_MODES``);
 #: ``never`` is ``bypassPermissions`` with a ``full`` write scope, else ``dontAsk``.
@@ -42,6 +49,8 @@ _SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
 #: read", so an OAuth-bound manager account could not pay.
 _HEADLESS_HEAD = ("--tools", "", "--max-turns", "1", "--output-format", "json")
 _HEADLESS_TAIL = ("--no-session-persistence", "--settings", "{}", "--strict-mcp-config")
+#: Claude Code's Homebrew cask, offered on macOS after the native installer.
+BREW_COMMAND = "brew install --cask claude-code"
 
 
 def _effort_level(payload: Mapping[str, Any]) -> str | None:
@@ -94,6 +103,13 @@ class ClaudeCodeAdapter:
     home_name = ".claude"
     settings_name = "settings.json"
     install_hint = "https://claude.ai/install.sh"
+    #: The native installer first: what ``install.sh`` runs and the layout
+    #: ``diagnostics.claude_code_version`` reads first; npm last, for it needs a Node.js.
+    install_routes: tuple[InstallRoute, ...] = (
+        InstallRoute("installer", INSTALL_COMMAND),
+        InstallRoute("Homebrew", BREW_COMMAND, frozenset({"darwin"})),
+        InstallRoute("npm", INSTALL_ALTERNATIVE),
+    )
     version_args: tuple[str, ...] = ("--version",)
     hooks_off_setting = '"disableAllHooks": true'
     exit_command = "/exit"
@@ -190,6 +206,19 @@ class ClaudeCodeAdapter:
         if read_json(settings_path).get("disableAllHooks") is True:
             return HooksSwitch(self.hooks_off_setting, settings_path)
         return None
+
+    def hook_entry(self, spec: HookSpec, command: str) -> dict[str, Any]:
+        """``{"type": "command", "command": …, "timeout": <seconds>}`` in a ``settings.json``
+        group (:func:`command_entry`)."""
+        return command_entry(spec, command)
+
+    def lasting_installs(self, home: Path) -> tuple[LastingInstall, ...]:
+        """The MCP servers that run aisquare in the ``.claude.json`` ``home`` uses and in the
+        ``.mcp.json`` of each project it lists, and the aisquare plugin enabled in ``home`` or
+        in a repository (``claude_installs``), each with the ``claude`` command that removes it."""
+        from aisquare.core.agent_adapters import claude_installs
+
+        return claude_installs.lasting_installs(home)
 
     def decode_event(self, payload: Mapping[str, Any]) -> AgentEvent | None:
         """One payload per hook subcommand (``aisquare hook session-start``…), which names

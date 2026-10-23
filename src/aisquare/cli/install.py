@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -19,6 +20,7 @@ import typer
 from aisquare.cli.common import fail
 from aisquare.core import agents as agent_core
 from aisquare.core import selfcli
+from aisquare.core.agent_adapters.types import LastingInstall
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.version import __version__
@@ -521,25 +523,19 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
                 "agent": entry.agent,
                 "file": str(entry.file),
                 "project": entry.project,
-                "remove": lifecycle_service.mcp_removal(entry),
+                "remove": entry.remove,
             }
             for entry in plan.mcp
         ],
-        "codex_plugins": [
-            {
-                "config_dir": str(plugin.config_dir),
-                "plugin": plugin.plugin_id,
-                "remove": lifecycle_service.codex_plugin_removal(plugin),
-            }
-            for plugin in plan.codex_plugins
-        ],
         "plugins": [
             {
-                "config_dir": str(plugin.config_dir),
+                "agent": plugin.agent,
+                "config_dir": str(plugin.home),
+                "plugin": plugin.name,
                 "version": plugin.version,
                 "scope": plugin.scope,
-                "project": None if plugin.project is None else str(plugin.project),
-                "remove": lifecycle_service.plugin_removal(plugin),
+                "project": plugin.project,
+                "remove": plugin.remove,
             }
             for plugin in plan.plugins
         ],
@@ -555,7 +551,9 @@ def _uninstall_plan_json(plan: lifecycle_service.UninstallPlan) -> dict[str, Any
             "exists": plan.home_exists,
             "entries": len(plan.home_entries),
             "accounts": list(plan.accounts),
-            "codex_accounts": [str(home) for home in plan.codex_accounts],
+            "account_homes": [
+                {"agent": agent, "path": str(home)} for agent, home in plan.account_homes
+            ],
             "keychain_tokens_kept": plan.keychain and bool(plan.accounts),
             "action": "delete" if plan.purges else "keep",
         },
@@ -608,9 +606,10 @@ def _home_line(plan: lifecycle_service.UninstallPlan) -> str:
     what = f"{count} entr{'ies' if count != 1 else 'y'}: your memory, boards and settings"
     if plan.accounts:
         what += f", and the Claude Code logins in {'; '.join(plan.accounts)}"
-    if plan.codex_accounts:
-        homes = len(plan.codex_accounts)
-        what += f", and {homes} Codex account home{'s' if homes != 1 else ''}, sign-ins included"
+    homes = Counter(agent for agent, _home in plan.account_homes)
+    for agent, count in homes.items():
+        label = lifecycle_service.agent_label(agent)
+        what += f", and {count} {label} account home{'s' if count != 1 else ''}, sign-ins included"
     return f"{plan.home} — {what}"
 
 
@@ -664,31 +663,23 @@ def _emit_uninstall_plan(plan: lifecycle_service.UninstallPlan) -> None:
         with_it = " (and this with it)" if plan.home_exists else " (delete it with --purge)"
         for answers in plan.plugin_answers:
             _say(f"  {_plugin_answers_line(answers)}{with_it if offer else ''}")
-    lasting_mcp = plan.lasting_mcp
-    claude_mcp = [entry for entry in lasting_mcp if entry.agent != lifecycle_service.CODEX]
-    codex_mcp = [entry for entry in lasting_mcp if entry.agent == lifecycle_service.CODEX]
-    if claude_mcp:
-        _say("  MCP servers that run aisquare (Claude Code owns .claude.json; remove each with")
+    by_agent: dict[str, list[LastingInstall]] = {}
+    for entry in plan.lasting_mcp:
+        by_agent.setdefault(entry.agent, []).append(entry)
+    for agent, entries in by_agent.items():
+        owner = lifecycle_service.agent_label(agent)
+        files = ", ".join(dict.fromkeys(entry.file.name for entry in entries))
+        _say(f"  MCP servers that run aisquare ({owner} owns {files}; remove each with")
         _say("  the command under it):")
-        for entry in claude_mcp:
+        for entry in entries:
             _say(f"    {entry.name} in {lifecycle_service.mcp_place(entry)}")
-            _say(f"      {lifecycle_service.mcp_removal(entry)}")
-    if codex_mcp:
-        _say("  Codex MCP servers that run aisquare (Codex owns config.toml; remove each with")
-        _say("  the command under it):")
-        for entry in codex_mcp:
-            _say(f"    {entry.name} in {lifecycle_service.mcp_place(entry)}")
-            _say(f"      {lifecycle_service.mcp_removal(entry)}")
+            _say(f"      {entry.remove}")
     for plugin in plan.lasting_plugins:
-        # Claude Code's to remove, and it keeps running aisquare: said, never silent.
+        # The agent's to remove, and it keeps running aisquare: said, never silent.
         where = lifecycle_service.plugin_place(plugin)
         _say(f"  the aisquare plugin in {where}, which keeps running aisquare")
         _say("  there (through uvx once the package is gone) — remove it with:")
-        _say(f"    {lifecycle_service.plugin_removal(plugin)}")
-    for codex_plugin in plan.lasting_codex_plugins:
-        _say(f"  the aisquare Codex plugin in {codex_plugin.config_dir}, which keeps running")
-        _say("  aisquare there — remove it with:")
-        _say(f"    {lifecycle_service.codex_plugin_removal(codex_plugin)}")
+        _say(f"    {plugin.remove}")
     _say(f"  {lifecycle_service.stays_installed(plan)}")
     if plan.fleet_error is not None:
         _say(f"⚠ the fleet's agents could not be counted ({plan.fleet_error}); make sure none run")
@@ -813,12 +804,6 @@ def _uninstall_question(plan: lifecycle_service.UninstallPlan) -> str | None:
         text += (
             f" (the aisquare plugin stays enabled in {count} "
             f"director{'ies' if count != 1 else 'y'} and keeps running aisquare)"
-        )
-    if plan.lasting_codex_plugins:
-        count = len(plan.lasting_codex_plugins)
-        text += (
-            f" (the aisquare Codex plugin stays enabled in {count} Codex "
-            f"home{'s' if count != 1 else ''} and keeps running aisquare)"
         )
     return text[0].upper() + text[1:] + "?"
 

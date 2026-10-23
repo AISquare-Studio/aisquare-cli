@@ -176,8 +176,9 @@ def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
     """
     from aisquare.core import agents as agent_core
 
-    context = agent_core.inspect_context(account.agent, account.config_dir, read_documents=False)
-    _readiness, detail = agent_core.integration_readiness(account.agent, account.config_dir)
+    home = core.agent_config_dir(account)
+    context = agent_core.inspect_context(account.agent, home, read_documents=False)
+    _readiness, detail = agent_core.integration_readiness(account.agent, home)
     if account.agent != AGENT:
         kind = core.kind(account.agent)
         return ClaudeAccountStatus(
@@ -216,7 +217,7 @@ def _hooks_installed(account: ClaudeAccount) -> bool:
         from aisquare.core import agents as agent_core
 
         try:
-            return agent_core.hooks_installed(account.agent, account.config_dir)
+            return agent_core.hooks_installed(account.agent, core.agent_config_dir(account))
         except Exception:
             return False
     return agents_service.claude_code_connected(account.config_dir)
@@ -2164,10 +2165,11 @@ def sign_in_landed(account: ClaudeAccount, *, since: str | None = None) -> Claud
 def complete_sign_in(account: ClaudeAccount) -> ClaudeAccountStatus:
     """Wire the newly signed-in directory like any other: aisquare's hooks into its settings.
 
-    ``agents connect <agent> --config-dir <slot>``'s own call, for the slot's agent.
+    ``agents connect <agent> --config-dir <slot>``'s own call, for the slot's agent, in
+    the config dir it reads there (``core.agent_config_dir``).
     """
     try:
-        agents_service.connect(account.agent, account.config_dir)
+        agents_service.connect(account.agent, core.agent_config_dir(account))
     except (ValueError, OSError) as exc:
         # Login has already landed. Keep the account and report the partial
         # success through both the terminal and the Accounts page.
@@ -2237,7 +2239,7 @@ def remove(account: ClaudeAccount, *, notes: list[str] | None = None) -> Path:
     )
     # The directory is leaving either way; a settings.json we cannot parse is not a stop.
     with contextlib.suppress(Exception):
-        agents_service.disconnect(account.agent, account.config_dir)
+        agents_service.disconnect(account.agent, core.agent_config_dir(account))
     moved = core.remove_account(account)
     # After the rename, never before: the number is free again the moment the
     # directory moves, and a default or alias left behind would be inherited by

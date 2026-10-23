@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from aisquare.core import harness
+from aisquare.core import agents, harness
+from aisquare.core.agent_adapters.lasting import fetches_aisquare, runs_aisquare
 from aisquare.core.agent_adapters.transcripts import (
     YOU,
     PendingTool,
@@ -43,6 +45,8 @@ from aisquare.core.agent_adapters.types import (
     ForkArgs,
     HookSpec,
     HooksSwitch,
+    InstallRoute,
+    LastingInstall,
     NativeChoice,
     PermissionIntent,
     SandboxWrites,
@@ -277,6 +281,9 @@ class FakeAccounts:
         value = plain.get(self.home_env, "").strip()
         return Path(value).expanduser() if value else home / ".fakeagent"
 
+    def config_dir(self, slot_dir: Path) -> Path:
+        return slot_dir  # FAKE_AGENT_HOME names its config dir itself
+
     def _login(self, account: ClaudeAccount) -> dict[str, Any] | None:
         try:
             data = json.loads((account.config_dir / "login.json").read_text(encoding="utf-8"))
@@ -326,6 +333,8 @@ class FakeAgentAdapter:
     home_name = ".fakeagent"
     settings_name = "hooks.json"
     install_hint = "pipx install fake-agent"
+    #: Its own route alone, unlike both real agents' installer, cask and npm.
+    install_routes: tuple[InstallRoute, ...] = (InstallRoute("pipx", "pipx install fake-agent"),)
     version_args: tuple[str, ...] = ("version",)
     hooks_off_setting = '"hooks_off": true'
     exit_command = "/quit"
@@ -378,6 +387,32 @@ class FakeAgentAdapter:
         if isinstance(settings, dict) and settings.get("hooks_off") is True:
             return HooksSwitch(self.hooks_off_setting, settings_path)
         return None
+
+    def hook_entry(self, spec: HookSpec, command: str) -> dict[str, Any]:
+        # Its handlers carry what they are for beside the command, and their timeout in seconds.
+        entry: dict[str, Any] = {"type": "command", "command": command, "for": "aisquare"}
+        if spec.timeout is not None:
+            entry["timeout"] = spec.timeout
+        return entry
+
+    def lasting_installs(self, home: Path) -> tuple[LastingInstall, ...]:
+        # Its MCP servers in `servers.json` (`{"servers": {name: {"command", "args"}}}`),
+        # removed with `fakeagent servers drop <name> --home <home>`.
+        path = agents.dir_identity(home / "servers.json")
+        servers = agents.read_json(path).get("servers")
+        return tuple(
+            LastingInstall(
+                self.id,
+                "mcp",
+                str(name),
+                path,
+                home,
+                shlex.join(["fakeagent", "servers", "drop", str(name), "--home", str(home)]),
+                fetches=fetches_aisquare(spec),
+            )
+            for name, spec in (servers.items() if isinstance(servers, dict) else ())
+            if runs_aisquare(spec)
+        )
 
     def decode_event(self, payload: Mapping[str, Any]) -> AgentEvent | None:
         kind = EVENTS.get(payload_text(payload, "hook_event_name") or "")

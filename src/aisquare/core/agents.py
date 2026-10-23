@@ -645,11 +645,12 @@ def install_hooks(name: str, config_dir: Path | None = None) -> bool:
         groups = hooks.get(hook.event)
         kept = _without_aisquare(groups) if isinstance(groups, list) else []
         argv = " ".join(_quote(arg) for arg in hook_args(adapter, hook, spec.home))
-        entry: dict[str, Any] = {"type": "command", "command": f"{command} hook {argv}"}
-        if hook.timeout is not None:
+        # The agent's own handler shape, the timeout in its own unit (Gemini CLI's is ms).
+        entry = adapter.hook_entry(hook, f"{command} hook {argv}")
+        if isinstance(entry.get("timeout"), int):
             # Never below the ceiling the CI hook may wait for; never *reducing*
             # a longer one the operator chose deliberately.
-            entry["timeout"] = max(hook.timeout, _installed_timeout(groups, hook.event) or 0)
+            entry["timeout"] = max(entry["timeout"], _installed_timeout(groups, hook.event) or 0)
         group: dict[str, Any] = {"hooks": [entry]}
         if hook.matcher is not None:
             group["matcher"] = hook.matcher
@@ -1009,12 +1010,36 @@ def read_json(path: Path) -> dict[str, Any]:
     is deliberately NOT this: it feeds a read-modify-WRITE of the operator's
     ``settings.json``, where a permission error or a trailing comma swallowed
     into ``{}`` would be written back over everything in it — so it raises.
+    Within :func:`reads_once`, a path read before answers as it did, unparsed again.
     """
+    once = _READ_ONCE.get()
+    if once is not None and path in once:
+        return once[path]
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+        data = {}
+    found: dict[str, Any] = data if isinstance(data, dict) else {}
+    if once is not None:
+        once[path] = found
+    return found
+
+
+_READ_ONCE: ContextVar[dict[Path, dict[str, Any]] | None] = ContextVar("_READ_ONCE", default=None)
+
+
+@contextmanager
+def reads_once() -> Iterator[None]:
+    """Within it, :func:`read_json` parses each path once, for a reader that asks several
+    things of one file: ``aisquare uninstall``'s plan reads a slot's ``.claude.json`` for
+    its MCP servers (the adapter's ``lasting_installs``) and for its login, and such a file
+    can reach tens of MB (round 23 of #257). What it answers is the reader's to read, never
+    to change; nothing written in the meantime is seen."""
+    token = _READ_ONCE.set({})
+    try:
+        yield
+    finally:
+        _READ_ONCE.reset(token)
 
 
 def enabled_plugins(config_dir: Path) -> list[str]:

@@ -47,6 +47,7 @@ from aisquare.cli.ui.views.onboard import ProjectOnboarded
 from aisquare.cli.ui.views.welcome import FLEET_UP, Seams, WelcomeView
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters import claude_code
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed
 from aisquare.core.workspace import project_id_for
@@ -405,8 +406,8 @@ def test_each_platform_names_its_own_install() -> None:
 
     mac = hosted(Machine(), go, platform="darwin")
     windows = hosted(Machine(), go, platform="win32")
-    assert first_run.BREW_COMMAND in mac and "WSL2" not in mac
-    assert "WSL2" in windows and first_run.BREW_COMMAND not in windows
+    assert claude_code.BREW_COMMAND in mac and "WSL2" not in mac
+    assert "WSL2" in windows and claude_code.BREW_COMMAND not in windows
 
 
 def test_an_override_that_is_missing_is_named_not_claude() -> None:

@@ -130,5 +130,17 @@
     "relogin": {
       "login.json": "{\"user\": \"one@example.com\", \"token\": \"token-two\"}"
     }
+  },
+  "lasting": {
+    "files": {
+      "servers.json": "{\"servers\": {\"memory\": {\"command\": \"uvx\", \"args\": [\"--from\", \"aisquare-cli\", \"aisquare\", \"serve\", \"--stdio\"]}, \"docs\": {\"command\": \"npx\", \"args\": [\"docs-mcp\"]}}}"
+    },
+    "expect": [
+      [
+        "mcp",
+        "memory",
+        true
+      ]
+    ]
   }
 }

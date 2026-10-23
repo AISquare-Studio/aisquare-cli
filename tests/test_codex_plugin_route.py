@@ -26,7 +26,6 @@ from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters.codex import PLUGIN, PLUGIN_HOOKS, PLUGIN_MARKETPLACE
-from aisquare.services import lifecycle
 from tests.test_claude_plugin import Machine, posix_only
 from tests.test_codex_plugin import _hooks_json, _program, _run, machine  # noqa: F401
 
@@ -109,7 +108,7 @@ def codex(isolated_agent_home: Path) -> Path:
 def test_the_names_are_the_manifests() -> None:
     market = json.loads((REPO / ".agents" / "plugins" / "marketplace.json").read_text("utf-8"))
     assert (market["plugins"][0]["name"], market["name"]) == (PLUGIN, PLUGIN_MARKETPLACE)
-    assert PLUGIN == lifecycle.CODEX_PLUGIN, "uninstall looks for the same name"
+    assert PLUGIN == agent_core.CLAUDE_PLUGIN, "the Claude Code plugin's name: one for both"
 
 
 def test_the_trust_keys_are_the_ones_codex_wrote() -> None:
@@ -222,8 +221,9 @@ def test_its_command_is_codex_plugin_remove_as_uninstall_names_it(
         )
     monkeypatch.delenv("CODEX_HOME")
     for home, plugin_id in ((codex, "aisquare@aisquare-cli"), (fork, "aisquare@my-fork")):
-        expected = lifecycle.codex_plugin_removal(lifecycle.CodexPlugin(home, plugin_id))
-        assert plugin.command(verb, home) == expected
+        # What uninstall names for it (the adapter's `lasting_installs`).
+        [left] = [e for e in get_adapter("codex").lasting_installs(home) if e.kind == "plugin"]
+        assert left.name == plugin_id and plugin.command(verb, home) == left.remove
 
 
 def test_native_windows_has_no_codex_plugin_route(

@@ -18,12 +18,10 @@ import os
 import re
 import shutil
 import sqlite3
-import sys
-import tomllib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any
 
 from aisquare.core import agents as agent_core
@@ -31,7 +29,8 @@ from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import credentials as credentials_store
 from aisquare.core import paths
 from aisquare.core import snapshot as snapshot_core
-from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters import DEFAULT_AGENT, adapters, get_adapter
+from aisquare.core.agent_adapters.types import AgentAdapter, LastingInstall
 from aisquare.core.config import (
     AppConfig,
     ExplainabilitySettings,
@@ -50,7 +49,7 @@ from aisquare.core.tmux import (
 )
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import project_id_for
-from aisquare.models import ClaudeIdentity, ProjectInfo, SetupReport
+from aisquare.models import ProjectInfo, SetupReport
 from aisquare.services import agents as agents_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import install_route, onboarding
@@ -281,13 +280,9 @@ def _explainability_step(decision: bool | None) -> list[str]:
 
 # --- upgrade -----------------------------------------------------------------------------
 
-HOOK_AGENT = "claude-code"
+HOOK_AGENT = DEFAULT_AGENT
 """The first agent whose hooks aisquare wrote (``core.agents._HOOKS``), and what every
 per-agent helper here reads when it is not told another (:func:`hook_agents`)."""
-
-CODEX = "codex"
-"""Codex: its hooks in ``$CODEX_HOME/hooks.json``, its MCP servers and plugins in
-``$CODEX_HOME/config.toml``, and the homes it may run in (:func:`_codex_homes`)."""
 
 
 def hook_agents() -> tuple[str, ...]:
@@ -656,18 +651,14 @@ def lacks_refresh_hooks(release: str) -> bool:
     return install_route.is_newer(FIRST_REFRESH_HOOKS, release) is True
 
 
-#: The last release with no Codex hooks: an install of it, or of one before it, has none to
-#: write, and its ``agents refresh-hooks codex`` fails.
-LAST_WITHOUT_CODEX_HOOKS = "0.8.2"
-
-
 def lacks_agent_hooks(agent: str, release: str) -> bool:
-    """Whether ``release`` has no hooks for ``agent`` to write: Codex's, up to
-    :data:`LAST_WITHOUT_CODEX_HOOKS`. Claude Code's have been there since before
-    ``upgrade`` (:func:`lacks_refresh_hooks` is that release's question)."""
-    if agent != CODEX:
+    """Whether ``release`` has no hooks for ``agent`` to write: one up to the adapter's
+    ``capabilities.hookless_through`` (Codex's 0.8.2). Claude Code's have been there since
+    before ``upgrade`` (:func:`lacks_refresh_hooks` is that release's question)."""
+    through = get_adapter(agent).capabilities.hookless_through
+    if through is None:
         return False
-    return install_route.is_newer(release, LAST_WITHOUT_CODEX_HOOKS) is False
+    return install_route.is_newer(release, through) is False
 
 
 def _held_by_target(
@@ -835,22 +826,19 @@ def runs_this_install(binary: agent_core.HookBinary, found: install_route.Facts)
 
 def _refresh_candidates(agent: str) -> list[Path]:
     """The directories whose ``agent`` hooks an upgrade may rewrite: those THIS home
-    connected (``agents.json``), and for Codex also every account home under this home
-    (:func:`_codex_account_dirs`), which only aisquare makes. Not a retired one
+    connected (``agents.json``), and every account home of the agent's under this home
+    (:func:`_account_homes`), which only aisquare makes. Not a retired one
     (``<n>.removed-<stamp>``): `refresh-hooks` records the home it writes as connected,
     and a removed account would come back as a connection."""
-    recorded = agent_core.connected_dirs(agent)
-    if agent != CODEX:
-        return recorded
-    slots = [home for home in _codex_account_dirs() if ".removed-" not in home.name]
-    return [*recorded, *slots]
+    slots = [home for slot, home in _account_homes(get_adapter(agent)) if not _retired(slot)]
+    return [*agent_core.connected_dirs(agent), *slots]
 
 
 def refresh_sites(found: install_route.Facts) -> tuple[tuple[HookSite, ...], tuple[HookSite, ...]]:
     """Which recorded hook sites the upgraded install re-connects, and which it leaves.
 
     Every agent's (:func:`hook_agents`), and only directories THIS home connected
-    (``agents.json``) or made (a Codex account home, :func:`_refresh_candidates`) — a
+    (``agents.json``) or made (an account home, :func:`_refresh_candidates`) — a
     directory found on disk was never this home's to rewrite — and only those that still
     carry aisquare hooks: an operator who removed them by hand did not ask for them
     back. A site whose hooks run ANOTHER install of aisquare that is still on
@@ -1295,53 +1283,6 @@ class UninstallRefused(RuntimeError):
 
 
 @dataclass(frozen=True)
-class McpRegistration:
-    """An MCP server entry in a ``.claude.json``, or in a Codex home's ``config.toml``
-    (``[mcp_servers.<name>]``), that runs aisquare."""
-
-    name: str
-    file: Path
-    """The ``.claude.json`` that holds it: the file itself, links resolved, so one file
-    reached two ways is one, and a link the purge deletes never stands for a file it
-    leaves (sweep 2 of #257). A Codex entry's ``config.toml``, the same way."""
-    project: str | None = None
-    """The project a local-scope entry belongs to; ``None`` for user scope."""
-    config_dir: Path | None = None
-    """The ``CLAUDE_CONFIG_DIR`` under which ``claude`` reads ``file``: ``None`` for
-    ``~/.claude.json``, which it reads with that variable unset. A Codex entry's is the
-    ``CODEX_HOME`` that holds ``file``."""
-    fetches: bool = False
-    """Whether it runs aisquare through a runner that fetches the package (``uvx``,
-    ``uv tool run``, ``uv run --with``, ``pipx run``), so it still starts once the
-    package is gone and makes the home again (:func:`_fetches_aisquare`)."""
-    shared: bool = False
-    """A project-scope entry: ``file`` is the repository's own ``.mcp.json``, which
-    ``claude mcp remove --scope project`` edits from inside ``project``."""
-    asked_in: tuple[Path, ...] = ()
-    """For a project-scope entry, each ``.claude.json`` (the file itself) whose block for
-    the project has not declined it: sessions under that config dir start it, or ask to
-    (:func:`_project_registrations`)."""
-    agent: str = HOOK_AGENT
-    """Whose file holds it, and so whose command removes it (:func:`mcp_removal`)."""
-
-
-#: The name the aisquare Codex plugin is installed under, before its ``@marketplace``: the
-#: one an uninstall looks for in each Codex home's ``config.toml`` (:func:`_codex_plugins`).
-#: The Codex plugin route's manifest holds the same name as the Claude Code plugin's.
-CODEX_PLUGIN = agent_core.CLAUDE_PLUGIN
-
-
-@dataclass(frozen=True)
-class CodexPlugin:
-    """The aisquare Codex plugin, enabled in a Codex home's ``config.toml``
-    (``[plugins."aisquare@<marketplace>"]``)."""
-
-    config_dir: Path
-    plugin_id: str
-    """As ``config.toml`` keys it and ``codex plugin remove`` takes it: ``aisquare@…``."""
-
-
-@dataclass(frozen=True)
 class UninstallPlan:
     """What ``aisquare uninstall`` would do, read before anything is touched.
 
@@ -1352,12 +1293,15 @@ class UninstallPlan:
 
     route: install_route.InstallRoute
     hooks: tuple[HookSite, ...]
-    """Every Claude Code directory and Codex home holding aisquare hooks, with what they
-    run (:attr:`HookSite.agent` says whose)."""
+    """Every agent's config dir holding aisquare hooks, with what they run
+    (:attr:`HookSite.agent` says whose)."""
     unreadable: tuple[HookSite, ...]
     """Directories whose hooks cannot be taken out: a settings.json that could not be
     read, which may hold some, or one holding ours that this user may not write."""
-    mcp: tuple[McpRegistration, ...]
+    mcp: tuple[LastingInstall, ...]
+    """The MCP servers that run aisquare in the agents' own files (each adapter's
+    ``lasting_installs``), which uninstall lists and never edits: the agent owns the file,
+    and each names the agent's command that removes it."""
     package_argv: tuple[str, ...]
     package_env: dict[str, str]
     package_reason: str | None
@@ -1400,22 +1344,20 @@ class UninstallPlan:
     :attr:`live_agents`: a label names its project's folder, and two folders share a name
     (``~/work/api``, ``~/oss/api``), so one ``manager (api)`` unreached hid the other that
     answers (round 29 of #257)."""
-    plugins: tuple[agent_core.ClaudePlugin, ...] = ()
-    """Where the aisquare Claude Code plugin is enabled: in a config dir (user scope) or
-    in a repository (project and local scope). Uninstall leaves it, as Claude Code owns
-    it, and it keeps running aisquare there: through uvx once the package is gone,
-    which makes the home again (review of #257)."""
+    plugins: tuple[LastingInstall, ...] = ()
+    """Where an agent enables the aisquare plugin: in a config dir (user scope) or in a
+    repository (project and local scope). Uninstall leaves it, as the agent owns it, and
+    it keeps running aisquare there: through uvx once the package is gone, which makes the
+    home again (review of #257)."""
     plugin_answers: tuple[Path, ...] = ()
     """The files the plugin's launcher keeps uv's answers in (:func:`plugin_answers`), each
     where it or what a launcher cut short left beside it is there
     (:func:`_plugin_answers_there`): outside the home, so named beside it, and deleted
     with --purge (:attr:`deletes_answers`)."""
-    codex_plugins: tuple[CodexPlugin, ...] = ()
-    """The Codex homes that enable the aisquare Codex plugin (:func:`_codex_plugins`). Codex
-    owns them, so uninstall leaves the plugin and names its removal, as for Claude Code's."""
-    codex_accounts: tuple[Path, ...] = ()
-    """The Codex account homes inside the home (:func:`_codex_account_dirs`), each with its
-    sign-in: a purge deletes them with it."""
+    account_homes: tuple[tuple[str, Path], ...] = ()
+    """``(agent, home)`` for every account home inside the home whose login :attr:`accounts`
+    does not describe (:func:`_account_homes`: a Codex slot's), each with its sign-in: a
+    purge deletes them with it."""
     remote: str | None = None
     """The Remote that is on for this home in another process, named (:func:`running_remote`);
     ``None`` when none is. It refuses the run, as a running fleet agent does."""
@@ -1466,31 +1408,24 @@ class UninstallPlan:
         return agent_core.dir_identity(self.home) in agent_core.dir_identity(path).parents
 
     @property
-    def lasting_plugins(self) -> tuple[agent_core.ClaudePlugin, ...]:
+    def lasting_plugins(self) -> tuple[LastingInstall, ...]:
         """The plugins still enabled after this run: when it purges, not those whose config
         dir is inside the home it deletes (the fleet's account slots, retired ones too),
         which go with it and can run nothing afterwards (review of #257)."""
         if not self.purges:
             return self.plugins
-        return tuple(plugin for plugin in self.plugins if not self.in_home(plugin.config_dir))
+        return tuple(plugin for plugin in self.plugins if not self.in_home(plugin.home))
 
     @property
-    def lasting_codex_plugins(self) -> tuple[CodexPlugin, ...]:
-        """:attr:`codex_plugins` still enabled after this run: when it purges, not those in a
-        Codex account home inside the home it deletes, as :attr:`lasting_plugins`."""
-        if not self.purges:
-            return self.codex_plugins
-        return tuple(p for p in self.codex_plugins if not self.in_home(p.config_dir))
-
-    @property
-    def lasting_mcp(self) -> tuple[McpRegistration, ...]:
+    def lasting_mcp(self) -> tuple[LastingInstall, ...]:
         """The MCP registrations still there after this run: when it purges, not those in a
-        ``.claude.json`` inside the home (an account slot's), which the purge deletes, as it
-        does a plugin there (sweep 2 of #257). Nor a repository's ``.mcp.json`` server that
-        only blocks inside the home have not declined (:attr:`McpRegistration.asked_in`):
-        the purge deletes them, and every config dir left declined it, so no session starts
-        it, and its removal would edit the repository's committed file (round 27). ``file``
-        is the file itself, so the answer is the same after the purge as before it."""
+        file inside the home (an account slot's ``.claude.json`` or ``config.toml``), which
+        the purge deletes, as it does a plugin there (sweep 2 of #257). Nor a repository's
+        own server (:attr:`LastingInstall.shared`) that only files inside the home start
+        (:attr:`LastingInstall.asked_in`): the purge deletes them, and every config dir left
+        declined it, so no session starts it, and its removal would edit the repository's
+        committed file (round 27). ``file`` is the file itself, so the answer is the same
+        after the purge as before it."""
         if not self.purges:
             return self.mcp
         return tuple(
@@ -1583,7 +1518,7 @@ class UninstallPlan:
         # (round 27 of #257); the next session undoing either is the same (round 28).
         purging = self.purges or self.deletes_answers
         if purging and fetching:
-            # As a plugin below: Claude Code's next session starts the server, uvx fetches
+            # As a plugin below: the agent's next session starts the server, uvx fetches
             # aisquare, and `aisquare serve` makes the home again (review of #257). One
             # naming the installed program can only fail once the package is gone.
             where = ", ".join(f"{entry.name} in {mcp_place(entry)}" for entry in fetching)
@@ -1592,47 +1527,27 @@ class UninstallPlan:
                 f"--purge would not last: the MCP server {where} runs aisquare through a "
                 f"runner that fetches it, so {who}'s next session starts it and makes "
                 f"{self.home} again. Remove it first: "
-                f"{'; '.join(mcp_removal(entry) for entry in fetching)}",
+                f"{'; '.join(entry.remove for entry in fetching)}",
                 error="mcp_registered",
             )
         if purging and lasting:
             # A purge the next session undoes is not one: refused like the fleet, with
             # the command that clears the way. A plain uninstall only says so.
             where = ", ".join(plugin_place(plugin) for plugin in lasting)
+            who = " or ".join(dict.fromkeys(agent_label(plugin.agent) for plugin in lasting))
             return UninstallRefused(
                 f"--purge would not last: the aisquare plugin is enabled in {where}, so "
-                f"Claude Code's next session there runs aisquare and makes {self.home} again. "
-                f"Remove the plugin first: "
-                f"{'; '.join(plugin_removal(plugin) for plugin in lasting)}",
-                error="plugin_enabled",
-            )
-        codex_lasting = self.lasting_codex_plugins
-        if purging and codex_lasting:
-            # The Codex plugin's hooks run aisquare as the Claude Code plugin's do, so a purge
-            # its next session undoes is refused the same way.
-            where = ", ".join(str(plugin.config_dir) for plugin in codex_lasting)
-            return UninstallRefused(
-                f"--purge would not last: the aisquare Codex plugin is enabled in {where}, so "
-                f"Codex's next session there runs aisquare and makes {self.home} again. "
-                f"Remove the plugin first: "
-                f"{'; '.join(codex_plugin_removal(plugin) for plugin in codex_lasting)}",
+                f"{who}'s next session there runs aisquare and makes {self.home} again. "
+                f"Remove the plugin first: {'; '.join(plugin.remove for plugin in lasting)}",
                 error="plugin_enabled",
             )
         return None
 
 
-def plugin_removal(plugin: agent_core.ClaudePlugin) -> str:
-    """The command that removes the aisquare plugin from its config dir — at its scope,
-    and for a project- or local-scope install from inside its repository."""
-    return agent_core.claude_plugin_command(
-        "uninstall", plugin.config_dir, scope=plugin.scope, project=plugin.project
-    )
-
-
-def plugin_place(plugin: agent_core.ClaudePlugin) -> str:
+def plugin_place(plugin: LastingInstall) -> str:
     """Where the aisquare plugin runs: its config dir, or the repository that enables it."""
     if plugin.project is None:
-        return str(plugin.config_dir)
+        return str(plugin.home)
     return f"{plugin.project} ({plugin.scope} scope)"
 
 
@@ -1757,8 +1672,8 @@ def purge_refusal(home: Path, *, custom: bool) -> str | None:
     return None
 
 
-def _account_dirs() -> list[Path]:
-    """Every directory under the managed account root: the slots and the removed ones.
+def _slot_dirs(root: Path) -> list[Path]:
+    """Every directory under an account root: the slots and the removed ones.
 
     Asked one entry at a time with ``os.path.isdir``, which never raises. ``Path.is_dir``
     raised PermissionError on 3.11 to 3.13 for a slot linked into a folder this user
@@ -1766,7 +1681,6 @@ def _account_dirs() -> list[Path]:
     one whose hooks hold the purge up included. That slot is skipped, as agent_core's
     scan skips such a directory: no session of this user can read hooks there.
     """
-    root = paths.claude_accounts_dir()
     if not os.path.isdir(root):
         return []
     try:
@@ -1776,561 +1690,140 @@ def _account_dirs() -> list[Path]:
     return [child for child in children if os.path.isdir(child)]
 
 
-def _accounts_kept(logins: Mapping[Path, ClaudeIdentity | None]) -> tuple[str, ...]:
+def _retired(slot: Path) -> bool:
+    """Whether ``slot`` is a removed account's directory (``<n>.removed-<stamp>``)."""
+    return ".removed-" in slot.name
+
+
+def _account_homes(adapter: AgentAdapter) -> list[tuple[Path, Path]]:
+    """``(slot, config dir)`` for each of the agent's account slots under this home, removed
+    ones too, with the config dir its agent reads there (``AgentAccounts.config_dir``):
+    homes only aisquare makes. None for an agent without account slots."""
+    accounts = adapter.accounts
+    if accounts is None:
+        return []
+    root = accounts_core.accounts_root(adapter.id)
+    return [(slot, accounts.config_dir(slot)) for slot in _slot_dirs(root)]
+
+
+def _siblings(adapter: AgentAdapter) -> list[Path]:
+    """Every ``~/<home_name>*`` directory, sorted, hooked or not (``~/.claude``,
+    ``~/.claude-account1``, ``~/.codex-work``): ``agent_core.claude_dir_siblings``' listing,
+    for any agent. Each asked with ``os.path.isdir``, which never raises; only the listing
+    itself is guarded."""
+    try:
+        found = sorted(agent_core.home().glob(f"{adapter.home_name}*"))
+    except OSError:
+        return []
+    return [path for path in found if os.path.isdir(path)]
+
+
+def _once(directories: Iterable[Path]) -> list[Path]:
+    """``directories`` with each directory once (``agent_core.dir_identity``), in order."""
+    seen: set[Path] = set()
+    kept: list[Path] = []
+    for directory in directories:
+        key = agent_core.dir_identity(directory)
+        if key not in seen:
+            seen.add(key)
+            kept.append(directory)
+    return kept
+
+
+def _agent_homes(adapter: AgentAdapter) -> list[Path]:
+    """Every config dir of the agent's that aisquare may have written into or the agent may
+    read, each once: the doctor's (``agent_core.hook_dirs``: those this home connected, the
+    one a session from this shell reads, siblings holding our hooks), the agent's default
+    whether or not it is there (Claude Code keeps ``~/.claude.json`` beside a ``~/.claude``
+    an npm install never made), every ``~/<home_name>*`` directory hooked or not
+    (:func:`_siblings`), and each account home under this home (:func:`_account_homes`).
+    Reading a few small files there is cheap next to telling nobody about a server that
+    will fail to start once the package is gone."""
+    return _once(
+        [
+            *agent_core.hook_dirs(adapter.id),
+            adapter.config_dir(agent_core.home(), {}),
+            *_siblings(adapter),
+            *(home for _slot, home in _account_homes(adapter)),
+        ]
+    )
+
+
+def _accounts_kept() -> tuple[str, ...]:
     """The logins the home keeps in its account slots, as a person reads them.
 
-    ``logins`` is the login in each ``.claude.json`` the MCP scan parsed
-    (:func:`_mcp_registrations`), which reads every slot's: such a file can reach tens of
-    MB, and read again here for an email, the plan parsed each twice (round 23 of #257).
-    A slot it did not read is read here.
+    Each slot's ``.claude.json`` is read through ``agent_core.read_json``, which the plan
+    (inside ``agent_core.reads_once``) has already parsed for its MCP servers: such a file
+    can reach tens of MB, and read again here for an email, the plan parsed each twice
+    (round 23 of #257).
     """
     described: list[str] = []
     for account in accounts_core.managed_accounts():
-        key = agent_core.dir_identity(accounts_core.claude_json_path(account))
-        identity = logins[key] if key in logins else accounts_core.identity(account)
+        data = agent_core.read_json(
+            agent_core.dir_identity(accounts_core.claude_json_path(account))
+        )
+        identity = accounts_core.identity_in(data)
         who = identity.email if identity is not None else "not signed in"
         described.append(f"slot {account.slot}: {who}")
-    retired = [d for d in _account_dirs() if ".removed-" in d.name]
+    retired = [d for d in _slot_dirs(accounts_core.accounts_root()) if _retired(d)]
     if retired:
         described.append(f"{len(retired)} removed slot{'s' if len(retired) != 1 else ''}")
     return tuple(described)
 
 
-#: The executable names that ARE aisquare, as either platform writes them.
-_PROGRAM_NAMES = frozenset({"aisquare", "asq", "aisquare.exe", "asq.exe"})
+def _lasting_installs() -> tuple[tuple[LastingInstall, ...], tuple[LastingInstall, ...]]:
+    """Every agent's MCP servers and plugin of aisquare's (each adapter's
+    ``lasting_installs``, asked of each of its homes: :func:`_agent_homes`), read only.
 
-
-def _runs_aisquare(spec: object) -> bool:
-    """Whether an ``mcpServers`` entry starts aisquare — by program, never by mention.
-
-    ``command`` counts when its file name IS the program (read as a Windows path
-    whatever this machine is, since the file may come from either; ``/`` splits
-    there too). An argument counts only as a BARE program name — ``uvx --from
-    aisquare-cli aisquare serve`` — or as the ``-m aisquare`` pair. A path or a
-    file that merely ends in ``aisquare`` (``~/Code/AISquare``, ``aisquare.json``)
-    is another server's argument, and naming that server for removal would be
-    wrong (review of #253).
-    """
-    if not isinstance(spec, dict):
-        return False
-    command = spec.get("command")
-    if isinstance(command, str) and PureWindowsPath(command).name.lower() in _PROGRAM_NAMES:
-        return True
-    args = spec.get("args")
-    tokens = [str(arg) for arg in args] if isinstance(args, list) else []
-    for index, token in enumerate(tokens):
-        if token.lower() in _PROGRAM_NAMES:
-            return True
-        if token == "-m" and tokens[index + 1 : index + 2] == ["aisquare"]:
-            return True
-    return False
-
-
-#: A ``--with`` item that NAMES its requirement (PEP 508): the name, then extras, a version,
-#: a marker, an ``@`` direct reference (``aisquare_cli @ https://…``) or nothing.
-_NAMED_REQUIREMENT = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\]\s*)?(?:[;@<>=!~]|$)")
-#: The archives a ``--with`` item may be a file of (a wheel, an sdist), whose names a
-#: requirement's name could otherwise be read off.
-_ARCHIVES = (".whl", ".tar.gz", ".tgz", ".tar.bz2", ".zip")
-
-
-def _requirement_items(value: str) -> list[str]:
-    """A ``uv run --with`` value's comma-separated requirements: split outside extras'
-    brackets, as uv splits them, with a part that starts with a version operator
-    (``rich>=1,<2``) kept with the one before it."""
-    parts: list[str] = []
-    depth, current = 0, ""
-    for char in value:
-        if char == "," and depth == 0:
-            parts.append(current)
-            current = ""
-            continue
-        depth = max(0, depth + {"[": 1, "]": -1}.get(char, 0))
-        current += char
-    parts.append(current)
-    items: list[str] = []
-    for part in (part.strip() for part in parts):
-        if items and part[:1] in ("<", ">", "=", "!", "~"):
-            items[-1] += f",{part}"
-        elif part:
-            items.append(part)
-    return items
-
-
-def _may_install_aisquare(value: str) -> bool:
-    """Whether a ``uv run --with`` value may install aisquare: an item that names it, or one
-    that names nothing — a URL (``git+https://…/aisquare-cli``), a path (a checkout) or an
-    archive (a wheel) — which may hold it. Read as fetching: the entry runs aisquare, so an
-    unnamed item is likely where it comes from, and a purge read as lasting is undone by
-    the next session (round 25 of #257). An item named for another package is not."""
-    for item in _requirement_items(value):
-        named = _NAMED_REQUIREMENT.match(item)
-        if named is None or item.lower().endswith(_ARCHIVES):
-            return True
-        if install_route.canonical_name(named.group(1)) == DISTRIBUTION:
-            return True
-    return False
-
-
-def _with_values(tokens: list[str]) -> list[tuple[str, str]]:
-    """``uv run``'s ``--with``/``-w``, ``--with-editable`` and ``--with-requirements`` among
-    ``tokens`` as ``(flag, value)``, in each spelling clap takes: ``--with X``, ``--with=X``,
-    ``-w X``, ``-w=X``, ``-wX``."""
-    values: list[tuple[str, str]] = []
-    for index, token in enumerate(tokens):
-        flag, glued, value = token.partition("=")
-        if flag in ("--with", "--with-editable", "--with-requirements"):
-            values.extend(
-                (flag, after) for after in ([value] if glued else tokens[index + 1 : index + 2])
-            )
-        elif token == "-w":
-            values.extend(("--with", after) for after in tokens[index + 1 : index + 2])
-        elif token.startswith("-w") and not token.startswith("--"):
-            values.append(("--with", token[2:].removeprefix("=")))
-    return values
-
-
-def _fetches_aisquare(spec: object) -> bool:
-    """Whether an ``mcpServers`` entry that runs aisquare (:func:`_runs_aisquare`) runs it
-    through a runner that fetches the package when it is not installed, so the server
-    outlives an uninstall: ``uvx``, ``uv tool run``, ``uv run --with aisquare-cli`` and
-    ``pipx run``.
-
-    The subcommand is looked for among the arguments BEFORE the program (the bare
-    ``aisquare`` or ``-m aisquare`` :func:`_runs_aisquare` reads), not at a fixed
-    position: uv and pipx take their own options first, so ``uv --offline tool run``
-    and ``pipx --verbose run`` read as other commands, and the purge they undo went
-    ahead (review of #257). ``uv run`` fetches only what its ``--with`` flags install
-    (:func:`_may_install_aisquare`; an editable path or a requirements file may hold it,
-    so either counts); without them the program comes from the project or PATH, as an
-    installed one does.
-    """
-    if not isinstance(spec, dict) or not isinstance(spec.get("command"), str):
-        return False
-    program = PureWindowsPath(spec["command"]).name.lower().removesuffix(".exe")
-    args = spec.get("args")
-    tokens = [str(arg) for arg in args] if isinstance(args, list) else []
-    end = next(
-        (
-            index
-            for index, token in enumerate(tokens)
-            if token.lower() in _PROGRAM_NAMES
-            or (token == "-m" and tokens[index + 1 : index + 2] == ["aisquare"])
-        ),
-        len(tokens),
-    )
-    before = tokens[:end]
-    if program == "uvx":
-        return True
-    if program == "pipx":
-        return "run" in before
-    if program != "uv":
-        return False
-    if any(before[index : index + 2] == ["tool", "run"] for index in range(len(before))):
-        return True
-    return "run" in before and any(
-        flag != "--with" or _may_install_aisquare(value) for flag, value in _with_values(before)
-    )
-
-
-def _mcp_registrations(
-    directories: Iterable[Path],
-) -> tuple[tuple[McpRegistration, ...], dict[Path, ClaudeIdentity | None]]:
-    """aisquare's MCP servers in every ``.claude.json`` these directories use, and in the
-    ``.mcp.json`` of every project those list (:func:`_project_registrations`) — read only.
-    Beside them, the login each ``.claude.json`` read records, by the file it reaches
-    (``agent_core.dir_identity``, which falls back to the spelling where pathlib cannot
-    resolve one), for :func:`_accounts_kept`, so no file is parsed twice.
-
-    Listed, never edited: ``.claude.json`` is Claude Code's own file, rewritten by
-    every running session, and a second writer racing them is how a login gets
-    lost. ``claude mcp remove`` is the tool that owns it.
-    """
-    found: list[McpRegistration] = []
-    logins: dict[Path, ClaudeIdentity | None] = {}
-    read: set[Path] = set()
-    listed: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
-    default = agent_core.dir_identity(accounts_core.home_config_dir().parent / ".claude.json")
-    for directory in directories:
-        for spelled in agent_core.claude_json_paths(directory):
-            # The file itself: a slot linked to ~/.claude, or a ~/.claude* sibling that is a
-            # link, reaches it twice. read_json fails open.
-            path = agent_core.dir_identity(spelled)
-            if path in read:
-                continue
-            read.add(path)
-            # Where `claude` reads it: ~/.claude.json with CLAUDE_CONFIG_DIR unset, any other
-            # .claude.json with the variable naming its own directory (which outlives a purge
-            # as the file does), and one linked to a file of another name through the
-            # directory it was found in.
-            if path == default:
-                reach: Path | None = None
-            elif path.name == ".claude.json":
-                reach = path.parent
-            else:
-                reach = directory
-            data = agent_core.read_json(path)
-            logins[path] = accounts_core.identity_in(data)
-            servers = data.get("mcpServers")
-            if isinstance(servers, dict):
-                found.extend(
-                    McpRegistration(str(name), path, None, reach, _fetches_aisquare(spec))
-                    for name, spec in servers.items()
-                    if _runs_aisquare(spec)
-                )
-            projects = data.get("projects")
-            if not isinstance(projects, dict):
-                continue
-            for project, block in projects.items():
-                if not isinstance(block, dict):
+    One file reached through two homes is one entry, the first home's. A project's own
+    server (``LastingInstall.shared``, a repository's ``.mcp.json``) is one entry however
+    many homes list the project, keeping every file that starts it (``asked_in``); an
+    agent's are listed after its homes' own."""
+    mcp: list[LastingInstall] = []
+    plugins: list[LastingInstall] = []
+    for adapter in adapters():
+        own: dict[tuple[object, ...], LastingInstall] = {}
+        shared: dict[tuple[object, ...], LastingInstall] = {}
+        for home in _agent_homes(adapter):
+            for found in adapter.lasting_installs(home):
+                if not found.shared:
+                    own.setdefault((found.kind, found.file, found.name, found.project), found)
                     continue
-                listed.setdefault(str(project), []).append((path, block))
-                servers = block.get("mcpServers")
-                if isinstance(servers, dict):
-                    found.extend(
-                        McpRegistration(
-                            str(name), path, str(project), reach, _fetches_aisquare(spec)
-                        )
-                        for name, spec in servers.items()
-                        if _runs_aisquare(spec)
-                    )
-    found.extend(_project_registrations(listed))
-    return tuple(found), logins
+                key = (found.kind, found.file, found.name)
+                first = shared.get(key)
+                if first is None:
+                    shared[key] = found
+                else:
+                    asked = tuple(dict.fromkeys((*first.asked_in, *found.asked_in)))
+                    shared[key] = replace(first, asked_in=asked)
+        for entry in (*own.values(), *shared.values()):
+            (mcp if entry.kind == "mcp" else plugins).append(entry)
+    return tuple(mcp), tuple(plugins)
 
 
-def _project_registrations(
-    listed: dict[str, list[tuple[Path, dict[str, Any]]]],
-) -> list[McpRegistration]:
-    """aisquare's MCP servers in the ``.mcp.json`` of every project a ``.claude.json``
-    lists (``listed``: each project's blocks, each beside the file it was read from) —
-    project scope.
-
-    A repository's committed ``.mcp.json`` starts its servers in every session there,
-    and none of them was read: one running aisquare through ``uvx`` made the purged
-    home again at the next session in that repository (review of #257). A server the
-    operator declined there never starts and is left out, but only if every block that
-    lists the project declined it. Each block answers for the sessions Claude Code
-    starts under its config dir and its spelling of the project, and one that has not
-    answered asks at its next session there, where an approval starts the server: the
-    lists were merged across config dirs, and one dir's no left out a server another
-    never answered (round 26). A block declines a name in its ``disabledMcpjsonServers``
-    and not in its ``enabledMcpjsonServers``, as the doctor reads one
-    (``diagnostics._declined_project_servers``). A project reached under two spellings
-    is one ``.mcp.json``, read once, with every spelling's blocks. Each entry keeps the
-    files whose blocks have not declined it (``asked_in``), so a purge can drop the
-    blocks it deletes (:attr:`UninstallPlan.lasting_mcp`).
-    """
-    found: list[McpRegistration] = []
-    blocks_of: dict[Path, list[tuple[Path, dict[str, Any]]]] = {}
-    spelled: dict[Path, str] = {}
-    for project, blocks in listed.items():
-        if not Path(project).is_absolute():
-            continue  # another platform's path, or none: read here, it would name the cwd's
-        path = agent_core.dir_identity(Path(project) / ".mcp.json")
-        spelled.setdefault(path, project)
-        blocks_of.setdefault(path, []).extend(blocks)
-    for path, blocks in blocks_of.items():
-        servers = agent_core.read_json(path).get("mcpServers")
-        if not isinstance(servers, dict):
-            continue
-        for name, spec in servers.items():
-            asked_in = tuple(
-                dict.fromkeys(file for file, block in blocks if not _declines(block, str(name)))
-            )
-            if _runs_aisquare(spec) and asked_in:
-                found.append(
-                    McpRegistration(
-                        str(name),
-                        path,
-                        spelled[path],
-                        None,
-                        _fetches_aisquare(spec),
-                        shared=True,
-                        asked_in=asked_in,
-                    )
-                )
-    return found
-
-
-def _declines(block: dict[str, Any], name: str) -> bool:
-    """Whether one ``.claude.json`` project block declined the ``.mcp.json`` server
-    ``name``: listed in its ``disabledMcpjsonServers`` and not in its
-    ``enabledMcpjsonServers`` (a name in both is approved, as the doctor reads it)."""
-
-    def named(field: str) -> bool:
-        names = block.get(field)
-        return isinstance(names, list) and name in (str(item) for item in names)
-
-    return named("disabledMcpjsonServers") and not named("enabledMcpjsonServers")
-
-
-def mcp_place(entry: McpRegistration) -> str:
-    """Where an MCP registration is: its ``.claude.json``, and the project it belongs to;
-    a project-scope one's ``.mcp.json``, which names the project itself; a Codex one's
-    ``config.toml``."""
+def mcp_place(entry: LastingInstall) -> str:
+    """Where an MCP registration is: the agent's file that holds it, and the project it
+    belongs to; a project's own (a ``.mcp.json``), which names the project itself."""
     if entry.shared:
         return str(entry.file)
     return str(entry.file) + (f", project {entry.project}" if entry.project else "")
 
 
-def _codex_command(argv: list[str], home: Path) -> str:
-    """``argv`` (a ``codex`` command) as one that acts on Codex home ``home``.
-
-    ``codex`` reads ``$CODEX_HOME``, else ``~/.codex``: nothing is added for the home this
-    shell's ``codex`` already reads, ``env -u CODEX_HOME`` for ``~/.codex`` from a shell
-    that names another, and the variable otherwise, as :func:`mcp_removal` aims ``claude``.
-    Native Windows has neither form, so there the variable it needs is said after it.
-    """
-    command = install_route.command_line(argv)
-    ambient = os.environ.get("CODEX_HOME", "").strip()
-    default = agent_core.dir_identity(agent_core.home() / ".codex")
-    here = agent_core.dir_identity(Path(ambient)) if ambient else default
-    there = agent_core.dir_identity(home)
-    if there == here:
-        return command
-    if sys.platform == "win32":
-        need = "unset" if there == default else f"set to {home}"
-        return f"{command} (run it with CODEX_HOME {need})"
-    if there == default:
-        return f"env -u CODEX_HOME {command}"
-    return f"CODEX_HOME={install_route.command_line([str(home)])} {command}"
-
-
-def mcp_removal(entry: McpRegistration) -> str:
-    """The command that removes ``entry``: ``claude mcp remove`` at its scope, aimed at the
-    ``.claude.json`` that holds it, and for a project's entry run from inside the project;
-    ``codex mcp remove`` aimed at its Codex home (:func:`_codex_command`) for a Codex one.
-
-    ``claude mcp remove`` acts on the file ``CLAUDE_CONFIG_DIR`` names (``~/.claude.json``
-    when it is unset), and its local scope is the project it runs in; its project scope
-    is that project's ``.mcp.json``, whatever the variable names. Bare, it answered
-    "No MCP server named …" for a project's entry run from elsewhere and for one in
-    another config dir, and left both (measured on Claude Code 2.1.296, review of #257).
-    Built as :func:`agent_core.claude_plugin_command` builds the plugin's: nothing for
-    the file this shell's ``claude`` already reads, ``env -u`` for ``~/.claude.json``
-    from a shell that names another, and the directory otherwise, every part quoted.
-    Native Windows has no ``env -u``, ``VAR=value command`` or (in PowerShell 5.1)
-    ``&&``, so there the folder and the variable the command needs are said after it.
-    """
-    if entry.agent == CODEX:
-        home = entry.config_dir if entry.config_dir is not None else entry.file.parent
-        return _codex_command(["codex", "mcp", "remove", entry.name], home)
-    scope = "project" if entry.shared else "user" if entry.project is None else "local"
-    command = install_route.command_line(["claude", "mcp", "remove", "--scope", scope, entry.name])
-    ambient = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    here = agent_core.dir_identity(Path(ambient)) if ambient else None
-    if entry.shared:
-        # Project scope is the `.mcp.json` of the directory it runs in, whatever config dir
-        # the shell names: only the project is needed.
-        there = here
-    elif entry.config_dir is None:
-        there = None
-    else:
-        there = agent_core.dir_identity(entry.config_dir)
-    if sys.platform == "win32":
-        needs = [] if entry.project is None else [f"in {entry.project}"]
-        if there != here:
-            needs.append(
-                "with CLAUDE_CONFIG_DIR unset"
-                if entry.config_dir is None
-                else f"with CLAUDE_CONFIG_DIR set to {entry.config_dir}"
-            )
-        return f"{command} (run it {', '.join(needs)})" if needs else command
-    if there == here:
-        line = command
-    elif entry.config_dir is None:
-        line = f"env -u CLAUDE_CONFIG_DIR {command}"
-    else:
-        line = f"CLAUDE_CONFIG_DIR={install_route.command_line([str(entry.config_dir)])} {command}"
-    if entry.project is None:
-        return line
-    return f"cd {install_route.command_line([entry.project])} && {line}"
-
-
-def mcp_note(entry: McpRegistration) -> str:
+def mcp_note(entry: LastingInstall) -> str:
     """What an uninstall leaves registered: one MCP server that runs aisquare, and its removal."""
     return (
         f"the MCP server {entry.name} is still registered in {mcp_place(entry)}, and "
-        f"{agent_label(entry.agent)} owns that file — remove it: {mcp_removal(entry)}"
+        f"{agent_label(entry.agent)} owns that file — remove it: {entry.remove}"
     )
 
 
-def plugin_note(plugin: agent_core.ClaudePlugin) -> str:
-    """What an uninstall leaves running in a directory that enables the aisquare plugin."""
+def plugin_note(plugin: LastingInstall) -> str:
+    """What an uninstall leaves running where an agent enables the aisquare plugin."""
     return (
-        f"the aisquare plugin is still enabled in {plugin_place(plugin)}, so Claude Code keeps "
-        f"running aisquare there (through uvx once the package is gone) — remove it: "
-        f"{plugin_removal(plugin)}"
+        f"the aisquare plugin is still enabled in {plugin_place(plugin)}, so "
+        f"{agent_label(plugin.agent)} keeps running aisquare there (through uvx once the "
+        f"package is gone) — remove it: {plugin.remove}"
     )
-
-
-# --- Codex homes ---------------------------------------------------------------------------
-#
-# What uninstall reads of Codex: the hooks in each home's hooks.json, which it takes out
-# (agent_core.remove_hooks keeps every other group), and the MCP servers and plugins in
-# its config.toml, which it never rewrites. config.toml is Codex's own file, which a
-# running Codex rewrites too (trust, plugins), so those are named with the `codex` command
-# that removes each, as `.claude.json`'s are with `claude mcp remove`.
-
-
-def _codex_account_dirs() -> list[Path]:
-    """Every directory under ``<aisquare home>/codex-accounts``: the Codex account homes
-    aisquare makes, one per slot, and any it retired. Asked one entry at a time with
-    ``os.path.isdir``, which never raises, as :func:`_account_dirs` asks Claude Code's;
-    nothing when the folder is not there."""
-    root = paths.aisquare_home() / "codex-accounts"
-    try:
-        children = sorted(root.iterdir()) if os.path.isdir(root) else []
-    except OSError:
-        return []
-    return [child for child in children if os.path.isdir(child)]
-
-
-def _codex_homes() -> list[Path]:
-    """Every Codex home aisquare may have written hooks into or Codex may read, each once.
-
-    The homes the doctor's scan finds (``agent_core.hook_dirs``: those this home connected,
-    ``$CODEX_HOME`` or ``~/.codex``, and ``~/.codex*`` holding our hooks), then every
-    ``~/.codex*`` directory, hooked or not, whose ``config.toml`` may register aisquare or
-    whose ``hooks.json`` holds ours only to a lenient reading (:func:`settings_unreadable`
-    names those), then each account home under this home (:func:`_codex_account_dirs`).
-    """
-    try:
-        siblings = sorted(agent_core.home().glob(".codex*"))
-    except OSError:
-        siblings = []
-    candidates = [
-        *agent_core.hook_dirs(CODEX),
-        *(path for path in siblings if os.path.isdir(path)),
-        *_codex_account_dirs(),
-    ]
-    seen: set[Path] = set()
-    homes: list[Path] = []
-    for directory in candidates:
-        key = agent_core.dir_identity(directory)
-        if key not in seen:
-            seen.add(key)
-            homes.append(directory)
-    return homes
-
-
-def _read_toml(path: Path) -> dict[str, Any]:
-    """The TOML table at ``path``, or ``{}``: absent, unreadable, or not TOML Codex reads.
-
-    A reader's rule (:func:`agent_core.read_json`'s): nothing here writes ``config.toml``.
-    One Codex cannot parse either starts no server and enables no plugin.
-    """
-    try:
-        with open(path, "rb") as handle:
-            return tomllib.load(handle)
-    except (OSError, ValueError):  # TOMLDecodeError and UnicodeDecodeError are ValueErrors
-        return {}
-
-
-def _codex_configs(homes: Iterable[Path]) -> list[tuple[Path, Path, dict[str, Any]]]:
-    """``(home, config.toml itself, its table)`` for each home's ``config.toml``, a file
-    reached through two homes read once."""
-    read: set[Path] = set()
-    found: list[tuple[Path, Path, dict[str, Any]]] = []
-    for home in homes:
-        path = agent_core.dir_identity(home / "config.toml")
-        if path in read:
-            continue
-        read.add(path)
-        data = _read_toml(path)
-        if data:
-            found.append((home, path, data))
-    return found
-
-
-def _codex_registrations(
-    configs: Iterable[tuple[Path, Path, dict[str, Any]]],
-) -> tuple[McpRegistration, ...]:
-    """aisquare's MCP servers in Codex's ``config.toml`` files: each ``[mcp_servers.<name>]``
-    whose ``command`` and ``args`` run aisquare (:func:`_runs_aisquare`, the rule
-    ``.claude.json``'s are read by). Read only: ``codex mcp remove`` is the tool that owns
-    the file. A launch's ``-c mcp_servers.aisquare…`` (``agents.mcp``) is written nowhere,
-    so there is nothing of it to find or remove."""
-    found: list[McpRegistration] = []
-    for home, path, data in configs:
-        servers = data.get("mcp_servers")
-        if not isinstance(servers, dict):
-            continue
-        found.extend(
-            McpRegistration(str(name), path, None, home, _fetches_aisquare(spec), agent=CODEX)
-            for name, spec in servers.items()
-            if _runs_aisquare(spec)
-        )
-    return tuple(found)
-
-
-def _codex_plugins(
-    configs: Iterable[tuple[Path, Path, dict[str, Any]]],
-) -> tuple[CodexPlugin, ...]:
-    """The aisquare Codex plugin wherever a ``config.toml`` enables it: a
-    ``[plugins."aisquare@<marketplace>"]`` table (:data:`CODEX_PLUGIN`) without
-    ``enabled = false``. Read only, and empty until the plugin route ships one."""
-    found: list[CodexPlugin] = []
-    for home, _path, data in configs:
-        plugins = data.get("plugins")
-        if not isinstance(plugins, dict):
-            continue
-        found.extend(
-            CodexPlugin(home, str(plugin_id))
-            for plugin_id, table in plugins.items()
-            if str(plugin_id).partition("@")[0] == CODEX_PLUGIN
-            and isinstance(table, dict)
-            and table.get("enabled", True) is not False
-        )
-    return tuple(found)
-
-
-def codex_plugin_removal(plugin: CodexPlugin) -> str:
-    """The command that removes the aisquare Codex plugin from its Codex home."""
-    return _codex_command(["codex", "plugin", "remove", plugin.plugin_id], plugin.config_dir)
-
-
-def codex_plugin_note(plugin: CodexPlugin) -> str:
-    """What an uninstall leaves running in a Codex home that enables the aisquare plugin."""
-    return (
-        f"the aisquare Codex plugin is still enabled in {plugin.config_dir}, so Codex keeps "
-        f"running aisquare there — remove it: {codex_plugin_removal(plugin)}"
-    )
-
-
-def _plugins(directories: Iterable[Path]) -> tuple[agent_core.ClaudePlugin, ...]:
-    """The aisquare plugin wherever these config dirs enable it: in the dir itself (user
-    scope), and in each repository a project- or local-scope install of theirs enables
-    (sweep of #257: those were never read, so --purge went ahead and the next session
-    in the repository made the home again). Read only; empty where the plugin route
-    does not run (:func:`agent_core.plugin_route_supported`)."""
-    if not agent_core.plugin_route_supported():
-        return ()
-    found: list[agent_core.ClaudePlugin] = []
-    seen: set[Path] = set()
-    for directory in directories:
-        key = agent_core.dir_identity(directory)
-        if key in seen:
-            continue
-        seen.add(key)
-        user = agent_core.claude_plugin(directory)
-        if user is not None:
-            found.append(user)
-        found.extend(agent_core.claude_repo_plugins(directory))
-    return tuple(found)
-
-
-def _claude_dirs_for_mcp() -> list[Path]:
-    """``~/.claude`` and every ``~/.claude*`` directory, hooked or not, for the MCP scan.
-
-    ``claude mcp add`` on a plain install writes ``~/.claude.json``, beside
-    ``~/.claude``, whether or not that directory carries hooks; reading a few
-    small files is cheap next to telling nobody about a server that will fail to
-    start once the package is gone. The siblings are the doctor's
-    (``agent_core.claude_dir_siblings``), so the two scans agree on which there are.
-    """
-    default = accounts_core.home_config_dir()
-    return [default, *(p for p in agent_core.claude_dir_siblings() if p != default)]
 
 
 _LIVE_ROWS = (
@@ -2352,21 +1845,21 @@ _RECORDED = (
 _LiveRow = tuple[str, str, datetime | None, Path | None, str | None, datetime | None]
 
 
-def _siblings_hiding_hooks() -> list[Path]:
-    """``~/.claude*`` directories whose aisquare hooks only show without strict parsing.
+def _siblings_hiding_hooks(adapter: AgentAdapter) -> list[Path]:
+    """``~/<home_name>*`` directories whose aisquare hooks only show without strict parsing.
 
     The on-disk scan behind :func:`agent_core.hook_dirs` reads leniently since
-    #247, so a sibling whose settings.json is Latin-1 or not valid JSON reads as
-    having no hooks there, though Claude Code may still run them. Those are found
+    #247, so a sibling whose hooks file is Latin-1 or not valid JSON reads as
+    having no hooks there, though the agent may still run them. Those are found
     here, and the plan then names them as sites it cannot clean, which keeps the
     package (review of #254). A sibling this user cannot read at all stays
     skipped, as the scan's own docstring rules: it cannot be shown to carry our
     hooks, and another account's backup must not block an uninstall forever.
     """
     found: list[Path] = []
-    for directory in _claude_dirs_for_mcp():
+    for directory in _siblings(adapter):
         try:
-            raw = (directory / "settings.json").read_bytes()
+            raw = (directory / adapter.settings_name).read_bytes()
         except OSError:
             continue
         if lenient_hook_commands(lenient_text(raw)):
@@ -2583,16 +2076,32 @@ def _plugin_answers_there() -> tuple[Path, ...]:
 
 
 def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
-    """Decide what ``aisquare uninstall`` would do. Reads only; never creates the home."""
+    """Decide what ``aisquare uninstall`` would do. Reads only; never creates the home.
+
+    Every file is parsed once however many answers it gives (``agent_core.reads_once``).
+    """
+    with agent_core.reads_once():
+        return _uninstall_plan(purge)
+
+
+def _hook_candidates(adapter: AgentAdapter) -> list[Path]:
+    """The directories whose ``adapter`` hooks uninstall takes out: the doctor's
+    (``agent_core.hook_dirs``), each account home under this home, removed ones too
+    (:func:`_account_homes`), and the siblings whose hooks only a lenient reading finds
+    (:func:`_siblings_hiding_hooks`)."""
+    return [
+        *agent_core.hook_dirs(adapter.id),
+        *(home for _slot, home in _account_homes(adapter)),
+        *_siblings_hiding_hooks(adapter),
+    ]
+
+
+def _uninstall_plan(purge: bool) -> UninstallPlan:
     route = install_route.detect()
-    candidates = [*agent_core.hook_dirs(HOOK_AGENT), *_account_dirs(), *_siblings_hiding_hooks()]
-    codex_homes = _codex_homes()
-    # An agent with hooks and no scan of its own here: the directories the doctor finds.
-    others = [agent for agent in hook_agents() if agent not in (HOOK_AGENT, CODEX)]
     sites = [
-        *((HOOK_AGENT, directory) for directory in candidates),
-        *((CODEX, directory) for directory in codex_homes),
-        *((agent, directory) for agent in others for directory in agent_core.hook_dirs(agent)),
+        (agent, directory)
+        for agent in hook_agents()
+        for directory in _hook_candidates(get_adapter(agent))
     ]
     hooks: list[HookSite] = []
     unreadable: list[HookSite] = []
@@ -2619,21 +2128,29 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
     answers, unlistened, fleet_error = _fleet_answers()
     live = tuple(label for label, _ in answers)
     custom = custom_home(home)
-    claude_dirs = [*candidates, *_claude_dirs_for_mcp()]
-    mcp, logins = _mcp_registrations(claude_dirs)
-    codex_configs = _codex_configs(codex_homes)
+    mcp, plugins = _lasting_installs()
+    # The slots `accounts` describes by their logins (`accounts_root()`'s); every other
+    # agent's account homes are counted.
+    described = agent_core.dir_identity(accounts_core.accounts_root())
+    account_homes = tuple(
+        (adapter.id, slot)
+        for adapter in adapters()
+        if adapter.accounts is not None
+        and agent_core.dir_identity(accounts_core.accounts_root(adapter.id)) != described
+        for slot, _home in _account_homes(adapter)
+    )
     return UninstallPlan(
         route=route,
         hooks=tuple(hooks),
         unreadable=tuple(unreadable),
-        mcp=(*mcp, *_codex_registrations(codex_configs)),
+        mcp=mcp,
         package_argv=tuple(install_route.remove_argv(route)),
         package_env=install_route.installer_env(route),
         package_reason=install_route.not_removable(route),
         home=home,
         home_exists=_home_there(home)[0],
         home_entries=entries,
-        accounts=_accounts_kept(logins),
+        accounts=_accounts_kept(),
         keychain=accounts_core.keychain_platform(),
         purge=purge,
         purge_refusal=purge_refusal(home, custom=custom),
@@ -2644,10 +2161,9 @@ def uninstall_plan(*, purge: bool = False) -> UninstallPlan:
         unreached=tuple(label for label, answer in answers if answer != "answers"),
         taken=tuple(label for label, answer in answers if answer == "another"),
         listening=tuple(label for label, answer in answers if answer == "answers"),
-        plugins=_plugins(claude_dirs),
+        plugins=plugins,
         plugin_answers=_plugin_answers_there(),
-        codex_plugins=_codex_plugins(codex_configs),
-        codex_accounts=tuple(_codex_account_dirs()),
+        account_homes=account_homes,
         remote=running_remote(),
     )
 
@@ -2823,8 +2339,6 @@ def _uninstall_notes(
         notes.append(mcp_note(entry))
     for plugin in plan.lasting_plugins if purged else plan.plugins:
         notes.append(plugin_note(plugin))
-    for codex_plugin in plan.lasting_codex_plugins if purged else plan.codex_plugins:
-        notes.append(codex_plugin_note(codex_plugin))
     notes.append(
         "a running `aisquare serve` keeps running until you stop it; "
         f"{stays_installed(plan)} stay installed"
@@ -2832,21 +2346,20 @@ def _uninstall_notes(
     return notes
 
 
-def touches_codex(plan: UninstallPlan) -> bool:
-    """Whether the plan names anything of Codex's: its hooks, an MCP server or the plugin."""
-    return (
-        any(site.agent == CODEX for site in (*plan.hooks, *plan.unreadable))
-        or any(entry.agent == CODEX for entry in plan.mcp)
-        or bool(plan.codex_plugins)
-    )
+def touched_agents(plan: UninstallPlan) -> tuple[str, ...]:
+    """The agents the plan names anything of (hooks, an MCP server, the plugin), in the
+    registry's order."""
+    named = {site.agent for site in (*plan.hooks, *plan.unreadable)}
+    named |= {install.agent for install in (*plan.mcp, *plan.plugins)}
+    return tuple(adapter.id for adapter in adapters() if adapter.id in named)
 
 
 def stays_installed(plan: UninstallPlan) -> str:
     """What an uninstall leaves installed: the tools beside aisquare, and the coding agents,
-    Codex among them where the plan names anything of its (:func:`touches_codex`)."""
-    if touches_codex(plan):
-        return "uv, tmux, Node, gh, Claude Code and Codex"
-    return "uv, tmux, Node, gh and Claude Code"
+    the default one and each other the plan names anything of (:func:`touched_agents`)."""
+    agents = dict.fromkeys((DEFAULT_AGENT, *touched_agents(plan)))
+    tools = ["uv", "tmux", "Node", "gh", *(agent_label(agent) for agent in agents)]
+    return ", ".join(tools[:-1]) + " and " + tools[-1]
 
 
 def remove_package(plan: UninstallPlan, *, stdout_to_stderr: bool) -> None:

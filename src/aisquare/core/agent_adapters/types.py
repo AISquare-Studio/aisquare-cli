@@ -34,8 +34,9 @@ class HookSpec:
     ``command`` is the subcommand: Claude Code's are one per event (``session-start``…),
     Codex's is ``codex`` for every event, and a new agent's is :data:`GENERIC_HOOK`
     (``aisquare hook event --agent <id>``), so it needs no subcommand of its own.
-    ``timeout`` is seconds, ``None`` for the agent's default; ``matcher`` narrows the
-    event where the agent's hook format has one (Codex's ``PreToolUse``).
+    ``timeout`` is seconds, ``None`` for the agent's default, written in the agent's own
+    unit by :meth:`AgentAdapter.hook_entry`; ``matcher`` narrows the event where the
+    agent's hook format has one (Codex's ``PreToolUse``).
     """
 
     event: str
@@ -73,6 +74,72 @@ class ScreenPrompt:
 #: The ``aisquare hook`` subcommand any adapter can install: ``event --agent <id> --event
 #: <native event>`` (:func:`hook_args`), decoded by that adapter.
 GENERIC_HOOK = "event"
+
+
+def command_entry(spec: HookSpec, command: str) -> dict[str, Any]:
+    """One hook handler as Claude Code's ``settings.json`` and Codex's ``hooks.json`` both
+    write it: ``{"type": "command", "command": …, "timeout": <seconds>}``, the timeout only
+    where ``spec`` has one. What :meth:`AgentAdapter.hook_entry` answers for an agent whose
+    hooks file has that shape."""
+    entry: dict[str, Any] = {"type": "command", "command": command}
+    if spec.timeout is not None:
+        entry["timeout"] = spec.timeout
+    return entry
+
+
+@dataclass(frozen=True)
+class InstallRoute:
+    """One way to install an agent, best first in :attr:`AgentAdapter.install_routes`: how
+    (``installer``, ``Homebrew``, ``npm``), the command a terminal runs, and the platforms
+    (``sys.platform``) it is offered on, every one where empty. Welcome's step 2 offers them
+    (``services.first_run.install_routes``); on Windows, where the fleet runs inside WSL2,
+    it offers the first alone, to run there."""
+
+    how: str
+    command: str
+    platforms: frozenset[str] = frozenset()
+
+
+LastingKind = Literal["mcp", "plugin"]
+
+
+@dataclass(frozen=True)
+class LastingInstall:
+    """Something of aisquare's that one of an agent's homes keeps in a file the agent owns,
+    which ``aisquare uninstall`` lists and never edits (a running session of the agent
+    rewrites that file too), naming the agent's own command that removes it
+    (:meth:`AgentAdapter.lasting_installs`): an MCP server that runs aisquare (``mcp``), the
+    aisquare plugin enabled (``plugin``)."""
+
+    agent: str
+    kind: LastingKind
+    name: str
+    """The server's name; the plugin's id as the agent's command takes it."""
+    file: Path
+    """The file that records it, itself (``core.agents.dir_identity``): one file reached
+    through two homes is one entry, and a link a purge deletes never stands for a file it
+    leaves."""
+    home: Path
+    """The agent's config dir it was found for, which :attr:`remove` acts on."""
+    remove: str
+    """The agent's own command that removes it, aimed at :attr:`home` and, for a project's
+    entry, run inside the project: a line to paste, built when the adapter answered."""
+    fetches: bool = False
+    """It starts aisquare even once the package is gone (a server run through a runner that
+    fetches the package, ``uvx``), and so makes the aisquare home again: a purge it would
+    undo is refused until it is removed. A plugin always does; its launcher fetches."""
+    project: str | None = None
+    """The project it is for, as the agent's file spells it; ``None`` for the home's own."""
+    scope: str = "user"
+    """Where it is enabled: ``user`` (the home), or ``project``/``local`` (a repository)."""
+    version: str | None = None
+    """A plugin's version as its install records it; ``None`` when none is recorded."""
+    shared: bool = False
+    """:attr:`file` is the project's own, committed beside its code (Claude Code's
+    ``.mcp.json``), which every session there reads: where it is, it names itself."""
+    asked_in: tuple[Path, ...] = ()
+    """For a :attr:`shared` entry, the files of the agent's homes (each itself) whose
+    sessions start it or ask to: once a purge deletes every one, nothing starts it."""
 
 
 @dataclass(frozen=True)
@@ -286,6 +353,12 @@ class AgentCapabilities:
     just above its box, and any other dialog with an Enter or Esc footer and no box. ``None``
     takes :attr:`dialog_on_screen`'s words (Codex's), else :attr:`screen_prompt`'s
     question."""
+    hookless_through: str | None = None
+    """The last aisquare release that writes none of this agent's hooks (Codex's 0.8.2): an
+    upgrade or a move back to it, or to one before it, leaves the agent's hooks as they are
+    and says so, since its ``agents refresh-hooks <agent>`` fails
+    (``services.lifecycle.lacks_agent_hooks``). ``None``: every release ``upgrade`` installs
+    writes them."""
     legacy_fleet_args: bool = False
     """``fleet.roles.<role>.extra_args`` and ``permission_mode`` are in this agent's
     vocabulary (they predate adapters and are Claude Code's); another agent takes only
@@ -677,10 +750,11 @@ class AgentAdapter(Protocol):
     """One terminal agent, in the terms the shared services ask in.
 
     Identity and installation: ``id`` (the board's and the config's name), ``label``,
-    ``binary``, ``home_env``/``home_name`` with :meth:`config_dir`, ``install_hint``,
-    ``version_args`` with :func:`version_in`. Hooks: ``settings_name`` (the hooks file in
-    the config dir), ``capabilities.hooks`` with :func:`hook_args`, ``hooks_off_setting``
-    with :meth:`hooks_switch`, ``plugin``. Events: :meth:`decode_event` and
+    ``binary``, ``home_env``/``home_name`` with :meth:`config_dir`, ``install_hint`` with
+    ``install_routes``, ``version_args`` with :func:`version_in`, :meth:`lasting_installs`.
+    Hooks: ``settings_name`` (the hooks file in the config dir), ``capabilities.hooks`` with
+    :func:`hook_args` and :meth:`hook_entry`, ``hooks_off_setting`` with
+    :meth:`hooks_switch`, ``plugin``. Events: :meth:`decode_event` and
     :meth:`encode_reply`. Launch: :meth:`model_args`, :meth:`permission_args`,
     :meth:`store_access`, :meth:`sandbox_writes`, :meth:`broker_access`, :meth:`fleet_args`,
     :meth:`label_args`, :meth:`resume_args`, :meth:`fork_args`,
@@ -700,6 +774,9 @@ class AgentAdapter(Protocol):
     settings_name: str
     capabilities: AgentCapabilities
     install_hint: str
+    install_routes: tuple[InstallRoute, ...]
+    """Every way to install the agent, best first (:class:`InstallRoute`): its own installer,
+    a package manager's, ``install_hint`` among them. At least one."""
     version_args: tuple[str, ...]
     """Arguments that print the version without starting a session (``--version``)."""
     hooks_off_setting: str
@@ -749,6 +826,21 @@ class AgentAdapter(Protocol):
     ) -> HooksSwitch | None:
         """What switches every hook off for the agent in ``home``, launched with ``args``;
         ``None`` when nothing does. Read-only; never raises."""
+        ...
+
+    def hook_entry(self, spec: HookSpec, command: str) -> dict[str, Any]:
+        """The handler ``core.agents.install_hooks`` writes into a group of
+        :attr:`settings_name` for ``spec``, running ``command`` (the whole ``aisquare hook …``
+        line): the agent's own shape, ``spec.timeout`` (seconds) in its own unit, and a
+        ``timeout`` key, where it has one, that an operator's longer value outlives.
+        :func:`command_entry` for Claude Code's and Codex's shape."""
+        ...
+
+    def lasting_installs(self, home: Path) -> tuple[LastingInstall, ...]:
+        """What config dir ``home`` keeps of aisquare's in the agent's own files, each with
+        the agent's command that removes it (:class:`LastingInstall`): what ``aisquare
+        uninstall`` leaves and names, and refuses a purge over where it would make the
+        aisquare home again. Read-only; never raises; ``()`` for a home that keeps none."""
         ...
 
     def decode_event(self, payload: Mapping[str, Any]) -> AgentEvent | None:
@@ -1032,11 +1124,20 @@ def config_home(
 ) -> Path:
     """Resolve against the environment the selected executable will actually use.
 
-    A ``~olduser`` this machine does not have is kept as written (``paths.expand_user``),
-    so ``paths.names_no_home`` still refuses to make it; a symlink loop is not resolved.
-    Claude Code's directory, as ``core.agents`` names it, is ``core.agents._claude_home``.
+    ``env[home_env]`` names the agent's home, which is its config dir only where its
+    accounts say so (:meth:`AgentAccounts.config_dir`: Gemini CLI's names the folder its
+    ``.gemini`` is in). A ``~olduser`` this machine does not have is kept as written
+    (``paths.expand_user``), so ``paths.names_no_home`` still refuses to make it; a symlink
+    loop is not resolved. Claude Code's directory, as ``core.agents`` names it, is
+    ``core.agents._claude_home``.
     """
-    raw = explicit or env.get(adapter.home_env, "").strip() or home / adapter.home_name
+    named = env.get(adapter.home_env, "").strip()
+    if explicit is not None:
+        raw = explicit
+    elif named and adapter.accounts is not None:
+        raw = adapter.accounts.config_dir(paths.expand_user(Path(named)))
+    else:
+        raw = Path(named) if named else home / adapter.home_name
     path = paths.expand_user(Path(raw))
     if paths.names_no_home(path):
         return path
@@ -1174,6 +1275,12 @@ class AgentAccounts(Protocol):
 
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
         """The plain home, from the shell's own launch variables (``plain``)."""
+        ...
+
+    def config_dir(self, slot_dir: Path) -> Path:
+        """The config dir the agent reads in a home :attr:`home_env` names (a slot's, the
+        plain one): where its hooks file, settings and login are. The home itself for
+        Claude Code and Codex; Gemini CLI's names the folder its ``.gemini`` is in."""
         ...
 
     def identity(

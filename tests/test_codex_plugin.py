@@ -36,8 +36,8 @@ from typing import Any
 import pytest
 
 from aisquare.core import agents as agent_core
+from aisquare.core.agent_adapters import codex as codex_adapter
 from aisquare.core.agent_adapters import get_adapter
-from aisquare.services import lifecycle
 from tests.test_claude_plugin import (
     LAUNCHER as CLAUDE_LAUNCHER,
 )
@@ -111,7 +111,7 @@ def test_the_marketplace_lists_this_plugin_under_the_names_doctor_reads() -> Non
     path = Path(source["path"])
 
     assert market["name"] == agent_core.CLAUDE_PLUGIN_MARKETPLACE
-    assert entry["name"] == plugin["name"] == agent_core.CLAUDE_PLUGIN == lifecycle.CODEX_PLUGIN
+    assert entry["name"] == plugin["name"] == agent_core.CLAUDE_PLUGIN == codex_adapter.PLUGIN
     assert f"{plugin['name']}@{market['name']}" == agent_core.CLAUDE_PLUGIN_ID
     assert source["source"] == "local"
     assert source["path"].startswith("./") and ".." not in path.parts

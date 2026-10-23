@@ -45,7 +45,6 @@ SHLEX_KEPT: dict[tuple[str, str], tuple[int, str]] = {
     ("cli/explainability.py", "env"): (1, "export lines for sh's eval"),
     ("cli/team.py", "harness_status"): (1, "a role's agent arguments as shown, not a command"),
     ("cli/ui/views/app_settings.py", "_append_flags"): (1, "a role's flags as shown, not run"),
-    ("core/agent_adapters/codex.py", "command"): (2, "its POSIX branch; Windows its own"),
     ("services/diagnostics.py", "_trust_fix"): (1, "its POSIX branch; Windows its own"),
 }
 

@@ -282,20 +282,31 @@ def find_account(slot: int) -> ClaudeAccount | None:
 
 
 def managed_slot(config_dir: Path | str, agent: str | None = AGENT) -> int | None:
-    """The slot number when ``config_dir`` is one of ``agent``'s (any agent's for ``None``)."""
+    """The slot number when ``config_dir`` is one of ``agent``'s (any agent's for ``None``):
+    a slot's directory, or the config dir its agent reads there (:func:`agent_config_dir`)."""
     path = Path(config_dir)
     for each in account_agents() if agent is None else (agent,):
         try:
-            relative = path.resolve().relative_to(accounts_root(each).resolve())
+            root = accounts_root(each).resolve()
+            relative = path.resolve().relative_to(root)
         except (ValueError, OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11/3.12
             continue
         parts = relative.parts
-        if len(parts) != 1 or not _SLOT_DIR.match(parts[0]):
+        if not parts or not _SLOT_DIR.match(parts[0]):
+            continue
+        if len(parts) > 1 and kind(each).config_dir(root / parts[0]) != root.joinpath(*parts):
             continue
         slot = int(parts[0])
         if slot >= FIRST_MANAGED_SLOT:
             return slot
     return None
+
+
+def agent_config_dir(account: ClaudeAccount) -> Path:
+    """The config dir ``account``'s agent reads in its home (``AgentAccounts.config_dir``):
+    where its hooks, settings and login are. ``account.config_dir`` is the home the launch
+    variable names, which is the config dir itself for Claude Code and Codex."""
+    return kind(account.agent).config_dir(account.config_dir)
 
 
 def label(account: ClaudeAccount) -> str:
@@ -1436,6 +1447,9 @@ class ClaudeCodeAccounts:
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
         value = plain.get(CONFIG_DIR_VAR, "").strip()
         return paths.expand_user(Path(value)) if value else home / ".claude"
+
+    def config_dir(self, slot_dir: Path) -> Path:
+        return slot_dir  # CLAUDE_CONFIG_DIR names the config dir itself
 
     def identity(
         self, account: ClaudeAccount, *, env: Mapping[str, str] | None = None

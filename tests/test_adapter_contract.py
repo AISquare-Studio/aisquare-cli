@@ -8,7 +8,8 @@ or writes a flag itself instead of asking the adapter, fails here for the fake.
 What a new adapter must bring for this suite to pass (docs/coding-agents.md, "Adding a
 terminal agent"): a recorded-payload fixture for every hook event it installs
 (``tests/fixtures/agent_events/<id>.json``, with its ``--version`` line and what switches
-its hooks off), a row in :data:`EXPECTED_PERMISSIONS`, and its transcript at four moments
+its hooks off, and the files of a home that keeps aisquare's MCP server: ``lasting``), a row in
+:data:`EXPECTED_PERMISSIONS`, and its transcript at four moments
 (``tests/fixtures/agent_transcripts/<id>.json``: a permission prompt up, a question, an
 interruption, a turn ended on a question) for its ``transcript_reader``; and with
 ``capabilities.dialog_on_screen`` or ``screen_prompt``, its screens
@@ -66,7 +67,7 @@ from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import ClaudeAccount
-from aisquare.services import agent_events, store_broker
+from aisquare.services import agent_events, first_run, store_broker
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from tests import fakebin
@@ -228,10 +229,49 @@ def test_identity_and_config_home(adapter: AgentAdapter, tmp_path: Path) -> None
 
     assert real(adapter.config_dir(tmp_path, {})) == real(tmp_path / adapter.home_name)
     elsewhere = tmp_path / "elsewhere"
-    assert real(adapter.config_dir(tmp_path, {adapter.home_env: str(elsewhere)})) == real(elsewhere)
+    # The home the variable names is the config dir where its accounts say so (S1).
+    named = adapter.accounts.config_dir(elsewhere) if adapter.accounts else elsewhere
+    assert real(adapter.config_dir(tmp_path, {adapter.home_env: str(elsewhere)})) == real(named)
     explicit = tmp_path / "explicit"
     chosen = adapter.config_dir(tmp_path, {adapter.home_env: str(elsewhere)}, explicit)
     assert real(chosen) == real(explicit)
+
+
+def test_install_routes_offer_one_on_every_platform(adapter: AgentAdapter) -> None:
+    """``install_routes``: at least one, each a command a terminal runs, and Welcome's step 2
+    offers one on every platform (on Windows the best, inside WSL2)."""
+    routes = adapter.install_routes
+    assert routes, f"{adapter.id} names no way to install it"
+    assert all(route.how and route.command.strip() for route in routes)
+    for platform in ("linux", "darwin", "win32"):
+        offered = first_run.install_routes(platform, agent=adapter.id)
+        assert offered and all(route.command for route in offered), platform
+    assert first_run.install_routes("win32", agent=adapter.id)[0].command == routes[0].command
+
+
+def test_lasting_installs_name_a_removal_the_agents_own_binary_runs(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``lasting_installs``: what a home keeps of aisquare's in the agent's own files (the
+    fixture's ``lasting``: an MCP server run through uvx, beside one that is not aisquare's),
+    each with a removal its own binary runs and whether it outlives the package; nothing in a
+    home that keeps none."""
+    home = _home(adapter, tmp_path)
+    assert adapter.lasting_installs(home) == ()
+    lasting = _fixture(adapter)["lasting"]
+    for name, text in lasting["files"].items():
+        (home / name).parent.mkdir(parents=True, exist_ok=True)
+        (home / name).write_text(text, encoding="utf-8")
+
+    found = adapter.lasting_installs(home)
+
+    assert [[entry.kind, entry.name, entry.fetches] for entry in found] == lasting["expect"]
+    for entry in found:
+        assert entry.agent == adapter.id and entry.home == home
+        assert entry.file.is_file() and agent_core.dir_identity(home) in entry.file.parents
+        words = entry.remove.split()
+        assert adapter.binary in words, f"{adapter.id} removes {entry.name} with {entry.remove}"
+        assert entry.name in entry.remove
 
 
 # --- hooks -------------------------------------------------------------------------------
@@ -271,6 +311,15 @@ def test_hook_install_and_remove_keep_every_foreign_entry(
         )
     assert agent_core.hooks_installed(adapter.id, home)
     assert agent_core.connected(adapter.id, home)
+    # Each handler is the adapter's own (`hook_entry`): its shape, its timeout's unit.
+    for spec in adapter.capabilities.hooks:
+        [handler] = [
+            item
+            for group in written["hooks"][spec.event]
+            for item in group.get("hooks", [])
+            if agent_core._is_aisquare_hook_command(item["command"])
+        ]
+        assert handler == adapter.hook_entry(spec, handler["command"]), spec.event
 
     assert agent_core.remove_hooks(adapter.id, home)
     assert json.loads(settings.read_text(encoding="utf-8")) == foreign
@@ -873,6 +922,27 @@ def test_an_accounts_slot_fingerprints_its_login_and_a_new_sign_in_changes_it(
     _sign_in(adapter, account, "relogin")
     assert slot.login_fingerprint(account) not in (None, first)
     assert accounts_service.sign_in_landed(account, since=first) == identity
+
+
+def test_a_slots_config_dir_holds_its_hooks_once_signed_in(
+    adapter: AgentAdapter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``AgentAccounts.config_dir``: a slot's sign-in connects aisquare in the config dir the
+    agent reads there (Gemini CLI's would be ``<slot>/.gemini``), which a hook naming
+    it (``--config-dir``) maps back to the slot."""
+    slot = _accounts_or_skip(adapter, monkeypatch)
+    account = accounts_core.create_account(adapter.id)
+    config = slot.config_dir(account.config_dir)
+    assert accounts_core.agent_config_dir(account) == config
+    _sign_in(adapter, account, "login")  # the agent's own sign-in, which makes its config dir
+
+    described = accounts_service.complete_sign_in(account)
+
+    assert described.hooks_installed, described.detail
+    assert (config / adapter.settings_name).is_file()
+    assert agent_core.hooks_installed(adapter.id, config)
+    assert accounts_core.managed_slot(config, adapter.id) == account.slot
+    assert accounts_core.managed_slot(account.config_dir, adapter.id) == account.slot
 
 
 def test_an_accounts_slot_shares_a_folders_trust_between_its_accounts(

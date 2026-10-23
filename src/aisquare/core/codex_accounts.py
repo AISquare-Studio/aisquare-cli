@@ -612,6 +612,9 @@ class CodexAccounts:
         value = plain.get(HOME_VAR, "").strip()
         return paths.expand_user(Path(value)) if value else home / ".codex"
 
+    def config_dir(self, slot_dir: Path) -> Path:
+        return slot_dir  # CODEX_HOME names the config dir itself
+
     def identity(
         self, account: ClaudeAccount, *, env: Mapping[str, str] | None = None
     ) -> ClaudeIdentity | None:

@@ -690,7 +690,7 @@ def test_launch_a_is_the_account_and_names_codexs_spelling(
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
     result = runner.invoke(app, ["launch", "coder", "--agent", "codex", "-a", "never", "fix"])
-    assert result.exit_code != 0 and "--ask-for-approval never" in result.output
+    assert result.exit_code != 0 and "pass -a never after --" in result.output
     execute.assert_not_called()
 
 

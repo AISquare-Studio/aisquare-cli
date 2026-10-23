@@ -26,7 +26,8 @@ from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
-from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters import claude_installs, get_adapter
+from aisquare.core.agent_adapters.lasting import fetches_aisquare, runs_aisquare
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.core.tmux import (
@@ -336,7 +337,7 @@ def test_mcp_servers_that_run_aisquare_are_listed_and_never_edited(
     }, "playwright does not run aisquare"
     assert result.exit_code == 0, result.output
     for entry in plan.mcp:  # the plan's own command for each, never a bare one
-        assert f"remove it: {lifecycle.mcp_removal(entry)}" in result.stdout, result.stdout
+        assert f"remove it: {entry.remove}" in result.stdout, result.stdout
     assert "claude mcp remove <name>" not in result.stdout
     assert beside.read_bytes() == before, ".claude.json is Claude Code's; uninstall only reads it"
     assert agent_core.hook_commands("claude-code", default) == []
@@ -1479,7 +1480,15 @@ def test_an_enabled_plugin_is_named_with_its_removal_and_a_purge_waits_for_it(
     assert removal.endswith("claude plugin uninstall aisquare@aisquare-cli"), removal
     scopes = [(plugin.pop("scope"), plugin.pop("project")) for plugin in plan["plugins"]]
     assert scopes == [("user", None)], "enabled in the config dir itself: user scope"
-    assert plan["plugins"] == [{"config_dir": str(site), "version": "0.9.0", "remove": removal}]
+    assert plan["plugins"] == [
+        {
+            "agent": "claude-code",
+            "config_dir": str(site),
+            "plugin": agent_core.CLAUDE_PLUGIN_ID,
+            "version": "0.9.0",
+            "remove": removal,
+        }
+    ]
     refused = _one_object(purge.stdout)
     assert (purge.exit_code, refused["error"]) == (1, "plugin_enabled"), refused
     assert removal in refused["detail"] and untouched, "refused with the command, nothing touched"
@@ -1772,7 +1781,9 @@ def test_a_plugin_a_repository_enables_is_named_with_its_removal_and_a_purge_wai
     assert removal.endswith(f"claude plugin uninstall aisquare@aisquare-cli --scope {scope}")
     assert plan["plugins"] == [
         {
+            "agent": "claude-code",
             "config_dir": str(config),
+            "plugin": agent_core.CLAUDE_PLUGIN_ID,
             "version": "0.8.0",
             "scope": scope,
             "project": str(repo),
@@ -2065,7 +2076,7 @@ def test_a_settings_file_that_is_not_utf8_is_reported_not_raised(
 )
 def test_an_mcp_server_runs_aisquare_only_by_program_name(spec: dict[str, Any], runs: bool) -> None:
     """Finding 5: a path or file merely named aisquare is not aisquare."""
-    assert lifecycle._runs_aisquare(spec) is runs
+    assert runs_aisquare(spec) is runs
 
 
 def test_a_refused_purge_says_why_under_json(
@@ -3031,14 +3042,18 @@ def test_on_native_windows_what_a_removal_needs_is_said_after_its_command(
     needs are said after it, never written in a syntax the shell cannot run."""
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     sibling = tmp_path / ".claude-c2"
-    top = lifecycle.McpRegistration("top", tmp_path / ".claude.json")
-    proj = lifecycle.McpRegistration("proj", tmp_path / ".claude.json", "C:\\work\\my repo")
-    other = lifecycle.McpRegistration("c2", sibling / ".claude.json", None, sibling)
     monkeypatch.setattr(sys, "platform", "win32")
 
-    default_shell = [lifecycle.mcp_removal(entry) for entry in (top, proj, other)]
+    def removal(name: str, project: str | None = None, config_dir: Path | None = None) -> str:
+        return claude_installs.mcp_removal(name, project=project, config_dir=config_dir)
+
+    default_shell = [
+        removal("top"),
+        removal("proj", project="C:\\work\\my repo"),
+        removal("c2", config_dir=sibling),
+    ]
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(sibling))
-    sibling_shell = [lifecycle.mcp_removal(entry) for entry in (top, other)]
+    sibling_shell = [removal("top"), removal("c2", config_dir=sibling)]
 
     assert default_shell == [
         "claude mcp remove --scope user top",
@@ -3337,7 +3352,7 @@ def test_uv_run_fetches_aisquare_when_with_names_it_in_any_spelling(args: list[s
     a URL, a checkout, a wheel — may be aisquare, and so may an editable path or a
     requirements file: `--with git+https://…/aisquare-cli` read as a package called `git`,
     and a purge it undoes went ahead (round 25 of #257)."""
-    assert lifecycle._fetches_aisquare({"command": "uv", "args": args})
+    assert fetches_aisquare({"command": "uv", "args": args})
 
 
 @pytest.mark.parametrize(
@@ -3366,7 +3381,7 @@ def test_a_runner_that_does_not_fetch_aisquare_is_not_read_as_one(
 ) -> None:
     """`uv run` without a `--with` naming aisquare runs the project's or PATH's program, and
     the arguments after the program are its own: each fails once the package is gone."""
-    assert not lifecycle._fetches_aisquare({"command": command, "args": args})
+    assert not fetches_aisquare({"command": command, "args": args})
 
 
 def test_a_purge_waits_for_a_project_mcp_json_server_that_fetches_aisquare(
@@ -3617,7 +3632,7 @@ def test_the_plan_finds_every_codex_home_and_its_mcp_server(
     found = {(site.agent, site.config_dir) for site in plan.hooks}
     assert found == {("codex", home) for home in (default, sibling, ambient, recorded, slot)}
     assert all(site.programs == (str(tool.script),) for site in plan.hooks)
-    removals = {entry.file.parent: lifecycle.mcp_removal(entry) for entry in plan.mcp}
+    removals = {entry.file.parent: entry.remove for entry in plan.mcp}
     assert {entry.name for entry in plan.mcp} == {"aisquare"}, "docs does not run aisquare"
     assert all(entry.agent == "codex" for entry in plan.mcp)
 
@@ -3635,7 +3650,7 @@ def test_the_plan_finds_every_codex_home_and_its_mcp_server(
         recorded: aimed(recorded),
         slot: aimed(slot),
     }
-    assert plan.codex_accounts == (slot,)
+    assert plan.account_homes == (("codex", slot),)
 
 
 def test_without_codex_home_set_the_default_homes_removal_is_the_bare_command(
@@ -3646,7 +3661,7 @@ def test_without_codex_home_set_the_default_homes_removal_is_the_bare_command(
     [entry] = lifecycle.uninstall_plan().mcp
 
     assert entry.file.parent == default
-    assert lifecycle.mcp_removal(entry) == "codex mcp remove aisquare"
+    assert entry.remove == "codex mcp remove aisquare"
 
 
 def test_yes_removes_only_aisquares_codex_hooks_and_never_rewrites_config_toml(
@@ -3702,7 +3717,7 @@ def test_the_codex_plan_under_json_names_each_site_and_server_by_agent(
             "remove": "codex mcp remove aisquare",
         }
     ]
-    assert plan["codex_plugins"] == []
+    assert plan["plugins"] == []
 
 
 def test_an_enabled_codex_plugin_is_named_with_its_removal_and_a_purge_waits_for_it(
@@ -3733,16 +3748,24 @@ def test_an_enabled_codex_plugin_is_named_with_its_removal_and_a_purge_waits_for
     disabled = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
 
     removal = "codex plugin remove aisquare@aisquare-cli"
-    assert plan["codex_plugins"] == [
-        {"config_dir": str(codex), "plugin": "aisquare@aisquare-cli", "remove": removal}
+    assert plan["plugins"] == [
+        {
+            "agent": "codex",
+            "config_dir": str(codex),
+            "plugin": "aisquare@aisquare-cli",
+            "version": None,
+            "scope": "user",
+            "project": None,
+            "remove": removal,
+        }
     ]
     refused = _one_object(purge.stdout)
     assert (purge.exit_code, refused["error"]) == (1, "plugin_enabled"), refused
     assert removal in refused["detail"] and untouched, "refused with the command, nothing touched"
     assert plain.exit_code == 0, plain.output
-    assert f"the aisquare Codex plugin is still enabled in {codex}" in plain.stdout
+    assert f"the aisquare plugin is still enabled in {codex}, so Codex keeps" in plain.stdout
     assert f"remove it: {removal}" in plain.stdout and world.events[-1][0] == "package"
-    assert disabled["codex_plugins"] == [], "control: a disabled plugin runs nothing"
+    assert disabled["plugins"] == [], "control: a disabled plugin runs nothing"
 
 
 def test_a_purge_refuses_a_codex_mcp_server_that_fetches_aisquare(
@@ -3809,7 +3832,7 @@ def test_a_claude_only_machine_with_codex_installed_plans_nothing_for_codex(
     result = runner.invoke(app, ["uninstall", "--dry-run"])
 
     assert [(site.agent, site.config_dir) for site in plan.hooks] == [("claude-code", claude)]
-    assert plan.mcp == () and plan.codex_plugins == () and plan.unreadable == ()
+    assert plan.mcp == () and plan.plugins == () and plan.unreadable == ()
     assert "Codex" not in result.stdout, result.stdout
     assert "uv, tmux, Node, gh and Claude Code" in result.stdout
 

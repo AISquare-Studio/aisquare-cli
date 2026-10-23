@@ -46,7 +46,6 @@ from aisquare.cli.common import fail
 from aisquare.cli.native_args import NativeForwardingCommand as LaunchCommand
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, orchestrator, paths, personas
-from aisquare.core.agent_adapters import codex
 from aisquare.core.agent_adapters.types import BadEffortError
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
@@ -83,8 +82,10 @@ _SEAT = re.compile(rf"^({'|'.join(ROLES)})\d+$")
 
 DEFAULT_AGENT = "claude"
 
-#: What Codex's own -a takes, which a launch's -a (--account) is told apart from.
-_CODEX_APPROVALS = frozenset({"untrusted", "on-failure", *codex.APPROVAL_POLICIES})
+#: launch's own short options, which an agent may spell with a value of its own (Codex's
+#: ``-a`` is its approval policy): one the agent's ``capabilities.value_options`` names too
+#: is told apart in the refusal of a value that is none of launch's.
+_ACCOUNT_SHORT = "-a"
 
 FLEET_ROW_TIMEOUT = 10.0
 """Seconds of LOOKS a fleet launch spends on its row before starting the agent anyway.
@@ -507,10 +508,11 @@ def launch(
             )
         except claude_accounts_service.NoSuchAccount as exc:
             message = str(exc)
-            if account in _CODEX_APPROVALS:
+            native = selected.adapter.capabilities.value_options
+            if _ACCOUNT_SHORT in native and account is not None and not account.isdigit():
                 message += (
-                    f". launch's -a is --account: for Codex's approval policy pass "
-                    f"--ask-for-approval {account}, or -a {account} after --"
+                    f". launch's {_ACCOUNT_SHORT} is --account: for {selected.adapter.label}'s "
+                    f"own {_ACCOUNT_SHORT}, pass {_ACCOUNT_SHORT} {account} after --"
                 )
             fail(message, error="unknown_account", ref=account)
     elif account is not None:

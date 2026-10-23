@@ -3,7 +3,6 @@
 import json
 import os
 import re
-import shlex
 import sys
 import tomllib
 from collections.abc import Mapping, Sequence
@@ -22,6 +21,8 @@ from aisquare.core.agent_adapters.types import (
     ForkArgs,
     HookSpec,
     HooksSwitch,
+    InstallRoute,
+    LastingInstall,
     NativeChoice,
     PermissionIntent,
     PluginInstall,
@@ -30,6 +31,7 @@ from aisquare.core.agent_adapters.types import (
     SkillDirs,
     WriteScope,
     block_reply,
+    command_entry,
     config_assignment,
     config_home,
     option_occurrences,
@@ -87,6 +89,13 @@ _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 #: aisquare-cli"]`` from this repository's marketplace (``.agents/plugins/marketplace.json``).
 PLUGIN = "aisquare"
 PLUGIN_MARKETPLACE = "aisquare-cli"
+#: The last aisquare release with no Codex hooks: an install of it, or of one before it,
+#: has none to write, and its ``agents refresh-hooks codex`` fails.
+LAST_WITHOUT_HOOKS = "0.8.2"
+#: Codex's own installer, as ``install.sh --agent codex`` runs it (its ``CODEX_INSTALLER_URL``).
+INSTALL_COMMAND = "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
+#: Codex's Homebrew cask, offered on macOS after its installer.
+BREW_COMMAND = "brew install --cask codex"
 #: Where in the plugin Codex reads its hooks, which keys their trust (``[hooks.state]``).
 PLUGIN_HOOKS = "hooks/hooks.json"
 #: ``codex plugin`` has add, list and remove: no disable (``enabled = false`` is the
@@ -141,28 +150,11 @@ class CodexPlugin:
         self, verb: str, config_dir: Path, *, scope: str = "user", project: Path | None = None
     ) -> str:
         """``codex plugin <verb> aisquare@<marketplace>``, aimed at ``config_dir`` as
-        ``aisquare uninstall`` aims it (``lifecycle._codex_command``): nothing for the home
-        this shell's ``codex`` reads, ``env -u CODEX_HOME`` for ``~/.codex`` from a shell
-        that names another, the variable otherwise. ``disable`` and ``uninstall`` are
+        ``aisquare uninstall`` aims it (:func:`_aimed`). ``disable`` and ``uninstall`` are
         ``remove`` (:data:`_PLUGIN_VERBS`)."""
-        from aisquare.core import agents
-
         found = _enabled_install(config_dir)
         plugin_id = found[0] if found is not None else f"{PLUGIN}@{PLUGIN_MARKETPLACE}"
-        argv = ["codex", "plugin", _PLUGIN_VERBS.get(verb, verb), plugin_id]
-        command = shlex.join(argv) if sys.platform != "win32" else " ".join(argv)
-        ambient = os.environ.get("CODEX_HOME", "").strip()
-        default = agents.dir_identity(agents.home() / ".codex")
-        here = agents.dir_identity(Path(ambient)) if ambient else default
-        there = agents.dir_identity(config_dir)
-        if there == here:
-            return command
-        if sys.platform == "win32":
-            need = "unset" if there == default else f"set to {config_dir}"
-            return f"{command} (run it with CODEX_HOME {need})"
-        if there == default:
-            return f"env -u CODEX_HOME {command}"
-        return f"CODEX_HOME={shlex.quote(str(config_dir))} {command}"
+        return _aimed(["codex", "plugin", _PLUGIN_VERBS.get(verb, verb), plugin_id], config_dir)
 
 
 #: Each write scope of a :class:`PermissionIntent` in ``--sandbox``'s words, and back.
@@ -463,6 +455,12 @@ class CodexAdapter:
     home_name = ".codex"
     settings_name = "hooks.json"
     install_hint = "npm install -g @openai/codex"
+    #: Its own installer first (the layout the Accounts page reads first), npm last.
+    install_routes: tuple[InstallRoute, ...] = (
+        InstallRoute("installer", INSTALL_COMMAND),
+        InstallRoute("Homebrew", BREW_COMMAND, frozenset({"darwin"})),
+        InstallRoute("npm", install_hint),
+    )
     version_args: tuple[str, ...] = ("--version",)
     hooks_off_setting = "`features.hooks = false`"
     #: Typed, then its Enter 0.2 s later: the paste-burst guard ate an Enter sent with it.
@@ -489,6 +487,7 @@ class CodexAdapter:
             HookSpec("PostToolUse", "codex", 3),
         ),
         requires_hook_trust=True,
+        hookless_through=LAST_WITHOUT_HOOKS,
         hook_names_home=True,
         strict_hooks_file=True,
         stop_reason_as_prompt=True,
@@ -612,6 +611,56 @@ class CodexAdapter:
         if path is None:
             return HooksSwitch(f"`{spelled}`")
         return HooksSwitch(f"`{key} = false` under [features]", path)
+
+    def hook_entry(self, spec: HookSpec, command: str) -> dict[str, Any]:
+        """``{"type": "command", "command": …, "timeout": <seconds>}`` in a ``hooks.json``
+        group (:func:`command_entry`), as Claude Code's ``settings.json`` writes one."""
+        return command_entry(spec, command)
+
+    def lasting_installs(self, home: Path) -> tuple[LastingInstall, ...]:
+        """What ``home``'s ``config.toml`` keeps of aisquare's: each ``[mcp_servers.<name>]``
+        whose ``command`` and ``args`` run aisquare, and the aisquare plugin, a ``[plugins.
+        "aisquare@<marketplace>"]`` table without ``enabled = false``, each with the
+        ``codex`` command that removes it (:func:`_aimed`). ``config.toml`` is Codex's own
+        file, which a running Codex rewrites too (trust, plugins), so it is never edited
+        here. A launch's ``-c mcp_servers.aisquare…`` (:meth:`mcp_args`) is written nowhere:
+        there is nothing of it to find."""
+        from aisquare.core import agents
+        from aisquare.core.agent_adapters.lasting import fetches_aisquare, runs_aisquare
+
+        path = agents.dir_identity(home / "config.toml")
+        config = _read_toml(path)
+        servers = config.get("mcp_servers")
+        plugins = config.get("plugins")
+        found = [
+            LastingInstall(
+                self.id,
+                "mcp",
+                str(name),
+                path,
+                home,
+                _aimed(["codex", "mcp", "remove", str(name)], home),
+                fetches=fetches_aisquare(spec),
+            )
+            for name, spec in (servers.items() if isinstance(servers, dict) else ())
+            if runs_aisquare(spec)
+        ]
+        found += [
+            LastingInstall(
+                self.id,
+                "plugin",
+                str(plugin_id),
+                path,
+                home,
+                _aimed(["codex", "plugin", "remove", str(plugin_id)], home),
+                fetches=True,
+            )
+            for plugin_id, table in (plugins.items() if isinstance(plugins, dict) else ())
+            if str(plugin_id).partition("@")[0] == PLUGIN
+            and isinstance(table, dict)
+            and table.get("enabled", True) is not False
+        ]
+        return tuple(found)
 
     def decode_event(self, payload: Mapping[str, Any]) -> AgentEvent | None:
         """Codex's command hook protocol: one ``aisquare hook codex`` for every event,
@@ -1385,6 +1434,33 @@ def _mcp_servers(home: Path, args: Sequence[str], cwd: Path) -> list[str]:
             if isinstance(servers, dict):
                 names.update(dict.fromkeys(servers))
     return list(names)
+
+
+def _aimed(argv: list[str], home: Path) -> str:
+    """``argv`` (a ``codex`` command) as one line that acts on Codex home ``home``.
+
+    ``codex`` reads ``$CODEX_HOME``, else ``~/.codex``: nothing is added for the home this
+    shell's ``codex`` already reads, ``env -u CODEX_HOME`` for ``~/.codex`` from a shell
+    that names another, and the variable otherwise, as ``claude_installs.mcp_removal`` aims
+    ``claude``. Native Windows has neither form, so there the variable it needs is said
+    after it.
+    """
+    from aisquare.core import agents
+    from aisquare.core.shell_line import command_line
+
+    command = command_line(argv)
+    ambient = os.environ.get(CodexAdapter.home_env, "").strip()
+    default = agents.dir_identity(agents.home() / CodexAdapter.home_name)
+    here = agents.dir_identity(Path(ambient)) if ambient else default
+    there = agents.dir_identity(home)
+    if there == here:
+        return command
+    if sys.platform == "win32":
+        need = "unset" if there == default else f"set to {home}"
+        return f"{command} (run it with {CodexAdapter.home_env} {need})"
+    if there == default:
+        return f"env -u {CodexAdapter.home_env} {command}"
+    return f"{CodexAdapter.home_env}={command_line([str(home)])} {command}"
 
 
 def _codex_home(config_dir: Path | None) -> Path:

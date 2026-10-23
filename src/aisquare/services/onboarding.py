@@ -35,6 +35,7 @@ from typing import Literal, Protocol
 from pydantic import TypeAdapter, ValidationError
 
 from aisquare.core import selfcli
+from aisquare.core.agent_adapters import adapters
 from aisquare.core.selfcli import CliResult
 from aisquare.core.store import store_session
 from aisquare.core.workspace import find_project_root, git_common_root, project_id_for
@@ -452,6 +453,9 @@ class _KnownFix:
     """Flags the hint may carry WITH one value we pass through verbatim."""
     slot: bool = False
     """The hint names an account slot first (a number), passed through verbatim."""
+    agent: bool = False
+    """The hint names an agent first, a registered adapter's id (``core.agent_adapters``,
+    asked when the hint is read), passed through verbatim: one row for every agent."""
     interactive: bool = False
     """It hands the terminal to an agent's own sign-in: never run under ``--json``
     (:func:`apply_fix` refuses it); the UI opens it in the Accounts page's pane."""
@@ -462,17 +466,13 @@ class _KnownFix:
 #: which starts a model process. Extending this table is the whole review
 #: surface for "what can one click run".
 KNOWN_FIXES: tuple[_KnownFix, ...] = (
+    # Any agent's Connect (`agents connect <agent>`), the doctor's per-agent row's fix.
     _KnownFix(
-        "agents connect codex",
-        ("agents", "connect", "codex"),
+        "agents connect",
+        ("agents", "connect"),
         "machine",
         valued=frozenset({"--config-dir"}),
-    ),
-    _KnownFix(
-        "agents connect claude-code",
-        ("agents", "connect", "claude-code"),
-        "machine",
-        valued=frozenset({"--config-dir"}),
+        agent=True,
     ),
     _KnownFix(
         "project onboard", ("project", "onboard", "--refresh"), "project", frozenset({"--refresh"})
@@ -539,6 +539,11 @@ def _argv_for(known: _KnownFix, rest: str) -> tuple[str, ...] | None:
     index = 0
     if known.slot:
         if not tokens or not tokens[0].isdigit():
+            return None
+        argv.append(tokens[0])
+        index = 1
+    if known.agent:
+        if not tokens or tokens[0] not in {adapter.id for adapter in adapters()}:
             return None
         argv.append(tokens[0])
         index = 1

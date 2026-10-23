@@ -374,7 +374,7 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
     if claude.agent != accounts_core.AGENT:
         return _other_agent_text(text, claude)
     text.append("✓ ", style="green")
-    name = "Claude Code" if claude.is_claude else claude.wanted
+    name = claude.label if claude.native else claude.wanted
     text.append(f"{name} {claude.version}" if claude.version else name)
     text.append(f" · {claude.binary}", style="dim")
     if claude.signed_in is True:

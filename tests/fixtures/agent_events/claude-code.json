@@ -119,5 +119,17 @@
     "relogin": {
       ".credentials.json": "{\"claudeAiOauth\": {\"accessToken\": \"token-two\", \"expiresAt\": 4102444800000, \"subscriptionType\": \"max\"}}"
     }
+  },
+  "lasting": {
+    "files": {
+      ".claude.json": "{\"mcpServers\": {\"memory\": {\"command\": \"uvx\", \"args\": [\"--from\", \"aisquare-cli\", \"aisquare\", \"serve\", \"--stdio\"]}, \"docs\": {\"command\": \"npx\", \"args\": [\"docs-mcp\"]}}}"
+    },
+    "expect": [
+      [
+        "mcp",
+        "memory",
+        true
+      ]
+    ]
   }
 }

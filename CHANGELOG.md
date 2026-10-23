@@ -17,6 +17,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tmux, and the trust model. B trusts A's key completely, so the runbook
   recommends a dedicated user and a key whose forced command runs `aisquare` and
   nothing else. (#293)
+- **Which instructions an agent follows** (`docs/instructions.md`, linked from the
+  README, Orchestration and Personas). Your `CLAUDE.md` files, the role cycle, the
+  persona and aisquare's memory all reach a fleet agent, and nothing ranks them:
+  the page says where each lands, that a conflict is removed rather than ranked
+  (with a `CLAUDE.md` snippet that keeps *use subagents* out of fleet agents), what
+  a subagent does and does not see, how to clear a stale `CLAUDE.md` section out of
+  aisquare's memory, and the 10,000-character cap on a hook's output. (#292)
 
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in

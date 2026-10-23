@@ -140,6 +140,9 @@ DOCUMENTED = (
     # step the reader types (docs/plans/spawn-personas.md §6 — planned commands
     # stay inline or in `text` fences until they exist).
     "docs/personas.md",
+    # Which instructions an agent follows (#292): its `sh` fence is the memory-pool
+    # cleanup a reader types.
+    "docs/instructions.md",
     # The captain's user page and its acceptance runbook: every `aisquare captain …`
     # line in an `sh` fence is a step the owner types (docs/plans/captain.md §7);
     # Phase 2 commands stay inline or in `text` fences until they exist.
@@ -985,6 +988,9 @@ CENSUS = {
     # `fleet spawn --persona`; twenty-five since P5's "Import anything else";
     # twenty-six since P8's `persona attach`.
     "docs/personas.md": (26, 0),
+    # Measured 2026-10-23 on the day it was written (#292): three fenced commands, the
+    # memory-pool cleanup (`context list`, `context remove`, `context preview`).
+    "docs/instructions.md": (3, 0),
     # Measured 2026-09-25 on the day the captain's pages were written: the user page's
     # fenced `aisquare captain …` lines (setup, talking, the voice page, the queue
     # verbs, the reboot) and the runbook's steps; the `pip install` line is a

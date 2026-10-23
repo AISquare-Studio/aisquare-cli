@@ -120,6 +120,11 @@ On every prompt, each session receives a compact delta of what teammates did
 since its last turn. Nothing needs forwarding; the coordination is the
 ambient state of the board.
 
+Your own `CLAUDE.md` files reach every agent too, beside its role cycle, and
+nothing ranks the two. When they disagree (*use subagents* against *spawn
+coders*), [Which instructions an agent follows](instructions.md) says where each
+comes from and how to remove the conflict.
+
 Orchestration is **opt-in per repo** (a role launch or `aisquare team on`)
 and fails open everywhere: the hooks are designed so orchestration can
 never break a Claude session, even when it is broken or absent. Repos

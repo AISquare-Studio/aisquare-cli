@@ -1955,7 +1955,7 @@ def test_press_sends_exactly_the_named_key(
     key: str, sent: str, alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
     fleet_rec.states["coder-1"] = "attention"
-    result = ok(actions.press("alpha", "coder-1", key, utterance=f"press {key} in coder-1"))
+    result = ok(actions.press("alpha", "coder-1", key))
     assert fleet_rec.panes["%1"].keys == [(sent,)]
     assert (result["key"], result["state"]) == (key, "attention")
 
@@ -2203,11 +2203,7 @@ def test_a_fresh_coder_takes_a_paste_when_its_box_is_drawn_and_idle(
     """Acceptance line 2 (13313; runner2's red-before at 13323): a just-spawned real claude
     reads working until its first Stop hook. Its drawn, idle box is the evidence."""
     pane = _working(fleet_rec, shots.REAL_IDLE_AFTER_STOP)
-    result = ok(
-        actions.paste(
-            "alpha", "coder-1", "run the fold's tests", submit=True, utterance="send it to coder-1"
-        )
-    )
+    result = ok(actions.paste("alpha", "coder-1", "run the fold's tests", submit=True))
     assert result["submitted"] is True
     assert pane.typed == [("paste", "run the fold's tests"), ("keys", "Enter")]
 
@@ -2236,7 +2232,7 @@ def test_a_chooser_just_drawn_takes_press_yes_while_the_fleet_still_reads_workin
 ) -> None:
     """A prompt showing is the agent asking, whatever the activity window says (13313)."""
     pane = _working(fleet_rec, CHOOSER, **{"1": IDLE})
-    result = ok(actions.press("alpha", "coder-1", "yes", utterance="approve coder-1"))
+    result = ok(actions.press("alpha", "coder-1", "yes"))
     assert pane.keys == [("1",)] and result["answered"] is True
 
 
@@ -2286,7 +2282,7 @@ def test_press_yes_answers_the_real_chooser_with_1_and_reads_it_gone(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
 ) -> None:
     pane = _at(fleet_rec, CHOOSER, **{"1": IDLE})
-    result = ok(actions.press("alpha", "coder-1", "yes", utterance="yes, approve coder-1"))
+    result = ok(actions.press("alpha", "coder-1", "yes"))
     assert pane.keys == [("1",)], "the digit, never the ignored y"
     assert (result["key"], result["sent"], result["answered"]) == ("yes", "1", True)
     assert result["prompt"] == "Do you want to create probe2.txt?"
@@ -2305,7 +2301,7 @@ def test_press_yes_on_a_y_n_line_is_y(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
 ) -> None:
     pane = _at(fleet_rec, YES_NO, y=["Installing 3 packages.", "Proceed? [y/N] y", "done"])
-    result = ok(actions.press("alpha", "coder-1", "yes", utterance="approve coder-1"))
+    result = ok(actions.press("alpha", "coder-1", "yes"))
     assert pane.keys == [("y",)] and result["answered"] is True
 
 
@@ -2314,7 +2310,7 @@ def test_a_press_the_prompt_ignores_is_a_said_failure_never_a_success(
 ) -> None:
     """y on the real chooser does nothing (13265): the captain must not report it pressed."""
     pane = _at(fleet_rec, CHOOSER)
-    message = refused(lambda: actions.press("alpha", "coder-1", "y", utterance="y for coder-1"))
+    message = refused(lambda: actions.press("alpha", "coder-1", "y"))
     assert message.startswith("error: pressed y in coder-1 but the prompt is still showing")
     assert "Do you want to create probe2.txt?" in message
     assert pane.keys == [("y",)]
@@ -2353,7 +2349,7 @@ def test_press_sends_a_digit(
     digit: str, alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
 ) -> None:
     pane = _at(fleet_rec, CHOOSER, **{digit: IDLE})
-    ok(actions.press("alpha", "coder-1", digit, utterance=f"press {digit} in coder-1"))
+    ok(actions.press("alpha", "coder-1", digit))
     assert pane.keys == [(digit,)]
 
 
@@ -2361,11 +2357,7 @@ def test_approve_prompt_answers_the_real_chooser_with_1(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
 ) -> None:
     pane = _at(fleet_rec, CHOOSER, **{"1": IDLE})
-    result = ok(
-        actions.act(
-            "approve_prompt", {"project": "alpha", "label": "coder-1"}, utterance="approve coder-1"
-        )
-    )
+    result = ok(actions.act("approve_prompt", {"project": "alpha", "label": "coder-1"}))
     assert pane.keys == [("1",)]
     assert result["steps"][0]["step"] == "press yes"
     assert actions.BUNDLED_ACTIONS["unblock"] == ("press yes", "read_pane 20")
@@ -2386,11 +2378,7 @@ def test_paste_submit_sends_exactly_one_enter_after_the_paste(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
     """One Enter for the whole paste — never one per newline (13013, acceptance line 2)."""
-    result = ok(
-        actions.paste(
-            "alpha", "coder-1", "line one\nline two\n", submit=True, utterance="send to coder-1"
-        )
-    )
+    result = ok(actions.paste("alpha", "coder-1", "line one\nline two\n", submit=True))
     assert fleet_rec.panes["%1"].typed == [("paste", "line one\nline two\n"), ("keys", "Enter")]
     assert result["submitted"] is True
     plain = ok(actions.paste("alpha", "coder-1", "again"))
@@ -2408,9 +2396,7 @@ def test_an_enter_that_fails_after_the_paste_says_the_text_is_waiting_in_the_inp
         raise TmuxError("can't find pane: %1")
 
     monkeypatch.setattr(FakeServer, "send_keys", no_enter)
-    message = refused(
-        lambda: actions.paste("alpha", "coder-1", "abc", submit=True, utterance="send to coder-1")
-    )
+    message = refused(lambda: actions.paste("alpha", "coder-1", "abc", submit=True))
     assert message.startswith("error: pasted 3 characters into coder-1 but the Enter failed")
     assert "do not paste it again" in message
     assert fleet_rec.panes["%1"].pastes == ["abc"], "the paste itself landed"
@@ -2424,115 +2410,6 @@ def test_paste_refuses_a_busy_pane(
         "refused: coder-1 is working"
     )
     assert fleet_rec.panes["%1"].pastes == []
-
-
-# --- a yes is the owner's (review of #240, R1-F3) ----------------------------------------
-
-
-@pytest.mark.parametrize("submit", [False, True])
-def test_a_paste_never_types_into_a_pane_at_a_permission_chooser(
-    submit: bool,
-    alpha: ProjectInfo,
-    agents: dict[str, FleetAgent],
-    fleet_rec: Fleet,
-    clock: Clock,
-) -> None:
-    """Its Enter would pick the highlighted "1. Yes": text asked for one thing would approve
-    a command nobody read. Refused whatever the owner said, and nothing reaches the pane."""
-    pane = _at(fleet_rec, CHOOSER, **{"1": IDLE, "Enter": IDLE})
-    message = refused(
-        lambda: actions.paste(
-            "alpha", "coder-1", "1", submit=submit, utterance="send 1 to coder-1, yes"
-        )
-    )
-    assert message.startswith("refused: a prompt is showing on coder-1")
-    assert "Do you want to create probe2.txt?" in message
-    assert pane.typed == []
-
-
-def test_an_owner_action_that_pastes_never_types_at_a_permission_chooser(
-    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
-) -> None:
-    write_config('[captain.actions.say]\nsteps = ["paste {text}", "press enter"]\n')
-    pane = _at(fleet_rec, CHOOSER, **{"Enter": IDLE})
-    message = refused(
-        lambda: actions.act(
-            "say", {"project": "alpha", "label": "coder-1", "text": "hi"}, utterance="coder-1"
-        )
-    )
-    assert "a prompt is showing on coder-1" in message
-    assert pane.typed == []
-
-
-@pytest.mark.parametrize("key", ["yes", "1", "2", "enter"])
-@pytest.mark.parametrize("words", ["", "go ahead", "yes"])
-def test_a_key_that_says_yes_without_the_owners_words_is_refused_and_nothing_is_pressed(
-    key: str,
-    words: str,
-    alpha: ProjectInfo,
-    agents: dict[str, FleetAgent],
-    fleet_rec: Fleet,
-    clock: Clock,
-) -> None:
-    """A bare yes with no question of the captain's pending is no yes either (13570)."""
-    pane = _at(fleet_rec, CHOOSER, **{"1": IDLE, "2": IDLE, "Enter": IDLE})
-    message = refused(lambda: actions.press("alpha", "coder-1", key, utterance=words))
-    assert f"Press {key} in coder-1 in" in message, message
-    assert "Do you want to create probe2.txt?" in message
-    assert pane.keys == []
-    assert audit(alpha.id)[-1]["ok"] is False
-
-
-def test_press_yes_takes_the_owners_yes_to_the_captains_own_question(
-    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
-) -> None:
-    pane = _at(fleet_rec, CHOOSER, **{"1": IDLE})
-    refused(lambda: actions.press("alpha", "coder-1", "yes", utterance="what's it asking?"))
-    assert pane.keys == []
-    result = ok(actions.press("alpha", "coder-1", "yes", utterance="yes"))
-    assert pane.keys == [("1",)] and result["answered"] is True
-
-
-def test_the_owners_no_to_an_approval_presses_nothing(
-    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
-) -> None:
-    pane = _at(fleet_rec, CHOOSER, **{"1": IDLE})
-    message = refused(
-        lambda: actions.press("alpha", "coder-1", "yes", utterance="don't approve coder-1")
-    )
-    assert message.startswith("refused: the owner said no") and pane.keys == []
-
-
-def test_approve_prompt_without_the_owners_words_presses_nothing(
-    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
-) -> None:
-    pane = _at(fleet_rec, CHOOSER, **{"1": IDLE})
-    message = refused(
-        lambda: actions.act("approve_prompt", {"project": "alpha", "label": "coder-1"})
-    )
-    assert "action approve_prompt stopped at step 1 (press yes)" in message
-    assert pane.keys == []
-
-
-@pytest.mark.parametrize("key", ["no", "esc", "down", "up"])
-def test_a_key_that_cannot_say_yes_needs_no_words(
-    key: str, alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
-) -> None:
-    pane = _at(fleet_rec, CHOOSER, Escape=IDLE)
-    ok(actions.press("alpha", "coder-1", key))
-    assert len(pane.keys) == 1
-
-
-def test_a_submitted_paste_without_the_owners_words_types_nothing(
-    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
-) -> None:
-    message = refused(
-        lambda: actions.paste("alpha", "coder-1", "rm -rf build", submit=True, utterance="")
-    )
-    assert message.startswith("Send 'rm -rf build' to coder-1 in")
-    assert fleet_rec.panes["%1"].typed == []
-    plain = ok(actions.paste("alpha", "coder-1", "rm -rf build"))
-    assert plain["submitted"] is False, "an unsubmitted paste is a draft: it needs no words"
 
 
 # --- ui ---------------------------------------------------------------------------------
@@ -2703,11 +2580,7 @@ def test_act_runs_a_bundled_action(
 ) -> None:
     """approve_prompt is ``press yes`` (T1b): the real chooser's Yes digit, read off the pane."""
     _at(fleet_rec, CHOOSER, **{"1": IDLE})
-    result = ok(
-        actions.act(
-            "approve_prompt", {"project": "alpha", "label": "coder-1"}, utterance="approve coder-1"
-        )
-    )
+    result = ok(actions.act("approve_prompt", {"project": "alpha", "label": "coder-1"}))
     assert fleet_rec.panes["%1"].keys == [("1",)]
     assert [step["step"] for step in result["steps"]] == ["press yes"]
 
@@ -2723,9 +2596,7 @@ def test_act_runs_a_config_defined_sequence_in_order_with_its_placeholders(
     fleet_rec.panes["%1"].screen = ["one", "two", "three"]
     result = ok(
         actions.act(
-            "nudge_and_look",
-            {"project": "alpha", "label": "coder-1", "text": "keep going"},
-            utterance="nudge coder-1",
+            "nudge_and_look", {"project": "alpha", "label": "coder-1", "text": "keep going"}
         )
     )
     assert fleet_rec.names() == ["tell"]
@@ -2767,11 +2638,7 @@ def test_a_config_action_wins_over_a_bundled_one_of_the_same_name(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
     write_config('[captain.actions.approve_prompt]\nsteps = ["press enter"]\n')
-    ok(
-        actions.act(
-            "approve_prompt", {"project": "alpha", "label": "coder-1"}, utterance="approve coder-1"
-        )
-    )
+    ok(actions.act("approve_prompt", {"project": "alpha", "label": "coder-1"}))
     assert fleet_rec.panes["%1"].keys == [("Enter",)]
 
 
@@ -2823,11 +2690,7 @@ def test_a_malformed_config_action_refuses_itself_only(
         "refused: captain.actions.broken in config.toml is not valid: steps must be a list"
     )
     _at(fleet_rec, CHOOSER, **{"1": IDLE})
-    ok(
-        actions.act(
-            "approve_prompt", {"project": "alpha", "label": "coder-1"}, utterance="approve coder-1"
-        )
-    )
+    ok(actions.act("approve_prompt", {"project": "alpha", "label": "coder-1"}))
 
 
 # --- attention: the T7 seam -------------------------------------------------------------

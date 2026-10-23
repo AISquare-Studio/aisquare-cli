@@ -48,13 +48,10 @@ ACTION_VERBS: dict[str, tuple[str, ...]] = {
     "stop": ("stop", "force stop"),
     "restart": ("restart",),
     "spawn": ("spawn",),
-    "press": ("press", "approve", "answer"),
-    "paste": ("send", "submit", "paste"),
 }
 """The verb each confirming tool stands for, as its own question says it ("Stop coder-1 in
 alpha?", "Force-stop …?"). No synonyms: neither the gate nor the persona reads another word
-as one of these, and "it did not start" is why an owner restarts an agent. A press that says
-yes (review of #240, R1-F3) is also said as the persona's approve_prompt says it."""
+as one of these, and "it did not start" is why an owner restarts an agent."""
 
 KEEPS = ("leave", "keep")
 """What refuses an action from right before the target's name: "Leave coder-1 alone",

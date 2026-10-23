@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`aisquare ui --project <ref>` and `--group <name>`** (both repeatable) list only
+  those projects for the session, plus the captain's section when it is on; a name
+  that matches nothing is refused before the app starts (#83).
+- **`[fleet] pane_clipboard = "off" | "on"`.** On, a program in an agent's pane may
+  set your clipboard with OSC 52: tmux keeps it as a paste buffer and hands it to the
+  terminal `fleet attach` runs in (#101, which measured tmux dropping it). Off, the
+  default, keeps any program a pane runs from writing your clipboard. Claude Code's own
+  copies reach tmux's paste buffer either way. Applies to a server started after the
+  change.
+
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in
@@ -261,6 +271,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dialog's flag is `_spawning`.
 
 ### Changed
+
+- **`asq`'s tick costs what its agents cost, not what its project list costs** (#83).
+  Every two seconds the sidebar read every listed project: a store session each, and
+  two tmux processes each, whether it had an agent or not. It now reads them all in
+  one store session, asks each tmux server once (`list-panes -a`), and skips a project
+  with no live agent and none that ended in the last day, and the members of a
+  collapsed group, whose header counts their live agents instead. A card whose agents
+  did not change is not repainted. With 50 listed projects, 10 of them with 3 agents:
+  51 store sessions and 20 tmux processes per read became 1 and 1, the read ~200 ms to
+  ~11 ms, and the UI thread's paint ~15 ms to ~4–7 ms (measured on one Mac).
+- **The fleet's tmux server turns the mouse on** (#100), so the wheel scrolls Claude
+  Code in `fleet attach`. A plain drag there is tmux's selection now; hold Shift
+  (Option in macOS Terminal and iTerm2) to select in your own terminal. `asq` is
+  unaffected: it sends mouse reports straight to the pane. Applies to a server started
+  after the upgrade.
 - **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and
   the suite on one Linux leg (py3.12), the Linux package job and the other jobs
   bar the ambient legs and the demo. Pushes to `rc/**` and `main`, PRs into
@@ -314,6 +339,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one JSON array, so every reader parses it as before. A pack that makes no
   skeleton (the compressed pack, or a full pack whose skeleton failed) now removes
   the one an earlier run left, which no longer matched the tree.
+
+- **A stale `ANTHROPIC_BASE_URL` is found wherever it hides, and one command removes
+  it** (#51). Tracing's proxy can outlive Disable in a Claude `settings.json` `env`
+  block (the plain claude's, a managed slot's, a project's shared or local file), a
+  role binding's `env` or `env_files`, the fleet tmux server's global environment or
+  the shell, and once that proxy is gone every agent launched with it fails at its
+  first model call. `aisquare doctor` has an `anthropic routing` row that reads them
+  all, with or without the team active: a proxy of ours (a target's, the shipped
+  default, or one carrying our identity headers) with tracing off or on another
+  target warns, naming each place and its fix; a URL the agent cannot parse warns;
+  your own gateway is information and is never changed. No header value is printed,
+  JSON included. `aisquare explainability reset [--dry-run] [--yes] [--json]` turns
+  tracing off (targets kept), removes the two keys from settings files (a
+  `settings.json.bak-<stamp>` copy kept, written under Claude Code's own lock), from
+  bindings and from the tmux server, prints the shell's `unset` line and the rc files
+  that mention them (never edited), and a second run says "nothing to reset".
+  `explainability disable` and the Explainability tab's Disable name the leftovers;
+  the tab then offers **Reset routing**.
+- **`doctor --fix` no longer undoes a Disable.** It turned tracing on whenever it was
+  off; it now does so only with `--target <name>`, and otherwise says how.
+- **A traced launch no longer waits on the gateway** (#129 (e)). The Run's root was
+  posted inline between the proxy probe and the agent's exec, a WAN write with a 3 s
+  budget that #129 measured over budget on 2 of 11 launches. A detached
+  `explainability post-root` worker makes the post now, with the key on its stdin,
+  and retries a transport failure or a 5xx; the agent starts on the `traceparent`
+  path at once, and the gateway holds its first spans until the root lands. A
+  gateway URL that cannot be parsed still falls back to `X-Pipeline-Id` before
+  anything starts; a post that fails in the worker leaves its reason in
+  `~/.aisquare/log/explainability-root.log`.
 
 - **A coder that claims a task sees its contract.** `task claim` and `task next
   --claim` printed the title line alone, and the contract (`--detail`) was a

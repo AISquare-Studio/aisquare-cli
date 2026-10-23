@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -28,7 +29,7 @@ import pytest
 
 from aisquare.core import claude_screen
 from aisquare.core.store import store_session
-from aisquare.core.tmux import TmuxServer
+from aisquare.core.tmux import Completed, TmuxServer
 from aisquare.models import FleetAgent, ProjectInfo, TeamSession
 from aisquare.services import delivery
 from aisquare.services import fleet as fleet_service
@@ -207,7 +208,7 @@ def test_a_human_typing_in_asq_holds_every_write_until_it_goes_quiet(
     holds a nudge and a tell back even where the box reader sees nothing (a draft wrapped
     past the box, a box mid-redraw). Past the quiet window, they go in."""
     manager = _waiting(tmux, project)
-    delivery.touch_typing_lease(tmux.socket, manager.pane_id)
+    delivery.touch_typing_lease(tmux, manager.pane_id)
 
     assert fleet_service.nudge_manager(project.id, reason="task_done") is False
     told = fleet_service.tell(project, manager.label, "status?")
@@ -215,7 +216,7 @@ def test_a_human_typing_in_asq_holds_every_write_until_it_goes_quiet(
     assert tmux.typed == []
 
     quiet = time.time() - fleet_service.settings().draft_quiet_seconds - 1
-    lease = delivery.typing_lease(tmux.socket, manager.pane_id)
+    lease = delivery.typing_lease(tmux, manager.pane_id)
     os.utime(lease, (quiet, quiet))
     assert fleet_service.nudge_manager(project.id, reason="task_done") is True
 
@@ -230,7 +231,7 @@ def test_the_pane_touches_the_typing_lease_at_most_once_a_second(
 
     touched: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        delivery, "touch_typing_lease", lambda socket, pane: touched.append((socket, pane))
+        delivery, "touch_typing_lease", lambda server, pane: touched.append((server.socket, pane))
     )
     now = [100.0]
     monkeypatch.setattr(time, "monotonic", lambda: now[0])  # the clock `_typing` reads
@@ -245,6 +246,37 @@ def test_the_pane_touches_the_typing_lease_at_most_once_a_second(
     pane._typing(server, "%4")
 
     assert touched == [("asq-test", "%3"), ("asq-test", "%3"), ("asq-test", "%4")]
+
+
+def test_the_typing_lease_is_the_servers_not_every_server_of_its_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #337, minor: every fleet server is named ``asq``, and every server numbers
+    its panes from ``%0``. Leased by the name, a key typed into ``%1`` on one held every write
+    to ``%1`` on another ``asq`` (another ``TMUX_TMPDIR``, a scratch fleet). The lease is the
+    server's, by its socket's path: the same server asked by name (``-L``) or at its path
+    (``-S``, a recorded row) is one lease, through the ``/tmp`` link macOS has."""
+    from aisquare.cli.ui import terminal
+
+    def no_screen(argv: Sequence[str], stdin: bytes | None) -> Completed:
+        return Completed(1, "", "can't find pane: %1")
+
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path / "real"))
+    (tmp_path / "linked").symlink_to(tmp_path / "real")
+    here = TmuxServer("asq", runner=no_screen)
+    elsewhere = here.at(tmp_path / "other" / "tmux-0" / "asq")
+    pane = object.__new__(terminal.TerminalPane)
+    pane._leased = None
+
+    pane._typing(here, "%1")
+
+    typing = "someone is typing in its pane"
+    assert delivery.draft_guard(here, "%1", quiet=10.0) == typing
+    assert delivery.draft_guard(here.at(here.socket_path()), "%1", quiet=10.0) == typing
+    through_link = tmp_path / "linked" / here.socket_path().relative_to(tmp_path / "real")
+    assert delivery.draft_guard(here.at(through_link), "%1", quiet=10.0) == typing
+    assert delivery.draft_guard(elsewhere, "%1", quiet=10.0) is None
+    assert delivery.draft_guard(here, "%2", quiet=10.0) is None
 
 
 # --- the tell ------------------------------------------------------------------------------------

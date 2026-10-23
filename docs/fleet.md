@@ -1500,7 +1500,9 @@ UI owns the mouse), monitor-activity on. One server for every project; one
 session per project; one window per agent.
 
 **The typing lease.** When you type into an agent's pane in `asq`, it touches
-`~/.aisquare/run/typing/<server>-<pane>`, at most once a second. For `[fleet]
+`~/.aisquare/run/typing/<socket>-<server>-<pane>`, at most once a second.
+`<server>` is a digest of the socket's real path, so another `asq` server at
+another path, whose pane ids repeat this one's, is never held by it. For `[fleet]
 draft_quiet_seconds` (10) after your last key, no fleet write types into that
 pane: not a nudge, a tell, a typed first message or the Remote's paste. The
 input box is read too, so a draft you leave there holds them off for as long as

@@ -1261,7 +1261,7 @@ class TerminalPane(Widget, can_focus=True):
         self._held: list[_Input] | None = None
         """Input typed while :meth:`_recover_input` waits to run, in order; ``None`` when
         no recovery is waiting."""
-        self._leased: tuple[str, str, float] | None = None
+        self._leased: tuple[_ServerKey, str, float] | None = None
         """The typing lease last touched: server, pane, and when (``time.monotonic``) —
         once a second at most (:meth:`_typing`)."""
         self._resize_timer: Timer | None = None
@@ -2622,10 +2622,10 @@ class TerminalPane(Widget, can_focus=True):
         touch per key would not."""
         now = time.monotonic()
         last = self._leased
-        if last is not None and last[:2] == (server.socket, pane_id) and now - last[2] < 1.0:
+        if last is not None and last[:2] == (_server_key(server), pane_id) and now - last[2] < 1.0:
             return
-        self._leased = (server.socket, pane_id, now)
-        delivery.touch_typing_lease(server.socket, pane_id)
+        self._leased = (_server_key(server), pane_id, now)
+        delivery.touch_typing_lease(server, pane_id)
 
     def _over_pipe(self, link: _Control, item: _Input) -> bool:
         """``item`` down the pipe, stamped; False for a paste the pipe cannot carry."""

@@ -36,6 +36,7 @@ re-exported there under the same names.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import time
@@ -48,7 +49,13 @@ from typing import Literal
 from aisquare.core import claude_screen as screen
 from aisquare.core import harness, paths
 from aisquare.core.store import ContextStore, store_session
-from aisquare.core.tmux import TmuxError, TmuxPartlyTyped, TmuxServer, TmuxTimedOut
+from aisquare.core.tmux import (
+    TmuxError,
+    TmuxPartlyTyped,
+    TmuxServer,
+    TmuxTimedOut,
+    TmuxUnavailable,
+)
 from aisquare.models import FleetAgent
 
 FIRST_PROMPT_FLAG = "--first-prompt-file"
@@ -380,26 +387,38 @@ def _composer(server: TmuxServer, pane_id: str) -> str | None:
 # --- the draft guard (P0-W2, #276) ----------------------------------------------------------
 
 
-def typing_lease(socket: str, pane_id: str) -> Path:
-    """The file ``asq`` touches while someone types into ``pane_id`` on the tmux server named
-    ``socket``: ``$AISQUARE_HOME/run/typing/<socket>-<pane>``, its mtime the last key."""
-    name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{socket}-{pane_id.lstrip('%')}")
+def typing_lease(server: TmuxServer, pane_id: str) -> Path:
+    """The file ``asq`` touches while someone types into ``pane_id`` on ``server``:
+    ``$AISQUARE_HOME/run/typing/<socket>-<server>-<pane>``, its mtime the last key.
+
+    ``<server>`` is a digest of the socket's real path (:meth:`TmuxServer.socket_path`), not
+    its name alone: every fleet server is named ``asq`` and numbers its panes from ``%0``, so a
+    key typed into ``%1`` on one held every write to ``%1`` on another ``asq`` at another path
+    (review of #337). The same server asked by name or at its path is one lease."""
+    try:
+        where = str(server.socket_path().resolve())
+    except TmuxUnavailable:
+        where = server.socket  # no POSIX uid: no tmux server either
+    digest = hashlib.sha256(where.encode()).hexdigest()[:12]
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{server.socket}-{digest}-{pane_id.lstrip('%')}")
     return paths.aisquare_home() / "run" / "typing" / name
 
 
-def touch_typing_lease(socket: str, pane_id: str) -> None:
+def touch_typing_lease(server: TmuxServer, pane_id: str) -> None:
     """Say someone is typing into ``pane_id`` now (``asq``'s ``_forward``). Never raises: a home
     that cannot be written costs the lease, and the input box is still read."""
-    path = typing_lease(socket, pane_id)
+    path = typing_lease(server, pane_id)
     with contextlib.suppress(OSError):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch()
 
 
-def human_typing(socket: str, pane_id: str, *, quiet: float, now: float | None = None) -> bool:
+def human_typing(
+    server: TmuxServer, pane_id: str, *, quiet: float, now: float | None = None
+) -> bool:
     """Whether someone typed into ``pane_id`` in ``asq`` within the last ``quiet`` seconds."""
     try:
-        touched = typing_lease(socket, pane_id).stat().st_mtime
+        touched = typing_lease(server, pane_id).stat().st_mtime
     except OSError:
         return False
     return (time.time() if now is None else now) - touched < quiet
@@ -417,7 +436,7 @@ def draft_guard(
     a binary that is not Claude Code. A human at ``tmux attach`` leaves no lease; the box
     reader covers them. A screen tmux will not show is no draft.
     """
-    if human_typing(server.socket, pane_id, quiet=quiet):
+    if human_typing(server, pane_id, quiet=quiet):
         return "someone is typing in its pane"
     composer = _composer(server, pane_id)
     if composer and not (ours is not None and holds(composer, ours)):

@@ -709,7 +709,11 @@ class FakePane:
         return self
 
     socket = "asq"
-    """Its name, as a real server's: the key of the pane's typing lease (P0-W2)."""
+    """Its name, as a real server's."""
+
+    def socket_path(self) -> Path:
+        """Where its socket is, as a real server's: the key of the pane's typing lease (P0-W2)."""
+        return Path("/run/fake/tmux-1000/asq")
 
     def __init__(self, log: list[str]) -> None:
         self.log = log

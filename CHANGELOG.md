@@ -10,8 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **App settings has two tabs**: *Agent settings* (shown first: roles, the fleet,
   accounts — the same fields, ids and save rules as the single page before, under
-  bold section headers and a shorter note) and *User preferences*. Save, Reload and
-  *Reset all settings to default* sit under the tabs and act on both. The first
+  bold section headers, with the pointers to `team harness`/`team bind` as its last
+  line) and *User preferences*. Save, Reload and *Reset all settings to default* sit
+  under the tabs on one compact line, beside a one-line "Saved to …" note, and act on
+  both; at 80x24 the tabs keep the four whole role rows the single page showed. The first
   preference is **Always show project directory** (`[ui] always_show_project_path`,
   off by default; `aisquare config get/set ui.always_show_project_path`): on, every
   card in the sidebar shows its directory under its name, not only two projects that

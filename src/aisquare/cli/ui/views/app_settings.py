@@ -61,6 +61,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static, Switch, TabbedContent, TabPane
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.sidebar import short_path
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import paths, personas
 from aisquare.core.config import (
@@ -281,7 +282,7 @@ class AppSettingsView(Vertical):
     accounts) and *User preferences* (``[ui]``) — and under them Save, Reload, Reset all."""
 
     DEFAULT_CSS = """
-    AppSettingsView { padding: 1 2; }
+    AppSettingsView { padding: 1 1 0 1; }
     AppSettingsView #app-settings-tabs { height: 1fr; }
     AppSettingsView #app-settings-tabs > ContentSwitcher { height: 1fr; }
     AppSettingsView #app-settings-tabs TabPane { height: 1fr; padding: 0; }
@@ -297,14 +298,23 @@ class AppSettingsView(Vertical):
     AppSettingsView .row .persona-select { width: 20; }
     AppSettingsView #settings-personas-unavailable { display: none; color: $warning; height: auto; }
     AppSettingsView #settings-personas-unavailable.shown { display: block; }
-    AppSettingsView .section { margin: 1 0 1 0; height: auto; }
+    AppSettingsView .section {
+        margin-top: 1; height: 1; text-wrap: nowrap; text-overflow: ellipsis;
+    }
     AppSettingsView .row.preference { margin-bottom: 0; }
     AppSettingsView .row .preference-label { width: 32; }
     AppSettingsView .about { color: $text-muted; height: auto; margin-bottom: 1; }
-    AppSettingsView #settings-buttons { margin: 1 0 0 0; }
-    AppSettingsView #settings-buttons Button { margin-right: 1; }
-    AppSettingsView #settings-note { color: $text-muted; height: auto; }
+    AppSettingsView #settings-buttons { height: 1; }
+    AppSettingsView #settings-buttons Button { min-width: 0; margin-right: 1; }
+    AppSettingsView #settings-note {
+        color: $text-muted; height: 1; text-wrap: nowrap; text-overflow: ellipsis;
+    }
     """
+    # Under the tabs, only what both tabs need, one line each: compact buttons and the
+    # note. They sat there three and eleven lines tall, and at 80x24 left the tabs two
+    # to four rows — the User preferences switch off screen (tester, PR #302). What the
+    # note said about the roles is the Agent settings tab's last line now
+    # (``#agent-settings-note``).
     ROLE_SECTION: ClassVar[tuple[str, str]] = (
         "Roles",
         "permission mode, worktree, persona and account per role",
@@ -462,23 +472,22 @@ class AppSettingsView(Vertical):
                 VerticalScroll(id="user-preferences", classes="tab-body"),
             ):
                 yield from self._compose_preferences()
-        with Horizontal(id="settings-buttons", classes="row"):
-            yield Button("Save", id="save-settings", variant="primary")
-            yield Button("Reload", id="reload-settings")
-            yield Button("Reset all settings to default", id="reset-settings", variant="error")
-        # The commands in bold, not in backticks: the note is a ``Text``, which shows them.
-        yield Static(
-            Text.assemble(
-                f"Saved to {paths.config_path()}, only what differs from the defaults; a "
-                "per-spawn flag still wins, and nothing here is read from the environment. "
-                "Model, effort and binary per role: ",
-                ("aisquare team harness", "bold"),
-                " and ",
-                ("team bind", "bold"),
-                ". The machine and project account defaults: the Accounts page.",
-            ),
-            id="settings-note",
+        with Horizontal(id="settings-buttons"):
+            yield Button("Save", id="save-settings", variant="primary", compact=True)
+            yield Button("Reload", id="reload-settings", compact=True)
+            yield Button(
+                "Reset all settings to default",
+                id="reset-settings",
+                variant="error",
+                compact=True,
+            )
+        saved = (
+            f"Saved to {short_path(paths.config_path())} · only non-defaults · "
+            "a per-spawn flag still wins"
         )
+        note = Static(Text(saved), id="settings-note")
+        note.tooltip = saved  # cut short with an ellipsis on a narrow terminal
+        yield note
 
     def _compose_roles(self) -> ComposeResult:
         yield Static(section_title(*self.ROLE_SECTION), classes="section")
@@ -570,6 +579,22 @@ class AppSettingsView(Vertical):
         with Horizontal(classes="row"):
             yield Label("share settings.json")
             yield Switch(self.accounts.share_settings, id="accounts-share-settings")
+        # The commands in bold, not in backticks: the note is a ``Text``, which shows them.
+        yield Static(
+            Text.assemble(
+                "Model, effort and binary per role: ",
+                ("aisquare team harness", "bold"),
+                " and ",
+                ("aisquare team bind", "bold"),
+                "; the account select is ",
+                ("team bind <role> --account", "bold"),
+                ". The machine and project account defaults: the Accounts page and ",
+                ("aisquare accounts default", "bold"),
+                ". No value on this tab is read from the environment.",
+            ),
+            id="agent-settings-note",
+            classes="about",
+        )
 
     def _compose_preferences(self) -> ComposeResult:
         yield Static(section_title(*self.SIDEBAR_SECTION), classes="section")

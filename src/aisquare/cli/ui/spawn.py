@@ -19,16 +19,18 @@ role's default, the name once one is chosen, and ``""`` for an explicit *(none)*
 over a role that has a default — ``spawn`` reads an empty name as "no persona",
 so that choice is honoured rather than replaced by the config.
 
-**Presets** — ``SpawnDialog(project, persona=, role=, binary=, account=)`` — are
-applied at compose, never by poking widgets after mount: the persona-first flow
-(the target picker, P7) opens the dialog already filled in. A preset is a
-choice, and is sent. A preset role the list does not name (a numbered seat,
-``coder2``) and a preset account the accounts read has not produced yet are
+**Presets** — ``SpawnDialog(project, persona=, role=, binary=, account=, label=,
+task_id=, prompt=)`` — are applied at compose, never by poking widgets after mount:
+the persona-first flow (the target picker, P7) opens the dialog already filled in. A
+preset is a choice, and is sent. A preset role the list does not name (a numbered
+seat, ``coder2``) and a preset account the accounts read has not produced yet are
 added as options, so they show on open. *Pick…* posts
 :class:`PickTargetRequested`, which the dialog answers itself: the target picker
 (``cli/ui/attach.py``) in "new" order, whose choice fills Role, Binary and Account
 through their own change handlers — an open form keeps what was typed — and whose
-*+ New account* hands over to the Accounts page. *Import…* beside the Persona
+*+ New account* hands over to the Accounts page with :meth:`SpawnDialog.form_state`.
+Once that sign-in lands the shell opens the dialog again from it, on the new account
+(#286): what was typed is not lost to a sign-in. *Import…* beside the Persona
 select opens the Personas tab's import dialog and selects what it imports.
 
 **The captain** (T4): opened on the home board preset to ``captain`` — the
@@ -97,7 +99,7 @@ from textual.widgets import (
 )
 from textual.worker import Worker, WorkerState
 
-from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, Target
+from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, ReturnTo, Target
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
 from aisquare.cli.ui.views.app_settings import permission_options
 from aisquare.core import codenames, experimental, harness, personas
@@ -363,6 +365,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         role: str | None = None,
         binary: str | None = None,
         account: str | None = None,
+        label: str | None = None,
+        task_id: str | None = None,
+        prompt: str | None = None,
         accounts: Callable[[], AccountsOverview] | None = accounts_service.overview,
     ) -> None:
         super().__init__()
@@ -384,9 +389,14 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._persona_shown = persona if persona is not None else self._persona_default(self._role)
         """The persona value the form itself last put in the field; any other is the user's."""
         self._tasks, self._tasks_unavailable = self._read_tasks()
+        self._preset_task: str = (
+            task_id if task_id and any(t.id == task_id for t in self._tasks) else NO_TASK
+        )
         self._manager_live = self._read_manager_live()
-        self._prefill = self._label_for(self._role, NO_TASK)
+        self._prefill = self._label_for(self._role, self._preset_task)
         """The label the form filled in for the current role and task; equal means untouched."""
+        self._preset_label = label if label and not self._captain else None
+        self._preset_prompt = prompt or ""
         self._kept_label: str | None = None
         """What the user had typed, kept while the manager role locks the field."""
         self._spawning = False
@@ -567,7 +577,11 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 yield Static(id="spawn-persona-description", classes="spawn-note")
                 with Horizontal(classes="spawn-row"):
                     yield Label("Label")
-                    yield Input(value=self._prefill, id="spawn-label", disabled=self._captain)
+                    yield Input(
+                        value=self._preset_label or self._prefill,
+                        id="spawn-label",
+                        disabled=self._captain,
+                    )
                     yield Button(
                         "🎲",
                         id="spawn-dice",
@@ -579,7 +593,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                     yield Label("Task")
                     yield Select(
                         [("(none)", NO_TASK), *((task_choice(t), t.id) for t in self._tasks)],
-                        value=NO_TASK,
+                        value=self._preset_task,
                         allow_blank=False,
                         disabled=self._captain,
                         id="spawn-task",
@@ -617,7 +631,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 yield Static(id="spawn-args-error", classes="spawn-note")
                 with Horizontal(classes="spawn-row"):
                     yield Label("First prompt")
-                    yield TextArea(id="spawn-prompt")
+                    yield TextArea(self._preset_prompt, id="spawn-prompt")
             yield Static(id="spawn-status")
             with Horizontal(id="spawn-buttons"):
                 yield Button("Spawn", id="spawn-submit", variant="primary")
@@ -1029,10 +1043,40 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 # page dismissed with ``None``, and the new agent's receipt and notes were
                 # lost (review of #240, finding 5).
                 return
-            self.post_message(NewAccountRequested())
+            # What was typed goes with it: the shell opens this form again from it, on the
+            # new account, once the sign-in lands (#286).
+            form = self.form_state()
+            self.post_message(NewAccountRequested(ReturnTo("spawn", self.project.id, form)))
             self.dismiss(None)
             return
         self.apply_target(role=target.role, binary=target.binary, account=target.account)
+
+    def form_state(self) -> dict[str, Any]:
+        """The form as presets: ``SpawnDialog(project, **form_state())`` opens it again.
+
+        Only what the user chose: a field still showing what the form put there is left
+        out, so the reopened dialog fills it the same way (the label for the role and
+        task, the persona for the role). Worktree, permission mode, extra args and a
+        hand-off are not carried; they open at the role's defaults again.
+        """
+        state: dict[str, Any] = {"role": self._role}
+        binary = self.query_one("#spawn-binary", Input).value.strip()
+        if binary:
+            state["binary"] = binary
+        account = self.query_one("#spawn-account", Select).value
+        if isinstance(account, str) and account != THIS_SHELL:
+            state["account"] = account
+        if self._persona_touched:
+            state["persona"] = self._persona_value()
+        label = self.query_one("#spawn-label", Input).value
+        if not self._label_fixed() and label != self._prefill:
+            state["label"] = label
+        if self._task_value():
+            state["task_id"] = self._task_value()
+        prompt = self.query_one("#spawn-prompt", TextArea).text
+        if prompt.strip():
+            state["prompt"] = prompt
+        return state
 
     def apply_target(
         self, *, role: str | None = None, binary: str | None = None, account: str | None = None

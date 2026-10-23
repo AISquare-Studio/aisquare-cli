@@ -117,8 +117,11 @@ re-reported — so a missing chip means *not reported*, never *wrong*. Tiering
 is enforced at launch, not policed in the store.
 
 On every prompt, each session receives a compact delta of what teammates did
-since its last turn. Nothing needs forwarding; the coordination is the
-ambient state of the board.
+since its last turn. The board lists task titles; the contract travels with
+the claim: `task claim` and `task next --claim` print the task's contract
+(`--detail`) and the reason it was last reopened, so nobody pastes a contract
+into a coder's pane. `task show <ref>` prints the whole task. The rest of the
+coordination is the ambient state of the board.
 
 Orchestration is **opt-in per repo** (a role launch or `aisquare team on`)
 and fails open everywhere: the hooks are designed so orchestration can
@@ -128,10 +131,12 @@ that never opt in see nothing.
 ### Tasks: idempotent, atomic, dependency-aware
 
 ```sh
-aisquare task add "wire auth" --role coder        # idempotent — safe to re-emit (#1)
+aisquare task add "wire auth" --role coder --detail "<objective · why · acceptance>"
+                                                  # idempotent — safe to re-emit (#1)
 aisquare task add "ship it" --needs 1             # held until #1 is done
 aisquare task next --role coder --claim --as <id> # atomic claim — exactly one winner; a
-                                                  # fleet agent's own assigned task comes first
+                                                  # fleet agent's own assigned task comes first;
+                                                  # prints the contract and any reopen reason
 aisquare task review 1 --note "how to verify" --as <id>
 aisquare task reopen '#1' --reason "fails on py3.11" --as <id>
 aisquare note "JWT it is" --kind decision --as <id>
@@ -238,6 +243,26 @@ Every line between the board's parts drags to resize — the one beside the task
 column, the one above the detail, the one between the sessions and the tasks — and
 a double-click puts it back. The sizes are kept in `~/.aisquare/state.json`, one
 for every project's board, and come back at the next launch.
+
+#### What a human does here
+
+The board's top line says what needs you, for example `needs you: 🔔 1 waiting · ❓ 2
+questions · 👀 1 in review · ⛔ 1 blocked`, or "nothing needs you — the manager is
+working; talk to it on the Manager tab". Each count is a button to the first thing it
+counts: the card in the table, or, for 🔔 and ❓, the agent's row in `asq`, whose pane
+is where you answer. The counts are the captain's attention queue's own rules
+(`services.captain.queue.observe`), read from what the board's tick already read: no
+tmux call, no extra store read, nothing written to `captain/queue.json`, and the
+captain need not be on. A question counts while it is still its asker's last word on
+the board; stale agents are left to the captain.
+
+- 🔔 and ❓ need you: click the agent and answer in its pane.
+- 👀 waits for a reviewer agent, or for you on the PR.
+- Nothing here is typed into: you talk to the manager, and it writes the tasks. With no
+  open task the table says so: "No open tasks. The manager writes them when you give it
+  a goal on the Manager tab."
+
+`?` lists these three lines under "what to do here", between the keys and the icons.
 
 ### Long-term memory (optional, via gbrain)
 

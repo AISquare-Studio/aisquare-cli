@@ -317,11 +317,14 @@ is converted into a skill by an engine: a name, a one-line description, a body o
 at most 4,000 characters that keeps the source's intent, and notes on what it
 dropped. `--llm` sends a recognised skill through an engine anyway, to reshape
 it; `--condense` asks for a shorter body — the remedy for a skill over the
-4,000-character soft cap, or even over the 12,000 hard cap. Either keeps the
-skill's name — `--name`, else the name a copy would take — so only a source with
-no name of its own is named by the engine. `--no-llm` forbids the path, for a
-script that must never spend a token. The source is given to the engine as data,
-never as instructions.
+4,000-character soft cap, or even over the 12,000 hard cap. A source keeps its own
+name on this path too — `--name`, else a skill directory's name (whether or not its
+`SKILL.md` is recognised), else the name a copy of the file would take — and that
+name is held to the naming rule before any engine runs. Only a source with no name
+of its own is named by the engine: a file, a page or stdin that is not a recognised
+skill, or stdin whose frontmatter names nothing usable. `--no-llm` forbids the path,
+for a script that must never spend a token. The source is given to the engine as
+data, never as instructions.
 
 The engines, tried in this order unless `--engine` picks one:
 
@@ -338,8 +341,10 @@ The engines, tried in this order unless `--engine` picks one:
 **An engine import costs money or quota**, and the output says which engine and
 model ran. The draft is held to the same rules as a copied skill (one retry, told
 what failed), written to `$AISQUARE_HOME/personas/.drafts/<name>/SKILL.md` before
-anything else, and shown — frontmatter, the first twelve body lines, the character
-count, engine, model and notes — for a `y/N`. `--yes` saves without asking. With
+anything else (a kept draft imported again, the retry after `import_invalid`, writes
+its new draft to `.drafts/retry/<name>/`, never over itself), and shown —
+frontmatter, the first twelve body lines, the character count, engine, model and
+notes — for a `y/N`. `--yes` saves without asking. With
 `--json`, or without a terminal, the draft is kept and the import exits
 `needs_confirmation` with the draft's path; importing that path saves it. A draft
 that fails validation twice is kept as well (`import_invalid`). A saved import

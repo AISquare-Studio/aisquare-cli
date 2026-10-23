@@ -1309,7 +1309,8 @@ No label the fleet makes is longer than 24 characters. Before a suffix (`-2`,
 whole fits: a live `coder-authentication-ref` (24) makes the next one
 `coder-authentication-r-2`, and a role bound as `platform-security-auditor`
 spawned for a task makes `platform-securi-01k9q8p3`, the short id kept whole.
-Only the length is fitted: a role bound under a name the rule would refuse as a
+A fork with no label is numbered and trimmed the same way. Only the length
+is fitted: a role bound under a name the rule would refuse as a
 `--label` (`data_eng`) keeps its own characters (`data_eng-1`). An over-long
 `--label` is refused with a label that fits — `label
 'coder-authentication-refactor' is 29 characters — at most 24; try

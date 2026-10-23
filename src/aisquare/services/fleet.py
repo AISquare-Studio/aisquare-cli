@@ -1092,6 +1092,13 @@ def _fixed_label(role: str, wanted: str | None) -> str | None:
     return None
 
 
+def _fitted(stem: str, suffix: str) -> str:
+    """``stem + suffix`` within 24 characters, the stem trimmed and the suffix kept whole: a
+    ``-N`` or a task's short id after a long label or role made one no ``--label`` may be
+    (#291). Asked by :func:`next_label` and :func:`_fork_label`, which number alike."""
+    return stem[: 24 - len(suffix)].rstrip("-") + suffix
+
+
 def next_label(
     project: ProjectInfo,
     role: str,
@@ -1103,31 +1110,27 @@ def next_label(
     """The label a new agent gets: the asked one, or ``<role>-<task>`` / ``<role>-<n>``,
     suffixed ``-2``, ``-3`` while a LIVE agent already holds it (§5.7).
 
-    The stem before a suffix is trimmed so the whole stays within 24 characters: a held
-    label of 24 suffixed to 26, and a long bound role made a ``<role>-<task>`` no
-    ``--label`` may be (#291). A bound role's characters are its own and kept as they are
+    The stem before a suffix is trimmed so the whole stays within 24 characters
+    (:func:`_fitted`). A bound role's characters are its own and kept as they are
     (``data_eng-1``): only a label somebody typed is checked against the rule.
     """
     fixed = _fixed_label(role, wanted)
     if fixed is not None:
         return fixed
 
-    def fitted(stem: str, suffix: str) -> str:
-        return stem[: 24 - len(suffix)].rstrip("-") + suffix
-
     def pick(store: ContextStore) -> str:
         live = {agent.label for agent in store.fleet_agents(project.id, live_only=True)}
         if wanted is not None:
             base = wanted
         elif task_id:
-            base = fitted(role, f"-{task_id.removeprefix('tsk_')[:TASK_SHORT]}")
+            base = _fitted(role, f"-{task_id.removeprefix('tsk_')[:TASK_SHORT]}")
         else:
-            base = fitted(role, "-1")
+            base = _fitted(role, "-1")
         if base not in live:
             return base
         stem = wanted if wanted is not None else role
         for n in range(2, 1000):
-            candidate = fitted(stem, f"-{n}")
+            candidate = _fitted(stem, f"-{n}")
             if candidate not in live:
                 return candidate
         raise FleetError(f"no free label for {stem!r}")
@@ -1201,9 +1204,9 @@ def _fork_label(
     label = fixed if fixed is not None else wanted
     if label is None:
         n = 1
-        while held_by(f"{role}-{n}") is not None:
+        while held_by(_fitted(role, f"-{n}")) is not None:
             n += 1
-        return f"{role}-{n}"
+        return _fitted(role, f"-{n}")
     held = held_by(label)
     if held is None:
         return label

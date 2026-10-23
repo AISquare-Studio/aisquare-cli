@@ -50,6 +50,7 @@ from aisquare.core.agent_adapters.types import (
     Approvals,
     PermissionIntent,
     PluginInstall,
+    SkillDirs,
     WriteScope,
     executable_name,
     hook_args,
@@ -583,6 +584,28 @@ def test_only_an_agent_with_a_system_seam_keeps_it_across_a_resume(
     assert isinstance(keeps, bool)
     seam = adapter.system_prompt_args(tmp_path / "b.md", "persona", [], _home(adapter, tmp_path))
     assert seam is not None or not keeps, f"{adapter.id} keeps a system prompt it cannot set"
+
+
+# --- personas: skills ------------------------------------------------------------------------
+
+
+def test_skill_dirs_are_absolute_the_users_first_and_the_projects_in_the_repository(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``skill_dirs``: where ``persona export --skill`` writes (the first of each) and what
+    ``import --list`` reads, the user's dirs outside the repository and the project's
+    inside it, every one absolute; outside a repository, the user's alone."""
+    home = _home(adapter, tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    dirs = adapter.skill_dirs(home, repo)
+    assert isinstance(dirs, SkillDirs) and dirs.user and dirs.project
+    every = (*dirs.user, *dirs.project)
+    assert all(path.is_absolute() for path in every), every
+    assert len(set(every)) == len(every), "each dir once"
+    assert all(path.is_relative_to(repo) and path != repo for path in dirs.project)
+    assert not any(path.is_relative_to(repo) for path in dirs.user)
+    assert adapter.skill_dirs(home, None) == SkillDirs(dirs.user, ())
 
 
 # --- account slots: a login's fingerprint, folder trust shared between accounts ---------------

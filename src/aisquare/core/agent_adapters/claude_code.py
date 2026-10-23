@@ -18,6 +18,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionIntent,
     PluginInstall,
     SandboxWrites,
+    SkillDirs,
     WriteScope,
     block_reply,
     option_occurrences,
@@ -422,3 +423,9 @@ class ClaudeCodeAdapter:
         ):
             return None
         return [SYSTEM_PROMPT_FLAG, str(block)]
+
+    def skill_dirs(self, home: Path, repo: Path | None) -> SkillDirs:
+        """``<config dir>/skills`` and ``<repo>/.claude/skills``."""
+        return SkillDirs(
+            (home / "skills",), (repo / ".claude" / "skills",) if repo is not None else ()
+        )

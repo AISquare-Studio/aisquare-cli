@@ -25,6 +25,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionIntent,
     PluginInstall,
     SandboxWrites,
+    SkillDirs,
     WriteScope,
     block_reply,
     config_assignment,
@@ -1049,6 +1050,19 @@ class CodexAdapter:
         own = _developer_instructions(home, args)
         value = f"{own.rstrip()}\n\n{text}" if own and own.strip() else text
         return ["-c", f"developer_instructions={_toml_string(value)}"]
+
+    def skill_dirs(self, home: Path, repo: Path | None) -> SkillDirs:
+        """Measured on 0.162.1, the request's skills list named a ``SKILL.md`` from each of
+        ``$HOME/.agents/skills``, ``$CODEX_HOME/skills``, ``<repo>/.agents/skills`` and
+        ``<repo>/.codex/skills`` (and its own ``$CODEX_HOME/skills/.system``). The user's
+        ``.agents/skills`` comes first: every Codex home reads it, so one export there
+        reaches every account."""
+        from aisquare.core import agents
+
+        return SkillDirs(
+            (agents.home() / ".agents" / "skills", home / "skills"),
+            (repo / ".agents" / "skills", repo / ".codex" / "skills") if repo is not None else (),
+        )
 
     def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
         """Codex's own OTLP/HTTP log exporter (asynchronous; no model routing or auth

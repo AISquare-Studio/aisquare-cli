@@ -22,6 +22,7 @@ from aisquare.core.agent_adapters.codex import CodexAdapter
 from aisquare.core.agent_adapters.types import (
     BadEffortError,
     PermissionIntent,
+    SkillDirs,
     WriteScope,
     store_dir,
 )
@@ -590,6 +591,18 @@ def test_the_operators_own_developer_instructions_argument_wins(
     assert codex.system_prompt_args(tmp_path / "b.md", "persona", args, _home(tmp_path)) is None
     after_the_boundary = ["--", *args]
     assert codex.system_prompt_args(tmp_path / "b.md", "p", after_the_boundary, tmp_path)
+
+
+def test_codex_reads_skills_from_the_users_agents_dir_its_home_and_the_repository(
+    tmp_path: Path,
+) -> None:
+    """Measured on 0.162.1 (M5): the request's skills list named one from each of these
+    roots, the user's ``.agents/skills`` read under every Codex home."""
+    home, repo = tmp_path / "codex-home", tmp_path / "repo"
+    assert codex.skill_dirs(home, repo) == SkillDirs(
+        (agents.home() / ".agents" / "skills", home / "skills"),
+        (repo / ".agents" / "skills", repo / ".codex" / "skills"),
+    )
 
 
 def test_a_resumed_codex_thread_keeps_its_first_developer_instructions() -> None:

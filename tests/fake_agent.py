@@ -45,6 +45,7 @@ from aisquare.core.agent_adapters.types import (
     NativeChoice,
     PermissionIntent,
     SandboxWrites,
+    SkillDirs,
     WriteScope,
     config_home,
     option_occurrences,
@@ -528,3 +529,9 @@ class FakeAgentAdapter:
     ) -> list[str] | None:
         # Its preamble takes the text itself; one in the launch arguments is the operator's.
         return None if "--preamble" in args else ["--preamble", text]
+
+    def skill_dirs(self, home: Path, repo: Path | None) -> SkillDirs:
+        # Its skills are personas, kept in its home and in the repository's own folder.
+        return SkillDirs(
+            (home / "personas",), (repo / ".fakeagent" / "personas",) if repo is not None else ()
+        )

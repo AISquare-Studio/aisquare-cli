@@ -590,7 +590,8 @@ class AgentAdapter(Protocol):
     :meth:`label_args`, :meth:`resume_args`,
     ``exit_command``, ``dismiss_key``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`context_files`, :meth:`disable_native_teams`,
-    :meth:`telemetry_args`. Personas: :meth:`system_prompt_args`. Accounts: ``accounts``.
+    :meth:`telemetry_args`. Personas: :meth:`system_prompt_args`, :meth:`skill_dirs`.
+    Accounts: ``accounts``.
     Remote: ``transcript_reader``. ``capabilities`` says the rest.
     """
 
@@ -819,6 +820,24 @@ class AgentAdapter(Protocol):
         text itself rather than the file puts it in argv, which every local user can read:
         a persona is no secret, and its 12,000-character cap sits far under ``ARG_MAX``."""
         ...
+
+    def skill_dirs(self, home: Path, repo: Path | None) -> SkillDirs:
+        """Where a session of config dir ``home`` reads skills, the user's and, in
+        ``repo`` (``None``: outside one), the project's (:class:`SkillDirs`): absolute, in the
+        agent's own order."""
+        ...
+
+
+@dataclass(frozen=True)
+class SkillDirs:
+    """Where an agent reads skills, one ``<name>/SKILL.md`` folder each
+    (:meth:`AgentAdapter.skill_dirs`): ``user``, the dirs every session of a config dir
+    reads, and ``project``, those a session in the repository reads, each in the agent's
+    own order. The first of each is where ``persona export --skill`` writes; ``persona
+    import --list`` reads them all, the user's first."""
+
+    user: tuple[Path, ...]
+    project: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)

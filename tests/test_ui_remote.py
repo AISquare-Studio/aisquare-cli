@@ -784,8 +784,13 @@ def test_the_panels_first_paint_never_waits_for_another_processs_lock_on_remote_
     """The panel's first paint was the process's first read of ``remote.json``, which makes
     a missing file under ``remote.json.lock``: on Textual's thread, the fleet UI froze for
     the 2 s another process held it (sweep 3 of #243). It opens at once, and paints the file
-    once the writer's thread has read it."""
-    monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", 10.0)
+    once the writer's thread has read it.
+
+    Bounded by half the lock's wait, not by a wall time: a paint that waits for the lock
+    takes all of it (10 s), and a slow runner took 1.6 s to open a panel that did not (seq
+    370)."""
+    lock_wait = 10.0
+    monkeypatch.setattr(remote_server, "STATE_LOCK_WAIT_SECONDS", lock_wait)
     state = paths.remote_state_path()
     state.parent.mkdir(parents=True, exist_ok=True)
     held = os.open(state.with_name(f"{state.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
@@ -806,7 +811,7 @@ def test_the_panels_first_paint_never_waits_for_another_processs_lock_on_remote_
         return took, made_meanwhile
 
     took, made_meanwhile = drive(go, tunnel=missing_ngrok)
-    assert took < 1.5, f"the panel took {took:.1f} s to open"
+    assert took < lock_wait / 2, f"the panel took {took:.1f} s to open"
     assert not made_meanwhile and state.exists() and remote_server.remote_state_loaded()
 
 
@@ -1153,6 +1158,9 @@ def test_the_write_switch_is_remote_jsons_whatever_an_older_state_json_says() ->
         app = pilot.app
         assert isinstance(app, FleetApp)
         assert app.remote.running, "restored"
+        # The restore's write of remote.json first: read mid-replace, Windows refused the
+        # open (PermissionError 13, CI run 39550669207), and this read takes no lock.
+        await written(pilot)
         assert json.loads(paths.remote_state_path().read_text())["allow_write"] is False
         modal = await open_panel(pilot)
         assert modal.query_one("#remote-allow-write", Switch).value is False
@@ -1815,6 +1823,11 @@ def test_a_remote_that_does_not_come_back_at_start_is_toasted() -> None:
             assert isinstance(app, FleetApp)
             await pilot.pause()
             assert not app.remote.running
+            # Said from the start's own thread: waited for, as one pause did not always.
+            for _ in range(100):
+                if any(note.startswith("Remote could not start — ") for note in toasts(app)):
+                    break
+                await asyncio.sleep(0.05)
             said = [note for note in toasts(app) if note.startswith("Remote could not start — ")]
             assert said and "is the port in use?" in said[0]
 

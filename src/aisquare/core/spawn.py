@@ -119,6 +119,9 @@ narrowing their environment would be change without a reason:
 Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
   * ``core/tmux.py::_tmux`` — every tmux command, stripped: the private server
     outlives every agent and would hand an inherited identity to all of them.
+  * ``core/tmux_control.py::_spawn_client`` — the UI's one long-lived ``tmux -C`` client
+    per server, which carries the pane on screen's commands; stripped, since its
+    ``attach-session`` starts a server when none runs.
   * ``core/selfcli.py::run`` — our own CLI as a subprocess for the fleet UI's
     onboarding (``init``, ``doctor``); no model process; not stripped, for the
     same reason ``sdk_doctor`` is not.
@@ -358,6 +361,13 @@ SEAMS: dict[str, Seam] = {
         "server. The server outlives every agent and hands its environment to all "
         "of them, so an inherited identity here would become EVERY agent's identity; "
         "each window's agent takes its own through `aisquare launch` instead",
+        strips_identity=True,
+    ),
+    "aisquare/core/tmux_control.py::_spawn_client": Seam(
+        EXCLUDED,
+        "the fleet UI's one long-lived `tmux -C` control client per server — a tmux "
+        "client, not an agent. Stripped like `_tmux`: its `attach-session` starts the "
+        "server when none is running, and the server hands its environment to every window",
         strips_identity=True,
     ),
     "aisquare/core/selfcli.py::run": Seam(

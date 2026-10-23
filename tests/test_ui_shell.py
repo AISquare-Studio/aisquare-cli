@@ -25,6 +25,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
@@ -273,6 +274,20 @@ async def settle(app: FleetApp) -> None:
     as this did: the Onboard view's ``DirectoryTree`` keeps one for its whole life.
     """
     await settle_page(app)
+
+
+async def refreshed(app: FleetApp) -> None:
+    """A refresh, as the two-second timer runs it, and its frame painted.
+
+    ``refresh_data`` reads the fleet in a thread worker, and one ``pilot.pause()``
+    after it can return before that read has painted: on windows-latest the
+    captain's quick action was still offered after its row had turned ``exited``
+    (CI run 39863195249). The test went on reading the frame before. Only the fleet
+    read is waited for, so a worker a test holds on purpose (the captain view's bar)
+    does not hold this up.
+    """
+    app.refresh_data()
+    await settle_page(app, group=app_mod.FLEET_WORKER)
 
 
 async def _toast_list(app: FleetApp) -> list[str]:
@@ -2653,18 +2668,18 @@ def test_bell_rings_once_on_a_transition_into_attention(
         counts = [len(rings)]
         script["prj_a"] = [status("prj_a", "manager", "manager", "attention")]
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         counts.append(len(rings))
         app.refresh_data()  # still attention: no second ring
-        await pilot.pause()
+        await settle(app)
         counts.append(len(rings))
         script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         counts.append(len(rings))
         script["prj_a"] = [status("prj_a", "manager", "manager", "attention")]
         app.refresh_data()  # a fresh transition rings again
-        await pilot.pause()
+        await settle(app)
         counts.append(len(rings))
         return counts
 
@@ -2677,7 +2692,7 @@ def test_bell_rings_once_on_a_transition_into_attention(
 
     async def first_frame(pilot: Pilot[None]) -> int:
         fleet_app(pilot).refresh_data()
-        await pilot.pause()
+        await settle(fleet_app(pilot))
         return len(rings)
 
     assert drive(first_frame) == 0
@@ -2703,7 +2718,7 @@ def test_rebuilds_update_in_place_and_keep_the_selection(tmp_path: Path, script:
             status("prj_a", "tester-1", "tester", "working", minute=2),
         ]
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         same_card = card_for(app, "prj_a") is card
         same_row = row_for(app, "agt_a_coder-auth") is row
         still_selected = row.has_class("selected")
@@ -2735,7 +2750,7 @@ def test_store_errors_keep_the_last_frame_and_say_so(
         quiet_before = not notice.display
         monkeypatch.setattr(app_mod, "store_session", broken)
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         assert app.snapshot is not None
         kept = [p.id for p in app.snapshot.projects]
         cards = [c.project.id for c in app.query(ProjectCard)]
@@ -2743,7 +2758,7 @@ def test_store_errors_keep_the_last_frame_and_say_so(
         text = shown(notice) if notice.display else ""
         monkeypatch.setattr(app_mod, "store_session", store_session)
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         recovered = not notice.display and app.snapshot.stale_since is None
         return kept, cards, text, stale, quiet_before, recovered
 
@@ -2752,6 +2767,240 @@ def test_store_errors_keep_the_last_frame_and_say_so(
     assert stale
     assert quiet_before and "store unreadable" in text  # …and was labelled as such
     assert recovered
+
+
+FLEET_HOLD_S = 10.0
+"""How long a scripted fleet read waits for its gate before giving up on the test."""
+
+
+def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``refresh_data`` opened the store and asked ``list_agents`` (tmux, ~11 ms a project)
+    on the event loop every two seconds: ~44 ms with four projects, and every click,
+    scroll or key that landed then waited for it (measured 2026-10-20, "everything feels
+    sluggish, happens after a tick"). Both run in a thread now, and the frame they read
+    is still painted. The first frame, read at mount before anything is drawn, is not
+    the tick's and is not counted."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    threads: dict[str, list[threading.Thread]] = {"store": [], "list_agents": []}
+    answer = ["waiting"]
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        threads["list_agents"].append(threading.current_thread())
+        return [status(project.id, "manager", "manager", answer[0])]
+
+    @contextmanager
+    def recorded() -> Iterator[ContextStore]:
+        threads["store"].append(threading.current_thread())
+        with store_session() as store:
+            yield store
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, bool]:
+        app = fleet_app(pilot)
+        for seen in threads.values():
+            seen.clear()
+        monkeypatch.setattr(app_mod, "store_session", recorded)
+        answer[0] = "working"
+        app.refresh_data()  # what the two-second timer runs
+        await settle(app)
+        rows = shown(row_for(app, "agt_a_manager")), shown(row_for(app, "agt_b_manager"))
+        return *rows, app.captain_on
+
+    row_a, row_b, captain = drive(go)
+    # With the captain on, the read also looks up its home board, in a session of its own
+    # (``_read_captain``): one more, off the UI thread as well.
+    assert len(threads["store"]) == 1 + captain and len(threads["list_agents"]) == 2, threads
+    main = threading.main_thread()
+    assert all(t is not main for seen in threads.values() for t in seen), threads
+    assert row_a.rstrip().endswith("▶") and row_b.rstrip().endswith("▶")  # …and painted
+
+
+def test_ticks_while_a_fleet_read_is_in_flight_start_no_second_read_and_cost_one_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One fleet read at a time, as the accounts' read (``refresh_accounts``): a read held
+    by tmux or a busy store outlives the tick, and an ``exclusive`` worker per tick would
+    pile a thread up per tick, since a cancelled thread runs on. A tick that finds a read
+    in flight starts nothing and owes one read, made once the first has painted: three
+    ticks during one wait cost ONE more read, and it sees what changed meanwhile."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    answer = ["waiting"]
+    reads: list[str] = []  # what each read was told, in order
+    running, peak = [0], [0]
+    counting = threading.Lock()
+    hold, asked, gate = threading.Event(), threading.Event(), threading.Event()
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        with counting:
+            told = answer[0]
+            reads.append(told)
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        try:
+            if hold.is_set():
+                hold.clear()
+                asked.set()
+                gate.wait(FLEET_HOLD_S)  # as tmux, or a writer holding the store, would
+            return [status(project.id, "manager", "manager", told)]
+        finally:
+            with counting:
+                running[0] -= 1
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def go(pilot: Pilot[None]) -> tuple[int, str, str]:
+        app = fleet_app(pilot)
+        reads.clear()
+        answer[0] = "working"
+        hold.set()
+        try:
+            app.refresh_data()  # a tick: its read waits
+            assert await asyncio.to_thread(asked.wait, FLEET_HOLD_S), "the tick read"
+            answer[0] = "attention"  # what changed while it waited
+            app.refresh_data()  # three more ticks while it waits
+            app.refresh_data()
+            app.refresh_data()
+            await pilot.pause()
+            in_flight = sum(
+                1 for w in app.workers if w.name == app_mod.FLEET_WORKER and not w.is_finished
+            )
+            while_held = shown(row_for(app, "agt_a_manager"))
+        finally:
+            gate.set()
+        await settle(app)
+        return in_flight, while_held, shown(row_for(app, "agt_a_manager"))
+
+    in_flight, while_held, after = drive(go)
+    assert in_flight == 1, f"{in_flight} fleet reads in flight"
+    assert peak[0] == 1, f"{peak[0]} reads at once"
+    assert while_held.rstrip().endswith("⏸")  # the frame shown is kept while the read waits
+    assert reads == ["working", "attention"], reads  # the held read, then ONE owed read
+    assert "🔔" in after  # …whose frame is the one painted last
+
+
+def test_a_frame_painted_late_leaves_the_owed_read_to_the_read_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of 738d5594: a read that has ended is painted when the app gets to its
+    ``StateChanged``, and a tick can come first. That tick finds no read in flight and
+    starts the next, and a call while that one runs owes one more. The late frame then
+    started the owed read itself, beside the read in flight: two reads at once (10 of 10
+    runs). The read in flight starts it once it has painted, one read at a time, and the
+    calls still cost one read after it."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    asked = {n: threading.Event() for n in range(1, 5)}
+    gates = {n: threading.Event() for n in range(1, 5)}
+    reads: list[int] = []  # the reads the test numbered, in order
+    running, peak = [0], [0]
+    counting = threading.Lock()
+    numbering = threading.Event()
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        with counting:
+            n = 0
+            if numbering.is_set():
+                reads.append(len(reads) + 1)
+                n = reads[-1]
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        try:
+            if n:
+                asked[n].set()
+                gates[n].wait(FLEET_HOLD_S)  # as tmux, or a writer holding the store, would
+            return [status(project.id, "manager", "manager", "working")]
+        finally:
+            with counting:
+                running[0] -= 1
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def go(pilot: Pilot[None]) -> int:
+        app = fleet_app(pilot)
+        painted = asyncio.Event()  # the first read's frame, and what it started after it
+        numbering.set()
+        try:
+            app.refresh_data(then=painted.set)  # a tick: its read waits
+            assert await asyncio.to_thread(asked[1].wait, FLEET_HOLD_S), "the tick read"
+            [first] = [
+                w for w in app.workers if w.name == app_mod.FLEET_WORKER and not w.is_finished
+            ]
+
+            async def tick_ahead_of_the_frame() -> None:
+                # The app handles nothing else while this callback runs, so the first
+                # read's StateChanged queues behind the tick and the call below.
+                gates[1].set()
+                await first.wait()
+                app.refresh_data()  # finds no read in flight, and starts one
+                assert await asyncio.to_thread(asked[2].wait, FLEET_HOLD_S), "the next read"
+                app.refresh_data()  # a call while it runs: one read owed
+
+            app.call_later(tick_ahead_of_the_frame)
+            await asyncio.wait_for(painted.wait(), FLEET_HOLD_S)
+            in_flight = sum(
+                1 for w in app.workers if w.name == app_mod.FLEET_WORKER and not w.is_finished
+            )
+        finally:
+            for gate in gates.values():
+                gate.set()
+        await settle(app)
+        return in_flight
+
+    in_flight = drive(go)
+    assert in_flight == 1, f"{in_flight} fleet reads in flight"
+    assert peak[0] == 1, f"{peak[0]} reads at once"
+    assert reads == [1, 2, 3], reads  # the read, the tick's, and ONE owed read after it
+
+
+def test_a_fleet_read_that_hangs_labels_the_frame_kept_once_it_has_waited_long_enough(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that HANGS, not one that fails — a store on a hung mount, a wedged tmux at
+    30 s a call — left the sidebar silently stale: each tick only owed one more read,
+    and nothing raised to label the frame (review of #272). Before the read moved off
+    the UI thread the whole UI froze, which was worse but obvious. Once a read has been
+    in flight :data:`~aisquare.cli.ui.app.FLEET_STALE_AFTER`, a tick says the frame shown
+    is an old one; the read's own frame takes the notice away."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    monkeypatch.setattr(app_mod, "FLEET_STALE_AFTER", 0.3)
+    hold, asked, gate = threading.Event(), threading.Event(), threading.Event()
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        if hold.is_set():
+            hold.clear()
+            asked.set()
+            gate.wait(FLEET_HOLD_S)
+        return [status(project.id, "manager", "manager", "working")]
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, str, str, bool]:
+        app = fleet_app(pilot)
+        notice = app.sidebar.query_one("#projects-notice", Static)
+        hold.set()
+        try:
+            app.refresh_data()  # a tick whose read hangs
+            assert await asyncio.to_thread(asked.wait, FLEET_HOLD_S), "the tick read"
+            app.refresh_data()  # a tick before the bound: nothing to say yet
+            await pilot.pause()
+            early = bool(notice.display)
+            await asyncio.sleep(0.4)
+            app.refresh_data()  # a tick after it
+            await pilot.pause()
+            late = shown(notice) if notice.display else ""
+            stale = app.snapshot is not None and app.snapshot.stale_since is not None
+        finally:
+            gate.set()
+        await settle(app)
+        return early, late, shown(notice) if notice.display else "", stale
+
+    early, late, after, stale = drive(go)
+    assert not early
+    assert "showing the frame from" in late, late
+    assert stale
+    assert after == "", after  # the read's own frame, painted at last, clears it
 
 
 def test_agent_errors_fail_open_with_the_cost_shown(
@@ -2827,18 +3076,18 @@ def test_a_fleet_read_that_failed_open_keeps_the_live_manager_pane(
             return pane.pane_id, pane.display, button.display, shown(header)
 
         app.refresh_data()  # the first frame the freshly opened view is handed
-        await pilot.pause()
+        await settle(app)
         attached = state()
         failure.append(fleet_service.FleetUnavailable("tmux 3.1 is too old (need 3.2)"))
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         failed_open = state()
         card_notice = shown(card_for(app, "prj_a").query_one(".card-notice", Static))
         # The control: the fleet answers, and its answer is that there is none.
         failure.clear()
         live.clear()
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         return attached, failed_open, card_notice, state()
 
     attached, failed_open, card_notice, answered = drive(go)
@@ -2873,7 +3122,7 @@ def test_open_views_are_fed_each_frame_and_survive_a_vanished_row(
             status("prj_a", "coder-auth", "coder", "attention", minute=1),
         ]
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         after_change = view.status.state
         # Negative control: the manager's row changed too, but no view is open for it —
         # and the project's codename arrives, which the project view (once opened) shows.
@@ -2887,7 +3136,7 @@ def test_open_views_are_fed_each_frame_and_survive_a_vanished_row(
         # The agent leaves the frame entirely: the view keeps its last row, nothing raises.
         script["prj_a"] = [status("prj_a", "manager", "manager", "waiting")]
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         return (
             opened_with,
             after_change,
@@ -2957,9 +3206,9 @@ def test_r_refreshes_the_fleet_and_neither_r_nor_a_runs_the_doctor(
         reads: list[int] = []
         read = app.refresh_data
 
-        def counted() -> None:
+        def counted(*, then: Callable[[], object] | None = None) -> None:
             reads.append(1)
-            read()
+            read(then=then)
 
         app.refresh_data = counted  # type: ignore[method-assign]
         app.sidebar.focus()
@@ -3118,8 +3367,7 @@ def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
         view = app.current_view()
         assert isinstance(view, AgentView)
         failing.append(fleet_service.FleetUnavailable("database is locked"))
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         real = click_guard.clock
         click_guard.clock = lambda: real() + click_guard.CLICK_GUARD + 1
         try:
@@ -5623,7 +5871,7 @@ def test_a_drop_the_store_refuses_part_way_lands_none_of_its_moves(
             patched.setattr(SqliteStore, "update_project_layout", refused)
             app.on_drop_project(DropProject(["prj_a", "prj_b"], scope=tools.id, before=None))
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         return before, _cards(app), len(app._undo)
 
     before, after, undo_depth = drive(go)
@@ -6079,7 +6327,7 @@ def test_a_handle_removed_mid_press_lets_the_mouse_go(
         with store_session() as store:
             store.forget_project("prj_b")
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         await pilot.pause()
         await _as_the_terminal_sends(pilot, events.MouseUp, api)
         return (

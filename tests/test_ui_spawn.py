@@ -958,9 +958,9 @@ def test_a_receipt_dismisses_toasts_it_and_its_notes_refreshes_and_opens_the_new
         refreshes: list[int] = []
         original = app.refresh_data
 
-        def counted() -> None:
+        def counted(**kwargs: Any) -> None:
             refreshes.append(1)
-            original()
+            original(**kwargs)
 
         app.refresh_data = counted  # type: ignore[method-assign]
         await pilot.click(spawn_row(app, "prj_a"))

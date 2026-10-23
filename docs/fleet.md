@@ -1577,7 +1577,8 @@ with the key and to the deployment, that the spawner and the UI's Explainability
 tab resolve, not the server's.
 *Passthrough:* the server keeps `set-clipboard off` and no `allow-passthrough`,
 and it does not matter for
-the UI — no tmux client is attached to it, so an OSC 52 copy, an OSC 8 link or
+the UI. The only client the UI attaches is a control-mode client (see *The UI's
+pipe to tmux* below), which has no terminal, so an OSC 52 copy, an OSC 8 link or
 an OSC 9 notification from Claude Code has no terminal to reach; copies arrive
 through the pane (Textual selection, and the paste-buffer mirror below) and
 links are plain text. In `fleet attach` your own terminal is the client and
@@ -1585,15 +1586,29 @@ tmux's defaults apply. *Multiple clients:* `window-size manual` is deliberately
 absent (it crashes tmux 3.4); the UI pins each window it shows with
 `resize-window`, and a window nobody shows takes tmux's default `latest`
 behaviour — an attached `fleet attach` client resizes it to its own terminal.
+The UI's own control client attaches with `ignore-size` and is never given a
+size, so it resizes nothing.
 *Rendering:* `default-terminal tmux-256color` with truecolor overrides, so
 italics, dim and 24-bit colour survive `capture-pane -e`; wide glyphs are
 measured by Rich's cell widths against tmux's, which agree on emoji and CJK;
 the cursor's shape is not reported by `display-message`, so the pane draws a
-block. *Two-key sequences:* each key is one `send-keys` process, issued in
-order on the event loop (measured ~2 ms each), so `ctrl+X ctrl+K` and vim's
-`gg`/`dd` arrive in order; coalescing a tick's keys into one call is a
-latency optimisation for the control-mode client (plan §3.1), not a
-correctness fix. *Escape hatch:* `[fleet] escape_key` (default `f12`) is
+block. *Two-key sequences:* each key is one `send-keys`, sent in order down
+the control client's pipe (or, polling, one process each), so `ctrl+X ctrl+K`
+and vim's `gg`/`dd` arrive in order. *The UI's pipe to tmux:* the pane on screen
+renders and takes input over ONE `tmux -C` client per server. It is attached to
+that pane's session, and every other pane there is paused for it, so a hidden
+agent sends it nothing and keeps running. It never changes which window is the
+session's current one, so a `fleet attach` open on the same project stays where
+you left it. tmux counts it as an attached, focused client, like a `fleet attach`
+client on that project. With `focus-events on`, the agent in the project's
+current window is told it has focus while `asq` shows that project, and that it
+lost focus when you move to another project or quit `asq`. A key reaches the screen in about a
+millisecond (it was 60 ms or more polled). On tmux older than 3.2, or if that
+client cannot start or ends, the pane polls tmux as before, without a word on
+screen; keys typed as it ended arrive once each, in order. If tmux will not say
+which of those keys it ran, none of them is sent again and nothing typed since is
+sent: the pane says `(input not confirmed)` and a warning names the agent, so check
+the pane and type again what is missing. *Escape hatch:* `[fleet] escape_key` (default `f12`) is
 yours to change; keep it out of Claude Code's set.
 
 **The mouse in a Claude Code pane.** A program that tracks the mouse — Claude
@@ -1765,7 +1780,8 @@ everything outside the fleet keeps working. `aisquare doctor` gains a `tmux`
 check — present, and new enough (the 3.2 minimum, with a note below 3.5) — with
 per-OS install hints, and warn-level checks for `gh` and the fleet's own stale
 rows (Phase 3). It does **not** source the bundled config: `tmux -f` queues
-configuration errors for the first attached client, which the fleet never has,
+configuration errors for the first attached client, and the only one the fleet
+attaches, the UI's control client, does not show them,
 so a `tmux` that rejects a line in that file surfaces as an odd or dead pane
 rather than as a doctor warning. Install or upgrade as above and re-run:
 

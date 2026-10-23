@@ -286,6 +286,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing more is asked of the network.
 - The command that attaches a terminal to the project's tmux session moved from
   the Manager tab to the project's Settings tab.
+- The agent pane in `asq` keeps up with your typing and scrolling. A key reaches
+  the screen in about a millisecond, where it took 60 ms or more, and a wheel or
+  trackpad gesture scrolls while you make it instead of when you stop. The pane
+  on screen now talks to tmux through one control-mode client per server
+  (`tmux -C`) instead of a tmux process per key and per frame. Agents you aren't
+  looking at send that client nothing and keep running as before. No window
+  changes size, and a `fleet attach` open on the same project stays on the
+  window it was on. tmux counts the client as attached and focused, as it counts
+  a `fleet attach` client, so the agent in the project's current window is told
+  it has focus while you're on that project, if it asks for focus events.
+  On tmux older than 3.2, or if that client can't start or stops, the pane polls
+  tmux as before. Polling is quicker too: typing no longer holds frames back
+  until you stop, and an echo that takes longer than 50 ms no longer waits half a
+  second to show.
 
 ### Fixed
 
@@ -334,6 +348,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   result away. The guard's rules and its document list are unchanged, and the
   positive control stays: the same fenced page at the repo's own level is still
   reported.
+- `asq` no longer stalls every two seconds. The sidebar's refresh read the store
+  and asked tmux about every agent on the UI thread, about 11 ms a project, so a
+  click, a scroll or a key that landed during it waited for it. The refresh now
+  reads in the background and only repaints on the UI thread: with four projects
+  of three agents each, a tick holds the UI for about 2 ms, where it held it for
+  about 117 ms.
 
 ## [0.8.2] - 2026-10-19
 

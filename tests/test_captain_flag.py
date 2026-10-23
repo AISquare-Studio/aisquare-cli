@@ -39,7 +39,7 @@ from aisquare.services.captain import state as captain_state
 from tests import test_ui_receiver as receiver_suite
 from tests import test_ui_shell as ui_suite
 from tests import test_ui_spawn as spawn_suite
-from tests.test_ui_shell import Script, drive, fleet_app, seed, status
+from tests.test_ui_shell import Script, drive, fleet_app, refreshed, seed, status
 
 # The suites' fixtures, bound here so pytest finds them for this module's tests.
 no_real_tmux = ui_suite.no_real_tmux
@@ -252,8 +252,7 @@ def _captain_surfaces(tmp_path: Path, script: Script) -> tuple[int, int, bool, i
 
     async def body(pilot: Pilot[None]) -> tuple[int, int, bool, int, bool]:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         home = app.snapshot.home if app.snapshot is not None else None
         return (
             len(app.query("#captain-button")),
@@ -294,8 +293,7 @@ def test_a_remembered_captain_opens_no_captain_view_when_off(
 
     async def body(pilot: Pilot[None]) -> int:
         app = fleet_app(pilot)
-        app.refresh_data()
-        await pilot.pause()
+        await refreshed(app)
         await pilot.pause()
         return len(app.query(CaptainView))
 

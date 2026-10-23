@@ -20,7 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import transcripts
+from aisquare.core.agent_adapters import claude_transcript as transcripts
 from aisquare.core.tmux import TmuxError
 from aisquare.models import FleetAgent, FleetAgentState, FleetAgentStatus, TeamSession
 from aisquare.services import fleet

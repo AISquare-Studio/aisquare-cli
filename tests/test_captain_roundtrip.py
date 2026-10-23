@@ -39,7 +39,8 @@ STAND_IN = r"""
 import json, os, pathlib, subprocess, sys
 
 args = sys.argv[1:]
-config = json.loads(pathlib.Path(args[args.index("--mcp-config") + 1]).read_text())
+given = args[args.index("--mcp-config") + 1]  # its JSON, or a file of it, as Claude Code takes
+config = json.loads(given if given.lstrip().startswith("{") else pathlib.Path(given).read_text())
 spec = config["mcpServers"]["captain"]
 env = dict(os.environ)
 env.update(spec.get("env", {}))
@@ -120,7 +121,8 @@ def test_a_stand_in_claude_mounts_the_captain_server_and_its_call_lands(
     receipt = brain.start()
     result = _wait_for(brain.brain_dir() / "roundtrip.json", 60.0)
     argv = result["argv"]
-    assert argv[argv.index("--mcp-config") + 1] == str(brain.mcp_config_path())
+    mounted = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
+    assert list(mounted) == [brain.SERVER] and mounted[brain.SERVER]["command"] == sys.executable
     assert "--strict-mcp-config" in argv
     assert argv[argv.index("--tools") + 1] == "", "no built-in tool"
     assert argv[argv.index("--allowedTools") + 1] == "mcp__captain__*"

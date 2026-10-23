@@ -1772,15 +1772,46 @@ def _is_home_project(project: ProjectInfo) -> bool:
     return project.id == project_id_for(home)
 
 
-def _is_the_captains_launch(cwd: Path | None, agent_args: Sequence[str] | None) -> bool:
-    """Whether a captain spawn carries what makes it the captain: a folder of its own and
-    no tool but its server (``services.captain.brain.launch_args``, replayed by a restart)."""
-    args = list(agent_args or ())
-    no_tools = any(
-        word == "--tools" and index + 1 < len(args) and args[index + 1] == ""
-        for index, word in enumerate(args)
-    )
-    return cwd is not None and "--strict-mcp-config" in args and no_tools
+def _is_the_captains_launch(cwd: Path | None) -> bool:
+    """Whether a captain spawn carries what only its caller gives the captain: a folder of
+    its own (``services.captain.brain.start``'s brain folder, the record's on a restart).
+    Its tools are never the caller's: the fleet confines them at every launch, as the
+    captain's agent spells it (:func:`_the_captains_tools`)."""
+    return cwd is not None
+
+
+def _the_captains_tools(
+    adapter: AgentAdapter, home: Path, cwd: Path, launch_args: Sequence[str]
+) -> list[str]:
+    """The arguments that leave the captain's session no tool but its own server and no other
+    MCP server, the operator's own included, as its agent spells them
+    (``AgentAdapter.tools_only_args``, for ``services.captain.brain.server``), launched from
+    config dir ``home`` in ``cwd`` with ``launch_args``. Asked at every launch and never
+    recorded, so a restart's are today's: the interpreter the server runs under, and the
+    operator's servers as their config names them now (a Codex captain's are switched off
+    by name, and a name its config no longer has would stop it starting). A
+    :class:`FleetError`, in one line, for an agent that cannot be confined so."""
+    from aisquare.services.captain import brain
+
+    server = brain.server()
+    try:
+        confined = adapter.tools_only_args(
+            brain.SERVER,
+            server.command,
+            server.args,
+            server.env,
+            inherit=server.inherit,
+            home=home,
+            cwd=cwd,
+            launch_args=launch_args,
+        )
+    except ValueError as exc:
+        raise FleetError(f"{adapter.label} cannot be the captain here: {exc}") from exc
+    if confined is None:
+        raise FleetError(
+            f"{adapter.label} cannot be the captain: its built-in tools cannot be switched off"
+        )
+    return confined
 
 
 def _fixed_label(role: str, wanted: str | None) -> str | None:
@@ -4040,7 +4071,7 @@ def spawn(
         worktree = worktree if worktree is not None else spec.worktree
         if replayed_args:
             agent_args = _replayed_args(role, spec, config)
-    if experimental.captain_role(role) and not _is_the_captains_launch(cwd, agent_args):
+    if experimental.captain_role(role) and not _is_the_captains_launch(cwd):
         # `fleet spawn captain` on the home was a captain with every tool, in the
         # home itself — and `aisquare captain` then attached to it and typed into it.
         raise FleetError(
@@ -4307,6 +4338,15 @@ def spawn(
         raise FleetError(
             f"--account selects an account, and {selected.adapter.label} has no account slots"
         )
+    if experimental.captain_role(role):
+        # Asked of the home the window runs under, the account's: its operator's own MCP
+        # servers are the ones the captain's session must not load.
+        native += _the_captains_tools(
+            selected.adapter,
+            choice.account.config_dir if choice.account is not None else selected.config_dir,
+            cwd or project.root,
+            arguments.argv,
+        )
 
     # Whether its launch record can be written, asked before the codename and the worktree,
     # as every refusal that needs no window is (#139): refused once they were made, a spawn
@@ -4419,10 +4459,12 @@ def spawn(
         # root (`_spawn_board_and_hub`), lands the launcher on the home board, which
         # the store keeps captured (T2).
         env["AISQUARE_HOME"] = str(paths.aisquare_home().resolve())
-        # Claude Code's session-rating survey drew in the captain's pane mid-conversation, and
-        # send (rightly) never types into a dialog: every voice line was refused, and from the
-        # phone the owner cannot answer it (T1e). screen.py's refusal stays the backstop.
-        env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] = "1"
+        # Nobody may be watching its pane, which is answered from a phone: a prompt of the
+        # agent's own there holds it (`unattended_env`). Claude Code's session-rating survey
+        # drew in the captain's pane mid-conversation, and send (rightly) never types into a
+        # dialog: every voice line was refused, and from the phone the owner cannot answer
+        # it (T1e). The screen's refusal (`modal_on_screen`) stays the backstop.
+        env.update(selected.adapter.unattended_env())
         # The experimental switch as THIS process has it, when it has it. The window's
         # launcher looks the bundled `captain` persona up again, and with the switch set
         # only in the starting shell — the server started without it — the window said

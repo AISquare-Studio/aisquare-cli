@@ -1,7 +1,7 @@
 """Where the captain runs and how it starts: its brain folder, its one server, one per home (T2).
 
-The captain is a Claude Code session the fleet starts like any agent (contract,
-seq 13121), with four things of its own:
+The captain is an agent session the fleet starts like any agent (contract, seq 13121):
+Claude Code's, or, experimentally, Codex's, with four things of its own:
 
 - **The home board.** Its row lives on the project row for ``$AISQUARE_HOME``
   (:func:`state.home_project`), which the store keeps captured and never
@@ -11,12 +11,17 @@ seq 13121), with four things of its own:
   window carries ``AISQUARE_HOME`` and ``AISQUARE_TEAM_HUB=<home>``: ``.aisquare``
   is itself a project-root marker, and without the hub a brain under
   ``~/.aisquare`` would resolve its board to ``$HOME``.
-- **One server and no other tool.** ``--strict-mcp-config --mcp-config
-  <captain/mcp.json>`` mounts only the Actions server, through the module entry
-  (0.8 s to its first answer against 1.0 s through the CLI); ``--tools ""``
-  leaves it no built-in tool; ``--allowedTools mcp__captain__*`` pre-approves
-  its own. ``mcp.json`` is rewritten at every start, so no interpreter path is
-  frozen into the launch spec a restart replays.
+- **One server and no other tool.** The fleet asks the captain's agent, at every
+  launch and a restart's too, for a session with no tool but the Actions server
+  (:func:`server`, through the module entry: 0.8 s to its first answer against 1.0 s
+  through the CLI), each of its tools pre-approved, and no other MCP server, the
+  operator's own included (``AgentAdapter.tools_only_args``, ``fleet.spawn``). Asked
+  per launch, never recorded, so neither an interpreter's path nor the operator's
+  servers are frozen into the launch spec a restart replays. Claude Code's:
+  ``--strict-mcp-config --mcp-config <the server> --tools "" --allowedTools
+  mcp__captain__*``. Codex's: its tool features off, the server's tools approved,
+  every other server its config layers name switched off, and the window's variables
+  the server needs (:data:`SERVER_INHERITS`) handed to it by name.
 - **One per home**, enforced by the fleet (``fleet.CAPTAIN_ROLE``).
 
 Every path handed to the window is ABSOLUTE (:func:`_home`): the window starts in
@@ -33,7 +38,6 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import json
 import os
 import sys
 import time
@@ -42,8 +46,8 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import paths, transcripts
-from aisquare.core.atomic import write_replacing
+from aisquare.core import experimental, paths
+from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
@@ -55,7 +59,14 @@ from aisquare.services.captain import state as captain_state
 
 PERSONA = "captain"
 SERVER = "captain"
-"""The MCP server's name in ``mcp.json``: Claude Code calls its tools ``mcp__captain__<tool>``."""
+"""The Actions server's name in the captain's session: its tools are Claude Code's
+``mcp__captain__<tool>``, Codex's ``mcp__captain`` namespace."""
+SERVER_INHERITS = ("TMUX_TMPDIR", "TMPDIR", "XDG_RUNTIME_DIR", "LANG", experimental.CAPTAIN_ENV)
+"""What the Actions server keeps of the window's environment where the agent starts its
+MCP servers with little of it (Codex's: ``HOME``, ``LC_CTYPE`` and ``PATH``, measured on
+0.162.1): where the fleet's tmux servers keep their sockets and the temporary files go,
+the runtime directory the speaker's ``spd-say`` finds speech-dispatcher in, the locale,
+and the experimental switch as the window has it. Claude Code's servers inherit it all."""
 
 SAY_TIMEOUT_S = 180.0
 SEND_TIMEOUT_S = 30.0
@@ -77,6 +88,16 @@ just been drawn may not have bracketed paste on yet, and a multi-line text would
 N messages (coderp's M3)."""
 PANE_ESCAPES = screen.PANE_ESCAPES
 """One pattern for every captured pane (coderp's M4) — ``services.captain.screen``'s."""
+
+
+@dataclass(frozen=True)
+class Server:
+    """The captain's one MCP server, as its session runs it (:func:`server`)."""
+
+    command: str
+    args: list[str]
+    env: dict[str, str]
+    inherit: tuple[str, ...]
 
 
 class Unreachable(fleet.FleetError):
@@ -128,45 +149,23 @@ def brain_dir() -> Path:
     return _home() / "captain" / "brain"
 
 
-def mcp_config_path() -> Path:
-    return _home() / "captain" / "mcp.json"
-
-
-def write_mcp_config() -> Path:
-    """Write the one-server MCP config the captain's session mounts; returns its path."""
-    config = {
-        "mcpServers": {
-            SERVER: {
-                "command": sys.executable,
-                "args": ["-m", "aisquare.services.captain", "--stdio", "--close-after", "0"],
-                # The window carries AISQUARE_HOME only when an account is chosen
-                # (fleet.spawn), so the server is told its home here, whatever the
-                # tmux server's environment says.
-                "env": {"AISQUARE_HOME": str(_home())},
-            }
-        }
-    }
-    path = mcp_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_replacing(path, json.dumps(config, indent=2) + "\n")
-    return path
+def server() -> Server:
+    """The Actions server the captain's session mounts, alone (``fleet.spawn`` asks the
+    captain's agent for it, ``tools_only_args``): this interpreter through the module entry,
+    told its home (the window carries ``AISQUARE_HOME`` only when an account is chosen, so
+    whatever the tmux server's environment says), keeping :data:`SERVER_INHERITS`."""
+    return Server(
+        command=sys.executable,
+        args=["-m", "aisquare.services.captain", "--stdio", "--close-after", "0"],
+        env={"AISQUARE_HOME": str(_home())},
+        inherit=SERVER_INHERITS,
+    )
 
 
 def launch_args(home_root: Path) -> list[str]:
-    """The captain's agent arguments: its environment (``launch -e``) and its only tools."""
-    return [
-        "-e",
-        f"AISQUARE_HOME={_home()}",
-        "-e",
-        f"AISQUARE_TEAM_HUB={home_root}",
-        "--strict-mcp-config",
-        "--mcp-config",
-        str(mcp_config_path()),
-        "--tools",
-        "",
-        "--allowedTools",
-        f"mcp__{SERVER}__*",
-    ]
+    """The captain's agent arguments: its environment (``launch -e``). Its tools are the
+    fleet's to confine at every launch (:func:`server`)."""
+    return ["-e", f"AISQUARE_HOME={_home()}", "-e", f"AISQUARE_TEAM_HUB={home_root}"]
 
 
 def find() -> FleetAgent | None:
@@ -242,7 +241,6 @@ def start(
     """
     home = captain_state.home_project()
     brain_dir().mkdir(parents=True, exist_ok=True)
-    write_mcp_config()
     receipt = fleet.spawn(
         home,
         fleet.CAPTAIN_ROLE,
@@ -296,10 +294,10 @@ def say(text: str, *, timeout: float = SAY_TIMEOUT_S) -> Reply:
     - A BUSY captain: waited for until its turn ends, then typed. Never a board
       note — nothing would prompt the captain to read one.
 
-    The reply is the transcript's text since the prompt (:func:`transcripts.last_reply`),
-    read once the captain's session reads ``waiting`` AFTER the text went in (a
-    ``waiting`` from before it is the previous turn's end). Raises :class:`NoReply`
-    past ``timeout`` seconds.
+    The reply is the transcript's text since the prompt, as the captain's own agent reads
+    its transcript (``AgentTranscript.reply_since``), read once the captain's session
+    reads ``waiting`` AFTER the text went in (a ``waiting`` from before it is the
+    previous turn's end). Raises :class:`NoReply` past ``timeout`` seconds.
     """
     if not text.strip():
         raise ValueError("nothing to say")
@@ -532,7 +530,7 @@ def _await_reply(
             and session.last_seen_at > typed_at
             and session.transcript_path
         ):
-            text = transcripts.last_reply(Path(session.transcript_path), since=typed_at)
+            text = _reply_since(agent, Path(session.transcript_path), typed_at)
             if text is not None:
                 return Reply(text or None, ended_at=session.last_seen_at)
         state = fleet.status_of(row).state
@@ -553,6 +551,15 @@ def _await_reply(
                 "pane (`aisquare captain`)"
             )
         _sleep(_POLL_S)
+
+
+def _reply_since(agent: FleetAgent, transcript: Path, typed_at: datetime) -> str | None:
+    """The captain's words since the prompt typed at ``typed_at``, as its own agent reads its
+    transcript (``AgentTranscript.reply_since``); ``""`` when its agent reads none there:
+    the turn has ended, and nothing else can say what it said."""
+    adapter = recorded_adapter(agent.agent)
+    reader = adapter.transcript_reader if adapter is not None else None
+    return reader.reply_since(transcript, typed_at) if reader is not None else ""
 
 
 def _bound(agent: FleetAgent) -> tuple[FleetAgent | None, TeamSession | None]:

@@ -1,10 +1,11 @@
 """The captain as a fleet agent: one per home, on the home board, briefed as the captain (T2).
 
-The captain is a Claude Code session the fleet starts like any agent, with four
-differences the card's contract (seq 13121) pins: it lives on the HOME board,
-which stays captured and never joins the projects; it runs from a brain folder
-under the home, so no project briefs it as a worker; it has no tool but the
-captain's own MCP server; and there is exactly one per home.
+The captain is an agent session the fleet starts like any agent (Claude Code's, or
+Codex's with the experimental switch), with four differences the card's contract (seq
+13121) pins: it lives on the HOME board, which stays captured and never joins the
+projects; it runs from a brain folder under the home, so no project briefs it as a
+worker; it has no tool but the captain's own MCP server, as its agent confines it at
+every launch (``tools_only_args``); and there is exactly one per home.
 """
 
 from __future__ import annotations
@@ -20,6 +21,10 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import paths
+from aisquare.core.agent_adapters import codex as codex_module
+from aisquare.core.agent_adapters import register, unregister
+from aisquare.core.agent_adapters.codex import TOOL_FEATURES
+from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.core.harness import role_cycle
 from aisquare.core.store import store_session
 from aisquare.core.workspace import project_id_for
@@ -29,7 +34,10 @@ from aisquare.services import project as project_service
 from aisquare.services import team as team_service
 from aisquare.services.captain import brain
 from aisquare.services.captain import state as captain_state
+from tests import fakebin
 from tests import test_fleet_service as fleet_suite
+from tests.fake_agent import FakeAgentAdapter
+from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
 from tests.test_fleet_service import FakeTmux
 
 # The fleet suite's fixtures, bound here so pytest finds them for this module's tests.
@@ -46,6 +54,22 @@ def _command(fake: FakeTmux, index: int = -1) -> list[str]:
 
 def _after(command: list[str], flag: str) -> str:
     return command[command.index(flag) + 1]
+
+
+def _mounted(command: list[str]) -> dict[str, object]:
+    """The MCP servers the window's Claude Code mounts (its ``--mcp-config``)."""
+    servers = json.loads(_after(command, "--mcp-config"))["mcpServers"]
+    assert isinstance(servers, dict)
+    return servers
+
+
+#: The captain's one server, as every launch of it mounts it (``brain.server``).
+def _the_server() -> dict[str, object]:
+    return {
+        "command": sys.executable,
+        "args": ["-m", "aisquare.services.captain", "--stdio", "--close-after", "0"],
+        "env": {"AISQUARE_HOME": str(paths.aisquare_home())},
+    }
 
 
 @pytest.fixture
@@ -99,7 +123,7 @@ def test_the_captain_starts_on_the_home_board_from_its_brain_folder(
     assert agent.cwd == brain.brain_dir() and brain.brain_dir().is_dir()
     assert agent.persona == "captain"
     command = _command(tmux)
-    assert _after(command, "--mcp-config") == str(brain.mcp_config_path())
+    assert _mounted(command) == {"captain": _the_server()}
     assert "--strict-mcp-config" in command
     assert _after(command, "--tools") == ""
     assert _after(command, "--allowedTools") == "mcp__captain__*"
@@ -116,12 +140,9 @@ def test_the_mcp_config_mounts_only_the_captain_server_through_the_module_entry(
     claude_on_path: Path,
 ) -> None:
     brain.start()
-    config = json.loads(brain.mcp_config_path().read_text(encoding="utf-8"))
-    assert list(config["mcpServers"]) == ["captain"]
-    server = config["mcpServers"]["captain"]
-    assert server["command"] == sys.executable
-    assert server["args"] == ["-m", "aisquare.services.captain", "--stdio", "--close-after", "0"]
-    assert server["env"] == {"AISQUARE_HOME": str(paths.aisquare_home())}
+    servers = _mounted(_command(tmux))
+    assert list(servers) == ["captain"]
+    assert servers["captain"] == _the_server()
 
 
 @pytest.mark.needs_captain
@@ -159,18 +180,17 @@ def test_the_fleet_refuses_a_captain_without_the_captains_launch(
     tmux: FakeTmux,
     claude_on_path: Path,
 ) -> None:
-    """``fleet spawn captain`` on the home would be a captain with every tool and no brain
-    folder, and ``aisquare captain`` would then attach to it and type into it."""
+    """``fleet spawn captain`` on the home would be a captain with no brain folder, and
+    ``aisquare captain`` would then attach to it and type into it. Its tools are never the
+    caller's: whatever arguments a spawn gives, the fleet confines them itself."""
     home = captain_state.home_project()
     with pytest.raises(fleet_service.FleetError, match="started by `aisquare captain`"):
         fleet_service.spawn(home, "captain")
-    with pytest.raises(fleet_service.FleetError, match="started by `aisquare captain`"):
-        fleet_service.spawn(home, "captain", cwd=brain.brain_dir(), agent_args=["--tools", ""])
-    with pytest.raises(fleet_service.FleetError, match="started by `aisquare captain`"):
-        fleet_service.spawn(  # its one server, but every built-in tool left on
-            home, "captain", cwd=brain.brain_dir(), agent_args=["--strict-mcp-config"]
-        )
     assert tmux.spawned == []
+    fleet_service.spawn(home, "captain", cwd=brain.brain_dir(), agent_args=["--tools", "Bash"])
+    command = _command(tmux)
+    assert command.count("--strict-mcp-config") == 1 and _after(command, "--tools") == ""
+    assert _mounted(command) == {"captain": _the_server()}
 
 
 @pytest.mark.needs_captain
@@ -242,10 +262,86 @@ def test_a_relative_home_gives_the_captain_absolute_paths(
     command = _command(tmux)
     envs = [command[i + 1] for i, word in enumerate(command) if word == "-e"]
     assert agent.cwd.is_absolute()
-    assert Path(_after(command, "--mcp-config")).is_absolute()
     assert all(Path(pair.split("=", 1)[1]).is_absolute() for pair in envs)
-    config = json.loads(brain.mcp_config_path().read_text(encoding="utf-8"))
-    assert Path(config["mcpServers"]["captain"]["env"]["AISQUARE_HOME"]).is_absolute()
+    server = _mounted(command)["captain"]
+    assert isinstance(server, dict)
+    assert Path(server["env"]["AISQUARE_HOME"]).is_absolute()
+
+
+# --- the captain on another agent: confined as that agent spells it -----------------------
+
+
+def _captain_runs(agent: str) -> None:
+    config = load_config()
+    config.team.profiles["captain"] = RoleLaunchProfile(agent=agent)
+    save_config(config)
+
+
+def _within(inner: list[str], outer: list[str]) -> bool:
+    return any(outer[at : at + len(inner)] == inner for at in range(len(outer) - len(inner) + 1))
+
+
+@pytest.mark.needs_captain
+def test_a_codex_captain_launches_confined_as_codex_spells_it(
+    tmux: FakeTmux,
+    codex_on_path: Path,  # noqa: F811 - the fixture, by name
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Experimental: the captain on Codex (``[team.profiles.captain] agent = "codex"``)
+    launches with Codex's ``tools_only_args``, asked of the home its window runs under:
+    every tool feature off, the server's tools approved, its variables inherited by name,
+    and the operator's own MCP server in that home's ``config.toml`` switched off. No
+    Claude Code flag, and none of Claude Code's unattended environment."""
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        '[mcp_servers.mine]\ncommand = "/opt/mine"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(codex_module, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
+    monkeypatch.setattr(codex_module, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")
+    _captain_runs("codex")
+
+    receipt = brain.start()
+
+    assert receipt.agent.agent == "codex" and receipt.agent.cwd == brain.brain_dir()
+    command = _command(tmux)
+    native = command[command.index("--") + 1 :]
+    for feature in TOOL_FEATURES:
+        assert _within(["--disable", feature], native), feature
+    assert _within(["-c", "mcp_servers.mine.enabled=false"], native), native
+    assert f"mcp_servers.captain.command={json.dumps(sys.executable)}" in native
+    assert 'mcp_servers.captain.default_tools_approval_mode="approve"' in native
+    kept = next(arg for arg in native if arg.startswith("mcp_servers.captain.env_vars="))
+    assert all(json.dumps(name) in kept for name in brain.SERVER_INHERITS), kept
+    assert not {"--strict-mcp-config", "--mcp-config", "--tools", "--allowedTools"} & set(native)
+    env = tmux.spawned[-1]["env"]
+    assert isinstance(env, dict) and "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY" not in env
+
+
+@pytest.mark.needs_captain
+def test_an_agent_that_cannot_be_confined_is_refused_as_the_captain_in_one_line(
+    tmux: FakeTmux,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``tools_only_args`` answers ``None`` (the fake agent's built-in tools cannot be
+    switched off): the spawn is refused, in one line naming the agent, before any window."""
+    bin_dir = tmp_path / "bin"
+    fakebin.executable_fake(bin_dir, "fakeagent", windows="set /p line=", posix="read line")
+    fakebin.prepend_to_path(bin_dir, monkeypatch)
+    fake = FakeAgentAdapter()
+    register(fake)
+    try:
+        _captain_runs(fake.id)
+        with pytest.raises(fleet_service.FleetError) as refused:
+            brain.start()
+    finally:
+        unregister(fake.id)
+    said = str(refused.value)
+    assert said == "Fake Agent cannot be the captain: its built-in tools cannot be switched off"
+    assert tmux.spawned == []
 
 
 # --- a captain that died --------------------------------------------------------------
@@ -433,7 +529,8 @@ def test_a_restart_keeps_the_captain_in_its_brain_folder(
     assert receipt.started.label == "captain"
     assert receipt.started.id != first.id  # a restart mints a new row (#138)
     command = _command(tmux)
-    assert _after(command, "--mcp-config") == str(brain.mcp_config_path()), "replayed"
+    assert _mounted(command) == {"captain": _the_server()}, "confined again, not replayed"
+    assert command.count("--strict-mcp-config") == 1 and command.count("--allowedTools") == 1
 
 
 @pytest.mark.needs_captain

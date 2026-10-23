@@ -278,6 +278,14 @@ class AgentCapabilities:
     (:attr:`idle_on_screen`, else :attr:`idle_prompt_mark` on its last line) with no turn
     running on it (:attr:`working_on_screen`): Codex's. Remote never reads it, its own
     reads being :attr:`idle_on_screen`'s."""
+    modal_on_screen: Callable[[Sequence[str]], str | None] | None = None
+    """What the agent's screen (its visible rows) shows that a typed line must not go into,
+    in the owner's words, or ``None`` for a screen a line may go into: what the captain's
+    ``say`` refuses before it types, naming it (:func:`screen_modal`). Claude Code's
+    ``claude_screen.modal_showing``: its chooser and trust dialog, the session-rating survey
+    just above its box, and any other dialog with an Enter or Esc footer and no box. ``None``
+    takes :attr:`dialog_on_screen`'s words (Codex's), else :attr:`screen_prompt`'s
+    question."""
     legacy_fleet_args: bool = False
     """``fleet.roles.<role>.extra_args`` and ``permission_mode`` are in this agent's
     vocabulary (they predate adapters and are Claude Code's); another agent takes only
@@ -301,6 +309,23 @@ def screen_ready(capabilities: AgentCapabilities, rows: Sequence[str]) -> bool:
         idle = bool(mark) and last.startswith(mark or "")
     working = capabilities.working_on_screen
     return idle and not (working is not None and working(rows))
+
+
+def screen_modal(capabilities: AgentCapabilities, rows: Sequence[str]) -> str | None:
+    """What ``rows``, an agent's screen, show that a typed line must not go into, in the
+    owner's words: its :attr:`~AgentCapabilities.modal_on_screen`, else the words of a
+    dialog of its own (``dialog_on_screen``; ``a dialog of its own`` when none are on
+    screen), else the question of its prompt (``screen_prompt``); ``None`` for a screen a
+    line may go into, or for an agent that reads none of them off its screen."""
+    if capabilities.modal_on_screen is not None:
+        return capabilities.modal_on_screen(rows)
+    if capabilities.dialog_on_screen is not None:
+        words = capabilities.dialog_on_screen(rows)
+        return None if words is None else words or "a dialog of its own"
+    if capabilities.screen_prompt is not None:
+        prompt = capabilities.screen_prompt(rows)
+        return None if prompt is None else prompt.question
+    return None
 
 
 # --- events: one vocabulary for every agent's lifecycle hooks -----------------------------

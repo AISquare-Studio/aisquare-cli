@@ -1305,3 +1305,43 @@ def test_an_agent_that_declares_no_ready_screen_is_ready_at_its_empty_prompt_alo
     )
     assert screen_ready(read, idle) and not screen_ready(read, draft), "its own reading"
     assert not screen_ready(read, busy), "a turn running on it"
+
+
+def test_what_a_line_must_not_go_into_is_named_on_the_agents_screen(adapter: AgentAdapter) -> None:
+    """``screen_modal`` (``capabilities.modal_on_screen``, else its default; what the
+    captain's ``say`` refuses by name) on the agent's recorded screens: each dialog of its own
+    is named, as its ``modal`` says where it says (Claude Code's ``[y/N]`` line is a prompt to
+    answer, not a dialog to refuse), and a screen with none names one only where its
+    ``modal`` does (Claude Code's rating survey over its box, its model picker)."""
+    from aisquare.core.agent_adapters.types import screen_modal
+
+    screens = _screens(adapter)
+    if screens is None:
+        assert screen_modal(adapter.capabilities, ["$ "]) is None
+        return
+    for shown in screens["dialogs"]:
+        said = screen_modal(adapter.capabilities, shown["rows"])
+        if "modal" in shown:
+            assert said == shown["modal"], shown["what"]
+        else:
+            assert said, f"{adapter.id} names nothing on {shown['what']}"
+    for shown in screens["not_dialogs"]:
+        assert screen_modal(adapter.capabilities, shown["rows"]) == shown.get("modal")
+
+
+def test_an_agent_that_declares_no_modal_screen_names_its_dialogs_by_their_words() -> None:
+    """The default an adapter gets with no ``modal_on_screen`` (the fake's): the words of a
+    dialog of its own (``dialog_on_screen``), a dialog whose words are off screen named as
+    one, else its prompt's question (``screen_prompt``), and nothing with neither."""
+    from aisquare.core.agent_adapters.types import screen_modal
+
+    plain = FakeAgentAdapter().capabilities
+    assert plain.modal_on_screen is None
+    asking, scrolled = ["?? Allow shell: make deploy", "(y/n)"], ["  make deploy", "(y/n)"]
+    assert screen_modal(plain, asking) == "Allow shell: make deploy"
+    assert screen_modal(plain, scrolled) == "a dialog of its own"
+    assert screen_modal(plain, ["fake> "]) is None
+    prompts = replace(plain, dialog_on_screen=None)
+    assert screen_modal(prompts, asking) == "Allow shell: make deploy", "its prompt's question"
+    assert screen_modal(prompts, ["fake> "]) is None
+    assert screen_modal(replace(prompts, screen_prompt=None), asking) is None

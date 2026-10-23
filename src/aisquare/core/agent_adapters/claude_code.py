@@ -6,7 +6,7 @@ from types import MappingProxyType
 from typing import Any
 
 from aisquare.core import harness, paths
-from aisquare.core.agent_adapters.claude_screen import box_idle, prompt_showing
+from aisquare.core.agent_adapters.claude_screen import box_idle, modal_showing, prompt_showing
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
@@ -122,6 +122,7 @@ class ClaudeCodeAdapter:
         start_dialog_mark="Enter to confirm",
         screen_prompt=prompt_showing,
         ready_on_screen=box_idle,
+        modal_on_screen=modal_showing,
         resumes_across_homes=True,
         pid_env="CLAUDE_PID",
         exports_home_env=False,

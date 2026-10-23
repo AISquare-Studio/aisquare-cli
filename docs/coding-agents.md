@@ -1124,7 +1124,7 @@ another agent's flags or claiming hookless detection is integration.
 | 3 | `tests/fixtures/agent_events/<id>.json` | `events`: a recorded payload for every hook event it installs, with the `AgentEvent` fields it must decode to; `version_output`/`version`; `hooks_off` (the file and text that switch its hooks off); with account slots, `accounts`: the files a `login` leaves in a slot's home, and a `relogin` (the same login after a new sign-in). |
 | 4 | `tests/test_adapter_contract.py` | Its row in `EXPECTED_PERMISSIONS` (a coder's and a reviewer's flags), in `EXPECTED_HEADLESS` and `RECORDED_HEADLESS` (its headless call's session and hook switches, and an answer it gave), and in `EXPECTED_TOOLS_OFF` (what leaves its tools-only session no built-in tool). |
 | 4a | `tests/fixtures/agent_transcripts/<id>.json` | `moments`: its transcript as it stood at a permission prompt, a question, an interruption and a turn ended on a question (`records`, or the first `lines` of a recorded session file beside it), with what `transcript_reader` must read of each. |
-| 4b | `tests/fixtures/agent_screens/<id>.json` | With `capabilities.dialog_on_screen` or `screen_prompt` only: `dialogs`, its screens at each dialog of its own (`rows`, as `capture-pane -p` gives them) with the `words` `dialog_on_screen` must read of each and, optionally, the `prompt` (`[shape, yes_key, no_key]`) `screen_prompt` must, and `not_dialogs`, screens with none (its empty prompt, a draft, a turn), each with `"ready": true` where `ready_on_screen` (or its default) reads it ready for a typed line. |
+| 4b | `tests/fixtures/agent_screens/<id>.json` | With `capabilities.dialog_on_screen` or `screen_prompt` only: `dialogs`, its screens at each dialog of its own (`rows`, as `capture-pane -p` gives them) with the `words` `dialog_on_screen` must read of each and, optionally, the `prompt` (`[shape, yes_key, no_key]`) `screen_prompt` must, and `not_dialogs`, screens with none (its empty prompt, a draft, a turn), each with `"ready": true` where `ready_on_screen` (or its default) reads it ready for a typed line; a `modal` on either, where given, is what `modal_on_screen` (or its default) must name on it (`null`: nothing). |
 | 5 | `tests/test_<agent>_native.py`, `tests/run_<agent>_native.py` | The opt-in test against the real binary (`AISQUARE_TEST_<AGENT>=1`), as `test_codex_native.py` and its CI job do for Codex. |
 | 6 | `docs/coding-agents.md` | Its setup and native settings. |
 
@@ -1223,6 +1223,11 @@ a `working` read for its `say`, `press` and `paste`, `types.screen_ready`. Claud
 input box drawn and idle, `claude_screen.box_idle`; `None` takes its empty prompt,
 `idle_on_screen` else `idle_prompt_mark`, with no turn on it by `working_on_screen`, which is
 Codex's. Remote never reads it),
+`modal_on_screen` (what its screen shows that a typed line must not go into, in the owner's
+words, or `None`: what the captain's `say` refuses by name, `types.screen_modal`. Claude
+Code's `claude_screen.modal_showing`, its chooser and trust dialog, the rating survey over its
+box and any other dialog with an Enter or Esc footer; `None` takes `dialog_on_screen`'s
+words, which is Codex's, else `screen_prompt`'s question),
 `fleet_settings` (`-c` settings a fleet window's agent launches with unless the
 operator's config sets the key: Codex's `notice.hide_rate_limit_model_nudge=true` and
 `check_for_update_on_startup=false`),
@@ -1344,6 +1349,10 @@ The store profile is [the sandbox and the store](#the-sandbox-and-the-aisquare-s
 - its screens read ready (`types.screen_ready`) at a dialog of its own, or otherwise than
   their `ready` says; or the default, for an agent with no `ready_on_screen`, reads ready
   where its empty prompt does not show or a turn runs on it.
+- its screens name nothing a line must not go into (`types.screen_modal`) at a dialog of
+  its own, or otherwise than their `modal` says; or the default, for an agent with no
+  `modal_on_screen`, names a dialog by other words than `dialog_on_screen`'s, else
+  `screen_prompt`'s question.
 
 The fake adapter was written from this section alone. Besides the cases above it is
 spawned through `services.fleet.spawn` with a stub binary, its window's `aisquare

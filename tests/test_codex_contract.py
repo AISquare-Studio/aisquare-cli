@@ -21,6 +21,7 @@ from aisquare.core.agent_adapters import get_adapter as _get_adapter
 from aisquare.core.agent_adapters.codex import CodexAdapter
 from aisquare.core.agent_adapters.types import (
     BadEffortError,
+    ForkArgs,
     PermissionIntent,
     SkillDirs,
     WriteScope,
@@ -643,6 +644,19 @@ def test_claude_codes_headless_answer_is_its_envelopes_structured_output(tmp_pat
     schema.write_text('{"type": "object"}\n', encoding="utf-8")
     call = claude.headless_call(schema, out, None)
     assert call is not None and call[call.index("--json-schema") + 1] == '{"type": "object"}'
+
+
+def test_a_fork_is_codexs_fork_subcommand_and_its_hook_names_the_new_thread(
+    tmp_path: Path,
+) -> None:
+    """Measured on 0.162.1 (M10): ``codex exec fork <id> "…"`` wrote a new rollout with a new
+    thread id, whose request carried the source's user turns. Claude Code's is main's
+    ``--resume <transcript> --fork-session``, beside the ``--session-id`` the fleet mints."""
+    transcript = tmp_path / "s.jsonl"
+    assert codex.fork_args("019a-thread", transcript) == ForkArgs(("fork", "019a-thread"), False)
+    assert get_adapter("claude-code").fork_args("abc", transcript) == ForkArgs(
+        ("--resume", str(transcript), "--fork-session"), True
+    )
 
 
 def test_a_resumed_codex_thread_keeps_its_first_developer_instructions() -> None:

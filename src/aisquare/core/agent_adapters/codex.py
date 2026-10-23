@@ -19,6 +19,7 @@ from aisquare.core.agent_adapters.types import (
     AgentTranscript,
     BadEffortError,
     EventKind,
+    ForkArgs,
     HookSpec,
     HooksSwitch,
     NativeChoice,
@@ -1017,6 +1018,13 @@ class CodexAdapter:
     def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
         """``codex resume <SESSION_ID>``: the thread by its id, any options after it."""
         return ["resume", native_session_id]
+
+    def fork_args(self, native_session_id: str, transcript_path: Path | None) -> ForkArgs | None:
+        """``codex fork <SESSION_ID>``: measured on 0.162.1, ``codex exec fork <id> "…"`` wrote
+        a new rollout, a new thread id, whose request carried the source's user turns. The
+        new id comes from its first hook. A thread forks only within its own home, as it
+        resumes (``resumes_across_homes`` is False)."""
+        return ForkArgs(("fork", native_session_id), mints_id=False)
 
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
         """``codex queue --thread <id> --message=<text>``: measured on 0.162.1 against an

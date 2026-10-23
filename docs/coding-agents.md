@@ -1143,6 +1143,7 @@ attributes and config layers, which a second telemetry agent extends there).
 | `broker_access(args, store, inbox, *, protect=(), writable=())` | `args` with the launch's broker inbox the one writable path under `store`, `protect` (the launch inputs of every tree the launch touches, the other worktrees, the tmux sockets: `services.store_broker.launch_paths`) read-only and `writable` (the agent's own worktree, for a seat that writes its workspace) writable, the rest of `store` read-only whatever `args` recorded, applied by every launch (`services.store_broker.start_for_launch`); `None` where `args` run no sandbox of `store_access`'s. An adapter with `sandboxes_tools` declares one, and the conformance suite fails one that does not. |
 | `fleet_args(role, label, mode, ...)` | A fleet spawn's flags from the role's native permission settings, then `label_args(label)`. |
 | `resume_args(native_id, transcript)` | The arguments that resume a session, put first: `fleet restart`, `fleet switch` and Restart resume the native id the first hook bound (Codex: `codex <options> resume <id> -- <continue line>`). |
+| `fork_args(native_id, transcript)` | A `types.ForkArgs`: the arguments, put first as `resume_args` are, that start a NEW session carrying this one's conversation (a hand-off's Fork), and `mints_id`, whether the launch names the new session (Claude Code: `--resume <transcript> --fork-session`, beside the `--session-id` the fleet mints) or its first hook does (Codex: `fork <id>`, measured on 0.162.1: a new rollout and thread id, the source's turns carried). In the session's own config dir unless `resumes_across_homes`. `None` for an agent that cannot fork: the fork starts fresh with a hand-off prompt, and the receipt says so. |
 | `exit_command` | What `fleet stop` types to end the session so its `SessionEnd` runs. |
 | `dismiss_key` | The one tmux key that closes a dialog of the agent's own with its least answer and leaves it at its prompt (both agents: `Escape`; never `Enter`). The automatic usage-limit hand-over presses it once where the screen shows anything but the empty prompt, and types `exit_command` once that prompt is back, as Remote's Switch with `dismiss_dialog` does; a screen the key does not bring back is killed as before. |
 | `queue_args(native_id, message)` | The arguments that queue a message for a RUNNING session's next turn (Codex: `queue --thread <id> --message <text>`), run with `home_env` set to the session's dir: what `fleet tell` does for a busy agent. `None` for none (a board note). |
@@ -1272,6 +1273,8 @@ The store profile is [the sandbox and the store](#the-sandbox-and-the-aisquare-s
 - its `headless_call` holds no schema, lacks the words that keep its session and hooks off
   (`EXPECTED_HEADLESS`), or does not pin a model given it; or its `headless_answer` misreads
   the answer it recorded (`RECORDED_HEADLESS`), or reads one where there is none;
+- its `fork_args` are its `resume_args`, name neither the session nor its transcript, or
+  mint an id for an agent that does not name its sessions at launch;
 - the agent has no `transcript_reader`, or it misreads one of its four recorded moments
   (`tests/fixtures/agent_transcripts/<id>.json`: the pending calls and what each waits
   for, the newest record, the last words, a walk cut short on a small file); the shared

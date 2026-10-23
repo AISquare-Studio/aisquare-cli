@@ -587,7 +587,7 @@ class AgentAdapter(Protocol):
     with :meth:`hooks_switch`, ``plugin``. Events: :meth:`decode_event` and
     :meth:`encode_reply`. Launch: :meth:`model_args`, :meth:`permission_args`,
     :meth:`store_access`, :meth:`sandbox_writes`, :meth:`broker_access`, :meth:`fleet_args`,
-    :meth:`label_args`, :meth:`resume_args`,
+    :meth:`label_args`, :meth:`resume_args`, :meth:`fork_args`,
     ``exit_command``, ``dismiss_key``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`context_files`, :meth:`disable_native_teams`,
     :meth:`telemetry_args`. Personas: :meth:`system_prompt_args`, :meth:`skill_dirs`,
@@ -788,6 +788,13 @@ class AgentAdapter(Protocol):
         """Arguments that resume a session, put before every other argument."""
         ...
 
+    def fork_args(self, native_session_id: str, transcript_path: Path | None) -> ForkArgs | None:
+        """Arguments that start a NEW session carrying this one's conversation, which goes on
+        unchanged (a hand-off's Fork; :class:`ForkArgs`); ``None`` for an agent that cannot
+        fork one, whose fork starts fresh with a hand-off prompt instead. Run in the session's
+        own config dir unless ``capabilities.resumes_across_homes``."""
+        ...
+
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
         """Arguments to the agent's binary that queue ``message`` for its RUNNING session,
         delivered as the next turn once the current one ends (``fleet tell`` to a busy
@@ -842,6 +849,18 @@ class AgentAdapter(Protocol):
         the file ``out``; ``None`` when there is none (no JSON, an error the agent reported).
         Never raises."""
         ...
+
+
+@dataclass(frozen=True)
+class ForkArgs:
+    """How one session forks into a new one that carries its conversation
+    (:meth:`AgentAdapter.fork_args`): ``args``, put first as :meth:`AgentAdapter.resume_args`
+    are, and ``mints_id``, whether the launch names the new session itself (Claude Code's
+    ``--session-id <new>`` beside ``--fork-session``, with ``capabilities.
+    assigns_session_id``) or the agent's first hook tells it (Codex's)."""
+
+    args: tuple[str, ...]
+    mints_id: bool
 
 
 @dataclass(frozen=True)

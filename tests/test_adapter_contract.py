@@ -590,6 +590,22 @@ def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_
         assert telemetry == []
 
 
+def test_a_fork_names_the_session_it_forks_and_is_no_resume(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``fork_args`` (a hand-off's Fork) starts a new session from this one's conversation:
+    not the resume, which goes on in the same one, and named by the same session; a launch
+    names the new session (``mints_id``) only for an agent it names at launch."""
+    transcript = tmp_path / "session.jsonl"
+    fork = adapter.fork_args("native-1", transcript)
+    if fork is None:
+        return  # cannot fork: the fork starts fresh with a hand-off prompt
+    assert fork.args and all(isinstance(arg, str) for arg in fork.args)
+    assert list(fork.args) != adapter.resume_args("native-1", transcript)
+    assert "native-1" in fork.args or str(transcript) in fork.args
+    assert adapter.capabilities.assigns_session_id or not fork.mints_id
+
+
 # --- personas: the system prompt ------------------------------------------------------------
 
 

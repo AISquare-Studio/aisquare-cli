@@ -40,6 +40,7 @@ from aisquare.core.agent_adapters.types import (
     BadEffortError,
     CallAsk,
     EventKind,
+    ForkArgs,
     HookSpec,
     HooksSwitch,
     NativeChoice,
@@ -514,6 +515,9 @@ class FakeAgentAdapter:
 
     def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
         return ["--thread", native_session_id]
+
+    def fork_args(self, native_session_id: str, transcript_path: Path | None) -> ForkArgs | None:
+        return None  # its threads cannot branch: a fork starts fresh
 
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
         return ["inbox", native_session_id, message]

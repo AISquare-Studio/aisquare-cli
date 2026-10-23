@@ -12,6 +12,7 @@ from aisquare.core.agent_adapters.types import (
     AgentTranscript,
     BadEffortError,
     EventKind,
+    ForkArgs,
     HookSpec,
     HooksSwitch,
     NativeChoice,
@@ -405,6 +406,12 @@ class ClaudeCodeAdapter:
         """``--resume <transcript>``: Claude Code ≥ 2.1.223 finds a session by its
         transcript's absolute path from any directory, and keeps its id (#146)."""
         return ["--resume", str(transcript_path) if transcript_path else native_session_id]
+
+    def fork_args(self, native_session_id: str, transcript_path: Path | None) -> ForkArgs | None:
+        """``--resume <transcript> --fork-session``, main's hand-off Fork: a new session from
+        the old one's conversation, which the launch names with ``--session-id <new>``."""
+        resume = self.resume_args(native_session_id, transcript_path)
+        return ForkArgs((*resume, "--fork-session"), mints_id=True)
 
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
         return None  # no queue: `fleet tell` types into its prompt when the pane waits

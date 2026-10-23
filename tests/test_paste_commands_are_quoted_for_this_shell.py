@@ -4,9 +4,10 @@
 which cmd.exe has no syntax for and passes on as part of the argument: the onboard
 ``NotAdded`` named failed on Windows (CI gate of #259), and the same quoting stood in
 ``project rename``'s refusal, the Remove dialog and its toast, the trust hints, and reap's
-``git branch -D`` (review of #259, round 20). ``install_route.command_line`` is the one
-quoting for a printed command: bare where cmd.exe and PowerShell both take a word as it is,
-double quotes on Windows otherwise, ``shlex.join`` elsewhere.
+``git branch -D`` (review of #259, round 20). ``shell_line.command_line``, which
+``install_route`` re-exports, is the one quoting for a printed command: bare where cmd.exe
+and PowerShell both take a word as it is, double quotes on Windows otherwise, ``shlex.join``
+elsewhere.
 
 What ``shlex`` still quotes is listed below, each with why it is no paste-this command for
 a Windows shell; a new use fails here until it is one or the other.
@@ -33,7 +34,7 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "aisquare"
 #: (module, function) → (how many ``shlex.quote``/``shlex.join`` calls, and why each is not
 #: a command a person on Windows pastes).
 SHLEX_KEPT: dict[tuple[str, str], tuple[int, str]] = {
-    ("services/install_route.py", "command_line"): (1, "it is the quoting: shlex.join off Windows"),
+    ("core/shell_line.py", "command_line"): (1, "it is the quoting: shlex.join off Windows"),
     ("core/agents.py", "_quote"): (1, "its POSIX branch; Windows has its own"),
     ("services/remote_server.py", "_remote_shell_word"): (1, "its POSIX branch; Windows its own"),
     ("services/remote_server.py", "_page_open_refusal"): (2, "chmod, which only POSIX has"),
@@ -83,7 +84,7 @@ def test_shlex_quotes_only_what_no_windows_shell_is_told_to_run() -> None:
     found = dict(_shlex_calls())
 
     assert found == kept, (
-        "a command a person is told to paste is quoted with install_route.command_line; "
+        "a command a person is told to paste is quoted with shell_line.command_line; "
         "a shlex use that is not one goes in SHLEX_KEPT, with why"
     )
 

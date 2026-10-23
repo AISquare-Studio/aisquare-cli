@@ -22,8 +22,10 @@ import logging
 import os
 import shutil
 import sqlite3
+import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
@@ -43,13 +45,16 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui import app as app_mod
 from aisquare.cli.ui import app as ui_app
-from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HelpScreen, Panes
+from aisquare.cli.ui.app import SIDEBAR_WIDTH_KEY, FleetApp, HeadroomReader, HelpScreen, Panes
 from aisquare.cli.ui.autosave import Autosave
+from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.divider import WIDEST_ASK, Divider, cells
 from aisquare.cli.ui.groups import DropProject, GroupPicker
 from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.sidebar import (
     RESIZE_STEP,
+    STATE_CHIP,
+    STOP_STATES,
     Activatable,
     AgentRow,
     CardChips,
@@ -62,6 +67,7 @@ from aisquare.cli.ui.sidebar import (
     ordered_agents,
     short_path,
 )
+from aisquare.cli.ui.stop import StopAgentScreen
 from aisquare.cli.ui.terminal import (
     DUPLICATE_PRESS_WINDOW,
     EscapeToSidebar,
@@ -85,10 +91,21 @@ from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import update_state
 from aisquare.core.store import ContextStore, SqliteStore, store_session
 from aisquare.core.tmux import Completed
-from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, FleetAgentStatus, ProjectInfo
+from aisquare.models import (
+    CheckStatus,
+    ClaudeAccount,
+    DoctorCheck,
+    FleetAgent,
+    FleetAgentStatus,
+    HeadroomSummary,
+    ProjectInfo,
+    TeamSession,
+)
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
+from tests import guard_clock, toast_log
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
 from tests.ui_workers import settle_page
 
@@ -187,12 +204,14 @@ def drive(
     doctor: Callable[[], list[DoctorCheck]] | None = None,
     notifications: bool = False,
     size: tuple[int, int] = SIZE,
+    headroom: HeadroomReader | None = None,
 ) -> T:
     """Run ``fn`` against a mounted ``FleetApp`` (no timer refresh; a stub doctor).
 
     ``notifications`` opts the screen's ``ToastRack`` in — ``run_test`` leaves it
     out by default, and without it a ``notify`` goes nowhere to be read.
     ``size`` is the terminal's; a test about a laptop passes a narrow one.
+    ``headroom`` stands in for the slow usage read; the app's own when not given.
 
     The start-up doctor run has been painted before ``fn`` starts. It is a thread
     worker, and a test that ended before its result was handled had that result
@@ -202,7 +221,11 @@ def drive(
     """
 
     async def run() -> T:
-        app = FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []))
+        app = (
+            FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []))
+            if headroom is None
+            else FleetApp(refresh_seconds=3600, doctor=doctor or (lambda: []), headroom=headroom)
+        )
         async with app.run_test(size=size, notifications=notifications) as pilot:
             await pilot.pause()
             await settle(app)
@@ -251,6 +274,20 @@ async def settle(app: FleetApp) -> None:
     as this did: the Onboard view's ``DirectoryTree`` keeps one for its whole life.
     """
     await settle_page(app)
+
+
+async def refreshed(app: FleetApp) -> None:
+    """A refresh, as the two-second timer runs it, and its frame painted.
+
+    ``refresh_data`` reads the fleet in a thread worker, and one ``pilot.pause()``
+    after it can return before that read has painted: on windows-latest the
+    captain's quick action was still offered after its row had turned ``exited``
+    (CI run 39863195249). The test went on reading the frame before. Only the fleet
+    read is waited for, so a worker a test holds on purpose (the captain view's bar)
+    does not hold this up.
+    """
+    app.refresh_data()
+    await settle_page(app, group=app_mod.FLEET_WORKER)
 
 
 async def _toast_list(app: FleetApp) -> list[str]:
@@ -413,6 +450,335 @@ def test_agent_rows_show_role_icon_state_chip_and_exit_status(
     assert "🔔" not in manager and "▶" not in manager
     # The card's chips: three alive (the exited one is not), one needing the user.
     assert chips.rstrip().endswith("3 · 🔔1")
+
+
+def on_screen(row: AgentRow) -> str:
+    """The strip a row composites across its whole width, its padding included.
+
+    :func:`composited` crops to ``size``, the content area: a padded row loses as many cells
+    off its end as its padding is wide — the end being what these tests are about.
+    """
+    (strip,) = row.render_lines(Region(0, 0, row.outer_size.width, 1))
+    return strip.text
+
+
+def on_slot(row: FleetAgentStatus, slot: int) -> FleetAgentStatus:
+    """``row`` spawned on account ``slot`` (``FleetAgent.account_slot``)."""
+    return row.model_copy(update={"agent": row.agent.model_copy(update={"account_slot": slot})})
+
+
+def session_use(*by_slot: tuple[int, float]) -> Callable[..., HeadroomSummary]:
+    """A headroom read answering ``by_slot`` as each account's five-hour window USED."""
+
+    def read(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
+        return HeadroomSummary(level="good", percent_left=50.0, session_by_slot=dict(by_slot))
+
+    return read
+
+
+def test_an_agent_row_gives_way_in_its_label_never_in_its_account_and_session_use(
+    tmp_path: Path, script: Script
+) -> None:
+    """The owner's option C: ``#<slot>·<pct>%`` after the state chip — the slot number here,
+    for want of room. At the default width of 30 a long label is ellipsised so the suffix is
+    whole; with no figure the slot alone, with no slot nothing, and an exited row keeps its
+    ``💤 exited(N)``."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [
+        on_slot(status("prj_a", "manager", "manager", "waiting"), 1),
+        on_slot(status("prj_a", "coder-01k8zq7mab", "coder", "working", minute=1), 3),
+        on_slot(status("prj_a", "coder-auth", "coder", "working", minute=2), 4),
+        status("prj_a", "scout-1", "scout", "attention", minute=3),
+        on_slot(status("prj_a", "tester-1", "tester", "exited", minute=4, exit_status=3), 3),
+    ]
+
+    async def go(pilot: Pilot[None]) -> tuple[int, list[str]]:
+        app = fleet_app(pilot)
+        await settle(app)  # the headroom read follows the first accounts frame
+        rows = [on_screen(row) for row in card_for(app, "prj_a").query(AgentRow)]
+        return app.sidebar.size.width, rows
+
+    width, rows = drive(go, headroom=session_use((1, 42.0), (3, 87.0)))
+    assert width == 30
+    manager, long, coder, scout, tester = (row.strip() for row in rows)
+    assert manager.startswith("🧭 manager") and manager.endswith("⏸ #1·42%")
+    assert long.endswith("▶ #3·87%"), long  # the whole suffix…
+    assert "…" in long and "coder-01k8zq7mab" not in long  # …and the label gave way
+    assert long.startswith("🔨 coder-01k8")
+    assert coder.endswith("▶ #4") and "%" not in coder  # no figure for slot 4: the slot alone
+    assert "#" not in scout and scout.endswith("🔔")  # no slot: nothing
+    assert tester.endswith("💤 exited(3)") and "#" not in tester
+
+
+def as_persona(row: FleetAgentStatus, persona: str) -> FleetAgentStatus:
+    """``row`` spawned as ``persona`` (``FleetAgent.persona``)."""
+    return row.model_copy(update={"agent": row.agent.model_copy(update={"persona": persona})})
+
+
+@pytest.mark.parametrize("size", [(90, 40), (120, 40)])
+def test_a_persona_badge_never_takes_the_session_figure_off_an_agent_row(
+    tmp_path: Path, script: Script, size: tuple[int, int]
+) -> None:
+    """Review of #267's merge, M-F1: at the default sidebar width a row with both a slot and a
+    persona read ``⏸ #1·42…`` — the badge pushed the figure under the row's ellipsis and was
+    never seen itself. The owner's order: the label's padding gives way first, then the badge
+    is cut (``…``), and the chip and ``#<slot>·<pct>%`` are never cut."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    script["prj_a"] = [
+        as_persona(on_slot(status("prj_a", "manager", "manager", "waiting"), 1), "skeptic"),
+        as_persona(
+            on_slot(status("prj_a", "coder-auth", "coder", "working", minute=1), 3),
+            "a-very-long-persona-name",
+        ),
+    ]
+
+    async def go(pilot: Pilot[None]) -> tuple[int, list[str]]:
+        app = fleet_app(pilot)
+        await settle(app)
+        rows = [on_screen(row) for row in card_for(app, "prj_a").query(AgentRow)]
+        return app.sidebar.size.width, rows
+
+    width, rows = drive(go, headroom=session_use((1, 42.0), (3, 87.0)), size=size)
+    assert width == 30
+    manager, coder = (row.strip() for row in rows)
+    assert manager.startswith("🧭 manager") and "⏸ #1·42% · sk" in manager, manager
+    assert "#1·42…" not in manager
+    assert coder.startswith("🔨 coder-auth"), coder
+    assert coder.endswith("▶ #3·87%") or "▶ #3·87% · " in coder, coder
+    assert "a-very-long-persona-name" not in coder
+
+
+def test_the_session_use_rides_the_slow_headroom_read_never_the_tick(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance (e): the figures on the rows and the info lines are the headroom read's
+    (``HeadroomSummary.session_by_slot``), handed to the widgets when it lands. Ticks of the
+    two-second clock read no usage, and any other usage read is recorded — not raised: every
+    usage read runs in a thread worker that does not exit on error, where a raise only marks
+    the worker failed (review of #267, 3). A view opened between two reads shows the last
+    figure at once; one already open takes the next read's figure as it lands, a modal on
+    top or not (review of #267, 2 and 5). The manager's Agent view and the Manager tab show
+    the same line (acceptance (a), mounted)."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    script["prj_a"] = [
+        on_slot(status("prj_a", "manager", "manager", "waiting"), 2),
+        on_slot(status("prj_a", "coder-auth", "coder", "working", minute=1), 2),
+    ]
+    reads: list[float] = []
+    figure = [71.0]
+
+    def headroom(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
+        reads.append(figure[0])
+        return session_use((2, figure[0]))(accounts)
+
+    elsewhere: list[str] = []
+
+    def reader(name: str) -> Callable[..., object]:
+        def read(*args: object, **kwargs: object) -> object:
+            elsewhere.append(name)
+            raise AssertionError(f"usage was read outside the headroom read: {name}")
+
+        return read
+
+    for name in ("cached_usage", "cached_usage_with_trends", "read_usage", "usage"):
+        monkeypatch.setattr(accounts_service, name, reader(name))
+    monkeypatch.setattr(accounts_service, "read_fleet_headroom", reader("read_fleet_headroom"))
+
+    def headers(app: FleetApp) -> tuple[str, str]:
+        agent = shown(app.query_one("#agent-agt_a_manager #agent-header", Static))
+        manager = shown(app.query_one("#project-prj_a #manager-header", Static))
+        return agent, manager.splitlines()[0]
+
+    async def go(pilot: Pilot[None]) -> tuple[list[float], tuple[str, str], tuple[str, str], str]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await settle(app)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        for _ in range(3):
+            app.refresh_data()
+            await settle(app)
+        opened = headers(app)
+        # The next slow read, with both views open and a modal over them.
+        figure[0] = 64.0
+        app.action_help()
+        await settle(app)
+        assert isinstance(app.screen, HelpScreen)
+        app.refresh_headroom()
+        await settle(app)
+        app.pop_screen()
+        await settle(app)
+        return list(reads), opened, headers(app), on_screen(row_for(app, "agt_a_coder-auth"))
+
+    seen, opened, after, row = drive(go, headroom=headroom)
+    assert seen == [71.0, 64.0], "one read at start, one asked for: the ticks read no usage"
+    assert elsewhere == [], f"usage read outside the headroom read: {elsewhere}"
+    agent_header, manager_first = opened
+    assert "account 2 · 71%" in agent_header
+    assert manager_first == agent_header
+    assert "account 2 · 64%" in after[0] and "71%" not in after[0], after
+    assert after[1] == after[0]
+    assert row.rstrip().endswith("▶ #2·64%")
+
+
+def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's rulings 2 and 3 on #267, in the real app in a 90-column terminal: the Agent
+    view's info line gets about 37 cells. The account and its use come right after the state,
+    and when the line does not fit, the LABEL gives way first — the labels ``fleet spawn``
+    gives (``<role>-<task id[:8]>``) pushed ``work · 42%`` off the line — so ``<icon>
+    <label…>  <chip> <state>  <account> · <pct>%`` stays whole and the rest is cut after it.
+    The label keeps six characters; beside an unaliased ``plain claude · 42%`` or
+    ``account 4 · 42%`` even that is too wide, and the line is cut at its end. At 140
+    columns the label is whole again."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    session = TeamSession(
+        id="s-1",
+        project_id="prj_a",
+        role="coder",
+        started_at=T0,
+        last_seen_at=T0,
+        model="claude-opus-5-5",
+        effort="high",
+    )
+
+    def row(
+        project_id: str, label: str, role: str, state: str, slot: int, minute: int
+    ) -> FleetAgentStatus:
+        spawned = on_slot(status(project_id, label, role, state, minute=minute), slot)
+        return spawned.model_copy(update={"session": session})
+
+    script["prj_a"] = [
+        row("prj_a", "coder-01k8zq7m", "coder", "working", 3, 1),
+        row("prj_a", "coder-01m5d34v", "coder", "working", 1, 2),
+        row("prj_a", "tester-01m5d34v", "tester", "waiting", 4, 3),
+    ]
+    script["prj_b"] = [row("prj_b", "coder-01m5d34v", "coder", "attention", 2, 1)]
+    # Slots 1 and 4 unaliased: the registry's built-in names, "plain claude" and "account 4".
+    monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work", 3: "max"})
+
+    async def bar(pilot: Pilot[None], agent_id: str) -> tuple[int, str]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, agent_id))
+        await settle(app)
+        header = app.query_one(f"#agent-{agent_id} #agent-header", Static)
+        (strip,) = header.render_lines(Region(0, 0, header.outer_size.width, 1))
+        return header.content_size.width, strip.text.strip()
+
+    async def go(pilot: Pilot[None]) -> dict[str, tuple[int, str]]:
+        app = fleet_app(pilot)
+        await settle(app)
+        seen = {
+            agent_id: await bar(pilot, agent_id)
+            for agent_id in (
+                "agt_a_coder-01k8zq7m",
+                "agt_a_coder-01m5d34v",
+                "agt_a_tester-01m5d34v",
+                "agt_b_coder-01m5d34v",
+            )
+        }
+        await pilot.resize_terminal(140, 30)
+        await settle(app)
+        seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
+        return seen
+
+    seen = drive(
+        go, headroom=session_use((1, 42.0), (2, 42.0), (3, 42.0), (4, 42.0)), size=(90, 30)
+    )
+    widths = {width for agent_id, (width, _) in seen.items() if agent_id != "wide"}
+    assert widths == {37}, seen  # about 38 cells, as the owner measured
+    assert seen["agt_a_coder-01k8zq7m"][1] == "🔨 coder-01k8…  ▶ working  max · 42%…"
+    assert seen["agt_b_coder-01m5d34v"][1] == "🔨 coder-…  🔔 attention  work · 42%…"
+    # Too narrow even at the label's floor: the floor, then the line cut at its end.
+    assert seen["agt_a_coder-01m5d34v"][1] == "🔨 coder-…  ▶ working  plain claude …"
+    assert seen["agt_a_tester-01m5d34v"][1] == "🧪 tester…  ⏸ waiting  account 4 · 4…"
+    width, wide = seen["wide"]
+    assert width > 60 and wide.startswith("🔨 coder-01k8zq7m  ▶ working  max · 42%  claude"), wide
+
+
+def test_at_90_columns_the_manager_tab_cuts_its_info_line_and_shows_its_hint_whole(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's ruling on #267, in the real app in a 90-column terminal (a 57-cell header):
+    the Manager tab's info line is cut on its one row with ``…``, as the Agent view's is — a
+    long detail (the folder-trust prompt's) used to wrap it over two to four rows — while the
+    dim hint under it shows whole. Under one nowrap rule for both, the hint was cut before
+    "F12 returns to the sidebar" (review of #267). With the manager gone, the prose that says
+    so wraps and nothing is cut. Acceptance (a), mounted: the Manager tab's line is the
+    manager's Agent view line, text and styles."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    row = on_slot(status("prj_a", "manager", "manager", "attention"), 2)
+    session = TeamSession(
+        id="s-manager",
+        project_id="prj_a",
+        role="manager",
+        started_at=T0,
+        last_seen_at=T0,
+        model="claude-opus-5-5",
+        effort="xhigh",
+    )
+    detail = fleet_service.trust_prompt_detail(tmp_path / "a [deep] folder" / "repo")
+    script["prj_a"] = [row.model_copy(update={"session": session, "detail": detail})]
+    monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work"})
+
+    def rows(widget: Widget) -> list[str]:
+        width, height = widget.outer_size
+        lines = widget.render_lines(Region(0, 0, width, height))
+        return [strip.text.strip() for strip in lines]
+
+    async def go(pilot: Pilot[None]) -> tuple[int, list[str], list[str], bool, list[str], bool]:
+        app = fleet_app(pilot)
+        await settle(app)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await settle(app)
+        agent_header = app.query_one("#agent-agt_a_manager #agent-header", Static)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)
+        app.refresh_data()
+        await settle(app)
+        header = app.query_one("#project-prj_a #manager-header", Static)
+        hint = app.query_one("#project-prj_a #manager-hint", Static)
+        same = header.content == agent_header.content  # plain and spans alike
+        seen = header.content_size.width, rows(header), rows(hint), same
+        script["prj_a"] = []
+        app.refresh_data()
+        await settle(app)
+        return *seen, rows(header), hint.display
+
+    width, line, hint, same, gone, hint_after = drive(
+        go, headroom=session_use((2, 42.0)), size=(90, 30)
+    )
+    assert width == 57, width  # a 90-column terminal, the default sidebar
+    assert len(line) == 1, line  # the info line on one row…
+    assert line[0].startswith("🧭 manager  🔔 attention  work · 42%  claude"), line
+    assert line[0].endswith("…"), line  # …cut at its end, and the cut is said
+    assert same, "the Manager tab's line is the Agent view's, text and styles"
+    assert "F12 returns to the sidebar" in " ".join(hint), hint  # the hint, whole
+    assert " ".join(hint).startswith("type to the manager as you would to any Claude session")
+    assert len(gone) > 2 and not any(r.endswith("…") for r in gone), gone  # prose wraps
+    assert "has no manager yet" in " ".join(gone) and hint_after is False
+
+
+def test_a_project_opened_between_two_ticks_names_its_session_at_once(
+    tmp_path: Path, script: Script
+) -> None:
+    """Review of #267, 7: a new Project view waited for the next tick for its rows, and its
+    Settings tab said "no live tmux session" until then while the frame the app already
+    held named one. The view is handed that frame as it is built."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"))
+    manager = status("prj_a", "manager", "manager", "waiting")
+    script["prj_a"] = [manager.model_copy(update={"tmux_session": "asq-amber-otter"})]
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await settle(app)  # no tick: the app refreshes every hour here
+        return shown(app.query_one("#project-prj_a #attach-line", Static))
+
+    line = drive(go)
+    assert line == f"Attach in a terminal: tmux -L {PRIVATE_SOCKET} attach -t =asq-amber-otter"
 
 
 def test_the_card_names_the_project_not_its_codename_and_a_path_tells_twins_apart(
@@ -2302,18 +2668,18 @@ def test_bell_rings_once_on_a_transition_into_attention(
         counts = [len(rings)]
         script["prj_a"] = [status("prj_a", "manager", "manager", "attention")]
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         counts.append(len(rings))
         app.refresh_data()  # still attention: no second ring
-        await pilot.pause()
+        await settle(app)
         counts.append(len(rings))
         script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         counts.append(len(rings))
         script["prj_a"] = [status("prj_a", "manager", "manager", "attention")]
         app.refresh_data()  # a fresh transition rings again
-        await pilot.pause()
+        await settle(app)
         counts.append(len(rings))
         return counts
 
@@ -2326,7 +2692,7 @@ def test_bell_rings_once_on_a_transition_into_attention(
 
     async def first_frame(pilot: Pilot[None]) -> int:
         fleet_app(pilot).refresh_data()
-        await pilot.pause()
+        await settle(fleet_app(pilot))
         return len(rings)
 
     assert drive(first_frame) == 0
@@ -2352,7 +2718,7 @@ def test_rebuilds_update_in_place_and_keep_the_selection(tmp_path: Path, script:
             status("prj_a", "tester-1", "tester", "working", minute=2),
         ]
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         same_card = card_for(app, "prj_a") is card
         same_row = row_for(app, "agt_a_coder-auth") is row
         still_selected = row.has_class("selected")
@@ -2384,7 +2750,7 @@ def test_store_errors_keep_the_last_frame_and_say_so(
         quiet_before = not notice.display
         monkeypatch.setattr(app_mod, "store_session", broken)
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         assert app.snapshot is not None
         kept = [p.id for p in app.snapshot.projects]
         cards = [c.project.id for c in app.query(ProjectCard)]
@@ -2392,7 +2758,7 @@ def test_store_errors_keep_the_last_frame_and_say_so(
         text = shown(notice) if notice.display else ""
         monkeypatch.setattr(app_mod, "store_session", store_session)
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         recovered = not notice.display and app.snapshot.stale_since is None
         return kept, cards, text, stale, quiet_before, recovered
 
@@ -2401,6 +2767,240 @@ def test_store_errors_keep_the_last_frame_and_say_so(
     assert stale
     assert quiet_before and "store unreadable" in text  # …and was labelled as such
     assert recovered
+
+
+FLEET_HOLD_S = 10.0
+"""How long a scripted fleet read waits for its gate before giving up on the test."""
+
+
+def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``refresh_data`` opened the store and asked ``list_agents`` (tmux, ~11 ms a project)
+    on the event loop every two seconds: ~44 ms with four projects, and every click,
+    scroll or key that landed then waited for it (measured 2026-10-20, "everything feels
+    sluggish, happens after a tick"). Both run in a thread now, and the frame they read
+    is still painted. The first frame, read at mount before anything is drawn, is not
+    the tick's and is not counted."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    threads: dict[str, list[threading.Thread]] = {"store": [], "list_agents": []}
+    answer = ["waiting"]
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        threads["list_agents"].append(threading.current_thread())
+        return [status(project.id, "manager", "manager", answer[0])]
+
+    @contextmanager
+    def recorded() -> Iterator[ContextStore]:
+        threads["store"].append(threading.current_thread())
+        with store_session() as store:
+            yield store
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, bool]:
+        app = fleet_app(pilot)
+        for seen in threads.values():
+            seen.clear()
+        monkeypatch.setattr(app_mod, "store_session", recorded)
+        answer[0] = "working"
+        app.refresh_data()  # what the two-second timer runs
+        await settle(app)
+        rows = shown(row_for(app, "agt_a_manager")), shown(row_for(app, "agt_b_manager"))
+        return *rows, app.captain_on
+
+    row_a, row_b, captain = drive(go)
+    # With the captain on, the read also looks up its home board, in a session of its own
+    # (``_read_captain``): one more, off the UI thread as well.
+    assert len(threads["store"]) == 1 + captain and len(threads["list_agents"]) == 2, threads
+    main = threading.main_thread()
+    assert all(t is not main for seen in threads.values() for t in seen), threads
+    assert row_a.rstrip().endswith("▶") and row_b.rstrip().endswith("▶")  # …and painted
+
+
+def test_ticks_while_a_fleet_read_is_in_flight_start_no_second_read_and_cost_one_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One fleet read at a time, as the accounts' read (``refresh_accounts``): a read held
+    by tmux or a busy store outlives the tick, and an ``exclusive`` worker per tick would
+    pile a thread up per tick, since a cancelled thread runs on. A tick that finds a read
+    in flight starts nothing and owes one read, made once the first has painted: three
+    ticks during one wait cost ONE more read, and it sees what changed meanwhile."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    answer = ["waiting"]
+    reads: list[str] = []  # what each read was told, in order
+    running, peak = [0], [0]
+    counting = threading.Lock()
+    hold, asked, gate = threading.Event(), threading.Event(), threading.Event()
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        with counting:
+            told = answer[0]
+            reads.append(told)
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        try:
+            if hold.is_set():
+                hold.clear()
+                asked.set()
+                gate.wait(FLEET_HOLD_S)  # as tmux, or a writer holding the store, would
+            return [status(project.id, "manager", "manager", told)]
+        finally:
+            with counting:
+                running[0] -= 1
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def go(pilot: Pilot[None]) -> tuple[int, str, str]:
+        app = fleet_app(pilot)
+        reads.clear()
+        answer[0] = "working"
+        hold.set()
+        try:
+            app.refresh_data()  # a tick: its read waits
+            assert await asyncio.to_thread(asked.wait, FLEET_HOLD_S), "the tick read"
+            answer[0] = "attention"  # what changed while it waited
+            app.refresh_data()  # three more ticks while it waits
+            app.refresh_data()
+            app.refresh_data()
+            await pilot.pause()
+            in_flight = sum(
+                1 for w in app.workers if w.name == app_mod.FLEET_WORKER and not w.is_finished
+            )
+            while_held = shown(row_for(app, "agt_a_manager"))
+        finally:
+            gate.set()
+        await settle(app)
+        return in_flight, while_held, shown(row_for(app, "agt_a_manager"))
+
+    in_flight, while_held, after = drive(go)
+    assert in_flight == 1, f"{in_flight} fleet reads in flight"
+    assert peak[0] == 1, f"{peak[0]} reads at once"
+    assert while_held.rstrip().endswith("⏸")  # the frame shown is kept while the read waits
+    assert reads == ["working", "attention"], reads  # the held read, then ONE owed read
+    assert "🔔" in after  # …whose frame is the one painted last
+
+
+def test_a_frame_painted_late_leaves_the_owed_read_to_the_read_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of 738d5594: a read that has ended is painted when the app gets to its
+    ``StateChanged``, and a tick can come first. That tick finds no read in flight and
+    starts the next, and a call while that one runs owes one more. The late frame then
+    started the owed read itself, beside the read in flight: two reads at once (10 of 10
+    runs). The read in flight starts it once it has painted, one read at a time, and the
+    calls still cost one read after it."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    asked = {n: threading.Event() for n in range(1, 5)}
+    gates = {n: threading.Event() for n in range(1, 5)}
+    reads: list[int] = []  # the reads the test numbered, in order
+    running, peak = [0], [0]
+    counting = threading.Lock()
+    numbering = threading.Event()
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        with counting:
+            n = 0
+            if numbering.is_set():
+                reads.append(len(reads) + 1)
+                n = reads[-1]
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        try:
+            if n:
+                asked[n].set()
+                gates[n].wait(FLEET_HOLD_S)  # as tmux, or a writer holding the store, would
+            return [status(project.id, "manager", "manager", "working")]
+        finally:
+            with counting:
+                running[0] -= 1
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def go(pilot: Pilot[None]) -> int:
+        app = fleet_app(pilot)
+        painted = asyncio.Event()  # the first read's frame, and what it started after it
+        numbering.set()
+        try:
+            app.refresh_data(then=painted.set)  # a tick: its read waits
+            assert await asyncio.to_thread(asked[1].wait, FLEET_HOLD_S), "the tick read"
+            [first] = [
+                w for w in app.workers if w.name == app_mod.FLEET_WORKER and not w.is_finished
+            ]
+
+            async def tick_ahead_of_the_frame() -> None:
+                # The app handles nothing else while this callback runs, so the first
+                # read's StateChanged queues behind the tick and the call below.
+                gates[1].set()
+                await first.wait()
+                app.refresh_data()  # finds no read in flight, and starts one
+                assert await asyncio.to_thread(asked[2].wait, FLEET_HOLD_S), "the next read"
+                app.refresh_data()  # a call while it runs: one read owed
+
+            app.call_later(tick_ahead_of_the_frame)
+            await asyncio.wait_for(painted.wait(), FLEET_HOLD_S)
+            in_flight = sum(
+                1 for w in app.workers if w.name == app_mod.FLEET_WORKER and not w.is_finished
+            )
+        finally:
+            for gate in gates.values():
+                gate.set()
+        await settle(app)
+        return in_flight
+
+    in_flight = drive(go)
+    assert in_flight == 1, f"{in_flight} fleet reads in flight"
+    assert peak[0] == 1, f"{peak[0]} reads at once"
+    assert reads == [1, 2, 3], reads  # the read, the tick's, and ONE owed read after it
+
+
+def test_a_fleet_read_that_hangs_labels_the_frame_kept_once_it_has_waited_long_enough(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read that HANGS, not one that fails — a store on a hung mount, a wedged tmux at
+    30 s a call — left the sidebar silently stale: each tick only owed one more read,
+    and nothing raised to label the frame (review of #272). Before the read moved off
+    the UI thread the whole UI froze, which was worse but obvious. Once a read has been
+    in flight :data:`~aisquare.cli.ui.app.FLEET_STALE_AFTER`, a tick says the frame shown
+    is an old one; the read's own frame takes the notice away."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    monkeypatch.setattr(app_mod, "FLEET_STALE_AFTER", 0.3)
+    hold, asked, gate = threading.Event(), threading.Event(), threading.Event()
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        if hold.is_set():
+            hold.clear()
+            asked.set()
+            gate.wait(FLEET_HOLD_S)
+        return [status(project.id, "manager", "manager", "working")]
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, str, str, bool]:
+        app = fleet_app(pilot)
+        notice = app.sidebar.query_one("#projects-notice", Static)
+        hold.set()
+        try:
+            app.refresh_data()  # a tick whose read hangs
+            assert await asyncio.to_thread(asked.wait, FLEET_HOLD_S), "the tick read"
+            app.refresh_data()  # a tick before the bound: nothing to say yet
+            await pilot.pause()
+            early = bool(notice.display)
+            await asyncio.sleep(0.4)
+            app.refresh_data()  # a tick after it
+            await pilot.pause()
+            late = shown(notice) if notice.display else ""
+            stale = app.snapshot is not None and app.snapshot.stale_since is not None
+        finally:
+            gate.set()
+        await settle(app)
+        return early, late, shown(notice) if notice.display else "", stale
+
+    early, late, after, stale = drive(go)
+    assert not early
+    assert "showing the frame from" in late, late
+    assert stale
+    assert after == "", after  # the read's own frame, painted at last, clears it
 
 
 def test_agent_errors_fail_open_with_the_cost_shown(
@@ -2476,18 +3076,18 @@ def test_a_fleet_read_that_failed_open_keeps_the_live_manager_pane(
             return pane.pane_id, pane.display, button.display, shown(header)
 
         app.refresh_data()  # the first frame the freshly opened view is handed
-        await pilot.pause()
+        await settle(app)
         attached = state()
         failure.append(fleet_service.FleetUnavailable("tmux 3.1 is too old (need 3.2)"))
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         failed_open = state()
         card_notice = shown(card_for(app, "prj_a").query_one(".card-notice", Static))
         # The control: the fleet answers, and its answer is that there is none.
         failure.clear()
         live.clear()
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         return attached, failed_open, card_notice, state()
 
     attached, failed_open, card_notice, answered = drive(go)
@@ -2522,7 +3122,7 @@ def test_open_views_are_fed_each_frame_and_survive_a_vanished_row(
             status("prj_a", "coder-auth", "coder", "attention", minute=1),
         ]
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         after_change = view.status.state
         # Negative control: the manager's row changed too, but no view is open for it —
         # and the project's codename arrives, which the project view (once opened) shows.
@@ -2536,7 +3136,7 @@ def test_open_views_are_fed_each_frame_and_survive_a_vanished_row(
         # The agent leaves the frame entirely: the view keeps its last row, nothing raises.
         script["prj_a"] = [status("prj_a", "manager", "manager", "waiting")]
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         return (
             opened_with,
             after_change,
@@ -2606,9 +3206,9 @@ def test_r_refreshes_the_fleet_and_neither_r_nor_a_runs_the_doctor(
         reads: list[int] = []
         read = app.refresh_data
 
-        def counted() -> None:
+        def counted(*, then: Callable[[], object] | None = None) -> None:
             reads.append(1)
-            read()
+            read(then=then)
 
         app.refresh_data = counted  # type: ignore[method-assign]
         app.sidebar.focus()
@@ -2663,6 +3263,593 @@ def test_theme_picker_applies_live_and_autosaves(
         return str(fleet_app(pilot).theme)
 
     assert drive(relaunch) == final  # restored on the next launch
+
+
+# --- stopping an agent --------------------------------------------------------------
+
+
+def ended(agent: FleetAgent, *, exit_status: int = 0) -> FleetAgent:
+    """The row ``services.fleet.stop`` answers with: the same agent, ended."""
+    return agent.model_copy(update={"ended_at": datetime.now(tz=UTC), "exit_status": exit_status})
+
+
+class StopRecorder:
+    """Stands in for ``services.fleet.stop``: records every call, answers a receipt.
+
+    What these tests assert is what the SERVICE was asked — the project, the
+    label, ``force`` and the row id the stop is pinned to — never the sentence
+    the dialog showed on the way there. The answer is the release train's
+    :class:`services.fleet.StopReceipt`: the ended row, and ``release_failed``
+    when the store refused to release the ended session's claims.
+    """
+
+    def __init__(self, agent: FleetAgent) -> None:
+        self.agent = agent
+        self.calls: list[tuple[str, str, bool, str | None]] = []
+        self.refuse: Exception | None = None
+        self.release_failed: str | None = None
+
+    def __call__(
+        self,
+        project: ProjectInfo,
+        label: str,
+        *,
+        force: bool = False,
+        grace: float = 5.0,
+        agent_id: str | None = None,
+    ) -> fleet_service.StopReceipt:
+        self.calls.append((project.id, label, force, agent_id))
+        if self.refuse is not None:
+            raise self.refuse
+        return fleet_service.StopReceipt(ended(self.agent), [], self.release_failed)
+
+
+def stopper(monkeypatch: pytest.MonkeyPatch, agent: FleetAgent) -> StopRecorder:
+    recorder = StopRecorder(agent)
+    monkeypatch.setattr(fleet_service, "stop", recorder)
+    return recorder
+
+
+async def open_stop_dialog(pilot: Pilot[None], app: FleetApp, agent_id: str) -> StopAgentScreen:
+    """Open the agent's view and press ITS Stop button — the dialog the shell pushes.
+
+    The button is taken from the view ON SCREEN rather than by a bare
+    ``#agent-stop`` selector: the ``ContentSwitcher`` keeps every agent view it
+    has ever mounted, so a test that opens a second agent would otherwise click
+    the first view's button, which is not on screen and opens nothing.
+
+    The click lands as a person's would, a moment after the view came up: past the click
+    guard's window (``click_guard``), which the guard's own clock is moved on for.
+    """
+    from aisquare.cli.ui import click_guard
+
+    await pilot.click(row_for(app, agent_id))
+    await pilot.pause()
+    await settle(app)
+    view = app.current_view()
+    assert isinstance(view, AgentView), f"the row opened {type(view).__name__}"
+    real = click_guard.clock
+    click_guard.clock = lambda: real() + click_guard.CLICK_GUARD + 1
+    try:
+        await pilot.click(view.query_one("#agent-stop", Button))
+        await pilot.pause()
+    finally:
+        click_guard.clock = real
+    screen = app.screen
+    assert isinstance(screen, StopAgentScreen), f"Stop opened {type(screen).__name__}"
+    return screen
+
+
+def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #240, "also confirmed": a refresh whose read of the project failed lists
+    none of its agents (``refresh_data`` fails open, the cost on the card), and Stop on
+    the agent's still-open view was then refused as "no longer listed" while the agent
+    ran. The dialog opens on the row the view shows; the service decides."""
+    from aisquare.cli.ui import click_guard
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = [status("prj_a", "coder-auth", "coder", "working")]
+    failing: list[Exception] = []
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        if failing:
+            raise failing[0]
+        return list(live)
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[str]]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_coder-auth"))
+        await pilot.pause()
+        view = app.current_view()
+        assert isinstance(view, AgentView)
+        failing.append(fleet_service.FleetUnavailable("database is locked"))
+        await refreshed(app)
+        real = click_guard.clock
+        click_guard.clock = lambda: real() + click_guard.CLICK_GUARD + 1
+        try:
+            await pilot.click(view.query_one("#agent-stop", Button))
+            await pilot.pause()
+        finally:
+            click_guard.clock = real
+        said = [str(n.message) for n in app._notifications]
+        return type(app.screen).__name__, said
+
+    screen, said = drive(go)
+    assert screen == "StopAgentScreen", said
+    assert not any("no longer listed" in line for line in said)
+
+
+def test_the_agent_view_offers_stop_exactly_while_there_is_a_process(
+    tmp_path: Path, script: Script
+) -> None:
+    """Every state in ``STOP_STATES`` shows Stop and no other state does.
+
+    That constant is ``ALIVE_STATES`` — the card's "agents alive" rule — plus 💤
+    exited, whose dead window Stop removes (#138), so the view, the chip and
+    this test cannot drift from each other: a state added to it must gain the
+    button, a state taken out of it must lose it. ✗ lost has neither a process
+    nor a window to remove: a lost row is ``fleet reap``'s business.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    states = sorted(STATE_CHIP)
+    script["prj_a"] = [
+        status(
+            "prj_a",
+            f"agent-{state}",
+            "coder",
+            state,
+            minute=index,
+            exit_status=0 if state == "exited" else None,
+        )
+        for index, state in enumerate(states)
+    ]
+
+    async def go(pilot: Pilot[None]) -> set[str]:
+        app = fleet_app(pilot)
+        offered: set[str] = set()
+        for state in states:
+            await pilot.click(row_for(app, f"agt_a_agent-{state}"))
+            await pilot.pause()
+            view = app.current_view()
+            assert isinstance(view, AgentView)
+            if view.query_one("#agent-stop", Button).display:
+                offered.add(state)
+        return offered
+
+    offered = drive(go)
+    assert offered == set(STOP_STATES)
+    assert set(STOP_STATES) < set(states), "the premise: some states offer no Stop"
+    assert "exited" in STOP_STATES and "lost" not in STOP_STATES
+
+
+def test_confirming_stop_asks_the_service_once_with_force_false(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    recorder = stopper(monkeypatch, live.agent)
+
+    async def go(pilot: Pilot[None]) -> bool:
+        app = fleet_app(pilot)
+        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        await pilot.click("#stop-confirm")
+        await settle(app)
+        await pilot.pause()
+        return isinstance(app.screen, StopAgentScreen)
+
+    still_open = drive(go)
+    assert recorder.calls == [
+        ("prj_a", "coder-auth", False, "agt_a_coder-auth")
+    ]  # the graceful /exit, exactly once
+    assert not still_open  # a stop that worked closes its own dialog
+
+
+def test_force_asks_the_service_to_skip_the_graceful_exit(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    recorder = stopper(monkeypatch, live.agent)
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        await pilot.click("#stop-force")
+        await settle(app)
+        await pilot.pause()
+
+    drive(go)
+    assert recorder.calls == [("prj_a", "coder-auth", True, "agt_a_coder-auth")]
+
+
+def test_cancelling_the_stop_dialog_calls_nothing(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    recorder = stopper(monkeypatch, live.agent)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, str]:
+        app = fleet_app(pilot)
+        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        await pilot.click("#stop-cancel")
+        await pilot.pause()
+        return isinstance(app.screen, StopAgentScreen), type(app.current_view()).__name__
+
+    still_open, view = drive(go)
+    assert recorder.calls == []  # Cancel asks the service nothing at all
+    assert not still_open and view == "AgentView"
+
+
+def test_a_refusal_stays_in_the_dialog_with_its_reason_intact(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``stop`` refuses when tmux cannot confirm the pane died; the dialog must SAY so.
+
+    The service leaves the row live on purpose rather than printing ✓ over an
+    agent that is still running. A dialog that closed on that answer — or an app
+    that died on it — would undo exactly that honesty, so the reason stays on the
+    status line, the dialog stays open, and the app keeps taking keys.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    recorder = stopper(monkeypatch, live.agent)
+    recorder.refuse = fleet_service.FleetError(
+        "could not stop 'coder-auth' ([red] pane 3 refused, tmux did not answer) — its pane "
+        "is still alive, so its row is left live"
+    )
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, bool, str]:
+        app = fleet_app(pilot)
+        screen = await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        await pilot.click("#stop-confirm")
+        await settle(app)
+        await pilot.pause()
+        note = shown(screen.query_one("#stop-status", Static))
+        open_after = isinstance(app.screen, StopAgentScreen)
+        await pilot.press("escape")  # the app still answers keys after a refusal
+        await pilot.pause()
+        return (
+            note,
+            open_after,
+            isinstance(app.screen, StopAgentScreen),
+            type(app.current_view()).__name__,
+        )
+
+    note, open_after, open_at_end, view = drive(go)
+    assert "tmux did not answer" in note and "[red]" in note
+    assert open_after, "the refusal must not close the dialog"
+    assert not open_at_end and view == "AgentView"  # …and the app is alive to close it
+    # Control: the same reason rendered AS MARKUP loses the tag — and `[red]` is a
+    # REAL Rich style, so this cannot be argued to survive by accident the way an
+    # unknown tag might. It is the failure the Text on that status line prevents.
+    assert "[red]" not in Content.from_markup(note).plain
+
+
+def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    reads: list[str] = []
+    stopped: list[bool] = []
+
+    def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        reads.append(project.id)
+        if stopped:
+            return [FleetAgentStatus(agent=ended(live.agent), state="exited")]
+        return [live]
+
+    def stop(
+        project: ProjectInfo,
+        label: str,
+        *,
+        force: bool = False,
+        grace: float = 5.0,
+        agent_id: str | None = None,
+    ) -> fleet_service.StopReceipt:
+        stopped.append(True)
+        return fleet_service.StopReceipt(ended(live.agent), [])
+
+    monkeypatch.setattr(fleet_service, "list_agents", list_agents)
+    monkeypatch.setattr(fleet_service, "stop", stop)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], int, str | None]:
+        app = fleet_app(pilot)
+        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        before = len(reads)
+        await pilot.click("#stop-confirm")
+        await settle(app)
+        await pilot.pause()
+        await pilot.pause()
+        # Every toast, not the first: the scripted pane has no tmux behind it and
+        # raises its own "(pane gone)" here, which is the harness, not the claim.
+        toasts = [toast.render().plain for toast in app.screen.query(Toast)]
+        return toasts, len(reads) - before, app.content.current
+
+    toasts, re_reads, current = drive(go, notifications=True)
+    assert f"✓ stopped coder-auth ({live.agent.id})" in toasts
+    assert re_reads == 1, "the sidebar re-reads the fleet once, through the shell's own refresh"
+    assert current == "project-prj_a"  # the stopped agent's view is not left polling a dead pane
+
+
+def test_x_on_the_selected_agent_row_opens_the_same_stop_dialog(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key is the SIDEBAR's: the rows are non-focusable Statics by design."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    stopper(monkeypatch, live.agent)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str | None]:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_a_coder-auth"))
+        await pilot.pause()
+        app.sidebar.focus()
+        await pilot.pause()
+        await pilot.press("x")
+        await pilot.pause()
+        screen = app.screen
+        label = screen.label if isinstance(screen, StopAgentScreen) else None
+        return type(screen).__name__, label
+
+    assert drive(go) == ("StopAgentScreen", "coder-auth")
+
+
+def test_x_ignores_a_selection_that_is_not_an_agent(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    recorder = stopper(monkeypatch, live.agent)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool]:
+        app = fleet_app(pilot)
+        app.sidebar.focus()
+        await pilot.press("x")  # nothing selected yet
+        await pilot.pause()
+        with_nothing = isinstance(app.screen, StopAgentScreen)
+        await pilot.click(card_for(app, "prj_a").query_one(ProjectTitle))
+        await pilot.pause()
+        app.sidebar.focus()
+        await pilot.press("x")  # a PROJECT is selected
+        await pilot.pause()
+        return with_nothing, isinstance(app.screen, StopAgentScreen)
+
+    assert drive(go) == (False, False)
+    assert recorder.calls == []
+
+
+def test_x_offers_no_stop_where_the_button_offers_none(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two controls, ONE rule: the key asks ``STOP_STATES`` exactly as the button does.
+
+    A lost row is still an ordinary selectable ``AgentRow``, so a key that did
+    not ask offered precisely the Stop the view had just refused. And ``stop``
+    does not decline such a row: its pane is gone, so there is no ``/exit`` and
+    no grace wait — it ends the row outright, which is ``fleet reap``'s outcome,
+    and reap is outside this task's boundaries.
+
+    Found by coder3a-1's probe before this PR opened, and reproduced by runner2-1
+    one state WIDER: ✗ lost disagreed as well as 💤 exited. The states are
+    derived from the constants — every ``STATE_CHIP`` key the rule leaves out —
+    rather than typed out here: the rule IS the constant, and a test naming one
+    state would drift from it. Since the release train's `remain-on-exit`
+    (#138) 💤 exited is IN the rule (Stop removes its dead window), so this is
+    ✗ lost alone today.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    dead = sorted(set(STATE_CHIP) - STOP_STATES)  # ✗ lost
+    script["prj_a"] = [
+        status(
+            "prj_a",
+            f"agent-{state}",
+            "coder",
+            state,
+            minute=index,
+            exit_status=0 if state == "exited" else None,
+        )
+        for index, state in enumerate(dead)
+    ]
+    recorder = stopper(monkeypatch, script["prj_a"][0].agent)
+
+    async def go(pilot: Pilot[None]) -> dict[str, tuple[bool, bool]]:
+        app = fleet_app(pilot)
+        offered: dict[str, tuple[bool, bool]] = {}
+        for state in dead:
+            await pilot.click(row_for(app, f"agt_a_agent-{state}"))
+            await pilot.pause()
+            view = app.current_view()
+            assert isinstance(view, AgentView), f"the row opened {type(view).__name__}"
+            button = view.query_one("#agent-stop", Button).display
+            app.sidebar.focus()
+            await pilot.press("x")
+            await pilot.pause()
+            offered[state] = (button, isinstance(app.screen, StopAgentScreen))
+        return offered
+
+    offered = drive(go)
+    assert dead, "the premise: some states have no process"
+    # One equality over both dead states, not a pair of negatives: a control that
+    # starts offering a stop in either state shows up as a diff, not as a silence.
+    assert offered == {state: (False, False) for state in dead}
+    assert recorder.calls == []  # and the service is never asked to stop a dead row
+
+
+def test_stop_on_an_exited_row_removes_its_dead_window_through_the_same_dialog(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#138 met P21. The release train keeps an exited agent's window for its last
+    screen (`remain-on-exit`), and Stop on the 💤 row is how the UI removes it — so the
+    row IS offered, by button and by ``x``, through the same dialog and the same
+    service call, pinned to the row. But there is no ``/exit`` and no grace to promise:
+    the question says what will happen, and *Force*, which only skips the ``/exit``,
+    is not offered."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    gone = status("prj_a", "coder-auth", "coder", "exited", exit_status=0)
+    script["prj_a"] = [gone]
+    recorder = stopper(monkeypatch, gone.agent)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, bool, bool, bool]:
+        app = fleet_app(pilot)
+        screen = await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        question = screen.question().plain
+        force_offered = screen.query_one("#stop-force", Button).display
+        await pilot.click("#stop-cancel")
+        await pilot.pause()
+        app.sidebar.focus()
+        await pilot.press("x")  # the row is still selected: a cancel leaves its view open
+        await pilot.pause()
+        x_opens = isinstance(app.screen, StopAgentScreen)
+        await pilot.click("#stop-confirm")
+        await settle(app)
+        await pilot.pause()
+        return question, force_offered, x_opens, not isinstance(app.screen, StopAgentScreen)
+
+    question, force_offered, x_opens, closed = drive(go)
+    assert "dead window" in question and "/exit" not in question  # nothing to /exit
+    assert force_offered is False
+    assert x_opens, "x asks the same rule as the button: an exited row is offered"
+    assert closed and recorder.calls == [("prj_a", "coder-auth", False, "agt_a_coder-auth")]
+
+
+def test_the_dialog_says_when_the_target_is_the_projects_manager(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stopping the manager is not like stopping a coder, so the question says so."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    manager = status("prj_a", "manager", "manager", "working")
+    coder = status("prj_a", "coder-auth", "coder", "working", minute=1)
+    script["prj_a"] = [manager, coder]
+    stopper(monkeypatch, manager.agent)
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str]:
+        app = fleet_app(pilot)
+        asked: list[str] = []
+        for agent_id in ("agt_a_manager", "agt_a_coder-auth"):
+            screen = await open_stop_dialog(pilot, app, agent_id)
+            asked.append(shown(screen.query_one("#stop-question", Static)))
+            await pilot.click("#stop-cancel")
+            await pilot.pause()
+        return asked[0], asked[1]
+
+    about_manager, about_coder = drive(go)
+    assert "the project's manager" in about_manager
+    assert "the agents it started keep running" in about_manager  # what the warning is FOR
+    # Control: a coder's dialog says none of it — the line is about this target,
+    # not a sentence every stop carries.
+    assert "manager" not in about_coder
+
+
+def test_the_app_stays_live_while_a_stop_is_in_flight(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``stop`` BLOCKS — /exit, a 5 s grace, then the kill. Inline, that is a frozen app.
+
+    Every other assertion in this file passes on a Stop that runs on the UI
+    thread: the service is still called with the right arguments, the dialog
+    still closes, the toast still says the right words — and the whole app is
+    dead for five seconds while it happens.
+
+    So the service here blocks until this test releases it, and the test proves a
+    frame rendered BEFORE the release. Run inline, the click could not return
+    until the service gave up on its own, which is what ``timed_out`` records —
+    a red, rather than a hang.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    script["prj_a"] = [live]
+    entered = threading.Event()
+    release = threading.Event()
+    timed_out: list[bool] = []
+
+    def blocking_stop(
+        project: ProjectInfo,
+        label: str,
+        *,
+        force: bool = False,
+        grace: float = 5.0,
+        agent_id: str | None = None,
+    ) -> fleet_service.StopReceipt:
+        entered.set()
+        if not release.wait(10):
+            timed_out.append(True)  # nobody let it go: the UI thread was inside it
+        return fleet_service.StopReceipt(ended(live.agent), [])
+
+    monkeypatch.setattr(fleet_service, "stop", blocking_stop)
+
+    async def go(pilot: Pilot[None]) -> tuple[bool, bool, str, bool]:
+        app = fleet_app(pilot)
+        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        await pilot.click("#stop-confirm")
+        await pilot.pause()
+        started = entered.wait(5)  # the worker really reached the service
+        # …and the app is still painting frames while the service holds a thread.
+        in_flight = isinstance(app.screen, StopAgentScreen)
+        note = shown(app.screen.query_one("#stop-status", Static))
+        release.set()
+        await settle(app)
+        await pilot.pause()
+        return started, in_flight, note, isinstance(app.screen, StopAgentScreen)
+
+    started, in_flight, note, open_at_end = drive(go)
+    assert timed_out == [], "the stop ran on the UI thread: the app could not release it"
+    assert started and in_flight  # the dialog is up and repainting mid-call
+    assert note == "stopping coder-auth …"  # a frame rendered WHILE the service blocked
+    assert not open_at_end  # and the answer still landed when it came
+
+
+def test_a_refusal_re_reads_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fleet is re-read on success only.
+
+    A reload after a refusal reports a stop that did not happen, and repaints the
+    row the service deliberately left live as though something had changed.
+    """
+    seed(tmp_path, ("prj_a", "alpha", None))
+    live = status("prj_a", "coder-auth", "coder", "working")
+    reads: list[str] = []
+
+    def list_agents(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        reads.append(project.id)
+        return [live]
+
+    def refusing_stop(
+        project: ProjectInfo,
+        label: str,
+        *,
+        force: bool = False,
+        grace: float = 5.0,
+        agent_id: str | None = None,
+    ) -> fleet_service.StopReceipt:
+        raise fleet_service.FleetError("tmux did not answer, so its row is left live")
+
+    monkeypatch.setattr(fleet_service, "list_agents", list_agents)
+    monkeypatch.setattr(fleet_service, "stop", refusing_stop)
+
+    async def go(pilot: Pilot[None]) -> tuple[int, bool]:
+        app = fleet_app(pilot)
+        await open_stop_dialog(pilot, app, "agt_a_coder-auth")
+        before = len(reads)
+        await pilot.click("#stop-confirm")
+        await settle(app)
+        await pilot.pause()
+        await pilot.pause()
+        return len(reads) - before, row_for(app, "agt_a_coder-auth").status.state == "working"
+
+    re_reads, still_live = drive(go)
+    assert re_reads == 0, "a refused stop must not re-read the fleet"
+    assert still_live  # the row the service left live is still shown live
 
 
 # --- the partition (#137) -----------------------------------------------------------------
@@ -3833,6 +5020,7 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         )  # fmt: skip
 
     monkeypatch.setattr(fleet_service, "restart", fake_restart)
+    clock = guard_clock.install(monkeypatch)
 
     async def go(
         pilot: Pilot[None],
@@ -3843,6 +5031,7 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
         view = app.current_view()
         assert isinstance(view, AgentView)
         stop_shown = view.query_one("#agent-stop", Button).display
+        clock.step()  # the 💤 row read, then Restart: past the click guard's window
         await pilot.click("#agent-restart")
         await settle(app)
         await pilot.pause()
@@ -3865,8 +5054,254 @@ def test_restart_from_the_agent_view_selects_the_new_row_in_the_shell(
     assert calls and calls[0][:2] == ("prj_a", "manager")
     assert current == "agent-agt_a_new" and selected == "agent:agt_a_new"
     assert typing_reaches, "the new pane has the keyboard, not nobody (where q quits the UI)"
-    assert any("✓ restarted manager — resumed its session" in toast for toast in toasts), toasts
+    assert any("✓ restarted manager (alpha) — resumed its session" in toast for toast in toasts), (
+        toasts
+    )
     assert len(rows) == 1 and rows[0].rstrip().endswith("⏸")  # the old 💤 exited row is gone
+
+
+def _replacement(old: FleetAgentStatus, agent_id: str) -> FleetAgentStatus:
+    """The row a restart or a switch starts for ``old``: its label, a new id and pane."""
+    agent = old.agent.model_copy(
+        update={
+            "id": agent_id,
+            "pane_id": "%2",
+            "created_at": old.agent.created_at + timedelta(minutes=5),
+        }
+    )
+    return FleetAgentStatus(agent=agent, state="waiting")
+
+
+_MESSAGES_ONLY = "no-worker-has-this-group"
+"""``settle_page``'s ``group`` for a test that holds a worker on purpose: the messages
+settle, and the held worker is not waited for."""
+
+
+def test_a_restart_that_ends_after_the_user_moved_on_leaves_them_where_they_are(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """User feedback (2026-10-19): "when I am in the pane of manager 1 and manager 0
+    restarts, it takes me back to manager 0's pane, and my mouse is either on stop or
+    restart". A restart started from manager 0's view ends after the user opened manager
+    1's, and the shell showed, highlighted, remembered and focused the new manager 0 all
+    the same. Now nothing of the user's moves: the restart is a toast naming its project,
+    and the sidebar lists the new row."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
+    zero = status("prj_a", "manager", "manager", "working")
+    one = status("prj_b", "manager", "manager", "working")
+    script["prj_a"], script["prj_b"] = [zero], [one]
+    started = _replacement(zero, "agt_a_new")
+    release = threading.Event()
+
+    def slow_restart(
+        project: ProjectInfo, label: str, **kw: object
+    ) -> fleet_service.RestartReceipt:
+        release.wait(10)  # the user moves on while it runs
+        script["prj_a"] = [started]
+        return fleet_service.RestartReceipt(
+            replaced=zero.agent, started=started.agent, resumed=True, was_running=True,
+            tmux_session="asq-amber-otter",
+        )  # fmt: skip
+
+    monkeypatch.setattr(fleet_service, "restart", slow_restart)
+
+    async def go(
+        pilot: Pilot[None],
+    ) -> tuple[str | None, str | None, str | None, bool, list[str], list[str]]:
+        app = fleet_app(pilot)
+        told = toast_log.record(app)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, AgentView)
+        view.query_one("#agent-restart", Button).press()
+        await settle_page(app, group=_MESSAGES_ONLY)
+        await pilot.click(row_for(app, "agt_b_manager"))
+        await settle_page(app, group=_MESSAGES_ONLY)
+        mine = app.current_view()
+        assert isinstance(mine, AgentView) and app.focused is mine.pane
+        release.set()
+        await settle(app)
+        toasts = list(told)
+        await pilot.pause()
+        current = app.current_view()
+        rows = [row.status.agent.id for row in card_for(app, "prj_a").query(AgentRow)]
+        return (
+            (current.id if current else None),
+            app.sidebar.selected_key,
+            ui_app._ui_state(ui_app.SELECTED_KEY),
+            app.focused is mine.pane,
+            toasts,
+            rows,
+        )
+
+    current, selected, remembered, typing_reaches, toasts, rows = drive(go, notifications=True)
+    assert current == "agent-agt_b_manager", "the restart took the screen back to its row"
+    assert selected == "agent:agt_b_manager"
+    assert remembered == "agent:prj_b/agt_b_manager"
+    assert typing_reaches, "the keyboard stays with the pane the user is typing into"
+    assert any("✓ restarted manager (alpha) — resumed its session" in t for t in toasts), toasts
+    assert rows == ["agt_a_new"]  # the replaced row is updated, quietly
+
+
+def _replaced_out_of_the_ui(script: Script, old: FleetAgentStatus) -> None:
+    script[old.agent.project_id] = [_replacement(old, "agt_a_new")]
+
+
+def _vanished(script: Script, old: FleetAgentStatus) -> None:
+    script[old.agent.project_id] = []
+
+
+@pytest.mark.parametrize(
+    ("shown_row", "change"),
+    [
+        pytest.param("agent:agt_b_manager", _replaced_out_of_the_ui, id="another-agent-replaced"),
+        pytest.param("agent:agt_a_manager", _replaced_out_of_the_ui, id="the-shown-agent-replaced"),
+        pytest.param("agent:agt_a_manager", _vanished, id="the-shown-row-vanishes"),
+        pytest.param("project:prj_a", _replaced_out_of_the_ui, id="its-manager-tab-replaced"),
+    ],
+)
+def test_a_row_replaced_outside_the_ui_moves_nothing_of_the_users(
+    tmp_path: Path,
+    script: Script,
+    shown_row: str,
+    change: Callable[[Script, FleetAgentStatus], None],
+) -> None:
+    """The other ways a row is replaced reach asq only as its next frame: ``fleet restart``
+    and ``fleet switch`` from a shell, the hand-over that ``[accounts] on_limit =
+    "switch"`` starts from a hook (its own process), and the phone's Restart and Switch
+    (Remote's thread). A frame repaints the sidebar and feeds the open views, and never
+    shows, highlights, remembers or focuses anything: the user stays on the view they
+    had, a dead one included, which keeps its last screen until they pick the new row.
+    The Manager tab follows its project's new manager in place, as it always did."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
+    zero = status("prj_a", "manager", "manager", "working")
+    script["prj_a"] = [zero]
+    script["prj_b"] = [status("prj_b", "manager", "manager", "working")]
+    kind, ident = shown_row.split(":", 1)
+
+    async def go(pilot: Pilot[None]) -> tuple[object, object]:
+        app = fleet_app(pilot)
+        target = (
+            row_for(app, ident) if kind == "agent" else card_for(app, ident).query_one(ProjectTitle)
+        )
+        await pilot.click(target)
+        await settle(app)
+
+        def where() -> tuple[str | None, str | None, str | None, Widget | None]:
+            current = app.current_view()
+            return (
+                (current.id if current else None),
+                app.sidebar.selected_key,
+                ui_app._ui_state(ui_app.SELECTED_KEY),
+                app.focused,
+            )
+
+        before = where()
+        change(script, zero)
+        app.refresh_data()
+        await settle(app)
+        await pilot.pause()
+        return before, where()
+
+    before, after = drive(go)
+    assert after == before
+
+
+def _acting_fleet(
+    monkeypatch: pytest.MonkeyPatch, script: Script, one: FleetAgentStatus
+) -> list[tuple[str, str]]:
+    """Fake ``restart`` and ``stop`` that record what they were asked to act on."""
+    acted: list[tuple[str, str]] = []
+
+    def fake_restart(
+        project: ProjectInfo, label: str, **kw: object
+    ) -> fleet_service.RestartReceipt:
+        acted.append(("restart", project.id))
+        started = _replacement(one, "agt_b_new")
+        script["prj_b"] = [started]
+        return fleet_service.RestartReceipt(
+            replaced=one.agent, started=started.agent, resumed=True, was_running=True,
+            tmux_session="asq-brave-lynx",
+        )  # fmt: skip
+
+    def fake_stop(project: ProjectInfo, label: str, **kw: object) -> fleet_service.StopReceipt:
+        acted.append(("stop", project.id))
+        return fleet_service.StopReceipt(one.agent, [])
+
+    monkeypatch.setattr(fleet_service, "restart", fake_restart)
+    monkeypatch.setattr(fleet_service, "stop", fake_stop)
+    return acted
+
+
+def test_a_click_on_stop_or_restart_as_the_view_switches_in_acts_on_nothing(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """User feedback (2026-10-19), the other half: a view that came up under a resting
+    pointer took the click aimed at the one before it, on its Stop or Restart. Within
+    CLICK_GUARD of the view switching in, a click on either starts no worker and says
+    so; the same click after it acts."""
+    seed(tmp_path, ("prj_a", "alpha", "amber-otter"), ("prj_b", "beta", "brave-lynx"))
+    script["prj_a"] = [status("prj_a", "manager", "manager", "working")]
+    one = status("prj_b", "manager", "manager", "working")
+    script["prj_b"] = [one]
+    acted = _acting_fleet(monkeypatch, script, one)
+    clock = guard_clock.install(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str]], list[str]]:
+        app = fleet_app(pilot)
+        told = toast_log.record(app)
+        await pilot.click(row_for(app, "agt_a_manager"))
+        await settle(app)
+        clock.step()  # a while on manager 0's pane
+        await pilot.click(row_for(app, "agt_b_manager"))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, AgentView) and view.status.agent.id == "agt_b_manager"
+        await pilot.click(view.query_one("#agent-restart", Button))
+        await pilot.click(view.query_one("#agent-stop", Button))
+        await settle(app)
+        toasts = list(told)
+        ignored = list(acted)
+        clock.step()
+        await pilot.click(view.query_one("#agent-restart", Button))
+        await settle(app)
+        return ignored, toasts
+
+    ignored, toasts = drive(go, notifications=True)
+    assert ignored == [], "a click as the view switched in restarted or stopped an agent"
+    for verb in ("Restart", "Stop"):
+        notice = f"ignored a click on {verb} — the view had just changed under the pointer"
+        assert toasts.count(notice) == 1, toasts
+    assert acted == [("restart", "prj_b")], "the click after the window restarts as it did"
+
+
+def test_enter_on_a_focused_restart_is_not_guarded(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A key is a deliberate gesture: Enter on the focused Restart acts at once, however
+    recently the view came up."""
+    seed(tmp_path, ("prj_b", "beta", "brave-lynx"))
+    one = status("prj_b", "manager", "manager", "working")
+    script["prj_b"] = [one]
+    acted = _acting_fleet(monkeypatch, script, one)
+    guard_clock.install(monkeypatch)
+
+    async def go(pilot: Pilot[None]) -> bool:
+        app = fleet_app(pilot)
+        await pilot.click(row_for(app, "agt_b_manager"))
+        await settle(app)
+        view = app.current_view()
+        assert isinstance(view, AgentView)
+        restart = view.query_one("#agent-restart", GuardedButton)
+        guarding = restart.guarding
+        restart.focus()
+        await pilot.press("enter")
+        await settle(app)
+        return guarding
+
+    assert drive(go) is True, "the window was open when Enter was pressed"
+    assert acted == [("restart", "prj_b")]
 
 
 def test_the_sidebar_hides_captured_directories_until_a_shows_them(
@@ -4436,7 +5871,7 @@ def test_a_drop_the_store_refuses_part_way_lands_none_of_its_moves(
             patched.setattr(SqliteStore, "update_project_layout", refused)
             app.on_drop_project(DropProject(["prj_a", "prj_b"], scope=tools.id, before=None))
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         return before, _cards(app), len(app._undo)
 
     before, after, undo_depth = drive(go)
@@ -4892,7 +6327,7 @@ def test_a_handle_removed_mid_press_lets_the_mouse_go(
         with store_session() as store:
             store.forget_project("prj_b")
         app.refresh_data()
-        await pilot.pause()
+        await settle(app)
         await pilot.pause()
         await _as_the_terminal_sends(pilot, events.MouseUp, api)
         return (

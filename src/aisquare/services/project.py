@@ -18,7 +18,7 @@ from aisquare.core.config import ProjectsSettings, SnapshotSettings, load_config
 from aisquare.core.entries import new_entry
 from aisquare.core.names import name_flaw
 from aisquare.core.state_file import StateUnwritableError
-from aisquare.core.store import ContextStore, store_session
+from aisquare.core.store import ContextStore, is_the_home, store_session
 from aisquare.core.workspace import (
     _is_dir,
     _resolved_or_spelled,
@@ -91,11 +91,28 @@ def tracked(store: ContextStore, project: ProjectInfo) -> bool:
     It captured the directory first when capture was on, so a caller that must not take
     the store's write lock only to ask (a session start) had to say so, while another in
     the same hook took it anyway (review of #259, round 17). The write is :func:`capture`.
+
+    While the experimental captain is on, the aisquare home's row is the one captured row
+    that may, whatever capture says: it is the captain's home board
+    (``services.captain.state.home_project``), captured on purpose and never onboarded, so
+    that it never joins the owner's projects. Asked like any other, the captain's session
+    start registered nothing there and briefed it nothing, and its audit and its row's
+    events went nowhere, with capture off (0.8.1's default). Off, it is any other captured
+    row, as on main: a session started in the home was briefed on the home board once a
+    row was left there (review of #240, F7).
     """
     if capture_on():
         return True
     stored = store.get_project(project.id)
-    return stored is not None and stored.onboarded_at is not None
+    if stored is None:
+        return False
+    if stored.onboarded_at is not None:
+        return True
+    if not is_the_home(stored.root):
+        return False
+    from aisquare.core import experimental  # lazy: only the home's row asks the switch
+
+    return experimental.captain_enabled()
 
 
 def capture(store: ContextStore, project: ProjectInfo) -> None:
@@ -648,7 +665,11 @@ def prune_candidates(
     """
 
     def plan(store: ContextStore) -> list[PruneCandidate]:
-        projects = store.list_projects(all=True)
+        # Never the aisquare home's row: the captain's home board, captured on purpose and
+        # never onboarded, so ``--captured-only`` took it for a scratch directory once the
+        # captain sat idle, and ``--purge`` deleted the captain's board and its audit
+        # (review of #240, "also confirmed": prune can purge the home board).
+        projects = [p for p in store.list_projects(all=True) if not is_the_home(p.root)]
         why = _why_stale(
             store,
             missing=missing,

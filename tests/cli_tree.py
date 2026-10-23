@@ -49,6 +49,19 @@ def _placeholder(parameter: Any) -> str:
     return "sample"
 
 
+NEEDED_UNLESS: dict[tuple[str, ...], tuple[str, str]] = {
+    ("fleet", "restart"): ("label", "--all"),
+    ("fleet", "stop"): ("label", "--all"),
+}
+"""Arguments a command still needs unless a flag stands in for them: ``(argument, flag)``.
+
+Typer can only call such an argument optional, so the walk below would leave it off,
+and the command would exit 2 on usage without running a line of its own (the
+configured-home sweep's USAGE_ONLY ratchet caught both when ``--all`` came in).
+Filled like a required argument. tests/test_fleet_cli.py checks that each one is
+refused without either."""
+
+
 def leaf_invocations_by_path() -> list[tuple[tuple[str, ...], list[str]]]:
     """``(path, argv)`` for every leaf: its own name, and a RUNNABLE invocation.
 
@@ -67,8 +80,9 @@ def leaf_invocations_by_path() -> list[tuple[tuple[str, ...], list[str]]]:
         if isinstance(command, TyperGroup):
             continue
         argv = [*path]
+        needed = NEEDED_UNLESS.get(path, (None, None))[0]
         for parameter in command.params:
-            if not parameter.required:
+            if not parameter.required and parameter.name != needed:
                 continue
             if parameter.param_type_name == "argument":
                 argv.append(_placeholder(parameter))

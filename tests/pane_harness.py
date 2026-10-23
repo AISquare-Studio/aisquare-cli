@@ -236,6 +236,10 @@ class FakeTmux:
         pane = self.panes.get(pane_id)
         if pane is None or pane.gone:
             return Completed(1, "", f"can't find pane: {pane_id}\n")
+        if name == "list-panes" and group[-1] == "#{session_id}":
+            # Every fake pane is in one session: what a control client asks before it
+            # attaches by session (``core.tmux_control``).
+            return Completed(0, "$0\n", "")
         if name == "capture-pane":
             if "-F" in group and (parse_version(self.version) or (0, 0)) < (3, 7):
                 # tmux parses flags in the server: one older than 3.7 refuses the

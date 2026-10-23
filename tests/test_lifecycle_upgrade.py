@@ -3968,7 +3968,8 @@ def test_a_move_back_to_a_release_without_codex_hooks_leaves_them_and_names_the_
 
 def test_a_release_after_the_last_without_codex_hooks_has_them() -> None:
     assert lifecycle.lacks_agent_hooks("codex", lifecycle.LAST_WITHOUT_CODEX_HOOKS)
-    # 0.8.1, the release this branch merged, ships no Codex adapter either.
+    # 0.8.2, the release this branch merged, ships no Codex adapter either, nor 0.8.1.
+    assert lifecycle.lacks_agent_hooks("codex", "0.8.2")
     assert lifecycle.lacks_agent_hooks("codex", "0.8.1")
     assert lifecycle.lacks_agent_hooks("codex", "0.8.0")
     assert lifecycle.lacks_agent_hooks("codex", "0.7.0")

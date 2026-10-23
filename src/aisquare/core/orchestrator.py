@@ -53,6 +53,21 @@ def env_role() -> str | None:
     return role or None
 
 
+PERSONA_ENV_VAR = "AISQUARE_PERSONA"
+"""The persona a session was launched as (``launch --persona``); blank is none."""
+
+
+def env_persona() -> str | None:
+    """The persona this session was launched as, if any (``AISQUARE_PERSONA``).
+
+    What ``launch --persona`` exports and the session-start hook reads — not a
+    config input, so a hand-typed ``AISQUARE_PERSONA=skeptic aisquare launch
+    coder`` works with no fleet at all (docs/plans/spawn-personas.md §3.8).
+    """
+    persona = os.environ.get(PERSONA_ENV_VAR, "").strip()
+    return persona or None
+
+
 FLEET_AGENT_ENV_VAR = "AISQUARE_FLEET_AGENT"
 """The variable that carries a fleet row's id into its window — an IDENTITY,
 which is why ``fleet spawn`` keeps it out of the tmux session environment."""
@@ -201,9 +216,16 @@ def team_project(cwd: Path | None = None) -> ProjectInfo:
             )
         hub = ""
     if hub:
-        root = _hub_root(hub)
-        return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
+        return hub_project(hub)
     return directory_project(cwd)
+
+
+def hub_project(hub: str) -> ProjectInfo:
+    """The board an absolute ``hub`` names: :func:`team_project`'s answer under it, for a
+    caller that gives a window a hub this process does not honour (``fleet.spawn``'s
+    ``hub``)."""
+    root = _hub_root(hub)
+    return ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
 
 
 def directory_project(cwd: Path | None = None) -> ProjectInfo:

@@ -417,6 +417,9 @@ class HeadroomSummary(BaseModel):
     """Signed-in accounts whose token has expired or was rejected: a session on each fixes it."""
     left_by_slot: dict[int, float] = Field(default_factory=dict)
     """Each usable account's share LEFT, ``100 - max(session used, week used)``."""
+    session_by_slot: dict[int, float] = Field(default_factory=dict)
+    """Each usable account's five-hour window, percent USED — never the weekly one: what
+    the sidebar's agent rows and the agent info line show beside an agent's account."""
     fetched_at: datetime | None = None
     """The OLDEST reading behind the figure: the summary is no staler than this."""
 
@@ -710,6 +713,9 @@ class TeamSession(BaseModel):
     """The model id the session reported at start (optional in hook payloads)."""
     effort: str | None = None
     """The effort level the session reported at start (optional in hook payloads)."""
+    persona: str | None = None
+    """The persona the session was launched as (``AISQUARE_PERSONA``), recorded at start —
+    what was ASKED, even when it could not be loaded (docs/plans/spawn-personas.md §3.7)."""
 
 
 class TeamTask(BaseModel):
@@ -1145,6 +1151,9 @@ class FleetAgent(BaseModel):
     created_at: datetime
     ended_at: datetime | None = None
     exit_status: int | None = None
+    persona: str | None = None
+    """The persona the agent was spawned with: ``--persona``, else the role's
+    ``[fleet.roles.<role>].persona``, else none."""
 
 
 class FleetAgentStatus(BaseModel):

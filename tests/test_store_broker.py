@@ -36,6 +36,7 @@ from aisquare.core.store import store_session
 from aisquare.models import TeamSession
 from aisquare.services import agent_launch, distill, store_broker
 from aisquare.services import team as team_service
+from tests.conftest import _PRIVATE_FLEETS
 
 #: The real process start, before the suite's ``no_store_broker`` stands it in.
 REAL_RUN_BROKER = store_broker.run_broker
@@ -313,6 +314,13 @@ def running(work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iter
     CLI's side seeing the store read-only as in the agent's sandbox."""
     agent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
     env = dict(os.environ)
+    # Less the suite's stand-in `claude` (conftest's `no_real_fleet`, 0.8.2), first on PATH
+    # in a folder under /tmp, which the sandbox may write: a launch refuses such a PATH.
+    env["PATH"] = os.pathsep.join(
+        entry
+        for entry in env.get("PATH", "").split(os.pathsep)
+        if not any(Path(entry).is_relative_to(private) for private in _PRIVATE_FLEETS)
+    )
     with pytest.MonkeyPatch.context() as launching:
         launching.setattr(
             store_broker,

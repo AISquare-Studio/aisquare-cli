@@ -31,6 +31,26 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("recall",),
     ("launch",),
     ("serve",),
+    ("captain", "serve"),
+    ("captain",),
+    ("captain", "say"),
+    ("captain", "chat"),
+    ("captain", "voice"),
+    *(
+        ("captain", verb)
+        for verb in (
+            "attention",
+            "next",
+            "resolve",
+            "snooze",
+            "since",
+            "log",
+            "uav",
+            "wololo",
+            "bt",
+            "actions",
+        )
+    ),
     ("login",),
     ("logout",),
     ("whoami",),
@@ -167,6 +187,20 @@ IMPLEMENTED: set[tuple[str, ...]] = {
         )
     ),
     *(("metrics", command) for command in ("show", "list")),
+    *(
+        ("persona", command)
+        for command in (
+            "list",
+            "show",
+            "new",
+            "edit",
+            "rm",
+            "validate",
+            "import",
+            "export",
+            "attach",
+        )
+    ),
     *(
         ("remote", command)
         for command in (

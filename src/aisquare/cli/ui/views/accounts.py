@@ -1823,6 +1823,7 @@ class AccountsView(Vertical):
         box.display = True
         pane = self.query_one("#login-pane", TerminalPane)
         pane.server = server
+        pane.label = f"the sign-in for {self._name_of(account)}"
         pane.attach(window.pane_id)
         pane.focus()
         self._notice(f"{self._name_of(account)}: waiting for the log-in below…")

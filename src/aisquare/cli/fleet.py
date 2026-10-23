@@ -25,7 +25,7 @@ from typing import Annotated, NoReturn
 import typer
 from rich.console import Console
 
-from aisquare.cli.common import fail, refuse_conflicting_scope
+from aisquare.cli.common import USAGE_ERROR, fail, refuse_conflicting_scope
 from aisquare.cli.native_args import NativeForwardingCommand
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
@@ -52,6 +52,18 @@ ProjectRef = Annotated[
 SessionRef = Annotated[
     str | None,
     typer.Option("--as", help="Acting session id (a manager passes its own).", metavar="SESSION"),
+]
+EveryAgent = Annotated[
+    bool,
+    typer.Option(
+        "--all",
+        help="Every running agent in every project's fleet, not one label (not with a label "
+        "or --project). Exited (💤) agents are left as they are, and so is the agent running "
+        "this command.",
+    ),
+]
+ManagersOnly = Annotated[
+    bool, typer.Option("--managers", help="With --all: the managers alone, not their teams.")
 ]
 
 _STATE_CHIP = {
@@ -116,7 +128,10 @@ def _agent_line(status: FleetAgentStatus, labels: Mapping[int, str] | None = Non
     # page use (the alias, or `plain claude` for slot 1; review of #205, finding
     # 10); absent when nothing chose and the window ran on its shell's claude.
     on = f"  {slot_label(agent.account_slot, labels)}" if agent.account_slot is not None else ""
-    return f"  {agent.label:<24} {agent.role:<10} {chip}{where}{on}{extra}  {agent.pane_id}"
+    persona = f"  · {agent.persona}" if agent.persona else ""
+    return (
+        f"  {agent.label:<24} {agent.role:<10} {chip}{where}{on}{persona}{extra}  {agent.pane_id}"
+    )
 
 
 def slot_label(slot: int, labels: Mapping[int, str] | None) -> str:
@@ -216,6 +231,15 @@ def spawn(
             metavar="ACCOUNT",
         ),
     ] = None,
+    persona: Annotated[
+        str | None,
+        typer.Option(
+            "--persona",
+            help="Persona the agent runs as (see `aisquare persona list`); default: the "
+            "role's fleet.roles.<role>.persona setting, else none.",
+            metavar="NAME",
+        ),
+    ] = None,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -242,6 +266,7 @@ def spawn(
             agent_args=list(ctx.args),
             spawned_by=as_session or "user",
             account=account,
+            persona=persona,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -264,10 +289,11 @@ def spawn(
         if receipt.asked_label and receipt.asked_label != receipt.agent.label
         else ""
     )
+    persona = f" · persona {receipt.agent.persona}" if receipt.agent.persona else ""
     console = stdout_console()
     console.print(
         f"✓ spawned {receipt.agent.label}{asked} ({receipt.agent.id}) → "
-        f"{receipt.tmux_session} {receipt.agent.pane_id}"
+        f"{receipt.tmux_session} {receipt.agent.pane_id}{persona}"
     )
     for note in receipt.notes:
         console.print(f"  {'✓' if note in receipt.shared else '⚠'} {note}")
@@ -302,7 +328,11 @@ def status(project: ProjectRef = None) -> None:
 
 @app.command("restart")
 def restart(
-    label: Annotated[str, typer.Argument(help="Agent label, e.g. manager or coder-auth.")],
+    ctx: typer.Context,
+    label: Annotated[
+        str | None,
+        typer.Argument(help="Agent label, e.g. manager or coder-auth (not with --all)."),
+    ] = None,
     fresh: Annotated[
         bool,
         typer.Option(
@@ -321,6 +351,8 @@ def restart(
             "for an agent spawned before that was recorded (#144).",
         ),
     ] = None,
+    every: EveryAgent = False,
+    managers: ManagersOnly = False,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -334,7 +366,23 @@ def restart(
     The replacement is launched as the agent was (#144) — binary, permission
     mode, arguments — not as the role's config reads today; --permission-mode
     changes the mode, and later restarts keep it.
+
+    With --all, every running agent in every project is restarted so, one line
+    each by project, then a count; --managers restarts the managers alone. It
+    exits 1 when any of them failed, and 130 when interrupted, after saying how
+    far it got.
     """
+    label = _one_or_every(
+        ctx,
+        label,
+        every,
+        managers,
+        project,
+        {"--fresh": fresh, "--permission-mode": permission_mode},
+    )
+    if label is None:
+        _bulk("restart", managers_only=managers, acting_session=as_session)
+        return
     target = _project(project)
     try:
         receipt = fleet_service.restart(
@@ -347,21 +395,7 @@ def restart(
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     if get_state().json_output:
-        typer.echo(
-            json.dumps(
-                {
-                    "replaced": receipt.replaced.model_dump(mode="json"),
-                    "started": receipt.started.model_dump(mode="json"),
-                    "resumed": receipt.resumed,
-                    "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
-                    "how": receipt.how,
-                    "failures": receipt.failures,
-                    "was_running": receipt.was_running,
-                    "tmux_session": receipt.tmux_session,
-                    "notes": receipt.notes,
-                }
-            )
-        )
+        typer.echo(json.dumps(_restart_json(receipt)))
         return
     console = stdout_console()
     before = "stopped and " if receipt.was_running else ""
@@ -484,49 +518,40 @@ def tell(
 
 @app.command("stop")
 def stop(
-    label: Annotated[str, typer.Argument(help="Agent label.")],
+    ctx: typer.Context,
+    label: Annotated[str | None, typer.Argument(help="Agent label (not with --all).")] = None,
     project: ProjectRef = None,
     force: Annotated[bool, typer.Option("--force", help="Kill without a graceful /exit.")] = False,
+    every: EveryAgent = False,
+    managers: ManagersOnly = False,
 ) -> None:
     """Stop an agent: /exit, a grace period, then the window is killed.
 
     On an agent that already exited (💤) it removes the dead window that
     `remain-on-exit` kept, which is what takes the row off the live listing.
+
+    With --all, every running agent in every project is stopped so, one line
+    each by project, then a count; --managers stops the managers alone. It exits
+    1 when any of them failed, and 130 when interrupted, after saying how far it
+    got.
     """
+    label = _one_or_every(ctx, label, every, managers, project, {"--force": force})
+    if label is None:
+        _bulk("stop", managers_only=managers, acting_session=None)
+        return
     target = _project(project)
     try:
         receipt = fleet_service.stop(target, label, force=force)
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     agent = receipt.agent
-    released = [task.id for task in receipt.released]
     if get_state().json_output:
-        typer.echo(
-            json.dumps(
-                {
-                    "agent": agent.model_dump(mode="json"),
-                    "claims_released": released,
-                    "release_failed": receipt.release_failed,
-                    "killed": receipt.killed,
-                }
-            )
-        )
+        typer.echo(json.dumps(_stop_json(receipt)))
     else:
         console = stdout_console()
         console.print(f"✓ stopped {agent.label} ({agent.id})")
-        if receipt.killed:
-            console.print(f"  ⚠ {receipt.killed}", markup=False)
-        if agent.worktree:
-            reap = project_service.fleet_command("reap", target)
-            console.print(f"  · run `{reap}` to remove its worktree once its work is pushed")
-        _say_released(console, len(released))
-        # The work the stop returned to the pool is the one thing the next agent
-        # inherits from this one; here the receipt carries the tasks, so they are
-        # named under the one line every fleet command uses for the count.
-        for task in receipt.released:
-            console.print(f"     · {task.title} ({task.id})")
-        if receipt.release_failed:
-            console.print(f"  ⚠ claims: {receipt.release_failed}")
+        for line in _stop_notes(receipt, target):
+            console.print(f"  {line}", markup=False)
     if receipt.release_failed:
         # One contract with `shutdown`: a claim left with a session that no
         # longer exists is not a clean stop, whichever command produced it, and
@@ -534,10 +559,222 @@ def stop(
         raise typer.Exit(code=1)
 
 
+def _one_or_every(
+    ctx: typer.Context,
+    label: str | None,
+    every: bool,
+    managers: bool,
+    project: str | None,
+    single: Mapping[str, object],
+) -> str | None:
+    """The label ``restart`` or ``stop`` acts on, or ``None`` for ``--all``; the usage errors.
+
+    ``--all`` is every project, so it takes neither a label nor ``--project`` (as ``reap
+    --all`` does not), nor the flags ``single`` names, which are for one agent. ``--managers``
+    narrows ``--all`` and means nothing without it. With neither, a label is required, as it
+    always was.
+    """
+    if managers and not every:
+        raise typer.BadParameter(
+            "--managers goes with --all: it narrows every project's agents to the managers",
+            param_hint="--managers",
+        )
+    if every and label is not None:
+        raise typer.BadParameter(
+            f"--all and a label conflict: --all is every running agent, {label!r} one agent — "
+            "drop one of them",
+            param_hint="--all",
+        )
+    refuse_conflicting_scope(every, project)
+    for flag, value in single.items():
+        if every and value not in (None, False):
+            raise typer.BadParameter(
+                f"{flag} is for one agent and does not go with --all", param_hint=flag
+            )
+    if not every and label is None:
+        # The words typer said when the label was a required argument, through the usage
+        # error typer itself raises (its click is vendored): exit 2, and JSON under --json.
+        raise USAGE_ERROR("Missing argument 'label'.", ctx)
+    return label
+
+
+def _bulk(
+    action: fleet_service.BulkAction, *, managers_only: bool, acting_session: str | None
+) -> None:
+    """``restart --all`` / ``stop --all``: :func:`fleet_service.bulk`, printed as it goes.
+
+    Each agent's line is printed when it is done with, under its project's name, so a long
+    restart shows how far it got; the count follows. Exits 1 when anything failed
+    (``BulkReport.ok``), as ``stop`` and ``reap`` do, and 130 when interrupted, with the
+    report of how far it got (``--json`` included), as ``shutdown`` does.
+    """
+    as_json = get_state().json_output
+    console = stdout_console()
+    heading: list[str] = []
+
+    def said(receipt: fleet_service.BulkReceipt) -> None:
+        if heading[-1:] != [receipt.project.id]:
+            heading.append(receipt.project.id)
+            console.print(_display_name(receipt.project), style="bold", markup=False)
+        for line in _bulk_lines(receipt):
+            console.print(line, markup=False)
+
+    try:
+        report = fleet_service.bulk(
+            action,
+            managers_only=managers_only,
+            acting_session=acting_session,
+            on_receipt=None if as_json else said,
+        )
+    except fleet_service.BulkInterrupted as exc:
+        # The operator's Ctrl-C: the agents before it were restarted or stopped, so they
+        # are told how far it got, and the code says it was not every agent.
+        _emit_bulk(exc.report, console, as_json=as_json)
+        raise typer.Exit(code=130) from None
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    _emit_bulk(report, console, as_json=as_json)
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+def _emit_bulk(report: fleet_service.BulkReport, console: Console, *, as_json: bool) -> None:
+    """What ``--all`` says once its agents are done with, or once it was interrupted: the
+    whole report under ``--json``, else what the agents' own lines have not said."""
+    if as_json:
+        typer.echo(json.dumps(_bulk_json(report)))
+        return
+    for unread, why in report.unread:
+        console.print(
+            f"⚠ {_display_name(unread)}: its agents could not be read — {why}", markup=False
+        )
+    if report.receipts or report.unread or report.interrupted:
+        console.print(report.summary())
+    else:
+        who = "manager" if report.managers_only else "agent"
+        console.print(f"nothing to {report.action}: no {who} is running in any project")
+    if report.interrupted:
+        console.print(f"⚠ {report.interrupted}", markup=False)
+    released = sum(
+        len(receipt.result.released)
+        for receipt in report.receipts
+        if isinstance(receipt.result, fleet_service.StopReceipt)
+    )
+    _say_released(console, released)
+
+
+def _stop_notes(receipt: fleet_service.StopReceipt, project: ProjectInfo) -> list[str]:
+    """What a stop leaves the operator, under its line: ``fleet stop``'s, and each agent's of
+    ``stop --all``, which said neither until review of #266, round 3.
+
+    The reap that removes the worktree it left on disk, and the work it returned to the
+    pool, which is the one thing the next agent inherits from this one: here the receipt
+    carries the tasks, so they are named under the one line every fleet command uses for
+    the count (:func:`_released_line`). Then the claims it could not give back.
+    """
+    notes: list[str] = []
+    if receipt.killed:
+        notes.append(f"⚠ {receipt.killed}")
+    if receipt.agent.worktree:
+        reap = project_service.fleet_command("reap", project)
+        notes.append(f"· run `{reap}` to remove its worktree once its work is pushed")
+    if receipt.released:
+        notes.append(_released_line(len(receipt.released)))
+        notes.extend(f"   · {task.title} ({task.id})" for task in receipt.released)
+    if receipt.release_failed:
+        notes.append(f"⚠ claims: {receipt.release_failed}")
+    return notes
+
+
+def _bulk_lines(receipt: fleet_service.BulkReceipt) -> list[str]:
+    """One agent's line in ``--all``'s output, and its notes under it."""
+    agent, result = receipt.agent, receipt.result
+    if receipt.outcome == "skipped":
+        said, mark = f"skipped — {receipt.why}", "·"
+    elif receipt.outcome == "failed":
+        said, mark = f"failed — {receipt.why}", "✗"
+    elif isinstance(result, fleet_service.RestartReceipt):
+        before = "stopped and " if result.was_running else ""
+        said, mark = f"{before}restarted — {result.how}", "✓"
+    else:
+        said, mark = "stopped", "✓"
+    lines = [f"  {mark} {agent.label:<24} {agent.role:<10} {said}"]
+    if isinstance(result, fleet_service.RestartReceipt):
+        # Every note `fleet restart` prints (the account ladder's, the launch replayed), and
+        # the ones that say what did not happen marked: each failure is among the notes.
+        failures = set(result.failures)
+        lines.extend(f"      {'⚠' if note in failures else '·'} {note}" for note in result.notes)
+    elif isinstance(result, fleet_service.StopReceipt):
+        lines.extend(f"      {note}" for note in _stop_notes(result, receipt.project))
+    return lines
+
+
+def _bulk_json(report: fleet_service.BulkReport) -> dict[str, object]:
+    def project_of(project: ProjectInfo) -> dict[str, object]:
+        return {"id": project.id, "name": _display_name(project), "codename": project.codename}
+
+    def receipt_of(receipt: fleet_service.BulkReceipt) -> dict[str, object]:
+        out: dict[str, object] = {
+            "project": project_of(receipt.project),
+            "agent": receipt.agent.model_dump(mode="json"),
+            "outcome": receipt.outcome,
+            "why": receipt.why,
+        }
+        result = receipt.result
+        if isinstance(result, fleet_service.RestartReceipt):
+            out |= _restart_json(result)
+        elif isinstance(result, fleet_service.StopReceipt):
+            out |= _stop_json(result)  # its `agent` is the row as the stop ended it
+        return out
+
+    return {
+        "action": report.action,
+        "managers_only": report.managers_only,
+        "receipts": [receipt_of(receipt) for receipt in report.receipts],
+        "unread": [
+            {"project": project_of(project), "reason": why} for project, why in report.unread
+        ],
+        "summary": {outcome: len(report.of(outcome)) for outcome in ("done", "skipped", "failed")},
+        "ok": report.ok,
+        "interrupted": report.interrupted,
+    }
+
+
+def _restart_json(receipt: fleet_service.RestartReceipt) -> dict[str, object]:
+    """One restart as ``fleet restart --json`` prints it, and each of ``restart --all``'s:
+    built twice, the two had drifted, and a script written against one broke on the other
+    (review of #266, round 3)."""
+    return {
+        "replaced": receipt.replaced.model_dump(mode="json"),
+        "started": receipt.started.model_dump(mode="json"),
+        "resumed": receipt.resumed,
+        "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
+        "how": receipt.how,
+        "failures": receipt.failures,
+        "was_running": receipt.was_running,
+        "tmux_session": receipt.tmux_session,
+        "notes": receipt.notes,
+    }
+
+
+def _stop_json(receipt: fleet_service.StopReceipt) -> dict[str, object]:
+    """One stop as ``fleet stop --json`` prints it, and each of ``stop --all``'s."""
+    return {
+        "agent": receipt.agent.model_dump(mode="json"),
+        "claims_released": [task.id for task in receipt.released],
+        "release_failed": receipt.release_failed,
+        "killed": receipt.killed,
+    }
+
+
 def _say_released(console: Console, count: int) -> None:
     """The one line for "claims went back to the board", for stop, shutdown and reap alike."""
     if count:
-        console.print(f"  🔓 {count} claimed task(s) released back to the board")
+        console.print(f"  {_released_line(count)}")
+
+
+def _released_line(count: int) -> str:
+    return f"🔓 {count} claimed task(s) released back to the board"
 
 
 def _exec_attach(argv: list[str]) -> None:

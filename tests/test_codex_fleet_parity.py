@@ -517,6 +517,30 @@ def test_tell_queues_for_a_busy_codex_agent_through_codex_queue(
     assert _notes_to(codex.project, codex.agent.label) == []
 
 
+def test_a_tell_that_files_no_note_queues_nothing_for_a_busy_codex_agent(
+    codex_agent: tuple[Codex, TeamTask], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0.8.2's ``tell(note=False)`` is a persona's briefing (``attach_persona``), which the
+    board never carries. Queued with ``codex queue`` it would be a turn in the human's name,
+    the persona's body in the transcript as their prompt: a busy Codex is typed nothing and
+    queued nothing, and the briefing waits for its next prompt as on Claude Code."""
+    codex, _ = codex_agent
+    codex.start(THREAD_ONE)
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="work", turn_id="turn-1")
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "Queued message m for thread t.\n", "")
+
+    monkeypatch.setattr(fleet_service, "_run_native", run)
+
+    told = fleet_service.tell(codex.project, codex.agent.label, "a persona", note=False)
+
+    assert told.delivered is False and calls == []
+    assert _notes_to(codex.project, codex.agent.label) == []
+
+
 @pytest.mark.parametrize(
     "text", ["--no-verify was wrong, amend the commit", "- [ ] step one\n- [ ] step two", "-"]
 )

@@ -42,7 +42,7 @@ from aisquare.cli.ui.views import explainability as explainability_view
 from aisquare.cli.ui.views import onboard as onboard_view
 from aisquare.cli.ui.views import welcome as welcome_view
 from aisquare.cli.ui.views.doctor import DoctorView
-from aisquare.core import selfcli
+from aisquare.core import clipboard, selfcli
 from aisquare.core.state import get_state, reset_state
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import remote_server
@@ -822,7 +822,16 @@ def test_a_called_off_hand_over_begins_each_start_that_stood_down_once(
     owed = _starts_with_a_hand_over(True, monkeypatch, then=call_off)
 
     assert owed == sorted(
-        [*started, ui_app.ACCOUNTS_WORKER, welcome_view.worker_name("validate")]
+        [
+            *started,
+            ui_app.FLEET_WORKER,
+            ui_app.ACCOUNTS_WORKER,
+            # The fleet read's frame asks for the accounts once it has painted, as every
+            # frame does: the tick reads in a thread, so its ask comes after the call-off
+            # and no longer folds into the held read.
+            ui_app.ACCOUNTS_WORKER,
+            welcome_view.worker_name("validate"),
+        ]
     ), "each start that stood down, once, and nothing else"
     assert looks == [True], "the look held is the full one asked for"
 
@@ -903,7 +912,7 @@ def test_a_read_asked_for_while_a_hand_over_waits_is_held_and_a_write_is_not() -
             first = start(app, ui_app._DOCTOR_WORKER, "the first doctor", exclusive=True)
             newest = start(app, ui_app._DOCTOR_WORKER, "the newest doctor", exclusive=True)
             write = start(app, doctor_view.FIX_WORKER, "a fix")
-            await app.workers.wait_for_complete([write])
+            await write.wait()  # each worker awaited on its own (tests/ui_workers.py)
             assert (first.state, newest.state) == (WorkerState.PENDING, WorkerState.PENDING)
             assert first not in set(app.workers) and newest in set(app.workers)
             assert ran == ["a fix"], "the writer began; the reads are held"
@@ -911,7 +920,7 @@ def test_a_read_asked_for_while_a_hand_over_waits_is_held_and_a_write_is_not() -
 
             app.hand_off = None  # called off
             assert app._worker_threads.release() == []
-            await app.workers.wait_for_complete([newest])
+            await newest.wait()
             assert ran == ["a fix", "the newest doctor"], "the newest read, once"
 
             app.hand_off = ("uninstall",)
@@ -1105,6 +1114,34 @@ def test_run_ui_hands_over_only_once_the_phones_farewell_has_gone_out(
     ui_app.run_ui()
 
     assert landed == [True], "the exec came before the farewell went out"
+
+
+def test_run_ui_hands_over_only_once_the_copy_made_before_the_press_is_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #266, round 3: the clipboard thread's copies are flushed at exit
+    (``clipboard.flush``, an ``atexit`` handler), and ``exec_self`` runs no exit handler. A
+    long selection copied just before Update reached ``pbcopy`` cut short, or never."""
+    written: list[str] = []
+
+    def slow_write(writer: clipboard.Writer, text: str, *, timeout: float | None = None) -> bool:
+        time.sleep(0.3)  # feeding a long selection to pbcopy
+        written.append(text)
+        return True
+
+    monkeypatch.setattr(clipboard, "_resolve", lambda: clipboard.Writer(("pbcopy",)))
+    monkeypatch.setattr(clipboard, "write", slow_write)
+    told: list[bool] = []
+    clipboard.submit("a long pane selection", told.append)
+    landed: list[list[str]] = []
+    monkeypatch.setattr(ui_app, "FleetApp", lambda **_options: _FakeApp(("upgrade",)))
+    monkeypatch.setattr(remote_server, "remote_wait_for_writes", lambda undone=None: None)
+    monkeypatch.setattr(selfcli, "exec_self", lambda args: landed.append(list(written)))
+
+    ui_app.run_ui()
+
+    assert landed == [["a long pane selection"]], "the exec came before the copy was written"
+    assert clipboard.flush(5) and told == [True]
 
 
 # --------------------------------------------------------------------------- the exec

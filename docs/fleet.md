@@ -10,7 +10,8 @@ and you are typing into the session itself.
 Three ideas carry the whole feature:
 
 - **One view.** Left: a navigator — `Fleet ▸ projects ▸ agents`, then under a
-  line *⚙ Settings* (App settings, Accounts, Doctor) with a dim status line: the
+  line *⚙ Settings* (App settings, Accounts, Doctor, and *Fleet*'s *Restart all…*
+  and *Stop all…*) with a dim status line: the
   AISquare sign-in and the Claude accounts' headroom as two dots, and with Codex
   accounts a line of their own under it, `● 1× codex` (`?` explains the colours;
   a click opens Accounts). Right: whatever you clicked — onboarding
@@ -120,21 +121,60 @@ its row says so (`no hooks`).
    anything a user sees, and a reviewer as the
    work needs them, reopens what fails, calls a validator once everything is
    done, and posts `READY: <PRs + evidence>` when its gate passes. It never
-   writes code and never merges — a human does (Phase 5).
+   writes code and never merges — a human does (Phase 5). The project's
+   **Personas** tab lists the personas it can use, previews exactly what an
+   agent is briefed with, and imports, edits, exports, removes and validates
+   them (`docs/personas.md`).
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
    bell), **⏳ limited** (parked on a usage limit, Claude Code's or Codex's, with the reset time),
    **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
-   session; click into the pane and every key you type goes to it. `＋ spawn
-   agent` on a project starts one of your own (Phase 4): its dialog is `aisquare
-   fleet spawn` with the role, the agent, the account (that agent's slots) and
-   the permission in that agent's words (Claude Code's `--permission-mode`;
-   Codex's `--sandbox` and `--approval`), and shows the flags the launch will pass.
+   session; click into the pane and every key you type goes to it. The header
+   carries a **Stop** button whenever the agent still has a process, and on a
+   **💤 exited** row, where it removes the dead window tmux kept for the last
+   screen and takes the row off the listing — a **✗ lost** row shows none — and
+   it asks first: *Stop* sends `/exit` and kills the window after the grace
+   period, *Force* skips the `/exit`, *Cancel* does nothing at all. A refusal
+   stays in the dialog with its reason and the agent keeps running (`fleet stop`
+   below: tmux that cannot confirm the pane died leaves the row live); a stop
+   toasts `✓ stopped <label> (<id>)`, the list re-reads and the view returns to
+   the project. Beside it, **Restart** starts the agent again under its label —
+   same role, task, worktree, account and persona; its session is resumed from
+   the transcript when that is on disk (`fleet restart` below) — and the new row
+   is shown if this view is still the one on screen. Both ignore a click in the
+   second after they appear or move.
+   **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
+   project, headed with its name and codename. It reads in two steps. First who
+   runs it: role (the fleet's roles plus any role bound with `team bind`;
+   `manager` is greyed out while one runs; *Pick…* beside it opens the target
+   picker — a bound teammate or an account fills these fields), account and
+   binary. Then as whom:
+   **persona** — `(none)` or one of the project's personas, the role's
+   `[fleet.roles.<role>].persona` preselected, its description shown under it,
+   and *Import…* beside it to bring one in (`docs/personas.md`).
+   Then label (prefilled `<role>-1`, or `<role>-<task short id>` once a task is
+   picked; 🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
+   disables *Spawn* and shows the rule), task (the project's open tasks),
+   worktree (disabled with "not a git repository" outside one), permission mode,
+   extra agent args (split like a shell would; a quoting error is shown inline)
+   and a first prompt. A field left as it opened means the role's default,
+   exactly as an omitted `fleet spawn` flag does; picking `(none)` over a role
+   that has a default persona spawns without one. A refusal —
+   the agent limit, a binary not on your `PATH` — stays in the dialog with its
+   reason; a spawn toasts its receipt and notes and opens the new agent's pane.
+   The dialog has no agent field yet: the role's binding (`team bind`,
+   `[agents]`) decides between Claude Code and Codex, and `fleet spawn --agent`
+   picks one for a single spawn.
+   `Esc` cancels, except while a spawn is already running: that one cannot be
+   taken back, so the dialog waits for its answer, and *Pick…* and *Import…*
+   are disabled until it has it.
 5. Selecting an agent gives its pane the keyboard at once — type, and it reaches
    the agent. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
-   `q` quits the UI — and the agents keep running.
+   `x` opens the Stop dialog for the selected agent — the same rule as the
+   button, so on a project row or a **✗ lost** agent it does nothing — `q` quits
+   the UI, and the agents keep running.
    The line between the navigator and the content is a divider: drag it to
    give an agent's pane more columns or the navigator room for long labels
    (bounded so neither side becomes unusable, and re-bounded when the terminal
@@ -217,15 +257,17 @@ aisquare fleet spawn manager
 aisquare fleet spawn coder --label coder-auth --task tsk_01k9q8p3
 aisquare fleet spawn tester --no-worktree
 aisquare fleet spawn reviewer --permission-mode acceptEdits
+aisquare fleet spawn coder --persona skeptic
 aisquare fleet spawn coder --agent claude-code --bin claude2 --prompt "start from the failing test" -- --model opus
 ```
 
 Starts an agent in the project's tmux session — a window running
 `aisquare launch <role> …` — with the role's permission flags and a session id
 minted *before* launch, records it, and prints a receipt:
-`✓ spawned coder-auth (agt_…) → asq-amber-otter %7`. Anything the receipt
-should tell you — a label that had to be suffixed, a worktree or branch that
-already existed, an agent that did not come up before its prompt was typed —
+`✓ spawned coder-auth (agt_…) → asq-amber-otter %7`, ending `· persona skeptic`
+when the agent runs as one. Anything the receipt should tell you — a label that
+had to be suffixed, a worktree or branch that already existed, an agent that did
+not come up before its prompt was typed, a persona written for other roles —
 follows as a `⚠` line.
 
 | Flag | Meaning | Default |
@@ -239,12 +281,18 @@ follows as a `⚠` line.
 | `--sandbox S` / `--approval P` | Codex's own sandbox and approval policy for this spawn; not beside a `WRITE:APPROVALS` `--permission-mode` | the role's setting |
 | `--bin B` | the agent executable | the role's binding, else the agent's (`claude`, `codex`) |
 | `--prompt TEXT` | its first message: typed once Claude Code's session has started, on Codex's command line ([below](#the-first-prompt-and-the-folder-trust-dialog)) | none |
+| `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
 
 Refused, with the reason in the message: a second `manager`, more agents than
 `max_agents_per_project`, `--worktree` in a project that is not a git
-repository, an unknown role, a `--task` that is already done or dropped.
+repository, an unknown role, a `--task` that is already done or dropped, a
+persona the project does not have (the known names are listed; a stale
+`[fleet.roles.<role>].persona` default names its key). All of these are checked
+before any window exists. A known role is one of `aisquare launch`'s roles, a
+numbered seat of one (`coder2`), or a role bound with `team bind` — the same
+rule `aisquare launch` applies, public as `services.fleet.role_ok`.
 
 #### The first prompt and the folder-trust dialog
 
@@ -287,8 +335,8 @@ context for its GATE note — nothing to claim, work or verify. `task next` puts
 the assigned task first — for the agent's own session, and for a verifier's
 cycle or the MCP server's `task_next` running under the same window (the order
 only; a claim needs the session). The assignment ends when its task is done or
-dropped: nothing is said about it afterwards, and the agent header's `task …`
-chip goes with it — the label and the branch keep the task's short id. The
+dropped: nothing is said about it afterwards, and the row no longer names the
+task — the label and the branch keep the task's short id. The
 row is written after the window starts, so `aisquare launch` inside the window
 waits for it (ten seconds at most) before it starts the agent: the first hook
 always finds the row.
@@ -330,7 +378,7 @@ aisquare fleet ls --all
 aisquare fleet status --project amber-otter
 ```
 
-One row per agent — label, role, state chip, `(worktree)`, the detail behind
+One row per agent — label, role, state chip, `(worktree)`, `· <persona>`, the detail behind
 the state, the pane id — under a header naming the project, its codename and
 its tmux session. `ls` shows live agents; `--all` (`-a`) includes the ones that
 have ended. `status` is the same data, always live only.
@@ -369,7 +417,9 @@ aisquare fleet tell coder-auth "use the existing JWT helper, do not add a depend
 Types the text into the agent — **only** when it is *waiting* and its pane is
 alive. Otherwise the message is filed as a board note addressed to that agent,
 and the output says which happened (`✓` typed, `→` noted, `…` neither yet: the
-line says what is at its prompt or on its way). Never interrupts an
+line says what is at its prompt or on its way). The note goes on the board the
+agent reads, the one its next prompt reads, whatever hub or fleet window the
+command runs in. Never interrupts an
 agent that is working or sitting on a permission prompt. Takes `--as SESSION`.
 Under `--json`, `typed` is `yes`, `no`, `unsent` or `maybe` beside `delivered`:
 `unsent` when the text is at its prompt and tmux refused its Enter (press Enter in
@@ -414,6 +464,13 @@ a moment later, as `fleet stop` types `/exit`: Codex reads keys in one burst as 
 paste and keeps an Enter inside it as text. The manager's wake-up nudge is typed
 the same way, under the same rule.
 
+`aisquare persona attach <name> --to <label>` types a persona's briefing into a
+waiting agent the same way, and keeps the persona on the agent's row so a `/clear`
+or a restart briefs it again ([docs/personas.md](personas.md)). A busy agent gets
+no note in the briefing's place: the board names the persona and never carries its
+body, and the agent's own next prompt hands it the briefing, for it alone. The
+receipt reads `typed` or `noted`.
+
 ### `fleet stop`
 
 ```sh
@@ -439,6 +496,8 @@ typed: the window is killed at once and the output says why (`killed` under
 there first (the agent's `dismiss_key`), and types `/exit` once the empty prompt
 is back, so the agent's `SessionEnd` ends the session it leaves; a screen Esc does
 not bring back is killed as above.
+In `asq` this is the agent view's **Stop** button and `x` on the selected sidebar
+row — the same command behind one confirmation, `--force` included.
 
 **When tmux cannot confirm the pane died** — a wedged server, a `tmux` that
 left `PATH`, a socket that is there but refuses this user (`Permission denied`)
@@ -457,6 +516,95 @@ server in this boot, or another server on its socket): those it leaves live and
 names, and `fleet shutdown --forget` ends them on your word.
 To take a whole project's fleet down and record every row in one go, use
 `fleet shutdown`.
+
+### `fleet restart --all` / `fleet stop --all`
+
+```sh
+aisquare fleet restart --all
+aisquare fleet restart --all --managers
+aisquare fleet stop --all
+aisquare fleet stop --all --managers
+```
+
+These restart or stop every running agent in every project at once. `--managers`
+acts on the managers alone and leaves their teams. *⚙ Settings ▸ Fleet* in `asq`
+does the same through the same service function (below). An agent is running when
+it has a process: ▶ working, ⏸ waiting, 🔔 needs you, ⏳ limited, or · unknown. Each
+is restarted or stopped the way `fleet restart` and `fleet stop` do it for one agent.
+A restart hands a running agent over and resumes its session from its transcript
+when that is on disk. Each agent is acted on by its row, never by its label, so a
+label that passed to another agent meanwhile never makes that agent the one
+stopped. Some agents are left alone, and each is named with the reason:
+
+- an exited (💤) or lost agent: `exited`, `lost`;
+- the agent running the command: `this session`. That is the row
+  `AISQUARE_FLEET_AGENT` names, and with `restart --as SESSION` also that session's
+  row, so a manager that runs `restart --all` isn't stopped half-way through it;
+- a row held as another tmux server's (`held: …`), whose pane id names another agent;
+- for a restart, an agent whose task is done or dropped (`task is done`), which
+  `fleet restart` would refuse;
+- for a restart, an agent of a project you forgot (`its project was forgotten`).
+  A `project forget` that races a spawn can leave a running agent on it. Its
+  replacement would add the project back, so the restart leaves it, and
+  `stop --all` stops it, as `fleet shutdown --all` does;
+- an agent that ended after the list was read and before its turn: `already
+  exited`. Each agent is looked at again just before it is acted on, so one that
+  exited or was stopped meanwhile is not started again, and its 💤 window stays.
+  One that another command ends after this run has sent it `/exit` is not left
+  alone: it fails, and a restart says no replacement was started.
+
+The agents are taken one at a time, each project's manager first. Each one is printed
+as it is done, under its project's name, and the count comes last. A restart's notes
+follow its line, as `fleet restart` prints them, with ⚠ on the ones that say what
+didn't happen. A stop's follow it as `fleet stop` prints them: the `fleet reap` that
+removes the worktree it left, and each claim it put back, by title:
+
+```text
+alpha
+  ✓ manager                  manager    stopped and restarted — resumed its session
+  · coder-2                  coder      skipped — task is done
+beta
+  ✗ coder-web                coder      failed — cannot restart 'coder-web': …
+restarted 1 · skipped 1 · failed 1
+```
+
+One agent's failure is only its own line; the rest are still restarted or stopped.
+The command **exits 1** when any agent failed, a project's agents couldn't be read,
+or a stop left claims behind (the same as `fleet stop`). `--json` prints one
+object: `receipts`, each with `project`, `agent`, `outcome` (`done`, `skipped` or
+`failed`) and `why`, plus, for one that was done, the fields `fleet restart --json`
+or `fleet stop --json` prints for that agent (a stop's `agent` is then the row as
+the stop ended it). The object also has `unread`, `summary`, `ok` and `interrupted`. Interrupted with
+Ctrl-C, it **exits 130**, and it still says how far it got: the agents done so far
+(the JSON object under `--json`), the count, and the agent it was on, as `fleet
+shutdown` does. The agents after it are left as they were.
+
+`--all` means every project's fleet, so it is refused with `--project` (as
+`reap --all` is) and with a label. `--managers` is refused without `--all`. With
+`--all`, `--fresh`, `--permission-mode` and `--force` are refused too, because each
+is for one agent. Without `--all`, both commands work as described above. Unlike
+`fleet shutdown`, which takes a project's whole tmux session down, these keep the
+sessions and the server, and a restart brings each agent back.
+
+**In `asq`: *⚙ Settings ▸ Fleet*.** *Restart all…* and *Stop all…* each open a
+dialog. It lists the agents it will act on, grouped by project (the project's name,
+then `label · role · state` for each agent). The agents it leaves are listed dim,
+with the reason. A *Managers only* switch redraws the list and the count, and the
+confirm button names the count (*Restart 4 managers*, *Stop 9 agents*). *Cancel*
+has the focus, and Escape cancels too. When nobody would be acted on, the dialog
+says *nothing to restart* (or *nothing to stop*) and its confirm button stays
+greyed. The list is read when the dialog opens, and read again on confirm. Confirm
+acts only on the agents the dialog showed: one that ended meanwhile is skipped as
+*already exited*, and one started meanwhile is left alone. A project whose agents
+can't be read on confirm is left alone too, and the summary names it and why. The work runs off the UI
+thread, with both buttons greyed until it ends, and `q` refused: a quit can't stop
+it, and would leave the terminal blank until the rest were done. Each agent gets a toast as it is
+done (`✓ restarted manager (alpha) — resumed its session`, `✓ stopped coder-1 (beta)`).
+Then one toast sums it up (`restarted 4 · skipped 1 · failed 0`) and names who was
+skipped or failed, and why. A restart from here never moves your view. Like an agent
+view's Stop and Restart, both buttons and the dialog's confirm ignore a mouse click
+in the second after they appear or move. An ignored click on the confirm button
+leaves the focus on *Cancel*.
 
 ### `fleet shutdown`
 
@@ -584,7 +732,7 @@ full-fidelity escape hatch. Under `--json` it prints the command it would run
 instead of running it. The session is one the project's spawns made, its live
 agents' records name (the manager's first) or its agents from before this version
 run in, by tmux's own id for it, on the server their spawns recorded (`tmux -S`),
-the line the Manager tab prints, so it works from a shell under another
+the line the project's Settings tab prints, so it works from a shell under another
 `TMUX_TMPDIR` and after a rename tmux was not told of. A session the project's
 spawns made is asked however long ago its last agent ended: an ended manager's
 window lingers there and holds the session, the screen behind the 💤 row.
@@ -809,7 +957,8 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   machine default, which with one login only is whatever `claude` the shell
   already has — exactly what it ran on before any of this existed; with several,
   the one with room comes before it (*Headroom*, below). The
-  agent's header and `fleet ls` show the slot it was resolved to.
+  agent's info line and `fleet ls` name the account it was resolved to, and its
+  sidebar row shows the slot (`#2`).
 - **Headroom.** By default — `[accounts] pick = "headroom"`, *launches pick* in
   App settings — the machine default gives way to the account with room
   (`aisquare config set accounts.pick default` keeps it): every enabled, signed-in account's
@@ -1248,6 +1397,14 @@ extra_args = []
 agent_args = {}
 ```
 
+A role may also name a default persona — every spawn of that role runs as it
+unless `--persona` names another:
+
+```toml
+[fleet.roles.coder]
+persona = "minimalist"                    # checked at spawn: a name the project lacks refuses, naming this key
+```
+
 A role or a key your file leaves out takes its default above; a role the table
 above does not name gets `auto`, no worktree and no extra args. A config file that will not parse costs you the customisation and
 never the fleet: the defaults apply and nothing refuses.
@@ -1563,7 +1720,7 @@ asq` looks from the asking shell. Under another `TMUX_TMPDIR`, `-L` reaches
 another server on the same name, or none, and every server numbers its panes
 from `%0`, so its panes would answer for the agents' ids: a dead one there read
 as a running agent's exit and ended its row. A row from before 0.8.0 recorded
-no socket and is asked by name. The Manager tab's attach line names the
+no socket and is asked by name. The Settings tab's attach line names the
 server the same way.
 
 **Under a hub: one board, many fleet projects.** With `AISQUARE_TEAM_HUB` set,
@@ -1588,6 +1745,12 @@ gets the one that gives its board, none for the checkout's, a project's root for
 that project's board. A project's own board where the checkout is another's is kept
 only when the agent's session registered on it, or its task is on it; otherwise it
 was only a default, and the replacement reads the checkout's.
+
+The captain (experimental, [docs/captain.md](captain.md)) is the one exception, both
+ways: its own row reads the home board, and its window is given the home's root,
+whatever hub started it; and a seat it spawns reads that seat's own project's board,
+since the captain's processes carry the home as their hub only to land the captain
+itself there.
 
 | On the session's board (the hub's, under one) | On the row's fleet project (whatever the board) |
 |---|---|
@@ -1745,7 +1908,8 @@ with the key and to the deployment, that the spawner and the UI's Explainability
 tab resolve, not the server's.
 *Passthrough:* the server keeps `set-clipboard off` and no `allow-passthrough`,
 and it does not matter for
-the UI — no tmux client is attached to it, so an OSC 52 copy, an OSC 8 link or
+the UI. The only client the UI attaches is a control-mode client (see *The UI's
+pipe to tmux* below), which has no terminal, so an OSC 52 copy, an OSC 8 link or
 an OSC 9 notification from Claude Code has no terminal to reach; copies arrive
 through the pane (Textual selection, and the paste-buffer mirror below) and
 links are plain text. In `fleet attach` your own terminal is the client and
@@ -1753,15 +1917,29 @@ tmux's defaults apply. *Multiple clients:* `window-size manual` is deliberately
 absent (it crashes tmux 3.4); the UI pins each window it shows with
 `resize-window`, and a window nobody shows takes tmux's default `latest`
 behaviour — an attached `fleet attach` client resizes it to its own terminal.
+The UI's own control client attaches with `ignore-size` and is never given a
+size, so it resizes nothing.
 *Rendering:* `default-terminal tmux-256color` with truecolor overrides, so
 italics, dim and 24-bit colour survive `capture-pane -e`; wide glyphs are
 measured by Rich's cell widths against tmux's, which agree on emoji and CJK;
 the cursor's shape is not reported by `display-message`, so the pane draws a
-block. *Two-key sequences:* each key is one `send-keys` process, issued in
-order on the event loop (measured ~2 ms each), so `ctrl+X ctrl+K` and vim's
-`gg`/`dd` arrive in order; coalescing a tick's keys into one call is a
-latency optimisation for the control-mode client (plan §3.1), not a
-correctness fix. *Escape hatch:* `[fleet] escape_key` (default `f12`) is
+block. *Two-key sequences:* each key is one `send-keys`, sent in order down
+the control client's pipe (or, polling, one process each), so `ctrl+X ctrl+K`
+and vim's `gg`/`dd` arrive in order. *The UI's pipe to tmux:* the pane on screen
+renders and takes input over ONE `tmux -C` client per server. It is attached to
+that pane's session, and every other pane there is paused for it, so a hidden
+agent sends it nothing and keeps running. It never changes which window is the
+session's current one, so a `fleet attach` open on the same project stays where
+you left it. tmux counts it as an attached, focused client, like a `fleet attach`
+client on that project. With `focus-events on`, the agent in the project's
+current window is told it has focus while `asq` shows that project, and that it
+lost focus when you move to another project or quit `asq`. A key reaches the screen in about a
+millisecond (it was 60 ms or more polled). On tmux older than 3.2, or if that
+client cannot start or ends, the pane polls tmux as before, without a word on
+screen; keys typed as it ended arrive once each, in order. If tmux will not say
+which of those keys it ran, none of them is sent again and nothing typed since is
+sent: the pane says `(input not confirmed)` and a warning names the agent, so check
+the pane and type again what is missing. *Escape hatch:* `[fleet] escape_key` (default `f12`) is
 yours to change; keep it out of Claude Code's set.
 
 **The mouse in a Claude Code pane.** A program that tracks the mouse — Claude
@@ -1773,21 +1951,23 @@ transcript to select *in Claude Code*, which copies on release by itself
 (double- and triple-click are its word and line selection). Claude's own copy
 runs `wl-copy`/`xclip` in the agent's environment — the tmux server's, which may
 have no display — and inside tmux writes the tmux paste buffer, so after a
-left-button release the UI reads tmux's buffers and mirrors one written since the
-press to your clipboard (OSC 52), the same way its own copies arrive — the same
-words selected twice included, and a copy that lands as late as about 0.65 s
-after the release, unless you press a mouse button first. Claude Code's selection
+left-button release the UI reads tmux's buffers and copies one written since the
+press to your clipboard by the route its own copies take (*Where a copy goes*,
+below) — the same words selected twice included, and a copy that lands as late
+as about 0.65 s after the release, unless you press a mouse button first. Claude
+Code's selection
 is copy-only by design: there is no "select in the prompt and paste over it"
 in Claude Code in any terminal. While such a program owns the mouse the UI's
 own drag-select stands down; **shift+drag** is the one gesture that always
 selects locally, in every pane, and copies on release. In a pane whose program
 does not track the mouse (a shell, the classic renderer) nothing changed:
 Drag to select text in a pane (double-click selects a word): it is copied to
-your clipboard on release (OSC 52 — your terminal has to accept it; Windows
-Terminal, kitty, wezterm, iTerm2 and foot do), and ctrl+c or cmd+c copies it
+your clipboard on release (*Where a copy goes*, below), and ctrl+c copies it
 again while the highlight stands — from the pane or from the sidebar — and then
 clears it (when two panes hold a highlight, the one made most recently goes
-first). Only a left-button drag is a copy, so a right-click over a highlight
+first). cmd+c does the same in a terminal that passes it on; Terminal.app and
+iTerm2 keep it as their own Copy (*Copy and paste on macOS*, below). Only a
+left-button drag is a copy, so a right-click over a highlight
 leaves your clipboard alone — and a right click followed by a left click is one
 click, not a double click — and so does a drag somewhere else entirely while a
 highlight stands. The highlight does not outlive what it means: typing or
@@ -1823,6 +2003,72 @@ keyboard protocol (kitty, ghostty, wezterm, foot, recent alacritty): in
 VTE-based terminals and Windows Terminal, shift+enter arrives as plain enter
 and the UI never fakes it — `\` then Enter inserts a newline in Claude Code
 everywhere.
+
+**Where a copy goes.** Every copy the UI makes — a release in a pane, ctrl+c on
+a standing highlight, the mirror of Claude Code's own selection, the board's
+`c`, the Remote panel's link, a text field's copy — goes two ways at once. On a
+local session it goes to the system clipboard through the platform's own tool:
+`pbcopy` on macOS; `clip.exe` on Windows, and on WSL while interop is on; and
+on Linux (WSLg included) and the BSDs `wl-copy` under Wayland, else `xclip` or
+`xsel` under X. A tool that fails or hangs is not run again for a minute, so
+a broken one (an `xclip` whose display has gone) doesn't hold up every copy's
+toast: those copies go by OSC 52 alone. It is also sent as OSC 52, which your *outer*
+terminal turns into a clipboard write if it accepts it: Windows Terminal,
+kitty, ghostty, wezterm and foot do, iTerm2 only with its clipboard setting on,
+and Terminal.app never. On a remote session the native tool would write the
+remote machine's clipboard, not yours, so OSC 52 is the only route: over SSH
+(`SSH_CONNECTION` or `SSH_TTY` set, or an `sshd` above `asq`, as under `sudo`
+or `su`), in a Codespace (`CODESPACES`), and in your own tmux when it was last
+attached over SSH (tmux's own `SSH_CONNECTION`, asked at each copy). Inside tmux
+its answer outranks `asq`'s own SSH variables, so a tmux created over SSH and
+attached at the machine since is local. GNU screen, zellij and dtach have no
+such answer to give: one started at the machine and reattached over SSH keeps
+writing the machine's clipboard, and says "copied". If you reattach from other
+machines, run `asq` in tmux. The
+toast says "copied" when the native tool took the text, or when OSC 52 was the
+only route (over SSH, or with the tool missing or failing) and the terminal is
+one known to take it: kitty, Ghostty and WezTerm by their own variables
+(`KITTY_WINDOW_ID`, `GHOSTTY_RESOURCES_DIR`, `WEZTERM_EXECUTABLE`), Ghostty and
+WezTerm also by `TERM_PROGRAM`, Windows Terminal by `WT_SESSION`, and kitty,
+Ghostty, WezTerm, foot and Alacritty by the `TERM` ssh carries. In Terminal.app
+(named by `TERM_PROGRAM`) it warns that the copy did not reach the clipboard,
+and how to select with the terminal itself. In iTerm2 — named by
+`TERM_PROGRAM`, and over SSH by the `LC_TERMINAL` ssh usually carries, though
+not behind tmux or screen, which keep the one of whichever terminal started
+them — it
+says the text was sent to your terminal's clipboard (OSC 52) and, if paste is
+empty, to turn on iTerm2's clipboard setting or hold ⌥ while you drag: whether
+that setting is on, nothing outside iTerm2 can see. On any terminal nothing
+names (over SSH from Terminal.app, or behind tmux or screen) it says the text
+was sent to your terminal's clipboard (OSC 52), and that an empty paste means
+the terminal ignores it.
+
+**Copy and paste on macOS.** Run on your Mac, every copy in `asq` reaches the
+clipboard through `pbcopy`, in any terminal. Over SSH only OSC 52 can carry it
+back, so the terminal decides:
+
+- *Terminal.app* never implemented OSC 52, so a copy over SSH does not reach
+  your clipboard. Terminal.app names itself to nothing across SSH, so the toast
+  says the copy was sent through OSC 52 and that an empty paste means the
+  terminal ignored it. Select with the terminal itself instead (below).
+- *iTerm2* accepts it only with *Settings › General › Selection › Applications
+  in terminal may access clipboard* turned on. The toast cannot see that
+  setting, so over SSH it says the copy was sent through OSC 52 and, if paste
+  is empty, to turn the setting on or hold ⌥ while you drag.
+- *Ghostty, kitty and WezTerm* accept it out of the box.
+
+⌘C is Terminal.app's and iTerm2's own Copy, so it never reaches `asq`, and it
+does not need to: a drag copies on release with no key, and ctrl+c copies a
+standing highlight again. ⌘V does reach `asq`, as a bracketed paste, and
+pastes into the focused pane or field. To select with the terminal itself while
+`asq` has the mouse, hold Option while dragging in iTerm2, or Fn in
+Terminal.app on most Macs (users report it; Apple does not document it); then
+⌘C copies that selection as it would anywhere else. When you type on a Mac —
+`asq` running on it, or reached from Terminal.app or iTerm2 (iTerm2 over SSH
+too, by its `LC_TERMINAL`) — the `?` screen lists these keys, and the board's
+copy row names `c`, not ⌘C. Through tmux or screen on another machine they
+are left out: the multiplexer keeps the `LC_TERMINAL` of whichever terminal
+started it, which may not be the one you attached from.
 
 The alt chord's limits are the terminal's and Textual's key parser's, not this
 UI's, and they were measured against the parser (`tests/test_keys.py` feeds it
@@ -1865,7 +2111,8 @@ everything outside the fleet keeps working. `aisquare doctor` gains a `tmux`
 check — present, and new enough (the 3.2 minimum, with a note below 3.5) — with
 per-OS install hints, and warn-level checks for `gh` and the fleet's own stale
 rows (Phase 3). It does **not** source the bundled config: `tmux -f` queues
-configuration errors for the first attached client, which the fleet never has,
+configuration errors for the first attached client, and the only one the fleet
+attaches, the UI's control client, does not show them,
 so a `tmux` that rejects a line in that file surfaces as an odd or dead pane
 rather than as a doctor warning. Install or upgrade as above and re-run:
 
@@ -1966,7 +2213,14 @@ hand-over is already moving (a `fleet switch`, by hand or on a usage limit, or
 another restart) is not restarted or switched again: that hand-over starts the
 replacement itself. The agent view's **Stop** and **Restart** act on the row it
 shows: once its label has passed to a replacement (the manager restarted that
-coder), they say so and leave the replacement alone.
+coder), they say so and leave the replacement alone. A restart from the view
+moves you to the new row only if that view is still on screen when the restart
+ends. If you have opened another agent meanwhile, you stay there, and a toast
+names the restart and its project. Both buttons ignore a mouse click that
+lands within a second of the view coming up, moving or a dialog over it
+closing, and say so once: that click was aimed at what was there before. An
+ignored click doesn't take the keyboard focus either, so the next Enter goes
+where it was going. Enter on the focused button is never ignored.
 
 **A panel reading "No changes this session" sits beside an agent's conversation
 and will not go away.** That is Claude Code's own diff panel (fullscreen

@@ -112,7 +112,9 @@ def _shown(widget: Static) -> str:
 # --- the sidebar ------------------------------------------------------------------------
 
 
-def test_the_sidebar_has_the_projects_then_settings_and_its_status_and_nothing_else() -> None:
+def test_the_sidebar_has_the_projects_then_settings_and_its_status_and_nothing_else(
+    captain_off: None,
+) -> None:
     async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str, bool]:
         app = _app(pilot)
         sidebar = app.sidebar
@@ -232,8 +234,8 @@ def test_the_hub_is_titled_settings_and_says_what_each_link_opens() -> None:
 
     title, links, about = _drive(go)
     assert title.endswith("Settings")
-    assert links == ["App settings", "Accounts", "Doctor"]
-    assert len(about) == 3 and all(about)
+    assert links == ["App settings", "Accounts", "Doctor", "Restart all…", "Stop all…"]
+    assert len(about) == 4 and all(about)  # the Fleet section's two share one line
 
 
 # --- what the doctor found (review of #261, m9) ----------------------------------------

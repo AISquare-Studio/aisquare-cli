@@ -136,6 +136,27 @@ _HANDLED_S = 5.0
 _UNTIL_POLL_S = 0.02
 
 
+async def settle_until_held(
+    app: App[Any], done: Callable[[], object], *, what: str, timeout: float = 5.0
+) -> None:
+    """:func:`settle_until`, then FAIL naming ``what`` when ``done()`` still does not hold.
+
+    For a wait on a timer, not a worker: the persona editor checks its text
+    ``PARSE_DEBOUNCE`` after the last keystroke, and its tests paused a fixed
+    ``PARSE_DEBOUNCE + 0.2`` for it. On a loaded windows-latest runner the timer
+    fired later than that, and the test read the state from before the check (run
+    39566939254, job 119111351513). Here the test waits for the state its next
+    assertion reads, in short rounds, for up to ``timeout`` seconds, and a check
+    that never ran fails here, saying what was waited for, rather than at an
+    assertion about something else.
+    """
+    await settle_until(app, done, timeout=timeout)
+    with contextlib.suppress(NoMatches):
+        if done():
+            return
+    raise AssertionError(f"waited {timeout:g} s for {what}, and it never held")
+
+
 async def _handled(app: App[Any]) -> None:
     """Wait until the app and every node of its screen is done with the message in hand.
 

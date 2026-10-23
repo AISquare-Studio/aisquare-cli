@@ -83,6 +83,25 @@ aisquare fleet attach                  # the same session in raw tmux, full fide
 aisquare doctor                        # is everything wired? (and how to fix anything)
 ```
 
+## The captain (experimental, off by default)
+
+One agent above every project: the **captain** runs every fleet for you, and you
+talk to it, typed or spoken. `aisquare captain` starts it (or attaches to it),
+and `aisquare captain say "what is up"` asks it what needs you, across every
+board. Every effect is one of its 24 tools, each leaving one audit event with
+your words; `stop`, `spawn` and `restart` happen only when your words name what
+they act on, and a refusal is said, never faked.
+
+It ships **off**. Turn it on once, or for one shell with
+`AISQUARE_EXPERIMENTAL_CAPTAIN=1`; while it is off, `aisquare captain` refuses
+with one line saying so, and `asq` shows no captain:
+
+```sh
+aisquare config set experimental.captain true
+aisquare captain
+aisquare captain say "what is up"
+```
+
 ## What stays free
 
 Everything that runs on your machine — memory, the fleet, the board — is MIT
@@ -114,6 +133,7 @@ short alias.
 | [Phone control](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/remote.md) | Optional: the fleet on your phone through your own ngrok tunnel. What needs you across every project, each agent's screen, the board, and once you allow writes, the keys to answer |
 | [Reference](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/reference.md) | The hooks, the `~/.aisquare` layout, the main command tree and the global flags |
 | [The AISquare platform](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/platform.md) | Optional: signing in, Explainability, the Collective Intelligence test bed |
+| [The captain](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/captain.md) | Experimental, off by default: one agent above every project that you talk to, typed or spoken. Turning it on, its tools, the voice page and the queue of what needs you |
 
 ## Community
 

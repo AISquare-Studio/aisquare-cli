@@ -110,6 +110,11 @@ ACTS: dict[str, dict[str, str]] = {
             "(`PlacedPane.type_then_enter`), or the pane of an agent a listing placed "
             "(Remote's paste, its row through `placed_row`)"
         ),
+        "pane_is_the_agent": (
+            "asks the pane its caller names, as `type_then_enter` types into it: the pane of an "
+            "agent a listing placed, or of a row put through `placed_row` (the captain's "
+            "`press` and `paste`, `services.captain`)"
+        ),
         "_live_rows_here": (
             "a socket probe at this shell's path for the live rows recorded there, only ever "
             "to forget an exited server's start (the row is then judged by its record's time, "
@@ -132,12 +137,17 @@ ACTS: dict[str, dict[str, str]] = {
             "as written (the doctor takes no census)"
         ),
         "_check_fleet_terminal": "`show-options -gv prefix`: the server's own option",
-        "_stale_server_environment": "`show-environment -g`: the server's own environment",
+        "_server_environment": (
+            "`show-environment -g`: the server's own environment (the stale-variable and the "
+            "pinned-team-variable rows, 0.8.2's `fleet server env`)"
+        ),
     },
     f"{UI}/terminal.py": {
         "TerminalPane": (
             "the pane a view attached (`shown_pane`): a listed status's, placed by the "
-            "resolver, or a sign-in window the Accounts view made itself"
+            "resolver, or a sign-in window the Accounts view made itself; its keys and frames "
+            "go down that pane's server's control client (`core.tmux_control`, 0.8.2's #272) "
+            "or are polled, for that pane alone"
         )
     },
     f"{UI}/views/accounts.py": {
@@ -413,3 +423,27 @@ def test_the_check_sees_every_shape_of_the_breach() -> None:
     ]
     for module, source in allowed:
         assert not violations(source, module, methods), source
+
+
+def test_the_control_mode_client_is_made_only_for_a_pane_a_view_attached() -> None:
+    """0.8.2's tmux control mode (#272) is a tmux path of its own: one ``tmux -C`` client per
+    server (``core.tmux_control.ControlClient``) that carries a pane's keys and frames. It
+    acts only on placed panes because it is made in one place, for the server of a
+    ``TerminalPane`` on screen (``cli/ui/terminal.py``, ``_Control``), and is asked only
+    about that pane and the panes that join it on that server (``watch_pane``): each one a
+    view attached (``shown_pane``: a listed status's, placed by the resolver), or a sign-in
+    window the Accounts view made itself. A client made anywhere else fails here."""
+    made = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for owner in ast.walk(tree):
+            if not isinstance(owner, ast.ClassDef | ast.FunctionDef):
+                continue
+            for node in ast.walk(owner):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "ControlClient"
+                ):
+                    made.append(f"{path.relative_to(SRC).as_posix()}:{owner.name}")
+    assert sorted(set(made)) == ["cli/ui/terminal.py:_Control", "cli/ui/terminal.py:__init__"], made

@@ -33,6 +33,7 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import experimental
 from aisquare.core.config import load_config
 from tests.cli_tree import leaf_invocations_by_path
 
@@ -113,6 +114,15 @@ def configured_home(isolated_home: Path, runner: CliRunner) -> Path:
 USAGE_ONLY: set[str] = set()
 
 
+def _usage_only_expected() -> set[str]:
+    """:data:`USAGE_ONLY`, and with the experimental captain off every swept ``captain``
+    leaf: off, each is refused with exit 2 before its body, as it ships (the captain-OFF
+    run). On, the captain's leaves are held to the ratchet like every other command."""
+    if experimental.captain_enabled():
+        return USAGE_ONLY
+    return USAGE_ONLY | {name for name, _ in _swept() if name.split()[0] == "captain"}
+
+
 def _swept() -> list[tuple[str, list[str]]]:
     """``(name, argv)`` for every leaf command this sweep runs.
 
@@ -180,10 +190,11 @@ def test_no_command_raises_in_a_configured_home(configured_home: Path, runner: C
         "a ratchet that is not tightened is an allow list."
     )
 
-    assert usage_only == USAGE_ONLY, (
+    expected = _usage_only_expected()
+    assert usage_only == expected, (
         "the set of commands that never reach their own body changed. Gained "
-        f"{sorted(usage_only - USAGE_ONLY)} — those are no longer tested for "
-        f"anything but usage; lost {sorted(USAGE_ONLY - usage_only)} — good, "
+        f"{sorted(usage_only - expected)} — those are no longer tested for "
+        f"anything but usage; lost {sorted(expected - usage_only)} — good, "
         "remove them from USAGE_ONLY. A command that silently falls back to a "
         "usage error takes its coverage with it."
     )

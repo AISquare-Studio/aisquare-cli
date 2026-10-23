@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.cli.watch import feed_line
 from aisquare.services import team as team_service
+from tests.fake_clipboard import NEEDS_POSIX, TEXT, install
 from tests.projects import add_project
 
 
@@ -951,3 +953,46 @@ def test_question_mark_opens_the_boards_keys_and_its_icon_legend(
     for glyph, _style, meaning in STATUS_ICONS.values():
         assert f"{glyph}" in text and meaning in text
     assert "done archive" in text and "themes" in text
+
+
+@NEEDS_POSIX
+def test_c_copies_the_selected_feed_onto_the_native_clipboard_and_osc52(
+    runner: CliRunner, work_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hotfix 0.8.2: the board's copy reaches pbcopy beside its OSC 52 — ``aisquare watch``
+    is a ``ClipboardApp`` too, not only the fleet's shell — and says so once it has."""
+    pytest.importorskip("textual", reason="the [tui] extra is not installed")
+    from textual.selection import SELECT_ALL
+    from textual.widgets import Static
+
+    from aisquare.cli import watch as watch_mod
+
+    team_service.activate()
+    runner.invoke(app, ["note", TEXT])
+    board = install(tmp_path, monkeypatch)
+    app_cls = watch_mod._build_app_class(interval=60.0)
+
+    async def drive() -> tuple[str, list[str], list[str]]:
+        async with app_cls().run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            writes: list[str] = []
+            monkeypatch.setattr(pilot.app._driver, "write", writes.append)
+            await pilot.press("v")  # select mode: the feed as text to select
+            await pilot.pause()
+            pilot.app.screen.selections = {pilot.app.query_one("#feedstatic", Static): SELECT_ALL}
+            await pilot.pause()
+            selected = pilot.app.screen.get_selected_text()
+            await pilot.press("c")
+            for _ in range(100):
+                if pilot.app._notifications:
+                    break
+                await pilot.pause(0.05)
+            told = [note.message for note in pilot.app._notifications]
+            return selected or "", told, [w for w in writes if "\x1b]52;" in w]
+
+    selected, told, osc52 = asyncio.run(drive())
+    assert TEXT in selected, "the premise: the note is in what was selected"
+    assert board.texts() == [selected]
+    encoded = base64.b64encode(selected.encode("utf-8")).decode("ascii")
+    assert osc52 == [f"\x1b]52;c;{encoded}\a"]
+    assert told == [f"copied {len(selected)} chars"]

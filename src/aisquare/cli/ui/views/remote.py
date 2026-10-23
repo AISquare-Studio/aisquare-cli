@@ -28,6 +28,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label, Select, Static, Switch
 from textual.widgets.data_table import ColumnKey
 
+from aisquare.cli.ui.clipboard import copy_and_tell
 from aisquare.cli.ui.remote_control import (
     AUTO_OFF_CHOICES,
     READ_ONLY_REASON,
@@ -353,8 +354,7 @@ class RemotePanel(ModalScreen[None]):
         elif event.button.id == "remote-copy":
             url = self.controller.link_url()
             if url is not None:
-                self.app.copy_to_clipboard(url)
-                self.notify("Link copied")
+                copy_and_tell(self.app, url, "Link copied", sent="the link")
         elif event.button.id == "remote-revoke":
             self._revoke_selected()
         self.repaint()

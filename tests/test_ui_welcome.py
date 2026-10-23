@@ -1254,6 +1254,11 @@ def fleet_rows(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[FleetAgentStat
     return rows
 
 
+async def frame_read(app: FleetApp) -> None:
+    """Wait for the frame ``app.refresh_data()`` asked for: read in a thread, then painted."""
+    await settle_page(app, group=app_mod.FLEET_WORKER)
+
+
 def in_shell(
     machine: Machine,
     fn: Callable[[Pilot[None], FleetApp, WelcomeView], Awaitable[T]],
@@ -1755,6 +1760,7 @@ def test_an_agent_stopped_elsewhere_is_not_brought_back(
         seen: list[Any] = [visible(page, "fleet-coders")]  # the manager is live
         machine.live.clear()  # stopped elsewhere: window gone, row off the listing
         app.refresh_data()
+        await frame_read(app)
         page.paint()  # what the page's refresh tick does
         seen += [visible(page, "fleet-manager"), visible(page, "fleet-coders")]
         seen.append(card(page, "fleet-status"))
@@ -1789,6 +1795,7 @@ def test_a_clock_that_steps_back_does_not_keep_a_stopped_agent_started(
         await press(pilot, page, "fleet-manager")
         machine.live.clear()  # stopped elsewhere
         app.refresh_data()
+        await frame_read(app)
         assert app.snapshot is not None
         an_hour_back = app.snapshot.taken_at - timedelta(hours=1)
         app.snapshot = dataclasses.replace(app.snapshot, taken_at=an_hour_back)
@@ -1833,6 +1840,7 @@ def test_coders_whose_windows_are_gone_are_not_counted_and_are_restarted(
         seen: list[Any] = [card(page, "fleet-status")]
         machine.states.update({"coder-1": "lost", "coder-2": "lost"})  # their windows gone
         app.refresh_data()
+        await frame_read(app)
         page.paint()  # what the page's refresh tick does
         seen += [card(page, "fleet-status"), visible(page, "fleet-coders")]
         await press(pilot, page, "fleet-coders")
@@ -1881,11 +1889,13 @@ def test_a_refused_restart_is_said_under_its_coder_with_the_way_out(
         await press(pilot, page, "fleet-coders")
         machine.states["coder-1"] = "lost"  # its window gone
         app.refresh_data()
+        await frame_read(app)
         page.paint()  # what the page's refresh tick does
         seen: list[Any] = []
         for _ in range(2):
             await press(pilot, page, "fleet-coders")
             app.refresh_data()
+            await frame_read(app)
             page.paint()  # the next frame, as the page's refresh tick paints it
             seen.append(card(page, "fleet-status"))
         seen.append(visible(page, "fleet-coders"))
@@ -1912,9 +1922,11 @@ def _lost_and_refused(machine: Machine, reason: str) -> Callable[..., Awaitable[
         machine.refuse_restart = {"coder-1": reason}
         machine.states["coder-1"] = "lost"
         app.refresh_data()
+        await frame_read(app)
         page.paint()
         await press(pilot, page, "fleet-coders")
         app.refresh_data()
+        await frame_read(app)
         page.paint()
         return card(page, "fleet-status")
 
@@ -1943,10 +1955,12 @@ def test_a_refusal_is_about_its_own_row_and_goes_with_it(
         machine.refuse_restart = {}  # the account is back: Restart in coder-1's own view
         machine.restart(project, "coder-1", agent_id="agt_coder-1")
         app.refresh_data()
+        await frame_read(app)
         page.paint()
         seen.append(card(page, "fleet-status"))
         machine.states["coder-1"] = "lost"  # the new coder-1's window closes
         app.refresh_data()
+        await frame_read(app)
         page.paint()
         seen.append(card(page, "fleet-status"))
         await press(pilot, page, "fleet-coders")
@@ -1987,10 +2001,12 @@ def test_a_restart_that_ended_its_row_keeps_its_refusal(
         machine.refuse_restart, machine.restart_ends_row = {"coder-1": reason}, True
         machine.states["coder-1"] = "lost"
         app.refresh_data()
+        await frame_read(app)
         page.paint()
         await press(pilot, page, "fleet-coders")
         landed = card(page, "fleet-status")  # on the frame the start landed on
         app.refresh_data()
+        await frame_read(app)
         page.paint()  # the next frame, as the page's refresh tick paints it
         seen = [landed, card(page, "fleet-status"), visible(page, "fleet-coders")]
         machine.refuse_restart = {}
@@ -2026,6 +2042,7 @@ def test_a_refusal_goes_once_its_row_is_reaped(
         before = await refused(pilot, app, page)
         machine.live = [agent for agent in machine.live if agent.label != "coder-1"]  # reaped
         app.refresh_data()
+        await frame_read(app)
         page.paint()
         reaped = card(page, "fleet-status")
         machine.cap = 2  # manager and coder-2: a spawn in coder-1's place meets the cap
@@ -2080,6 +2097,7 @@ def test_a_refusal_goes_once_its_row_is_reaped_while_the_page_is_hidden(
         machine.refuse_restart = {"coder-2": reason}
         machine.states.update({"coder-1": "lost", "coder-2": "lost"})  # a reboot
         app.refresh_data()
+        await frame_read(app)
         page.paint()
         if left == "after-it-landed":
             await press(pilot, page, "fleet-coders")
@@ -2096,8 +2114,10 @@ def test_a_refusal_goes_once_its_row_is_reaped_while_the_page_is_hidden(
             await settle_page(app)
         seen: list[Any] = [page.display, page.steps["coder-2"].outcome]
         app.refresh_data()  # the shell's tick while the user is away
+        await frame_read(app)
         machine.live = [agent for agent in machine.live if agent.label != "coder-2"]  # reaped
         app.refresh_data()
+        await frame_read(app)
         await app.action_welcome()  # `w`
         await settle_page(app)
         return [*seen, card(page, "fleet-status")]
@@ -2161,6 +2181,7 @@ def test_a_spawn_refusal_is_not_said_under_a_row_that_came_later(
         machine.live.append(_agent(project, "manager", "manager"))  # `fleet spawn manager`
         machine.states["manager"] = "lost"
         app.refresh_data()
+        await frame_read(app)
         page.paint()
         return [refused, card(page, "fleet-status")]
 
@@ -2188,10 +2209,12 @@ def test_an_agent_the_page_started_that_exited_is_said(
         started = card(page, "fleet-status")
         machine.exit("manager", 3)
         app.refresh_data()
+        await frame_read(app)
         page.paint()  # the next frame, as the page's refresh tick paints it
         seen = [started, card(page, "fleet-status"), visible(page, "fleet-manager")]
         machine.ended.clear()  # Stop on its 💤 row removes the window: the row leaves
         app.refresh_data()
+        await frame_read(app)
         page.paint()
         return [*seen, card(page, "fleet-status")]
 
@@ -2261,6 +2284,7 @@ def test_step_one_follows_the_frame_when_a_folder_is_listed_elsewhere(
         with store_session() as store:  # `aisquare init` in another terminal
             store.onboard_project(ProjectInfo(id=pid, root=root))
         app.refresh_data()
+        await frame_read(app)
         page._tick()  # the page's refresh tick
         await settle_page(app)
         seen.append(page.project.id if page.project else None)

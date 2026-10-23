@@ -37,6 +37,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import ClassVar, NamedTuple
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -60,6 +61,7 @@ from aisquare.cli.ui.groups import (
 )
 from aisquare.cli.ui.terminal import InPlaceField
 from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, ProjectInfo
+from aisquare.services import fleet as fleet_service
 from aisquare.services.project import NICKNAME_MAX, display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
 
@@ -86,13 +88,25 @@ STATE_CHIP: dict[str, tuple[str, str]] = {
 CUSTOM_ROLE_ICON = "🤖"
 """The icon for a role the table above does not know (a `team bind` role, say)."""
 
-ALIVE_STATES: frozenset[str] = frozenset({"working", "waiting", "attention", "limited", "unknown"})
+ALIVE_STATES: frozenset[str] = fleet_service.PROCESS_STATES
 """States that count toward the card's "agents alive" chip — a limited agent is
-alive and parked (#146), not gone."""
+alive and parked (#146), not gone. The fleet's own set, which Stop and ``--all`` act on:
+a third copy of it could count as alive what they leave, or the reverse (review of #266,
+round 3)."""
+STOP_STATES: frozenset[str] = ALIVE_STATES | {"exited"}
+"""Where **Stop** is offered — the agent view's button and the sidebar's ``x`` ask
+this one constant, never a copy of it: a process to stop (``ALIVE_STATES``), or an
+exited agent's dead window — `remain-on-exit` keeps it for the last screen, and Stop
+on the 💤 row removes it, which takes the row off the listing (``fleet stop`` on an
+ended row, #138). A ✗ lost row has neither: it is ``fleet reap``'s business."""
 
 
 class AddProject(Message):
     """The + beside Fleet."""
+
+
+class CaptainRequested(Message):
+    """The rank insignia beside Fleet: the captain's view, or a start when there is none (T4)."""
 
 
 class ProjectSelected(Message):
@@ -111,6 +125,20 @@ class AgentSelected(Message):
 class SpawnAgent(Message):
     def __init__(self, project_id: str) -> None:
         self.project_id = project_id
+        super().__init__()
+
+
+class StopAgent(Message):
+    """Stop this agent, please: the agent view's button, or ``x`` on the selected row.
+
+    Both controls ask the SHELL rather than calling the service, because the
+    shell is what holds the :class:`ProjectInfo` a stop needs (``on_spawn_agent``
+    resolves a project the same way) and what owns the dialog.
+    """
+
+    def __init__(self, project_id: str, agent_id: str) -> None:
+        self.project_id = project_id
+        self.agent_id = agent_id
         super().__init__()
 
 
@@ -191,6 +219,13 @@ def project_name(project: ProjectInfo) -> str:
     return display_name(project)
 
 
+def agent_name(label: str, project: ProjectInfo | None) -> str:
+    """``coder-1 (alpha)``: an agent's label, with the project that tells one ``manager``
+    from another; the label alone when the project is not known. The one way a toast names
+    an agent across projects: the agent view's restart and Settings ▸ Fleet's alike."""
+    return f"{label} ({project_name(project)})" if project is not None else label
+
+
 def short_path(path: Path, home: Path | None = None) -> str:
     """``~/work/api`` for a path under the home directory; the path itself otherwise."""
     home = Path.home() if home is None else home
@@ -207,19 +242,74 @@ def ordered_agents(statuses: Iterable[FleetAgentStatus]) -> list[FleetAgentStatu
     )
 
 
-def agent_row_text(status: FleetAgentStatus) -> Text:
-    """``🧭 manager       ⏸`` — icon, label, state chip, exit status when exited."""
+LABEL_WIDTH = 13
+"""The cells an agent row gives its label when there is room, so the chips line up on rows
+that fit. A row that would not fit gives cells back from its label, the ``#N·NN%`` held
+whole at the right: a wide chip (``🔔``, ``💤 exited(N)``) or ``100%`` sits further left."""
+BADGE_KEEP = 5
+"""The fewest cells a cut persona badge keeps — `` · s…``, one letter of the name; with
+fewer left it is dropped rather than shown as a bare ``·``."""
+
+
+def agent_row_text(
+    status: FleetAgentStatus, percent: float | None = None, *, width: int | None = None
+) -> Text:
+    """``🧭 manager       ⏸ #1·42% · skeptic`` — icon, label, state chip, the account's slot
+    and the session use on it, exit status when exited, persona.
+
+    ``#<slot>`` is ``FleetAgent.account_slot`` and ``percent`` that account's five-hour
+    window, percent USED (:func:`session_percent_text`); with no percent the slot alone,
+    with no slot neither. An exited row shows ``💤 exited(N)`` instead: it no longer draws
+    on the account, and at the default width the two did not fit beside each other.
+
+    ``width`` is the row's content width once it has one. The label gives way first,
+    ellipsised, so the chip and the ``#N·NN%`` after it are never what is cut.
+
+    The persona badge is the row's (what the agent was spawned with) or, for an
+    agent the row does not know one for, its session's (what it launched as) —
+    docs/plans/spawn-personas.md §0 item 9. It comes last, and on a row too narrow for
+    everything the owner's order holds (review of #267's merge, M-F1): the label's padding
+    gives way first, then the badge is ellipsised, and dropped once fewer than
+    :data:`BADGE_KEEP` cells are left for it; only then is the label cut. The row is built
+    to its width, so its own ellipsis never reaches the chip or the ``#N·NN%``.
+    """
     agent = status.agent
     chip, style = STATE_CHIP.get(status.state, STATE_CHIP["unknown"])
-    text = Text(no_wrap=True, overflow="ellipsis")
-    text.append(f"{ROLE_ICON.get(agent.role, CUSTOM_ROLE_ICON)} ")
-    text.append(f"{agent.label:<13} ")
-    text.append(chip, style=style)
+    icon = f"{ROLE_ICON.get(agent.role, CUSTOM_ROLE_ICON)} "
+    tail = Text()
+    tail.append(chip, style=style)
     if status.state == "exited":
         # 💤 alone read as "sleeping" (#138); the word says what happened.
-        text.append(" exited", style="dim")
+        tail.append(" exited", style="dim")
         if agent.exit_status is not None:
-            text.append(f"({agent.exit_status})", style="dim")
+            tail.append(f"({agent.exit_status})", style="dim")
+    elif agent.account_slot is not None:
+        tail.append(f" #{agent.account_slot}" + ("·" if percent is not None else ""), style="dim")
+        if percent is not None:
+            tail.append_text(session_percent_text(percent))
+    persona = agent.persona or (status.session.persona if status.session is not None else None)
+    badge = Text(f" · {persona}", style="dim") if persona else Text()
+    label = Text(agent.label)
+    room = LABEL_WIDTH if width is None else max(2, width - cell_len(icon) - 1 - tail.cell_len)
+    if width is None or label.cell_len <= room:
+        left = room - label.cell_len  # the cells after the label's own, the badge's to take
+        if width is not None and badge.cell_len > left:
+            if left >= BADGE_KEEP:
+                badge.truncate(left, overflow="ellipsis")
+            else:
+                badge = Text()
+        label.pad_right(
+            min(LABEL_WIDTH, room - (0 if width is None else badge.cell_len)) - label.cell_len
+        )
+    else:
+        label.truncate(room, overflow="ellipsis")
+        badge = Text()
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(icon)
+    text.append_text(label)
+    text.append(" ")
+    text.append_text(tail)
+    text.append_text(badge)
     return text
 
 
@@ -274,6 +364,24 @@ HEADROOM_DOT: dict[str, tuple[str, str]] = {
 }
 """The Claude dot per ``HeadroomSummary.level``: over 50 % left green, 25-50 % yellow,
 5-25 % orange-red, under 5 % red, nothing left a skull, not read yet grey."""
+
+SESSION_WARN_FROM = 70
+"""From this share of an account's five-hour window USED, its figure is yellow."""
+SESSION_HIGH_FROM = 90
+"""From this share USED, red: the account is close to its session limit."""
+
+
+def session_percent_text(percent: float) -> Text:
+    """``42%`` — an account's five-hour window, percent USED, in the colour of how close it is.
+
+    Green below :data:`SESSION_WARN_FROM`, yellow up to :data:`SESSION_HIGH_FROM`, red from
+    there: the one format the sidebar's agent rows and the agent info line share. The
+    colour is the shown figure's, so ``70%`` is never green for a 69.6 read. The SESSION
+    window only (``HeadroomSummary.session_by_slot``), never the weekly one.
+    """
+    shown = round(percent)
+    colour = RED if shown >= SESSION_HIGH_FROM else YELLOW if shown >= SESSION_WARN_FROM else GREEN
+    return Text(f"{shown}%", style=colour)
 
 
 TIMES = "\N{MULTIPLICATION SIGN}"
@@ -426,6 +534,43 @@ class AddButton(Activatable):
 
     def message(self) -> Message:
         return AddProject()
+
+
+class CaptainButton(Activatable):
+    """The ``★`` between Fleet and ``+``: the captain, one click away (T4).
+
+    A rank insignia, a single star (plan section 4, the owner's pick): lit in the
+    accent while the captain's row is live — a process that can answer, the
+    ``ALIVE_STATES`` the cards count by — and dim otherwise. The shell decides what a
+    click does from the same frame: the captain view, or the Spawn dialog preset to
+    the captain when there is none to show.
+    """
+
+    DEFAULT_CSS = """
+    CaptainButton { width: 3; color: $text-muted; }
+    CaptainButton.live { color: $accent; text-style: bold; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__(Text(" ★ "), id="captain-button")
+        # No selection key: the keyboard cursor's walk (↑ ↓ from the header, pinned by the
+        # shell's tests) stays as it was, and the captain's own row in the Captain section
+        # is the keyboard's way to it — the star is the mouse's.
+        self.tooltip = CaptainButton.tip(live=False)
+
+    @staticmethod
+    def tip(*, live: bool) -> str:
+        if live:
+            return "The captain — open its view (aisquare captain)"
+        return "No captain running — start one (aisquare captain)"
+
+    def show(self, status: FleetAgentStatus | None) -> None:
+        live = status is not None and status.state in ALIVE_STATES
+        self.set_class(live, "live")
+        self.tooltip = CaptainButton.tip(live=live)
+
+    def message(self) -> Message:
+        return CaptainRequested()
 
 
 class Disclosure(Static):
@@ -717,11 +862,30 @@ class AgentRow(Activatable):
         super().__init__(agent_row_text(status), id=f"agent-row-{status.agent.id}")
         self.status = status
         self.selection_key = f"agent:{status.agent.id}"
+        self._painted: tuple[FleetAgentStatus, float | None, int] | None = None
 
     def show(self, status: FleetAgentStatus) -> None:
-        if status != self.status:
-            self.status = status
-            self.update(agent_row_text(status))
+        self.status = status
+        self.paint()
+
+    def paint(self) -> None:
+        """Draw the row for its status, its account's session use and its width.
+
+        The use is the sidebar's (:attr:`Sidebar.session_usage`, from the slow headroom
+        read), so a row mounted between two reads shows the last figure at once.
+        """
+        sidebar = self._sidebar()
+        slot = self.status.agent.account_slot
+        usage = sidebar.session_usage if sidebar is not None else {}
+        percent = usage.get(slot) if slot is not None else None
+        width = self.content_size.width
+        wanted = (self.status, percent, width)
+        if wanted != self._painted:
+            self._painted = wanted
+            self.update(agent_row_text(self.status, percent, width=width or None), layout=False)
+
+    def on_resize(self) -> None:
+        self.paint()
 
     def message(self) -> Message:
         return AgentSelected(self.status.agent.project_id, self.status.agent.id)
@@ -1044,6 +1208,57 @@ def doctor_badge(failing: int, warning: int) -> str:
     )
 
 
+class CaptainSection(Vertical):
+    """The home-level heading above the projects: the captain's row (one per home, T2).
+
+    The captain lives on the home board, which is never a project, so it never gets
+    a :class:`ProjectCard`; its row is an ordinary :class:`AgentRow` — selecting it
+    opens the same agent view, with Stop and Restart — under this heading instead.
+    """
+
+    DEFAULT_CSS = """
+    CaptainSection { height: auto; padding: 0 1; }
+    CaptainSection #captain-title { height: 1; }
+    CaptainSection #captain-empty { height: 1; color: $text-muted; }
+    CaptainSection #captain-notice { height: auto; color: $text-muted; }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static(Text("Captain", style="bold"), id="captain-title")
+        yield Static(
+            Text("no captain — `aisquare captain` starts one", style="dim"), id="captain-empty"
+        )
+        yield Static("", id="captain-notice")
+
+    def show(self, status: FleetAgentStatus | None, *, notice: str | None = None) -> None:
+        """Show the captain's row, or the line saying how to start one.
+
+        ``notice`` says the read behind this frame failed; ``status`` is then the
+        last frame's row, or ``None`` when there was none. It takes the place of
+        the "starts one" line, which is true only when the fleet ANSWERED none —
+        the project cards' rule (``Sidebar.show_projects``), for the captain.
+        """
+        empty = self.query_one("#captain-empty", Static)
+        said = self.query_one("#captain-notice", Static)
+        said.update(Text(notice or "", style="dim"))
+        said.display = bool(notice)
+        rows = list(self.query(AgentRow))
+        keep = next(
+            (row for row in rows if status and row.status.agent.id == status.agent.id), None
+        )
+        for row in rows:
+            if row is not keep:
+                row.remove()
+        empty.display = status is None and not notice
+        if status is None:
+            return
+        if keep is None:
+            # Under the heading, above the two lines that stand in for it.
+            self.mount(AgentRow(status), after=self.query_one("#captain-title"))
+        else:
+            keep.show(status)
+
+
 class StatusLine(Static):
     """The dim line under *⚙ Settings* (:func:`status_line_text`). A click opens Accounts.
 
@@ -1100,6 +1315,8 @@ class Sidebar(Vertical):
         ("down", "cursor_down", "next"),
         ("up", "cursor_up", "previous"),
         ("enter", "activate", "open"),
+        # Out of the footer, which is full at 80 columns; the help screen (?) lists it.
+        Binding("x", "stop_agent", "stop", show=False),
         # The partition, for terminals without mouse reporting (#137): live only
         # while the sidebar has focus, so a pane still receives < > = as text.
         # Out of the footer (it is full); the help screen (?) lists them.
@@ -1132,8 +1349,10 @@ class Sidebar(Vertical):
 
     can_focus = True
 
-    def __init__(self, *, id: str | None = None) -> None:
+    def __init__(self, *, id: str | None = None, captain: bool = True) -> None:
         super().__init__(id=id)
+        self.captain = captain
+        """Whether the experimental captain is on: off, no insignia and no captain section."""
         self.selected_key: str | None = None
         """What is highlighted: ``project:<id>``, ``agent:<id>``, or ``settings`` while the hub
         or a page it opens (App settings, Accounts, Doctor) shows."""
@@ -1147,6 +1366,9 @@ class Sidebar(Vertical):
         """The word the first dot names its accounts by (``status_line_text``'s ``name``)."""
         self.more_headroom: tuple[AgentHeadroom, ...] = ()
         """Every other agent's accounts the status line shows, each on its own line."""
+        self.session_usage: Mapping[int, float] = {}
+        """Slot → its five-hour window, percent USED, from the last headroom read: the
+        ``#N·NN%`` on the agent rows (``HeadroomSummary.session_by_slot``)."""
         self._prev_states: dict[str, str] = {}
         self._cursor_key: str | None = None
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
@@ -1161,7 +1383,11 @@ class Sidebar(Vertical):
     def compose(self) -> ComposeResult:
         with Horizontal(id="fleet-header"):
             yield Static(Text("Fleet"), id="fleet-title")
+            if self.captain:
+                yield CaptainButton()
             yield AddButton()
+        if self.captain:
+            yield CaptainSection(id="captain-section")
         yield Static("", id="projects-notice")
         # can_focus=False: the rows are Statics, so a mouse-down on one focuses
         # the nearest focusable ancestor. Left focusable, this scroll would take
@@ -1177,6 +1403,18 @@ class Sidebar(Vertical):
         yield OthersSection(id="others")
 
     # --- data in -----------------------------------------------------------------
+
+    def show_captain(self, status: FleetAgentStatus | None, *, notice: str | None = None) -> None:
+        """The home's captain row, above the projects (``None``: there is none).
+
+        ``notice``: why the read failed — the row is then the last frame's, kept.
+        The insignia in the header follows the same row (T4). With the captain off
+        there is neither, and nothing to show.
+        """
+        if not self.captain:
+            return
+        self.query_one(CaptainSection).show(status, notice=notice)
+        self.query_one(CaptainButton).show(status)
 
     def show_projects(
         self,
@@ -1565,12 +1803,17 @@ class Sidebar(Vertical):
         more: Sequence[AgentHeadroom] = (),
     ) -> None:
         """The status line's Claude dot, and one for each other agent's accounts (``more``),
-        from the usage cache (``FleetApp.refresh_headroom``)."""
+        from the usage cache (``FleetApp.refresh_headroom``), and the agent rows' session use
+        from the same read — never from the two-second tick."""
         self.headroom = headroom
         self.every_needs_login = every_needs_login
         self.headroom_name = name
         self.more_headroom = tuple(more)
         self._paint_status()
+        if headroom.session_by_slot != self.session_usage:
+            self.session_usage = headroom.session_by_slot
+            for row in self.query(AgentRow):
+                row.paint()
 
     def _paint_status(self) -> None:
         line = status_line_text(
@@ -1690,6 +1933,28 @@ class Sidebar(Vertical):
             return ahead[0] if ahead else behind[-1]
         return behind[-1] if behind else ahead[0]
 
+    def put_cursor(self, key: str) -> bool:
+        """Put the keyboard cursor on the row for ``key``; whether that row is on screen.
+
+        For a caller that hands the keyboard to a row on the user's behalf (the ui
+        receiver's ``focus_project``): ↑/↓ and Enter then go on from that row, as
+        they would had the arrows brought the cursor there. A row that is not on
+        screen — a card inside a folded group — is not one to land on (the arrows ask
+        ``_on_screen`` too), so the cursor stays where it was.
+        """
+        rows = [row for row in self.query(Activatable) if row.selection_key]
+        target = next(
+            (row for row in rows if row.selection_key == key and self._on_screen(row)), None
+        )
+        if target is None:
+            return False
+        for row in rows:
+            row.remove_class("cursor")
+        self._cursor_key = key
+        target.add_class("cursor")
+        target.scroll_visible()
+        return True
+
     def action_resize(self, delta: int | None) -> None:
         """Ask for the partition to move ``delta`` columns (``None``: reset); ``Panes`` answers."""
         self.post_message(ResizeSidebar(delta))
@@ -1705,3 +1970,34 @@ class Sidebar(Vertical):
             if row.selection_key == self._cursor_key:
                 row.activate()
                 return
+
+    def action_stop_agent(self) -> None:
+        """``x``: the Stop dialog for the SELECTED agent; any other selection does nothing.
+
+        The binding is the sidebar's, not the row's — the rows are Statics with
+        ``can_focus=False`` on purpose (see ``#projects`` above), so there is no
+        focused row to bind to. It acts on what is selected, which is what the
+        user sees highlighted and what the open view is showing.
+
+        The agent names its own project, so a row selected under one card cannot
+        be stopped against another's ``ProjectInfo``.
+
+        It asks ``STOP_STATES`` too — the rule the agent view's button asks, the
+        same constant, not a copy of it. A lost row is an ordinary selectable
+        row, so without this the key offered exactly the Stop the button
+        refuses; and ``stop`` does not decline such a row, it ends it outright
+        with no ``/exit`` and no grace, which is ``fleet reap``'s outcome and
+        outside this task (found by coder3a-1 before the PR opened). An exited
+        row IS offered: its dead window is what Stop removes there (#138).
+        """
+        key = self.selected_key
+        if key is None or not key.startswith("agent:") or self.last_frame is None:
+            return
+        agent_id = key.removeprefix("agent:")
+        _projects, agents = self.last_frame
+        for statuses in agents.values():
+            for status in statuses:
+                if status.agent.id == agent_id:
+                    if status.state in STOP_STATES:
+                        self.post_message(StopAgent(status.agent.project_id, agent_id))
+                    return

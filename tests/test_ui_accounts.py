@@ -39,7 +39,8 @@ from textual.worker import Worker, WorkerState
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli_app
-from aisquare.cli.ui.app import ACCOUNTS_WORKER, SIDEBAR_WIDTH_KEY, FleetApp
+from aisquare.cli.ui import app as shell_module
+from aisquare.cli.ui.app import ACCOUNTS_WORKER, FLEET_WORKER, SIDEBAR_WIDTH_KEY, FleetApp
 from aisquare.cli.ui.sidebar import SETTINGS_KEY, AccountsSelected, StatusLine
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import accounts as accounts_view
@@ -583,6 +584,133 @@ def test_ticks_while_the_accounts_read_waits_let_it_answer_and_read_once_more_af
     assert after == 3  # and the one read after it
     assert peak[0] == 1, f"{peak[0]} reads at once"
     assert held == [1, 2], held  # three ticks during one wait cost one more read
+
+
+def test_tick_frames_that_paint_after_the_accounts_wait_still_cost_one_read_after_it(
+    no_network: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fleet read left the UI thread, and a tick asks for the accounts' read with its
+    frame, which now paints after the tick. The frames of two ticks that a slow accounts
+    read outlived painted once it had ended, and each asked again: the first started a
+    read, the second one after it. The ticks the wait outlived cost two reads after it, not
+    one (a fourth frame on Windows CI, d13455de). A frame asks for none when a read began
+    after the ticks it answers."""
+    no_network["session"] = _session()
+    hold = threading.Event()
+    waiting, release = threading.Event(), threading.Event()
+    frames = threading.Event()  # the fleet reads wait on it while it is clear
+    frames.set()
+    held: list[int] = []  # the reads that ran while the registry was held, numbered
+    counting = threading.Lock()
+    read_fleet = shell_module._read_fleet
+
+    def slow_fleet(show_captured: bool) -> Any:
+        frames.wait(HOLD_S)
+        return read_fleet(show_captured)
+
+    def reader() -> AccountsOverview:
+        with counting:
+            n = 0
+            if hold.is_set():
+                held.append(len(held) + 1)
+                n = held[-1]
+        if n == 1:
+            waiting.set()
+            release.wait(HOLD_S)  # as a writer holds the lock
+        emails = ["me@example.com", *(f"{i}@example.com" for i in range(2, n + 2))]
+        return _overview(*(_status(i, email) for i, email in enumerate(emails, 1)))
+
+    monkeypatch.setattr(shell_module, "_read_fleet", slow_fleet)
+
+    async def run() -> int | None:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
+        async with app.run_test(size=SIZE) as pilot:
+            await accounts_read(app)
+            hold.set()
+            try:
+                app.refresh_data()  # a tick: its frame starts the read that waits
+                assert await asyncio.to_thread(waiting.wait, HOLD_S), "the tick asked"
+                frames.clear()
+                app.refresh_data()  # two more ticks while it waits, their frames held
+                app.refresh_data()
+                await pilot.pause()
+                release.set()  # the writer lets go: the waiting read answers
+                await accounts_read(app)
+                frames.set()  # and the ticks' frames paint after it
+                await settle_page(app, group=FLEET_WORKER)
+                await accounts_read(app)
+            finally:
+                release.set()
+                frames.set()
+            return _claude_count(app)
+
+    after = asyncio.run(run())
+    assert held == [1, 2], held  # the wait, then ONE read after it
+    assert after == 3
+
+
+class _StoppedClock:
+    """The app's ``time``, with ``monotonic`` stopped: every two stamps tie, as two a few ms
+    apart do on Windows before Python 3.13, where it moves in 15.6 ms steps."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+    @staticmethod
+    def monotonic() -> float:
+        return 0.0
+
+
+def test_a_frame_orders_its_calls_and_the_accounts_reads_by_count_not_by_the_clock(
+    no_network: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows CI on 738d5594: the frame's cue for the accounts (a read began after the
+    calls it answers) compared ``time.monotonic`` stamps, and on Windows' 15.6 ms steps a
+    tick a few ms after a read began read the same time. The tie counted as "began
+    after", the tick's frame asked for nothing, and a wait could end with no read after
+    it. The calls are counted instead, so a stopped clock changes nothing: a frame asks
+    when the newest read began before its tick, and not when one began after it."""
+    no_network["session"] = _session()
+    reads = [0]
+    frames = threading.Event()  # the fleet reads wait on it while it is clear
+    frames.set()
+    read_fleet = shell_module._read_fleet
+
+    def slow_fleet(show_captured: bool) -> Any:
+        frames.wait(HOLD_S)
+        return read_fleet(show_captured)
+
+    def reader() -> AccountsOverview:
+        reads[0] += 1  # one read at a time
+        return _overview(_status(1, "me@example.com"))
+
+    monkeypatch.setattr(shell_module, "time", _StoppedClock())
+    monkeypatch.setattr(shell_module, "_read_fleet", slow_fleet)
+
+    async def run() -> tuple[int, int, int]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=reader)
+        async with app.run_test(size=SIZE) as pilot:
+            await accounts_read(app)
+            at_start = reads[0]
+            app.refresh_data()  # a tick after that read began: its frame asks
+            await settle_page(app, group=FLEET_WORKER)
+            await accounts_read(app)
+            after_tick = reads[0]
+            frames.clear()
+            try:
+                app.refresh_data()  # a tick whose frame is held…
+                await pilot.pause()
+                app.refresh_accounts()  # …and a read begun after it (AccountsChanged)
+                await accounts_read(app)
+            finally:
+                frames.set()
+            await settle_page(app, group=FLEET_WORKER)
+            await accounts_read(app)
+            return at_start, after_tick, reads[0]
+
+    at_start, after_tick, after = asyncio.run(run())
+    assert after_tick == at_start + 1  # the tick's frame read the accounts
+    assert after == after_tick + 1  # the read begun after the tick answers its frame too
 
 
 def test_a_tick_the_app_handles_before_a_reads_answer_still_lets_that_answer_paint(

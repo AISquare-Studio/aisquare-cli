@@ -39,7 +39,7 @@ from typing import Any
 import typer
 from typer.core import TyperGroup, TyperOption
 
-from aisquare.cli.common import expected_home_creation_errors, fail
+from aisquare.cli.common import USAGE_ERROR, expected_home_creation_errors, fail
 from aisquare.core.state import get_state
 from aisquare.core.store import (
     StoreUnopenable,
@@ -75,11 +75,6 @@ VERB_SYNONYMS: dict[str, tuple[str, ...]] = {
 really has are ever suggested."""
 
 _NO_SUCH_COMMAND = re.compile(r"No such command '([^']+)'")
-
-# click is vendored (``typer._click``); like tests/cli_tree.py we stay on the
-# public typer surface and duck-type instead — UsageError is the direct base
-# of the public ``typer.BadParameter``.
-_USAGE_ERROR: type[Exception] = typer.BadParameter.__bases__[0]
 
 _JSON_HELP = (
     "Emit machine-readable JSON on stdout. Put --json before the subcommand "
@@ -325,6 +320,6 @@ class GlobalFlagsGroup(TyperGroup):
                 hint=damaged_store_recovery(),
                 detail=str(damaged),
             )
-        except _USAGE_ERROR as error:
+        except USAGE_ERROR as error:
             _handle_usage_error(error)
             raise

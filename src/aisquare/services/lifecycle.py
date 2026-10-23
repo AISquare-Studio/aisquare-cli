@@ -658,7 +658,7 @@ def lacks_refresh_hooks(release: str) -> bool:
 
 #: The last release with no Codex hooks: an install of it, or of one before it, has none to
 #: write, and its ``agents refresh-hooks codex`` fails.
-LAST_WITHOUT_CODEX_HOOKS = "0.8.1"
+LAST_WITHOUT_CODEX_HOOKS = "0.8.2"
 
 
 def lacks_agent_hooks(agent: str, release: str) -> bool:

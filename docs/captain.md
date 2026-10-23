@@ -358,7 +358,7 @@ aisquare captain
 
 ## Known limits
 
-Two follow-ups are open, each on its own card:
+Three follow-ups are open:
 
 - **After a reboot, a project agent's row still reads `waiting`.** The fleet
   reads an agent's state from its last hook, not from tmux. So an agent whose
@@ -371,6 +371,15 @@ Two follow-ups are open, each on its own card:
   loads on the first utterance, which takes a few seconds on a CPU. A mode
   switch or a hold-to-talk press in those seconds is answered late. Speak once
   and wait for the first transcript before you switch.
+- **Under an exported `AISQUARE_TEAM_HUB`, the captain's seats trace as their
+  own projects.** A seat the captain spawns reads its own project's board (see
+  the CHANGELOG), so its trace and its explainability key are its project's.
+  `aisquare explainability key set` and the Explainability tab in a shell with
+  the hub exported speak for the hub's project, and a key set there never
+  reaches those seats. Set it for the seat's project with
+  `aisquare explainability key set -P <project>`. Seats you spawn yourself follow
+  the hub as before. Not fixed here: making one key cover both would change
+  which project a hub's key is for, everywhere.
 
 The captain reads Claude Code's own screens: the input box, the trust dialog
 and the permission chooser. Every capture it was built and tested on is from

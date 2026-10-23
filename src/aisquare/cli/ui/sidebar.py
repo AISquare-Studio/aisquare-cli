@@ -242,6 +242,15 @@ BADGE_KEEP = 5
 fewer left it is dropped rather than shown as a bare ``·``."""
 
 
+def persona_badge(status: FleetAgentStatus) -> Text:
+    """`` · skeptic``, dim: the persona the row was spawned with, or else the one its session
+    runs as; empty for none. A sidebar row and the agent info line both end with it, and
+    both drop it first, by :data:`BADGE_KEEP`."""
+    agent = status.agent
+    persona = agent.persona or (status.session.persona if status.session is not None else None)
+    return Text(f" · {persona}", style="dim") if persona else Text()
+
+
 def agent_row_text(
     status: FleetAgentStatus, percent: float | None = None, *, width: int | None = None
 ) -> Text:
@@ -281,8 +290,7 @@ def agent_row_text(
         tail.append(f" #{agent.account_slot}" + ("·" if percent is not None else ""), style="dim")
         if percent is not None:
             tail.append_text(session_percent_text(percent))
-    persona = agent.persona or (status.session.persona if status.session is not None else None)
-    badge = Text(f" · {persona}", style="dim") if persona else Text()
+    badge = persona_badge(status)
     label = Text(agent.label)
     room = LABEL_WIDTH if width is None else max(2, width - cell_len(icon) - 1 - tail.cell_len)
     if width is None:
@@ -1182,6 +1190,30 @@ def doctor_badge(failing: int, warning: int) -> str:
     )
 
 
+CAPTAIN_READING = "reading the captain's board…"
+"""The Captain section's line from the moment Settings switches the captain on until a read
+of the fleet that asked for it answers: until then nothing says there is no captain."""
+
+
+class StartCaptain(Activatable):
+    """*▶ Start captain*, in the Captain section while there is no captain: what the ``★`` does
+    then, the Spawn dialog with the captain chosen. It said "`aisquare captain` starts one",
+    a command to go and type, and the owner did not find how to start one (#33)."""
+
+    DEFAULT_CSS = """
+    StartCaptain { color: $accent; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__(Text("▶ Start captain"), id="captain-empty")
+        # No selection key, as the ★ has none: the keyboard cursor's walk (pinned by the
+        # shell's tests) stays as it was, and the line is the mouse's way to a start.
+        self.tooltip = "No captain running — start one (aisquare captain)"
+
+    def message(self) -> Message:
+        return CaptainRequested()
+
+
 class CaptainSection(Vertical):
     """The home-level heading above the projects: the captain's row (one per home, T2).
 
@@ -1199,9 +1231,7 @@ class CaptainSection(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static(Text("Captain", style="bold"), id="captain-title")
-        yield Static(
-            Text("no captain — `aisquare captain` starts one", style="dim"), id="captain-empty"
-        )
+        yield StartCaptain()
         yield Static("", id="captain-notice")
 
     def show(self, status: FleetAgentStatus | None, *, notice: str | None = None) -> None:
@@ -1212,7 +1242,7 @@ class CaptainSection(Vertical):
         the "starts one" line, which is true only when the fleet ANSWERED none —
         the project cards' rule (``Sidebar.show_projects``), for the captain.
         """
-        empty = self.query_one("#captain-empty", Static)
+        empty = self.query_one("#captain-empty", StartCaptain)
         said = self.query_one("#captain-notice", Static)
         said.update(Text(notice or "", style="dim"))
         said.display = bool(notice)
@@ -1268,6 +1298,10 @@ class OthersSection(Vertical):
 # --- the pane ---------------------------------------------------------------------
 
 
+MOVE_KEYS = Binding.Group("move", compact=True)
+"""The sidebar's ↓ and ↑, as the footer shows them: one entry."""
+
+
 class Sidebar(Vertical):
     """Header and the scrolling project list; under the separator, *⚙ Settings* and its status.
 
@@ -1286,8 +1320,9 @@ class Sidebar(Vertical):
     """
 
     BINDINGS: ClassVar = [
-        ("down", "cursor_down", "next"),
-        ("up", "cursor_up", "previous"),
+        # One footer entry, "↓↑ move": two took the room "R remote" needs at 80 columns (#33).
+        Binding("down", "cursor_down", "next", group=MOVE_KEYS),
+        Binding("up", "cursor_up", "previous", group=MOVE_KEYS),
         ("enter", "activate", "open"),
         # Out of the footer, which is full at 80 columns; the help screen (?) lists it.
         Binding("x", "stop_agent", "stop", show=False),
@@ -1385,6 +1420,23 @@ class Sidebar(Vertical):
             return
         self.query_one(CaptainSection).show(status, notice=notice)
         self.query_one(CaptainButton).show(status)
+
+    async def set_captain(self, on: bool) -> None:
+        """The captain switched on or off while asq runs (Settings, #33): the insignia and the
+        Captain section mounted, saying the captain is being read until a frame answers,
+        or removed. As at a start with the switch so (:meth:`compose`), never a restart."""
+        if on == self.captain:
+            return
+        self.captain = on
+        if not on:
+            for widget in [*self.query(CaptainButton), *self.query(CaptainSection)]:
+                await widget.remove()
+            return
+        header = self.query_one("#fleet-header", Horizontal)
+        await header.mount(CaptainButton(), before=self.query_one(AddButton))
+        section = CaptainSection(id="captain-section")
+        await self.mount(section, before=self.query_one("#projects-notice"))
+        section.show(None, notice=CAPTAIN_READING)
 
     def show_projects(
         self,

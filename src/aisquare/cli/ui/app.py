@@ -77,6 +77,7 @@ from aisquare.cli.ui.receiver import listen_for_ui, stop_listening_for_ui
 from aisquare.cli.ui.remote_control import SWITCHES, RemoteController, ngrok_ends_with
 from aisquare.cli.ui.sidebar import (
     ALIVE_STATES,
+    CAPTAIN_READING,
     HEADROOM_DOT,
     RED,
     SETTINGS_KEY,
@@ -113,7 +114,9 @@ from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
 from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.remote import RemotePanel
+from aisquare.cli.ui.views.settings_captain import CaptainSwitched
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
+from aisquare.cli.ui.views.settings_remote import RemoteChip
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core import clipboard, experimental, paths
 from aisquare.core.console import stderr_console
@@ -292,13 +295,16 @@ class _FleetRead:
     captain_error: str | None = None
     """Why the home or its captain could not be read: ``FleetApp._captain`` keeps the last
     frame's then."""
+    captain_asked: bool = False
+    """Whether the captain's part was read: the captain was on as the read began. One begun
+    before Settings switched it on found nothing of it, which is not "no captain"."""
 
 
 def _read_frame(show_captured: bool, captain: bool) -> _FleetRead:
     """One frame of the sidebar, read on the calling thread: the fleet, then the captain's
     home board and row when the captain is on (``experimental.captain``)."""
     read = _read_fleet(show_captured, captain=captain)
-    return _read_captain(read) if captain else read
+    return replace(_read_captain(read), captain_asked=True) if captain else read
 
 
 def _read_fleet(show_captured: bool, *, captain: bool = False) -> _FleetRead:
@@ -773,8 +779,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Binding("q", "quit", "quit"),
         Binding("ctrl+q", "quit", "quit", show=False),
         Binding("t", "pick_theme", "theme"),
-        # Off the footer, which must fit 80 columns; the ? screen and the palette list it.
-        Binding("R", "remote_panel", "remote", show=False),
+        # In the footer, where the owner looks for it (#33): it fits 80 columns now that the
+        # sidebar's ↓ and ↑ share one entry. The ? screen and the palette list it too.
+        Binding("R", "remote_panel", "remote"),
         Binding("r", "refresh_now", "refresh"),
         Binding("a", "toggle_captured", "captured", show=False),
         Binding("plus", "add_project", "add project", show=False, key_display="+"),
@@ -901,9 +908,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._undo: list[project_groups.UndoEntry] = []
         """The layout gestures of this session, newest last; ``u`` reverts the last (#140)."""
         self.captain_on = experimental.captain_enabled()
-        """The experimental captain, read once at the start: off, there is no insignia,
-        captain row or captain view, and no ui receiver is started (:meth:`on_mount`).
-        Turned on while asq runs, it shows at asq's next start (``core.experimental``)."""
+        """The experimental captain, read at the start: off, there is no insignia, captain
+        row or captain view, and no ui receiver is started (:meth:`on_mount`). Settings'
+        *Captain* box switches it while asq runs (:meth:`on_captain_switched`)."""
 
     # --- layout -------------------------------------------------------------------
 
@@ -946,6 +953,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # wait=False here and below: a Remote that stops runs down on a thread of its own,
         # since stopping uvicorn and ngrok froze the fleet UI for seconds (r3 review of #243).
         self.remote.restore(wait=False)
+        # "📡 remote · N devices" under the status line while Remote is on (#33).
+        self.query_one("#others").mount(RemoteChip(self.remote, id="remote-chip"))
         self.set_interval(30.0, self._remote_auto_off)
         self.set_interval(30.0, self.remote.revive_tunnel_if_dead)
         # The captain's ui actions (T4): after the first frame, which they resolve against.
@@ -954,6 +963,20 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         # for actions the receiver then refused one by one (review of #240, F6).
         if self.captain_on:
             listen_for_ui(self)
+
+    async def on_captain_switched(self, event: CaptainSwitched) -> None:
+        """Settings' *Captain* box (#33): all that :attr:`captain_on` gates, at once, with no
+        restart: the insignia and the Captain section, the captain's part of the fleet read
+        (read as each read runs) and the ui receiver."""
+        if event.on == self.captain_on:
+            return
+        self.captain_on = event.on
+        await self.sidebar.set_captain(event.on)
+        if event.on:
+            listen_for_ui(self)
+        else:
+            stop_listening_for_ui(self)
+        self.refresh_data()
 
     # --- what was open (#144) ---------------------------------------------------------
 
@@ -1340,12 +1363,15 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         resolve against them — and the notice says why where the "starts one"
         line would be: the project cards' rule, for the captain.
         """
-        if read.captain_error is None:
+        if not self.captain_on:  # a read begun before Settings switched the captain off
+            return None, None, None
+        if read.captain_asked and read.captain_error is None:
             return read.home, read.captain, None
         last = self.snapshot
         kept = last.home if last is not None else None
         rows = last.agents.get(kept.id, []) if last is not None and kept is not None else []
-        return kept, next(iter(rows), None), read.captain_error
+        # Not asked: begun before Settings switched the captain on, and the next read asks.
+        return kept, next(iter(rows), None), read.captain_error or CAPTAIN_READING
 
     def refresh_accounts(self) -> None:
         """Re-read the Claude accounts OFF the UI thread; the status line and the page follow.
@@ -2578,6 +2604,7 @@ def _writing_workers() -> dict[str, str]:
         personas_tab,
         project,
         settings,
+        settings_remote,
         welcome,
     )
 
@@ -2596,6 +2623,7 @@ def _writing_workers() -> dict[str, str]:
         personas_tab.ATTACH_WORKER: "a persona's attachment",
         captain.TELL_WORKER: "a line to the captain",
         captain.VOICE_WORKER: "the captain's speaker switch",
+        settings_remote.TOKEN_WORKER: "Settings ▸ Remote's save of the ngrok token",
         agent.RESTART_WORKER: "an agent's restart",
         fleet_bulk.BULK_WORKER: "Settings ▸ Fleet's restart or stop of every agent",
         explainability.SAVE_WORKER: "Explainability's setup",

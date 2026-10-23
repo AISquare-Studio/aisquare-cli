@@ -287,11 +287,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - In `asq`, every agent has one info line, the same on the Manager tab and in the
   agent's own view: its label, its state, the Claude account it runs on (by name)
   with how much of that account's five-hour session is used, the model and the
-  effort it runs at, and its pane, as in
-  `🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4`. A line too long
-  for its row shortens the agent's label first (to six characters at least), then is
-  cut at its end, so the account and its use stay. The figure is
-  green below 70 %, yellow from 70 % and red from 90 %. The agent view no longer
+  effort it runs at, its pane, and the persona it runs as, as in
+  `🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4 · skeptic`. A line
+  too long for its row drops the persona first, as the sidebar's rows do (cut while a
+  letter of it fits, never left as a bare `·`), then shortens the agent's label (to six
+  characters at least), then is cut at its end, so the account and its use stay. The
+  figure is green below 70 %, yellow from 70 % and red from 90 %. The agent view no longer
   shows the role, the task or the working directory there.
 - The sidebar's agent rows show the account's slot and its session use after the
   state chip, as in `▶ #3·87%`. A long label is shortened to make room, never the
@@ -313,6 +314,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tmux as before. Polling is quicker too: typing no longer holds frames back
   until you stop, and an echo that takes longer than 50 ms no longer waits half a
   second to show.
+- Remote control is in `asq`'s *⚙ Settings* now, as well as behind `R`.
+  *Turn on remote control* starts it. The first time, it asks for your ngrok
+  token instead (*Paste your ngrok token*, with the link to get a free one),
+  checks it with ngrok and keeps it. It never shows the token again, and a token
+  ngrok refuses is reported beside the field. On, the section shows the link and
+  copies it by itself once ngrok's link arrives, and shows the QR code, the
+  passphrase and *Turn off*.
+  The write switch, auto-off, a new passphrase and the connected devices sit
+  under a folded *Advanced*. It is the same Remote the `R` panel shows. The
+  footer shows `R remote` again (the sidebar's ↓ and ↑ share one entry,
+  `↓↑ move`, so it fits 80 columns), and while Remote is on the sidebar shows
+  `📡 remote · N devices`, which opens the panel.
+- The experimental captain has a box in `asq`'s *⚙ Settings ▸ Captain*. Ticking it
+  saves `experimental.captain` and shows the ★ and the Captain section at once,
+  with no restart; unticking hides them. While `AISQUARE_EXPERIMENTAL_CAPTAIN` is
+  set, it wins over the setting: the box shows the state it forces, greyed, with a
+  line saying why.
+- With no captain running, the Captain section offers *▶ Start captain*, which
+  opens the Spawn dialog with the captain chosen, as the ★ does. It used to show
+  the command to type instead.
+- The captain's view in `asq` has a one-line message box. Enter types the line into
+  the captain's pane the way *What's up* does and clears the box. If the send is
+  refused, a notice says why and the line comes back.
+- Remote control works out of the box: there is nothing to install. Its web
+  server (starlette, uvicorn, websockets), `cryptography` for Web Push and the
+  ngrok agent are core dependencies now, so the one-line install and `asq upgrade`
+  bring them; the agent is the official ngrok Python SDK, bundled, which runs
+  inside `asq` with no traffic inspector and no local API on `127.0.0.1:4040`.
+  The one setup step left is pasting your free ngrok token once, in *⚙ Settings ▸
+  Remote control*; it is checked with ngrok and kept owner-only in
+  `~/.aisquare/ngrok-authtoken`. An ngrok you already signed in
+  (`NGROK_AUTHTOKEN`, or your own `ngrok.yml`) keeps working with nothing to
+  paste. Remote no longer answers "not installed" with a pip, uv or pipx command,
+  or tells you to run `ngrok config`; only a damaged install gets one line with
+  the command that repairs it. `aisquare-cli[remote]` still resolves, and adds
+  nothing.
 
 ### Fixed
 

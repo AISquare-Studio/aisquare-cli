@@ -11,6 +11,10 @@ Under them, *Fleet*: *Restart all…* and *Stop all…*, for every running agent
 project (``views.fleet_bulk``). Each asks first, in a dialog that lists who. The action
 then runs off the UI thread, with a toast per agent as it is done and one that sums it
 up. Both buttons are greyed while it runs.
+
+Then *Remote control* (``views.settings_remote``) and *Captain* (``views.settings_captain``),
+each a section of its own mounted by one line (#33). The page scrolls: Remote's QR alone
+is some eighteen rows.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
@@ -37,6 +41,8 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.views.agent import AgentRestarted
 from aisquare.cli.ui.views.fleet_bulk import BULK_WORKER, ConfirmBulk, named, summary_text
+from aisquare.cli.ui.views.settings_captain import CaptainToggle
+from aisquare.cli.ui.views.settings_remote import RemoteSection
 from aisquare.services import fleet as fleet_service
 
 LINKS: tuple[tuple[str, str, str], ...] = (
@@ -61,7 +67,7 @@ FLEET_ABOUT = (
 )
 
 
-class SettingsHubView(Vertical):
+class SettingsHubView(VerticalScroll, can_focus=False):
     """Settings: a title, then one link per :data:`LINKS` with what it opens."""
 
     DEFAULT_CSS = """
@@ -97,6 +103,8 @@ class SettingsHubView(Vertical):
                         variant="error" if action == "stop" else "default",
                     )
             yield Static(Text(FLEET_ABOUT), classes="hub-about", id="hub-fleet-about")
+        yield RemoteSection(id="settings-remote")
+        yield CaptainToggle(id="settings-captain")
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)

@@ -318,7 +318,10 @@ short answer is never mistaken for a short pane.
 REMOTE_SERVER_NEEDS = ("starlette", "uvicorn", "websockets")
 """What the server cannot start without (:func:`_remote_dependency_error`)."""
 REMOTE_EXTRA = (*REMOTE_SERVER_NEEDS, "cryptography")
-"""What the ``remote`` extra installs: the server's three, and what Web Push needs."""
+"""Remote's dependencies: the server's three, and what Web Push needs. Core since #34 (they
+were the ``remote`` extra, now a no-op alias), so only a damaged install misses one."""
+DAMAGED_INSTALL = "this install is damaged: Remote's own dependencies are missing from it"
+"""The start of the one line a damaged install gets, before the command that repairs it."""
 
 NO_DIST_INDEX = (
     "no index.html in the --dist directory (is it still being built?) — build the page on the "
@@ -5485,10 +5488,8 @@ def build_remote_app(
         from starlette.routing import Mount, Route, WebSocketRoute
         from starlette.status import WS_1011_INTERNAL_ERROR
         from starlette.websockets import WebSocketDisconnect
-    except ImportError as exc:  # pragma: no cover - exercised only in a base install
-        raise RemoteUnavailable(
-            f"the remote extra is not installed — {remote_install_hint()}"
-        ) from exc
+    except ImportError as exc:  # pragma: no cover - only a damaged install: they are core
+        raise RemoteUnavailable(f"{DAMAGED_INSTALL} — repair it: {remote_install_hint()}") from exc
 
     from aisquare.services import remote_actions, remote_needs, remote_push
 
@@ -6330,8 +6331,9 @@ assignment is not a def, so the alias bridges nothing."""
 
 
 def remote_install_hint() -> str:
-    """The one command that adds the ``remote`` extra to the install that is running, made
-    the way that install was made.
+    """The one command that repairs the install that is running, made the way that install
+    was made: Remote's dependencies are core (#34), so only a damaged install misses one, and
+    this is the last-resort line it gets, never the normal path's.
 
     It said ``pip install 'aisquare-cli[remote]' (or: pipx inject aisquare-cli
     websockets)``, and neither fixed the install the docs give, a uv tool
@@ -6369,7 +6371,7 @@ def remote_install_hint() -> str:
         missing = [name for name in needed if importlib.util.find_spec(name) is None]
         return f"pipx inject {DISTRIBUTION} {' '.join(missing or REMOTE_EXTRA)}"
     python = _remote_shell_word(sys.executable)
-    extra = _remote_shell_word(f"{DISTRIBUTION}[remote]")
+    extra = _remote_shell_word(DISTRIBUTION)
     if _remote_made_by_uv(prefix):
         return f"uv pip install --python {python} {extra}"
     if sys.platform == "win32" and python.startswith('"'):
@@ -6392,8 +6394,8 @@ no command line carries."""
 
 
 def _remote_uv_tool_hint(receipt: Path) -> str:
-    """``uv tool install`` as this tool's receipt says it was installed, ``remote`` added to
-    aisquare-cli's extras.
+    """``uv tool install`` as this tool's receipt says it was installed, which syncs what its
+    environment lacks.
 
     Installing a tool again resolves it from that command alone (measured with uv
     0.12.19): what the command does not name goes. A fixed ``--with tiktoken
@@ -6420,16 +6422,13 @@ def _remote_uv_tool_hint(receipt: Path) -> str:
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
         tool, requirements = {}, None
     if not isinstance(requirements, list) or not requirements:
-        as_installed = ["--python", running, "--with", "tiktoken", f"{DISTRIBUTION}[remote]"]
+        as_installed = ["--python", running, "--with", "tiktoken", DISTRIBUTION]
         return " ".join(
             _remote_shell_word(word) for word in ["uv", "tool", "install", *as_installed]
         )
     said = _remote_uv_tool_words(tool, requirements, running)
     if said is None:
-        return (
-            f"install {DISTRIBUTION} again with uv tool install, as {receipt} records it, "
-            "adding remote to its extras"
-        )
+        return f"install {DISTRIBUTION} again with uv tool install, as {receipt} records it"
     return " ".join(_remote_shell_word(word) for word in said)
 
 
@@ -6460,7 +6459,7 @@ def _remote_uv_tool_words(
         editable, requirement = given
         flag = "--with-executables-from" if entry["name"] in executables else "--with"
         words += ["--with-editable" if editable else flag, requirement]
-    given = _remote_uv_requirement(main, extra="remote")
+    given = _remote_uv_requirement(main)
     if given is None:
         return None
     editable, requirement = given
@@ -6566,7 +6565,7 @@ def _remote_dependency_error() -> str | None:
     if not missing:
         return None
     named = ", ".join(missing)
-    return f"the remote extra is not installed ({named} missing) — {remote_install_hint()}"
+    return f"{DAMAGED_INSTALL} ({named}) — repair it: {remote_install_hint()}"
 
 
 def runtime() -> Runtime:
@@ -6614,7 +6613,7 @@ def _remote_uvicorn_server() -> type[uvicorn.Server]:
     """uvicorn's server for Remote, in the TUI's thread (:class:`_Server`) and under ``serve``
     (:func:`_remote_serve_server`) alike: its stop cuts what a phone that stopped reading
     holds up (:func:`_remote_cut_stuck`). Made where a server is, from the ``uvicorn``
-    imported then: it is the remote extra's."""
+    imported then: a core dependency since #34."""
     import asyncio
 
     import uvicorn

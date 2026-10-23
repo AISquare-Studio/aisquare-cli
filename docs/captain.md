@@ -62,19 +62,28 @@ can read and change. It is never packed into a codebase snapshot (`init`,
 `project onboard` and `--refresh` skip it, and doctor says so), so agents there
 get no packed overview. Removing it from the fleet hides it again.
 
-Turn it on for this home:
+Turn it on for this home in `asq`: *⚙ Settings ▸ Captain*, tick *Captain
+(experimental)*. The ★ beside Fleet and the Captain section above the projects
+show at once, with no restart, and so does the captain's part of the sidebar's
+read and the receiver for its `ui` actions; untick, and they all go at once. From a
+shell, the same setting:
 
 ```sh
 aisquare config set experimental.captain true
 ```
 
-To turn it on for one shell only, set `AISQUARE_EXPERIMENTAL_CAPTAIN=1`. The
-variable wins over the config either way, and `0` turns it off. The captain's
-own window is started with the variable as that shell has it, at every start and
-restart, so the captain runs with the switch on even when the fleet's tmux
-server was started without it. `asq` reads the switch when it starts, so restart
-it to see the insignia. Turning it off stops nothing that is already running.
-On, everything below holds exactly as written.
+A running `asq` follows its own box at once, and a `config set` from a shell
+at its next start. To turn it on for one shell only, set
+`AISQUARE_EXPERIMENTAL_CAPTAIN=1`. The variable wins over the config either way,
+and `0` turns it off; while it is set, Settings shows the box in the state it
+forces, greyed, with a line saying why. The captain's own window is started with
+the variable as that shell has it, at every start and restart, so the captain
+runs with the switch on even when the fleet's tmux server was started without
+it. Turning it off stops nothing that is already running. On, everything below
+holds exactly as written.
+
+With no captain running, the Captain section's *▶ Start captain* does what the
+dim ★ does: it opens the Spawn dialog with the captain chosen.
 
 ## Setup, once
 
@@ -106,6 +115,11 @@ On, everything below holds exactly as written.
    headset there.
 
 ## Talking to the captain
+
+In `asq`, the captain's view has a one-line box under its bar: type, and Enter
+types the line into the captain's pane the way *What's up* does, through the one
+guarded door that reads the pane first and refuses any dialog by name. The box
+clears; a send that is refused says why, and the line comes back into the box.
 
 Typed, from any terminal:
 

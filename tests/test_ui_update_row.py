@@ -1,6 +1,6 @@
 """The ⬆ row under *⚙ Settings*, its dialog, and the one-click update's hand-over and reopen.
 
-The release check is the app's ``release_check`` seam (``services.updates.check`` in
+The release check is the app's ``release_check`` seam (``services.updates.check_for_release`` in
 production, tested in tests/test_release_check.py), and the plan the dialog is built on is
 ``lifecycle.upgrade_plan``'s, replaced here. The press's record is the real store's. What
 leaves the process — PyPI, uv, the exec into ``aisquare upgrade`` — is closed by
@@ -325,11 +325,11 @@ def test_the_reopen_reattaches_and_says_so(monkeypatch: pytest.MonkeyPatch) -> N
     )
     asked: list[str] = []
 
-    def after_update() -> updates.Reattached:
-        asked.append("after_update")
+    def reattach() -> updates.Reattached:
+        asked.append("reattach")
         return outcome
 
-    monkeypatch.setattr(updates, "after_update", after_update)
+    monkeypatch.setattr(updates, "reattach_after_update", reattach)
 
     async def body(pilot: Pilot[None], app: FleetApp) -> list[str]:
         return await _toasts(app)
@@ -337,7 +337,7 @@ def test_the_reopen_reattaches_and_says_so(monkeypatch: pytest.MonkeyPatch) -> N
     toasts = _drive(body, offer=None, after_update=True)
     ordinary = _drive(body, offer=None)
 
-    assert asked == ["after_update"], "only the reopen looks: an ordinary start restarts nothing"
+    assert asked == ["reattach"], "only the reopen looks: an ordinary start restarts nothing"
     assert "✓ aisquare 0.9.1 — 1 agent reattached, 1 restarted (coder-2: pane gone)" in toasts
     assert not any("reattached" in toast for toast in ordinary)
 
@@ -451,7 +451,7 @@ def test_ui_after_update_tells_the_app(monkeypatch: pytest.MonkeyPatch, runner: 
     ordinary = runner.invoke(cli_app, ["ui"])
 
     assert after.exit_code == 0 and ordinary.exit_code == 0, after.output + ordinary.output
-    assert opened == [{"after_update": True}, {"after_update": False}]
+    assert opened == [{"after_update": True}, {}], "an ordinary start is run as before"
 
 
 def test_the_one_click_reopen_names_a_ui_that_takes_it() -> None:

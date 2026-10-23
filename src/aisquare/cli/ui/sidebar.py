@@ -1814,7 +1814,8 @@ class Sidebar(Vertical):
                 row.paint()
 
     def show_update(self, version: str | None, *, runnable: bool = True) -> None:
-        """The ⬆ row for a newer release (``services.updates.check``); ``None`` hides it."""
+        """The ⬆ row for a newer release (``services.updates.check_for_release``); ``None``
+        hides it."""
         self.query_one(UpdateRow).offer(version, runnable=runnable)
 
     def _paint_status(self) -> None:

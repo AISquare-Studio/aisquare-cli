@@ -38,6 +38,7 @@ from aisquare.cli.ui.sidebar import (
     OthersSection,
     SettingsRow,
     StatusLine,
+    UpdateRow,
     headroom_dot,
     status_line_text,
 )
@@ -112,7 +113,7 @@ def _shown(widget: Static) -> str:
 def test_the_sidebar_has_the_projects_then_settings_and_its_status_and_nothing_else(
     captain_off: None,
 ) -> None:
-    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str, bool]:
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str, bool, bool]:
         app = _app(pilot)
         sidebar = app.sidebar
         sections = [child.id or type(child).__name__ for child in sidebar.children]
@@ -123,11 +124,16 @@ def test_the_sidebar_has_the_projects_then_settings_and_its_status_and_nothing_e
             inside,
             _shown(app.query_one(SettingsRow)),
             app.query_one(StatusLine).can_focus,
+            app.query_one(UpdateRow).display,
         )
 
-    sections, inside, settings, focusable = _drive(go)
+    sections, inside, settings, focusable, offered = _drive(go)
     assert sections == ["fleet-header", "projects-notice", "projects", "others"]
-    assert inside == ["SettingsRow", "StatusLine"]
+    # The ⬆ row (tests/test_ui_update_row.py) sits between the two, and shows only while a
+    # newer release is offered: never here, as the suite runs from a checkout, which the
+    # release check never checks (services.updates.route_is_checked).
+    assert inside == ["SettingsRow", "UpdateRow", "StatusLine"]
+    assert offered is False
     assert settings == "⚙︎ Settings"  # ⚙ in its text (monotone) presentation
     assert not focusable
 

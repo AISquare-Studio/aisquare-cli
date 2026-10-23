@@ -152,8 +152,8 @@ HeadroomReader = Callable[[Sequence[ClaudeAccount] | None], HeadroomSummary]
 the five-minute usage cache) in production, a stub in tests."""
 
 ReleaseCheck = Callable[[], updates_service.Offer | None]
-"""What the ⬆ row asks whether a newer aisquare is out: ``updates.check`` in production (PyPI
-at most once a day), a stub in tests."""
+"""What the ⬆ row asks whether a newer aisquare is out: ``updates.check_for_release`` in
+production (PyPI at most once a day), a stub in tests."""
 
 UPDATE_HAND_OFF = ("upgrade", "--one-click")
 """What the ⬆ dialog's *Restart & update* hands the terminal to, as Doctor's Update hands it
@@ -807,7 +807,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         headroom: HeadroomReader | None = accounts_service.read_fleet_headroom,
         headroom_seconds: float = HEADROOM_SECONDS,
         remote: RemoteController | None = None,
-        release_check: ReleaseCheck | None = updates_service.check,
+        release_check: ReleaseCheck | None = updates_service.check_for_release,
         after_update: bool = False,
     ) -> None:
         super().__init__()
@@ -2266,9 +2266,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     # --- the ⬆ row: a newer aisquare, and the one-click update ------------------------------
 
     def check_release(self) -> None:
-        """Ask, off the UI thread, whether a newer aisquare is out (``updates.check``): at the
-        start and every hour after. PyPI is asked only once the last answer is a day old, and
-        a lookup that failed is tried again on the next hour's ask. One at a time."""
+        """Ask, off the UI thread, whether a newer aisquare is out
+        (``updates.check_for_release``): at the start and every hour after. PyPI is asked
+        only once the last answer is a day old, and a lookup that failed is tried again on
+        the next hour's ask. One at a time."""
         check = self._release_check
         if check is None or any(
             worker.name == CHECK_WORKER and not worker.is_finished for worker in self.workers
@@ -2373,9 +2374,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     def _reattach(self) -> None:
         """Opened by the one-click update: look at the agents the press recorded, off the UI
-        thread, restarting any that is gone (``updates.after_update``)."""
+        thread, restarting any that is gone (``updates.reattach_after_update``)."""
         self.run_worker(
-            updates_service.after_update,
+            updates_service.reattach_after_update,
             name=REATTACH_WORKER,
             group=REATTACH_WORKER,
             thread=True,

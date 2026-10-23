@@ -1317,4 +1317,7 @@ def ui(
         )
     from aisquare.cli.ui.app import run_ui  # lazy: textual is heavy and only the UI needs it
 
-    run_ui(after_update=after_update)
+    if after_update:
+        run_ui(after_update=True)
+    else:
+        run_ui()

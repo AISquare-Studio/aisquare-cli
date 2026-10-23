@@ -3,7 +3,7 @@
 The check asks PyPI what ``aisquare upgrade --check`` asks it
 (:func:`~aisquare.services.lifecycle.latest_release`, the only lookup) and nothing more, at
 most once a day: at asq's start when the last answer is :data:`CHECK_EVERY` old or older, and
-again as each one comes due while asq runs. asq asks :func:`check` every
+again as each one comes due while asq runs. asq asks :func:`check_for_release` every
 :data:`ASK_EVERY_SECONDS`, and :func:`due` decides whether that ask looks anything up. A
 lookup that fails (offline, PyPI erring, a uv setting that holds releases back) is no
 answer: nothing is recorded and the next hourly ask tries again. ``[updates] check = false``
@@ -17,7 +17,7 @@ newer (the plan's ``up_to_date``: a version ahead of PyPI's is offered nothing).
 
 The update is ``aisquare upgrade``'s, handed the terminal as Doctor's Update hands it. At the
 press, :func:`record_press` writes down every agent alive then, by row and pane; the asq that
-reopens takes that record once (:func:`take_press`), and :func:`reattach` restarts each one
+reopens takes that record once (:func:`take_press`), and :func:`reattach_agents` restarts each one
 whose pane is gone through ``fleet.restart``, which resumes its session when the transcript
 is on disk. Agents outlive asq on the fleet's tmux server, so normally every one is still
 there. Nothing else is ever restarted: an ordinary start reads no record.
@@ -50,7 +50,8 @@ PRESSED_KEY = "updates.pressed"
 CHECK_EVERY = timedelta(hours=24)
 """How old the last answer is before the check asks PyPI again."""
 ASK_EVERY_SECONDS = 3600.0
-"""How often asq asks :func:`check` while it runs: a failed lookup's retry, at most hourly."""
+"""How often asq asks :func:`check_for_release` while it runs: a failed lookup's retry, at
+most hourly."""
 
 _CHECKOUTS = frozenset({install_route.EDITABLE, install_route.LOCAL_SOURCE})
 
@@ -69,7 +70,7 @@ class Offer:
     """The first time this release was found: one toast says so."""
 
 
-def lookup() -> str | None:
+def lookup_latest() -> str | None:
     """The newest release for this install, or ``None`` when that could not be learned.
 
     The check's one way out of the process, and the seam its tests and the real-app captures
@@ -78,12 +79,12 @@ def lookup() -> str | None:
     return lifecycle_service.latest_release().version
 
 
-def checks(route: install_route.InstallRoute) -> bool:
+def route_is_checked(route: install_route.InstallRoute) -> bool:
     """Whether an install that came by ``route`` is checked: every one but a checkout's."""
     return route.kind not in _CHECKOUTS
 
 
-def enabled() -> bool:
+def check_enabled() -> bool:
     """``[updates] check``; on when the config cannot be read, as its default is."""
     try:
         return load_config().updates.check
@@ -109,24 +110,24 @@ def _instant(text: str | None) -> datetime | None:
     return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
 
 
-def check(now: datetime | None = None) -> Offer | None:
+def check_for_release(now: datetime | None = None) -> Offer | None:
     """The release the ⬆ row offers, or ``None``; PyPI is asked first when an answer is due.
 
     Nothing at all for a checkout, or with ``[updates] check`` off. A lookup that fails is
     not recorded, and the release an earlier answer named is offered meanwhile. Writes the
     store, a little: the answer, and the release announced.
     """
-    if not enabled():
+    if not check_enabled():
         return None
     route = install_route.detect()
-    if not checks(route):
+    if not route_is_checked(route):
         return None
     now = now or datetime.now(UTC)
     with store_session() as store:
         checked_at = _instant(store.ui_state(CHECKED_KEY))
         latest = store.ui_state(LATEST_KEY)
     if due(checked_at, now):
-        found = lookup()
+        found = lookup_latest()
         if found is not None:
             latest = found
             with store_session() as store:
@@ -246,7 +247,7 @@ class Reattached:
         return f"{head} — {', '.join(parts)}"
 
 
-def reattach(press: Press) -> Reattached:
+def reattach_agents(press: Press) -> Reattached:
     """Each agent ``press`` recorded: still running, or restarted on its session.
 
     Running is what the listing reads as having a process (``fleet.PROCESS_STATES``,
@@ -285,8 +286,8 @@ def reattach(press: Press) -> Reattached:
     )
 
 
-def after_update() -> Reattached | None:
+def reattach_after_update() -> Reattached | None:
     """What the asq that ``upgrade --one-click`` reopened does first: take the press's record
-    and :func:`reattach` its agents. ``None`` when there is no record to take."""
+    and :func:`reattach_agents` its agents. ``None`` when there is no record to take."""
     press = take_press()
-    return None if press is None else reattach(press)
+    return None if press is None else reattach_agents(press)

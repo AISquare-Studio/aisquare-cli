@@ -1,9 +1,10 @@
 """asq's daily release check and the one-click update's record (``services.updates``).
 
-The check runs the real path down to PyPI: ``updates.check`` → ``lifecycle.latest_release``
-→ ``install_route.fetch_latest``, which the ``machine`` fake answers and counts, on the
-``tool`` fake's uv tool install of 0.9.0. ``no_real_installer`` closes every way out of the
-process, so a test that forgot a fake fails rather than asking PyPI.
+The check runs the real path down to PyPI: ``updates.check_for_release`` →
+``lifecycle.latest_release`` → ``install_route.fetch_latest``, which the ``machine`` fake
+answers and counts, on the ``tool`` fake's uv tool install of 0.9.0. ``no_real_installer``
+closes every way out of the process, so a test that forgot a fake fails rather than asking
+PyPI.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ def test_a_first_check_asks_pypi_once_and_offers_the_newer_release(
     running: Tool,
     machine: Machine,  # noqa: F811
 ) -> None:
-    offer = updates.check(NOW)
+    offer = updates.check_for_release(NOW)
 
     assert machine.lookups == 1
     assert offer == updates.Offer(version="0.9.1", current="0.9.0", runnable=True, announce=True)
@@ -68,7 +69,7 @@ def test_no_lookup_while_the_last_answer_is_under_a_day_old(
     """The answer kept is offered instead: the row stays without asking again."""
     _answered_at(NOW - age)
 
-    offer = updates.check(NOW)
+    offer = updates.check_for_release(NOW)
 
     assert machine.lookups == 0
     assert offer is not None and offer.version == "0.9.1"
@@ -83,7 +84,7 @@ def test_a_lookup_once_the_last_answer_is_a_day_old_or_more(
     _answered_at(NOW - age, latest="0.9.1")
     machine.latest = LatestRelease("0.9.2")
 
-    offer = updates.check(NOW)
+    offer = updates.check_for_release(NOW)
 
     assert machine.lookups == 1
     assert offer is not None and offer.version == "0.9.2"
@@ -102,8 +103,8 @@ def test_a_failed_lookup_records_no_check_and_the_next_ask_tries_again(
 ) -> None:
     machine.latest = LatestRelease(None, "could not reach PyPI (offline)")
 
-    first = updates.check(NOW)
-    an_hour_later = updates.check(NOW + timedelta(hours=1))
+    first = updates.check_for_release(NOW)
+    an_hour_later = updates.check_for_release(NOW + timedelta(hours=1))
 
     assert first is None and an_hour_later is None
     assert machine.lookups == 2, "not counted as a check: the next ask looks up again"
@@ -118,7 +119,7 @@ def test_a_failed_lookup_keeps_offering_what_an_earlier_answer_found(
     _answered_at(NOW - timedelta(days=2), latest="0.9.1")
     machine.latest = LatestRelease(None, "could not reach PyPI (offline)")
 
-    offer = updates.check(NOW)
+    offer = updates.check_for_release(NOW)
 
     assert machine.lookups == 1
     assert offer is not None and offer.version == "0.9.1"
@@ -133,12 +134,14 @@ def test_with_the_opt_out_there_is_never_a_lookup(
     settings_service.set_value("updates.check", "false")
     _answered_at(NOW - timedelta(days=3))
 
-    assert updates.check(NOW) is None
-    assert updates.check(NOW + timedelta(days=5)) is None
+    assert updates.check_for_release(NOW) is None
+    assert updates.check_for_release(NOW + timedelta(days=5)) is None
     assert machine.lookups == 0
 
     settings_service.set_value("updates.check", "true")
-    assert updates.check(NOW) is not None and machine.lookups == 1, "control: on, it asks"
+    assert updates.check_for_release(NOW) is not None and machine.lookups == 1, (
+        "control: on, it asks"
+    )
 
 
 @pytest.mark.parametrize("kind", [install_route.EDITABLE, install_route.LOCAL_SOURCE])
@@ -152,7 +155,7 @@ def test_a_checkout_never_looks_up_and_shows_no_row(
     monkeypatch.setattr(install_route, "detect", lambda: route)
     _answered_at(NOW - timedelta(days=3))
 
-    assert updates.check(NOW) is None
+    assert updates.check_for_release(NOW) is None
     assert machine.lookups == 0
 
 
@@ -165,7 +168,7 @@ def test_an_install_asq_does_not_update_still_gets_the_row_with_no_restart(
     route = install_route.InstallRoute(install_route.HOMEBREW, running.facts, formula="aisquare")
     monkeypatch.setattr(install_route, "detect", lambda: route)
 
-    offer = updates.check(NOW)
+    offer = updates.check_for_release(NOW)
 
     assert machine.lookups == 1
     assert offer is not None and offer.version == "0.9.1" and offer.runnable is False
@@ -182,7 +185,7 @@ def test_no_row_when_the_running_version_equals_or_is_ahead_of_the_latest(
 ) -> None:
     machine.latest = LatestRelease(latest)
 
-    assert updates.check(NOW) is None
+    assert updates.check_for_release(NOW) is None
     assert machine.lookups == 1
     assert _state(updates.LATEST_KEY) == latest, "the answer is recorded all the same"
 
@@ -193,10 +196,10 @@ def test_the_row_goes_once_the_version_that_runs_is_the_one_offered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """After the update: the same record, a newer asq, no row and no lookup."""
-    assert updates.check(NOW) is not None
+    assert updates.check_for_release(NOW) is not None
     monkeypatch.setattr(updates, "__version__", "0.9.1")
 
-    assert updates.check(NOW + timedelta(minutes=1)) is None
+    assert updates.check_for_release(NOW + timedelta(minutes=1)) is None
     assert machine.lookups == 1
 
 
@@ -204,11 +207,11 @@ def test_a_release_is_announced_once_and_a_newer_one_again(
     running: Tool,
     machine: Machine,  # noqa: F811
 ) -> None:
-    first = updates.check(NOW)
-    next_start = updates.check(NOW + timedelta(hours=1))
+    first = updates.check_for_release(NOW)
+    next_start = updates.check_for_release(NOW + timedelta(hours=1))
     machine.latest = LatestRelease("0.9.2")
-    a_day_later = updates.check(NOW + timedelta(days=1))
-    after_that = updates.check(NOW + timedelta(days=1, hours=1))
+    a_day_later = updates.check_for_release(NOW + timedelta(days=1))
+    after_that = updates.check_for_release(NOW + timedelta(days=1, hours=1))
 
     announced = [o.announce if o else None for o in (first, next_start, a_day_later, after_that)]
     assert announced == [True, False, True, False]
@@ -303,7 +306,7 @@ def test_the_reopen_reattaches_the_running_and_restarts_only_the_gone(
     updates.record_press(agents)
     monkeypatch.setattr(updates, "__version__", "0.9.1")
 
-    outcome = updates.after_update()
+    outcome = updates.reattach_after_update()
 
     assert fleet.restarted == [("coder-2", "agt_coder-2")], "pinned to the recorded row"
     assert outcome is not None and outcome.updated
@@ -312,7 +315,7 @@ def test_the_reopen_reattaches_the_running_and_restarts_only_the_gone(
         outcome.toast()
         == "✓ aisquare 0.9.1 — 2 agents reattached, 1 restarted (coder-2: pane gone)"
     )
-    assert updates.after_update() is None, "an ordinary start after it finds no record"
+    assert updates.reattach_after_update() is None, "an ordinary start after it finds no record"
 
 
 def test_every_agent_kept_says_so_and_names_no_restart(
@@ -324,7 +327,7 @@ def test_every_agent_kept_says_so_and_names_no_restart(
     updates.record_press(agents)
     monkeypatch.setattr(updates, "__version__", "0.9.1")
 
-    outcome = updates.after_update()
+    outcome = updates.reattach_after_update()
 
     assert fleet.restarted == []
     assert outcome is not None
@@ -341,7 +344,7 @@ def test_a_restart_that_fails_is_named_and_its_row_left(
     updates.record_press(agents)
     monkeypatch.setattr(updates, "__version__", "0.9.1")
 
-    outcome = updates.after_update()
+    outcome = updates.reattach_after_update()
 
     assert outcome is not None and outcome.restarted == ()
     assert outcome.failed == (("coder-1", "exit 1; cannot restart 'coder-1': its task is done"),)
@@ -359,7 +362,7 @@ def test_a_failed_update_reopens_on_the_old_version_and_says_so(
     monkeypatch.setattr(updates, "__version__", "0.9.0")
     updates.record_press(agents)
 
-    outcome = updates.after_update()
+    outcome = updates.reattach_after_update()
 
     assert outcome is not None and not outcome.updated
     assert outcome.toast() == (

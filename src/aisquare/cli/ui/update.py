@@ -34,7 +34,7 @@ Remote is on in another process (:func:`~aisquare.services.lifecycle.upgrade_pla
 REATTACH_WORKER = "update-reattach"
 """The reopened asq's look at the agents the press recorded, restarting any that are gone."""
 CHECK_WORKER = "update-check"
-"""The daily release check (``services.updates.check``)."""
+"""The daily release check (``services.updates.check_for_release``)."""
 
 
 def agents_line(live: int) -> str:

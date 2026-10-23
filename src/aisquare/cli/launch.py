@@ -108,12 +108,6 @@ def _declared_roles() -> set[str]:
         return set()
 
 
-UNSEATED = ("captain",)
-"""Roles with a standing cycle that never take a numbered seat: the captain is one per HOME
-(services.captain, T2), so ``captain1`` is not a seat of anything — and ``ROLES`` stays
-the list whose every member has a harness profile (``_SEAT`` is built from it)."""
-
-
 def _role_ok(role: str) -> bool:
     """First-class role, a numbered seat of one, or declared in config.
 
@@ -123,14 +117,17 @@ def _role_ok(role: str) -> bool:
     shapes real crews use: numbered seats, and roles the operator has already
     written down.
 
-    The captain (:data:`UNSEATED`) is a role only while the experimental captain is on.
+    The captain (``experimental.captain_role``, the one definition) is a role only while the
+    experimental captain is on, and never a numbered seat: it is one per HOME (T2), so
+    ``captain1`` is not a seat of anything, and ``ROLES`` stays the list whose every
+    member has a harness profile (``_SEAT`` is built from it).
     Off, it is the unknown role main calls it: ``launch captain`` in a fleet window
     started an agent under a role that does not exist, and ``fleet spawn captain`` named
     the off feature in its refusal (review of #240, F2).
     """
     return (
         role in ROLES
-        or (role in UNSEATED and experimental.captain_enabled())
+        or experimental.captain_role(role)
         or bool(_SEAT.match(role))
         or role in _declared_roles()
     )

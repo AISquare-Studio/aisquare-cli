@@ -23,6 +23,23 @@ adapter.**
 - [Adding a terminal agent](docs/coding-agents.md#adding-a-terminal-agent):
   one adapter file and one registration line, held to a conformance suite
   that a synthetic third agent passes.
+- The captain reads each agent's pane by that agent's own screens. On a Codex
+  agent, `paste` and `press` at its folder-trust dialog are refused (*trust this
+  folder first*): before, read with Claude Code's shapes, it showed no prompt,
+  and a paste's Enter there picked *Trust and continue*. `press yes` and
+  `press no` at its approval view send `1` and Esc, and its other dialogs are
+  yours.
+- The captain on Codex, experimental (`[team.profiles.captain] agent =
+  "codex"`, [the captain on Codex](docs/captain.md#the-captain-on-codex)):
+  every tool feature off, its server's tools approved, and every MCP server its
+  config layers name switched off for its session, as Codex has no
+  `--strict-mcp-config`. It is confined anew at every launch, a restart's too.
+- A hand-off's Fork of a Codex teammate forks its thread (`codex fork <id>`);
+  a Fork or a Take over onto another account's home starts fresh with a
+  hand-off prompt, and says so.
+- A tmux server the fleet starts holds no agent's process identity
+  (`CODEX_THREAD_ID`, `CLAUDE_PID`), and the doctor's *fleet server env* row
+  names one a server pins.
 
 **Upgrading:**
 - The store migrates to schema v37 on first open, from 0.8.2's v32 (and from

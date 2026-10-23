@@ -1,7 +1,8 @@
 # The captain
 
-The captain is the home-level agent: one Claude Code session per home that runs
-every project's fleet for you. You talk to it — typed or spoken — and it acts
+The captain is the home-level agent: one agent session per home that runs
+every project's fleet for you, Claude Code's (or, experimentally, Codex's:
+[the captain on Codex](#the-captain-on-codex)). You talk to it — typed or spoken — and it acts
 through a fixed set of tools, each with one meaning, each leaving one audit
 event on a board. It never types into a pane itself, never guesses a project's
 work, and says every refusal as it came.
@@ -257,10 +258,13 @@ from the call's arguments. Three come bundled — `approve_prompt` (press yes),
 wins on a name. The whole sequence is checked before the first step runs, and
 a failing step stops it and says which. `aisquare captain actions` lists them.
 
-`press yes` and `press no` are read off the pane at the moment of the press.
-On Claude Code's permission chooser, yes is the digit of the option that says
-Yes (usually `1`), and no is Esc. On a `[y/N]` line they are `y` and `n`. The
-letter `y` does nothing on Claude Code's chooser. `1` to `9` press a digit.
+`press yes` and `press no` are read off the pane at the moment of the press, by
+the pane's own agent. On Claude Code's permission chooser, yes is the digit of
+the option that says Yes (usually `1`), and no is Esc. On a `[y/N]` line they are
+`y` and `n`. The letter `y` does nothing on Claude Code's chooser. On Codex's
+approval view, yes is `1` (*Yes, proceed*) and no is Esc; every other dialog of
+Codex's own (its hook review, *Switch to gpt-6-luna?*, *Implement this plan?*)
+offers no yes or no, as its keys are yours. `1` to `9` press a digit.
 After a key that answers a prompt, the pane is read back, and the same prompt
 still showing is an error: the captain never reports a press the prompt ignored.
 The prompt is compared whole (what it asks about, its question, its options).
@@ -269,8 +273,8 @@ it is not taken for the one just answered: it waits for you to read it.
 The trust dialog is refused by name for every key, because trusting a folder is
 yours to answer. An agent is ready for a key or a paste when it is waiting or asking. It
 is also ready when the fleet still reads it working but its screen shows a
-prompt, or Claude Code's input box drawn and idle: a freshly spawned agent
-reads working until its first reply.
+prompt, or its prompt drawn and idle (Claude Code's input box, Codex's empty
+composer): a freshly spawned agent reads working until its first reply.
 
 ### The easter eggs
 
@@ -317,9 +321,9 @@ reads working until its first reply.
   typed in the Spawn dialog goes in the same way: the captain starts bare, and
   the prompt is typed once its input box shows. When a dialog shows instead, it
   is not typed, and the start's notes say so and why.
-- **Never into an agent's trust dialog.** An agent spawned into a folder
-  Claude Code has never trusted stops at its own trust dialog, where any typing
-  answers it. `press`, `paste`, `tell`, the manager ask, `wololo` and
+- **Never into an agent's trust dialog.** An agent spawned into a folder it
+  has never trusted stops at its own trust dialog, where any typing answers it:
+  Claude Code's Enter picks *No, exit*, Codex's *Trust and continue*. `press`, `paste`, `tell`, the manager ask, `wololo` and
   `attach_persona` read the agent's pane first and refuse by name: *trust this
   folder first*. A pane that cannot be read is refused too, so nothing is typed
   blind.
@@ -333,6 +337,41 @@ reads working until its first reply.
   answered, so they are not refused there.
 - **One captain per home.** A second `aisquare captain` attaches; the fleet
   refuses a second row and refuses `captain` on a project.
+
+## The captain on Codex
+
+Experimental, as the captain is. Bind the role to Codex:
+
+```toml
+[team.profiles.captain]
+agent = "codex"
+```
+
+The captain then starts on Codex as it does on Claude Code, from its brain
+folder, which is no git checkout, so Codex asks no folder trust. What keeps it to
+its own tools differs, because Codex has no `--strict-mcp-config`. At every
+launch, a restart's too, the fleet asks Codex's adapter for the session
+(`tools_only_args`):
+
+- every tool feature is off (its shell, its file and image tools, its sub-agents,
+  web search), so only the Actions server's tools, `request_user_input` (Plan
+  mode only) and Codex's readers of MCP resources remain;
+- the Actions server's tools are approved for it, so a call is never held for a
+  yes no one can give;
+- every other MCP server its config layers name is switched off for that session
+  (`mcp_servers.<name>.enabled=false`): the system's and the managed config, the
+  account home's `config.toml` and its `-p` profile, `-c` overrides, and a trusted
+  project's `.codex/config.toml` from its git root down to its folder. Codex
+  refuses a config that switches off a name it does not have, so only those
+  servers are named, as their files say at that launch;
+- a Codex MCP server starts with little of the window's environment (`HOME`,
+  `LC_CTYPE` and `PATH`), so the Actions server is handed by name what it needs:
+  `TMUX_TMPDIR`, `TMPDIR`, `XDG_RUNTIME_DIR` (the speaker's `spd-say`), `LANG`
+  and the experimental switch.
+
+Its reply is read from its rollout, its pane by Codex's own screens. An agent
+whose built-in tools cannot be switched off is refused as the captain, in one
+line naming it.
 
 ## After a reboot
 
@@ -364,12 +403,15 @@ Two follow-ups are open, each on its own card:
   switch or a hold-to-talk press in those seconds is answered late. Speak once
   and wait for the first transcript before you switch.
 
-The captain reads Claude Code's own screens: the input box, the trust dialog
-and the permission chooser. Every capture it was built and tested on is from
+The captain reads each agent's pane by that agent's own screens. Claude Code's
+(the input box, the trust dialog and the permission chooser) were captured from
 Claude Code 2.1.282, and the input box and the trust dialog read the same on
-2.1.283. A later Claude Code that redraws them can be misread. If the captain
-refuses an agent you can see is ready, or says no prompt is showing when one
-is, compare `claude --version` with these.
+2.1.283. Codex's (its folder trust, its approval view, its other dialogs and its
+empty composer) were measured on Codex 0.162.1. A later release that redraws
+them can be misread. If the captain refuses an agent you can see is ready, or
+says no prompt is showing when one is, compare `claude --version` or
+`codex --version` with these. An agent whose screen aisquare reads for no prompt
+is never pressed or pasted into.
 
 ## Phase 2
 

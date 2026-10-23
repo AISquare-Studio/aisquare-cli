@@ -63,6 +63,15 @@ CI (`.github/workflows/ci.yml`) runs lint, format-check, mypy and pytest on
 Python 3.11–3.13, plus a packaging job that builds the wheel and smoke-tests the
 `aisquare` / `asq` console scripts. All jobs must pass before a PR can merge.
 
+**A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and the
+suite on one Linux leg (Python 3.12, captain on), the Linux package job and every
+other job except the two ambient legs; the demo does not render. The full matrix
+(3.11–3.13, captain off, Windows, both ambient legs, the demo) runs on every push
+to `rc/**` and `main`, so on each sub-PR's merge, and again on the train's PR into
+`main`, nightly and by hand. A sub-PR that may break only on Windows or another
+Python is caught on its merge to the train, before anything reaches `main`;
+`gh workflow run ci.yml --ref <branch>` runs the full matrix on a branch first.
+
 ### Proving a test can fail
 
 Many guards in this suite are written to catch something specific, so the useful

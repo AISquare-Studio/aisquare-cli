@@ -1051,6 +1051,41 @@ class CodexAdapter:
         value = f"{own.rstrip()}\n\n{text}" if own and own.strip() else text
         return ["-c", f"developer_instructions={_toml_string(value)}"]
 
+    def headless_call(self, schema: Path, out: Path, model: str | None) -> list[str] | None:
+        """``exec --ephemeral --skip-git-repo-check --sandbox read-only -c features.hooks=false
+        --output-schema <schema> -o <out> [-m <model>] -``, measured on 0.162.1 with a
+        loopback provider: the request carries the schema as its strict ``json_schema``
+        text format, ``out`` holds the final JSON, no rollout is written, and ``-`` reads
+        the prompt from stdin. ``features.hooks=false`` because the hooks a manager slot
+        trusted fire under ``exec`` (``--ignore-user-config`` does not stop them), and with
+        it none did."""
+        return [
+            "exec",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "-c",
+            "features.hooks=false",
+            "--output-schema",
+            str(schema),
+            "-o",
+            str(out),
+            *(["-m", model] if model else []),
+            "-",
+        ]
+
+    def headless_answer(self, stdout: str, out: Path) -> object | None:
+        """``out`` read as JSON: ``-o`` writes the final message there, which
+        ``--output-schema`` made the JSON."""
+        try:
+            if not out.is_file():  # a FIFO would block the read
+                return None
+            answer: object = json.loads(out.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            return None
+        return answer
+
     def skill_dirs(self, home: Path, repo: Path | None) -> SkillDirs:
         """Measured on 0.162.1, the request's skills list named a ``SKILL.md`` from each of
         ``$HOME/.agents/skills``, ``$CODEX_HOME/skills``, ``<repo>/.agents/skills`` and

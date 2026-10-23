@@ -605,6 +605,46 @@ def test_codex_reads_skills_from_the_users_agents_dir_its_home_and_the_repositor
     )
 
 
+# --- personas: the import engine's headless call ---------------------------------------
+
+
+def test_codexs_headless_call_is_an_ephemeral_read_only_exec_with_its_hooks_off(
+    tmp_path: Path,
+) -> None:
+    """Measured on 0.162.1 (M6, M7): ``exec --output-schema`` sends the schema as the
+    request's strict ``json_schema`` format and writes the final JSON to ``-o``; with
+    ``--ephemeral`` no rollout is written; ``-`` reads the prompt from stdin; and the hooks
+    a manager slot trusted fire under ``exec`` unless ``features.hooks=false``."""
+    home = _home(tmp_path)
+    schema, out = tmp_path / "s.json", tmp_path / "out.json"
+    call = codex.headless_call(schema, out, "gpt-5.5-codex")
+    assert call == [
+        "exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only",
+        "-c", "features.hooks=false", "--output-schema", str(schema), "-o", str(out),
+        "-m", "gpt-5.5-codex", "-",
+    ]  # fmt: skip
+    assert agents.hooks_switch("codex", home, call) is not None
+    out.write_text("[1, 2]", encoding="utf-8")
+    assert codex.headless_answer("", out) == [1, 2]
+    out.write_text("{cut", encoding="utf-8")
+    assert codex.headless_answer('{"name": "from stdout"}', out) is None, "the file decides"
+
+
+def test_claude_codes_headless_answer_is_its_envelopes_structured_output(tmp_path: Path) -> None:
+    """main's persona engine's reading: ``structured_output``, else a JSON ``result``; an
+    envelope that says ``is_error`` answers nothing."""
+    claude = get_adapter("claude-code")
+    out = tmp_path / "unused.json"
+    assert claude.headless_answer(json.dumps({"result": '{"name": "x"}'}), out) == {"name": "x"}
+    errored = {"is_error": True, "structured_output": {"name": "x"}}
+    assert claude.headless_answer(json.dumps(errored), out) is None
+    assert claude.headless_answer(json.dumps({"result": "prose"}), out) is None
+    schema = tmp_path / "s.json"
+    schema.write_text('{"type": "object"}\n', encoding="utf-8")
+    call = claude.headless_call(schema, out, None)
+    assert call is not None and call[call.index("--json-schema") + 1] == '{"type": "object"}'
+
+
 def test_a_resumed_codex_thread_keeps_its_first_developer_instructions() -> None:
     """Measured on 0.162.1 (M4): ``codex exec resume <id> -c developer_instructions=Y`` kept
     the thread's first value and dropped Y, and a later resume without ``-c`` still carried

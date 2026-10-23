@@ -35,6 +35,11 @@ _MODES = {"ask": "manual", "auto": "auto", "never": "dontAsk"}
 #: sits in argv, which ``ps`` shows. Either spelling in the launch arguments is the operator's.
 SYSTEM_PROMPT_FLAG = "--append-system-prompt-file"
 _SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
+#: A headless call's flags around ``--json-schema``: ``harness.probe_model``'s isolation. No
+#: ``--bare``: Claude Code 2.1.272 documents that under it "OAuth and keychain are never
+#: read", so an OAuth-bound manager account could not pay.
+_HEADLESS_HEAD = ("--tools", "", "--max-turns", "1", "--output-format", "json")
+_HEADLESS_TAIL = ("--no-session-persistence", "--settings", "{}", "--strict-mcp-config")
 
 
 def _effort_level(payload: Mapping[str, Any]) -> str | None:
@@ -423,6 +428,34 @@ class ClaudeCodeAdapter:
         ):
             return None
         return [SYSTEM_PROMPT_FLAG, str(block)]
+
+    def headless_call(self, schema: Path, out: Path, model: str | None) -> list[str] | None:
+        """``-p`` with ``--json-schema`` (the text of ``schema``, which it reads, ``OSError``
+        when it cannot) and ``--output-format json``, isolated as the model probe is: no
+        tools, one turn, no session saved, no settings, no MCP servers. ``out`` is unused:
+        the answer is in the envelope it prints."""
+        text = schema.read_text(encoding="utf-8").strip()
+        model_args = ["--model", model] if model else []
+        return ["-p", *model_args, *_HEADLESS_HEAD, "--json-schema", text, *_HEADLESS_TAIL]
+
+    def headless_answer(self, stdout: str, out: Path) -> object | None:
+        """The ``--output-format json`` envelope's ``structured_output``, else its ``result``
+        read as JSON; ``None`` for one that says ``is_error``, or holds neither."""
+        import json
+
+        try:
+            envelope = json.loads(stdout)
+        except (ValueError, RecursionError):
+            return None
+        if not isinstance(envelope, dict) or envelope.get("is_error"):
+            return None
+        answer = envelope.get("structured_output")
+        if answer is None and isinstance(envelope.get("result"), str):
+            try:
+                answer = json.loads(envelope["result"])
+            except (ValueError, RecursionError):
+                return None
+        return answer
 
     def skill_dirs(self, home: Path, repo: Path | None) -> SkillDirs:
         """``<config dir>/skills`` and ``<repo>/.claude/skills``."""

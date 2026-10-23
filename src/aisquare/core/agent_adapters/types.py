@@ -590,8 +590,8 @@ class AgentAdapter(Protocol):
     :meth:`label_args`, :meth:`resume_args`,
     ``exit_command``, ``dismiss_key``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`context_files`, :meth:`disable_native_teams`,
-    :meth:`telemetry_args`. Personas: :meth:`system_prompt_args`, :meth:`skill_dirs`.
-    Accounts: ``accounts``.
+    :meth:`telemetry_args`. Personas: :meth:`system_prompt_args`, :meth:`skill_dirs`,
+    :meth:`headless_call` with :meth:`headless_answer`. Accounts: ``accounts``.
     Remote: ``transcript_reader``. ``capabilities`` says the rest.
     """
 
@@ -825,6 +825,22 @@ class AgentAdapter(Protocol):
         """Where a session of config dir ``home`` reads skills, the user's and, in
         ``repo`` (``None``: outside one), the project's (:class:`SkillDirs`): absolute, in the
         agent's own order."""
+        ...
+
+    def headless_call(self, schema: Path, out: Path, model: str | None) -> list[str] | None:
+        """Arguments to the agent's binary for ONE headless turn whose answer is JSON that
+        the JSON Schema in the file ``schema`` describes (``persona import --engine
+        manager``), with ``model`` pinned where given: the instructions and the source go on
+        its stdin, it keeps no session, its hooks are off where a launch argument can say so,
+        and :meth:`headless_answer` reads its answer from what it printed or wrote to
+        ``out``. ``None`` for an agent without such a call: the engine ladder goes on to the
+        next engine. Run with the environment of the agent's manager account."""
+        ...
+
+    def headless_answer(self, stdout: str, out: Path) -> object | None:
+        """The JSON answer of a :meth:`headless_call` that exited 0, from its ``stdout`` or
+        the file ``out``; ``None`` when there is none (no JSON, an error the agent reported).
+        Never raises."""
         ...
 
 

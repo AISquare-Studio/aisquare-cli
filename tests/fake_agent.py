@@ -530,6 +530,18 @@ class FakeAgentAdapter:
         # Its preamble takes the text itself; one in the launch arguments is the operator's.
         return None if "--preamble" in args else ["--preamble", text]
 
+    def headless_call(self, schema: Path, out: Path, model: str | None) -> list[str] | None:
+        # Its `ask` takes the schema's file, keeps nothing, runs no hook, and prints the answer.
+        model_args = ["--model", model] if model else []
+        return ["ask", "--schema", str(schema), "--no-save", "--no-hooks", *model_args]
+
+    def headless_answer(self, stdout: str, out: Path) -> object | None:
+        try:
+            printed = json.loads(stdout)
+        except ValueError:
+            return None
+        return printed.get("reply") if isinstance(printed, dict) else None
+
     def skill_dirs(self, home: Path, repo: Path | None) -> SkillDirs:
         # Its skills are personas, kept in its home and in the repository's own folder.
         return SkillDirs(

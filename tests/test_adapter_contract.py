@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Iterator
+from contextlib import suppress
 from dataclasses import replace
 from importlib import import_module
 from pathlib import Path, PureWindowsPath
@@ -100,6 +101,45 @@ EXPECTED_PERMISSIONS: dict[str, dict[str, list[str]]] = {
         "coder": ["--write", "workspace", "--approvals", "auto", STORE],
         "reviewer": ["--write", "read_only", "--approvals", "auto", STORE],
     },
+}
+
+
+#: The words of each adapter's headless call (``headless_call``) that keep it from saving a
+#: session, and from running hooks where a launch argument can say so: Codex's trusted hooks
+#: fire under ``exec`` unless ``features.hooks=false`` (measured on 0.162.1). Claude Code's
+#: ``-p`` is main's persona engine's call, isolated by no tools, settings or MCP servers.
+EXPECTED_HEADLESS: dict[str, list[str]] = {
+    "claude-code": ["--no-session-persistence"],
+    "codex": ["--ephemeral", "features.hooks=false"],
+    "fake-agent": ["--no-save", "--no-hooks"],
+}
+#: A persona draft, as each adapter's headless call answered it (``headless_answer``): what it
+#: printed, and what it wrote to its ``out`` file (``None``: nothing). Codex's is 0.162.1's,
+#: recorded through ``headless_call``'s own argv against a loopback provider; Claude Code's
+#: is its ``--output-format json`` envelope, in the shape main's persona engine reads.
+DRAFT = {
+    "name": "skeptic",
+    "description": "Questions every claim.",
+    "body": "Ask for the evidence.",
+    "notes": [],
+}
+RECORDED_HEADLESS: dict[str, dict[str, str | None]] = {
+    "claude-code": {
+        "stdout": json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "num_turns": 1,
+                "result": "",
+                "session_id": "1f0c5a52-2b1e-4e7a-9d0e-5c1f2a3b4c5d",
+                "structured_output": DRAFT,
+            }
+        ),
+        "out": None,
+    },
+    "codex": {"stdout": json.dumps(DRAFT) + "\n", "out": json.dumps(DRAFT)},
+    "fake-agent": {"stdout": json.dumps({"reply": DRAFT}), "out": None},
 }
 
 
@@ -606,6 +646,46 @@ def test_skill_dirs_are_absolute_the_users_first_and_the_projects_in_the_reposit
     assert all(path.is_relative_to(repo) and path != repo for path in dirs.project)
     assert not any(path.is_relative_to(repo) for path in dirs.user)
     assert adapter.skill_dirs(home, None) == SkillDirs(dirs.user, ())
+
+
+# --- personas: the headless call of the import engine --------------------------------------
+
+
+def test_the_headless_call_holds_the_schema_keeps_no_session_and_reads_its_answer(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``headless_call`` (``persona import --engine manager``) holds the schema, by its file
+    or its text, keeps no session and runs no hook where a launch argument can say so
+    (:data:`EXPECTED_HEADLESS`), and pins a model it is given; ``headless_answer`` reads the
+    answer the agent gave (:data:`RECORDED_HEADLESS`), and nothing from a call that gave
+    none."""
+    schema = tmp_path / "persona-draft.schema.json"
+    shape = {"type": "object", "properties": {"name": {"type": "string"}}}
+    schema.write_text(json.dumps(shape), encoding="utf-8")
+    out = tmp_path / "answer.json"
+    call = adapter.headless_call(schema, out, None)
+    if call is None:
+        return  # no headless call: the engine ladder goes on to the next engine
+    assert call and all(isinstance(arg, str) for arg in call)
+
+    def schema_in(arg: str) -> bool:
+        with suppress(ValueError):
+            return bool(arg == str(schema) or json.loads(arg) == shape)
+        return False
+
+    assert any(map(schema_in, call)), f"{adapter.id}'s call holds no schema"
+    named = _named(call)
+    for word in EXPECTED_HEADLESS[adapter.id]:
+        assert word in named, f"{adapter.id}'s headless call lacks {word}"
+    pinned = adapter.headless_call(schema, out, "chosen-model")
+    assert pinned is not None and "chosen-model" in pinned and "chosen-model" not in call
+    recorded = RECORDED_HEADLESS[adapter.id]
+    if recorded["out"] is not None:
+        out.write_text(recorded["out"], encoding="utf-8")
+    assert adapter.headless_answer(str(recorded["stdout"]), out) == DRAFT
+    out.unlink(missing_ok=True)
+    assert adapter.headless_answer("", out) is None
+    assert adapter.headless_answer("not json", out) is None
 
 
 # --- account slots: a login's fingerprint, folder trust shared between accounts ---------------

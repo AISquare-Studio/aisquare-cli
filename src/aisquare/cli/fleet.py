@@ -142,9 +142,18 @@ def slot_label(slot: int, labels: Mapping[int, str] | None) -> str:
 
 
 def agents_json(project: ProjectInfo, agents: list[FleetAgentStatus]) -> dict[str, object]:
-    """The ``fleet ls --json`` payload — shared with the Remote Control server verbatim."""
+    """The ``fleet ls --json`` payload — shared with the Remote Control server verbatim.
+
+    Each agent says whether it was spawned with Claude Code's own Remote Control asked for
+    (``remote_control``, #289), from its row's spec: ``False`` for a row with none."""
     payload = _project_json(project)
-    payload["agents"] = [status.model_dump(mode="json") for status in agents]
+    rows: list[dict[str, object]] = []
+    for status in agents:
+        spec = status.agent.launch_spec
+        row = status.model_dump(mode="json")
+        row["remote_control"] = spec is not None and spec.remote_control
+        rows.append(row)
+    payload["agents"] = rows
     return payload
 
 
@@ -222,6 +231,16 @@ def spawn(
             metavar="NAME",
         ),
     ] = None,
+    remote_control: Annotated[
+        bool | None,
+        typer.Option(
+            "--remote-control/--no-remote-control",
+            help="Start it with Claude Code's Remote Control, to continue from claude.ai/code "
+            "or the Claude app; a restart keeps the choice (default: the role's "
+            "fleet.roles.<role>.remote_control setting, else off).",
+            show_default=False,
+        ),
+    ] = None,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -246,6 +265,7 @@ def spawn(
             spawned_by=as_session or "user",
             account=account,
             persona=persona,
+            remote_control=remote_control,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)

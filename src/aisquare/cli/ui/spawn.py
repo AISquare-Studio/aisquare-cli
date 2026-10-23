@@ -348,6 +348,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     SpawnDialog #spawn-import { min-width: 12; width: 12; }
     SpawnDialog .spawn-note { height: auto; padding-left: 18; color: $text-muted; }
     SpawnDialog #spawn-worktree-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
+    SpawnDialog #spawn-remote-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
     SpawnDialog #spawn-prompt { height: 6; width: 1fr; }
     SpawnDialog #spawn-how { width: auto; height: auto; }
     SpawnDialog #spawn-fresh { margin-left: 2; }
@@ -610,6 +611,13 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                         "" if self._git else "not a git repository", id="spawn-worktree-note"
                     )
                 with Horizontal(classes="spawn-row"):
+                    yield Label("Remote control")
+                    yield Switch(value=defaults.remote_control, id="spawn-remote")
+                    yield Static(
+                        "continue it from claude.ai/code or the Claude app",
+                        id="spawn-remote-note",
+                    )
+                with Horizontal(classes="spawn-row"):
                     yield Label("Permission mode")
                     yield Select(
                         permission_options(defaults.permission_mode),
@@ -747,6 +755,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         switch = self.query_one("#spawn-worktree", Switch)
         if self._git and switch.value == old_defaults.worktree:
             switch.value = new_defaults.worktree
+        remote = self.query_one("#spawn-remote", Switch)
+        if remote.value == old_defaults.remote_control:  # untouched: it follows the role
+            remote.value = new_defaults.remote_control
         mode = self.query_one("#spawn-permission", Select)
         current = mode.value
         keep = (
@@ -1157,6 +1168,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             worktree = None if switched == defaults.worktree else switched
         mode = self.query_one("#spawn-permission", Select).value
         account = self.query_one("#spawn-account", Select).value
+        remote = self.query_one("#spawn-remote", Switch).value
         prompt = self.query_one("#spawn-prompt", TextArea).text
         chosen = self._persona_value()
         persona: str | None = chosen
@@ -1174,6 +1186,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             "agent_args": split_agent_args(self.query_one("#spawn-args", Input).value),
             "account": account if isinstance(account, str) and account != THIS_SHELL else None,
             "persona": persona,
+            "remote_control": None if remote == defaults.remote_control else remote,
         }
 
     @on(Button.Pressed, "#spawn-submit")

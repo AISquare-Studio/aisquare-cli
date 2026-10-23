@@ -154,7 +154,9 @@ tmux can see and its row says so (`no hooks`).
    Then label (prefilled `<role>-1`, or `<role>-<task short id>` once a task is
    picked; 🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
    disables *Spawn* and shows the rule), task (the project's open tasks),
-   worktree (disabled with "not a git repository" outside one), permission mode,
+   worktree (disabled with "not a git repository" outside one), *Remote control*
+   (Claude Code's own, at the role's `remote_control`; it follows the role until
+   you touch it), permission mode,
    extra agent args (split like a shell would; a quoting error is shown inline)
    and a first prompt. A field left as it opened means the role's default,
    exactly as an omitted `fleet spawn` flag does; picking `(none)` over a role
@@ -267,6 +269,7 @@ follows as a `⚠` line.
 | `--bin B` | the agent executable | the role's binding, else `claude` |
 | `--prompt TEXT` | first message typed once the agent is up | none |
 | `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
+| `--remote-control` / `--no-remote-control` | start it with Claude Code's own Remote Control, titled `<project> · <label>`, to continue from claude.ai/code or the Claude app ([remote](remote.md#claude-codes-own-remote-control)); recorded on the row, so a restart and a switch keep it; `fleet ls --json` reports it as `remote_control` | the role's `[fleet.roles.<role>].remote_control`, else off |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
 

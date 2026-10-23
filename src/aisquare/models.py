@@ -1070,6 +1070,11 @@ class LaunchSpec(BaseModel):
     (``core.orchestrator.window_team_hub``). A restart or switch gives the replacement's
     window the same, whoever runs it (``services.fleet._board_and_hub``). ``None`` on a spec
     recorded before 0.8.1 kept it."""
+    remote_control: bool = False
+    """Whether it was spawned with Claude Code's Remote Control asked for (#289): the
+    spawn's ``--remote-control``/``--no-remote-control``, else the role's
+    ``[fleet.roles.<role>] remote_control``. A restart and a switch replay it; ``False`` on a
+    spec recorded before it existed."""
 
 
 class FleetAgent(BaseModel):

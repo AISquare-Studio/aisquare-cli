@@ -171,6 +171,9 @@ def doctor(
         # Beside the fleet terminal row, which reads the same running server (fix 4 of the
         # fleet-board card): it can warn, so it waits with the other late rows.
         _check_fleet_server_env(cwd=cwd),
+        # Only while a role asks for Claude Code's Remote Control (#289): which roles, and
+        # what in their launch would make Claude Code refuse it.
+        *_optional(_check_remote_control()),
         *_experiment_checks(),
         # Only while the experimental captain is off: one ok row saying how to turn it
         # on. On, doctor is as it was before the switch.
@@ -3171,6 +3174,62 @@ def _fleet_labels(agents: list[FleetAgent], names: dict[str, str], *, limit: int
     if len(agents) > limit:
         shown.append(f"+{len(agents) - limit} more")
     return ", ".join(shown)
+
+
+REMOTE_CONTROL_HOST = "api.anthropic.com"
+
+
+def _check_remote_control(environ: Mapping[str, str] | None = None) -> DoctorCheck | None:
+    """``remote control``: the roles started with Claude Code's own Remote Control (#289),
+    and what in their launch would make Claude Code refuse it; ``None`` while no role asks.
+
+    A blocker is what ``launch`` steps aside for: a role bound to a binary that is not
+    Claude Code; an ``ANTHROPIC_BASE_URL`` naming another host than the Anthropic API, in
+    the role's binding or in this shell; explainability tracing, whose proxy is such a
+    base URL at every traced launch; a ``CLAUDE_CODE_OAUTH_TOKEN``, which can make model
+    requests only. ``launch`` says the same on each launch; this row says it before one.
+    """
+    name = "remote control"
+    try:
+        config = load_config()
+    except Exception:  # the config row has the verdict on a config that will not load
+        return None
+    roles = sorted(role for role, settings in config.fleet.roles.items() if settings.remote_control)
+    if not roles:
+        return None
+    shell = os.environ if environ is None else environ
+    blockers: list[str] = []
+    for role in roles:
+        profile = harness.resolve_profile(role)
+        binary = harness.resolve_binary(role).binary
+        if not harness.is_default_agent(binary):
+            blockers.append(f"{role} runs {os.path.basename(binary)!r}, not Claude Code")
+        env = {**shell, **profile.env}
+        base_url = (env.get("ANTHROPIC_BASE_URL") or "").strip()
+        if base_url and urlsplit(base_url).hostname != REMOTE_CONTROL_HOST:
+            where = "its binding" if "ANTHROPIC_BASE_URL" in profile.env else "this shell"
+            host = urlsplit(base_url).hostname or "another host"
+            blockers.append(f"{role}: ANTHROPIC_BASE_URL in {where} points at {host}")
+        if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            where = "its binding" if "CLAUDE_CODE_OAUTH_TOKEN" in profile.env else "this shell"
+            blockers.append(f"{role}: CLAUDE_CODE_OAUTH_TOKEN is set in {where}")
+    if config.explainability.enabled:
+        blockers.append("explainability tracing sends every traced launch through its proxy")
+    on = ", ".join(roles)
+    if not blockers:
+        return _ok(
+            name,
+            f"on for {on} — each session can be continued from claude.ai/code and the Claude "
+            "app, titled '<project> · <label>'",
+        )
+    return _warn(
+        name,
+        f"on for {on}, but Claude Code will refuse it: {'; '.join(blockers)}",
+        "Remote Control needs Claude Code on a Claude.ai login (Pro, Max, Team or "
+        "Enterprise) talking to the Anthropic API: unbind the base URL or the token, or "
+        "turn tracing off (`aisquare explainability disable`) for these roles; "
+        "`aisquare launch` skips the flag and says why until then",
+    )
 
 
 def _check_fleet(

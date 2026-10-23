@@ -25,7 +25,7 @@ from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.keys import EXTENDED_MINIMUM
-from aisquare.core.spawn import TEAM_ENV_VARS
+from aisquare.core.spawn import TEAM_ENV_VARS, tmux_client_env
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
 from aisquare.core.terminal import outer_terminal
@@ -3179,13 +3179,36 @@ def _fleet_labels(agents: list[FleetAgent], names: dict[str, str], *, limit: int
 REMOTE_CONTROL_HOST = "api.anthropic.com"
 
 
-def _check_remote_control(environ: Mapping[str, str] | None = None) -> DoctorCheck | None:
+def _window_environment(
+    environ: Mapping[str, str] | None, server: tmux_core.TmuxServer | None
+) -> tuple[Mapping[str, str], str]:
+    """The environment a fleet window inherits, and where it comes from.
+
+    A tmux server copies the environment of the client that started it, and every window
+    opened on it inherits that, before its own ``-e`` pairs (the role's binding). So it is
+    the running fleet server's global environment; with none running, what the fleet would
+    start one with: this shell's, less what ``core.spawn.tmux_client_env`` strips (a
+    tracing base URL among it). A server that will not answer is read as none.
+    """
+    try:
+        srv = server or _fleet_server(fleet_service.settings().tmux_socket)
+        if srv.available() and not srv.server_absent():
+            return _server_environment(srv), "on the fleet server"
+    except Exception:  # diagnostics must never crash
+        pass
+    return tmux_client_env(os.environ if environ is None else environ), "in this shell"
+
+
+def _check_remote_control(
+    environ: Mapping[str, str] | None = None, server: tmux_core.TmuxServer | None = None
+) -> DoctorCheck | None:
     """``remote control``: the roles started with Claude Code's own Remote Control (#289),
     and what in their launch would make Claude Code refuse it; ``None`` while no role asks.
 
     A blocker is what ``launch`` steps aside for: a role bound to a binary that is not
     Claude Code; an ``ANTHROPIC_BASE_URL`` naming another host than the Anthropic API, in
-    the role's binding or in this shell; explainability tracing, whose proxy is such a
+    the role's binding or in what its window inherits (:func:`_window_environment`, not
+    this shell's: the agents never see it); explainability tracing, whose proxy is such a
     base URL at every traced launch; a ``CLAUDE_CODE_OAUTH_TOKEN``, which can make model
     requests only. ``launch`` says the same on each launch; this row says it before one.
     """
@@ -3197,22 +3220,22 @@ def _check_remote_control(environ: Mapping[str, str] | None = None) -> DoctorChe
     roles = sorted(role for role, settings in config.fleet.roles.items() if settings.remote_control)
     if not roles:
         return None
-    shell = os.environ if environ is None else environ
+    inherited, source = _window_environment(environ, server)
     blockers: list[str] = []
     for role in roles:
         profile = harness.resolve_profile(role)
         binary = harness.resolve_binary(role).binary
         if not harness.is_default_agent(binary):
             blockers.append(f"{role} runs {os.path.basename(binary)!r}, not Claude Code")
-        env = {**shell, **profile.env}
+        env = {**inherited, **profile.env}
         base_url = (env.get("ANTHROPIC_BASE_URL") or "").strip()
         if base_url and urlsplit(base_url).hostname != REMOTE_CONTROL_HOST:
-            where = "its binding" if "ANTHROPIC_BASE_URL" in profile.env else "this shell"
+            where = "in its binding" if "ANTHROPIC_BASE_URL" in profile.env else source
             host = urlsplit(base_url).hostname or "another host"
-            blockers.append(f"{role}: ANTHROPIC_BASE_URL in {where} points at {host}")
+            blockers.append(f"{role}: ANTHROPIC_BASE_URL {where} points at {host}")
         if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
-            where = "its binding" if "CLAUDE_CODE_OAUTH_TOKEN" in profile.env else "this shell"
-            blockers.append(f"{role}: CLAUDE_CODE_OAUTH_TOKEN is set in {where}")
+            where = "in its binding" if "CLAUDE_CODE_OAUTH_TOKEN" in profile.env else source
+            blockers.append(f"{role}: CLAUDE_CODE_OAUTH_TOKEN is set {where}")
     if config.explainability.enabled:
         blockers.append("explainability tracing sends every traced launch through its proxy")
     on = ", ".join(roles)
@@ -3222,13 +3245,22 @@ def _check_remote_control(environ: Mapping[str, str] | None = None) -> DoctorChe
             f"on for {on} — each session can be continued from claude.ai/code and the Claude "
             "app, titled '<project> · <label>'",
         )
+    fix = (
+        "Remote Control needs Claude Code on a Claude.ai login (Pro, Max, Team or "
+        "Enterprise) talking to the Anthropic API: unbind the base URL or the token from "
+        "these roles, or turn tracing off, which `aisquare explainability disable` does for "
+        "every launch on this machine, not for these roles alone"
+    )
+    if source == "on the fleet server" and any(source in blocker for blocker in blockers):
+        fix += (
+            "; a variable the fleet server holds reaches every agent it starts until the "
+            "server is restarted from a shell without it (with no agent running: tmux -L "
+            f"{fleet_service.settings().tmux_socket} kill-server)"
+        )
     return _warn(
         name,
         f"on for {on}, but Claude Code will refuse it: {'; '.join(blockers)}",
-        "Remote Control needs Claude Code on a Claude.ai login (Pro, Max, Team or "
-        "Enterprise) talking to the Anthropic API: unbind the base URL or the token, or "
-        "turn tracing off (`aisquare explainability disable`) for these roles; "
-        "`aisquare launch` skips the flag and says why until then",
+        f"{fix}; `aisquare launch` skips the flag and says why until then",
     )
 
 

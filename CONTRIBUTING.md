@@ -84,8 +84,8 @@ The next run ends them: the suite's private folders under `/tmp` are named
 servers in it (`tests/private_fleets.py`).
 
 CI (`.github/workflows/ci.yml`) runs lint, format-check, mypy and pytest on
-Python 3.11–3.13, a `lock` job that runs `uv lock --check`, plus a packaging job that builds the wheel and smoke-tests the
-`aisquare` / `asq` console scripts. All jobs must pass before a PR can merge.
+Python 3.11–3.13, a `lock` job that runs `uv lock --check`, plus a packaging job
+that builds the wheel and smoke-tests the `aisquare` / `asq` console scripts. All jobs must pass before a PR can merge.
 
 **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and the
 suite on one Linux leg (Python 3.12, captain on), the Linux package job and every

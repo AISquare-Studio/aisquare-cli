@@ -19,6 +19,7 @@ from aisquare.cli import (
     auth,
     captain,
     capture,
+    command_reports,
     connectors,
     context,
     enforce,
@@ -155,6 +156,7 @@ app.command("note")(team.note)
 app.command("board")(team.board)
 app.command("recall")(team.recall)
 launch.register(app)  # needs context_settings to forward agent args
+command_reports.register(app)  # `exec` forwards everything after -- to the command
 app.command("serve")(serve.serve)
 app.add_typer(remote.app, name="remote")
 app.add_typer(fleet.app, name="fleet")

@@ -79,6 +79,10 @@ aisquare
 │                   role = planner|coder|runner|validator, a fleet role (manager,
 │                   tester, reviewer, ui-tester), a numbered seat (coder1), or any role you
 │                   have bound; env merges over `team bind`
+├── exec [--project P] [--task T] [--session S] [--raw] [--max-output-bytes N] -- CMD …
+│                   run CMD once and save a report of how it ended (docs/command-reports.md)
+├── reports         list · show <id> [--raw] [--stream stdout|stderr|both] · stats
+│                   prune [--keep N] [--days N]   — read saved reports; never reruns
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
 ├── remote          serve · needs · status · allow-write on|off · revoke · regenerate-password

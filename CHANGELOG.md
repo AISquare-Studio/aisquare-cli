@@ -66,7 +66,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   each command above reads it when it runs. Whatever it says, the home's own row is
   never added as a project, and `project prune` and doctor's captured row leave it
   alone (Fixed, below). Every other role, fleet row and board, and the store
-  (schema v33), are the same either way.
+  (schema v33), are the same either way. Four fleet changes that came with it are
+  not behind the switch, on or off: a tmux server the fleet starts holds no team
+  variable, doctor's `fleet server env` row, the board each delta and wake-up line
+  names, and `serve --stdio`'s idle clock (all under Fixed, below).
 - **The persona rides the system prompt too, and a replay keeps it.** For Claude
   Code the launch appends the persona block to the default system prompt
   (`--append-system-prompt-file`, a file under `~/.aisquare/cache/persona-prompts/`;

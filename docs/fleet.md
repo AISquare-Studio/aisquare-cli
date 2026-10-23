@@ -243,7 +243,7 @@ follows as a `⚠` line.
 | `--worktree` / `--no-worktree` | run in its own git worktree | the role's setting: on for coder and reviewer |
 | `--permission-mode M` | Claude Code permission mode | the role's setting: `auto` |
 | `--bin B` | the agent executable | the role's binding, else `claude` |
-| `--prompt TEXT` | first message typed once the agent is up: for Claude Code, once its input box is drawn, past its first-run Security notes screen (Enter), and read back from the pane so a lost Enter is pressed once more | with `--task`, "Start on your assigned task #N … `aisquare task show N`, then `aisquare task claim N`"; else none |
+| `--prompt TEXT` | first message typed once the agent is up: for Claude Code, once its input box is drawn, past its first-run Security notes screen (Enter), and read back from the pane so a lost Enter is pressed once more | with `--task`, "Start on your assigned task #N … `aisquare task show N`, then do what the ASSIGNED TO YOU line of your briefing says" — that line says per role and state whether to claim; else none |
 | `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |

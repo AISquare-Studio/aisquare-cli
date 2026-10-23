@@ -206,7 +206,7 @@ def spawn(
         typer.Option(
             "--prompt",
             help="First message to type once the agent is up. With --task and no --prompt, "
-            "the agent is told to read and claim its task.",
+            "the agent is told to read its task and follow its briefing.",
         ),
     ] = None,
     account: Annotated[

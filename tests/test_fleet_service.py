@@ -18440,11 +18440,40 @@ def test_a_prompt_is_not_typed_into_security_notes_that_stay(
 
     pane = receipt.agent.pane_id
     assert all(entry == (pane, "key", "Enter") for entry in tmux.typed)
-    assert _enters(tmux, pane) == fleet_service._SECURITY_PRESSES
+    assert _enters(tmux, pane) == 1, "one unchanged screen is pressed once"
     assert receipt.prompt_typed == "no"
     [note] = receipt.failures
     assert fleet_service.SECURITY_NOTES in note
     assert "NOT typed" in note and "fleet tell" in note
+
+
+def test_a_second_enter_never_lands_on_the_screen_after_the_security_notes(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delta review of #274, n1: the notes were pressed again every 2 s while the capture
+    still showed them. A redraw slower than that put the second Enter on the next screen,
+    the trust question, where Enter is "No, exit". Pressed once, an unchanged screen is
+    waited on: here it holds for 3 s, then the trust question is drawn, and no Enter
+    reaches it."""
+    pressed_at: list[float] = []
+
+    def screen(pane: str) -> list[str]:
+        if _enters(tmux, pane) and not pressed_at:
+            pressed_at.append(clock.now)
+        if pressed_at and clock.now >= pressed_at[0] + 3:
+            return TRUST_SCREEN
+        return SECURITY_SCREEN
+
+    _drawn(tmux, monkeypatch, screen)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="hello")
+
+    assert _enters(tmux, receipt.agent.pane_id) == 1
+    assert receipt.prompt_typed == "no"
+    assert any("folder-trust question" in note for note in receipt.failures)
 
 
 def test_an_agent_left_at_the_security_notes_reads_attention_with_the_reason(
@@ -18459,21 +18488,39 @@ def test_an_agent_left_at_the_security_notes_reads_attention_with_the_reason(
     assert status.detail is not None and status.detail.startswith(fleet_service.SECURITY_NOTES)
 
 
-def test_a_spawn_for_a_task_with_no_prompt_is_told_to_read_and_claim_it(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+@pytest.mark.parametrize("role", ["coder", "tester"])
+def test_a_spawn_for_a_task_with_no_prompt_is_told_to_read_it_and_follow_its_briefing(
+    role: str,
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#32, L1 (the owner's D2, board seq 671): ``fleet spawn --task`` with no ``--prompt``
-    left the agent idle at an empty prompt. Its first message reads and claims its task. A
-    spawn with neither is typed nothing."""
+    left the agent idle at an empty prompt. Its first message reads its task and sends it to
+    its briefing's ASSIGNED TO YOU line, which says per role and state whether to claim
+    (delta review of #274, m1): a tester spawned on a todo task was told "claim it", and
+    claimed a coder's task, while its briefing said "not yours to claim". A spawn with
+    neither a task nor a prompt is typed nothing."""
     task = _add_task(project, "Ship auth")
-    agent = _coder(project, task_id=task.id)
+    agent = fleet_service.spawn(project, role, worktree=False, task_id=task.id).agent
     number = _task_now(task.id).number
     [(pane, kind, text)] = [entry for entry in tmux.typed if entry[1] == "paste"]
     assert (pane, kind) == (agent.pane_id, "paste")
     assert f"`aisquare task show {number}`" in text
-    assert f"`aisquare task claim {number}`" in text
+    assert "task claim" not in text, "whether to claim is the briefing's to say"
+    assert "ASSIGNED TO YOU" in text
     assert "Ship auth" in text and "\n" not in text
     assert (agent.pane_id, "key", "Enter") in tmux.typed
+    assert agent.session_id is not None
+    _become(agent, tmux, monkeypatch, pid=PANE_PID, role=role)
+    told = _assignment_block(
+        team_service.hook_session_start(agent.session_id, project.root, "startup")
+    )
+    if role == "tester":
+        assert "not yours to claim" in " ".join(told.split())
+    else:
+        assert "Claim it FIRST" in told
 
     tmux.typed.clear()
     bare = fleet_service.spawn(project, "coder", worktree=False, label="coder-bare")

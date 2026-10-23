@@ -4528,7 +4528,8 @@ def _at_input_box(
     """Whether Claude Code is at its input box, ready for the prompt: waited for (bounded).
 
     On the way, Claude Code's first-run Security notes screen ("Press Enter to continue")
-    is pressed past, up to :data:`_SECURITY_PRESSES` times: typed there, the prompt was
+    is pressed past, up to :data:`_SECURITY_PRESSES` times, and never twice on one unchanged
+    screen: typed there, the prompt was
     lost and its Enter only moved the screen on (#32, L2). The folder-trust question,
     which can follow it, is :func:`_past_trust_prompt`'s. A screen still at the notes, or
     at another dialog (:func:`pane_screen.modal_showing`), is not typed into: its Enter
@@ -4538,6 +4539,7 @@ def _at_input_box(
     """
     deadline = _monotonic() + (PROMPT_TIMEOUT if wait else 0.0)
     pressed = 0
+    pressed_on: list[str] | None = None
     while True:
         try:
             lines = srv.capture(pane_id).lines
@@ -4548,15 +4550,19 @@ def _at_input_box(
                 return False
             continue
         notes_up = claude_sharing.shows_security_notes(lines)
-        if notes_up and pressed < _SECURITY_PRESSES:
+        # Another Enter only for notes drawn anew: on the very screen the last one was pressed
+        # on, it may still be on its way, and a second would land on whatever comes next —
+        # the trust question, whose Enter is "No, exit" (delta review of #274, n1).
+        if notes_up and pressed < _SECURITY_PRESSES and lines != pressed_on:
             enter = pane_write("Enter", lambda: srv.send_keys(pane_id, "Enter"))
             if enter.typed == "yes":
                 pressed += 1
+                pressed_on = list(lines)
                 _sleep(_PROMPT_SETTLE)
                 continue
         if pressed and not notes_up:
             (notes if done is None else done).append(f"pressed Enter past {SECURITY_NOTES}")
-            pressed = 0  # said once: the notes are not drawn again
+            pressed, pressed_on = 0, None  # said once: the notes are not drawn again
         if not notes_up and pane_screen.input_box_at(pane_screen.tail(lines)) is not None:
             return True
         if _monotonic() >= deadline:
@@ -8427,15 +8433,22 @@ _HANDOFF_DETAIL = 600
 
 
 def task_prompt(task: TeamTask) -> str:
-    """The first message of an agent spawned for ``task`` with no prompt of its own (#32, L1):
-    read the task, then claim it. Without it the agent sat idle at an empty prompt until
-    someone typed this by hand. The owner's words (board seq 671, D2)."""
+    """The first message of an agent spawned for ``task`` with no prompt of its own (#32, L1;
+    the owner's D2, board seq 671): read the task, and do what its briefing's ASSIGNED TO YOU
+    line says. Without it the agent sat idle at an empty prompt until someone typed this.
+
+    It names no claim. Whether to claim is the briefing's to say, per role and per state
+    (``team._assignment_lines``): a tester or reviewer is told a todo task is "not yours to
+    claim", a task waiting on its needs is not to be claimed yet, and one in review is to
+    be verified. "Claim it" here had a verifier take a coder's task, and fail on a review
+    one (delta review of #274, m1).
+    """
     ref = str(task.number) if task.number is not None else task.id
     named = f"#{ref}" if task.number is not None else ref
     return (
-        f"Start on your assigned task {named}: {' '.join(task.title.split())}. Read its "
-        f"whole contract with "
-        f"`aisquare task show {ref}`, then claim it with `aisquare task claim {ref}`."
+        f"Start on your assigned task {named}: {' '.join(task.title.split())}. Read its whole "
+        f"contract with `aisquare task show {ref}`, then do what the ASSIGNED TO YOU line of "
+        "your briefing says for it — claim it only if that line tells you to."
     )
 
 

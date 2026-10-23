@@ -277,9 +277,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`fleet spawn --task` with no `--prompt` tells the agent to start on its
   task** (#32; the owner's decision, board seq 671): its first message names the
-  task and says to read it with `aisquare task show N`, then claim it with
-  `aisquare task claim N`. A spawn with neither is typed nothing, and reads
-  `waiting`.
+  task and says to read it with `aisquare task show N`, then do what its
+  briefing's ASSIGNED TO YOU line says, which decides per role and state whether
+  to claim it (a tester on a todo task is told it is not its to claim). A spawn
+  with neither is typed nothing, and reads `waiting`.
 - The store migrates to schema v34 on first open, from 0.8.2's v32, in two steps: v34
   adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,
   `died` otherwise; NULL on a row from before it, read by its exit status, #38). v33

@@ -18187,3 +18187,31 @@ def test_spawn_types_its_prompt_once_the_trust_question_is_answered(
     assert tmux.typed == [(pane, "paste", "start on tsk_1"), (pane, "key", "Enter")]
     assert receipt.notes == [] and clock.now < PROMPT_TIMEOUT
     assert claude_sharing.shows_trust_prompt(TRUST_SCREEN)  # the fixture is the question
+
+
+def test_a_switch_after_a_cross_account_resume_resumes_the_real_transcript(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """P0-W3b: the resumed session's SessionStart reports a transcript under the NEW account
+    that Claude Code never creates (measured by P0-W0 on 2.1.309 and 2.1.223). Stored, it left
+    the row naming no file, and the agent's next switch started fresh, its session lost."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    real = tmp_path / "accounts" / "2" / "projects" / "-repo" / f"{agent.session_id}.jsonl"
+    real.parent.mkdir(parents=True)
+    real.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, real)
+    missing = tmp_path / "accounts" / "3" / "projects" / "-repo" / f"{agent.session_id}.jsonl"
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start(
+        agent.session_id or "", project.root, "resume", transcript_path=str(missing)
+    )
+
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+
+    assert receipt.resumed
+    assert _flag(_command(tmux), "--resume") == str(real)

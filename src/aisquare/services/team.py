@@ -1879,6 +1879,34 @@ def _shared_row_banner(
     )
 
 
+def _transcript_to_keep(known: TeamSession | None, transcript_path: str | None) -> str | None:
+    """The transcript a session start records: the one reported, unless the row already names
+    a transcript ON DISK and the reported one is not (P0-W3b).
+
+    Measured by P0-W0 on Claude Code 2.1.309 and 2.1.223: ``claude --resume <path>`` under
+    another ``CLAUDE_CONFIG_DIR`` — every resumed ``fleet switch`` and usage-limit hand-over —
+    hands ``SessionStart`` a path under the NEW account's ``projects/`` that is never created;
+    the records keep going to the original file, and ``UserPromptSubmit`` hands that one.
+    Recorded, the missing path raised :func:`_shared_row_banner` at every prompt, and the next
+    restart or switch found no file to resume and started fresh. Two paths that both exist
+    are two transcripts, and recorded as before: the banner is for them.
+    """
+    if known is None or not known.transcript_path or not transcript_path:
+        return transcript_path
+    if transcript_path == known.transcript_path or Path(transcript_path).is_file():
+        return transcript_path
+    return known.transcript_path if Path(known.transcript_path).is_file() else transcript_path
+
+
+def _heals(session: TeamSession, transcript_path: str | None) -> bool:
+    """Whether a prompt's ``transcript_path`` should replace the row's: the row's is not on
+    disk and the prompt's is (:func:`_transcript_to_keep`'s other half)."""
+    recorded = session.transcript_path
+    if not transcript_path or not recorded or transcript_path == recorded:
+        return False
+    return not Path(recorded).is_file() and Path(transcript_path).is_file()
+
+
 def _briefing_events(store: ContextStore, project_id: str) -> list[TeamEvent]:
     """The recent updates an agent is briefed with: the board's last :data:`_BOARD_EVENTS`
     that are an agent's to read, :data:`HUMAN_BOARD_KINDS` left out in the query.
@@ -1921,6 +1949,10 @@ def hook_session_start(
         project_service.capture(store, project)
         known = store.get_session(session_id)
         now = _now()
+        # The account the session runs on is the reported path's, even where the
+        # transcript recorded is the original file (`_transcript_to_keep`).
+        account = session_account(transcript_path)
+        transcript_path = _transcript_to_keep(known, transcript_path)
         # Computed before upsert_session(), which overwrites transcript_path.
         collision = _shared_row_banner(known, transcript_path, now)
         # Self-reported by the payload — validated before it can reach any
@@ -1937,7 +1969,7 @@ def hook_session_start(
                 last_seen_at=now,
                 cursor=store.latest_seq(project.id),
                 transcript_path=transcript_path,
-                account=session_account(transcript_path),
+                account=account,
                 model=model,
                 effort=effort,
                 # Recorded as ASKED, loadable or not (§3.7): this pane's fleet row
@@ -2057,6 +2089,13 @@ def hook_prompt_heartbeat(
         # that only rides along with unrelated teammate traffic would go unseen for
         # exactly as long as the two agents were quiet, which is when the
         # interleaved claims do their damage.
+        if _heals(session, transcript_path):
+            # A row that recorded a transcript which never appeared, this prompt's being
+            # the one on disk (P0-W3b, a row written before `_transcript_to_keep`): pointed
+            # at it, so the next restart resumes it and no banner reads it as a second agent.
+            assert transcript_path is not None  # `_heals` says so
+            store.set_transcript_path(session.id, transcript_path)
+            session = session.model_copy(update={"transcript_path": transcript_path})
         collision = _shared_row_banner(session, transcript_path, _now())
         # The fleet-row bind the start hook could not make is tried again here,
         # and the briefing it was owed comes with it (rule 2, second half).

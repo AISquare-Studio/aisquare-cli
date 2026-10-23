@@ -312,6 +312,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   coder's cycle names `task show`, the manager's says the contract belongs in
   `--detail`, and `--detail`'s help says it is the contract. `--json` is unchanged.
   (#74)
+- **A session resumed under another account keeps its transcript.** `claude
+  --resume <path>` under another `CLAUDE_CONFIG_DIR` (every resumed `fleet
+  switch` and usage-limit hand-over) reports a transcript under the new account
+  that Claude Code never creates, and keeps writing the original. The board
+  recorded the missing one, so every prompt after it raised a false *TWO live
+  agents* collision banner, and the agent's next restart or switch found nothing
+  to resume and started fresh. A session start no longer replaces a transcript
+  on disk with one that is not, and a row an earlier build wrote heals at the next
+  prompt. Found by the P0-W0 spike on Claude Code 2.1.309 and 2.1.223.
 
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for

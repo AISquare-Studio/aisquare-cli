@@ -788,6 +788,7 @@ themselves.
 - CHANGELOG `[Unreleased]`: `Fixed` — first prompts acknowledged (#122), idle agents
   read waiting (#123), claimed contracts (#74), drafts never overwritten (W2), tells
   delivered at turn end (W2), one switch per limit and per-family windows (W3),
+  a cross-account resume keeps its real transcript (W3b, found by W0),
   `capture.enabled` honoured (#268), `uv.lock`. `Added` — `[fleet] first_prompt`,
   `prompt_ack_seconds`, `busy_quiet_seconds`, `draft_quiet_seconds`,
   `deliver_notes_at_turn_end`, `inbox_delivery` (if built); `[accounts] prefer`;

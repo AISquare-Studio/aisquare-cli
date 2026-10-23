@@ -1310,6 +1310,7 @@ class ContextStore(Protocol):
     def mark_handover(self, session_id: str, *, held_after: datetime) -> bool: ...
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
+    def set_transcript_path(self, session_id: str, transcript_path: str) -> None: ...
     def unmark_handover(self, session_id: str, state: str) -> None: ...
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
     def release_claims(self, session_id: str) -> list[TeamTask]: ...
@@ -2628,6 +2629,19 @@ class SqliteStore:
         )
         self._conn.commit()
         return cursor.rowcount == 1
+
+    def set_transcript_path(self, session_id: str, transcript_path: str) -> None:
+        """Point the row at the transcript its agent writes, and touch nothing else (P0-W3b).
+
+        For a row whose recorded transcript is not on disk: a cross-account resume reports
+        one under the new account that Claude Code never creates. ``upsert_session`` would
+        also revive the row and set it ``working``, over a hand-over's or a limit's state.
+        """
+        self._conn.execute(
+            "UPDATE team_session SET transcript_path = ? WHERE id = ?",
+            (transcript_path, session_id),
+        )
+        self._conn.commit()
 
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None:
         """The session's turn ended on a usage limit (#146): park it as ``limited``.

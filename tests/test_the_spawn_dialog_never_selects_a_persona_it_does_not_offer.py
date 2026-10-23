@@ -33,6 +33,7 @@ from tests.test_ui_spawn import (
     configure_role,
     drive,
     note,
+    open_advanced,
     option_prompts,
     picker_ids,
     select,
@@ -53,6 +54,7 @@ MISSING = "ghost — not one of this project's personas"
 
 async def pick_the_bind(pilot: Pilot[None], seat: str) -> None:
     """*Pick…*, then the bound seat in the picker: the choice fills the dialog's Role."""
+    await open_advanced(pilot)
     await pilot.click("#spawn-pick")
     picker = await wait_for_screen(pilot, AttachTargetScreen)
     await settle(pilot)

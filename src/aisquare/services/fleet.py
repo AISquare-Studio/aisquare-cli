@@ -109,6 +109,10 @@ from aisquare.services import project as project_service
 FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
 
+PLAIN_ROLE = harness.PLAIN_ROLE
+"""No role: a plain Claude Code session, on the board with no standing cycle or mission.
+Not one of :data:`FLEET_ROLES`, whose every member the manager's loop and the docs brief."""
+
 MANAGER_LABEL = "manager"
 """A label the fleet reserves: exactly one manager per project."""
 
@@ -2681,7 +2685,7 @@ def _require_role(role: str) -> None:
     if not _role_ok(role):
         raise FleetError(
             f"unknown role {role!r} — expected one of: {', '.join(FLEET_ROLES)}, a harness "
-            "role, or one bound with `aisquare team bind`"
+            f"role, one bound with `aisquare team bind`, or {PLAIN_ROLE!r} for no role"
         )
 
 

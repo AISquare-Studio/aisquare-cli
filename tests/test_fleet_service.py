@@ -1082,12 +1082,29 @@ def test_spawn_refuses_an_unknown_role_but_accepts_a_bound_one(
     assert _command(tmux)[5] == "scribe"
 
 
+def test_no_role_spawns_a_plain_claude_from_the_cli_as_from_the_dialog(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, runner: CliRunner
+) -> None:
+    """The Spawn dialog's *(none) — general-purpose Claude* is `fleet spawn agent` (card
+    tsk_01m5mm2sz23b): a row and a window like any spawn's, launched as `agent`, so the agent
+    joins the board, and briefed with no standing cycle and no mission, on no ladder."""
+    result = runner.invoke(app, ["fleet", "spawn", fleet_service.PLAIN_ROLE, "-P", project.id])
+    assert result.exit_code == 0, result.output
+    [agent] = fleet_service.list_agents(project)
+    assert (agent.agent.role, agent.agent.label) == ("agent", "agent-1")
+    assert agent.agent.cwd == project.root  # the plain role's default: no worktree
+    assert _command(tmux)[4:6] == ["launch", "agent"]
+    assert harness.role_cycle("agent", "abcd1234", fleet=lambda verb: verb) == []
+    assert "agent" not in harness.ROLE_PROFILES  # no mission, no ladder
+    assert fleet_service.PLAIN_ROLE not in fleet_service.FLEET_ROLES
+
+
 @pytest.mark.parametrize(
     ("role", "expected"),
-    [("tester", True), ("coder2", True), ("scribe", True), ("codr", False)],
+    [("tester", True), ("coder2", True), ("scribe", True), ("agent", True), ("codr", False)],
 )
 def test_role_ok_is_the_public_name_of_the_rule_spawn_applies(role: str, expected: bool) -> None:
-    """A fleet role, a numbered seat, a name bound with `team bind`, and a typo."""
+    """A fleet role, a numbered seat, a name bound with `team bind`, no role, and a typo."""
     bound = CliRunner().invoke(app, ["team", "bind", "scribe", "--bin", "claude"])
     assert bound.exit_code == 0, bound.output
     assert fleet_service.role_ok(role) is expected

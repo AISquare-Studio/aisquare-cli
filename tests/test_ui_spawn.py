@@ -36,6 +36,7 @@ from textual.pilot import Pilot
 from textual.widgets import (
     Button,
     Checkbox,
+    Collapsible,
     Input,
     OptionList,
     RadioButton,
@@ -338,6 +339,30 @@ def select(dialog: SpawnDialog, name: str) -> Select[str]:
     return widget
 
 
+def advanced(dialog: SpawnDialog) -> Collapsible:
+    return dialog.query_one("#spawn-advanced", Collapsible)
+
+
+async def open_advanced(pilot: Pilot[Any]) -> None:
+    """Unfold *Advanced* as the owner does, with a click on its title. Folded, its fields are
+    not on screen, and a click at one of them lands on nothing at all."""
+    dialog = pilot.app.screen
+    assert isinstance(dialog, SpawnDialog)
+    if advanced(dialog).collapsed:
+        await pilot.click("#spawn-advanced CollapsibleTitle")
+        await unfolded(pilot)
+    assert not advanced(dialog).collapsed
+
+
+async def unfolded(pilot: Pilot[Any]) -> None:
+    """Wait out a fold or an unfold: the box grows or shrinks and centres again, and the
+    section scrolls itself into view (``Collapsible.scroll_visible``, animated). A click
+    before that lands where a widget was."""
+    await settle(pilot)
+    await pilot.wait_for_scheduled_animations()
+    await pilot.pause()
+
+
 # --- the row opens it -----------------------------------------------------------------
 
 
@@ -547,6 +572,7 @@ def test_dice_offers_role_adjective_animal_matching_the_label_rule(
     git_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> tuple[str, bool]:
+        await open_advanced(pilot)
         await pilot.click("#spawn-dice")
         await pilot.pause()
         rolled = label_input(dialog).value
@@ -575,8 +601,9 @@ def test_dice_fits_every_role_in_the_limit_and_refuses_a_role_too_long() -> None
     assert dice_label("a-very-long-custom-role") is None
 
 
-def test_role_choices_are_the_fleet_roles_then_the_bound_ones_sorted() -> None:
-    assert role_choices(["zeta", "coder", "alpha"]) == [
+def test_role_choices_are_none_then_the_fleet_roles_then_the_bound_ones_sorted() -> None:
+    assert role_choices(["zeta", "coder", "alpha", fleet_service.PLAIN_ROLE]) == [
+        fleet_service.PLAIN_ROLE,  # (none): offered once, first, even when bound
         *fleet_service.FLEET_ROLES,
         "alpha",
         "zeta",
@@ -727,7 +754,7 @@ def test_the_manager_role_locks_the_label_and_a_live_manager_greys_it_out(
 ) -> None:
     async def pick_manager(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         overlay = select(dialog, "role").query_one(OptionList)
-        greyed = overlay.get_option_at_index(list(fleet_service.FLEET_ROLES).index("manager"))
+        greyed = overlay.get_option_at_index(role_choices([]).index("manager"))
         label_input(dialog).value = "coder-auth"
         await pilot.pause()
         select(dialog, "role").value = "manager"
@@ -1010,14 +1037,22 @@ def option_prompts(dialog: SpawnDialog, name: str) -> list[str]:
     return [str(overlay.get_option_at_index(i).prompt) for i in range(overlay.option_count)]
 
 
-def test_the_fields_read_who_runs_it_then_as_whom(git_project: ProjectInfo) -> None:
-    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
-        return [str(label.render()) for label in dialog.query(".spawn-row > Label")]
+def test_the_fields_read_role_hand_off_and_account_then_advanced_who_runs_it_then_as_whom(
+    git_project: ProjectInfo,
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[list[str]]:
+        folded = advanced(dialog)
+        labels = list(dialog.query(".spawn-row > Label"))
+        return [
+            [str(label.render()) for label in labels if folded not in label.ancestors],
+            [str(label.render()) for label in labels if folded in label.ancestors],
+        ]
 
-    labels = drive(git_project, scenario)
-    # Hand off from, and its How row, come first (HANDOFF, tsk_01m3ns5a736s): who it comes from
-    # decides who runs it.
-    assert labels[:7] == ["Hand off from", "How", "Role", "Account", "Binary", "Persona", "Label"]
+    basic, folded = drive(git_project, scenario)
+    # The owner's three (tsk_01m5mm2sz23b): the role, the teammate it comes from with its
+    # How row, the account. Then, folded, who runs it — the bind, the binary — and as whom.
+    assert basic == ["Role", "Hand off from", "How", "Account"]
+    assert folded[:4] == ["Bind", "Binary", "Persona", "Label"]
 
 
 def test_the_persona_select_lists_none_and_the_catalogue_with_the_description_below(
@@ -1165,6 +1200,7 @@ def test_pick_opens_the_picker_in_new_order_and_fills_who_runs_it(
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = []
+        await open_advanced(pilot)
         await pilot.click("#spawn-pick")
         picker = await wait_for_screen(pilot, AttachTargetScreen)
         await settle(pilot)
@@ -1215,6 +1251,7 @@ def test_import_beside_the_persona_select_selects_what_it_imports(
     monkeypatch.setattr(personas_service, "importable_skills", lambda root: [])
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        await open_advanced(pilot)
         await pilot.click("#spawn-import")
         importer = await wait_for_screen(pilot, ImportPersonaScreen)
         await settle(pilot)

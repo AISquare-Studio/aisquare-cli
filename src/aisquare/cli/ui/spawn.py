@@ -10,9 +10,26 @@ the config it reads then, not from the one this form read when it opened. The
 prefilled label follows the same rule: sent only when the user changed it, so
 the service picks the free label under the store it is writing with.
 
-**Two steps: who runs it, then as whom** (§4.1, P4). The target fields come
-first — Role (with *Pick…*), Account, Binary — and the Persona select right
-after them, with the persona's description under it. It preselects the role's
+**Two tiers: three fields, then Advanced** (tsk_01m5mm2sz23b). Always on show,
+in this order: Role, *Hand off from* (its *How* row only once a teammate is
+picked) and Account, then the status line and the buttons. Role's first option
+is *(none) — general-purpose Claude*, ``fleet.PLAIN_ROLE``: a plain Claude Code
+session on the board, with no standing cycle and no mission; ``coder`` stays
+the default. Everything else is folded into one *Advanced* section (a
+``Collapsible``, opened by a click or ``Enter`` on its title): *Pick…*, Binary,
+Persona with *Import…*, Label with 🎲, Task, Worktree, Permission mode, Extra
+agent args and First prompt. It opens by itself when a preset fills one of its
+fields (``binary=``, or ``persona=`` from the persona-first flow; not the
+captain's own persona) and whenever one of its fields blocks *Spawn* — a bad
+label, a quoting error in the args — so *Spawn* is never disabled for a reason
+folded out of sight; folded again over such a field, it opens again. Folding
+changes nothing that is sent. The box sizes to what it shows: the header and the
+footer are docked, and the fields between them scroll once Advanced is open on
+a short terminal.
+
+**Who runs it, then as whom** (§4.1, P4). Inside Advanced the target fields come
+first — *Pick…*, Binary — and the Persona select right after them, with the
+persona's description under it. It preselects the role's
 ``[fleet.roles.<role>].persona`` and follows the role until the user picks one.
 ``persona=`` is sent like every other field: ``None`` while the form shows the
 role's default, the name once one is chosen, and ``""`` for an explicit *(none)*
@@ -85,6 +102,7 @@ from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     Checkbox,
+    Collapsible,
     Input,
     Label,
     OptionList,
@@ -134,6 +152,11 @@ NO_PERSONA = ""
 NO_SOURCE = ""
 """The Hand off from field's ``(none)``: the plain spawn, field for field (tsk_01m3ns5a736s)."""
 
+NO_ROLE = fleet_service.PLAIN_ROLE
+"""The Role field's ``(none)``: a plain Claude Code session, no standing cycle or mission."""
+NO_ROLE_CHOICE = "(none) — general-purpose Claude"
+NO_ROLE_NOTE = "a plain Claude Code session on the board: no standing cycle, no mission"
+
 OPEN_TASK_STATUSES = ("todo", "doing", "review", "blocked")
 """A task an agent can still be spawned for; ``done`` and ``dropped`` are refused by the service."""
 
@@ -163,10 +186,12 @@ class SpawnCompleted(Message):
 
 
 def role_choices(bound: Iterable[str]) -> list[str]:
-    """The fleet's roles in their fixed order, then every other role ``team bind`` knows, sorted."""
+    """``(none)``, the fleet's roles in their fixed order, then every other role ``team bind``
+    knows, sorted."""
     return [
+        NO_ROLE,
         *fleet_service.FLEET_ROLES,
-        *sorted(set(bound) - set(fleet_service.FLEET_ROLES)),
+        *sorted(set(bound) - {NO_ROLE, *fleet_service.FLEET_ROLES}),
     ]
 
 
@@ -333,10 +358,13 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     DEFAULT_CSS = """
     SpawnDialog { align: center middle; }
-    SpawnDialog #spawn-box { width: 90; max-width: 96%; height: 92%; border: heavy $accent;
-                             background: $surface; padding: 0 1; }
-    SpawnDialog #spawn-header { height: auto; padding: 1 0; }
-    SpawnDialog #spawn-fields { height: 1fr; }
+    SpawnDialog #spawn-box { width: 90; max-width: 96%; height: auto; max-height: 92%;
+                             border: heavy $accent; background: $surface; padding: 0 1; }
+    SpawnDialog #spawn-header { dock: top; height: auto; padding: 1 0; }
+    SpawnDialog #spawn-fields { height: auto; max-height: 100%; }
+    SpawnDialog #spawn-footer { dock: bottom; height: auto; }
+    SpawnDialog #spawn-advanced { padding: 0; margin-top: 1; background: $surface; }
+    SpawnDialog #spawn-advanced > Contents { padding: 0; }
     SpawnDialog .spawn-row { height: auto; }
     SpawnDialog .spawn-row > Label { width: 18; padding-top: 1; }
     SpawnDialog .spawn-row > Select { width: 1fr; }
@@ -346,6 +374,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     SpawnDialog #spawn-import { min-width: 12; width: 12; }
     SpawnDialog .spawn-note { height: auto; padding-left: 18; color: $text-muted; }
     SpawnDialog #spawn-worktree-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
+    SpawnDialog #spawn-pick-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
     SpawnDialog #spawn-prompt { height: 6; width: 1fr; }
     SpawnDialog #spawn-how { width: auto; height: auto; }
     SpawnDialog #spawn-fresh { margin-left: 2; }
@@ -377,6 +406,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._roles = roles if self._role in roles else [*roles, self._role]
         self._preset_binary = binary or ""
         self._preset_account = account
+        self._advanced_preset = bool(binary) or (persona is not None and not self._captain)
+        """A preset fills an Advanced field, so the section opens with the form. Not the
+        captain's persona: that preset is the captain's own, not a choice to show."""
         self._account_statuses: list[ClaudeAccountStatus] = []
         self._personas, self._personas_unavailable = self._read_personas()
         self._persona_touched = persona is not None
@@ -466,6 +498,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         return text
 
     def _role_prompt(self, role: str) -> str | Text:
+        if role == NO_ROLE:
+            return NO_ROLE_CHOICE
         if role == "manager" and self._manager_live:
             return Text("manager — one per project, already running", style="dim")
         return role
@@ -495,9 +529,20 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         with Vertical(id="spawn-box"):
             yield Static(self._header(), id="spawn-header")
             with VerticalScroll(id="spawn-fields"):
+                # The basic tier: who runs it, from whom, on which account.
+                with Horizontal(classes="spawn-row"):
+                    yield Label("Role")
+                    yield Select(
+                        [(self._role_prompt(role), role) for role in self._roles],
+                        value=self._role,
+                        allow_blank=False,
+                        disabled=self._captain,
+                        id="spawn-role",
+                    )
+                yield Static(id="spawn-role-note", classes="spawn-note")
                 if not self._captain:
                     # A hand-off from a teammate (card tsk_01m3ns5a736s). ``(none)`` is
-                    # the plain spawn below, field for field. Each teammate is its ROW's
+                    # the plain spawn, field for field. Each teammate is its ROW's
                     # id: two rows can carry one label (_source_changed).
                     with Horizontal(classes="spawn-row"):
                         yield Label("Hand off from")
@@ -519,23 +564,6 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                             yield RadioButton("Take over", id="spawn-take-over")
                         yield Checkbox("Start fresh", id="spawn-fresh")
                     yield Static(id="spawn-how-note", classes="spawn-note")
-                # Who runs it …
-                with Horizontal(classes="spawn-row"):
-                    yield Label("Role")
-                    yield Select(
-                        [(self._role_prompt(role), role) for role in self._roles],
-                        value=self._role,
-                        allow_blank=False,
-                        disabled=self._captain,
-                        id="spawn-role",
-                    )
-                    yield Button(
-                        "Pick…",
-                        id="spawn-pick",
-                        tooltip="choose a bind or an account",
-                        disabled=self._captain,
-                    )
-                yield Static(id="spawn-role-note", classes="spawn-note")
                 with Horizontal(classes="spawn-row"):
                     yield Label("Account")
                     yield Select(
@@ -545,89 +573,109 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                         id="spawn-account",
                     )
                 yield Static(id="spawn-account-note", classes="spawn-note")
-                with Horizontal(classes="spawn-row"):
-                    yield Label("Binary")
-                    yield Input(
-                        value=self._preset_binary,
-                        placeholder=self._binary_hint(self._role),
-                        id="spawn-binary",
-                    )
-                # … then as whom.
-                with Horizontal(classes="spawn-row"):
-                    yield Label("Persona")
-                    yield Select(
-                        self._persona_options(),
-                        value=self._persona_shown,
-                        allow_blank=False,
-                        id="spawn-persona",
-                    )
-                    yield Button(
-                        "Import…", id="spawn-import", tooltip="import a persona, then pick it"
-                    )
-                yield Static(id="spawn-persona-description", classes="spawn-note")
-                with Horizontal(classes="spawn-row"):
-                    yield Label("Label")
-                    yield Input(value=self._prefill, id="spawn-label", disabled=self._captain)
-                    yield Button(
-                        "🎲",
-                        id="spawn-dice",
-                        tooltip="<role>-<adjective>-<animal>",
-                        disabled=self._captain,
-                    )
-                yield Static(id="spawn-label-rule", classes="spawn-note")
-                with Horizontal(classes="spawn-row"):
-                    yield Label("Task")
-                    yield Select(
-                        [("(none)", NO_TASK), *((task_choice(t), t.id) for t in self._tasks)],
-                        value=NO_TASK,
-                        allow_blank=False,
-                        disabled=self._captain,
-                        id="spawn-task",
-                    )
-                yield Static(id="spawn-task-note", classes="spawn-note")
-                with Horizontal(classes="spawn-row"):
-                    yield Label("Worktree")
-                    yield Switch(
-                        value=defaults.worktree and self._git,
-                        disabled=not self._git,
-                        id="spawn-worktree",
-                    )
-                    yield Static(
-                        "" if self._git else "not a git repository", id="spawn-worktree-note"
-                    )
-                with Horizontal(classes="spawn-row"):
-                    yield Label("Permission mode")
-                    yield Select(
-                        permission_options(defaults.permission_mode),
-                        value=defaults.permission_mode,
-                        allow_blank=False,
-                        id="spawn-permission",
-                    )
-                with Horizontal(classes="spawn-row"):
-                    yield Label("Extra agent args")
-                    yield Input(
-                        placeholder=(
-                            "the captain's own: its server and no other tool"
-                            if self._captain
-                            else "e.g. --model opus"
-                        ),
-                        disabled=self._captain,
-                        id="spawn-args",
-                    )
-                yield Static(id="spawn-args-error", classes="spawn-note")
-                with Horizontal(classes="spawn-row"):
-                    yield Label("First prompt")
-                    yield TextArea(id="spawn-prompt")
-            yield Static(id="spawn-status")
-            with Horizontal(id="spawn-buttons"):
-                yield Button("Spawn", id="spawn-submit", variant="primary")
-                yield Button("Cancel", id="spawn-cancel")
+                # The advanced tier, folded until asked for — or needed (_open_advanced).
+                with Collapsible(
+                    title="Advanced", collapsed=not self._advanced_preset, id="spawn-advanced"
+                ):
+                    with Horizontal(classes="spawn-row"):
+                        yield Label("Bind")
+                        yield Button(
+                            "Pick…",
+                            id="spawn-pick",
+                            tooltip="choose a bind or an account",
+                            disabled=self._captain,
+                        )
+                        yield Static(
+                            "a bind or an account: fills Role, Binary and Account",
+                            id="spawn-pick-note",
+                        )
+                    with Horizontal(classes="spawn-row"):
+                        yield Label("Binary")
+                        yield Input(
+                            value=self._preset_binary,
+                            placeholder=self._binary_hint(self._role),
+                            id="spawn-binary",
+                        )
+                    with Horizontal(classes="spawn-row"):
+                        yield Label("Persona")
+                        yield Select(
+                            self._persona_options(),
+                            value=self._persona_shown,
+                            allow_blank=False,
+                            id="spawn-persona",
+                        )
+                        yield Button(
+                            "Import…", id="spawn-import", tooltip="import a persona, then pick it"
+                        )
+                    yield Static(id="spawn-persona-description", classes="spawn-note")
+                    with Horizontal(classes="spawn-row"):
+                        yield Label("Label")
+                        yield Input(value=self._prefill, id="spawn-label", disabled=self._captain)
+                        yield Button(
+                            "🎲",
+                            id="spawn-dice",
+                            tooltip="<role>-<adjective>-<animal>",
+                            disabled=self._captain,
+                        )
+                    yield Static(id="spawn-label-rule", classes="spawn-note")
+                    with Horizontal(classes="spawn-row"):
+                        yield Label("Task")
+                        yield Select(
+                            [("(none)", NO_TASK), *((task_choice(t), t.id) for t in self._tasks)],
+                            value=NO_TASK,
+                            allow_blank=False,
+                            disabled=self._captain,
+                            id="spawn-task",
+                        )
+                    yield Static(id="spawn-task-note", classes="spawn-note")
+                    with Horizontal(classes="spawn-row"):
+                        yield Label("Worktree")
+                        yield Switch(
+                            value=defaults.worktree and self._git,
+                            disabled=not self._git,
+                            id="spawn-worktree",
+                        )
+                        yield Static(
+                            "" if self._git else "not a git repository", id="spawn-worktree-note"
+                        )
+                    with Horizontal(classes="spawn-row"):
+                        yield Label("Permission mode")
+                        yield Select(
+                            permission_options(defaults.permission_mode),
+                            value=defaults.permission_mode,
+                            allow_blank=False,
+                            id="spawn-permission",
+                        )
+                    with Horizontal(classes="spawn-row"):
+                        yield Label("Extra agent args")
+                        yield Input(
+                            placeholder=(
+                                "the captain's own: its server and no other tool"
+                                if self._captain
+                                else "e.g. --model opus"
+                            ),
+                            disabled=self._captain,
+                            id="spawn-args",
+                        )
+                    yield Static(id="spawn-args-error", classes="spawn-note")
+                    with Horizontal(classes="spawn-row"):
+                        yield Label("First prompt")
+                        yield TextArea(id="spawn-prompt")
+            # Docked: the form scrolls between the header and these, which never leave sight.
+            with Vertical(id="spawn-footer"):
+                yield Static(id="spawn-status")
+                with Horizontal(id="spawn-buttons"):
+                    yield Button("Spawn", id="spawn-submit", variant="primary")
+                    yield Button("Cancel", id="spawn-cancel")
 
     def on_mount(self) -> None:
         if self._manager_live:
             # After the Select has built its overlay's options (its own mount).
             self.call_after_refresh(self._grey_out_manager)
         self._note("#spawn-task-note", self._tasks_unavailable, style="dim")
+        # Empty, a note is no row: the folded form is sized to what it shows.
+        self._note("#spawn-account-note", None)
+        self._note("#spawn-status", None)
         if not self._captain:
             self.query_one("#spawn-how-row").display = False
             self._note("#spawn-how-note", None)
@@ -683,12 +731,25 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             split_agent_args(self.query_one("#spawn-args", Input).value)
         except ValueError as exc:
             args_problem = f"extra agent args: {exc}"
-        self._note("#spawn-role-note", role_problem)
+        if role_problem is None and self._role == NO_ROLE:
+            self._note("#spawn-role-note", NO_ROLE_NOTE, style="dim")
+        else:
+            self._note("#spawn-role-note", role_problem)
         self._note("#spawn-label-rule", label_problem)
         self._note("#spawn-args-error", args_problem)
+        if label_problem or args_problem:
+            self._open_advanced()  # never a disabled Spawn whose reason is folded away
         ok = role_problem is None and label_problem is None and args_problem is None
         self.query_one("#spawn-submit", Button).disabled = self._spawning or not ok
         return ok
+
+    def _open_advanced(self) -> None:
+        self.query_one("#spawn-advanced", Collapsible).collapsed = False
+
+    @on(Collapsible.Collapsed, "#spawn-advanced")
+    def _folded(self) -> None:
+        """Folded over a field that blocks *Spawn*: ``_validate`` opens it again."""
+        self._validate()
 
     # --- the fields follow the role and the task until touched --------------------------
 

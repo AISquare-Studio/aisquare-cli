@@ -116,13 +116,14 @@ the list whose every member has a harness profile (``_SEAT`` is built from it)."
 
 
 def _role_ok(role: str) -> bool:
-    """First-class role, a numbered seat of one, or declared in config.
+    """First-class role, a numbered seat of one, declared in config, or no role at all.
 
     The whitelist earns its keep by catching typos — ``codr`` silently
     producing an unattached session was the original footgun — so this stays a
     check rather than becoming free-form. It just stops rejecting the two
     shapes real crews use: numbered seats, and roles the operator has already
-    written down.
+    written down. ``agent`` (:data:`harness.PLAIN_ROLE`) is the one word for "no
+    role": a plain Claude Code session on the board, with no cycle to brief.
 
     The captain (:data:`UNSEATED`) is a role only while the experimental captain is on.
     Off, it is the unknown role main calls it: ``launch captain`` in a fleet window
@@ -131,6 +132,7 @@ def _role_ok(role: str) -> bool:
     """
     return (
         role in ROLES
+        or role == harness.PLAIN_ROLE
         or (role in UNSEATED and experimental.captain_enabled())
         or bool(_SEAT.match(role))
         or role in _declared_roles()
@@ -319,7 +321,10 @@ def launch(
     ctx: typer.Context,
     role: Annotated[
         str,
-        typer.Argument(help=f"Team role for this session: {', '.join(ROLES)}."),
+        typer.Argument(
+            help=f"Team role for this session: {', '.join(ROLES)}, "
+            f"or {harness.PLAIN_ROLE} for none."
+        ),
     ],
     command: Annotated[
         str | None,
@@ -379,8 +384,8 @@ def launch(
     if not _role_ok(role):
         fail(
             f"unknown role {role!r} — expected one of: {', '.join(ROLES)}, "
-            "a numbered seat of one (coder1, coder2), or a role you have "
-            "bound with `aisquare team bind`",
+            "a numbered seat of one (coder1, coder2), a role you have "
+            f"bound with `aisquare team bind`, or {harness.PLAIN_ROLE!r} for no role",
             error="unknown_role",
         )
     if experimental.captain_role(role) and orchestrator.env_fleet_agent() is None:

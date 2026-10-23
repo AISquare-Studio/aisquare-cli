@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A fleet across two machines, the interim way**
+  (`docs/runbooks/multi-machine-ssh.md`). A multi-machine fleet is postponed (#293;
+  the design is in `docs/plans/multi-machine-fleet.md`). Until it ships, a manager
+  on one box drives another box's fleet over SSH: setting up box B, an
+  `~/.ssh/config` that shares one connection and drops a dead link in about 45
+  seconds, the four commands to brief the manager with, watching B's `asq` in
+  tmux, and the trust model. B trusts A's key completely, so the runbook
+  recommends a dedicated user and a key whose forced command runs `aisquare` and
+  nothing else. (#293)
+
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in

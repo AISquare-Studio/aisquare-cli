@@ -243,11 +243,34 @@ def meta_path(project_id: str) -> Path:
     return snapshot_dir(project_id) / "snapshot.json"
 
 
+HOME_SKIPPED = (
+    "never packed for the aisquare home: it holds aisquare's settings, the fleet database "
+    "and every Claude account's login data"
+)
+"""Why the aisquare home, added as a project, has no snapshot (the owner's decision,
+2026-10-23)."""
+
+
+def is_the_homes(project_id: str) -> bool:
+    """Whether ``project_id`` is the aisquare home's row, whose folder is never packed: a
+    pack of it would copy its login data into a file agents are pointed at."""
+    from aisquare.core.workspace import project_id_for  # lazy: workspace is heavier
+
+    try:
+        return project_id == project_id_for(paths.aisquare_home().resolve())
+    except (OSError, RuntimeError):
+        return False
+
+
 def exists(project_id: str) -> bool:
-    return meta_path(project_id).exists()
+    return not is_the_homes(project_id) and meta_path(project_id).exists()
 
 
 def load(project_id: str) -> Snapshot | None:
+    """The project's snapshot, or ``None``: never the aisquare home's, even one packed
+    before it was skipped (no hook points an agent at it, and doctor reads none)."""
+    if is_the_homes(project_id):
+        return None
     path = meta_path(project_id)
     if not path.exists():
         return None

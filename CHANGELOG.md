@@ -69,8 +69,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`aisquare init` or `aisquare project onboard` there, or `+` in asq) makes it a
   project with its own card, which never shows the captain's row; it warns once
   that the folder holds aisquare's settings, the fleet database and every Claude
-  account's login data, which agents working there can read and change. Removing
-  it from the fleet hides it again. Every other role, fleet row and board, and the store
+  account's login data, which agents working there can read and change. It is
+  never packed into a codebase snapshot, so agents there get no packed overview
+  (a pack of it left from before is not served, and is deleted). Removing it from
+  the fleet hides it again. Every other role, fleet row and board, and the store
   (schema v33), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line

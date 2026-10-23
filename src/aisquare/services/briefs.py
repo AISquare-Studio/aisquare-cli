@@ -21,6 +21,8 @@ already carries their fields.
 from __future__ import annotations
 
 import hashlib
+import os
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -173,6 +175,23 @@ def _read_artifact(path: Path) -> _Artifact:
     return _Artifact(source=resolved, body=body, sha256=hashlib.sha256(body).hexdigest())
 
 
+def _private_dirs(directory: Path) -> None:
+    """Make ``directory`` and each level of it under the home's ``briefs/``, every one
+    owner-only: made by ``mkdir(parents=True)``, only the leaf would take the mode, and
+    ``briefs/`` and ``briefs/<project>/`` would list brief ids to every local user. A
+    level an earlier build made wider is narrowed. POSIX bits; on Windows the copies
+    themselves are restricted (:func:`_keep_copy`)."""
+    root = paths.aisquare_home() / "briefs"
+    root.parent.mkdir(parents=True, exist_ok=True)
+    level = root
+    for part in (None, *directory.relative_to(root).parts):
+        if part is not None:
+            level = level / part
+        level.mkdir(exist_ok=True, mode=0o700)
+        if sys.platform != "win32":
+            os.chmod(level, 0o700)
+
+
 def _keep_copy(brief: WorkBrief, evidence_id: str, artifact: _Artifact) -> Path:
     """Copy the artifact under the store's home, owner-only, and return the copy's path.
 
@@ -181,7 +200,7 @@ def _keep_copy(brief: WorkBrief, evidence_id: str, artifact: _Artifact) -> Path:
     provenance only.
     """
     directory = paths.brief_evidence_dir(brief.project_id, brief.id)
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _private_dirs(directory)
     suffix = artifact.source.suffix
     if not (len(suffix) <= 16 and suffix[1:].isalnum()):
         suffix = ""

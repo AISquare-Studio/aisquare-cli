@@ -271,7 +271,26 @@ def test_the_kept_copy_is_owner_only(shot: Path) -> None:
     _pass(brief, task, "R1", shot)
     copy = _copy_of(brief)
     assert stat.S_IMODE(copy.stat().st_mode) == 0o600
-    assert stat.S_IMODE(copy.parent.stat().st_mode) & 0o077 == 0
+    root = paths.aisquare_home() / "briefs"
+    levels = [root, root / brief.project_id, copy.parent]
+    assert copy.parent == paths.brief_evidence_dir(brief.project_id, brief.id)
+    # Review of #306: mkdir(parents=True) gave only the leaf the mode, so briefs/ and
+    # briefs/<project>/ listed brief ids to every local user.
+    assert {str(level): stat.S_IMODE(level.stat().st_mode) for level in levels} == {
+        str(level): 0o700 for level in levels
+    }
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_a_briefs_dir_an_earlier_build_left_wide_is_narrowed(shot: Path) -> None:
+    root = paths.aisquare_home() / "briefs"
+    root.mkdir(parents=True, mode=0o755)
+    root.chmod(0o755)
+    brief = _brief()
+    task = _task()
+    briefs.link(brief.id, task.id, ["R1"])
+    _pass(brief, task, "R1", shot)
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
 
 
 def test_an_artifact_over_16_mib_is_refused_and_leaves_nothing(work: Path) -> None:

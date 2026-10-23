@@ -322,6 +322,13 @@ class AppSettingsView(Vertical):
         "Show each project's path under its name in the sidebar. "
         "Off: shown only when two projects share a name."
     )
+    PREFERENCES_FROM_A_SHELL: ClassVar[tuple[str, str]] = (
+        "Set from a shell (",
+        "), a preference shows after Reload here or when asq next starts, not live.",
+    )
+    """The tab's note, around the command it names in bold: ``asq`` holds ``[ui]`` and
+    takes it from this page, so a ``config set`` made while it runs waits for one or the
+    other."""
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
@@ -571,6 +578,14 @@ class AppSettingsView(Vertical):
             yield Switch(self.ui.always_show_project_path, id="ui-always-show-path")
         yield Static(
             Text(self.ALWAYS_SHOW_PATH_ABOUT), id="ui-always-show-path-about", classes="about"
+        )
+        before, after = self.PREFERENCES_FROM_A_SHELL
+        yield Static(
+            Text.assemble(
+                before, ("aisquare config set ui.always_show_project_path true", "bold"), after
+            ),
+            id="preferences-from-a-shell",
+            classes="about",
         )
 
     def on_mount(self) -> None:

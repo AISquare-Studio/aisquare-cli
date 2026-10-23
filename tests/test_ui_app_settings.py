@@ -768,6 +768,7 @@ def test_the_form_opens_on_agent_settings_beside_a_user_preferences_tab() -> Non
             ),
             "switch": host.query_one("#ui-always-show-path", Switch).value,
             "about": str(host.query_one("#ui-always-show-path-about", Static).render()),
+            "from a shell": str(host.query_one("#preferences-from-a-shell", Static).render()),
             "in preferences": bool(
                 host.query_one(f"#{PREFERENCES_TAB}").query("#ui-always-show-path")
             ),
@@ -789,6 +790,10 @@ def test_the_form_opens_on_agent_settings_beside_a_user_preferences_tab() -> Non
     assert seen["about"] == (
         "Show each project's path under its name in the sidebar. "
         "Off: shown only when two projects share a name."
+    )
+    assert seen["from a shell"] == (
+        "Set from a shell (aisquare config set ui.always_show_project_path true), a preference "
+        "shows after Reload here or when asq next starts, not live."
     )
     assert seen["buttons shown"] is True
 

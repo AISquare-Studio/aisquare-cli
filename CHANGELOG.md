@@ -17,7 +17,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   card in the sidebar shows its directory under its name, not only two projects that
   share a name. `asq` reads it at start and takes the new value from App settings
   when it saves, reloads or resets, so it shows at once and the two-second refresh
-  never reads `config.toml` for it.
+  never reads `config.toml` for it. A `config set` from a shell while `asq` runs
+  shows after App settings' *Reload* or at `asq`'s next start, not live.
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in

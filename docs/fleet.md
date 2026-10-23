@@ -1187,7 +1187,9 @@ directory's basename — `aisquare-cli` — for git repos and plain directories
 alike. Two projects sharing a basename also show their parent as a dim subtitle
 (`~/work/api`, `~/oss/api`). To see every project's directory under its name, turn
 on *Always show project directory* in *⚙ Settings ▸ App settings ▸ User
-preferences* (`aisquare config set ui.always_show_project_path true`).
+preferences* (`aisquare config set ui.always_show_project_path true`). Saved there,
+it shows at once; set from a shell while `asq` runs, it shows after that page's
+*Reload* or at `asq`'s next start, since `asq` does not re-read the file every refresh.
 
 **Nickname.** Free text on one line, up to 255 characters — `API: auth rewrite
 🚀` — like naming a browser tab for what you are doing there. Emoji are fine,

@@ -757,6 +757,13 @@ class AccountsSettings(BaseModel):
     ``share_settings``, off by default, keeps every managed account's ``settings.json``
     a link to the plain claude's. Both: ``core.claude_sharing``.
 
+    ``share`` (P2-W7, #198), empty by default, names what every account has in common:
+    ``memory`` (one auto-memory directory per project under
+    ``~/.aisquare/claude-shared/memory``, passed to each launch as ``--settings``),
+    ``skills``, ``agents``, ``commands`` and ``claude_md`` (each managed slot's entry a
+    link to the plain claude's, its own kept beside it), and ``plugins`` (experimental).
+    ``aisquare accounts share`` turns parts on and off; a launch links a slot made since.
+
     Read from the config file alone, like ``[fleet]``: there is no
     ``AISQUARE_ACCOUNTS_*`` variable, for the same reason that section gives.
     """
@@ -768,6 +775,9 @@ class AccountsSettings(BaseModel):
     prefer: Literal["priority", "reset-soonest"] = "priority"
     share_trust: bool = True
     share_settings: bool = False
+    share: list[Literal["memory", "skills", "agents", "commands", "claude_md", "plugins"]] = Field(
+        default_factory=list
+    )
 
 
 class AppConfig(BaseModel):

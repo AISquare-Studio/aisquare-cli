@@ -13,7 +13,7 @@ removes exactly them):
 | `Stop` | mark the session waiting; renew its task leases |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |
-| `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and remembers the limit on the account until that reset, so no pick by headroom sends an agent back to it before then. With `[accounts] on_limit = "switch"` a fleet agent is handed to another account and the line is a `limited_handing_over` event, which wakes nobody; a hand-over that cannot go ahead posts `handover_failed`, which wakes the manager. Without a hand-over coming, `limited` wakes it ([accounts](orchestration.md#several-accounts-one-team)). Any other error marks it `waiting`, with a feed line naming the error |
+| `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and remembers the limit on the account until that reset, so no pick by headroom sends an agent back to it before then; with `[accounts] on_limit = "switch"` a fleet agent is handed to another account, the line is a `limited_handing_over` event that wakes nobody, and a hand-over that cannot go ahead posts `handover_failed`, which wakes the manager; without a hand-over coming, `limited` wakes it ([accounts](orchestration.md#several-accounts-one-team)); any other error marks it `waiting`, with a feed line naming the error |
 
 `SessionStart` and `UserPromptSubmit` get `"timeout": 120` (seconds): Claude
 Code stops a hook after 60 seconds by default, and these two can wait that

@@ -25,31 +25,46 @@ concurrency:
 permissions:
   contents: read
 
+# LEAN CI FOR A TRAIN'S SUB-PRS (owner decision 2026-10-23). A pull request into
+# rc/** — one workstream of a release train — runs lint, typecheck and the suite on
+# ONE Linux leg (py3.12, captain on), the Linux package job and every other job
+# below except the two ambient legs; demo.yml does not render for it at all. Shared
+# runners give about 21 concurrent jobs and a check leg takes about 45 minutes, so
+# ten-job runs per sub-PR queued for hours. Everything else keeps the FULL matrix:
+# a push to rc/** or main (every sub-PR's merge, so the full matrix runs on the
+# train branch as each lands), a PR into main (the train itself), the nightly, and
+# a run by hand.
+#
+# The test is spelled the same in every job, as `LEAN` in
+# tests/test_ci_is_lean_for_sub_prs.py, which pins the split:
+#   github.event_name == 'pull_request' && startsWith(github.base_ref, 'rc/')
+# A matrix is chosen with fromJSON(<lean> && '<lean legs>' || '<full legs>'), so a
+# leg a sub-PR skips never starts a runner, rather than starting and skipping.
+# Contexts in `strategy` are github, needs, vars and inputs only: no `env` to
+# name the test once.
+
 jobs:
   check:
     name: check (${{ matrix.os }}, py${{ matrix.python-version }}${{ matrix.captain == 'off' && ', captain off' || '' }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        python-version: ["3.11", "3.12", "3.13"]
-        # The suite runs with the experimental captain ON (tests/conftest.py's autouse
-        # captain_on), so every leg above tests the captain as it is when turned on. A
-        # user who never turns it on gets it OFF, so one more leg runs the whole suite
-        # that way (AISQUARE_SUITE_CAPTAIN=off): every test must pass, bar those marked
-        # needs_captain, which it skips and says why (review of #240).
-        captain: ["on"]
-        include:
-          # Windows on one interpreter rather than the full cross-product: the
-          # platform-specific branches read sys.platform at call time, so a
-          # second Python version re-runs the same branches for ~3x the minutes.
-          - os: windows-latest
-            python-version: "3.12"
-            captain: "on"
-          - os: ubuntu-latest
-            python-version: "3.12"
-            captain: "off"
+      # Full: ubuntu on 3.11-3.13, plus two legs by `include`. The suite runs with
+      # the experimental captain ON (tests/conftest.py's autouse captain_on), so
+      # every leg tests the captain as it is when turned on. A user who never turns
+      # it on gets it OFF, so one more leg runs the whole suite that way
+      # (AISQUARE_SUITE_CAPTAIN=off): every test must pass, bar those marked
+      # needs_captain, which it skips and says why (review of #240). Windows on one
+      # interpreter rather than the full cross-product: the platform-specific
+      # branches read sys.platform at call time, so a second Python version re-runs
+      # the same branches for ~3x the minutes.
+      # Lean (a sub-PR into rc/**): ubuntu, py3.12, captain on.
+      matrix: >-
+        ${{ fromJSON((github.event_name == 'pull_request' && startsWith(github.base_ref, 'rc/'))
+        && '{"include": [{"os": "ubuntu-latest", "python-version": "3.12", "captain": "on"}]}'
+        || '{"os": ["ubuntu-latest"], "python-version": ["3.11", "3.12", "3.13"], "captain": ["on"],
+        "include": [{"os": "windows-latest", "python-version": "3.12", "captain": "on"},
+        {"os": "ubuntu-latest", "python-version": "3.12", "captain": "off"}]}') }}
     steps:
       - uses: actions/checkout@v7
 
@@ -132,6 +147,8 @@ jobs:
     # A properly isolated suite is green in both. Anything that reads ambient
     # machine state fails in one of them.
     name: ambient (${{ matrix.ambient }})
+    # Not on a sub-PR into rc/** (lean CI, above): its merge runs both legs on rc/**.
+    if: ${{ !(github.event_name == 'pull_request' && startsWith(github.base_ref, 'rc/')) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -360,8 +377,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # Lean (a sub-PR into rc/**): Linux only; Windows on its merge.
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: >-
+          ${{ fromJSON((github.event_name == 'pull_request' && startsWith(github.base_ref, 'rc/'))
+          && '["ubuntu-latest"]' || '["ubuntu-latest", "windows-latest"]') }}
     steps:
       - uses: actions/checkout@v7
 

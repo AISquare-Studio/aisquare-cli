@@ -508,6 +508,7 @@ _V1_DEFAULTS: dict[str, Any] = {
             "validator": {"permission_mode": "auto", "worktree": False, "extra_args": []},
             "ui-tester": {"permission_mode": "auto", "worktree": False, "extra_args": []},
         },
+        "pane_clipboard": "off",
     },
     "accounts": {
         "pick": "default",
@@ -630,6 +631,10 @@ class FleetSettings(BaseModel):
     disable_native_agent_teams: bool = True
     max_continuations_per_hour: int = 30
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
+    pane_clipboard: Literal["off", "on"] = "off"
+    """Whether a program in an agent's pane may set your clipboard (OSC 52, tmux's
+    ``set-clipboard``). Off by default: on, any program a pane runs can write it. Applies
+    to a server started after the change."""
 
 
 class SnapshotSettings(BaseModel):

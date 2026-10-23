@@ -30,6 +30,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -273,7 +274,8 @@ def _stop(process: subprocess.Popen[str]) -> None:
 
 
 def _signal(process: subprocess.Popen[str], *, kill: bool) -> None:
-    if os.name != "nt":
+    # sys.platform, not os.name: it is the check mypy's Windows leg reads past killpg on.
+    if sys.platform != "win32":
         sig = signal.SIGKILL if kill else signal.SIGTERM
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(process.pid, sig)  # its group: pgid == pid (start_new_session)

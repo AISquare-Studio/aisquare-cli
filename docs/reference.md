@@ -8,7 +8,7 @@ removes exactly them):
 
 | Hook | What it does |
 | --- | --- |
-| `SessionStart` | inject orientation: snapshot pointers, context, team briefing |
+| `SessionStart` | inject orientation: snapshot pointers, context, team briefing; mark the session `waiting` (it sits at its prompt until one is typed), except after a compaction, which keeps what the turn said |
 | `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on), unless `capture.enabled` is off; deliver the teammate delta; heartbeat, which stamps the session's last prompt and marks its fleet agent's first message taken ([fleet](fleet.md#the-first-message)) |
 | `Stop` | mark the session waiting; renew its task leases |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |

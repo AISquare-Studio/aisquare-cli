@@ -108,7 +108,10 @@ tmux can see and its row says so (`no hooks`).
    them (`docs/personas.md`).
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
-   state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
+   state chip — **▶ working**, **⏸ waiting** (a fresh agent reads waiting until its
+   first prompt starts a turn, and one whose pane has been quiet for
+   `busy_quiet_seconds` with Claude Code idle at its prompt reads *idle (the board
+   said working)*: a turn ended with Esc fires no hook), **🔔 NEEDS YOU** (with a terminal
    bell), **⏳ limited** (parked on a Claude usage limit, with the reset time),
    **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it. The header
@@ -1146,6 +1149,8 @@ max_agents_per_project = 4                # the manager (and you) cannot exceed 
 worktree_dir = ".aisquare-worktrees"      # relative to the repo root; kept out of git via .git/info/exclude
 disable_native_agent_teams = true         # exports CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0 into fleet launches
 max_continuations_per_hour = 30           # cap on the manager's Stop-hook continuations
+busy_quiet_seconds = 30                   # a "working" row whose pane printed nothing this long is
+                                          # checked once: an idle Claude Code prompt reads waiting
 
 [fleet.roles.manager]
 permission_mode = "auto"                  # any Claude Code mode; "" = pass no flag

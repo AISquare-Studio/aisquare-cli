@@ -858,3 +858,33 @@ def test_the_bar_reads_nothing_while_the_view_is_hidden(
 
     hidden_from, after = drive(body)
     assert after == hidden_from, "no read while hidden"
+
+
+@pytest.mark.needs_captain
+def test_the_homes_card_shows_its_own_agents_and_the_captain_stays_in_its_section(
+    tmp_path: Path, script: Script
+) -> None:
+    """The owner's decision D5: added on purpose, the home is a project with its own card.
+    The frame's home agents were replaced by ``[captain]`` when painted, so the card showed
+    the captain and lost every other agent (found by #33 on f9baaaad)."""
+    from aisquare.core.store import store_session
+
+    home = captain_state.home_project()
+    with store_session() as store:
+        store.onboard_project(home, explicit=True)
+    captain, coder = _captain(), status(home.id, "coder-1", "coder", "waiting")
+    script[home.id] = [captain, coder]
+
+    async def body(pilot: Pilot[None]) -> tuple[list[str], list[str]]:
+        app = fleet_app(pilot)
+        await refreshed(app)
+        card = app.query_one(f"#card-{home.id}")
+        section = app.query_one("#captain-section")
+        return (
+            [row.id or "" for row in card.query(AgentRow)],
+            [row.id or "" for row in section.query(AgentRow)],
+        )
+
+    on_card, in_section = drive(body)
+    assert on_card == [f"agent-row-{coder.agent.id}"], on_card
+    assert f"agent-row-{captain.agent.id}" in in_section

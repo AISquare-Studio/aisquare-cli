@@ -254,7 +254,9 @@ def test_a_persona_badge_gives_way_before_the_session_figure_never_after() -> No
             row = agent_row_text(status, 42.0, width=width)
             plain = row.plain
             assert row.cell_len <= width, (width, plain)
-            assert plain.endswith("⏸ #1·42%") or "⏸ #1·42% · " in plain, (width, plain)
+            # Every width here has room for a badge of BADGE_KEEP cells (review of #267's
+            # delta, n1: a branch for a row without one could never be taken).
+            assert "⏸ #1·42% · " in plain, (width, plain)
             badge = plain.partition("#1·42%")[2]
             assert badge.startswith(" · ") and len(badge) >= BADGE_KEEP, (width, plain)
             if persona in badge:
@@ -265,8 +267,50 @@ def test_a_persona_badge_gives_way_before_the_session_figure_never_after() -> No
     wide = agent_row_text(_status(slot=1, persona="skeptic"), 42.0, width=60).plain
     assert wide == "🔨 coder-auth    ▶ #1·42% · skeptic"
     # Too narrow even for a cut badge: it is dropped, the figure is not.
+    # Nothing after the figure (n1: '"·sk" not in tight' could not fail, as a cut badge
+    # reads " · s…").
     tight = agent_row_text(_status(slot=1, persona="skeptic"), 42.0, width=25).plain
-    assert tight.rstrip().endswith("▶ #1·42%") and "·sk" not in tight and " · " not in tight
+    assert tight.rstrip().endswith("▶ #1·42%"), tight
+    assert tight.partition("#1·42%")[2].strip() == "", tight
+
+
+def test_a_mounted_row_is_never_drawn_wider_than_it_is() -> None:
+    """Review of #267's delta, m2: a row is built in ``__init__`` before it has a width, and
+    its first frame was the whole-width text until ``on_resize`` repainted it, cut at its
+    end by its own ellipsis: the badge, or the figure behind a long label. Every frame is
+    drawn at the width it has."""
+    import asyncio
+
+    from rich.cells import cell_len
+    from textual.app import App, ComposeResult, RenderResult
+    from textual.containers import Vertical
+
+    from aisquare.cli.ui.sidebar import AgentRow
+
+    drawn: list[tuple[int, str]] = []
+
+    class Recorded(AgentRow):
+        def render(self) -> RenderResult:
+            frame = super().render()
+            drawn.append((self.content_size.width, str(getattr(frame, "plain", frame))))
+            return frame
+
+    class Host(App[None]):
+        CSS = "Vertical { width: 30; }"
+
+        def compose(self) -> ComposeResult:
+            with Vertical():
+                yield Recorded(_status(label="manager", role="manager", slot=1, persona="skeptic"))
+
+    async def run() -> None:
+        async with Host().run_test(size=(80, 10)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+
+    asyncio.run(run())
+    sized = [(width, plain) for width, plain in drawn if width]
+    assert sized, "the premise: the row was drawn"
+    assert all(cell_len(plain) <= width for width, plain in sized), sized
 
 
 def test_no_hash_tmux_command_role_task_or_working_directory_in_the_info_line() -> None:

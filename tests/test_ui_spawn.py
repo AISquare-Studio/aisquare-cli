@@ -754,6 +754,26 @@ def test_the_remote_control_switch_follows_the_role_until_touched_and_is_sent_th
     assert seen[5:] == [False, None], "back to coder: off is coder's default again"
 
 
+def test_the_remote_control_note_wraps_at_80_columns(git_project: ProjectInfo) -> None:
+    """At 80 columns the note beside *Remote control* was laid out on one line wider than
+    its row and painted cut, '…or the Cl' (#335's walk). It wraps in its row now."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str:
+        await pilot.resize_terminal(80, 45)
+        widget = dialog.query_one("#spawn-remote-note", Static)
+        widget.scroll_visible(animate=False)
+        await settle(pilot)
+        x, y, width, height = widget.region
+        # What the screen paints there, not the layout: a line wider than its row is laid
+        # out whole and painted cut (test_ui_remote.painted_in).
+        update = host.screen._compositor.render_full_update()
+        rows = ["".join(chop.text for chop in row) for row in update.strips]
+        return " ".join(" ".join(row[x : x + width] for row in rows[y : y + height]).split())
+
+    painted = drive(git_project, scenario)
+    assert painted == "continue it from claude.ai/code or the Claude app"
+
+
 def test_the_manager_role_locks_the_label_and_a_live_manager_greys_it_out(
     git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, spawns: SpawnRecorder
 ) -> None:

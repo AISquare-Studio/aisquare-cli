@@ -167,3 +167,26 @@ def test_session_start_leaves_out_a_preference_a_claude_md_already_loads(
     assert "prefer tabs" in result.stdout
     assert "graphify" not in result.stdout
     assert "use make check" not in result.stdout
+
+
+def test_the_claude_md_chain_is_the_hook_inputs_cwd_not_the_hook_process_cwd(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The plugin launcher or a worktree runs the hook elsewhere than the session: the
+    files Claude Code loads are the session's (the payload's ``cwd``), so a CLAUDE.md
+    where the hook process happens to run neither drops nor keeps anything."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
+    session_dir = tmp_path / "session-checkout"
+    session_dir.mkdir()
+    (session_dir / "CLAUDE.md").write_text("# session\nuse the session's make check\n")
+    (work_dir / "CLAUDE.md").write_text("# hook process\nuse the hook's tox\n")
+    for text in ("use the session's make check", "use the hook's tox"):
+        runner.invoke(app, ["context", "add", text, "--user"])
+    assert Path.cwd() == work_dir  # the hook process runs here
+
+    payload = json.dumps({"cwd": str(session_dir)})
+    result = runner.invoke(app, ["hook", "session-start"], input=payload)
+
+    assert result.exit_code == 0, result.output
+    assert "use the hook's tox" in result.stdout
+    assert "use the session's make check" not in result.stdout

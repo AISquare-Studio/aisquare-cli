@@ -17,7 +17,7 @@ from typer.testing import CliRunner
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import paths, personas
-from aisquare.core.config import AppConfig, save_config
+from aisquare.core.config import AppConfig, FleetRoleSettings, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import FleetAgent
@@ -1076,3 +1076,111 @@ def test_launch_without_persona_exports_no_persona_variable(
     assert result.exit_code == 0, result.output
     assert spy["env"]["AISQUARE_ROLE"] == "coder"
     assert "AISQUARE_PERSONA" not in spy["env"]
+
+
+# --- Claude Code's own Remote Control, per role (#289) -------------------------------------
+
+
+def _remote_control_role(role: str = "coder", *, on: bool = True) -> None:
+    config = AppConfig()
+    config.fleet.roles[role] = FleetRoleSettings.model_validate({"remote_control": on})
+    save_config(config)
+
+
+def _said(result: Any) -> str:
+    return str(result.output) + str(getattr(result, "stderr", ""))
+
+
+def test_launch_puts_remote_control_and_its_title_on_claudes_argv(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """``[fleet.roles.coder] remote_control = true``: Claude Code starts with Remote Control,
+    titled with the project and, launched by hand with no label, the role."""
+    _remote_control_role()
+
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["claude", "--remote-control", "repo · coder"]
+
+
+def test_the_fleet_label_titles_the_remote_session(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    _remote_control_role()
+
+    result = runner.invoke(app, ["launch", "coder", "--name", "coder-1"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["claude", "--remote-control", "repo · coder-1", "--name", "coder-1"]
+
+
+@pytest.mark.parametrize("command", ["codex", "my-claude-wrapper"])
+def test_remote_control_is_claude_codes_alone_and_another_binary_is_told_so(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], command: str
+) -> None:
+    _remote_control_role()
+
+    result = runner.invoke(app, ["launch", "coder", "--command", command])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == [command]
+    assert f"remote control: {command!r} is not Claude Code — not turned on" in _said(result)
+
+
+def test_a_base_url_on_another_host_or_an_oauth_token_turns_remote_control_off_and_says_so(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code refuses Remote Control behind a host other than the Anthropic API (the
+    explainability proxy is one) and with a ``claude setup-token`` token: nothing is
+    added, and the line names the variable. The Anthropic API itself is no blocker."""
+    _remote_control_role()
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://user:secret@proxy.example/v1")
+    proxied = runner.invoke(app, ["launch", "coder"])
+    proxied_argv = spy["argv"]
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    anthropic = runner.invoke(app, ["launch", "coder"])
+    anthropic_argv = spy["argv"]
+    monkeypatch.delenv("ANTHROPIC_BASE_URL")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-example")
+    token = runner.invoke(app, ["launch", "coder"])
+
+    assert proxied_argv == ["claude"]
+    assert "ANTHROPIC_BASE_URL points at proxy.example" in _said(proxied)
+    assert "secret" not in _said(proxied), "the host alone, never the URL's credentials"
+    assert anthropic.exit_code == 0 and anthropic_argv == [
+        "claude",
+        "--remote-control",
+        "repo · coder",
+    ]
+    assert spy["argv"] == ["claude"]
+    assert "CLAUDE_CODE_OAUTH_TOKEN is set" in _said(token)
+    assert "sk-ant-oat-example" not in _said(token)
+
+
+def test_the_launch_flags_override_the_role_and_the_operators_own_flag_wins(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    _remote_control_role(on=False)
+    asked = runner.invoke(app, ["launch", "coder", "--remote-control"])
+    asked_argv = spy["argv"]
+    _remote_control_role(on=True)
+    refused = runner.invoke(app, ["launch", "coder", "--no-remote-control"])
+    refused_argv = spy["argv"]
+    own = runner.invoke(app, ["launch", "coder", "--rc", "Mine"])
+
+    assert asked.exit_code == refused.exit_code == own.exit_code == 0
+    assert asked_argv == ["claude", "--remote-control", "repo · coder"]
+    assert refused_argv == ["claude"]
+    assert spy["argv"] == ["claude", "--rc", "Mine"]
+    assert "the launch line already carries it" in _said(own)
+
+
+def test_without_the_setting_nothing_changes(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    result = runner.invoke(app, ["launch", "coder"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"] == ["claude"]
+    assert "remote control" not in _said(result)

@@ -250,6 +250,23 @@ def test_a_forks_numbered_label_is_generated_as_a_spawns_is_not_checked_as_a_typ
     assert (fork.label, fork.role) == ("data_eng-2", "data_eng")
 
 
+def test_a_forks_numbered_label_under_a_long_role_fits_in_24_characters(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#291: a fork with no label walks `<role>-1`, `-2` … as a spawn does, and was never
+    measured, so a role bound under a name near 24 characters forked to a label longer than
+    any `--label` may be. It walks the spawn's trimmed labels instead."""
+    role = "platform-security-auditor"
+    monkeypatch.setattr("aisquare.cli.launch._declared_roles", lambda: {role})
+    source = fleet_service.spawn(project, role, worktree=False).agent
+    assert source.label == "platform-security-audi-1"
+
+    fork = fleet_service.hand_off(project, source.label).started.agent
+
+    assert (fork.label, fork.role) == ("platform-security-audi-2", role)
+    assert fleet_service.is_label(fork.label)
+
+
 def test_a_fork_in_a_plain_folder_leaves_its_exited_source_its_label_and_last_screen(
     tmux: FakeTmux, claude_on_path: Path, plain_project: ProjectInfo
 ) -> None:

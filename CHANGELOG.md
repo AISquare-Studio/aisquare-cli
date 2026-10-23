@@ -25,6 +25,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a subagent does and does not see, how to clear a stale `CLAUDE.md` section out of
   aisquare's memory, and the 10,000-character cap on a hook's output. (#292)
 
+- **`aisquare persona import` takes several sources, or `--from-dir DIR`** (#294).
+  Each goes through the same import in turn, and one refusal does not stop the
+  rest. The receipt is one table (SOURCE · NAME · ENGINE · OUTCOME), `--json` a
+  list of results, and the exit is 1 when any source was refused. One source
+  alone reads as before; `--name` is refused with more than one.
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in
@@ -101,6 +106,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the day; one that no longer resolves steps down to the role's current
   default, then to none, each said on the receipt and never a refusal (owner
   decision, 2026-09-24; supersedes #209).
+- **A fleet role can start its agents with Claude Code's own Remote Control** (#289).
+  `[fleet.roles.<role>] remote_control = true`, or `fleet spawn --remote-control` /
+  `--no-remote-control` for one agent, starts Claude Code with `--remote-control
+  "<project> · <label>"`, so the session can be continued from claude.ai/code or the
+  Claude app. The Spawn dialog has a *Remote control* switch at the role's default.
+  The choice is recorded on the row (a restart and a switch keep it), and
+  `fleet ls --json` reports it as `remote_control`. `aisquare launch` leaves the flag
+  off, saying why in one line, when the binary is not Claude Code, when your own
+  line carries `--remote-control` or `--rc`, when `ANTHROPIC_BASE_URL` names another
+  host (the explainability proxy does), or when `CLAUDE_CODE_OAUTH_TOKEN` is set. A
+  doctor row, `remote control`, names the roles that have it on and what Claude Code
+  would refuse; it appears only while a role has it on. Off for every role by
+  default. `docs/remote.md` compares it with `aisquare remote`.
 - **Stop an agent from `asq`.** The agent view's header gains a compact **Stop**
   button, and `x` with the sidebar focused stops the selected agent — both open
   one dialog (*Stop* · *Force* · *Cancel*) over `services.fleet.stop`, the same
@@ -354,6 +372,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`project forget` and `project prune` never move or write the active-project
+  pin** (#271). With no pin, the project your working directory is in counted as
+  the active one, so forgetting it from inside, or a prune that dropped it,
+  pinned the most recently touched project left. That pin is machine-wide, in a
+  `state.json` written for it, and every terminal and every fleet's `fleet ls`
+  without `--project` then followed it. A pin on the project that went was moved
+  the same way. Now a pin that named the project that went is cleared ("the pin
+  on alpha was cleared"), and nothing else is touched. `--json` gains `unpinned`,
+  the project whose pin was cleared; `active` is always `null`, and
+  `active_changed` says whether the pin was cleared.
 - **A coder that claims a task sees its contract.** `task claim` and `task next
   --claim` printed the title line alone, and the contract (`--detail`) was a
   separate `task show` that nothing named, so people pasted contracts into coders'
@@ -378,6 +406,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   none. A *Fork* as another role started without the teammate's persona, which the
   dialog showed and kept; it now keeps it, as *Take over* does, and a persona the
   dialog changed is the dialog's.
+- **Cancelling a persona import stops its engine** (#211). *Cancel* or `Esc` in
+  the Import dialog closed it and published nothing, but the manager engine's
+  `claude -p` ran on until its 180-second timeout. It now runs in a session of
+  its own and is waited on in 0.2-second steps: on a cancel it, and what it
+  started, are ended within two seconds (SIGTERM, then SIGKILL), and an api
+  answer that arrives after a cancel is dropped. `aisquare persona import`
+  handles Ctrl-C the same way, writes nothing and exits 130.
 - **`aisquare project prune --captured-only` never takes the captain's home board,**
   and doctor no longer counts it among the captured directories. The home is
   captured on purpose and never added, so once the captain sat idle the prune took
@@ -415,6 +450,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads in the background and only repaints on the UI thread: with four projects
   of three agents each, a tick holds the UI for about 2 ms, where it held it for
   about 117 ms.
+- **No agent label is longer than 24 characters, and the manager is told the
+  limit** (#291). A label a live agent held at 24 characters was suffixed to 26
+  (`coder-authentication-ref-2`), and a role bound with `team bind` whose name
+  was near 24 characters made a `<role>-<task>` label longer than any `--label`
+  may be, as did a fork with no label under such a role. The stem before `-2`,
+  `-3` … or the task's short id is now trimmed so the whole fits
+  (`coder-authentication-r-2`). An over-long `--label` is refused
+  with one that fits (`label 'coder-authentication-refactor' is 29 characters
+  — at most 24; try 'coder-authentication-ref'`), so a manager that has already
+  added the task retries in the same turn instead of leaving the task without an
+  agent, and the manager's cycle now says "at most 24 characters".
 
 ## [0.8.2] - 2026-10-19
 

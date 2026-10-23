@@ -154,7 +154,9 @@ tmux can see and its row says so (`no hooks`).
    Then label (prefilled `<role>-1`, or `<role>-<task short id>` once a task is
    picked; 🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
    disables *Spawn* and shows the rule), task (the project's open tasks),
-   worktree (disabled with "not a git repository" outside one), permission mode,
+   worktree (disabled with "not a git repository" outside one), *Remote control*
+   (Claude Code's own, at the role's `remote_control`; it follows the role until
+   you touch it), permission mode,
    extra agent args (split like a shell would; a quoting error is shown inline)
    and a first prompt. A field left as it opened means the role's default,
    exactly as an omitted `fleet spawn` flag does; picking `(none)` over a role
@@ -267,6 +269,7 @@ follows as a `⚠` line.
 | `--bin B` | the agent executable | the role's binding, else `claude` |
 | `--prompt TEXT` | first message typed once the agent is up | none |
 | `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
+| `--remote-control` / `--no-remote-control` | start it with Claude Code's own Remote Control, titled `<project> · <label>`, to continue from claude.ai/code or the Claude app ([remote](remote.md#claude-codes-own-remote-control)); recorded on the row, so a restart and a switch keep it; `fleet ls --json` reports it as `remote_control` | the role's `[fleet.roles.<role>].remote_control`, else off |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
 
@@ -1347,12 +1350,25 @@ current codename — a rename never strands an agent.
 **Agent labels.** `manager` — always, one per project; a second is refused.
 Everything else matches `^[a-z][a-z0-9-]{1,23}$`: 2–24 characters, lowercase
 letters, digits and `-`, no `.`, `:` or spaces. The manager is briefed to make
-labels descriptive (`coder-auth`, `tester-py311`, not `coder-2`). Labels are
+labels descriptive (`coder-auth`, `tester-py311`, not `coder-2`) and told the
+24-character limit. Labels are
 unique per project among **live** agents — an ended agent frees its label. A
 collision appends `-2`, `-3` … and the receipt names the label actually used
 (`✓ spawned coder-auth-2 (asked: coder-auth)`) rather than failing: a manager
 mid-plan must not stall on a name. Without `--label`, the default is
 `<role>-<task short id>` when there is a `--task`, else `<role>-1`.
+
+No label the fleet makes is longer than 24 characters. Before a suffix (`-2`,
+`-3` …) or a task's short id, the label or role it follows is trimmed so the
+whole fits: a live `coder-authentication-ref` (24) makes the next one
+`coder-authentication-r-2`, and a role bound as `platform-security-auditor`
+spawned for a task makes `platform-securi-01k9q8p3`, the short id kept whole.
+A fork with no label is numbered and trimmed the same way. Only the length
+is fitted: a role bound under a name the rule would refuse as a
+`--label` (`data_eng`) keeps its own characters (`data_eng-1`). An over-long
+`--label` is refused with a label that fits — `label
+'coder-authentication-refactor' is 29 characters — at most 24; try
+'coder-authentication-ref'` — so it can be retried as it stands.
 
 **Branches and worktrees.** A coder's branch is
 `fleet/<codename>/<task-short-id>-<slug>` — `fleet/amber-otter/01k9q8p3-wire-auth`:

@@ -1069,9 +1069,17 @@ def _fixed_label(role: str, wanted: str | None) -> str | None:
     so all three go by one copy of them.
     """
     if wanted is not None and not is_label(wanted):
+        # The manager adds the task before it spawns for it: a refusal it can retry from in
+        # the same turn names a label that fits, where there is one (#291).
+        # Never a reserved label, which the retry would be refused for next (`Manager`).
+        fits = slugify(wanted, limit=24)
+        reserved = {MANAGER_LABEL, CAPTAIN_LABEL} - {role}
+        try_it = f"; try {fits!r}" if is_label(fits) and fits not in reserved else ""
+        if len(wanted) > 24 and re.fullmatch(r"[a-z][a-z0-9-]*", wanted):
+            raise FleetError(f"label {wanted!r} is {len(wanted)} characters — at most 24{try_it}")
         raise FleetError(
             f"label {wanted!r} is not valid — lowercase letters, digits and '-', "
-            "2 to 24 characters, no '.', ':' or spaces"
+            f"2 to 24 characters, no '.', ':' or spaces{try_it}"
         )
     if wanted == MANAGER_LABEL and role != "manager":
         raise FleetError(f"the label {MANAGER_LABEL!r} is reserved for the manager role")
@@ -1086,6 +1094,13 @@ def _fixed_label(role: str, wanted: str | None) -> str | None:
     return None
 
 
+def _fitted(stem: str, suffix: str) -> str:
+    """``stem + suffix`` within 24 characters, the stem trimmed and the suffix kept whole: a
+    ``-N`` or a task's short id after a long label or role made one no ``--label`` may be
+    (#291). Asked by :func:`next_label` and :func:`_fork_label`, which number alike."""
+    return stem[: 24 - len(suffix)].rstrip("-") + suffix
+
+
 def next_label(
     project: ProjectInfo,
     role: str,
@@ -1095,7 +1110,12 @@ def next_label(
     store: ContextStore | None = None,
 ) -> str:
     """The label a new agent gets: the asked one, or ``<role>-<task>`` / ``<role>-<n>``,
-    suffixed ``-2``, ``-3`` while a LIVE agent already holds it (§5.7)."""
+    suffixed ``-2``, ``-3`` while a LIVE agent already holds it (§5.7).
+
+    The stem before a suffix is trimmed so the whole stays within 24 characters
+    (:func:`_fitted`). A bound role's characters are its own and kept as they are
+    (``data_eng-1``): only a label somebody typed is checked against the rule.
+    """
     fixed = _fixed_label(role, wanted)
     if fixed is not None:
         return fixed
@@ -1105,14 +1125,14 @@ def next_label(
         if wanted is not None:
             base = wanted
         elif task_id:
-            base = f"{role}-{task_id.removeprefix('tsk_')[:TASK_SHORT]}"
+            base = _fitted(role, f"-{task_id.removeprefix('tsk_')[:TASK_SHORT]}")
         else:
-            base = f"{role}-1"
+            base = _fitted(role, "-1")
         if base not in live:
             return base
         stem = wanted if wanted is not None else role
         for n in range(2, 1000):
-            candidate = f"{stem}-{n}"
+            candidate = _fitted(stem, f"-{n}")
             if candidate not in live:
                 return candidate
         raise FleetError(f"no free label for {stem!r}")
@@ -1186,9 +1206,9 @@ def _fork_label(
     label = fixed if fixed is not None else wanted
     if label is None:
         n = 1
-        while held_by(f"{role}-{n}") is not None:
+        while held_by(_fitted(role, f"-{n}")) is not None:
             n += 1
-        return f"{role}-{n}"
+        return _fitted(role, f"-{n}")
     held = held_by(label)
     if held is None:
         return label
@@ -3007,6 +3027,7 @@ def spawn(
     start_point: str | None = None,
     fork: bool = False,
     hub: str | None = None,
+    remote_control: bool | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -3133,6 +3154,8 @@ def spawn(
         if permission_mode is None:
             permission_mode = spec.permission_mode or ""
         worktree = worktree if worktree is not None else spec.worktree
+        if remote_control is None:
+            remote_control = spec.remote_control  # Claude Code's Remote Control, as spawned
         if replayed_args:
             agent_args = _replayed_args(role, spec, config)
     if experimental.captain_role(role) and not _is_the_captains_launch(cwd, agent_args):
@@ -3350,6 +3373,15 @@ def spawn(
     if chosen_persona is not None:
         # A flag, not an env var: the window's environment is the tmux SERVER's.
         flags += ["--persona", chosen_persona]
+    # Claude Code's Remote Control (#289): the spawn's choice, else the role's. The window's
+    # `launch` decides whether Claude Code would take it, after its tracing wiring; asked
+    # for only when on, or when it turns a role's default off, so any other spawn's window
+    # command is as it was.
+    asked_remote = remote_control if remote_control is not None else role_config.remote_control
+    if asked_remote:
+        flags += ["--remote-control"]
+    elif role_config.remote_control:
+        flags += ["--no-remote-control"]
     flags += ["--name", picked]
     command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
@@ -3549,6 +3581,7 @@ def spawn(
                 command=list(command),
                 recorded_by=__version__,
                 hub=hub,
+                remote_control=asked_remote,
             ),
             socket_path=socket_path,
             boot_id=tmux_core.boot_id(),

@@ -72,6 +72,14 @@ it. A `prune` that drops the reading project too, its agents all stopped, drops
 the hub with it: every hold is decided before anything goes, so the plan and
 the sweep agree.
 
+Neither ever moves or writes the pin. When the pin from `project switch` named
+the project that went, it is cleared ("the pin on alpha was cleared"), and the
+active project follows your working directory again. With no pin, or a pin on
+another project, nothing changes, even when you forget the project you are
+standing in. Before #271 the pin moved to the most recently touched project,
+and with no pin at all one was written. Every terminal and every fleet that ran
+without `--project` then followed it.
+
 ```sh
 aisquare project forget ../old-checkout       # one registration; --purge deletes its history too
 aisquare project prune --missing --worktrees  # the stale ones, after a confirmation (or --yes)

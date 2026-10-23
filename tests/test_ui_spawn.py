@@ -223,6 +223,7 @@ UNTOUCHED: Kwargs = {
     "agent_args": [],
     "account": None,
     "persona": None,
+    "remote_control": None,
 }
 """What a Spawn press sends for a form nobody changed: the role's default everywhere."""
 
@@ -668,6 +669,7 @@ def test_spawn_sends_exactly_the_chosen_values_with_the_agent_args_shlex_split(
                 "agent_args": ["--model", "opus", "--append-system-prompt", "be brief"],
                 "account": "2",
                 "persona": None,
+                "remote_control": None,
             },
         )
     ]
@@ -720,6 +722,36 @@ def test_untouched_defaults_follow_the_role_and_touched_ones_stay(
     assert seen[1] == ("plan", False)  # both untouched: they followed coder → tester
     assert seen[2] == ("acceptEdits", True)  # the touched mode stayed; the switch followed
     assert seen[3] == "acceptEdits"  # and differs from the reviewer's default: it is sent
+
+
+def test_the_remote_control_switch_follows_the_role_until_touched_and_is_sent_then(
+    git_project: ProjectInfo,
+) -> None:
+    """#289: *Remote control* opens at the role's ``remote_control``, follows a role change
+    while untouched, and is sent only when it differs from the role's default."""
+    config = load_config()
+    config.fleet.roles["reviewer"] = FleetRoleSettings.model_validate({"remote_control": True})
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        remote = dialog.query_one("#spawn-remote", Switch)
+        seen: list[Any] = [remote.value, dialog.spawn_kwargs()["remote_control"]]
+        select(dialog, "role").value = "reviewer"
+        await pilot.pause()
+        seen += [remote.value, dialog.spawn_kwargs()["remote_control"]]
+        remote.value = False  # touched: off for this one reviewer
+        await pilot.pause()
+        seen.append(dialog.spawn_kwargs()["remote_control"])
+        select(dialog, "role").value = "coder"
+        await pilot.pause()
+        seen += [remote.value, dialog.spawn_kwargs()["remote_control"]]
+        return seen
+
+    seen = drive(git_project, scenario)
+    assert seen[:2] == [False, None], "a coder: off, the role's default, sent as None"
+    assert seen[2:4] == [True, None], "untouched, it followed the reviewer's default"
+    assert seen[4] is False, "touched off over the reviewer's default: sent"
+    assert seen[5:] == [False, None], "back to coder: off is coder's default again"
 
 
 def test_the_manager_role_locks_the_label_and_a_live_manager_greys_it_out(

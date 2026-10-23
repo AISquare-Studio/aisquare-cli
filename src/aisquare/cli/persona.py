@@ -14,6 +14,7 @@ import os
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -298,13 +299,26 @@ def _show_draft(draft: PersonaDraftView) -> None:
         typer.echo(f"  note: {note}", err=True)
 
 
+CANCELLED = "Import cancelled. Nothing was written."
+"""What Ctrl-C during ``persona import`` says before it exits 130 (#211)."""
+
+
 @app.command("import")
 def import_(
-    source: Annotated[
-        str | None,
+    sources: Annotated[
+        list[str] | None,
         typer.Argument(
-            help="A skill directory, a SKILL.md or any text file, - for stdin, an https:// "
-            "URL, or a Claude Code skill's name."
+            help="One or more of: a skill directory, a SKILL.md or any text file, - for "
+            "stdin, an https:// URL, or a Claude Code skill's name.",
+            show_default=False,
+        ),
+    ] = None,
+    from_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--from-dir",
+            help="Import every skill directory and file in DIR (hidden ones aside).",
+            metavar="DIR",
         ),
     ] = None,
     user: UserFlag = False,
@@ -348,13 +362,19 @@ def import_(
         bool, typer.Option("--yes", "-y", help="Save an engine's draft without asking.")
     ] = False,
 ) -> None:
-    """Import a persona: a skill is copied byte for byte; anything else is converted
-    by an engine and shown before it is saved (default: --user)."""
+    """Import personas: a skill is copied byte for byte; anything else is converted
+    by an engine and shown before it is saved (default: --user). Several sources, or
+    --from-dir, are imported one after another into one receipt table; one refusal does
+    not stop the rest, and the exit is 1 if any was refused. Ctrl-C ends the import, and
+    any engine it started, and exits 130."""
     root = _root()
     if list_skills:
         _emit_skills(persona_service.importable_skills(root))
         return
-    if source is None:
+    batch = list(sources or [])
+    if from_dir is not None:
+        batch.extend(_dir_sources(from_dir))
+    if not batch:
         fail(
             "name a source: a skill directory, a SKILL.md or Markdown file, - for stdin, or a "
             "skill from `aisquare persona import --list`",
@@ -364,26 +384,23 @@ def import_(
     mode: Literal["auto", "always", "never"] = (
         "auto" if llm is None else "always" if llm else "never"
     )
-    asked: list[bool] = []
+    one = _Import(layer, root, name, force, mode, condense, engine, model, yes)
+    if len(batch) > 1 or from_dir is not None:
+        if name is not None:
+            fail(
+                "--name names one persona — import the sources one at a time to name each",
+                error="usage",
+            )
+        _import_batch(batch, one)
+        return
     with _reported():
         try:
-            result = persona_service.import_source(
-                source,
-                layer=layer,
-                root=root,
-                name=name,
-                force=force,
-                llm=mode,
-                condense=condense,
-                engine=engine,
-                model=model,
-                confirm=_confirmer(yes, asked),
-                progress=_progress,
-            )
+            result = one.run(batch[0])
         except persona_service.DraftKept as exc:
-            # "n" at a terminal is not_confirmed; no terminal to ask is needs_confirmation.
-            code = "needs_confirmation" if exc.code == "not_confirmed" and not asked else exc.code
+            code = one.code_of(exc)
             fail(str(exc), error=code, ref=str(exc.draft_path), detail=str(exc))
+        except KeyboardInterrupt:
+            fail(CANCELLED, error="cancelled", exit_code=130)
     persona = result.persona
     if _json():
         _emit(
@@ -405,6 +422,125 @@ def import_(
     typer.echo(f"✓ imported {persona.name} ({how}) into {persona.layer}: {persona.path}{replaced}")
     _warn_links(result.skipped_links)
     _warn(result.warnings)
+
+
+@dataclass
+class _Import:
+    """One ``persona import`` as the flags asked for it, run once per source."""
+
+    layer: Layer
+    root: Path | None
+    name: str | None
+    force: bool
+    llm: Literal["auto", "always", "never"]
+    condense: bool
+    engine: str | None
+    model: str | None
+    yes: bool
+    asked: list[bool] = field(default_factory=list)
+
+    def run(self, source: str) -> persona_service.ImportResult:
+        self.asked = []
+        return persona_service.import_source(
+            source,
+            layer=self.layer,
+            root=self.root,
+            name=self.name,
+            force=self.force,
+            llm=self.llm,
+            condense=self.condense,
+            engine=self.engine,
+            model=self.model,
+            confirm=_confirmer(self.yes, self.asked),
+            progress=_progress,
+        )
+
+    def code_of(self, kept: persona_service.DraftKept) -> str:
+        """A no at a terminal is ``not_confirmed``; no terminal to ask is
+        ``needs_confirmation``."""
+        if kept.code == "not_confirmed" and not self.asked:
+            return "needs_confirmation"
+        return kept.code
+
+
+def _dir_sources(directory: Path) -> list[str]:
+    """``--from-dir``: each skill directory and file in ``directory``, hidden ones aside, by
+    name; each goes through the import's own ladder, which refuses what is no persona."""
+    try:
+        entries = sorted(directory.expanduser().iterdir(), key=lambda entry: entry.name)
+    except OSError as exc:
+        fail(f"--from-dir {directory}: {exc.strerror or exc}", error="io_error")
+    return [str(entry) for entry in entries if not entry.name.startswith(".")]
+
+
+def _import_batch(batch: list[str], one: _Import) -> None:
+    """#294: each source in turn, one refusal never stopping the rest; one table (``--json``:
+    one list), and exit 1 when any was refused. Ctrl-C stops at the source it was on."""
+    rows: list[dict[str, Any]] = []
+    cancelled = False
+    for source in batch:
+        _progress(f"→ {source}")
+        row: dict[str, Any] = {"source": source, "outcome": "refused", "error": None}
+        try:
+            result = one.run(source)
+        except persona_service.DraftKept as exc:
+            row.update(error=one.code_of(exc), message=str(exc), ref=str(exc.draft_path))
+        except PersonaError as exc:
+            row.update(error=exc.code, message=str(exc))
+        except OSError as exc:
+            where = f"{exc.filename}: " if exc.filename else ""
+            row.update(error="io_error", message=f"{where}{exc.strerror or exc}")
+        except KeyboardInterrupt:
+            row.update(outcome="cancelled", error="cancelled", message=CANCELLED)
+            cancelled = True
+        else:
+            persona = result.persona
+            row.update(
+                outcome="imported",
+                name=persona.name,
+                layer=persona.layer,
+                path=str(persona.path),
+                engine=result.engine,
+                model=result.model,
+                replaced=result.replaced,
+                warnings=result.warnings,
+                skipped_links=result.skipped_links,
+            )
+        rows.append(row)
+        if cancelled:
+            break
+    if _json():
+        typer.echo(json.dumps(rows, default=str))
+    else:
+        _receipt_table(rows)
+    if cancelled:
+        raise typer.Exit(130)
+    if any(row["outcome"] != "imported" for row in rows):
+        raise typer.Exit(1)
+
+
+def _receipt_table(rows: list[dict[str, Any]]) -> None:
+    """SOURCE · NAME · ENGINE · OUTCOME, one row per source; then each one's warnings."""
+    table = [("SOURCE", "NAME", "ENGINE", "OUTCOME")]
+    for row in rows:
+        if row["outcome"] == "imported":
+            outcome = "replaced" if row["replaced"] else "imported"
+            how = f"{row['engine']}, {row['model']}" if row.get("model") else row["engine"]
+            table.append((row["source"], row["name"], how, outcome))
+        else:
+            reason = _flattened(str(row.get("message") or ""))
+            table.append((row["source"], "—", "—", f"{row['outcome']} ({row['error']}): {reason}"))
+    widths = [max(len(line[column]) for line in table) for column in range(3)]
+    for line in table:
+        cells = [cell.ljust(width) for cell, width in zip(line[:3], widths, strict=True)]
+        typer.echo("  ".join([*cells, line[3]]).rstrip())
+    for row in rows:
+        if row["outcome"] == "imported":
+            _warn_links(row["skipped_links"])
+            _warn([f"{row['name']}: {warning}" for warning in row["warnings"]])
+    imported = sum(row["outcome"] == "imported" for row in rows)
+    refused = len(rows) - imported
+    typer.echo(f"{imported} imported, {refused} not", err=True)
 
 
 def _emit_skills(skills: list[persona_service.SkillRef]) -> None:

@@ -147,15 +147,18 @@ def list_(
 @app.command("show")
 def show(name: PersonaName) -> None:
     """Print exactly what a session would be briefed with, then its provenance and files."""
+    root = _root()
     with _reported():
-        persona = core.resolve(name, _root())
+        persona = core.resolve(name, root)
     lines = core.briefing(persona)
     warnings = core.warnings(persona)
     provenance = persona.provenance
     if _json():
         _emit(
             {
-                **_entry(persona, None),
+                # The root it resolved at: with none, ``shadows`` was always [] where
+                # ``list --json`` names what the persona shadows (review of #201, R1-F5).
+                **_entry(persona, root),
                 "frontmatter": persona.frontmatter,
                 "body": persona.body,
                 "briefing": "\n".join(lines),

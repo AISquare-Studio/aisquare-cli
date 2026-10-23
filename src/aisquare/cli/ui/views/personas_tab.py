@@ -15,8 +15,8 @@ module at call time, so a test replaces each with a recorder.
 **Attach to existing / Attach to new** post :class:`AttachRequested`, which the
 tab answers itself with the target picker (``cli/ui/attach.py``): an agent is
 attached to after one confirmation (``fleet_service.attach_persona`` in a thread
-worker; the toast says whether the briefing was typed, or noted for the agent's
-own next prompt), a bind or an account opens the Spawn dialog preset with the
+worker; the toast says whether the briefing was typed, and when it was not, why and how
+the persona reaches the agent), a bind or an account opens the Spawn dialog preset with the
 persona, and *+ New account* hands over to the Accounts page. The message is not
 stopped, so the shell can see it.
 
@@ -420,12 +420,13 @@ class PersonasTab(Vertical):
             if isinstance(receipt, fleet_service.AttachReceipt):
                 label = receipt.agent.label
                 said = f"✓ attached {receipt.persona} to {label} ({receipt.delivered})"
-                noted = receipt.delivered == "noted"
-                if noted:
-                    # Nothing reached the agent yet: say why, and how the persona gets to
-                    # it, as the CLI's second line does (review of #240, finding 7).
+                typed = receipt.delivered == "typed"
+                if not typed:
+                    # Noted, unsent or maybe: the briefing may not have reached the agent, so
+                    # say why, and how the persona gets to it, as the CLI's second line does
+                    # (review of #240, finding 7; for all three, #201's R1-F9).
                     said = f"{said} — {receipt.how}"
-                self.notify(said, timeout=10 if noted else 6, markup=False)
+                self.notify(said, timeout=6 if typed else 10, markup=False)
             self.reload()
         elif event.state is WorkerState.ERROR:
             error = event.worker.error

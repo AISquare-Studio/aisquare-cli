@@ -916,6 +916,30 @@ def test_a_persona_written_for_other_roles_is_a_receipt_note_never_a_refusal(
     ]
 
 
+def test_the_persona_roles_note_counts_a_seat_as_its_role_as_harness_base_role_does(
+    project: ProjectInfo,
+) -> None:
+    """``coder2`` is a seat of ``coder``; ``bot7``, a role of its own, is no seat of ``bot``.
+    A ``re.sub`` of the digits counted both as seats (review of #201, R1-F8)."""
+    from aisquare.core.config import FleetRoleSettings
+
+    persona = project.root / ".aisquare" / "personas" / "steady" / "SKILL.md"
+    persona.parent.mkdir(parents=True)
+    persona.write_text(
+        "---\nname: steady\ndescription: Steady.\nmetadata:\n  persona-roles: coder, bot\n"
+        "---\nWork steadily.\n",
+        encoding="utf-8",
+    )
+    notes: dict[str, list[str]] = {"coder2": [], "bot7": []}
+    for role, said in notes.items():
+        fleet_service._chosen_persona(project, role, "steady", FleetRoleSettings(), said)
+
+    assert notes == {
+        "coder2": [],
+        "bot7": ["persona steady is written for coder, bot, not bot7 — spawned with it anyway"],
+    }
+
+
 def test_spawn_records_where_its_server_listens_and_in_which_boot(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

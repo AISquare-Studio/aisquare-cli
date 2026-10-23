@@ -1997,6 +1997,11 @@ def hook_prompt_heartbeat(
             # `capture_prompt` had captured already (review of #259, round 19).
             project_service.capture(store, project)
             now = _now()
+            # The persona as a session start asks it, and briefed below as there: this is
+            # the session's first injection. Without it, an agent launched with --persona
+            # before its project was tracked or the team was on ran without its persona
+            # block until a /clear (review of #201, R1-F3).
+            asked_persona, persona_note, named = _asked_persona(store, project.id)
             session = store.upsert_session(
                 TeamSession(
                     id=session_id,
@@ -2009,14 +2014,15 @@ def hook_prompt_heartbeat(
                     account=session_account(transcript_path),
                     model=harness.clean_model_id(model),
                     effort=harness.clean_effort(effort),
+                    persona=asked_persona,
                 )
             )
             # This door binds a fleet row too (an agent that started before the
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
             # under its old holder on this very board (review of #135).
-            named = _hook_named_row(store)
             assigned = _assignment(store, session.id, project.id, named=named)
+            _settle_owed_persona(store, session)  # this injection briefs the persona itself
             return _render_board(
                 project,
                 store.team_sessions(project.id),
@@ -2024,8 +2030,11 @@ def hook_prompt_heartbeat(
                 _briefing_events(store, project.id),
                 me=session,
                 assigned=assigned,
+                briefing=True,
+                persona_note=persona_note,
                 labels=lambda: slot_labels_via(store),
                 fleet=_cycle_project(store, project, cwd, session.id, named=named),
+                cwd=cwd,
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -2849,9 +2858,11 @@ def _render_board(
     cwd: Path | None = None,
 ) -> str:
     """The board, and for ``me`` the protocol and its role's cycle, whose fleet commands
-    name ``fleet`` (:func:`_cycle_project`). ``briefing`` is SessionStart's alone: it adds
-    ``me``'s persona after the role cycle — never on the board command, never on a
-    per-prompt path, so no factual surface carries persona text (§3.1).
+    name ``fleet`` (:func:`_cycle_project`). ``briefing`` is a session's first injection's
+    alone — SessionStart's, or the prompt's that joins a session the board did not know
+    (review of #201, R1-F3): it adds ``me``'s persona after the role cycle. Never on the
+    board command, never on a later prompt, so no factual surface carries persona text
+    (§3.1).
     ``persona_note`` is the one line saying why no attached persona was read. ``cwd`` is the
     session's directory, whose project's layer the persona comes from when ``fleet`` is
     ``None``."""

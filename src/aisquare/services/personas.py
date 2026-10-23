@@ -1028,7 +1028,11 @@ def _occupied(path: Path) -> bool:
 
 def _publish(dest: Path, fill: Callable[[Path], object]) -> bool:
     """Build ``dest`` in a staging directory beside it, then rename it into place,
-    replacing what was there. Returns whether something was replaced."""
+    replacing what was there. Returns whether something was replaced.
+
+    A replacement that fails at its last rename puts the old one back: left in its hidden
+    ``.<name>.old-*`` directory, the persona was gone from every catalogue (review of
+    #201, R1-F4)."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     staged = Path(tempfile.mkdtemp(dir=dest.parent, prefix=f".{dest.name}.new-"))
     try:
@@ -1038,7 +1042,11 @@ def _publish(dest: Path, fill: Callable[[Path], object]) -> bool:
             retired = Path(tempfile.mkdtemp(dir=dest.parent, prefix=f".{dest.name}.old-"))
             retired.rmdir()
             dest.rename(retired)
-            staged.rename(dest)
+            try:
+                staged.rename(dest)
+            except BaseException:
+                retired.rename(dest)
+                raise
             _discard(retired)
         else:
             staged.rename(dest)

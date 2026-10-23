@@ -1023,7 +1023,9 @@ once, after all four trains are on `main`.
 **Not built in this train, and why.** The inbox-socket tier (W1a/W2 "if built"): W0
 pinned its schema for 2.1.309 only, 2.1.223 has no socket, and its migration collided
 with P1's reserved schema 35; follow-up behind `[fleet] inbox_delivery = false`. The
-per-family `weekly_scoped` window W0 found is #49 (P0-W3c); W1a's round-2 minors are #51.
+per-family `weekly_scoped` window W0 found is follow-up P0-W3c, and W1a's round-2 minors
+(the prompt file confined to its agent, a `Stop` taking a pending first message) are a
+follow-up PR into this branch; both land before the train merges.
 
 ## Release checklist
 

@@ -268,7 +268,9 @@ def test_off_a_session_started_as_a_declared_captain_gets_the_ordinary_briefing(
     assert "attention()" not in text, "not the captain's cycle"
     with store_session() as store:
         session = store.get_session("declared-captain-1")
-    assert session is not None and session.state != "waiting", "not forced to waiting"
+    # Waiting at its prompt as every session start leaves one (#32, L1), the captain's or
+    # not: what tells them apart is the briefing above.
+    assert session is not None and session.state == "waiting"
 
 
 @pytest.mark.needs_captain

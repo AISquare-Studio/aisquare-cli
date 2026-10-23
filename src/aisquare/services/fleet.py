@@ -66,7 +66,7 @@ from aisquare.core.agent_adapters import (
     get_adapter,
     recorded_adapter,
 )
-from aisquare.core.agent_adapters.types import AgentAdapter, PermissionIntent
+from aisquare.core.agent_adapters.types import AgentAdapter, ForkArgs, PermissionIntent
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
     FleetRoleSettings,
@@ -4139,18 +4139,21 @@ def spawn(
     # The same goes for a session the CALLER chose (`--session-id`, `--resume`,
     # `--continue`): see `_without_session_choice`.
     recorded_args = _without_session_choice(resolution.binary, [*role_args, *extra])
+    forked: ForkArgs | None = None
     if resume is not None:
         # The agent's resume (`--resume <transcript path>`) keeps the ORIGINAL session
         # id (#146), so the row is joined to it here rather than minted or learned
-        # later; the identity planner would otherwise read the path as the id.
-        extra = [
-            *selected.adapter.resume_args(
-                resume.native_session_id or resume.session_id, resume.transcript_path
-            ),
-            # A fork's: the source's conversation under the id minted below (`--session-id`).
-            *(["--fork-session"] if resume.fork else []),
-            *extra,
-        ]
+        # later; the identity planner would otherwise read the path as the id. A fork's
+        # is the agent's own (`fork_args`): a new session from the source's conversation.
+        native_id = resume.native_session_id or resume.session_id
+        if resume.fork:
+            forked = selected.adapter.fork_args(native_id, resume.transcript_path)
+            if forked is None:
+                raise FleetError(f"{selected.adapter.label} cannot fork a session")
+            lead = list(forked.args)
+        else:
+            lead = selected.adapter.resume_args(native_id, resume.transcript_path)
+        extra = [*lead, *extra]
     # Validate native model pins before creating a worktree/window or live row.
     model_resolution = None
     try:
@@ -4385,17 +4388,24 @@ def spawn(
         project = ensure_codename(project, store)
         codename = project.codename or _codename_to_add(store, project)
     notes.extend(f"accounts: {note}" for note in choice.notes)
-    if resume is not None and resume.fork:
-        # A FORK (card tsk_01m3ns5a736s): the resume above with `--fork-session` opens the
-        # source's conversation under a NEW id, minted here and passed as `--session-id`
-        # (Claude Code takes the two together only when it forks), so the row joins the
-        # fork's own session. The identity planner is not asked: it reads `--resume <path>`
-        # as the RESUMED id and knows nothing of `--fork-session`. The recorded spec drops
-        # all three flags (`_without_session_choice`), so a restart of the fork resumes the
-        # fork, never its source.
-        forked = str(uuid.uuid4())
+    if forked is not None and forked.mints_id:
+        # A FORK (card tsk_01m3ns5a736s) by an agent the launch names (`ForkArgs.mints_id`,
+        # Claude Code's `--resume <transcript> --fork-session`): the source's conversation
+        # under a NEW id, minted here and passed as `--session-id` (Claude Code takes the
+        # two together only when it forks), so the row joins the fork's own session. The
+        # identity planner is not asked: it reads `--resume <path>` as the RESUMED id and
+        # knows nothing of `--fork-session`. The fork's arguments come before the recorded
+        # ones and are never recorded (`_without_session_choice`), so a restart of the fork
+        # resumes the fork, never its source.
+        minted = str(uuid.uuid4())
         identity = explainability_service.SessionIdentity(
-            forked, inject_args=("--session-id", forked)
+            minted, inject_args=("--session-id", minted)
+        )
+    elif forked is not None:
+        # A fork the agent names itself (Codex's `fork <id>`): a new thread, whose id its
+        # first hook brings, as a fresh start's does.
+        identity = explainability_service.SessionIdentity(
+            None, note="native ID binds at session start"
         )
     elif resume is not None:
         identity = explainability_service.SessionIdentity(resume.session_id)
@@ -10398,6 +10408,20 @@ def restart(
     # The ladder's notes travel with the slot it chose; with none chosen, `spawn`
     # asks the same ladder and gives them itself.
     notes = [f"accounts: {note}" for note in choice.notes] if account is not None else []
+    if (
+        replays is not None
+        and not replays.capabilities.resumes_across_homes
+        and not fresh
+        and choice.account is not None
+        and not _same_home(record, choice.account)
+    ):
+        # A take-over onto another account (the Spawn dialog's): its thread lives under the
+        # old home (a Codex rollout under its CODEX_HOME), as `switch` says of it.
+        fresh = True
+        notes.append(
+            f"{replays.label} cannot resume a thread under another account's home — the "
+            "replacement starts fresh with a hand-off prompt"
+        )
     was_running = False
     handed_over: StopReceipt | None = None
     # Set when THIS restart ended a dead or vanished pane's row with the manager's
@@ -10699,27 +10723,13 @@ def hand_off(
     # its launch, its tree, and the session its own hook reported, never the row's columns.
     record = _launch_record(project, agent, "fork")
     forks = recorded_adapter(record.agent)
-    facts = record.session
-    transcript = Path(facts.transcript) if facts is not None and facts.transcript else None
-    resume: ResumeSpec | None = None
-    if fresh:
-        pass
-    elif forks is None or not forks.capabilities.assigns_session_id:
-        # A fork resumes under an id minted for it (`--session-id`), which only an agent
-        # that takes one at launch can be given.
-        named = forks.label if forks is not None else record.agent
-        notes.append(f"{named} cannot fork a session — the new agent starts fresh from the board")
-    elif (
-        facts is not None
-        and transcript is not None
-        and transcript.is_absolute()
-        and transcript.is_file()
-    ):
-        resume = ResumeSpec(facts.id, transcript, fork=True)
-    else:
-        notes.append("no transcript on disk to fork — the new agent starts fresh from the board")
     runs_as = role or record.role
     replay = runs_as == record.role
+    slot = record.account_slot
+    wanted = _account_wanted(account, slot)
+    resume: ResumeSpec | None = None
+    if not fresh:
+        resume, wanted = _forkable(project, record, forks, runs_as, wanted, notes)
     own = is_git_project(project.root)
     if not own:
         notes.append(f"not a git repository — the fork works in {project.root}, beside {source}")
@@ -10728,7 +10738,6 @@ def hand_off(
         # A resumed fork's first message stays one line (see :func:`_fork_prompt`).
         extra = " ".join(prompt.split()) if resume is not None else prompt.strip()
         first = f"{first} {extra}" if resume is not None else f"{first}\n\n{extra}"
-    slot = record.account_slot
     receipt = spawn(
         project,
         runs_as,
@@ -10737,7 +10746,7 @@ def hand_off(
         worktree=own,
         prompt=first,
         spawned_by=spawned_by,
-        account=_account_wanted(account, slot),
+        account=wanted,
         resume=resume,
         size=size,
         spec=record.spec if replay else None,
@@ -10749,7 +10758,7 @@ def hand_off(
             _persona_for_replay(project, agent, notes, role=runs_as) if persona is None else persona
         ),
         agent=record.agent,
-        family=facts.agent if facts is not None else None,
+        family=record.session.agent if record.session is not None else None,
         start_point=_head_of(Path(record.cwd)) if own else None,
         fork=True,
     )
@@ -10771,6 +10780,61 @@ def hand_off(
         notes=[*notes, *receipt.notes],
         failures=list(receipt.failures),
     )
+
+
+def _forkable(
+    project: ProjectInfo,
+    record: launch_seal.LaunchRecord,
+    forks: AgentAdapter | None,
+    role: str,
+    wanted: str | None,
+    notes: list[str],
+) -> tuple[ResumeSpec | None, str | None]:
+    """What a hand-off's Fork resumes of the session ``record`` holds, on ``forks``, its agent
+    — or ``None`` with why on ``notes``, the new agent then starting fresh from the board —
+    and the account it is asked to run on (``wanted``, the one resolved here when it was).
+
+    The agent's own fork (``fork_args``: Claude Code's ``--resume <transcript>
+    --fork-session`` under an id the fleet mints, Codex's ``fork <id>`` under one its first
+    hook brings) of what :func:`_resumable` would resume: the record's session, its
+    transcript on disk and, for an agent the launch does not name, its native id. An agent
+    whose sessions live in their home (``resumes_across_homes`` false: a Codex thread is a
+    rollout under its ``CODEX_HOME``) forks only onto that home: asked onto another
+    account's, it starts fresh with a hand-off prompt, as ``switch`` does, and the account
+    resolved here is the one the spawn gets, so the two cannot differ."""
+    named = forks.label if forks is not None else record.agent
+    found, why = _resumable(record, forks)
+    if forks is None or found is None:
+        notes.append(
+            f"{why or f'{named} is not known here'} — the new agent starts fresh from the board"
+        )
+        return None, wanted
+    fork = forks.fork_args(found.native_session_id or found.session_id, found.transcript_path)
+    if fork is None:
+        notes.append(f"{named} cannot fork a session — the new agent starts fresh from the board")
+        return None, wanted
+    if not forks.capabilities.resumes_across_homes and forks.accounts is not None:
+        try:
+            choice = claude_accounts_service.choose(
+                wanted, role=role, project=project, agent=forks.id
+            )
+        except claude_accounts_service.NoSuchAccount as exc:
+            raise FleetError(str(exc)) from exc
+        if choice.account is not None:
+            wanted = str(choice.account.slot)
+            moved = not _same_home(record, choice.account)
+        else:
+            # The launch environment as it is: the plain home, which a record on an account
+            # slot did not run under.
+            moved = record.account_slot is not None
+        if moved:
+            notes.append(
+                f"{named} cannot fork a thread under another account's home — the new agent "
+                "starts fresh with a hand-off prompt"
+            )
+            return None, wanted
+    notes.append(f"forked as {named} forks a session: `{install_route.command_line(fork.args)}`")
+    return replace(found, fork=True), wanted
 
 
 def _handoff_row(

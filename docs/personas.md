@@ -109,7 +109,9 @@ name: `persona:skeptic` on the session's line, `· skeptic` in `fleet ls`. A
 persona removed or broken after launch costs one line in the briefing
 (`… — launched without it`), never the session. Setting the variable by hand,
 `AISQUARE_PERSONA=skeptic aisquare launch coder`, works too; it is checked when
-the session starts rather than before.
+the session starts rather than before. Where the persona sits beside the role
+cycle and your own `CLAUDE.md`, and why a long one costs the briefing: [Which
+instructions an agent follows](instructions.md).
 
 `fleet spawn --persona` passes the name to `launch` inside the agent's window and
 records it on the fleet row; without the flag the role's

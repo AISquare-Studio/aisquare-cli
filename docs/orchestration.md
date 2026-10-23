@@ -123,6 +123,11 @@ the claim: `task claim` and `task next --claim` print the task's contract
 into a coder's pane. `task show <ref>` prints the whole task. The rest of the
 coordination is the ambient state of the board.
 
+Your own `CLAUDE.md` files reach every agent too, beside its role cycle, and
+nothing ranks the two. When they disagree (*use subagents* against *spawn
+coders*), [Which instructions an agent follows](instructions.md) says where each
+comes from and how to remove the conflict.
+
 Orchestration is **opt-in per repo** (a role launch or `aisquare team on`)
 and fails open everywhere: the hooks are designed so orchestration can
 never break a Claude session, even when it is broken or absent. Repos

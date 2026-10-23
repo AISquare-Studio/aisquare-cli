@@ -1299,6 +1299,7 @@ def gate(
 
     Polls every 5 s. With enough memory it runs the command after `--` and exits with
     its code (with no command, exits 0). At the deadline it runs nothing and exits 75.
+    With --json the command's output goes to stderr and stdout is one JSON object.
     """
     needed = fleet_service.gate_floor(min_free_mb)
     seconds = (
@@ -1339,7 +1340,13 @@ def gate(
         import subprocess  # lazy: only a gated run needs it
 
         try:
-            code = subprocess.run(command, check=False).returncode
+            # Under --json the one object is stdout's: the command's own output goes to
+            # stderr, where a human still sees it (review of #323).
+            code = subprocess.run(
+                command,
+                check=False,
+                stdout=2 if as_json else None,  # fd 2: stderr
+            ).returncode
         except OSError as exc:
             fail(f"could not run {command[0]}: {exc}", error="not_run")
     if as_json:

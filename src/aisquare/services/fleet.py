@@ -3022,6 +3022,7 @@ def spawn(
     start_point: str | None = None,
     fork: bool = False,
     hub: str | None = None,
+    admit: bool = True,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -3229,7 +3230,10 @@ def spawn(
         )
     # The machine's own limits (#283), after the project's: the fleet-wide budget and
     # the memory floor. Before the store opens below and before any window.
-    if not experimental.captain_role(role):
+    # ``admit`` is False for a live 1:1 replacement (a restart of a running agent, a
+    # switch: `_respawn(takes_over=True)`): its own seat and memory are freed as it
+    # starts, and refused after the stop, the agent was lost (review of #323).
+    if admit and not experimental.captain_role(role):
         notes.extend(_admit(config))
     # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
     # 5/8), and the refusals above need neither.
@@ -4505,17 +4509,31 @@ def _memory_floor(min_free_mb: int) -> int:
 
 
 def _live_per_project() -> dict[str, int]:
-    """Live agents per project, by the name lists use, the captain excluded: what the
-    fleet-wide budget counts."""
+    """Live agents per project, the captain excluded: what the fleet-wide budget counts.
+
+    Counted by project id and named as lists name a project, with its root beside the
+    name where two share it: two checkouts of one repo, neither nicknamed, are two
+    projects, and one entry for both read as one project over its cap (review of #323).
+    """
     counts: dict[str, int] = {}
+    rows: dict[str, ProjectInfo | None] = {}
     with store_session() as store:
         for agent in store.live_fleet_agents():
             if agent.role == CAPTAIN_ROLE:
                 continue
-            row = store.get_project(agent.project_id, include_forgotten=True)
-            name = _name(row) if row is not None else agent.project_id[:12]
-            counts[name] = counts.get(name, 0) + 1
-    return dict(sorted(counts.items()))
+            if agent.project_id not in rows:
+                rows[agent.project_id] = store.get_project(agent.project_id, include_forgotten=True)
+            counts[agent.project_id] = counts.get(agent.project_id, 0) + 1
+    names = {pid: _name(row) if row is not None else pid[:12] for pid, row in rows.items()}
+    shared = {name for name in names.values() if list(names.values()).count(name) > 1}
+    labelled: dict[str, int] = {}
+    for pid, count in counts.items():
+        row = rows[pid]
+        label = names[pid]
+        if label in shared:
+            label = f"{label} ({row.root if row is not None else pid[:12]})"
+        labelled[label] = count
+    return dict(sorted(labelled.items()))
 
 
 def _memory_refused(record: Mapping[str, object], why: str) -> NoReturn:
@@ -7455,6 +7473,8 @@ def _respawn(
         own_worktree=agent.cwd if agent.worktree else None,
         own_branch=agent.branch,
         board_and_hub=board_and_hub,
+        # A hand-over replaces a running agent 1:1: admitted as the agent it replaces.
+        admit=not takes_over,
     )
     if agent.launch_spec is not None and replay:
         # Said once the replacement is up, for what it really took from the row: a

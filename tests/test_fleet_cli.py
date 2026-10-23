@@ -2380,3 +2380,23 @@ def test_a_capacity_refusal_carries_its_own_json_code(
     result = runner.invoke(app, ["--json", "fleet", "spawn", "coder"])
     assert result.exit_code == 1
     assert json.loads(result.output)["error"] == "capacity_memory"
+
+
+def test_gate_json_with_a_command_is_still_one_object_on_stdout(tmp_path: Path) -> None:
+    """Review of #323 (minor): the child inherited stdout, so `--json fleet gate -- pytest`
+    printed pytest's output and then the object. Under --json the child's stdout goes
+    to stderr. A real process: CliRunner cannot see what a child writes to fd 1."""
+    import subprocess
+    import sys
+
+    from aisquare.core import selfcli
+
+    child = [sys.executable, "-c", "print('the child speaks'); raise SystemExit(4)"]
+    argv = selfcli.argv_for(
+        ["--json", "fleet", "gate", "--min-free-mb", "0", "--wait", "0s", "--", *child]
+    )
+    done = subprocess.run(argv, capture_output=True, text=True, timeout=120, cwd=tmp_path)
+    assert done.returncode == 4, done.stderr
+    [line] = done.stdout.strip().splitlines()
+    assert json.loads(line)["exit_code"] == 4
+    assert "the child speaks" in done.stderr

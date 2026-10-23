@@ -18373,3 +18373,70 @@ def test_the_doctor_capacity_row_warns_when_a_spawn_would_be_refused(
     assert row.status.value == "ok" and "8000 MB available, pressure normal" in row.detail
     _memory(monkeypatch, 8000, "warn")
     assert diagnostics._check_fleet_capacity().status.value == "warn"
+
+
+def test_a_restart_of_a_running_agent_at_low_memory_replaces_it_rather_than_losing_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #323 (major): the replacement was admitted AFTER the stop, so below
+    min_free_mb the agent was stopped and its replacement refused. A live 1:1
+    replacement frees its own seat and memory as it starts: it is not a new spawn."""
+    _settings(monkeypatch, min_free_mb=2048)
+    agent = _coder(project)
+    _memory(monkeypatch, 1500)
+    receipt = fleet_service.restart(project, agent.label)
+    assert receipt.was_running is True
+    assert receipt.started.label == agent.label and receipt.started.ended_at is None
+    with store_session() as store:
+        assert [a.label for a in store.fleet_agents(project.id, live_only=True)] == ["coder-1"]
+
+
+def test_a_restart_of_an_exited_agent_is_a_spawn_and_is_admitted_as_one(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: nothing is stopped, so nothing is lost, and the floor applies."""
+    _settings(monkeypatch, min_free_mb=2048)
+    agent = _coder(project)
+    tmux.die(agent.pane_id, 130)
+    _memory(monkeypatch, 1500)
+    with pytest.raises(fleet_service.CapacityRefused, match="1500 MB available"):
+        fleet_service.restart(project, agent.label)
+
+
+def test_a_switch_at_low_memory_moves_the_agent_rather_than_losing_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings(monkeypatch, min_free_mb=2048)
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _memory(monkeypatch, 1500)
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+    assert receipt.to_slot == 3
+    with store_session() as store:
+        live = store.fleet_agents(project.id, live_only=True)
+    assert [(a.label, a.account_slot) for a in live] == [("coder-1", 3)]
+
+
+def test_two_projects_that_share_a_name_are_counted_apart(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #323 (minor): two checkouts named `repo` were one entry, `repo 2 of 1`."""
+    _settings(monkeypatch, max_agents_per_project=1, max_agents_total=5)
+    path = tmp_path / "elsewhere" / "repo"
+    path.mkdir(parents=True)
+    _git("init", "-q", "-b", "main", cwd=path)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=path)
+    twin = team_project(path)
+    with store_session() as store:
+        store.onboard_project(twin)
+    _coder(project)
+    _coder(twin)
+    live = fleet_service.capacity().live
+    assert live == {f"repo ({project.root})": 1, f"repo ({twin.root})": 1}

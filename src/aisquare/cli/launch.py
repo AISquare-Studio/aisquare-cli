@@ -47,7 +47,7 @@ from aisquare.core import experimental, harness, orchestrator, paths, personas
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
-from aisquare.core.workspace import git_common_root
+from aisquare.core.workspace import git_common_root, project_id_for
 from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
@@ -306,6 +306,25 @@ def _await_fleet_row() -> None:
             _sleep(FLEET_ROW_POLL)
 
 
+def _in_the_captains_window() -> bool:
+    """Whether this window is the captain's own: its fleet row is the captain's, on the home
+    board (review of #240, R1-F6). Any fleet window carries ``AISQUARE_FLEET_AGENT``, so
+    ``launch captain`` in a coder's window started a full-tool claude briefed as the captain
+    and bound the coder's row to it. Waits for the row as the launch does; a row that never
+    shows, or a store that cannot be read, is no captain's — this fails closed."""
+    agent_id = orchestrator.env_fleet_agent()
+    if agent_id is None:
+        return False
+    _await_fleet_row()
+    try:
+        with store_session() as store:
+            row = store.get_fleet_agent(agent_id)
+    except Exception:
+        return False
+    home = project_id_for(paths.aisquare_home().resolve())
+    return row is not None and row.role == "captain" and row.project_id == home
+
+
 def _starting_unbriefed(agent_id: str, why: str) -> None:
     """The one line every fail-open exit of :func:`_await_fleet_row` prints."""
     stderr_console().print(
@@ -383,7 +402,7 @@ def launch(
             "bound with `aisquare team bind`",
             error="unknown_role",
         )
-    if experimental.captain_role(role) and orchestrator.env_fleet_agent() is None:
+    if experimental.captain_role(role) and not _in_the_captains_window():
         # Only the window `aisquare captain` starts is the captain: its brain folder,
         # its one server, no other tool. By hand in a project this was plain claude
         # with every tool, briefed as the one captain that has no shell.

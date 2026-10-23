@@ -368,6 +368,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the next write replaced it, losing every resolution, snooze and cursor. Each is
   now dropped or kept alone, an unreadable row written back as it was, and a
   `queue.json` from a later version is refused, never rewritten.
+- **`aisquare launch captain` starts the captain only in the captain's own
+  window.** With the captain on, it asked only that the window be a fleet window,
+  so typed in a coder's window it started a claude with every tool, briefed as the
+  captain, and bound the coder's row to it. The window's fleet row must now be the
+  captain's, on the home board.
 
 ## [0.8.2] - 2026-10-19
 

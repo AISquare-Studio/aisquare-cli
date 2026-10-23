@@ -15,7 +15,8 @@ worker and reaches back through the two callbacks the CLI passes too:
 ``app.call_from_thread(app.push_screen_wait, …)`` and returns its answer — the
 CLI's ``y/N`` (verified on Textual 8.2.8 before this was written). Cancelling a
 running import cancels the worker: a later ``confirm`` answers ``False`` and its
-progress is dropped; the service's own timeout bounds the process (§9). The
+progress is dropped, and the import's ``cancel`` event is set, which ends an engine's
+``claude -p`` within two seconds rather than at its 180-second timeout (#211). The
 worker's THREAD runs on, though, so the import is handed a third callback,
 ``cancelled``, its last question before it publishes a recognised skill: once the
 user has backed out it answers yes and nothing is written. From the moment that
@@ -184,6 +185,8 @@ class ImportPersonaScreen(_Dialog):
         """The running import was let past its last question: it cannot be stopped."""
         self._cancel_late = False
         """Esc or Cancel came while ``_publishing``: the result is announced when it lands."""
+        self._cancel_event = threading.Event()
+        """The running import's ``cancel``: Esc or Cancel sets it (#211)."""
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -298,6 +301,7 @@ class ImportPersonaScreen(_Dialog):
         kwargs = self.import_kwargs()
         self._progress_lines = []
         self._publishing = self._cancel_late = False
+        self._cancel_event = cancel = threading.Event()
         self.note("#import-draft", None)
         self._set_importing(True)
         self._worker = self.run_worker(
@@ -306,6 +310,7 @@ class ImportPersonaScreen(_Dialog):
                 confirm=self._confirm,
                 progress=self._progress,
                 cancelled=self._cancelled,
+                cancel=cancel,
             ),
             name=IMPORT_WORKER,
             group=IMPORT_WORKER,
@@ -420,7 +425,9 @@ class ImportPersonaScreen(_Dialog):
             with self._publish_lock:
                 too_late = self._publishing
                 if not too_late:
-                    # Its confirm answers False from here on, and its last question yes.
+                    # Its engine stops, its confirm answers False from here on, and its
+                    # last question yes.
+                    self._cancel_event.set()
                     self._worker.cancel()
             if too_late:
                 # The persona is being written and cannot be taken back. Dismissing now

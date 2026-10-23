@@ -18,6 +18,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   recommends a dedicated user and a key whose forced command runs `aisquare` and
   nothing else. (#293)
 
+- **`aisquare persona import` takes several sources, or `--from-dir DIR`** (#294).
+  Each goes through the same import in turn, and one refusal does not stop the
+  rest. The receipt is one table (SOURCE · NAME · ENGINE · OUTCOME), `--json` a
+  list of results, and the exit is 1 when any source was refused. One source
+  alone reads as before; `--name` is refused with more than one.
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in
@@ -327,6 +332,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   none. A *Fork* as another role started without the teammate's persona, which the
   dialog showed and kept; it now keeps it, as *Take over* does, and a persona the
   dialog changed is the dialog's.
+- **Cancelling a persona import stops its engine** (#211). *Cancel* or `Esc` in
+  the Import dialog closed it and published nothing, but the manager engine's
+  `claude -p` ran on until its 180-second timeout. It now runs in a session of
+  its own and is waited on in 0.2-second steps: on a cancel it, and what it
+  started, are ended within two seconds (SIGTERM, then SIGKILL), and an api
+  answer that arrives after a cancel is dropped. `aisquare persona import`
+  handles Ctrl-C the same way, writes nothing and exits 130.
 - **`aisquare project prune --captured-only` never takes the captain's home board,**
   and doctor no longer counts it among the captured directories. The home is
   captured on purpose and never added, so once the captain sat idle the prune took

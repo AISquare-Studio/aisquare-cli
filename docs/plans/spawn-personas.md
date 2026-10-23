@@ -226,6 +226,19 @@ way that does not survive `/clear`. If adherence ever measures short, the
 hook's block can be promoted for the default binary as a follow-up; the file
 format and the board do not change.
 
+> **Superseded, 2026-09-24 (#210).** The owner took that follow-up: decision 8 of
+> the 2026-09-24 decision audit (`docs/plans/hackathon-overnight-log.md`, "The
+> release train folded in", item 8) sends the persona through the system prompt by
+> default, with a switch. The briefing above stays, and is not replaced. For Claude
+> Code the launch also appends the same block with `--append-system-prompt-file`,
+> a file under `~/.aisquare/cache/persona-prompts/` named by the block's hash, so
+> the body never reaches argv (`cli/launch.py`, `_persona_system_prompt`). `[persona]
+> system_prompt = false` keeps the hook alone; an operator's own
+> `--append-system-prompt` wins; codex, aider and any wrapper not named `claude`
+> get the hook alone, and the launch says so. Shipped in `b39f6fa9`; fixed under a
+> hub in `d9cafd74` (review of #240, F1). The user-facing account is
+> `docs/personas.md`, "The system prompt, and the switch".
+
 ### 3.3 Format: a persona IS a Claude Code skill
 
 Decided by the owner on 2026-09-15, replacing the first cut's own `.md`

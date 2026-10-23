@@ -41,9 +41,8 @@ from aisquare.core.terminal import outer_terminal
 from aisquare.core.tmux import PaneFacts, SocketAnswer, TmuxError, TmuxServer, TmuxUnavailable
 from aisquare.core.workspace import project_id_for
 from aisquare.models import CheckStatus, DoctorCheck, FleetAgent, ProjectInfo, Snapshot
-from aisquare.services import diagnostics
+from aisquare.services import diagnostics, install_route
 from aisquare.services import fleet as fleet_service
-from aisquare.services import install_route
 from aisquare.services import team as team_service
 from aisquare.services.onboarding import fix_commands
 from tests.fsperms import can_symlink

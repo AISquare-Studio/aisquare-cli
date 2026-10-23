@@ -242,6 +242,15 @@ BADGE_KEEP = 5
 fewer left it is dropped rather than shown as a bare ``·``."""
 
 
+def persona_badge(status: FleetAgentStatus) -> Text:
+    """`` · skeptic``, dim: the persona the row was spawned with, or else the one its session
+    runs as; empty for none. A sidebar row and the agent info line both end with it, and
+    both drop it first, by :data:`BADGE_KEEP`."""
+    agent = status.agent
+    persona = agent.persona or (status.session.persona if status.session is not None else None)
+    return Text(f" · {persona}", style="dim") if persona else Text()
+
+
 def agent_row_text(
     status: FleetAgentStatus, percent: float | None = None, *, width: int | None = None
 ) -> Text:
@@ -281,8 +290,7 @@ def agent_row_text(
         tail.append(f" #{agent.account_slot}" + ("·" if percent is not None else ""), style="dim")
         if percent is not None:
             tail.append_text(session_percent_text(percent))
-    persona = agent.persona or (status.session.persona if status.session is not None else None)
-    badge = Text(f" · {persona}", style="dim") if persona else Text()
+    badge = persona_badge(status)
     label = Text(agent.label)
     room = LABEL_WIDTH if width is None else max(2, width - cell_len(icon) - 1 - tail.cell_len)
     if width is None:

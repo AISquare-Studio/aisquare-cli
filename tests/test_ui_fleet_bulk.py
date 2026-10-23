@@ -251,7 +251,7 @@ def test_each_dialog_lists_its_agents_by_project_with_cancel_focused(
         ]
     assert (label, disabled) == (confirm, False)
     assert focused == "bulk-cancel", "an Enter that came too fast acts on nobody"
-    assert title == TITLE[action]
+    assert title == TITLE["restart" if action == "restart" else "stop"]
 
 
 def test_the_managers_only_switch_redraws_the_list_and_the_count(two_projects: Script) -> None:

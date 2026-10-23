@@ -273,7 +273,7 @@ class FleetSnapshot:
 
 @dataclass(frozen=True)
 class _FleetRead:
-    """What one read of the fleet found (:func:`_read_fleet`), handed from the thread that
+    """What one read of the fleet found (:func:`_read_frame`), handed from the thread that
     read it to the UI thread that paints it (``FleetApp._paint_fleet``).
 
     ``error`` is why the store could not be read, the rest then empty: the frame on screen
@@ -288,7 +288,8 @@ class _FleetRead:
     error: str | None = None
     taken_at: datetime = field(default_factory=datetime.now)
     home: ProjectInfo | None = None
-    """The captain's home board (T2), read only while the captain is on (:func:`_read_captain`)."""
+    """The captain's home board (T2), read only while the captain is on: in the fleet's own
+    store session (:func:`_read_fleet`), its agents by :func:`_read_captain`."""
     captain: FleetAgentStatus | None = None
     """Its captain's row, when it has one."""
     captain_error: str | None = None
@@ -302,15 +303,19 @@ class _FleetRead:
 def _read_frame(show_captured: bool, captain: bool) -> _FleetRead:
     """One frame of the sidebar, read on the calling thread: the fleet, then the captain's
     home board and row when the captain is on (``experimental.captain``)."""
-    read = _read_fleet(show_captured)
+    read = _read_fleet(show_captured, captain=captain)
     return replace(_read_captain(read), captain_asked=True) if captain else read
 
 
-def _read_fleet(show_captured: bool) -> _FleetRead:
+def _read_fleet(show_captured: bool, *, captain: bool = False) -> _FleetRead:
     """One frame of the fleet, read on the calling thread: the projects and their groups,
     then each project's agents. ``list_agents`` asks tmux about every row and ends the dead
     ones through a store session it opens itself, on this thread too. The captured
-    directories are listed when ``show_captured`` and ``[projects] capture`` both say so."""
+    directories are listed when ``show_captured`` and ``[projects] capture`` both say so.
+
+    With ``captain``, the captain's home board is read in the same session, by the id
+    resolved here: :func:`_read_captain` opened a second session and resolved the home
+    again, every tick (review of #272, m5)."""
     home_id = project_id_for(paths.aisquare_home().resolve())
     capturing = project_service.capture_on()
     try:
@@ -324,6 +329,7 @@ def _read_fleet(show_captured: bool) -> _FleetRead:
                 p for p in store.list_projects(all=show_captured and capturing) if p.id != home_id
             ]
             groups = store.project_groups()
+            home = store.get_project(home_id) if captain else None
     except Exception as exc:  # the store is briefly unavailable — keep what is shown
         return _FleetRead(capturing, error=f"{type(exc).__name__}: {exc}")
     agents: dict[str, list[FleetAgentStatus]] = {}
@@ -331,17 +337,23 @@ def _read_fleet(show_captured: bool) -> _FleetRead:
     for project in projects:
         try:
             agents[project.id] = fleet_service.list_agents(project)
-        except fleet_service.FleetError as exc:
-            agents[project.id] = []
-            notices[project.id] = f"agents unavailable — {exc}"
         except Exception as exc:  # a bug in the fleet path must not take the view down
             agents[project.id] = []
-            notices[project.id] = f"agents unavailable — {type(exc).__name__}: {exc}"
-    return _FleetRead(capturing, projects, groups, agents, notices)
+            notices[project.id] = f"agents unavailable — {_why_unread(exc)}"
+    return _FleetRead(capturing, projects, groups, agents, notices, home=home)
+
+
+def _why_unread(exc: Exception) -> str:
+    """Why a ``list_agents`` failed, as a card and the captain's section both say it: a
+    ``FleetError`` already says what failed; anything else is named by its class."""
+    if isinstance(exc, fleet_service.FleetError):
+        return str(exc)
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _read_captain(read: _FleetRead) -> _FleetRead:
-    """``read`` with the home board and its captain's row, read on the calling thread too.
+    """``read`` with its captain's row, read on the calling thread too, from the home board
+    :func:`_read_fleet` read.
 
     Read without writing anything: the home's id is computed, not registered,
     because this runs on every refresh tick and ``captain_state.home_project()``
@@ -349,21 +361,13 @@ def _read_captain(read: _FleetRead) -> _FleetRead:
     and ``FleetApp._captain`` keeps the last frame's home and row for it. A read that
     found the store unreadable is left as it is: its frame is not painted.
     """
-    if read.error is not None:
+    home = read.home
+    if read.error is not None or home is None:
         return read
     try:
-        with store_session() as store:
-            home = store.get_project(project_id_for(paths.aisquare_home().resolve()))
-        if home is None:
-            return read
         statuses = fleet_service.list_agents(home)
     except Exception as exc:  # a bug in the fleet path must not take the view down
-        # The cards' wording: a FleetError already says what failed.
-        if isinstance(exc, fleet_service.FleetError):
-            reason = str(exc)
-        else:
-            reason = f"{type(exc).__name__}: {exc}"
-        return replace(read, captain_error=f"captain unavailable — {reason}")
+        return replace(read, captain_error=f"captain unavailable — {_why_unread(exc)}")
     captain = next((s for s in statuses if s.agent.role == fleet_service.CAPTAIN_ROLE), None)
     return replace(read, home=home, captain=captain)
 
@@ -1187,7 +1191,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def refresh_data(self, *, then: Callable[[], object] | None = None) -> None:
         """Re-read projects and agents OFF the UI thread; :meth:`_fleet_read` paints the frame.
 
-        The read (:func:`_read_fleet`) opens the store and asks ``list_agents`` about
+        The read (:func:`_read_frame`) opens the store and asks ``list_agents`` about
         every project, and that asks tmux: ~11 ms a project, ~44 ms with four, on the
         event loop every two seconds (measured 2026-10-20 on an M4 Pro). Every click,
         scroll or key that landed in that window waited for it — "everything feels
@@ -2177,7 +2181,30 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.notify(note, severity="warning", timeout=8, markup=False)
         # Selected off a frame read after the spawn (``refresh_data(then=)``): the read is
         # off the UI thread, and the frame shown has no row for the new agent yet.
-        self.refresh_data(then=lambda: self.post_message(AgentSelected(agent.project_id, agent.id)))
+        here = self.content.current
+        self.refresh_data(then=lambda: self._show_spawned(agent, here))
+
+    def _show_spawned(self, agent: FleetAgent, here: str | None) -> None:
+        """Open the agent a spawn started, off the frame read after it (:meth:`spawn_finished`).
+
+        Not once the user has gone elsewhere: ``here`` is what showed at the spawn, and a
+        read that hung for seconds moved the view and the focus off where they went, as
+        :meth:`_show_restarted` never did (review of #272, m2). A frame without its row
+        says it comes on the next refresh, as a restart's does: that read found the store
+        unreadable, or the captain's read failed on the first frame that would have had
+        its home, and "that agent is no longer listed" was said of an agent that runs
+        (m1, m3).
+        """
+        if self.content.current != here:
+            return  # the user is elsewhere: nothing of theirs moves
+        if self.snapshot is None or self.snapshot.agent(agent.project_id, agent.id) is None:
+            self.notify(
+                f"{agent.label} spawned — its row appears on the next refresh",
+                timeout=5,
+                markup=False,
+            )
+            return
+        self.post_message(AgentSelected(agent.project_id, agent.id))
 
     def on_stop_agent(self, event: StopAgent) -> None:
         """The agent view's Stop button, or ``x`` on the selected row: one question first.

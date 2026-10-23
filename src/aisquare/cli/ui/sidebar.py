@@ -39,7 +39,7 @@ from typing import ClassVar
 from rich.cells import cell_len
 from rich.text import Text
 from textual import events, on
-from textual.app import ComposeResult
+from textual.app import ComposeResult, RenderResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
@@ -262,7 +262,10 @@ def agent_row_text(
     everything the owner's order holds (review of #267's merge, M-F1): the label's padding
     gives way first, then the badge is ellipsised, and dropped once fewer than
     :data:`BADGE_KEEP` cells are left for it; only then is the label cut. The row is built
-    to its width, so its own ellipsis never reaches the chip or the ``#N·NN%``.
+    to its width, so its own ellipsis never reaches the chip or the ``#N·NN%`` while the
+    width holds the icon, two cells of label and the tail; a row narrower than that (under
+    16 cells, with ``🔔 #1·100%``) is cut at its end, figure included (review of #267's
+    delta, m1).
     """
     agent = status.agent
     chip, style = STATE_CHIP.get(status.state, STATE_CHIP["unknown"])
@@ -282,16 +285,16 @@ def agent_row_text(
     badge = Text(f" · {persona}", style="dim") if persona else Text()
     label = Text(agent.label)
     room = LABEL_WIDTH if width is None else max(2, width - cell_len(icon) - 1 - tail.cell_len)
-    if width is None or label.cell_len <= room:
+    if width is None:
+        label.pad_right(LABEL_WIDTH - label.cell_len)
+    elif label.cell_len <= room:
         left = room - label.cell_len  # the cells after the label's own, the badge's to take
-        if width is not None and badge.cell_len > left:
+        if badge.cell_len > left:
             if left >= BADGE_KEEP:
                 badge.truncate(left, overflow="ellipsis")
             else:
                 badge = Text()
-        label.pad_right(
-            min(LABEL_WIDTH, room - (0 if width is None else badge.cell_len)) - label.cell_len
-        )
+        label.pad_right(min(LABEL_WIDTH, room - badge.cell_len) - label.cell_len)
     else:
         label.truncate(room, overflow="ellipsis")
         badge = Text()
@@ -848,6 +851,15 @@ class AgentRow(Activatable):
 
     def on_resize(self) -> None:
         self.paint()
+
+    def render(self) -> RenderResult:
+        """The row for the width it is drawn at. Built in ``__init__`` before it had one, the
+        first frame was the whole-width text until ``on_resize`` repainted it, and the
+        row's own ellipsis cut its end: the badge, or a ``#1·42%`` behind a long label
+        (review of #267's delta, m2). Painted here, a frame is never drawn at no width;
+        :meth:`paint` changes nothing when nothing it reads has changed."""
+        self.paint()
+        return super().render()
 
     def message(self) -> Message:
         return AgentSelected(self.status.agent.project_id, self.status.agent.id)

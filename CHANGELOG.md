@@ -266,8 +266,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   update` under *⚙ Settings*, until asq runs that version or a newer one, with
   one toast the first time each release is found. The row opens a confirm
   dialog with the live agent count; *Restart & update* hands the terminal to
-  `aisquare upgrade` the way Doctor's Update does, with no y/N, and asq reopens
-  by itself on the new version, in the view it had open. The fleet's tmux panes
+  `aisquare upgrade` the way Doctor's Update does, with no y/N, pinned to the
+  release the dialog names, and asq reopens by itself on it, in the view it
+  had open. The fleet's tmux panes
   and their sessions keep running; the agents alive at the press are recorded,
   and any whose pane is gone after the reopen is restarted on its session
   (`fleet restart`). The toast says `✓ aisquare 0.8.3 — 2 agents reattached`,

@@ -136,9 +136,9 @@ def check_for_release(now: datetime | None = None) -> Offer | None:
                 store.set_ui_state(LATEST_KEY, found)
     if latest is None or lifecycle_service.newer_release(latest, __version__) is not True:
         return None
-    # The dialog's own plan, built on this answer and offline, decides whether the row says
-    # "restart to update": one rule for both, so the two cannot disagree (review of #301).
-    plan = lifecycle_service.upgrade_plan(known_latest=install_route.LatestRelease(latest))
+    # The dialog's own plan, built offline, decides whether the row says "restart to update":
+    # one rule for both, so the two cannot disagree (review of #301).
+    plan = update_plan(latest)
     with store_session() as store:
         announce = store.ui_state(ANNOUNCED_KEY) != latest
         if announce:
@@ -149,6 +149,22 @@ def check_for_release(now: datetime | None = None) -> Offer | None:
         runnable=plan.runnable,
         announce=announce,
     )
+
+
+def update_plan(version: str) -> lifecycle_service.UpgradePlan:
+    """The upgrade asq's ⬆ update runs and its dialog shows: pinned to ``version``, the release
+    the row offers, wherever the route can pin one; otherwise the newest release.
+
+    Pinned (``upgrade --version``), the release the dialog names is the one installed: asked
+    for the newest, uv took 0.8.4 for a dialog that said 0.8.3 once 0.8.4 was out (review
+    of #301). A pin needs no lookup. Homebrew installs the version its formula has
+    (``install_route.pin_refusal``), so there the plan is the newest release's, built on the
+    check's answer (``known_latest``) and offline, and the dialog names no number.
+    """
+    pinned = lifecycle_service.upgrade_plan(version)
+    if not pinned.pin_refused:
+        return pinned
+    return lifecycle_service.upgrade_plan(known_latest=install_route.LatestRelease(version))
 
 
 # --- the press, and the reopen ----------------------------------------------------------------
@@ -171,21 +187,28 @@ class Press:
     agents: tuple[Kept, ...]
 
 
-def agents_alive_now(project_ids: Collection[str]) -> list[FleetAgent]:
-    """The agents alive at this moment in the projects ``project_ids`` names, read again.
+def agents_alive_now(
+    project_ids: Collection[str], seen: Iterable[FleetAgent] = ()
+) -> list[FleetAgent]:
+    """The agents alive at this moment, each one's status read again.
 
-    Each live row is read from the store and its pane from tmux (``fleet.status_of``), and
-    kept when the listing reads it as having a process (``fleet.PROCESS_STATES``). Not the
-    frame on screen, which is up to a refresh old: an agent that exited since would have
-    been recorded and restarted after the reopen, and only the agents live at the press
-    are ever restarted (review of #301, m1). The projects are the ones the frame lists, so
-    the record holds what the dialog counted from: never a forgotten project's row.
+    The candidates are ``seen``, the agents the frame on screen shows alive (what the dialog
+    counted), and every live row the store holds now for the projects ``project_ids`` names
+    (one spawned since the frame, too); the store's copy of a row wins. Each is kept when a
+    fresh read of its pane (``fleet.status_of``) says it has a process
+    (``fleet.PROCESS_STATES``). The frame alone is up to a refresh old: an agent that exited
+    since would have been recorded and restarted after the reopen, and only the agents live
+    at the press are ever restarted (review of #301, m1, and the tester's
+    tests/test_update_edges.py). Never a forgotten project's row: the projects are the
+    frame's.
     """
     with store_session() as store:
         rows = [agent for agent in store.live_fleet_agents() if agent.project_id in project_ids]
+    candidates = {agent.id: agent for agent in seen}
+    candidates.update((agent.id, agent) for agent in rows)
     return [
         agent
-        for agent in rows
+        for agent in candidates.values()
         if fleet_service.status_of(agent).state in fleet_service.PROCESS_STATES
     ]
 

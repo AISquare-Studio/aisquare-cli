@@ -189,6 +189,36 @@ def test_the_row_says_restart_only_where_the_dialogs_plan_runs(
     assert lifecycle.upgrade_plan().runnable is False, "the plan agrees"
 
 
+def test_the_update_is_pinned_to_the_release_offered_and_asks_pypi_nothing(
+    running: Tool,
+    machine: Machine,  # noqa: F811
+) -> None:
+    """The version the dialog names is the one installed: a uv tool's plan is pinned to it,
+    which needs no lookup, so a newer release out since is not what the press installs."""
+    machine.latest = LatestRelease("0.9.2")
+
+    plan = updates.update_plan("0.9.1")
+
+    assert plan.target == "0.9.1" and plan.runnable
+    assert plan.argv[-1].endswith("@0.9.1"), plan.argv
+    assert machine.lookups == 0
+
+
+def test_where_brew_cannot_pin_the_update_is_the_newest_and_names_no_number(
+    running: Tool,
+    machine: Machine,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route = install_route.InstallRoute(install_route.HOMEBREW, running.facts, formula="aisquare")
+    monkeypatch.setattr(install_route, "detect", lambda: route)
+
+    plan = updates.update_plan("0.9.1")
+
+    assert plan.target is None, "Homebrew installs its formula's version, not one asq names"
+    assert plan.command == "brew upgrade aisquare" and not plan.runnable
+    assert machine.lookups == 0, "the newest release's plan is built on the check's answer"
+
+
 # --- what is offered, and announced -----------------------------------------------------------
 
 

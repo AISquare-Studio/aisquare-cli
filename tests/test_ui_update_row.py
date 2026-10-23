@@ -59,10 +59,17 @@ _FACTS = Facts(
 )
 
 
-def _plan(*, runnable: bool = True, remote: str | None = None) -> UpgradePlan:
+def _plan(
+    *,
+    runnable: bool = True,
+    remote: str | None = None,
+    target: str | None = None,
+    pin_refused: bool = False,
+) -> UpgradePlan:
     if runnable:
         route = InstallRoute(install_route.UV_TOOL, _FACTS)
-        argv: tuple[str, ...] = ("uv", "tool", "install", "--force", "aisquare-cli>=0.9.0")
+        spec = f"aisquare-cli@{target}" if target else "aisquare-cli>=0.9.0"
+        argv: tuple[str, ...] = ("uv", "tool", "install", "--force", spec)
         reason = None
     else:
         route = InstallRoute(install_route.HOMEBREW, _FACTS, formula="aisquare-cli")
@@ -71,23 +78,25 @@ def _plan(*, runnable: bool = True, remote: str | None = None) -> UpgradePlan:
     return UpgradePlan(
         route=route,
         current="0.9.0",
-        target=None,
-        latest=LatestRelease("0.9.1"),
+        target=target,
+        latest=None if target else LatestRelease("0.9.1"),
         argv=argv,
         env={},
         reason=reason,
         remote=remote,
+        pin_refused=pin_refused,
     )
 
 
 @pytest.fixture
 def planned(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
-    """``upgrade_plan`` as the dialog asks it: answered with :func:`_plan`, each ask kept."""
+    """``upgrade_plan`` as the dialog asks it: answered with :func:`_plan`, pinned to the
+    release asked for, each ask kept."""
     asked: list[dict[str, Any]] = []
 
     def plan(target: str | None = None, **kwargs: Any) -> UpgradePlan:
         asked.append({"target": target, **kwargs})
-        return _plan()
+        return _plan(target=target)
 
     monkeypatch.setattr(lifecycle, "upgrade_plan", plan)
     return asked
@@ -243,8 +252,8 @@ def test_the_row_opens_the_dialog_and_cancel_or_escape_changes_nothing(
         "2 agents keep running; any whose pane is gone afterwards is restarted on its session."
     )
     assert buttons == ["Restart & update", "Cancel"]
-    assert planned == [{"target": None, "known_latest": LatestRelease("0.9.1")}], (
-        "the plan is built on the check's answer: PyPI is not asked again"
+    assert planned == [{"target": "0.9.1"}], (
+        "the plan is pinned to the release offered, which needs no lookup: PyPI is not asked"
     )
     assert still_open is False
     assert updates.take_press() is None, "nothing recorded"
@@ -302,7 +311,7 @@ def alive_now(monkeypatch: pytest.MonkeyPatch, script: Script) -> list[Collectio
     NOW, which a test changes after the frame was painted. Each ask's project ids are kept."""
     asked: list[Collection[str]] = []
 
-    def alive(project_ids: Collection[str]) -> list[FleetAgent]:
+    def alive(project_ids: Collection[str], seen: Collection[FleetAgent] = ()) -> list[FleetAgent]:
         asked.append(set(project_ids))
         return [
             row.agent
@@ -337,7 +346,7 @@ def test_restart_and_update_records_the_agents_alive_at_the_press_then_hands_ove
     hand_off, counted = _drive(body)
 
     assert "2 agents keep running" in counted, "the dialog counted from the frame"
-    assert hand_off == ("upgrade", "--one-click")
+    assert hand_off == ("upgrade", "--one-click", "--version", "0.9.1")
     assert alive_now == [{"prj_a"}], "the frame's projects, read again at the press"
     press = updates.take_press()
     assert press is not None
@@ -371,11 +380,20 @@ def test_a_refused_hand_over_leaves_no_record_behind(
     assert updates.take_press() is None
 
 
-def test_only_the_dialogs_own_press_hands_over() -> None:
-    """A worker of the press's name that this dialog did not start (a stray, a test's
-    stand-in) hands nothing over, whatever it answers: an update runs on a confirmed press."""
+def test_only_the_dialogs_own_press_hands_over(
+    tmp_path: Path,
+    script: Script,  # noqa: F811
+    planned: list[dict[str, Any]],
+) -> None:
+    """The dialog was opened and cancelled; then a worker of the press's name that no press
+    started (a stray, a test's stand-in) answers with a record: it hands nothing over, and
+    leaves no record. An update runs on a confirmed press alone."""
+    _two_alive(tmp_path, script)
 
     async def body(pilot: Pilot[None], app: FleetApp) -> Any:
+        await _open_by_keyboard(pilot, app)
+        await pilot.click("#update-cancel")
+        await settle_page(app)
         app.run_worker(
             lambda: updates.Press(previous="0.9.0", agents=()),
             name=PRESS_WORKER,
@@ -386,6 +404,7 @@ def test_only_the_dialogs_own_press_hands_over() -> None:
         return app.hand_off
 
     assert _drive(body) is None
+    assert planned == [{"target": "0.9.1"}], "control: the dialog did open on its plan"
 
 
 def test_an_update_called_off_takes_its_record_with_it() -> None:
@@ -468,8 +487,46 @@ def test_the_row_says_what_the_dialogs_plan_says(
 
 def test_a_ctrl_c_in_the_quit_names_the_command_without_asqs_own_flag() -> None:
     said = ui_app._hand_off_undone(ui_app.UPDATE_HAND_OFF)
+    pinned = ui_app._hand_off_undone(ui_app.update_hand_off(_plan(target="0.9.1")))
 
     assert said == "⚠ Update did not run: asq quit at the Ctrl-C — `aisquare upgrade` runs it"
+    assert pinned == (
+        "⚠ Update did not run: asq quit at the Ctrl-C — `aisquare upgrade --version 0.9.1` runs it"
+    )
+
+
+def test_where_the_route_cannot_pin_the_dialog_names_no_number(
+    tmp_path: Path,
+    script: Script,  # noqa: F811
+    alive_now: list[Collection[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The version the dialog names is the one installed. Where the route cannot pick a
+    release (``pin_refused``), the update takes the newest, and the dialog says so in words
+    rather than name a number it may not be; the hand-over carries no ``--version``."""
+    _two_alive(tmp_path, script)
+    asked: list[str | None] = []
+
+    def plan(target: str | None = None, **_kwargs: Any) -> UpgradePlan:
+        asked.append(target)
+        return _plan(pin_refused=target is not None)
+
+    monkeypatch.setattr(lifecycle, "upgrade_plan", plan)
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[str, str, Any]:
+        screen = await _open_by_keyboard(pilot, app)
+        title = str(screen.query_one("#update-box").border_title)
+        said = shown(screen.query_one("#update-text", Static))
+        await pilot.click("#update-confirm")
+        await settle_page(app)
+        return title, said, app.hand_off
+
+    title, said, hand_off = _drive(body)
+
+    assert asked == ["0.9.1", None], "pinned first; refused, the newest release's plan"
+    assert title == "Update aisquare 0.9.0 → the newest release"
+    assert said.startswith("asq closes, installs the newest release and reopens here.")
+    assert hand_off == ("upgrade", "--one-click")
 
 
 # --- the reopen -------------------------------------------------------------------------------
@@ -521,6 +578,28 @@ def test_one_click_upgrades_without_asking_and_reopens_at_once_to_reattach(
     assert len(machine.installs) == 1
     assert terminal.prompts == [], "no Press Enter on success"
     assert terminal.reopened == [["ui", "--after-update"]]
+
+
+def test_one_click_installs_the_release_the_dialog_named_not_a_newer_one(
+    runner: CliRunner,
+    tool: Tool,  # noqa: F811
+    machine: Machine,  # noqa: F811
+    terminal: Terminal,  # noqa: F811
+) -> None:
+    """The dialog said 0.9.1; 0.9.2 is out by the press. The pinned run installs 0.9.1, asks
+    PyPI nothing (a pin needs no lookup) and reopens at once (review of #301)."""
+    machine.latest = LatestRelease("0.9.2")
+    machine.new_version = "0.9.1"
+
+    result = runner.invoke(cli_app, ["upgrade", "--one-click", "--version", "0.9.1"])
+    installs = [argv for argv, _env, _stderr in machine.installs]
+
+    assert result.exit_code == 0, result.output
+    assert len(installs) == 1, installs
+    spec = installs[0][-1]
+    assert spec.startswith("aisquare-cli") and spec.endswith("@0.9.1"), installs
+    assert machine.lookups == 0
+    assert terminal.reopened == [["ui", "--after-update"]] and terminal.prompts == []
 
 
 def test_one_click_with_nothing_newer_reopens_at_once(

@@ -282,8 +282,12 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         _say(f"· {note}")
 
 
-#: The command a person runs instead of ``--one-click``, as asq's own flag is never told.
-_ONE_CLICK_COMMAND = "aisquare upgrade"
+def _by_hand(version: str | None) -> str:
+    """The command a person runs instead of ``--one-click``: asq's own flag is never told."""
+    return install_route.command_line(
+        ["aisquare", "upgrade", *(["--version", version] if version else [])]
+    )
+
 
 #: What ``upgrade --one-click`` opens asq as: the asq that reattaches the agents the press
 #: recorded (``services.updates``), and says how that went.
@@ -387,7 +391,7 @@ def upgrade(
         raise
     except KeyboardInterrupt:
         stderr_console().print(
-            f"✗ the upgrade was interrupted. Run it again by hand: {_ONE_CLICK_COMMAND}",
+            f"✗ the upgrade was interrupted. Run it again by hand: {_by_hand(version)}",
             markup=False,
         )
         _reopen(True, one_click=True, failed=True)
@@ -396,7 +400,7 @@ def upgrade(
         stderr_console().print(traceback.format_exc().rstrip(), markup=False, highlight=False)
         stderr_console().print(
             f"✗ the upgrade stopped on an error: {type(exc).__name__}: {exc}. Run it again "
-            f"by hand: {_ONE_CLICK_COMMAND}",
+            f"by hand: {_by_hand(version)}",
             markup=False,
         )
         _reopen(True, one_click=True, failed=True)

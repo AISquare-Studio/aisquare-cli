@@ -40,6 +40,10 @@ CHECK_WORKER = "update-check"
 """The daily release check (``services.updates.check_for_release``)."""
 
 
+NEWEST = "the newest release"
+"""What the dialog names where the route cannot install a chosen release (Homebrew)."""
+
+
 def agents_line(live: int) -> str:
     """What the update does to the ``live`` agents: nothing, and what happens if one is gone."""
     if live == 0:
@@ -65,7 +69,8 @@ def remote_line(plan: UpgradePlan) -> str | None:
 
 
 class UpdateScreen(ModalScreen[bool]):
-    """Update aisquare ``plan.current`` → ``version``: Restart & update, or Cancel; Esc cancels."""
+    """Update aisquare ``plan.current`` → what it installs: Restart & update, or Cancel; Esc
+    cancels."""
 
     DEFAULT_CSS = """
     UpdateScreen { align: center middle; }
@@ -77,11 +82,9 @@ class UpdateScreen(ModalScreen[bool]):
     """
     BINDINGS: ClassVar = [Binding("escape", "cancel", "cancel")]
 
-    def __init__(self, plan: UpgradePlan, version: str, live: int) -> None:
+    def __init__(self, plan: UpgradePlan, live: int) -> None:
         super().__init__()
         self.plan = plan
-        self.version = version
-        """The release the row offered: the newest the daily check found."""
         self.live = live
         """How many agents are alive at the moment the dialog opened."""
 
@@ -95,7 +98,7 @@ class UpdateScreen(ModalScreen[bool]):
                 text.append(self.plan.command, style="bold")
                 text.append("\n\nthen start asq again. The agents keep running.")
             return text
-        text.append(f"asq closes, installs {self.version} and reopens here.\n")
+        text.append(f"asq closes, installs {self.installs} and reopens here.\n")
         text.append(agents_line(self.live))
         remote = remote_line(self.plan)
         if remote is not None:
@@ -103,12 +106,18 @@ class UpdateScreen(ModalScreen[bool]):
             text.append(remote, style="yellow")
         return text
 
+    @property
+    def installs(self) -> str:
+        """What the update installs, as the dialog names it: the release its plan is pinned to
+        (``services.updates.update_plan``), else :data:`NEWEST`, never a number it may not be."""
+        return self.plan.target or NEWEST
+
     def heading(self) -> Text:
         """``Update aisquare 0.8.2 → 0.8.3``: the versions are data, never markup."""
         text = Text("Update aisquare ")
         text.append(self.plan.current)
         text.append(" → ")
-        text.append(self.version)
+        text.append(self.installs)
         return text
 
     def compose(self) -> ComposeResult:

@@ -44,6 +44,7 @@ from aisquare.core.agent_adapters import (
     register,
     unregister,
 )
+from aisquare.core.agent_adapters import codex as codex_adapter
 from aisquare.core.agent_adapters.types import (
     EVENT_KINDS,
     AgentAccounts,
@@ -112,6 +113,18 @@ EXPECTED_HEADLESS: dict[str, list[str]] = {
     "claude-code": ["--no-session-persistence"],
     "codex": ["--ephemeral", "features.hooks=false"],
     "fake-agent": ["--no-save", "--no-hooks"],
+}
+#: The switches that leave each adapter's tools-only session (``tools_only_args``, the
+#: captain's) no built-in tool to run, as measured: Claude Code's ``--tools ""`` (main's
+#: captain), Codex's tool features off (0.162.1: the request offered the server's tools,
+#: ``request_user_input`` and its MCP-resource readers, nothing that runs a command).
+EXPECTED_TOOLS_OFF: dict[str, list[list[str]]] = {
+    "claude-code": [["--tools", ""], ["--strict-mcp-config"]],
+    "codex": [
+        *(["--disable", feature] for feature in codex_adapter.TOOL_FEATURES),
+        ["-c", 'web_search="disabled"'],
+    ],
+    "fake-agent": [],
 }
 #: A persona draft, as each adapter's headless call answered it (``headless_answer``): what it
 #: printed, and what it wrote to its ``out`` file (``None``: nothing). Codex's is 0.162.1's,
@@ -456,6 +469,9 @@ def _named(args: list[str]) -> set[str]:
 
     named = set(args)
     for arg in args:
+        if arg.startswith(("{", "[")):  # a JSON argument (Claude Code's --mcp-config)
+            with suppress(ValueError, RecursionError):
+                named |= strings(json.loads(arg))
         _, assigned, raw = arg.partition("=")
         if not assigned:
             continue
@@ -588,6 +604,28 @@ def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_
         assert any("127.0.0.1:9" in arg for arg in telemetry)
     else:
         assert telemetry == []
+
+
+def test_a_tools_only_session_names_its_server_and_leaves_no_built_in_tool(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``tools_only_args`` (the captain's session): the one server, its command, arguments
+    and environment named, and the switches that leave no built-in tool
+    (:data:`EXPECTED_TOOLS_OFF`), none switched back on; more than the MCP registration
+    every session gets."""
+    command, args = "/opt/python", ["-m", "aisquare.services.captain", "--stdio"]
+    env = {"AISQUARE_HOME": str(tmp_path / "aisquare home")}
+    only = adapter.tools_only_args("captain", command, args, env)
+    if only is None:
+        return  # it cannot be confined so: it cannot be the captain
+    assert only and all(isinstance(arg, str) for arg in only)
+    assert any("captain" in arg for arg in only), "the server is named"
+    named = _named(only)
+    assert {command, *args, env["AISQUARE_HOME"]} <= named, named
+    for switch in EXPECTED_TOOLS_OFF[adapter.id]:
+        assert _runs_within(switch, only), f"{adapter.id} leaves a built-in tool: {switch}"
+    assert "--enable" not in only
+    assert only != adapter.mcp_args(command, args, list(env))
 
 
 def test_a_fork_names_the_session_it_forks_and_is_no_resume(

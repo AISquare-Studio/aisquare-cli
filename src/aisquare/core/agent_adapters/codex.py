@@ -56,6 +56,31 @@ APPROVAL_POLICIES = ("on-request", "never")
 _APPROVAL_SWITCHES = frozenset(
     {"--approve-for-me", "--dangerously-bypass-approvals-and-sandbox", "--yolo"}
 )
+#: The features whose tools :meth:`CodexAdapter.tools_only_args` switches off (with
+#: ``web_search="disabled"``), by their names in ``codex features list``. Measured on 0.162.1:
+#: ``exec`` offers ``exec_command``, ``write_stdin``, ``request_user_input``, ``view_image``,
+#: the multi-agent and goal tools and ``web_search``; with these off, the request offers
+#: ``request_user_input``, which no feature switches off and which says it is only
+#: available in Plan mode, and, beside an MCP server, Codex's three readers of MCP
+#: resources (``list_mcp_resources``, ``list_mcp_resource_templates``, ``read_mcp_resource``).
+TOOL_FEATURES = (
+    "shell_tool",
+    "unified_exec",
+    "view_image",
+    "multi_agent",
+    "goals",
+    "apps",
+    "plugins",
+    "browser_use",
+    "computer_use",
+    "sleep_tool",
+    "tool_suggest",
+    "skill_search",
+    "in_app_browser",
+    "image_generation",
+)
+#: A ``-c`` key splits on every dot, so an MCP server's name in one is a bare TOML key.
+_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 #: aisquare's Codex plugin (``plugins/codex``), by the name ``codex plugin add
 #: aisquare@<marketplace>`` takes and ``config.toml`` keys it under, ``[plugins."aisquare@
 #: aisquare-cli"]`` from this repository's marketplace (``.agents/plugins/marketplace.json``).
@@ -669,6 +694,40 @@ class CodexAdapter:
             f"mcp_servers.aisquare.env_vars={json.dumps(env_vars or [])}",
             "-c",
             "mcp_servers.aisquare.required=false",
+        ]
+
+    def tools_only_args(
+        self, server: str, command: str, args: list[str], env: dict[str, str]
+    ) -> list[str] | None:
+        """Every tool feature off (:data:`TOOL_FEATURES`, ``web_search="disabled"``), then
+        the server as ``-c mcp_servers.<server>.*``, :meth:`mcp_args`' shape, with
+        ``default_tools_approval_mode="approve"``. Measured on 0.162.1 through these
+        arguments: the request offered the server's tools, ``request_user_input`` and the
+        MCP-resource readers, and ``exec`` ran a call of the server's tool unasked, which
+        without that key it declined ("MCP tool call requires approval, but approval policy
+        is never"). Codex has no ``--strict-mcp-config``: an ``mcp_servers`` table of the
+        operator's config loads beside the server (a ``-c mcp_servers={…}`` inline table
+        merges into it, measured), its tools asking as their own approval mode says.
+        ``ValueError`` for a server name that is not a bare TOML key, which a ``-c`` key
+        cannot hold."""
+        if not _BARE_KEY.fullmatch(server):
+            raise ValueError(
+                f"an MCP server's name in a Codex -c key is a bare key, not {server!r}"
+            )
+        table = f"mcp_servers.{server}"
+        pairs = ", ".join(f"{json.dumps(name)} = {_toml_string(v)}" for name, v in env.items())
+        return [
+            *(arg for feature in TOOL_FEATURES for arg in ("--disable", feature)),
+            "-c",
+            'web_search="disabled"',
+            "-c",
+            f"{table}.command={_toml_string(command)}",
+            "-c",
+            f"{table}.args=[{', '.join(map(_toml_string, args))}]",
+            "-c",
+            f"{table}.env={{{pairs}}}",
+            "-c",
+            f'{table}.default_tools_approval_mode="approve"',
         ]
 
     def context_files(self, home: Path) -> tuple[Path, ...]:

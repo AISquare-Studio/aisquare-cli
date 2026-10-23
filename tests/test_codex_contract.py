@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import tomllib
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ from aisquare.cli.app import app
 from aisquare.core import agents
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters import get_adapter as _get_adapter
-from aisquare.core.agent_adapters.codex import CodexAdapter
+from aisquare.core.agent_adapters.codex import TOOL_FEATURES, CodexAdapter
 from aisquare.core.agent_adapters.types import (
     BadEffortError,
     ForkArgs,
@@ -657,6 +658,30 @@ def test_a_fork_is_codexs_fork_subcommand_and_its_hook_names_the_new_thread(
     assert get_adapter("claude-code").fork_args("abc", transcript) == ForkArgs(
         ("--resume", str(transcript), "--fork-session"), True
     )
+
+
+def test_codexs_tools_only_session_is_its_tool_features_off_and_one_approved_server() -> None:
+    """Measured on 0.162.1 (M11): with these features off and ``web_search`` disabled the
+    request offered the server's tools, ``request_user_input`` and the MCP-resource readers;
+    ``default_tools_approval_mode="approve"`` let ``exec`` run the server's tool unasked."""
+    only = codex.tools_only_args("captain", "C:\\py\\python.exe", ["-m", "x ✓"], {"K": 'v "1"'})
+    assert only is not None
+    settings = {
+        item.partition("=")[0]: tomllib.loads(f"v = {item.partition('=')[2]}")["v"]
+        for flag, item in pairwise(only)
+        if flag == "-c"
+    }
+    assert settings == {
+        "web_search": "disabled",
+        "mcp_servers.captain.command": "C:\\py\\python.exe",
+        "mcp_servers.captain.args": ["-m", "x ✓"],
+        "mcp_servers.captain.env": {"K": 'v "1"'},
+        "mcp_servers.captain.default_tools_approval_mode": "approve",
+    }
+    disabled = [item for flag, item in pairwise(only) if flag == "--disable"]
+    assert disabled == list(TOOL_FEATURES)
+    with pytest.raises(ValueError, match="bare key"):
+        codex.tools_only_args("my.server", "python", [], {})
 
 
 def test_a_resumed_codex_thread_keeps_its_first_developer_instructions() -> None:

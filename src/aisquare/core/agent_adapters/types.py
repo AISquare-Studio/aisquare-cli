@@ -589,7 +589,8 @@ class AgentAdapter(Protocol):
     :meth:`store_access`, :meth:`sandbox_writes`, :meth:`broker_access`, :meth:`fleet_args`,
     :meth:`label_args`, :meth:`resume_args`, :meth:`fork_args`,
     ``exit_command``, ``dismiss_key``, :meth:`queue_args`,
-    :meth:`mcp_args`, :meth:`context_files`, :meth:`disable_native_teams`,
+    :meth:`mcp_args`, :meth:`tools_only_args`, :meth:`context_files`,
+    :meth:`disable_native_teams`,
     :meth:`telemetry_args`. Personas: :meth:`system_prompt_args`, :meth:`skill_dirs`,
     :meth:`headless_call` with :meth:`headless_answer`. Accounts: ``accounts``.
     Remote: ``transcript_reader``. ``capabilities`` says the rest.
@@ -793,6 +794,15 @@ class AgentAdapter(Protocol):
         unchanged (a hand-off's Fork; :class:`ForkArgs`); ``None`` for an agent that cannot
         fork one, whose fork starts fresh with a hand-off prompt instead. Run in the session's
         own config dir unless ``capabilities.resumes_across_homes``."""
+        ...
+
+    def tools_only_args(
+        self, server: str, command: str, args: list[str], env: dict[str, str]
+    ) -> list[str] | None:
+        """Launch arguments that leave the session no tool but those of the one MCP server
+        ``server`` (run as ``command`` with ``args`` and ``env``), each of its tools allowed
+        without asking: the captain's session. ``None`` for an agent that cannot be confined
+        so, which then cannot be the captain."""
         ...
 
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:

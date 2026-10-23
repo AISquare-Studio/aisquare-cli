@@ -302,6 +302,25 @@ class ClaudeCodeAdapter:
             json.dumps({"mcpServers": {"aisquare": {"command": executable, "args": args}}}),
         ]
 
+    def tools_only_args(
+        self, server: str, command: str, args: list[str], env: dict[str, str]
+    ) -> list[str] | None:
+        """main's captain flags: the one server (``--strict-mcp-config``, so no other MCP
+        server of the operator's loads), no built-in tool (``--tools ""``), and every tool of
+        the server allowed (``--allowedTools mcp__<server>__*``)."""
+        import json
+
+        config = {"mcpServers": {server: {"command": command, "args": args, "env": env}}}
+        return [
+            "--strict-mcp-config",
+            "--mcp-config",
+            json.dumps(config),
+            "--tools",
+            "",
+            "--allowedTools",
+            f"mcp__{server}__*",
+        ]
+
     def context_files(self, home: Path) -> tuple[Path, ...]:
         return (home / "CLAUDE.md",)
 

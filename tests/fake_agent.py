@@ -397,6 +397,11 @@ class FakeAgentAdapter:
         server = {"command": executable, "args": args, "env": env_vars or []}
         return ["--mcp", json.dumps({"aisquare": server})]
 
+    def tools_only_args(
+        self, server: str, command: str, args: list[str], env: dict[str, str]
+    ) -> list[str] | None:
+        return None  # its built-in tools cannot be switched off: it cannot be the captain
+
     def native_args(self, args: list[str]) -> list[str]:
         return list(args)
 

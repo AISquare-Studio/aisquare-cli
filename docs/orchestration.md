@@ -230,6 +230,26 @@ column, the one above the detail, the one between the sessions and the tasks —
 a double-click puts it back. The sizes are kept in `~/.aisquare/state.json`, one
 for every project's board, and come back at the next launch.
 
+#### What a human does here
+
+The board's top line says what needs you, for example `needs you: 🔔 1 waiting · ❓ 2
+questions · 👀 1 in review · ⛔ 1 blocked`, or "nothing needs you — the manager is
+working; talk to it on the Manager tab". Each count is a button to the first thing it
+counts: the card in the table, or, for 🔔 and ❓, the agent's row in `asq`, whose pane
+is where you answer. The counts are the captain's attention queue's own rules
+(`services.captain.queue.observe`), read from what the board's tick already read: no
+tmux call, no extra store read, nothing written to `captain/queue.json`, and the
+captain need not be on. A question counts while it is still its asker's last word on
+the board; stale agents are left to the captain.
+
+- 🔔 and ❓ need you: click the agent and answer in its pane.
+- 👀 waits for a reviewer agent, or for you on the PR.
+- Nothing here is typed into: you talk to the manager, and it writes the tasks. With no
+  open task the table says so: "No open tasks. The manager writes them when you give it
+  a goal on the Manager tab."
+
+`?` lists these three lines under "what to do here", between the keys and the icons.
+
 ### Long-term memory (optional, via gbrain)
 
 Durable events — decisions, results, task outcomes, reopen feedback —

@@ -34,7 +34,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from rich.cells import cell_len
 from rich.text import Text
@@ -63,6 +63,9 @@ from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, Pro
 from aisquare.services import fleet as fleet_service
 from aisquare.services.project import NICKNAME_MAX, display_name
 from aisquare.services.project_groups import Arrangement, GroupEntry, arrange
+
+if TYPE_CHECKING:
+    from aisquare.cli.ui.attach import ReturnTo
 
 ROLE_ICON: dict[str, str] = {
     "manager": "🧭",
@@ -148,7 +151,14 @@ class DoctorSelected(Message):
 
 
 class AccountsSelected(Message):
-    """The Accounts page: the AISquare sign-in and the Claude Code accounts."""
+    """The Accounts page: the AISquare sign-in and the Claude Code accounts.
+
+    ``return_to`` is where to go back once a sign-in started there lands: Welcome's
+    *Sign in* asks to come back to Welcome (#286). Every other way in carries none."""
+
+    def __init__(self, return_to: ReturnTo | None = None) -> None:
+        self.return_to = return_to
+        super().__init__()
 
 
 class SettingsSelected(Message):

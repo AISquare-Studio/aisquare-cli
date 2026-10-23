@@ -259,6 +259,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the way: a private `_running` on a Textual screen shadows the message
   pump's own flag and silently leaves every button of the screen dead; the
   dialog's flag is `_spawning`.
+- **A sign-in comes back to where you started it, and the board says what needs
+  you** (#286, #215). Welcome's *Sign in*, the persona picker's *+ New account*
+  and the Spawn dialog's *Pick… ▸ + New account* each left for the Accounts page
+  and stayed there. Once the sign-in lands, Welcome is shown again with the
+  keyboard on the next step (from a signed-out step 2, *Start manager*: two keys
+  to the manager's pane, where no path existed); the picker opens again with the
+  new account highlighted, and confirming it opens the Spawn dialog on that
+  account; the Spawn dialog opens again as it was typed, on the new account. A
+  sign-in that does not land reopens nothing and says so in one toast, and going
+  to another page first drops the way back. A sign-in from nowhere in particular
+  names the one step after it under the notice: add a project, start a
+  project's manager (with *Go to Welcome*, `w`), or spawn under one. The board
+  (the *Board* tab, and `aisquare board -w`) gains a top line, `needs you: 🔔 1
+  waiting · ❓ 2 questions · 👀 1 in review · ⛔ 1 blocked`, each count a button to
+  what it counts, or "nothing needs you"; it counts by the captain's attention
+  queue's own rules over what the board's tick already read, so it adds no tmux
+  call and no store read. With no open task the table says where tasks come
+  from, and `?` lists what a human does on the board.
 
 ### Changed
 - The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33

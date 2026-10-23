@@ -21,8 +21,10 @@ Two footer actions make a target without leaving the flow. **+ New bind** is
 writer ``aisquare team bind`` uses — after which the list is read again with the
 new bind selected. **+ New account** dismisses with a ``new-account`` target; its
 owner posts :class:`NewAccountRequested` and the app opens the Accounts page's
-own add-account flow. That is a navigation: the page does not hand the flow back
-to the picker when the sign-in lands (v1, recorded in the plan's §10).
+own add-account flow, carrying a :class:`ReturnTo` that brings the flow back once the
+sign-in lands: the picker again, its persona, intent and filter as they were, and the
+new slot highlighted (#215). The shell holds at most one; a sign-in that does not land,
+or the user going elsewhere first, drops it.
 
 The rows are read in a thread worker — ``list_agents`` asks tmux and the accounts
 read opens every slot's files — so the screen opens at once. Every read is
@@ -59,6 +61,7 @@ from aisquare.services import settings as settings_service
 
 Intent = Literal["existing", "new"]
 TargetKind = Literal["agent", "bind", "account", "new-account"]
+ReturnKind = Literal["welcome", "picker", "spawn"]
 Section = Literal["agents", "binds", "accounts"]
 
 SECTION_ORDER: dict[Intent, tuple[Section, ...]] = {
@@ -81,8 +84,28 @@ ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DEFAULT_BINARY = "claude"
 
 
+@dataclass(frozen=True)
+class ReturnTo:
+    """Where a sign-in started from goes back to once it lands (#215, #286).
+
+    ``welcome`` is Welcome's step 2; ``picker`` the target picker, ``form`` holding its
+    ``persona``, ``intent`` and ``filter``; ``spawn`` the Spawn dialog, ``form`` holding
+    what ``SpawnDialog.form_state`` read. ``project_id`` is the project the picker or the
+    dialog was for.
+    """
+
+    kind: ReturnKind
+    project_id: str | None = None
+    form: dict[str, Any] = field(default_factory=dict)
+
+
 class NewAccountRequested(Message):
-    """Open the Accounts page's add-account flow — the picker's *+ New account*."""
+    """Open the Accounts page's add-account flow — the picker's *+ New account* — and come
+    back to ``return_to`` once the sign-in lands."""
+
+    def __init__(self, return_to: ReturnTo | None = None) -> None:
+        self.return_to = return_to
+        super().__init__()
 
 
 @dataclass(frozen=True)
@@ -91,7 +114,8 @@ class Target:
 
     kind: TargetKind
     key: str = ""
-    """The agent's label, the bind's seat, or the account's slot."""
+    """The agent's label, the bind's seat, or the account's slot; for ``new-account``, what
+    the filter held, so the picker that comes back after the sign-in shows it again."""
     role: str | None = None
     binary: str | None = None
     account: str | None = None
@@ -209,6 +233,8 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         persona: str | None,
         intent: Intent,
         accounts: Callable[[], AccountsOverview] | None,
+        select: str | None = None,
+        filter_text: str = "",
     ) -> None:
         super().__init__()
         self.project = project
@@ -216,8 +242,10 @@ class AttachTargetScreen(ModalScreen[Target | None]):
         self.attach_intent: Intent = intent
         self._accounts = accounts
         self.targets = Targets()
-        self._wanted: str | None = None
-        """The option id to highlight after the next read (a bind just created)."""
+        self._wanted: str | None = select
+        """The option id to highlight after the next read: a bind just created, or the
+        account a sign-in started from here just added (``select``)."""
+        self._filter_text = filter_text
 
     def _header(self) -> Text:
         text = Text()
@@ -235,7 +263,11 @@ class AttachTargetScreen(ModalScreen[Target | None]):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(self._header(), classes="picker-header")
-            yield Input(placeholder="filter agents, binds and accounts", id="picker-filter")
+            yield Input(
+                value=self._filter_text,
+                placeholder="filter agents, binds and accounts",
+                id="picker-filter",
+            )
             yield OptionList(id="picker-list")
             yield Static(id="picker-status", classes="picker-note")
             with Horizontal(classes="picker-buttons"):
@@ -245,7 +277,7 @@ class AttachTargetScreen(ModalScreen[Target | None]):
 
     def on_mount(self) -> None:
         self._say("reading agents, binds and accounts …", "dim")
-        self.read()
+        self.read(select=self._wanted)
         self.query_one("#picker-list", OptionList).focus()
 
     def read(self, *, select: str | None = None) -> None:
@@ -354,7 +386,7 @@ class AttachTargetScreen(ModalScreen[Target | None]):
 
     @on(Button.Pressed, "#picker-new-account")
     def _new_account(self) -> None:
-        self.dismiss(Target("new-account"))
+        self.dismiss(Target("new-account", self.query_one("#picker-filter", Input).value))
 
     @on(Button.Pressed, "#picker-cancel")
     def action_cancel(self) -> None:

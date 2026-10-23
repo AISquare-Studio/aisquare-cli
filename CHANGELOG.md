@@ -280,7 +280,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   task and says to read it with `aisquare task show N`, then claim it with
   `aisquare task claim N`. A spawn with neither is typed nothing, and reads
   `waiting`.
-- The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
+- The store migrates to schema v34 on first open, from 0.8.2's v32, in two steps: v34
+  adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,
+  `died` otherwise; NULL on a row from before it, read by its exit status, #38). v33
   adds the two persona columns, `team_session.persona` (the persona a session was
   launched as) and `fleet_agent.persona` (the one an agent was spawned with or given
   since). Both are nullable, and a row from before them reads as no persona. The step
@@ -359,6 +361,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Restart all brings back the agents that died** (#38). After an outside SIGTERM
+  killed every agent of a fleet (exit 143), *Settings ▸ Fleet ▸ Restart all…* and
+  `fleet restart --all` listed each one as exited and restarted none: they acted on
+  running agents alone. A restart now also brings back every agent that ended for a
+  reason nobody gave it (killed, crashed, its tmux server gone, a reboot), within 7
+  days; one aisquare stopped on purpose (`fleet stop`, *Stop all*, `shutdown`), one
+  that exited 0, and one whose task is closed are left, each with why. The dialog
+  lists the dead apart (`💤 exited (143) — will be started again`) and its count
+  says how many are running and how many dead; the CLI says so per agent and in the
+  count, and `--json` gives each row's `was`. *Stop all* is unchanged.
+- **A restarted manager is told its dead team** (#38): its first message, resumed or
+  fresh, names each teammate that died and is still dead, with its state, its task
+  and the exact `aisquare fleet restart --project <codename> <label>`, so after a
+  crash *Managers only* brings the managers back and they bring their teams. A
+  restart of all brings each manager back after its team.
 - **A `fleet spawn --prompt` is sent, not left in the input box** (#32). It was
   typed once the agent's process ran and two seconds had passed. A Claude Code
   still starting reads the keyboard into an early-input buffer that keeps the

@@ -1233,7 +1233,9 @@ def test_a_worktree_is_not_checked_out_from_under_an_agent_whose_row_lands_late(
     first = fleet_service.spawn(project, "coder", label="coder-auth", task_id=first_task.id).agent
     on_first = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd)
     with store_session() as store:
-        store.end_fleet_agent(first.id)  # the pre-check sees a free label and a free tree
+        store.end_fleet_agent(
+            first.id, ended_by="stopped"
+        )  # the pre-check sees a free label and a free tree
     second_task = _add_task(project, "Second job")
     real_git = fleet_service._git
 
@@ -1255,7 +1257,7 @@ def test_a_worktree_is_not_checked_out_from_under_an_agent_whose_row_lands_late(
     # as test_a_reused_worktree_is_put_on_the_branch_this_spawn_asked_for requires.
     monkeypatch.setattr(fleet_service, "_git", real_git)
     with store_session() as store:
-        store.end_fleet_agent(first.id)
+        store.end_fleet_agent(first.id, ended_by="stopped")
     receipt = fleet_service.spawn(project, "coder", label="coder-auth", task_id=second_task.id)
     assert receipt.agent.cwd == first.cwd
     assert _git("rev-parse", "--abbrev-ref", "HEAD", cwd=first.cwd) != on_first
@@ -1449,7 +1451,9 @@ def test_spawn_kills_the_window_when_no_label_can_be_recorded(
     """A manager race has no suffix to fall back on: the second window must not linger."""
     fleet_service.spawn(project, "manager")
     with store_session() as store:
-        store.end_fleet_agent(store.fleet_agents(project.id)[0].id)  # looks free to the pre-check
+        store.end_fleet_agent(
+            store.fleet_agents(project.id)[0].id, ended_by="stopped"
+        )  # looks free to the pre-check
     original = tmux.spawn_window
 
     def spawn_then_revive(*args: object, **kwargs: object) -> WindowInfo:
@@ -3697,7 +3701,7 @@ def test_rows_in_no_recorded_project_are_said_to_be_out_of_reach_not_left_mid_se
     monkeypatch.setattr(tmux_core, "boot_id", lambda: "b00t-1")
     coder = _coder(project)
     with store_session() as store:  # ended in its own project, and live in none
-        store.end_fleet_agent(coder.id)
+        store.end_fleet_agent(coder.id, ended_by="stopped")
         orphan = store.upsert_fleet_agent(
             coder.model_copy(update={"id": new_agent_id(), "project_id": "prj_nowhere"})
         )
@@ -6001,7 +6005,7 @@ def test_a_080_row_a_restart_moves_to_the_checkouts_board_holds_the_checkout_aga
     with store_session() as store:
         assert agent.session_id is not None and store.get_session(agent.session_id) is None
         if ended:
-            store.end_fleet_agent(agent.id, exit_status=0)
+            store.end_fleet_agent(agent.id, exit_status=0, ended_by="stopped")
         row = _row(agent.id)
         assert row.board == below.id, "the premise: read as its project's"
         assert fleet_service._board_and_hub(store, below, row, None) == (project.id, "")
@@ -6197,7 +6201,7 @@ def test_a_080_row_whose_root_is_gone_keeps_its_board_and_holds_no_ancestor(
     agent = _coder(own)
     _as_080_left_it(agent)
     with store_session() as store:
-        store.end_fleet_agent(agent.id, exit_status=0)
+        store.end_fleet_agent(agent.id, exit_status=0, ended_by="stopped")
     remove_tree(app)  # a checkout with a commit: its objects are read-only
 
     with store_session() as store:
@@ -6224,7 +6228,7 @@ def test_a_080_row_whose_root_may_not_be_searched_keeps_its_board_on_every_pytho
     agent = _coder(below)
     _as_080_left_it(agent)
     with store_session() as store:
-        store.end_fleet_agent(agent.id, exit_status=0)
+        store.end_fleet_agent(agent.id, exit_status=0, ended_by="stopped")
     below.root.chmod(0)
     try:
         with store_session() as store:
@@ -7540,7 +7544,7 @@ def test_a_row_that_ends_mid_hook_briefs_nobody(
         self: SqliteStore, agent_id: str, previous: str | None, session_id: str, lease: datetime
     ) -> bool:
         # The race, made deterministic: the row ends after it was read.
-        self.end_fleet_agent(agent_id, exit_status=0)
+        self.end_fleet_agent(agent_id, exit_status=0, ended_by="stopped")
         return original(self, agent_id, previous, session_id, lease)
 
     monkeypatch.setattr(SqliteStore, "adopt_fleet_agent_session", stop_first)
@@ -8562,7 +8566,7 @@ def test_shutdown_counts_an_agent_that_exited_on_its_own_as_stopped(
 
     def exit_first(*args: object, **kwargs: object) -> None:
         with store_session() as store:  # its own SessionEnd hook got there first
-            store.end_fleet_agent(coder.id, exit_status=7)
+            store.end_fleet_agent(coder.id, exit_status=7, ended_by="stopped")
         real_row(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(fleet_service, "_shutdown_row", exit_first)
@@ -9651,7 +9655,7 @@ def test_a_label_reused_mid_shutdown_stops_the_snapshots_row_and_not_the_new_age
         # Between the snapshot and the first row's turn: the old coder-1 exits
         # on its own (its hook ends the row) and a new coder-1 is spawned.
         with store_session() as store:
-            store.end_fleet_agent(old_row.id, exit_status=3)
+            store.end_fleet_agent(old_row.id, exit_status=3, ended_by="stopped")
         new_ids.append(_coder(project).id)
         return real_probe(*args, **kwargs)  # type: ignore[arg-type]
 
@@ -12807,7 +12811,7 @@ def test_attach_argv_asks_no_server_by_the_name_alone_when_a_live_row_recorded_i
         fleet_service.attach_argv(project)
 
     with store_session() as store:  # the manager ended: no live row says where to look
-        store.end_fleet_agent(manager.id, exit_status=0)
+        store.end_fleet_agent(manager.id, exit_status=0, ended_by="stopped")
     assert fleet_service.attach_argv(project)[:3] == ["/fake/tmux", "-L", "asq-test"]
 
 
@@ -12819,7 +12823,7 @@ def test_attach_argv_resolves_each_recorded_server_once_however_many_rows_ended_
     recorded one server are one question, asked in the order the rows give."""
     manager = fleet_service.spawn(project, "manager").agent
     with store_session() as store:
-        ended = store.end_fleet_agent(manager.id, exit_status=0)
+        ended = store.end_fleet_agent(manager.id, exit_status=0, ended_by="stopped")
         for n in range(40):
             store.upsert_fleet_agent(
                 ended.model_copy(update={"id": f"agt_old_{n}", "label": f"coder-{n}"})

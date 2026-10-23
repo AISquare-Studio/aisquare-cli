@@ -207,7 +207,7 @@ def test_forget_refuses_a_project_with_live_fleet_agents(
     assert _listed(runner) == {alpha}
 
     with store_session() as store:
-        store.end_fleet_agent(agent.id, exit_status=0)
+        store.end_fleet_agent(agent.id, exit_status=0, ended_by="stopped")
     assert runner.invoke(app, ["project", "forget", "alpha"]).exit_code == 0
     assert _listed(runner) == set()
 
@@ -229,7 +229,7 @@ def test_forget_refuses_a_hub_whose_board_another_projects_live_agents_read(
         ended = store.upsert_fleet_agent(
             _agent(beta, "coder0").model_copy(update={"board": alpha, "created_at": earlier})
         )
-        store.end_fleet_agent(ended.id, exit_status=0)
+        store.end_fleet_agent(ended.id, exit_status=0, ended_by="stopped")
         store.upsert_fleet_agent(_agent(beta, "coder0"))  # its label's newest, on beta's board
         for label in ("manager", "coder1"):
             store.upsert_fleet_agent(_agent(beta, label).model_copy(update={"board": alpha}))
@@ -262,7 +262,7 @@ def test_forget_refuses_a_hub_a_restart_of_another_projects_stopped_agent_reads_
     with store_session() as store:
         for label in ("manager", "coder1"):
             row = store.upsert_fleet_agent(_agent(beta, label).model_copy(update={"board": alpha}))
-            store.end_fleet_agent(row.id, exit_status=0)
+            store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
         live = store.upsert_fleet_agent(_agent(beta, "coder2").model_copy(update={"board": alpha}))
 
     refused = runner.invoke(app, ["project", "forget", "alpha"])
@@ -271,7 +271,7 @@ def test_forget_refuses_a_hub_a_restart_of_another_projects_stopped_agent_reads_
     assert "alpha is the board beta's 3 fleet agent(s) read: manager (stopped), coder1 " in said
     assert "(stopped), coder2 — stop the live ones first" in said, said
     with store_session() as store:
-        store.end_fleet_agent(live.id, exit_status=0)
+        store.end_fleet_agent(live.id, exit_status=0, ended_by="stopped")
     for purge in ([], ["--purge"]):
         refused = runner.invoke(app, ["project", "forget", "alpha", *purge])
         assert refused.exit_code == 2, refused.output
@@ -310,7 +310,7 @@ def test_what_reads_a_board_is_looked_up_by_the_board_not_over_every_row(
         manager = store.upsert_fleet_agent(
             _agent(api, "manager").model_copy(update={"board": tools})
         )
-        store.end_fleet_agent(manager.id, exit_status=0)
+        store.end_fleet_agent(manager.id, exit_status=0, ended_by="stopped")
         store.upsert_fleet_agent(_agent(web, "coder1").model_copy(update={"board": tools}))
         for other in others:
             store.upsert_fleet_agent(_agent(other, "coder1"))
@@ -350,7 +350,7 @@ def test_forget_of_a_hub_two_projects_read_names_both_with_what_frees_each(
         manager = store.upsert_fleet_agent(
             _agent(api, "manager").model_copy(update={"board": tools})
         )
-        store.end_fleet_agent(manager.id, exit_status=0)
+        store.end_fleet_agent(manager.id, exit_status=0, ended_by="stopped")
         coder = store.upsert_fleet_agent(_agent(web, "coder1").model_copy(update={"board": tools}))
         known = {each.id: each for each in store.list_projects(all=True)}
 
@@ -380,7 +380,9 @@ def test_forget_of_a_hub_two_projects_read_names_both_with_what_frees_each(
 
     assert runner.invoke(app, ["project", "forget", "api"]).exit_code == 0
     with store_session() as store:
-        store.end_fleet_agent(coder.id, exit_status=0)  # a forgotten project's stopped row: none
+        store.end_fleet_agent(
+            coder.id, exit_status=0, ended_by="stopped"
+        )  # a forgotten project's stopped row: none
     assert runner.invoke(app, ["project", "forget", "tools"]).exit_code == 0
 
 
@@ -415,7 +417,7 @@ def test_forget_of_a_hub_a_running_reader_holds_gives_its_stop_and_then_its_forg
         assert runner.invoke(app, ["project", "onboard", str(work_dir / "web")]).exit_code == 0
 
     with store_session() as store:
-        store.end_fleet_agent(coder.id, exit_status=0)  # its stop
+        store.end_fleet_agent(coder.id, exit_status=0, ended_by="stopped")  # its stop
     refused = runner.invoke(app, ["project", "forget", "tools"])
     assert refused.exit_code == 2, "a stopped row holds the hub, as the forget step said"
     assert f"forget web first if you are done with its agents ({forget})" in " ".join(
@@ -528,7 +530,7 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
             TeamEvent(id=new_event_id(), project_id=alpha, text="an event", created_at=now)
         )
         ended = store.upsert_fleet_agent(_agent(alpha))
-        store.end_fleet_agent(ended.id, exit_status=0)
+        store.end_fleet_agent(ended.id, exit_status=0, ended_by="stopped")
         store.set_meta(f"distill_seq:{alpha}", "3")
         store.set_meta(f"signal/{alpha}/phase", "{}")
         store.set_meta(f"nudge:{session.id}", now.isoformat())
@@ -1130,7 +1132,7 @@ def test_a_prune_says_why_it_kept_a_row_as_the_run_read_it_not_the_plan(
         plan = real(**kwargs)
         with store_session() as store:
             if own is not None:
-                store.end_fleet_agent(own.id, exit_status=0)
+                store.end_fleet_agent(own.id, exit_status=0, ended_by="stopped")
             store.upsert_fleet_agent(_agent(beta, "coder1").model_copy(update={"board": hub}))
         return plan
 
@@ -1401,7 +1403,7 @@ def test_a_prune_of_a_hub_and_its_reader_decides_every_hold_before_either_goes(
             row = store.upsert_fleet_agent(
                 _agent(project_id, "manager").model_copy(update={"board": board})
             )
-            store.end_fleet_agent(row.id, exit_status=0)
+            store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
 
     plan = project_service.prune_candidates(missing=True, worktrees=False)
     by_id = {c.project.id: c for c in plan}

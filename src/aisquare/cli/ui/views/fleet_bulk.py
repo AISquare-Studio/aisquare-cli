@@ -9,8 +9,15 @@ the managers alone. It is ``fleet_service.bulk``, the service function ``fleet r
 :class:`ConfirmBulk` reads the plan when it opens (``fleet_service.bulk_plan``, off the
 UI thread) and lists what it read, by project. Its *Managers only* switch redraws from
 that read. Confirm hands back the plan it SHOWED, and ``bulk`` reads the fleet again
-before it acts: an agent that ended since is skipped as already exited, and one started
-since was never shown, so it is left alone. Cancel has the focus, and Escape cancels.
+before it acts: for a stop, an agent that ended since is skipped as already exited; one
+started since was never shown, so it is left alone. Cancel has the focus, and Escape
+cancels.
+
+A restart brings back the agents that died, not only the running ones (#38, after an
+outside SIGTERM killed a whole fleet and Restart all restarted none): an agent killed,
+crashed or left without its tmux server is listed apart, ``💤 exited (143) — will be
+started again``, and the count says how many are running and how many dead. One aisquare
+stopped on purpose is left, and says so.
 """
 
 from __future__ import annotations
@@ -35,19 +42,29 @@ PLAN_WORKER = "fleet-bulk-plan"
 """The dialog's read of what the action would act on."""
 
 VERB: dict[fleet_service.BulkAction, str] = {"restart": "Restart", "stop": "Stop"}
-ABOUT: dict[fleet_service.BulkAction, str] = {
-    "restart": "Each one is stopped and started again under its label, with the same role, "
-    "task, worktree and account. Its session is resumed from its transcript when that is "
-    "on disk.",
-    "stop": "Each one is sent /exit, given a grace period, and then its window is killed. "
-    "Its claims go back to the board.",
+TITLE: dict[fleet_service.BulkAction, str] = {
+    "restart": "Restart every running agent, and every one that died?",
+    "stop": "Stop every running agent?",
 }
+ABOUT: dict[fleet_service.BulkAction, str] = {
+    "restart": "Each one is started again under its label, with the same role, task, "
+    "worktree and account; a running one is stopped first. Its session is resumed from its "
+    "transcript when that is on disk. An agent that died without being stopped (killed, "
+    "crashed, its tmux server gone) is brought back too; one stopped on purpose is left as "
+    "it is.",
+    "stop": "Each one is sent /exit, given a grace period, and then its window is killed. "
+    "Its claims go back to the board. Exited (💤) agents are left as they are.",
+}
+WILL_START = "will be started again"
+"""A dead row a restart brings back (#38), after its state in the dialog's list."""
 
 
-def count_words(count: int, *, managers_only: bool) -> str:
-    """``4 managers``, ``1 agent``: what the confirm button names."""
+def count_words(count: int, *, managers_only: bool, dead: int = 0) -> str:
+    """``4 managers``, ``1 agent``, ``3 agents (2 running, 1 dead)``: what the confirm button
+    names, with how many died when any did (#38)."""
     noun = "manager" if managers_only else "agent"
-    return f"{count} {noun}{'' if count == 1 else 's'}"
+    words = f"{count} {noun}{'' if count == 1 else 's'}"
+    return f"{words} ({count - dead} running, {dead} dead)" if dead else words
 
 
 def plan_text(plan: fleet_service.BulkPlan) -> Text:
@@ -73,6 +90,10 @@ def plan_text(plan: fleet_service.BulkPlan) -> Text:
         if row.skip is not None:
             line.append(f" — left: {row.skip}")
             line.stylize("dim")
+        elif row.dead:
+            # Apart from the running ones (#38): its exit, and that it comes back.
+            exit_code = f" ({agent.exit_status})" if agent.exit_status is not None else ""
+            line.append(f"{exit_code} — {WILL_START}")
         text.append_text(line)
         text.append("\n")
     for project, why in plan.unread:
@@ -118,11 +139,8 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
     def compose(self) -> ComposeResult:
         verb = VERB[self.action]
         with Vertical(id="bulk-box", classes=self.action):
-            yield Static(Text(f"{verb} every running agent?"), id="bulk-title")
-            yield Static(
-                Text(f"{ABOUT[self.action]} Exited (💤) agents are left as they are."),
-                id="bulk-about",
-            )
+            yield Static(Text(TITLE[self.action]), id="bulk-title")
+            yield Static(Text(ABOUT[self.action]), id="bulk-about")
             with Horizontal(id="bulk-switch-row"):
                 yield Switch(False, id="bulk-managers")
                 yield Label("Managers only")
@@ -188,9 +206,12 @@ class ConfirmBulk(ModalScreen[fleet_service.BulkPlan | None]):
             return
         listing.update(plan_text(plan))
         count = len(plan.targets)
+        dead = sum(1 for row in plan.targets if row.dead)
         verb = VERB[self.action]
         confirm.label = (
-            f"{verb} {count_words(count, managers_only=plan.managers_only)}" if count else verb
+            f"{verb} {count_words(count, managers_only=plan.managers_only, dead=dead)}"
+            if count
+            else verb
         )
         # A new label is not a layout change in Textual, so the button kept the width it was
         # laid out at, for "Restart" while the plan was read: "Restart 2 managers" read

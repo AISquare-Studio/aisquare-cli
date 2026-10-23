@@ -1271,7 +1271,7 @@ def test_ended_rows_do_not_count_as_live(
     _initialised(runner, tmp_path)
     _live_agent(tmp_path / "repo")
     with store_session() as store:
-        store.end_fleet_agent("agt_coder-1")
+        store.end_fleet_agent("agt_coder-1", ended_by="stopped")
 
     plan = lifecycle.uninstall_plan()
 

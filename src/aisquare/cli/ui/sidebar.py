@@ -1229,10 +1229,17 @@ class CaptainSection(Vertical):
     CaptainSection #captain-notice { height: auto; color: $text-muted; }
     """
 
+    def __init__(self, *, notice: str | None = None, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self._notice = notice
+        """The line it is built with, as :meth:`show` would say it with no row."""
+
     def compose(self) -> ComposeResult:
         yield Static(Text("Captain", style="bold"), id="captain-title")
-        yield StartCaptain()
-        yield Static("", id="captain-notice")
+        empty = StartCaptain()
+        empty.display = self._notice is None
+        yield empty
+        yield Static(Text(self._notice or "", style="dim"), id="captain-notice")
 
     def show(self, status: FleetAgentStatus | None, *, notice: str | None = None) -> None:
         """Show the captain's row, or the line saying how to start one.
@@ -1434,9 +1441,10 @@ class Sidebar(Vertical):
             return
         header = self.query_one("#fleet-header", Horizontal)
         await header.mount(CaptainButton(), before=self.query_one(AddButton))
-        section = CaptainSection(id="captain-section")
+        # Built saying so: shown after the mount, the section said *Start captain* for as
+        # long as the mount took, to a frame and to a read in that window (review of #274, m7).
+        section = CaptainSection(notice=CAPTAIN_READING, id="captain-section")
         await self.mount(section, before=self.query_one("#projects-notice"))
-        section.show(None, notice=CAPTAIN_READING)
 
     def show_projects(
         self,

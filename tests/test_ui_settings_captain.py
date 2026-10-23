@@ -118,7 +118,12 @@ def test_a_read_begun_before_the_tick_is_not_taken_for_no_captain(
 ) -> None:
     """A fleet read already on its way when the box is ticked began with the captain off and
     read nothing of it. Painted as it was, the section said *Start captain* over a captain
-    that was running; it says the captain is being read until a read that asked answers."""
+    that was running; it says the captain is being read until a read that asked answers.
+
+    It says so from its mount on: shown after the mount, it said *Start captain* for as long
+    as the mount took, and this test, which waited for the mount alone, read that now and then
+    under load (review of #274, m7). So it waits for the switch's last step, and every look
+    on the way, from the mount on, finds no *Start captain*."""
     seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
     home = captain_state.home_project()
     script[home.id] = [_captain("waiting")]
@@ -131,7 +136,7 @@ def test_a_read_begun_before_the_tick_is_not_taken_for_no_captain(
 
     monkeypatch.setattr(fleet_service, "list_agents", held)
 
-    async def body(pilot: Pilot[None]) -> tuple[str, bool, str, bool, list[str]]:
+    async def body(pilot: Pilot[None]) -> tuple[list[bool], str, bool, str, bool, list[str]]:
         app = fleet_app(pilot)
         await refreshed(app)
         toggle = await _settings(pilot)
@@ -141,7 +146,15 @@ def test_a_read_begun_before_the_tick_is_not_taken_for_no_captain(
         before = app._fleet_worker
         assert before is not None and not before.is_finished
         toggle.query_one("#captain-toggle", Checkbox).toggle()
-        await until(pilot, lambda: bool(app.query(CaptainSection)), what="the section mounted")
+        start_said: list[bool] = []
+
+        def switched() -> bool:
+            """The ui receiver listens: the step after ``Sidebar.set_captain``, its last."""
+            for section in app.query(CaptainSection):
+                start_said.extend(start.display for start in section.query(StartCaptain))
+            return ui_receiver(app) is not None
+
+        await until(pilot, switched, what="the captain switched on")
         section = app.query_one(CaptainSection)
         notice, start = (
             section.query_one("#captain-notice", Static),
@@ -154,9 +167,10 @@ def test_a_read_begun_before_the_tick_is_not_taken_for_no_captain(
         permits.release(1000)  # the read the tick asked for, and every one after it
         await refreshed(app)
         rows = [row.status.agent.label for row in section.query(AgentRow)]
-        return (*mounted, *landed, rows)
+        return (start_said, *mounted, *landed, rows)
 
-    said, start_shown, said_after, start_after, rows = drive(body)
+    start_said, said, start_shown, said_after, start_after, rows = drive(body)
+    assert start_said and not any(start_said), "Start captain, from the mount on"
     assert (said, start_shown) == (CAPTAIN_READING, False)
     assert (said_after, start_after) == (CAPTAIN_READING, False), "not Start captain"
     assert rows == ["captain"]

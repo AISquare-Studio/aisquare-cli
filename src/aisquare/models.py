@@ -821,12 +821,16 @@ class ProjectForgetReport(BaseModel):
     removed: dict[str, int] = Field(default_factory=dict)
     data_dir_removed: bool = False
     active: ProjectInfo | None = None
-    """The active project AFTER the forget — ``None`` when nothing is pinned any
-    more and the active project again follows the working directory."""
+    """The project pinned AFTER the forget. Always ``None`` since #271: a forget clears a
+    pin that named the project and never moves one, so the active project follows the
+    working directory, or the pin it left alone. Kept for ``--json`` readers."""
     active_changed: bool = False
-    """Whether the forgotten project WAS the active one, so the pin moved."""
+    """Whether the pin named the forgotten project, so it was cleared (:attr:`unpinned`)."""
+    unpinned: ProjectInfo | None = None
+    """The project whose pin the forget cleared, else ``None``: there was no pin, or it
+    named another project, and nothing was written (#271)."""
     pin_error: str | None = None
-    """Why the pin could not be moved after the forget, when it could not — the
+    """Why the pin could not be cleared after the forget, when it could not — the
     forget itself is complete; the active project follows the working directory
     until ``project switch`` succeeds."""
     keys_still_live: list[PendingRevocation] = Field(default_factory=list)
@@ -890,9 +894,13 @@ class ProjectPruneReport(BaseModel):
     dry_run: bool = True
     purged: bool = False
     active: ProjectInfo | None = None
+    """As for ``ProjectForgetReport``: always ``None`` since #271."""
     active_changed: bool = False
+    """Whether the pin named a project the sweep dropped, so it was cleared."""
+    unpinned: ProjectInfo | None = None
+    """The dropped project whose pin the sweep cleared, else ``None`` (#271)."""
     pin_error: str | None = None
-    """Why the pin could not be moved after the sweep, when it could not — the
+    """Why the pin could not be cleared after the sweep, when it could not — the
     registrations are dropped (and purged) regardless."""
     keys_still_live: list[PendingRevocation] = Field(default_factory=list)
     """As for ``ProjectForgetReport``: minted keys of purged projects still live."""

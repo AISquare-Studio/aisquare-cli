@@ -1456,6 +1456,10 @@ def test_an_over_long_label_is_refused_with_a_label_that_fits(project: ProjectIn
     with pytest.raises(FleetError) as hopeless:
         fleet_service.next_label(project, "coder", wanted="9")
     assert "not valid" in str(hopeless.value) and "try" not in str(hopeless.value)
+    # Never a label the retry would be refused for next: `manager` is the manager's alone.
+    with pytest.raises(FleetError) as reserved:
+        fleet_service.next_label(project, "coder", wanted="Manager")
+    assert "not valid" in str(reserved.value) and "try" not in str(reserved.value)
 
 
 def test_spawn_retries_the_label_when_the_live_index_trips(

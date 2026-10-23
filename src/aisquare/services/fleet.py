@@ -1071,8 +1071,10 @@ def _fixed_label(role: str, wanted: str | None) -> str | None:
     if wanted is not None and not is_label(wanted):
         # The manager adds the task before it spawns for it: a refusal it can retry from in
         # the same turn names a label that fits, where there is one (#291).
+        # Never a reserved label, which the retry would be refused for next (`Manager`).
         fits = slugify(wanted, limit=24)
-        try_it = f"; try {fits!r}" if is_label(fits) else ""
+        reserved = {MANAGER_LABEL, CAPTAIN_LABEL} - {role}
+        try_it = f"; try {fits!r}" if is_label(fits) and fits not in reserved else ""
         if len(wanted) > 24 and re.fullmatch(r"[a-z][a-z0-9-]*", wanted):
             raise FleetError(f"label {wanted!r} is {len(wanted)} characters — at most 24{try_it}")
         raise FleetError(

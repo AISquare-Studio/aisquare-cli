@@ -513,7 +513,6 @@ _V1_DEFAULTS: dict[str, Any] = {
                 "permission_mode": "auto",
                 "worktree": True,
                 "extra_args": ["--disallowedTools=Edit Write NotebookEdit"],
-                "board_context": "none",
             },
             "validator": {"permission_mode": "auto", "worktree": False, "extra_args": []},
             "ui-tester": {"permission_mode": "auto", "worktree": False, "extra_args": []},

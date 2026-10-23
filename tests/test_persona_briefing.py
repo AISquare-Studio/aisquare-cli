@@ -9,6 +9,7 @@ cannot be loaded costs one line, never the team block.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -377,3 +378,140 @@ def test_a_fleet_row_without_a_persona_leaves_the_start_byte_identical(
 
     assert _start(work) == _pinned(work)
     assert _recorded() is None
+
+
+def test_a_codex_session_start_with_the_variable_gets_the_persona_block(
+    work: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113 0.8.2 A2: Codex's SessionStart (its recorded fixture payload, through the
+    hook its adapter installs) briefs the persona ``AISQUARE_PERSONA`` names, the same
+    block Claude Code's start gets; Codex reads the hook's plain stdout as context."""
+    import json
+
+    fixture = Path(__file__).parent / "fixtures" / "agent_events" / "codex.json"
+    payload = json.loads(fixture.read_text(encoding="utf-8"))["events"]["SessionStart"]["payload"]
+    monkeypatch.setenv("AISQUARE_PERSONA", "skeptic")
+
+    result = runner.invoke(
+        app,
+        ["hook", "event", "--agent", "codex", "--event", "SessionStart"],
+        input=json.dumps({**payload, "cwd": str(work)}),
+    )
+
+    assert result.exit_code == 0, result.output
+    block = personas.briefing(personas.resolve("skeptic", work))
+    lines = result.stdout.splitlines()
+    assert sum(line.startswith("<aisquare-persona ") for line in lines) == 1
+    start = lines.index(block[0])
+    assert lines[start : start + len(block)] == block
+    assert not result.stdout.lstrip().startswith("{"), "plain text, not a JSON envelope"
+    (you,) = [line for line in lines if "(you)" in line]
+    assert you.endswith("persona:skeptic — 0m ago"), "the session row records it"
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_spawned_with_a_persona_has_it_in_its_developer_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113 0.8.2 A3, live: a fleet Codex coder spawned with ``--persona`` has the
+    persona's block in its request's developer message, after the operator's own
+    ``developer_instructions`` (``-c developer_instructions=…``, measured as M1 and M3), on
+    a loopback provider that records every request body (``tests/test_codex_native.py``)."""
+    import json
+    import shlex
+    import shutil
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from typing import Any
+
+    from aisquare.core import agents, selfcli
+    from aisquare.core.config import load_config, save_config
+    from aisquare.services import fleet, team
+    from tests.test_codex_native import _answer, _message, _user_texts
+
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    native_home = tmp_path / "codex"
+    native_home.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            if not self.path.endswith("/responses"):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+                return
+            requests.append(json.loads(raw))
+            _answer(self, _message("ok"))
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    def developer_texts(request: dict[str, Any]) -> list[str]:
+        return [
+            part.get("text", "")
+            for item in request.get("input", [])
+            if item.get("role") == "developer"
+            for part in item.get("content", [])
+        ]
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        (native_home / "config.toml").write_text(
+            'model = "local-fixture"\nmodel_provider = "local"\n'
+            'developer_instructions = "OPERATOR_OWN_4211"\n'
+            '[model_providers.local]\nname = "Local fixture"\nwire_api = "responses"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            "requires_openai_auth = false\n"
+            f'[projects.{json.dumps(str(workspace))}]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
+        for key in tuple(os.environ):
+            if key.startswith(("OPENAI_", "ANTHROPIC_", "CODEX_")):
+                monkeypatch.delenv(key)
+        monkeypatch.setenv("CODEX_HOME", str(native_home))
+        monkeypatch.setattr(
+            agents, "_aisquare_command", lambda *args, **kwargs: shlex.join(selfcli.argv_for([]))
+        )
+        agents.install_hooks("codex", native_home)
+        config = load_config()
+        config.fleet.tmux_socket = f"asq-codex-persona-{os.getpid()}"
+        save_config(config)
+        project = team.activate(workspace)
+        srv = fleet.server(config.fleet)
+        try:
+            coder = fleet.spawn(
+                project,
+                "coder",
+                agent="codex",
+                worktree=False,
+                persona="skeptic",
+                prompt="persona fixture",
+                # Only this test's owned hook definitions are trusted by this flag.
+                agent_args=["--dangerously-bypass-hook-trust"],
+            ).agent
+            deadline = time.monotonic() + 45
+            while not any("persona fixture" in _user_texts(request) for request in requests):
+                if time.monotonic() >= deadline:
+                    raise AssertionError(srv.run("capture-pane", "-p", "-t", coder.pane_id))
+                time.sleep(0.2)
+            first = next(r for r in requests if "persona fixture" in _user_texts(r))
+            block = "\n".join(personas.briefing(personas.resolve("skeptic", workspace)))
+            developer = developer_texts(first)
+            # The system seam: the operator's own value, a blank line, then the block.
+            (seam,) = [text for text in developer if text.startswith("OPERATOR_OWN_4211")]
+            assert seam.startswith(f"OPERATOR_OWN_4211\n\n{block}"), seam[:400]
+            # And the session-start briefing, the hook's context, carries it too.
+            briefed = [t for t in developer if block in t and "<aisquare-team>" in t]
+            assert len(briefed) == 1, developer
+        finally:
+            if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
+                srv.run("kill-server")
+            server.shutdown()
+            thread.join(timeout=2)

@@ -492,6 +492,8 @@ def test_the_wake_kinds_are_the_plans() -> None:
         # #146: an agent parked on a usage limit, and the hand-over that moved one.
         "limited",
         "switched",
+        # P0-W1a (#122): an agent whose first message never started a turn.
+        "prompt_unsent",
     } == team_service.MANAGER_WAKE_KINDS
 
 

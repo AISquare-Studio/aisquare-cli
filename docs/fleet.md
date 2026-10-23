@@ -239,11 +239,11 @@ follows as a `⚠` line.
 | --- | --- | --- |
 | `<role>` | `manager`, `coder`, `tester`, `ui-tester`, `reviewer`, `validator`, or any role you have bound with `team bind` | — |
 | `--label L` / `-l L` | the agent's label (see [Naming](#naming)) | `<role>-<task short id>` with `--task`, else `<role>-<n>` |
-| `--task ID` | the board task this agent is for (id or prefix) | none |
+| `--task ID` | the board task this agent is for (id or prefix); with no `--prompt`, its first message is a kickoff that names the task as its ASSIGNED TO YOU block does | none |
 | `--worktree` / `--no-worktree` | run in its own git worktree | the role's setting: on for coder and reviewer |
 | `--permission-mode M` | Claude Code permission mode | the role's setting: `auto` |
 | `--bin B` | the agent executable | the role's binding, else `claude` |
-| `--prompt TEXT` | first message typed once the agent is up | none |
+| `--prompt TEXT` | the agent's first message: on Claude Code's command line, typed for any other binary ([the first message](#the-first-message)); after the kickoff with `--task` | none |
 | `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
@@ -294,6 +294,42 @@ was parked for. A nested `claude -p` started from the agent's shell inherits
 task and never takes its row, whatever start it reports. A binary that exports
 no `CLAUDE_PID` binds its row on first arrival and keeps that session; a
 `/clear` there releases its claims, as any session end does.
+
+### The first message
+
+Every first message the fleet gives an agent — `--prompt`, the kickoff of a
+`--task` spawn, the line `fleet restart` and `fleet switch` start a replacement
+with, a fresh hand-off, the usage-limit hand-over's — either starts a turn, or
+`fleet ls` says it did not.
+
+- **A Claude Code agent gets it on its command line**, as Claude Code's own
+  first turn (`claude -- "<message>"`, and `claude --resume <transcript> --
+  "<message>"` for a replacement). Nothing is typed, so there is no Enter to
+  lose: an Enter that reaches Claude Code before it draws its input box is
+  dropped while the text stays in the box, which left agents idle with their
+  first message unsent. The message waits behind Claude Code's folder-trust
+  question too, and runs once the folder is trusted. It travels in a file only
+  you can read (`$AISQUARE_HOME/run/prompts/<agent>.txt`), named to `aisquare
+  launch` with `--first-prompt-file` and deleted as the launch reads it, so the
+  row's recorded launch never holds it and a restart replays no old message.
+- **Any other binary has it typed**, and so does every agent with `[fleet]
+  first_prompt = "type"`. For Claude Code that means once its input box is
+  drawn: the text is pasted, checked in the box, sent with Enter, and Enter is
+  pressed again only while the text is provably still waiting there — never into
+  a box that is empty, holds anything else, or has a dialog over it.
+- **The board tracks it.** The agent's row reads `pending` until its
+  `UserPromptSubmit` says a turn started (`acked`). `fleet spawn`, `restart` and
+  `switch` wait up to `[fleet] prompt_ack_seconds` (45) for that and print it
+  (`✓ first message taken`); their `--json` adds `prompt_delivery` (`argv` or
+  `typed`) and `prompt_acked`. A message still pending past that wait, with the
+  agent at an idle input box, is not going to be taken: the agent reads
+  `attention` — "first prompt not taken", with the `fleet tell` and `fleet
+  restart` commands that take it on, each naming the project — and the board
+  gets one `prompt_unsent`, which wakes the manager.
+  `aisquare doctor`'s `fleet-delivery` row counts the last week's: acknowledged N
+  of M, and how long the agents took to start their first turn.
+
+Both keys are in [the configuration keys](reference.md#configuration-keys).
 
 ### `fleet ls` / `fleet status`
 
@@ -1762,6 +1798,14 @@ typing the letter.
 ---
 
 ## Troubleshooting
+
+**An agent reads `attention`: "first prompt not taken".** Its first message
+never started a turn: nothing acknowledged it within `[fleet] prompt_ack_seconds`
+and its input box is idle. Look at its window (`aisquare fleet attach`): text
+still in the box goes with an Enter there; an empty box takes the message again
+with `aisquare fleet tell <label> "…"`, or `aisquare fleet restart <label>`
+starts it over. Either one clears the `attention`. See [the first
+message](#the-first-message).
 
 **`asq` prints usage instead of opening the UI.** It is not at an interactive
 terminal: stdin or stdout is a pipe, or `TERM` is empty or `dumb`. That is

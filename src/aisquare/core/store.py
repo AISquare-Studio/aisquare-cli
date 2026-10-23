@@ -1022,6 +1022,13 @@ _SCHEMA_V32 = ""
 # in :data:`_PRODUCTS`, added only where absent, and a row from before them keeps NULL,
 # which reads as no persona.
 _SCHEMA_V33 = ""
+# v34 (P0-W1a, #122): whether a fleet agent's first message started a turn. The session's
+# last ``UserPromptSubmit`` (``team_session.prompted_at``), and on the agent's row where its
+# first message stands (``fleet_agent.first_prompt``: pending, acked, unsent) and since when
+# (``first_prompt_at``). Nullable: a row from before them reads as "not tracked", never as
+# a message that was not taken. The columns are the whole step, so the script is empty:
+# they are in :data:`_PRODUCTS`, added only where absent.
+_SCHEMA_V34 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1057,6 +1064,7 @@ _MIGRATIONS = (
     _SCHEMA_V31,
     _SCHEMA_V32,
     _SCHEMA_V33,
+    _SCHEMA_V34,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1113,6 +1121,13 @@ _PRODUCTS: dict[int, _Products] = {
     31: _Products(columns=(("fleet_agent", "board", "TEXT"),)),
     32: _Products(
         columns=(("team_session", "persona", "TEXT"), ("fleet_agent", "persona", "TEXT"))
+    ),
+    33: _Products(
+        columns=(
+            ("team_session", "prompted_at", "TEXT"),
+            ("fleet_agent", "first_prompt", "TEXT"),
+            ("fleet_agent", "first_prompt_at", "TEXT"),
+        )
     ),
 }
 
@@ -1178,7 +1193,7 @@ in the wall-clock median. Older than this it stays open and is excluded
 instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path, account, model, effort, limit_resets_at, persona"
+    "transcript_path, account, model, effort, limit_resets_at, persona, prompted_at"
 )
 _USAGE_COLUMNS = (
     "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at, "
@@ -1195,7 +1210,7 @@ _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
     "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
-    "board", "persona",
+    "board", "persona", "first_prompt", "first_prompt_at",
 )  # fmt: skip
 _FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
 
@@ -1399,6 +1414,11 @@ class ContextStore(Protocol):
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
     def codenames_in_use(self) -> set[str]: ...
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
+    def mark_prompted(
+        self, session_id: str, at: datetime, *, agent_id: str | None = None
+    ) -> bool: ...
+    def mark_first_prompt_unsent(self, agent_id: str, at: datetime) -> bool: ...
+    def first_prompt_rows(self, since: datetime) -> list[FleetAgent]: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
@@ -1561,6 +1581,8 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         branch=row["branch"],
         board=row["board"],  # never NULL as read (`_FLEET_AGENT_READ`)
         persona=row["persona"],
+        first_prompt=row["first_prompt"],
+        first_prompt_at=_maybe_dt(row["first_prompt_at"]),
     )
 
 
@@ -1692,6 +1714,7 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         effort=row["effort"],
         limit_resets_at=_maybe_dt(row["limit_resets_at"]),
         persona=row["persona"],
+        prompted_at=_maybe_dt(row["prompted_at"]),
     )
 
 
@@ -2397,7 +2420,7 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
@@ -2405,7 +2428,8 @@ class SqliteStore:
             "account = COALESCE(excluded.account, account), "
             "model = COALESCE(excluded.model, model), "
             "effort = COALESCE(excluded.effort, effort), "
-            "persona = COALESCE(excluded.persona, persona)",
+            "persona = COALESCE(excluded.persona, persona), "
+            "prompted_at = COALESCE(excluded.prompted_at, prompted_at)",
             (
                 session.id,
                 session.project_id,
@@ -2423,6 +2447,7 @@ class SqliteStore:
                 session.effort,
                 session.limit_resets_at.isoformat() if session.limit_resets_at else None,
                 session.persona,
+                session.prompted_at.isoformat() if session.prompted_at else None,
             ),
         )
         self._conn.commit()
@@ -3421,10 +3446,15 @@ class SqliteStore:
         A second LIVE agent with the same label in the same project trips the
         partial unique index and raises ``sqlite3.IntegrityError`` — the service
         layer picks the suffixed label and retries; the store never guesses.
+
+        The first message's state is written with the row and never by an update here:
+        only its own transitions move it (:meth:`mark_prompted`,
+        :meth:`mark_first_prompt_unsent`), so an upsert of a row read before its
+        ``UserPromptSubmit`` cannot put an ``acked`` message back to ``pending``.
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
@@ -3456,12 +3486,70 @@ class SqliteStore:
                 agent.branch,
                 agent.board if agent.board is not None else agent.project_id,
                 agent.persona,
+                agent.first_prompt,
+                agent.first_prompt_at.isoformat() if agent.first_prompt_at else None,
             ),
         )
         self._conn.commit()
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
+
+    def mark_prompted(self, session_id: str, at: datetime, *, agent_id: str | None = None) -> bool:
+        """A prompt started a turn in ``session_id`` (``UserPromptSubmit``): stamp the session's
+        ``prompted_at``, and take the first message of the fleet row it belongs to.
+
+        The row is the one ``agent_id`` names (``AISQUARE_FLEET_AGENT``, the window's own) or,
+        failing that, the live one bound to the session. Only a ``pending`` message is taken:
+        one already ``acked`` keeps its time, and an ``unsent`` one becomes ``acked`` too,
+        since a human's Enter sent it after the listing gave up on it. Returns whether this
+        prompt took one. One transaction, an indexed read and at most two indexed updates:
+        every prompt of every session pays it, and no row is read back.
+        """
+        stamp = at.isoformat()
+        self._conn.execute(
+            "UPDATE team_session SET prompted_at = ? WHERE id = ?", (stamp, session_id)
+        )
+        # A read, then a compare-and-set on what it found: no ``RETURNING``, which the SQLite
+        # of an older Python lacks.
+        found = self._conn.execute(
+            "SELECT id FROM fleet_agent "
+            "WHERE first_prompt IN ('pending', 'unsent') AND ended_at IS NULL "
+            "AND (id = ? OR (? IS NULL AND session_id = ?)) LIMIT 1",
+            (agent_id, agent_id, session_id),
+        ).fetchone()
+        taken = found is not None and (
+            self._conn.execute(
+                "UPDATE fleet_agent SET first_prompt = 'acked', first_prompt_at = ? "
+                "WHERE id = ? AND first_prompt IN ('pending', 'unsent')",
+                (stamp, found["id"]),
+            ).rowcount
+            == 1
+        )
+        self._conn.commit()
+        return taken
+
+    def mark_first_prompt_unsent(self, agent_id: str, at: datetime) -> bool:
+        """Move ``agent_id``'s first message from ``pending`` to ``unsent``: compare and set,
+        so of two listings that both found it overdue exactly one moves it, and only that one
+        writes the board's ``prompt_unsent``. False when it was not pending any more."""
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET first_prompt = 'unsent', first_prompt_at = ? "
+            "WHERE id = ? AND first_prompt = 'pending'",
+            (at.isoformat(), agent_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def first_prompt_rows(self, since: datetime) -> list[FleetAgent]:
+        """Every fleet row given a first message since ``since``, in any project: what doctor's
+        ``fleet-delivery`` row counts."""
+        rows = self._conn.execute(
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
+            "WHERE first_prompt IS NOT NULL AND created_at >= ? ORDER BY created_at",
+            (since.isoformat(),),
+        ).fetchall()
+        return [_row_to_fleet_agent(row) for row in rows]
 
     # --- project groups, pins and order (#140) ------------------------------------------
 

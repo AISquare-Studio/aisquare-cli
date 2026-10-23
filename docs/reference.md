@@ -9,7 +9,7 @@ removes exactly them):
 | Hook | What it does |
 | --- | --- |
 | `SessionStart` | inject orientation: snapshot pointers, context, team briefing |
-| `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on); deliver the teammate delta; heartbeat |
+| `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on); deliver the teammate delta; heartbeat, which stamps the session's last prompt and marks its fleet agent's first message taken ([fleet](fleet.md#the-first-message)) |
 | `Stop` | mark the session waiting; renew its task leases |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |
@@ -120,6 +120,16 @@ so the listed surface is only what actually works, but they still run and
 still say plainly that they are not implemented (exit code 70) rather than
 half-working. Follow along in
 [issues](https://github.com/AISquare-Studio/aisquare-cli/issues).
+
+## Configuration keys
+
+Set with `aisquare config set <key> <value>`, read with `config get`; `config
+list` prints every key. The ones that need more than their name:
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `fleet.first_prompt` | `argv` | how an agent's first message reaches it: `argv` gives a Claude Code agent its message on its command line and types it for any other binary; `type` types it for every agent ([fleet](fleet.md#the-first-message)). |
+| `fleet.prompt_ack_seconds` | `45` | how long `fleet spawn`, `restart` and `switch` wait for the agent's first turn to start, and how long a listing gives it before the agent reads `attention`: "first prompt not taken". |
 
 ## Architecture
 

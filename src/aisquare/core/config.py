@@ -621,6 +621,14 @@ class FleetSettings(BaseModel):
     ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0`` into fleet launches so a manager
     cannot spawn help the sidebar cannot see; ``max_continuations_per_hour`` caps
     how often the manager's Stop hook may keep it going on new board events.
+
+    ``first_prompt`` is how an agent's first message reaches it (P0-W1a, #122):
+    ``argv``, Claude Code's own command line (``claude -- "<prompt>"``), for a Claude
+    Code agent, and typed into its input box for any other binary; ``type`` types it
+    for every agent (``services.delivery``). ``prompt_ack_seconds`` is how long
+    ``fleet spawn``, ``restart`` and ``switch`` wait for the agent's
+    ``UserPromptSubmit`` to say the first message started a turn, and how long a
+    listing gives a first message before it reads the agent ``attention``.
     """
 
     tmux_socket: str = "asq"
@@ -629,6 +637,8 @@ class FleetSettings(BaseModel):
     worktree_dir: str = ".aisquare-worktrees"
     disable_native_agent_teams: bool = True
     max_continuations_per_hour: int = 30
+    first_prompt: Literal["argv", "type"] = "argv"
+    prompt_ack_seconds: float = Field(default=45.0, ge=0)
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
 
 

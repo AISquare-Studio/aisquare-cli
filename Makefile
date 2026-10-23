@@ -12,9 +12,9 @@ PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 install:
 	$(PYTHON) -m pip install -c ci/constraints.txt -e ".[dev]"
 
-## test: run the test suite
+## test: run the test suite, one pytest-xdist worker per core
 test:
-	$(PYTHON) -m pytest
+	$(PYTHON) -m pytest -n auto
 
 ## lint: static checks without modifying files (matches CI: format + lint)
 lint:

@@ -265,6 +265,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the suite on one Linux leg (py3.12), the Linux package job and the other jobs
   bar the ambient legs and the demo. Pushes to `rc/**` and `main`, PRs into
   `main`, the nightly and a run by hand keep the full matrix (CONTRIBUTING).
+- **`make test` runs the suite on every core** (#129 d). pytest-xdist is in the `dev`
+  extra and `uv.lock`, and `make test` runs `pytest -n auto`; so does CI's `check` job on
+  3.11–3.13 (the `ambient` job stays serial: it exists to catch reads of machine state,
+  not to be fast). No test needed a group: each one already has a home, a tmux folder and
+  a `claude` stand-in of its own. What a test left running wrote outside every home is
+  still reported under workers: each worker hands its notes to the controller, which
+  prints the summary. Run serially with `pytest -p no:xdist`.
 - The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
   adds the two persona columns, `team_session.persona` (the persona a session was
   launched as) and `fleet_agent.persona` (the one an agent was spawned with or given
@@ -316,6 +323,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   coder's cycle names `task show`, the manager's says the contract belongs in
   `--detail`, and `--detail`'s help says it is the contract. `--json` is unchanged.
   (#74)
+
+- **A killed test run no longer leaves its tmux servers running.** Teardown ends every
+  server a test starts, but a run that is killed (a timeout, `kill`, an xdist worker that
+  dies) runs no teardown, and its servers lived on with a pane each: 55 were found on one
+  box, some days old. The suite's private folders under `/tmp` are now named for the
+  process that made them (`asqtx<pid>-…`), and each run starts by ending the servers in,
+  and removing, every folder whose process is gone; a folder of a run still going is
+  never touched. `test_live_a_server_under_another_tmux_tmpdir_is_reached_at_the_path_it_said`
+  also ends its server when it fails before its old `try`: its folder is one that neither
+  the `live` fixture nor `no_real_fleet` looks in.
 
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for

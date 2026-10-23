@@ -103,8 +103,10 @@ jobs:
       - name: Type check (mypy)
         run: mypy
 
+      # One pytest-xdist worker per core, as `make test` runs it (#129 d). The ambient
+      # job below stays serial: it exists to catch reads of machine state, not to be fast.
       - name: Test (pytest)
-        run: pytest -ra
+        run: pytest -n auto -ra
         env:
           AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
 

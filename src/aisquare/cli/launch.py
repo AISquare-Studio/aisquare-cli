@@ -35,7 +35,7 @@ import os
 import re
 import sqlite3
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Annotated
 
@@ -172,32 +172,30 @@ def _check_persona(name: str, project: ProjectInfo | None) -> None:
         fail(str(exc), error="unknown_persona", ref=name)
 
 
-SYSTEM_PROMPT_FLAG = "--append-system-prompt-file"
-"""Claude Code's seam for appending to its default system prompt — a FILE, so the body
-never sits in argv, which ``ps`` shows (the name travels as ``AISQUARE_PERSONA``)."""
-_SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
-
-
 def _persona_system_prompt(
-    name: str, project: ProjectInfo | None, binary: str, args: Sequence[str]
+    name: str,
+    project: ProjectInfo | None,
+    selected: agent_launch.ResolvedAgent,
+    env: Mapping[str, str],
+    args: Sequence[str],
 ) -> list[str]:
-    """The persona in the agent's system prompt too, where the binary has a seam for it.
+    """The persona in the agent's system prompt too, where its adapter has a seam for it
+    (``system_prompt_args``).
 
-    Claude Code takes ``--append-system-prompt-file``: the same block the
-    session-start hook briefs (``personas.briefing``), written under the home
-    and appended to the default system prompt, so the persona holds over a
-    long session as hook context alone may not (docs/plans/spawn-personas.md
-    §9; gh #210). The system prompt is the LAUNCH's, for the life of the
-    process: ``/clear`` keeps it, and a persona attached since (``persona
-    attach``) reaches the agent through the hook alone, which briefs the persona
-    the fleet row names at every session start. A restart replays the row's
-    persona, so the two agree again from it on (review of #240, "also
-    confirmed": this docstring said ``/clear`` dropped the system prompt).
-    ``[persona] system_prompt = false`` keeps the hook alone. Any other binary —
-    codex, aider, a wrapper not named claude — has no seam this launcher knows
-    (codex reads AGENTS.md, aider its own prompts), so it gets the hook alone and
-    one dim line says so, as does a cache it cannot write. An ``--append-system-prompt``
-    of either spelling already in the arguments is the operator's and wins.
+    The block is the one the session-start hook briefs (``personas.briefing``), so the two
+    channels cannot disagree, and the persona holds over a long session as hook context
+    alone may not (docs/plans/spawn-personas.md §9; gh #210). Claude Code takes the block's
+    file (``--append-system-prompt-file``); Codex takes its text as ``-c
+    developer_instructions=…`` after the operator's own, from the config dir this launch
+    runs in. The system prompt is the LAUNCH's, for the life of the process: ``/clear``
+    keeps it, and a persona attached since (``persona attach``) reaches the agent through
+    the hook alone, which briefs the persona the fleet row names at every session start. A
+    restart replays the row's persona, so the two agree again from it on (review of #240),
+    except on an agent whose resumed thread keeps its first system prompt
+    (``capabilities.resume_keeps_system_prompt``: Codex's). ``[persona] system_prompt =
+    false`` keeps the hook alone. An agent with no seam, or a launch whose own arguments
+    already set it (the operator's, which wins), gets the hook alone and one dim line
+    saying so, as does a cache it cannot write where the seam takes the file.
 
     The file is named by the block's own hash: two launches of one persona
     share it, and a project-layer persona that differs from a bundled one of
@@ -209,17 +207,6 @@ def _persona_system_prompt(
     except Exception:  # an unreadable config was already said above; the default stands
         wanted = True
     if not wanted:
-        return []
-    if any(
-        arg == flag or arg.startswith(f"{flag}=") for arg in args for flag in _SYSTEM_PROMPT_FLAGS
-    ):
-        return []
-    if not harness.is_default_agent(binary):
-        stderr_console().print(
-            f"persona {name}: {os.path.basename(binary)!r} takes no system-prompt flag this "
-            "launcher knows — briefed by the session-start hook alone",
-            style="dim",
-        )
         return []
     try:
         persona = personas.resolve(name, _persona_root(project))
@@ -235,6 +222,18 @@ def _persona_system_prompt(
     block = "\n".join(personas.briefing(persona)) + "\n"
     digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:12]
     path = paths.aisquare_home() / "cache" / "persona-prompts" / f"{name}-{digest}.md"
+    adapter = selected.adapter
+    seam = adapter.system_prompt_args(path, block, args, agent_launch._launch_home(selected, env))
+    if seam is None:
+        stderr_console().print(
+            f"persona {name}: no system-prompt seam for {adapter.label} on this launch (it "
+            "has none, or the launch's own arguments set it) — briefed by the session-start "
+            "hook alone",
+            style="dim",
+        )
+        return []
+    if str(path) not in seam:  # the agent took the text itself
+        return seam
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists() or path.read_text(encoding="utf-8") != block:
@@ -249,7 +248,7 @@ def _persona_system_prompt(
             style="dim",
         )
         return []
-    return [SYSTEM_PROMPT_FLAG, str(path)]
+    return seam
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
@@ -656,11 +655,11 @@ def launch(
     if native_trace_note:
         stderr_console().print(native_trace_note, markup=False)
     # The persona's system-prompt seam, before the role's and the operator's line:
-    # `_persona_system_prompt` stands down when that line already carries the flag, and
-    # for a binary that is not Claude Code's. `_check_persona` refused an unknown name
-    # above, so the resolve inside cannot fail here.
+    # `_persona_system_prompt` stands down when that line already sets the seam, and for
+    # an agent with none. `_check_persona` refused an unknown name above, so the resolve
+    # inside cannot fail here.
     persona_args = (
-        _persona_system_prompt(persona, project, resolution.binary, arguments.argv)
+        _persona_system_prompt(persona, project, selected, env, arguments.argv)
         if persona is not None
         else []
     )

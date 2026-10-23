@@ -194,3 +194,72 @@ def test_from_the_terminal_a_locked_gate_refuses_a_verb_and_a_code_opens_it(
     assert status["active"] is True and status["window"] and "secret" not in status
     after = runner.invoke(app, ["captain", "wololo", "nowhere", "coder-1", "t1"])
     assert "gate is locked" not in after.output, "the window is open: the gate lets it by"
+
+
+def _wrong(at: datetime) -> str:
+    """A six-digit code no step within the drift accepts at ``at``."""
+    valid = {_code(at + timedelta(seconds=gate.STEP_SECONDS * k)) for k in (-1, 0, 1)}
+    return next(code for code in ("000000", "111111", "222222", "333333") if code not in valid)
+
+
+def _lock_once(at: datetime) -> str:
+    """Three wrong codes in a row at ``at``: the third's refusal."""
+    for _ in range(gate.THROTTLE - 1):
+        with pytest.raises(Refused, match="wrong code"):
+            gate.unlock(_wrong(at), now=at)
+    with pytest.raises(Refused) as third:
+        gate.unlock(_wrong(at), now=at)
+    return str(third.value)
+
+
+def test_each_lock_in_a_row_lasts_twice_the_last_up_to_a_day_until_a_correct_code() -> None:
+    """RFC 4226 §7.3: the delay increases. A flat five minutes let a patient guesser try
+    ~864 codes a day (review of #339); each lock with no correct code between doubles."""
+    gate.enroll()
+    at, said = T0, []
+    for minutes in (5, 10, 20, 40):
+        said.append(_lock_once(at))
+        almost = at + timedelta(minutes=minutes) - timedelta(seconds=1)
+        with pytest.raises(Refused, match="locked until"):
+            gate.unlock(_code(almost), now=almost)
+        at += timedelta(minutes=minutes, seconds=1)
+    assert [refusal.rsplit("locked for ", 1)[1] for refusal in said] == [
+        "5 minutes",
+        "10 minutes",
+        "20 minutes",
+        "40 minutes",
+    ]
+    assert gate.lockout(9) == timedelta(hours=21, minutes=20)
+    assert gate.lockout(10) == gate.lockout(400) == gate.LOCKOUT_MAX == timedelta(hours=24)
+    assert gate.unlock(_code(at), now=at).until == at + gate.WINDOW
+    later = at + timedelta(minutes=1)
+    assert _lock_once(later).endswith("locked for 5 minutes"), "a correct code resets it"
+
+
+def test_a_code_said_alongside_another_command_is_masked_in_that_tools_audit() -> None:
+    """ "Unlock 123 456 and press enter": the press's audit keeps the owner's words, and
+    the code in them is masked there too, not only in unlock's (review of #339)."""
+    gate.enroll()
+    code = _code(datetime.now(UTC))
+    gate.unlock(code)
+    spoken = f"captain, unlock {code[:3]} {code[3:]} and press enter on coder-1"
+    actions._run("press", {"label": "coder-1"}, spoken, lambda _: _ran())
+    (event,) = [event for event in _audit() if event["tool"] == "press"]
+    assert f"{code[:3]} {code[3:]}" not in json.dumps(event)
+    assert event["utterance"] == "captain, unlock ****** and press enter on coder-1"
+
+
+@pytest.mark.parametrize(
+    ("words", "kept"),
+    [
+        ("unlock 123456", "unlock ******"),
+        ("123 456", "******"),
+        ("1 2 3 4 5 6", "******"),
+        ("123-456", "******"),
+        ("on 2026-10-23 at 12:30", "on 2026-10-23 at 12:30"),
+        ("ticket 1234567", "ticket 1234567"),
+        ("stop coder-1 and look at PR 339", "stop coder-1 and look at PR 339"),
+    ],
+)
+def test_redact_masks_a_code_but_not_a_date_or_a_longer_number(words: str, kept: str) -> None:
+    assert gate.redact(words) == kept

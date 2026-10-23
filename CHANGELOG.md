@@ -86,9 +86,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tasks and the `bt` brake never need a code.
   - The codes are RFC 6238 TOTP: 30-second steps, one step of drift either side,
     and no code accepted twice. Three wrong codes in a row lock code entry for five
-    minutes (RFC 4226's throttle), audited on the home board.
-  - The window's id joins each gated call's `captain_action` event, and an
-    `unlock`'s audit masks the code.
+    minutes (RFC 4226's throttle), audited on the home board. Each further lock
+    with no correct code between doubles the last, up to 24 hours.
+  - The window's id joins each gated call's `captain_action` event. Every audit
+    masks a code in the owner's words, and `unlock`'s masks it in its arguments.
   - `aisquare captain gate enroll` writes the secret (mode 0600) and prints the QR.
     `gate status` says whether the gate applies and why not.
   - pyotp comes with the new `gate` extra (`pip install 'aisquare-cli[gate]'`),

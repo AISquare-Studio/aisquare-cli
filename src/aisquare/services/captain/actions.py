@@ -300,7 +300,9 @@ def _audit(
         "tool": tool,
         "project": target.id if target is not None else None,
         "args": {**args, "via": via} if via is not None else args,
-        "utterance": utterance,
+        # A code said alongside another command ("unlock 123 456 and stop coder-1") is
+        # in that tool's words too: masked in every audit, not only unlock's (#216).
+        "utterance": captain_gate.redact(utterance),
         "ok": ok,
         "said": said,
         "receipt": receipt,

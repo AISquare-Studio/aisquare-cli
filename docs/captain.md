@@ -368,12 +368,16 @@ aisquare captain gate status    # on or off, ready or why not, the open window
   The step before and the step after are accepted too, for clock drift. A code
   that opened a window never opens another, and nor does an earlier one.
 - **Three wrong codes in a row lock code entry for five minutes** (RFC 4226's
-  throttling), and the refusal says so on the home board. A correct code
-  resets the count.
+  throttling), and the refusal says so on the home board. Each lock after
+  that, with no correct code between, lasts twice as long as the one before:
+  10 minutes, then 20, 40, and so on, never more than 24 hours. A correct code
+  resets the count and the doubling.
 - **The audit.** Every call of a gated tool records the open window's id
   (`window` on its `captain_action` event), so each one traces to the code
   that allowed it. An `unlock`'s audit masks the code, in the arguments and
-  in your words.
+  in your words. Every other tool's audit masks a code in your words too,
+  since one can be said alongside another command ("unlock 123 456 and stop
+  coder-1").
 - **The secret** is `$AISQUARE_HOME/captain/gate.secret`, mode 0600, written
   by `aisquare captain gate enroll`. `--replace` makes a new one: the old
   authenticator entry stops working and any open window closes. The captain

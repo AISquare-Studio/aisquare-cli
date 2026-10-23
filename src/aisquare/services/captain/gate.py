@@ -13,8 +13,11 @@ call: they spend quota, but each only types into one agent or asks the manager).
 - A code that was accepted is never accepted again, nor one from an earlier step: the
   last accepted step is kept.
 - Failed attempts are throttled (RFC 4226 §7.3). Every :data:`THROTTLE`-th wrong code in a
-  row locks code entry for :data:`LOCKOUT` and says so: the refusal is audited on the
-  captain's home board, which is where "three wrong codes in a row" shows.
+  row locks code entry, for :data:`LOCKOUT` the first time and twice as long at each lock
+  after it, up to :data:`LOCKOUT_MAX`, until a correct code resets the count (§7.3: "the
+  delay increases"; a flat delay let a patient guesser try ~864 codes a day). The refusal
+  says so and is audited on the captain's home board, which is where "three wrong codes
+  in a row" shows.
 
 **Where things live.**
 - The secret is ``~/.aisquare/captain/gate.secret``, mode 0600, written once by ``aisquare
@@ -62,7 +65,10 @@ DRIFT_STEPS = 1
 THROTTLE = 3
 """RFC 4226 §7.3's throttling parameter: this many wrong codes in a row lock code entry."""
 LOCKOUT = timedelta(minutes=5)
-"""How long code entry stays locked after every :data:`THROTTLE`-th wrong code in a row."""
+"""How long code entry stays locked at the first :data:`THROTTLE`-th wrong code in a row;
+each lock after it, with no correct code between, doubles it."""
+LOCKOUT_MAX = timedelta(hours=24)
+"""The longest one lock lasts, however many came before it."""
 ISSUER = "aisquare captain"
 """What an authenticator app shows above the code."""
 EXTRA = "pip install 'aisquare-cli[gate]'"
@@ -185,7 +191,7 @@ def unlock(code: str, *, now: datetime | None = None) -> Window:
         failures = _count(record.get("failures"))
         if locked is not None and locked > moment:
             verdict.append(
-                f"code entry is locked until {locked:%H:%M:%S} UTC after {failures} wrong "
+                f"code entry is locked until {locked:%Y-%m-%d %H:%M:%S} UTC after {failures} wrong "
                 "codes in a row — wait, then try a fresh code"
             )
             return record
@@ -200,10 +206,11 @@ def unlock(code: str, *, now: datetime | None = None) -> Window:
             failures += 1
             record["failures"] = failures
             if failures % THROTTLE == 0:
-                record["locked_until"] = (moment + LOCKOUT).isoformat()
+                lasts = lockout(failures // THROTTLE)
+                record["locked_until"] = (moment + lasts).isoformat()
                 verdict.append(
                     f"{reason}: a wrong code {failures} times in a row, so code entry is "
-                    f"locked for {int(LOCKOUT.total_seconds() // 60)} minutes"
+                    f"locked for {_spoken(lasts)}"
                 )
             else:
                 verdict.append(f"{reason} ({failures} in a row; {THROTTLE} lock code entry)")
@@ -217,6 +224,12 @@ def unlock(code: str, *, now: datetime | None = None) -> Window:
     if isinstance(outcome, str):
         raise Refused(outcome)
     return outcome
+
+
+def lockout(locks: int) -> timedelta:
+    """How long the ``locks``-th lock in a row lasts: :data:`LOCKOUT`, doubled at each lock
+    after the first, never past :data:`LOCKOUT_MAX`."""
+    return min(LOCKOUT * (1 << min(max(locks - 1, 0), 16)), LOCKOUT_MAX)
 
 
 def lock() -> bool:
@@ -282,9 +295,23 @@ def status(*, now: datetime | None = None) -> dict[str, object]:
     }
 
 
+_CODE = re.compile(r"(?<![\d-])\d(?:[\s-]?\d){5}(?![\d-])")
+"""Six digits on their own, run together, spaced or dashed as a code is said or typed
+("123456", "123 456", "1 2 3 4 5 6"). Not part of a longer number or a date."""
+
+
 def redact(text: str) -> str:
-    """``text`` with anything that could be a code masked: what an ``unlock``'s audit keeps."""
-    return re.sub(r"\d(?:[\s-]?\d){5}", "******", text)
+    """``text`` with anything that could be a code masked: what every captain audit keeps of
+    the owner's words, since a code can be said alongside another command."""
+    return _CODE.sub("******", text)
+
+
+def _spoken(span: timedelta) -> str:
+    minutes = int(span.total_seconds() // 60)
+    if minutes < 60:
+        return f"{minutes} minutes"
+    hours, rest = divmod(minutes, 60)
+    return f"{hours} hours" if rest == 0 else f"{hours} hours {rest} minutes"
 
 
 def _read_secret() -> str:

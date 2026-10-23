@@ -2625,7 +2625,6 @@ def _waited_reads() -> dict[str, str]:
         fleet_bulk,
         welcome,
     )
-    from aisquare.cli.ui.views import spawn as spawn_screen
 
     return {
         _DOCTOR_WORKER: "the doctor's checks",
@@ -2646,7 +2645,6 @@ def _waited_reads() -> dict[str, str]:
         welcome.worker_name("candidates"): "Welcome's folder list",
         welcome.worker_name("validate"): "Welcome's folder check",
         spawn.ACCOUNTS_WORKER: "the Spawn dialog's accounts",
-        spawn_screen.FACTS_WORKER: "the spawn dialog's choices",
         attach.TARGETS_WORKER: "the persona target picker's list",
         persona_dialogs.SKILLS_WORKER: "the Import dialog's skill list",
         captain.BAR_WORKER: "the captain's bar",

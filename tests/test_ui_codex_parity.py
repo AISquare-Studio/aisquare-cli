@@ -3,8 +3,8 @@
 - **App settings** offers Codex 0.162.1's approval policies (no ``untrusted``), the role's
   ``approve_for_me``, and under each role the flags its next ``fleet spawn`` passes —
   the adapter's own ``fleet_args`` — or the refusal it would meet.
-- **The spawn dialog** offers the account and the permission in the launch agent's own
-  words, and passes them to ``fleet.spawn`` as ``fleet spawn`` does.
+- **The spawn dialog** (tests/test_ui_spawn.py) offers the account and the permission in
+  the launch agent's own words, and passes them to ``fleet.spawn`` as ``fleet spawn`` does.
 - **Doctor** tells a partial Codex install from a missing one, gives the trust row its
   real step instead of a Connect that cannot trust, and makes a slot's sign-in one
   click (the Accounts page's pane), never a ``--json`` run.
@@ -15,10 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
 
 import pytest
 from textual.app import App, ComposeResult
@@ -34,18 +32,13 @@ from aisquare.cli.ui.views.app_settings import (
     launch_line,
 )
 from aisquare.cli.ui.views.doctor import DoctorView
-from aisquare.cli.ui.views.spawn import SpawnScreen
-from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
-from aisquare.core.orchestrator import team_project
 from aisquare.models import (
     CheckStatus,
     ClaudeAccount,
-    ClaudeIdentity,
     DoctorCheck,
-    FleetAgent,
 )
-from aisquare.services import agent_launch, diagnostics, fleet, onboarding
+from aisquare.services import agent_launch, diagnostics, onboarding
 from aisquare.services import agents as agents_service
 from tests.test_ui_app_settings import AppHost
 from tests.test_ui_app_settings import drive as drive_app_settings
@@ -124,114 +117,6 @@ def test_account_options_name_another_agents_slot_against_the_roles_agent() -> N
     assert "Claude Code" in for_codex["1"] and "Codex" not in for_codex["0"]
     for_claude = dict((value, label) for label, value in account_options([claude, codex], None))
     assert "Codex" in for_claude["0"] and "Claude Code" not in for_claude["1"]
-
-
-# --------------------------------------------------------------------------- spawn dialog
-
-
-def _receipt(project_id: str, tmp_path: Path) -> fleet.SpawnReceipt:
-    agent = FleetAgent(
-        id="fixture",
-        project_id=project_id,
-        label="coder-1",
-        role="coder",
-        agent="codex",
-        binary="codex",
-        cwd=tmp_path,
-        tmux_socket="test",
-        pane_id="%1",
-        created_at=datetime.now(UTC),
-    )
-    return fleet.SpawnReceipt(agent=agent, asked_label=None, tmux_session="test")
-
-
-@pytest.mark.parametrize("agent", ["codex", "claude-code"])
-def test_the_spawn_dialog_passes_account_and_permission_in_the_agents_words(
-    agent: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    project = team_project(tmp_path)
-    started = Mock(return_value=_receipt(project.id, tmp_path))
-    monkeypatch.setattr(fleet, "spawn", started)
-    slot = ClaudeAccount(slot=3, config_dir=tmp_path / "3", managed=True, agent=agent)
-    monkeypatch.setattr("aisquare.services.claude_accounts.list_accounts", lambda: [slot])
-
-    async def scenario() -> tuple[bool, bool, str]:
-        host: App[None] = App()
-        async with host.run_test(size=(100, 48)) as pilot:
-            host.push_screen(SpawnScreen(project))
-            await settle_page(host)
-            screen = host.screen
-            screen.query_one("#spawn-family", Select).value = agent
-            await pilot.pause()
-            sandbox_shown = screen.query_one("#spawn-sandbox", Select).display
-            mode_shown = screen.query_one("#spawn-permission", Select).display
-            screen.query_one("#spawn-account", Select).value = "3"
-            if agent == "codex":
-                screen.query_one("#spawn-sandbox", Select).value = "read-only"
-                screen.query_one("#spawn-approval", Select).value = "on-request"
-            else:
-                screen.query_one("#spawn-permission", Select).value = "plan"
-            await pilot.pause()
-            line = str(screen.query_one("#spawn-launch", Static).render())
-            screen.query_one("#spawn-submit", Button).press()
-            await settle_page(host)
-            return sandbox_shown, mode_shown, line
-
-    sandbox_shown, mode_shown, line = asyncio.run(scenario())
-    kwargs = started.call_args.kwargs
-    assert started.call_args.args == (project, "coder")
-    assert kwargs["agent"] == agent and kwargs["account"] == "3"
-    if agent == "codex":
-        assert sandbox_shown and not mode_shown
-        assert (kwargs["sandbox"], kwargs["approval_policy"]) == ("read-only", "on-request")
-        assert kwargs["permission_mode"] is None
-        assert "--ask-for-approval on-request" in line and "its read_only sandbox" in line
-    else:
-        assert mode_shown and not sandbox_shown
-        assert kwargs["permission_mode"] == "plan"
-        assert kwargs["sandbox"] is None and kwargs["approval_policy"] is None
-        assert "--permission-mode plan" in line
-
-
-def test_the_spawn_dialog_reads_who_each_account_is_once_off_the_ui_thread(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A Claude slot's identity is its .claude.json, which can be tens of MB: read on
-    the event loop on every change of role or agent, it froze the dialog."""
-    import threading
-
-    project = team_project(tmp_path)
-    slots = [
-        ClaudeAccount(slot=slot, config_dir=tmp_path / str(slot), managed=True)
-        for slot in (2, 3, 4)
-    ]
-    monkeypatch.setattr("aisquare.services.claude_accounts.list_accounts", lambda: slots)
-    readers: list[threading.Thread] = []
-
-    def identity(account: ClaudeAccount, **_: Any) -> ClaudeIdentity:
-        readers.append(threading.current_thread())
-        return ClaudeIdentity(email=f"slot{account.slot}@example.com")
-
-    monkeypatch.setattr(accounts_core, "identity", identity)
-
-    async def scenario() -> list[str]:
-        host: App[None] = App()
-        async with host.run_test(size=(100, 48)) as pilot:
-            host.push_screen(SpawnScreen(project))
-            await settle_page(host)
-            screen = host.screen
-            for role in ("reviewer", "tester", "coder"):
-                screen.query_one("#spawn-role", Select).value = role
-                await pilot.pause()
-            screen.query_one("#spawn-family", Select).value = "claude-code"
-            await pilot.pause()
-            options = screen.query_one("#spawn-account", Select)._options
-            return [str(label) for label, _value in options]
-
-    labels = asyncio.run(scenario())
-    assert len(readers) == len(slots), "once per account, in the facts worker"
-    assert threading.main_thread() not in readers
-    assert any("slot3@example.com" in label for label in labels), labels
 
 
 # --------------------------------------------------------------------------- Doctor

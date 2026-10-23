@@ -218,6 +218,9 @@ UNTOUCHED: Kwargs = {
     "task_id": None,
     "worktree": None,
     "permission_mode": None,
+    "sandbox": None,
+    "approval_policy": None,
+    "agent": None,
     "binary": None,
     "prompt": None,
     "agent_args": [],
@@ -663,6 +666,9 @@ def test_spawn_sends_exactly_the_chosen_values_with_the_agent_args_shlex_split(
                 "task_id": task.id,
                 "worktree": True,
                 "permission_mode": "plan",
+                "sandbox": None,
+                "approval_policy": None,
+                "agent": None,
                 "binary": "claude2",
                 "prompt": "start from the failing test",
                 "agent_args": ["--model", "opus", "--append-system-prompt", "be brief"],
@@ -1017,7 +1023,16 @@ def test_the_fields_read_who_runs_it_then_as_whom(git_project: ProjectInfo) -> N
     labels = drive(git_project, scenario)
     # Hand off from, and its How row, come first (HANDOFF, tsk_01m3ns5a736s): who it comes from
     # decides who runs it.
-    assert labels[:7] == ["Hand off from", "How", "Role", "Account", "Binary", "Persona", "Label"]
+    assert labels[:8] == [
+        "Hand off from",
+        "How",
+        "Role",
+        "Agent",
+        "Account",
+        "Binary",
+        "Persona",
+        "Label",
+    ]
 
 
 def test_the_persona_select_lists_none_and_the_catalogue_with_the_description_below(
@@ -1534,3 +1549,250 @@ def test_account_set_to_this_shells_is_sent_as_this_shells(
     [(_, _, sent)] = hand_offs.calls
     assert sent["mode"] == ("take_over" if take_over else "fork")
     assert sent["account"] == fleet_service.THIS_SHELL_ACCOUNT
+
+
+# --- the agent the launch starts (SCOPE #113 0.8.2, A6) ------------------------------------
+
+
+def agents_overview(*slots: tuple[int, str]) -> AccountsOverview:
+    """An accounts overview with ``(slot, agent)`` per account, each signed in."""
+    return AccountsOverview(
+        claude=ClaudeInstall(installed=True, binary="/usr/bin/claude"),
+        accounts=[
+            ClaudeAccountStatus(
+                account=ClaudeAccount(slot=slot, config_dir=Path(f"/accounts/{slot}"), agent=agent),
+                label=f"account {slot}",
+                identity=ClaudeIdentity(email=f"slot{slot}@example.com"),
+                signed_in=True,
+            )
+            for slot, agent in slots
+        ],
+    )
+
+
+MIXED = (2, "claude-code"), (5, "codex")
+"""One Claude Code slot and one Codex slot: slots are one ladder across the agents."""
+
+
+def offered(dialog: SpawnDialog, name: str) -> list[str]:
+    return [str(value) for _prompt, value in select(dialog, name)._options]
+
+
+def test_the_agent_select_offers_that_agents_accounts_and_the_spawn_names_both(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [
+            [str(prompt) for prompt, _ in select(dialog, "agent")._options],
+            offered(dialog, "account"),
+            dialog.query_one("#spawn-binary", Input).placeholder,
+        ]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        seen += [offered(dialog, "account"), dialog.query_one("#spawn-binary", Input).placeholder]
+        select(dialog, "account").value = "5"
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
+    assert seen[0] == ["(role's: Claude Code)", "Claude Code", "Codex"]
+    assert seen[1:3] == [["", "2"], "claude"]  # the role's agent: Claude Code's slot alone
+    assert seen[3:] == [["", "5"], "codex"]  # Codex picked: its slot, its binary
+    [(_, role, kwargs)] = spawns.calls
+    assert role == "coder" and kwargs == {**UNTOUCHED, "agent": "codex", "account": "5"}
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude-code"])
+def test_the_permission_controls_are_the_launch_agents_own_and_sent_in_its_words(
+    agent: str, git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """Codex's permission is a sandbox and an approval policy (``sandbox_permissions``),
+    Claude Code's a mode: only the launch agent's show, only they are sent, and the line
+    under them is what that agent would be passed."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "agent").value = agent
+        await settle(pilot)
+        rows = [
+            dialog.query_one(f"#spawn-{name}-row").display
+            for name in ("permission", "sandbox", "approval")
+        ]
+        if agent == "codex":
+            select(dialog, "sandbox").value = "read-only"
+            select(dialog, "approval").value = "on-request"
+        else:
+            select(dialog, "permission").value = "plan"
+        await settle(pilot)
+        line = shown(dialog.query_one("#spawn-launch", Static))
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return [rows, line]
+
+    rows, line = drive(git_project, scenario)
+    [(_, _, kwargs)] = spawns.calls
+    if agent == "codex":
+        assert rows == [False, True, True]
+        assert (kwargs["sandbox"], kwargs["approval_policy"]) == ("read-only", "on-request")
+        assert kwargs["permission_mode"] is None
+        assert "--ask-for-approval on-request" in line and "its read_only sandbox" in line
+    else:
+        assert rows == [True, False, False]
+        assert kwargs["permission_mode"] == "plan"
+        assert kwargs["sandbox"] is None and kwargs["approval_policy"] is None
+        assert "--permission-mode plan" in line
+    assert kwargs["agent"] == agent
+
+
+def test_one_permission_for_every_agent_replaces_the_agents_own_controls(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[bool]:
+        select(dialog, "agent").value = "codex"
+        select(dialog, "sandbox").value = "read-only"  # chosen, then replaced by the one value
+        await settle(pilot)
+        select(dialog, "intent").value = "workspace:auto"
+        await settle(pilot)
+        rows = [
+            dialog.query_one(f"#spawn-{name}-row").display
+            for name in ("permission", "sandbox", "approval")
+        ]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return rows
+
+    assert drive(git_project, scenario) == [False, False, False]
+    [(_, _, kwargs)] = spawns.calls
+    assert kwargs["permission_mode"] == "workspace:auto"  # `fleet spawn --permission-mode`
+    assert kwargs["sandbox"] is None and kwargs["approval_policy"] is None
+
+
+def test_the_roles_own_agent_is_named_and_followed_and_sent_as_none(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    settings_service.bind_role("coder", agent="codex")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        agent = select(dialog, "agent")
+        seen = [
+            agent.value,
+            str(agent._options[0][0]),
+            offered(dialog, "account"),
+            dialog.query_one("#spawn-sandbox-row").display,
+        ]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
+    assert seen == ["", "(role's: Codex)", ["", "5"], True]
+    assert spawns.calls == [(git_project.id, "coder", UNTOUCHED)]  # the role decides
+
+
+def test_a_preset_agent_is_honoured_and_a_preset_account_brings_its_agent(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def preset_agent(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen = [select(dialog, "agent").value, offered(dialog, "account")]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    seen = drive(
+        git_project,
+        preset_agent,
+        accounts=lambda: agents_overview(*MIXED),
+        presets={"agent": "codex", "persona": "skeptic"},
+    )
+    assert seen == ["codex", ["", "5"]]
+    [(_, _, kwargs)] = spawns.calls
+    assert kwargs["agent"] == "codex" and kwargs["persona"] == "skeptic"
+    spawns.calls.clear()
+
+    async def preset_account(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen = [select(dialog, "agent").value, select(dialog, "account").value]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    # The Personas tab opens the dialog with the picked account alone: a Codex slot is
+    # Codex's, so the form starts Codex rather than refuse the slot for Claude Code.
+    seen = drive(
+        git_project,
+        preset_account,
+        accounts=lambda: agents_overview(*MIXED),
+        presets={"account": "5"},
+    )
+    assert seen == ["codex", "5"]
+    [(_, _, kwargs)] = spawns.calls
+    assert (kwargs["agent"], kwargs["account"]) == ("codex", "5")
+
+
+def test_a_picked_account_brings_its_agent_and_a_picked_bind_its_own(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        dialog.apply_target(account="5")
+        await settle(pilot)
+        seen: list[Any] = [select(dialog, "agent").value, select(dialog, "account").value]
+        dialog.apply_target(role="coder2", agent="claude-code", binary="claude")
+        await settle(pilot)
+        seen += [select(dialog, "agent").value, select(dialog, "account").value]
+        return seen
+
+    seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
+    # The Codex slot goes with Codex; back on Claude Code it is no option, so this shell's.
+    assert seen == ["codex", "5", "claude-code", ""]
+
+
+def test_the_accounts_are_read_once_off_the_ui_thread_whatever_the_agent_or_role(
+    git_project: ProjectInfo,
+) -> None:
+    """A Claude slot's identity is its .claude.json, which can be tens of MB: read on the
+    event loop on every change of role or agent, it froze the dialog."""
+    readers: list[threading.Thread] = []
+
+    def accounts() -> AccountsOverview:
+        readers.append(threading.current_thread())
+        return agents_overview(*MIXED)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        for role in ("reviewer", "tester", "coder"):
+            select(dialog, "role").value = role
+            await settle(pilot)
+        for agent in ("codex", "claude-code"):
+            select(dialog, "agent").value = agent
+            await settle(pilot)
+        return [str(prompt) for prompt, _ in select(dialog, "account")._options]
+
+    labels = drive(git_project, scenario, accounts=accounts)
+    assert len(readers) == 1 and threading.main_thread() not in readers
+    assert labels == ["(this shell's)", "2 · account 2 · slot2@example.com"]
+
+
+def test_a_codex_teammate_hands_off_on_its_own_accounts_and_its_agent_is_locked(
+    git_project: ProjectInfo,
+    hand_offs: HandOffRecorder,
+    teammates: list[FleetAgentStatus],
+) -> None:
+    mate = teammate(git_project, slot=5)
+    teammates.append(
+        mate.model_copy(update={"agent": mate.agent.model_copy(update={"agent": "codex"})})
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        seen: list[Any] = [
+            select(dialog, "agent").value,
+            select(dialog, "agent").disabled,
+            select(dialog, "account").value,
+            offered(dialog, "account"),
+        ]
+        select(dialog, "from").value = ""  # (none): the plain form comes back as it was
+        await settle(pilot)
+        seen += [select(dialog, "agent").value, offered(dialog, "account")]
+        return seen
+
+    seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
+    assert seen == ["codex", True, "5", ["", "5"], "", ["", "2"]]

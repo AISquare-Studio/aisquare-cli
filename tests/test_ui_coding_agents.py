@@ -2,24 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
-from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
-from textual.app import App
 from textual.pilot import Pilot
 from textual.widgets import Button, Select
 
 from aisquare.cli.ui.views.app_settings import AppSettingsView
-from aisquare.cli.ui.views.spawn import SpawnScreen
 from aisquare.core import paths
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.config import RoleLaunchProfile, load_config, save_config
-from aisquare.core.orchestrator import team_project
-from aisquare.models import FleetAgent
-from aisquare.services import fleet
 from tests.test_ui_app_settings import AppHost, drive
 
 
@@ -149,43 +141,6 @@ def test_settings_never_persist_an_uninitialized_selection(
         assert saved.fleet.roles["coder"].permission_mode == "plan"
 
     drive(scenario)
-
-
-def test_spawn_dialog_uses_selected_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    project = team_project(tmp_path)
-    receipt = fleet.SpawnReceipt(
-        agent=FleetAgent(
-            id="fixture",
-            project_id=project.id,
-            label="coder-1",
-            role="coder",
-            agent="codex",
-            binary="codex",
-            cwd=tmp_path,
-            tmux_socket="test",
-            pane_id="%1",
-            created_at=datetime.now(UTC),
-        ),
-        asked_label=None,
-        tmux_session="test",
-    )
-    started = Mock(return_value=receipt)
-    monkeypatch.setattr(fleet, "spawn", started)
-
-    async def scenario() -> None:
-        host: App[None] = App()
-        async with host.run_test(size=(100, 36)) as pilot:
-            host.push_screen(SpawnScreen(project))
-            await pilot.pause()
-            host.screen.query_one("#spawn-family", Select).value = "codex"
-            host.screen.query_one("#spawn-submit", Button).press()
-            await pilot.pause()
-            assert started.call_count == 1
-            assert started.call_args.args == (project, "coder")
-            assert started.call_args.kwargs["agent"] == "codex"
-            assert not isinstance(host.screen, SpawnScreen)
-
-    asyncio.run(scenario())
 
 
 def test_settings_round_trip_the_empty_native_permission_mode(tmp_path: Path) -> None:

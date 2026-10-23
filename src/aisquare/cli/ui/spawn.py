@@ -11,7 +11,7 @@ prefilled label follows the same rule: sent only when the user changed it, so
 the service picks the free label under the store it is writing with.
 
 **Two steps: who runs it, then as whom** (§4.1, P4). The target fields come
-first — Role (with *Pick…*), Account, Binary — and the Persona select right
+first — Role (with *Pick…*), Agent, Account, Binary — and the Persona select right
 after them, with the persona's description under it. It preselects the role's
 ``[fleet.roles.<role>].persona`` and follows the role until the user picks one.
 ``persona=`` is sent like every other field: ``None`` while the form shows the
@@ -19,15 +19,26 @@ role's default, the name once one is chosen, and ``""`` for an explicit *(none)*
 over a role that has a default — ``spawn`` reads an empty name as "no persona",
 so that choice is honoured rather than replaced by the config.
 
-**Presets** — ``SpawnDialog(project, persona=, role=, binary=, account=)`` — are
+**The agent** (``--agent``) is the coding agent the launch starts, and the form
+follows it: the one picked, else the one ``agent_launch.resolve`` gives the role (and
+the Binary typed) in this project, which the field's *(role's: …)* names. Only that
+agent's accounts are offered — a launch refuses another agent's slot, and slots are
+one ladder, so an account preset or picked brings its own agent with it — and only
+its permission controls show: Claude Code's mode, or the sandbox and approval policy
+of an agent whose permissions are a sandbox (Codex). *Permission* is the one
+``WRITE:APPROVALS`` value every agent maps to its own flags; chosen, it replaces the
+agent's own controls. What the launch would pass for permission is under them
+(``app_settings.launch_line``).
+
+**Presets** — ``SpawnDialog(project, persona=, role=, agent=, binary=, account=)`` — are
 applied at compose, never by poking widgets after mount: the persona-first flow
 (the target picker, P7) opens the dialog already filled in. A preset is a
 choice, and is sent. A preset role the list does not name (a numbered seat,
 ``coder2``) and a preset account the accounts read has not produced yet are
 added as options, so they show on open. *Pick…* posts
 :class:`PickTargetRequested`, which the dialog answers itself: the target picker
-(``cli/ui/attach.py``) in "new" order, whose choice fills Role, Binary and Account
-through their own change handlers — an open form keeps what was typed — and whose
+(``cli/ui/attach.py``) in "new" order, whose choice fills Role, Agent, Binary and
+Account through their own change handlers — an open form keeps what was typed — and whose
 *+ New account* hands over to the Accounts page. *Import…* beside the Persona
 select opens the Personas tab's import dialog and selects what it imports.
 
@@ -35,9 +46,10 @@ select opens the Personas tab's import dialog and selects what it imports.
 insignia's dialog when there is no captain — the form starts the captain through
 ``services.captain.brain.start``, never ``fleet.spawn``, which refuses a captain
 without its brain folder and its one server (T2). So the fields that would change
-what the captain IS are fixed: the role, the label (one per home), the task (it
-has none) and the extra agent args (its own: the server, no other tool). Account,
-binary, permission mode, persona and a first prompt are the owner's to choose.
+what the captain IS are fixed: the role, the agent (its role's), the label (one per
+home), the task (it has none) and the extra agent args (its own: the server, no other
+tool). Account, binary, permission, persona and a first prompt are the owner's to
+choose.
 
 Two things are sent although nobody touched them, because the default cannot
 stand: in a project that is not a git repository the worktree switch is off and
@@ -99,8 +111,15 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, Target
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
-from aisquare.cli.ui.views.app_settings import permission_options
+from aisquare.cli.ui.views.app_settings import (
+    APPROVAL_OPTIONS,
+    INTENTS,
+    SANDBOX_OPTIONS,
+    launch_line,
+    permission_options,
+)
 from aisquare.core import codenames, experimental, harness, personas
+from aisquare.core.agent_adapters import DEFAULT_AGENT, adapters, get_adapter
 from aisquare.core.config import FleetRoleSettings, load_config
 from aisquare.core.personas import Persona
 from aisquare.core.store import store_session
@@ -112,6 +131,7 @@ from aisquare.models import (
     ProjectInfo,
     TeamTask,
 )
+from aisquare.services import agent_launch
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
@@ -121,7 +141,25 @@ SPAWN_WORKER = "spawn-agent"
 tab's, and a worker's state change bubbles up to the app past both."""
 
 ACCOUNTS_WORKER = "spawn-accounts"
-"""The worker that reads the Claude accounts, so the dialog opens before they are read."""
+"""The worker that reads every agent's accounts, so the dialog opens before they are read."""
+
+ROLE_AGENT = ""
+"""The Agent field's ``(role's: …)``: no ``--agent``, the role's agent."""
+ROLE_DEFAULT = ""
+"""The Permission, Sandbox and Approval fields' role default: nothing sent."""
+INTENT_CHOICES: list[tuple[str, str]] = [
+    ("role default (each agent's own below)", ROLE_DEFAULT),
+    *((intent, intent) for intent in INTENTS),
+]
+"""One value every agent maps to its own flags; chosen, it replaces the agent's own below."""
+SPAWN_SANDBOX_OPTIONS: list[tuple[str, str]] = [
+    ("role default", ROLE_DEFAULT),
+    *SANDBOX_OPTIONS[1:],
+]
+SPAWN_APPROVAL_OPTIONS: list[tuple[str, str]] = [
+    ("role default", ROLE_DEFAULT),
+    *APPROVAL_OPTIONS[1:],
+]
 
 NO_TASK = ""
 """The Task field's ``(none)``."""
@@ -272,6 +310,7 @@ class PlainFields:
     """
 
     role: str
+    agent: str
     account: str
     preset_account: str | None
     persona: str
@@ -345,6 +384,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     SpawnDialog #spawn-pick { min-width: 10; width: 10; }
     SpawnDialog #spawn-import { min-width: 12; width: 12; }
     SpawnDialog .spawn-note { height: auto; padding-left: 18; color: $text-muted; }
+    SpawnDialog #spawn-launch { height: auto; padding-left: 18; }
     SpawnDialog #spawn-worktree-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
     SpawnDialog #spawn-prompt { height: 6; width: 1fr; }
     SpawnDialog #spawn-how { width: auto; height: auto; }
@@ -361,6 +401,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         *,
         persona: str | None = None,
         role: str | None = None,
+        agent: str | None = None,
         binary: str | None = None,
         account: str | None = None,
         accounts: Callable[[], AccountsOverview] | None = accounts_service.overview,
@@ -375,9 +416,16 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         """Started through ``brain.start``, its role, label, task and args fixed (T4)."""
         roles = role_choices(_bound_roles())
         self._roles = roles if self._role in roles else [*roles, self._role]
+        self._preset_agent = agent or ROLE_AGENT
+        self._role_agents: dict[tuple[str, str], str] = {}
+        """Role and binary → the agent they launch on (:meth:`_role_agent`)."""
         self._preset_binary = binary or ""
         self._preset_account = account
         self._account_statuses: list[ClaudeAccountStatus] = []
+        self._agents_offered: list[tuple[str, str]] = []
+        """What the Agent field offers now (:meth:`_follow_agent`)."""
+        self._accounts_offered: list[tuple[str, str]] = []
+        """What the Account field offers now (:meth:`_offer_accounts`)."""
         self._personas, self._personas_unavailable = self._read_personas()
         self._persona_touched = persona is not None
         """A preset or a pick: from then on the persona no longer follows the role."""
@@ -448,12 +496,33 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             short = task_id.removeprefix("tsk_")[: fleet_service.TASK_SHORT]
             return f"{role}-{short}" if short else f"{role}-1"
 
-    @staticmethod
-    def _binary_hint(role: str) -> str:
+    def _binary_hint(self, role: str, agent: str = ROLE_AGENT) -> str:
+        """What an empty Binary runs: the picked agent's own binary, else the role's."""
         try:
-            return harness.resolve_binary(role).binary
+            return get_adapter(agent).binary if agent else harness.resolve_binary(role).binary
         except Exception:  # a hint, never a reason to fail
             return harness.DEFAULT_AGENT_BINARY
+
+    def _role_agent(self, role: str, binary: str = "") -> str:
+        """The agent ``role`` launches on here with no ``--agent``: ``agent_launch.resolve``'s
+        answer, given what the Binary field holds; Claude Code's when it cannot answer (a
+        binary that runs another agent than the role's: the spawn says why).
+
+        Asked once per role and binary while the dialog is open: the answer reads the config
+        and the project's choice in the store, and the Binary field asks on every key."""
+        key = (role, binary)
+        if key not in self._role_agents:
+            try:
+                resolved = agent_launch.resolve(role, binary=binary or None, cwd=self.project.root)
+                self._role_agents[key] = resolved.adapter.id
+            except Exception:  # a hint, never a reason to fail
+                self._role_agents[key] = DEFAULT_AGENT
+        return self._role_agents[key]
+
+    def _agent_options(self, role: str, binary: str) -> list[tuple[str, str]]:
+        """``(role's: <its agent>)``, then every agent this version knows."""
+        own = get_adapter(self._role_agent(role, binary)).label
+        return [(f"(role's: {own})", ROLE_AGENT), *((a.label, a.id) for a in adapters())]
 
     # --- layout -----------------------------------------------------------------------
 
@@ -481,17 +550,33 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             options.append((f"{name} — not one of this project's personas", name))
         return options
 
-    def _account_options(self, statuses: Iterable[ClaudeAccountStatus]) -> list[tuple[str, str]]:
+    def _account_options(
+        self, statuses: Iterable[ClaudeAccountStatus], agent: str
+    ) -> list[tuple[str, str]]:
+        """``(this shell's)``, then ``agent``'s slots: a launch refuses another agent's."""
         options = [("(this shell's)", THIS_SHELL)] + [
-            (account_choice(status), str(status.account.slot)) for status in statuses
+            (account_choice(status), str(status.account.slot))
+            for status in statuses
+            if status.account.agent == agent
         ]
         preset = self._preset_account
-        if preset and preset not in {value for _, value in options}:
+        if (
+            preset
+            and preset not in {value for _, value in options}
+            and self._slot_agent(preset) in (None, agent)
+        ):
             options.append((f"{preset} (preset)", preset))
         return options
 
+    def _slot_agent(self, slot: str | None) -> str | None:
+        """The agent whose account ``slot`` is, once the accounts are read; slots are one
+        ladder, so it is never two agents'."""
+        status = next((s for s in self._account_statuses if str(s.account.slot) == slot), None)
+        return status.account.agent if status is not None else None
+
     def compose(self) -> ComposeResult:
         defaults = self._defaults(self._role)
+        agent = self._preset_agent or self._role_agent(self._role, self._preset_binary)
         with Vertical(id="spawn-box"):
             yield Static(self._header(), id="spawn-header")
             with VerticalScroll(id="spawn-fields"):
@@ -537,9 +622,18 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                     )
                 yield Static(id="spawn-role-note", classes="spawn-note")
                 with Horizontal(classes="spawn-row"):
+                    yield Label("Agent")
+                    yield Select(
+                        self._agent_options(self._role, self._preset_binary),
+                        value=self._preset_agent,
+                        allow_blank=False,
+                        disabled=self._captain,
+                        id="spawn-agent",
+                    )
+                with Horizontal(classes="spawn-row"):
                     yield Label("Account")
                     yield Select(
-                        self._account_options([]),
+                        self._account_options([], agent),
                         value=self._preset_account or THIS_SHELL,
                         allow_blank=False,
                         id="spawn-account",
@@ -549,7 +643,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                     yield Label("Binary")
                     yield Input(
                         value=self._preset_binary,
-                        placeholder=self._binary_hint(self._role),
+                        placeholder=self._binary_hint(self._role, self._preset_agent),
                         id="spawn-binary",
                     )
                 # … then as whom.
@@ -596,6 +690,11 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                         "" if self._git else "not a git repository", id="spawn-worktree-note"
                     )
                 with Horizontal(classes="spawn-row"):
+                    yield Label("Permission")
+                    yield Select(
+                        INTENT_CHOICES, value=ROLE_DEFAULT, allow_blank=False, id="spawn-intent"
+                    )
+                with Horizontal(classes="spawn-row", id="spawn-permission-row"):
                     yield Label("Permission mode")
                     yield Select(
                         permission_options(defaults.permission_mode),
@@ -603,6 +702,23 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                         allow_blank=False,
                         id="spawn-permission",
                     )
+                with Horizontal(classes="spawn-row", id="spawn-sandbox-row"):
+                    yield Label("Sandbox")
+                    yield Select(
+                        SPAWN_SANDBOX_OPTIONS,
+                        value=ROLE_DEFAULT,
+                        allow_blank=False,
+                        id="spawn-sandbox",
+                    )
+                with Horizontal(classes="spawn-row", id="spawn-approval-row"):
+                    yield Label("Approval")
+                    yield Select(
+                        SPAWN_APPROVAL_OPTIONS,
+                        value=ROLE_DEFAULT,
+                        allow_blank=False,
+                        id="spawn-approval",
+                    )
+                yield Static(id="spawn-launch")
                 with Horizontal(classes="spawn-row"):
                     yield Label("Extra agent args")
                     yield Input(
@@ -633,6 +749,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             self._note("#spawn-how-note", None)
             self._note("#spawn-from-note", self._sources_unavailable, style="dim")
         self._describe_persona()
+        self._follow_agent()
         self._validate()
         if self._accounts is not None:
             self.run_worker(
@@ -748,8 +865,100 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             # never needs set_options — which would post a Changed for "(none)".
             self._persona_shown = self._persona_default(role)
             self.query_one("#spawn-persona", Select).value = self._persona_shown
-        self.query_one("#spawn-binary", Input).placeholder = self._binary_hint(role)
+        self._follow_agent()
         self._validate()
+
+    # --- the agent the launch starts, and what follows it ---------------------------------
+
+    def _value_of(self, selector: str) -> str:
+        value = self.query_one(selector, Select).value
+        return value if isinstance(value, str) else ""
+
+    def launch_agent(self) -> str:
+        """The agent this launch starts: the one picked, else the role's (given the Binary)."""
+        binary = self.query_one("#spawn-binary", Input).value.strip()
+        return self._value_of("#spawn-agent") or self._role_agent(self._role, binary)
+
+    @staticmethod
+    def _sandboxed(agent: str) -> bool:
+        """Whether ``agent``'s permission is a sandbox and an approval policy (Codex), not a
+        mode (Claude Code)."""
+        try:
+            return get_adapter(agent).capabilities.sandbox_permissions
+        except ValueError:
+            return False
+
+    def _follow_agent(self) -> None:
+        """Offer what fits the agent the launch starts: the role's agent named in the Agent
+        field, that agent's binary under Binary, its accounts, its permission controls, and
+        the line of what it would be passed for permission."""
+        role, binary = self._role, self.query_one("#spawn-binary", Input).value.strip()
+        field = self.query_one("#spawn-agent", Select)
+        picked = self._value_of("#spawn-agent")
+        options = self._agent_options(role, binary)
+        if options != self._agents_offered:
+            self._agents_offered = options
+            # Quietly: the value is put back as it was, and no pick is made by the form.
+            with self.prevent(Select.Changed):
+                field.set_options(options)
+                field.value = picked
+        agent = picked or self._role_agent(role, binary)
+        self.query_one("#spawn-binary", Input).placeholder = self._binary_hint(role, picked)
+        self._offer_accounts(agent)
+        sandboxed = self._sandboxed(agent)
+        # One value for every agent replaces the agent's own words, which then hide. The
+        # captain is started by ``brain.start``, which takes a permission and no sandbox.
+        intent = self._value_of("#spawn-intent")
+        self.query_one("#spawn-permission-row").display = not sandboxed and not intent
+        own = sandboxed and not intent and not self._captain
+        self.query_one("#spawn-sandbox-row").display = own
+        self.query_one("#spawn-approval-row").display = own
+        self._paint_launch(agent, sandboxed)
+
+    def _offer_accounts(self, agent: str) -> None:
+        """``agent``'s accounts in the Account field; one shown that is not among them goes
+        back to ``(this shell's)``."""
+        select = self.query_one("#spawn-account", Select)
+        options = self._account_options(self._account_statuses, agent)
+        if options == self._accounts_offered:
+            return
+        self._accounts_offered = options
+        current = select.value
+        select.set_options(options)
+        select.value = current if current in {value for _, value in options} else THIS_SHELL
+
+    def _paint_launch(self, agent: str, sandboxed: bool) -> None:
+        """What ``agent`` would be passed for permission (``app_settings.launch_line``): the
+        role's settings, with what this form chose over them, as ``fleet spawn`` takes it."""
+        settings = self._defaults(self._role)
+        intent = self._value_of("#spawn-intent")
+        mode = self._value_of("#spawn-permission")
+        sandbox = self._value_of("#spawn-sandbox") if sandboxed else ""
+        approval = self._value_of("#spawn-approval") if sandboxed else ""
+        overrides: dict[str, object] = {
+            "permission_mode": mode,
+            "sandbox": sandbox or settings.sandbox,
+            "approval_policy": approval or settings.approval_policy,
+        }
+        if intent:
+            overrides["permission"] = intent
+        elif (not sandboxed and mode != settings.permission_mode) or sandbox or approval:
+            # The agent's own words chosen for this spawn win over the role's one value,
+            # as they do in `fleet spawn`.
+            overrides["permission"] = None
+        if sandbox or approval:
+            overrides["approve_for_me"] = None  # a chosen sandbox or policy wins over it
+        line = launch_line(self._role, agent, settings.model_copy(update=overrides))
+        self.query_one("#spawn-launch", Static).update(line)
+
+    @on(Select.Changed, "#spawn-agent")
+    @on(Select.Changed, "#spawn-intent")
+    @on(Select.Changed, "#spawn-permission")
+    @on(Select.Changed, "#spawn-sandbox")
+    @on(Select.Changed, "#spawn-approval")
+    @on(Input.Changed, "#spawn-binary")
+    def _agent_changed(self) -> None:
+        self._follow_agent()
 
     @on(Select.Changed, "#spawn-persona")
     def _persona_changed(self, event: Select.Changed) -> None:
@@ -821,7 +1030,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         return self.query_one("#spawn-take-over", RadioButton).value
 
     def _prefill_from(self, source: FleetAgentStatus) -> None:
-        """Role, Account and Persona from the teammate, all still editable (the owner's call).
+        """Role, Account and Persona from the teammate, all still editable (the owner's call),
+        and its agent, whose accounts the Account field then offers.
 
         The persona is marked chosen, so the role's own change handler, which runs after
         this, does not replace it with the role's default. All three from EVERY teammate:
@@ -842,11 +1052,12 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         field = self.query_one("#spawn-persona", Select)
         field.set_options(self._persona_options())
         field.value = persona
+        with self.prevent(Select.Changed):
+            self.query_one("#spawn-agent", Select).value = agent.agent or ROLE_AGENT
         own = str(agent.account_slot) if agent.account_slot is not None else THIS_SHELL
         self._preset_account = own or None
-        accounts = self.query_one("#spawn-account", Select)
-        accounts.set_options(self._account_options(self._account_statuses))
-        accounts.value = own
+        self._follow_agent()
+        self.query_one("#spawn-account", Select).value = own
         self._describe_persona()
 
     def _plain_fields(self) -> PlainFields:
@@ -854,6 +1065,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         account = self.query_one("#spawn-account", Select).value
         return PlainFields(
             role=self._role,
+            agent=self._value_of("#spawn-agent"),
             account=account if isinstance(account, str) else THIS_SHELL,
             preset_account=self._preset_account,
             persona=self._persona_value(),
@@ -872,10 +1084,11 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         if plain is None:
             return
         self._preset_account = plain.preset_account
-        options = self._account_options(self._account_statuses)
+        with self.prevent(Select.Changed):
+            self.query_one("#spawn-agent", Select).value = plain.agent
+        self._follow_agent()
         accounts = self.query_one("#spawn-account", Select)
-        accounts.set_options(options)
-        if plain.account in {value for _, value in options}:
+        if plain.account in {value for _, value in self._accounts_offered}:
             accounts.value = plain.account
         self._persona_touched, self._persona_shown = plain.persona_touched, plain.persona
         field = self.query_one("#spawn-persona", Select)
@@ -893,7 +1106,15 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         label = self.query_one("#spawn-label", Input)
         worktree = self.query_one("#spawn-worktree", Switch)
         prompt = self.query_one("#spawn-prompt", TextArea)
-        for selector in ("#spawn-binary", "#spawn-permission", "#spawn-args"):
+        for selector in (
+            "#spawn-agent",
+            "#spawn-binary",
+            "#spawn-intent",
+            "#spawn-permission",
+            "#spawn-sandbox",
+            "#spawn-approval",
+            "#spawn-args",
+        ):
             self.query_one(selector).disabled = source is not None
         self._lock_other_screens()  # Pick…: the teammate's lock, and a running spawn's
         submit = self.query_one("#spawn-submit", Button)
@@ -1032,16 +1253,24 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             self.post_message(NewAccountRequested())
             self.dismiss(None)
             return
-        self.apply_target(role=target.role, binary=target.binary, account=target.account)
+        self.apply_target(
+            role=target.role, agent=target.agent, binary=target.binary, account=target.account
+        )
 
     def apply_target(
-        self, *, role: str | None = None, binary: str | None = None, account: str | None = None
+        self,
+        *,
+        role: str | None = None,
+        agent: str | None = None,
+        binary: str | None = None,
+        account: str | None = None,
     ) -> None:
         """Fill who runs it from a picked target, as if the user had chosen each field.
 
         Unlike the constructor presets this acts on an open form, so it goes through
         the fields' own change handlers: a new role brings its label, worktree,
-        permission mode and (untouched) persona with it, and nothing typed is lost.
+        permission mode and (untouched) persona with it, and nothing typed is lost. An
+        account brings its own agent when the target names none (slots are one ladder).
         """
         if role:
             roles = self.query_one("#spawn-role", Select)
@@ -1054,11 +1283,15 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             roles.value = role
         if binary:
             self.query_one("#spawn-binary", Input).value = binary
+        agent = agent or (self._slot_agent(account) if account else None)
+        if agent:
+            self.query_one("#spawn-agent", Select).value = agent
         if account:
             self._preset_account = account
-            slots = self.query_one("#spawn-account", Select)
-            slots.set_options(self._account_options(self._account_statuses))
-            slots.value = account
+        if agent or account:
+            self._follow_agent()  # now, not at the Changed: the account must be an option
+        if account:
+            self.query_one("#spawn-account", Select).value = account
 
     def _offer_role_personas(self) -> None:
         """Rebuild what the Persona field offers once the role list has grown, its value kept.
@@ -1114,6 +1347,19 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         mode = self.query_one("#spawn-permission", Select).value
         account = self.query_one("#spawn-account", Select).value
         prompt = self.query_one("#spawn-prompt", TextArea).text
+        sandboxed = self._sandboxed(self.launch_agent())
+        # One value for every agent, as `fleet spawn --permission-mode WRITE:APPROVALS`
+        # takes it; else the agent's own words: the mode for Claude Code, the sandbox and
+        # the approval policy for an agent whose permission is a sandbox (Codex). Another
+        # agent's are never sent.
+        intent = self._value_of("#spawn-intent")
+        sandbox = self._value_of("#spawn-sandbox") if sandboxed and not intent else ""
+        approval = self._value_of("#spawn-approval") if sandboxed and not intent else ""
+        permission_mode: str | None = None
+        if intent:
+            permission_mode = intent
+        elif not sandboxed and mode != defaults.permission_mode and isinstance(mode, str):
+            permission_mode = mode
         chosen = self._persona_value()
         persona: str | None = chosen
         if not self._persona_touched or (
@@ -1124,7 +1370,10 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             "label": None if self._label_fixed() or label == self._prefill else label,
             "task_id": self._task_value() or None,
             "worktree": worktree,
-            "permission_mode": None if mode == defaults.permission_mode else mode,
+            "permission_mode": permission_mode,
+            "sandbox": sandbox or None,
+            "approval_policy": approval or None,
+            "agent": self._value_of("#spawn-agent") or None,
             "binary": self.query_one("#spawn-binary", Input).value.strip() or None,
             "prompt": prompt if prompt.strip() else None,
             "agent_args": split_agent_args(self.query_one("#spawn-args", Input).value),
@@ -1244,13 +1493,19 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
 
     def _accounts_changed(self, worker: Worker[Any], state: WorkerState) -> None:
         if state is WorkerState.SUCCESS and isinstance(worker.result, AccountsOverview):
-            select = self.query_one("#spawn-account", Select)
-            current = select.value
             self._account_statuses = list(worker.result.accounts)
-            options = self._account_options(worker.result.accounts)
-            select.set_options(options)
-            if current in {value for _, value in options}:
-                select.value = current
+            # A preset account is its agent's: shown, it brings that agent with it, unless
+            # one was chosen (then the launch refuses the slot, and the field drops it).
+            owner = self._slot_agent(self._preset_account)
+            field = self.query_one("#spawn-agent", Select)
+            if (
+                owner is not None
+                and not self._value_of("#spawn-agent")
+                and owner != self.launch_agent()
+                and not field.disabled
+            ):
+                field.value = owner
+            self._follow_agent()
         elif state is WorkerState.ERROR:
             error = worker.error
             self._note(

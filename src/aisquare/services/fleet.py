@@ -3616,7 +3616,7 @@ def _chosen_persona(
     config names the key, so a stale default is found at the first spawn rather
     than after a day of work (§3.7). ``persona-roles`` is advisory: a persona
     written for other roles is a receipt note, never a refusal. A seat
-    (``coder2``) counts as its role.
+    (``coder2``) counts as its role (``harness.base_role``).
     """
     # ``""`` is a flag too: a replay's "the row had none" (``_persona_for_replay``),
     # which must not fall through to a role default adopted since the spawn.
@@ -3624,15 +3624,16 @@ def _chosen_persona(
     if not name:
         return None
     try:
-        found = personas.resolve(name, project.root)
+        found = personas.resolve(name, personas.project_root(project))
     except personas.PersonaError as exc:
         if flag is not None:
             raise FleetError(exc.rule) from exc
         raise FleetError(
             f"[fleet.roles.{role}].persona = {name!r}: {exc.rule} — fix the key or pass --persona"
         ) from exc
-    seat_of = re.sub(r"\d+$", "", role)
-    if found.roles and role not in found.roles and seat_of not in found.roles:
+    # ``harness.base_role``: a seat of a profiled role counts as it, and a declared role
+    # that ends in a digit stays itself, as everywhere else (review of #201, R1-F8).
+    if found.roles and role not in found.roles and harness.base_role(role) not in found.roles:
         notes.append(
             f"persona {name} is written for {', '.join(found.roles)}, not {role} — spawned "
             "with it anyway"
@@ -5048,7 +5049,7 @@ def attach_persona(
     session start briefs it first. The receipt says that instead of a delivery.
     """
     try:
-        persona = personas.resolve(name, project.root)
+        persona = personas.resolve(name, personas.project_root(project))
     except personas.PersonaError as exc:
         raise FleetError(exc.rule) from exc
     with store_session() as store:
@@ -7216,7 +7217,7 @@ def _persona_for_replay(
     if not agent.persona:
         return ""
     try:
-        personas.resolve(agent.persona, project.root)
+        personas.resolve(agent.persona, personas.project_root(project))
     except personas.PersonaError as exc:
         gone = f"persona {agent.persona} no longer resolves ({exc.rule})"
     else:
@@ -7226,7 +7227,7 @@ def _persona_for_replay(
         notes.append(f"{gone} — started without a persona")
         return ""
     try:
-        personas.resolve(fallback, project.root)
+        personas.resolve(fallback, personas.project_root(project))
     except personas.PersonaError as exc:
         notes.append(
             f"{gone}, and the role's default {fallback} does not either ({exc.rule}) — "

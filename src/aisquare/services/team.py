@@ -1961,9 +1961,7 @@ def hook_session_start(
             assigned=assigned,
             briefing=True,
             persona_note=persona_note,
-            # Asked only when the briefing needs it: one git call, which a session with no
-            # persona, or one whose cycle names its project, never pays.
-            persona_root=_directory_root(cwd) if session.persona and fleet is None else None,
+            cwd=cwd,
             labels=lambda: slot_labels_via(store),
             fleet=fleet,
         )
@@ -1999,6 +1997,11 @@ def hook_prompt_heartbeat(
             # `capture_prompt` had captured already (review of #259, round 19).
             project_service.capture(store, project)
             now = _now()
+            # The persona as a session start asks it, and briefed below as there: this is
+            # the session's first injection. Without it, an agent launched with --persona
+            # before its project was tracked or the team was on ran without its persona
+            # block until a /clear (review of #201, R1-F3).
+            asked_persona, persona_note, named = _asked_persona(store, project.id)
             session = store.upsert_session(
                 TeamSession(
                     id=session_id,
@@ -2011,14 +2014,15 @@ def hook_prompt_heartbeat(
                     account=session_account(transcript_path),
                     model=harness.clean_model_id(model),
                     effort=harness.clean_effort(effort),
+                    persona=asked_persona,
                 )
             )
             # This door binds a fleet row too (an agent that started before the
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
             # under its old holder on this very board (review of #135).
-            named = _hook_named_row(store)
             assigned = _assignment(store, session.id, project.id, named=named)
+            _settle_owed_persona(store, session)  # this injection briefs the persona itself
             return _render_board(
                 project,
                 store.team_sessions(project.id),
@@ -2026,8 +2030,11 @@ def hook_prompt_heartbeat(
                 _briefing_events(store, project.id),
                 me=session,
                 assigned=assigned,
+                briefing=True,
+                persona_note=persona_note,
                 labels=lambda: slot_labels_via(store),
                 fleet=_cycle_project(store, project, cwd, session.id, named=named),
+                cwd=cwd,
             )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
@@ -2848,13 +2855,17 @@ def _render_board(
     persona_note: str | None = None,
     labels: Mapping[int, str] | Callable[[], Mapping[int, str]] | None = None,
     fleet: ProjectInfo | None = None,
-    persona_root: Path | None = None,
+    cwd: Path | None = None,
 ) -> str:
     """The board, and for ``me`` the protocol and its role's cycle, whose fleet commands
-    name ``fleet`` (:func:`_cycle_project`). ``briefing`` is SessionStart's alone: it adds
-    ``me``'s persona after the role cycle — never on the board command, never on a
-    per-prompt path, so no factual surface carries persona text (§3.1).
-    ``persona_note`` is the one line saying why no attached persona was read."""
+    name ``fleet`` (:func:`_cycle_project`). ``briefing`` is a session's first injection's
+    alone — SessionStart's, or the prompt's that joins a session the board did not know
+    (review of #201, R1-F3): it adds ``me``'s persona after the role cycle. Never on the
+    board command, never on a later prompt, so no factual surface carries persona text
+    (§3.1).
+    ``persona_note`` is the one line saying why no attached persona was read. ``cwd`` is the
+    session's directory, whose project's layer the persona comes from when ``fleet`` is
+    ``None``."""
     now = _now()
     numbers = {t.id: t.number for t in tasks if t.number is not None}
     lines = ["<aisquare-team>"]
@@ -2939,10 +2950,11 @@ def _render_board(
         if briefing and me.persona:
             # The session's own project, whose layer the persona was checked against
             # at spawn and launch: the cycle's (its fleet row's, else its directory's
-            # when registered), else ``persona_root``, the directory's own. The
-            # board's is the hub's under one (review of #201, F1 and F6).
-            root = fleet.root if fleet is not None else (persona_root or project.root)
-            lines += _persona_briefing(me.persona, root)
+            # when registered), else the project ``cwd`` is in, asked only here: one git
+            # call, which a session with no persona, or one whose cycle names its
+            # project, never pays. Never the board's, the hub's under one (review of
+            # #201, F1 and F6).
+            lines += _persona_briefing(me.persona, fleet if fleet is not None else cwd)
         if briefing and persona_note:
             lines.append(persona_note)
     lines.append("</aisquare-team>")
@@ -3592,15 +3604,18 @@ def _captain_briefing(project: ProjectInfo, me: TeamSession, persona_note: str |
         *_role_cycle(me, project),
     ]
     if me.persona:
-        lines += _persona_briefing(me.persona, project.root)
+        lines += _persona_briefing(me.persona, project)
     if persona_note:
         lines.append(persona_note)
     lines.append("</aisquare-team>")
     return "\n".join(lines)
 
 
-def _persona_briefing(name: str, root: Path, *, without: str = "launched without it") -> list[str]:
-    """The persona block for a session start (docs/plans/spawn-personas.md §3.2).
+def _persona_briefing(
+    name: str, where: ProjectInfo | Path | None, *, without: str = "launched without it"
+) -> list[str]:
+    """The persona block for a session start (docs/plans/spawn-personas.md §3.2), from the
+    layers of ``where``: a project, or a directory of one (``personas.project_root``).
 
     NEVER raises: a raise here loses the whole team block, role cycle and lane
     rule included (``harness._lane_rule``'s docstring). A persona removed or
@@ -3612,22 +3627,10 @@ def _persona_briefing(name: str, root: Path, *, without: str = "launched without
     try:
         from aisquare.core import personas
 
-        return personas.briefing(personas.resolve(name, root))
+        return personas.briefing(personas.resolve(name, personas.project_root(where)))
     except Exception as exc:
         reason = getattr(exc, "rule", None) or f"{type(exc).__name__}: {exc}"
         return [f'persona "{name}": {reason} — {without}']
-
-
-def _directory_root(cwd: Path | None) -> Path | None:
-    """The root of ``cwd``'s own project, the hub aside (``orchestrator.directory_project``):
-    the persona layer ``launch --persona`` checked (``cli.launch._check_persona``). For a
-    session with no fleet row in a directory nobody added, the briefing had only the board's
-    root, the hub's under one, and said a persona the launch had found was missing (review
-    of #201, F6). ``None`` when the directory cannot be read (a symlink loop)."""
-    try:
-        return orchestrator.directory_project(cwd).root
-    except OSError:
-        return None
 
 
 def _asked_persona(
@@ -3789,9 +3792,10 @@ def _owed_persona_briefing(store: ContextStore, session: TeamSession) -> str:
         name = owed.row.persona
         if name:
             # The row's own project, as attach resolved it; the session's is the board's,
-            # the hub's under one (review of #201, F1).
-            root = _project_root(store, owed.row.project_id) or owed.row.cwd
-            lines = _persona_briefing(name, root, without=_ATTACHED_WITHOUT)
+            # the hub's under one (review of #201, F1). A row whose project is gone: the
+            # project its directory is in.
+            where = store.get_project(owed.row.project_id) or owed.row.cwd
+            lines = _persona_briefing(name, where, without=_ATTACHED_WITHOUT)
             if len(lines) > 1:  # the block; a single line is why it could not be loaded
                 replaced = owed.replaced if owed.replaced != name else None
                 lines = [persona_attached_preface(name, replaced), *lines]

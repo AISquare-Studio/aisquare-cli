@@ -921,6 +921,38 @@ def test_a_persona_holding_the_kept_name_is_refused_before_any_engine_runs(
     assert not (_user_layer() / INVENTED).exists()
 
 
+def test_a_replacement_whose_last_rename_fails_puts_the_old_persona_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--force`` moved the old persona aside, then the new one failed to take its place:
+    the old one was left only in a hidden ``.pair.old-*`` directory, gone from every
+    catalogue (review of #201, R1-F4)."""
+    held = _user_layer() / "pair"
+    held.mkdir(parents=True)
+    (held / "SKILL.md").write_text(
+        "---\nname: pair\ndescription: Held.\n---\nYou hold the name.\n", encoding="utf-8"
+    )
+    source = tmp_path / "pair"
+    source.mkdir()
+    (source / "SKILL.md").write_text(
+        "---\nname: pair\ndescription: New.\n---\nYou are new.\n", encoding="utf-8"
+    )
+    rename = Path.rename
+
+    def refuse_the_staged_copy(self: Path, target: Any) -> Path:
+        if self.name.startswith(".pair.new-"):
+            raise OSError(28, "No space left on device", str(target))
+        return rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", refuse_the_staged_copy)
+
+    with pytest.raises(OSError):
+        _import(str(source), force=True)
+
+    assert personas.resolve("pair").description == "Held."
+    assert sorted(entry.name for entry in _user_layer().iterdir()) == ["pair"]
+
+
 def test_a_kept_name_that_breaks_the_rule_is_refused_before_any_engine_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -297,7 +297,9 @@ reads working until its first reply.
   with *no*, *nope*, *nah*, *never*, *negative*, *don't* or *do not* ("No, leave
   coder-1 running"); *don't*, *do not*, *not*, *never*, *shouldn't* or
   *mustn't* right before *stop*, *restart* or *spawn*, whichever is asked
-  ("Please don't stop coder-1", "I would not restart coder-1"); *leave* or
+  ("Please don't stop coder-1", "I would not restart coder-1"; for a press,
+  *press*, *approve* or *answer*; for a submitted paste, *send*, *submit* or
+  *paste*); *leave* or
   *keep* followed within two words by the agent, its role or its project
   ("Leave coder-1 alone", "keep the coder running"); *cancel* or *stop that* on
   its own. Only these: "Stop coder-1, no
@@ -323,14 +325,20 @@ reads working until its first reply.
   `attach_persona` read the agent's pane first and refuse by name: *trust this
   folder first*. A pane that cannot be read is refused too, so nothing is typed
   blind.
-- **Never a message into an agent's prompt.** `tell`, the manager ask, `wololo`
-  and `attach_persona` end in one paste and one Enter, and an Enter answers
+- **Confirm by name before saying yes for you.** A `press` that can approve —
+  `yes`, the yes digit, `enter` — and a `paste` with `submit` read your words as
+  stop, spawn and restart do: they name the agent, its role or its project, or
+  answer the captain's own question with a yes. `approve_prompt` and `unblock`
+  are presses, so they read them too. `press no`, Esc and the arrows need none.
+- **Never a message into an agent's prompt.** `tell`, the manager ask, `wololo`,
+  `attach_persona` and `paste` end in a paste (and all but an unsubmitted paste
+  in one Enter), and an Enter answers
   whatever prompt is showing: at a parked permission chooser it picks the
   highlighted Yes. So they refuse while any prompt shows on the agent's pane,
   whatever state the fleet reads, and name its question. Nothing is typed, no
   claim moves and no persona is attached: answer the prompt first (`press yes`,
-  `press no`), then send the message. `press` and `paste` are how a prompt is
-  answered, so they are not refused there.
+  `press no`), then send the message. `press` is how a prompt is answered, so
+  it is not refused there.
 - **One captain per home.** A second `aisquare captain` attaches; the fleet
   refuses a second row and refuses `captain` on a project.
 

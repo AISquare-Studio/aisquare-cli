@@ -284,6 +284,8 @@ NOTHING_SHORT = "nothing needs you"
 STRIP_TAIL = "— click one to go to it"
 BUTTON_CELLS = 3
 """What a compact button adds to its label in cells: its padding and the margin after it."""
+BUTTON_PAD = 2
+"""A compact button's padding, one cell each side of its label."""
 
 
 class NeedsYouStrip(Horizontal):
@@ -354,7 +356,13 @@ class NeedsYouStrip(Horizontal):
             if width <= 0 or used <= width or compact:
                 break
         for kind, label in labels.items():
-            self.query_one(f"#needs-you-{kind}", Button).label = label
+            button = self.query_one(f"#needs-you-{kind}", Button)
+            button.label = label
+            # Sized from the label, not left to ``width: auto``: a Button keeps the width
+            # it measured for its LAST label, so a terminal shrunk from 160 columns to 80
+            # kept "🔔 1 waiting"'s 14 cells for "🔔 1", and the last counts ran off the
+            # strip (review of #324, round 2, from the tmux walk).
+            button.styles.width = cell_len(label) + BUTTON_PAD
         lead.update(Text(lead_text, style="bold"))
         tail.update(Text(STRIP_TAIL, style="dim") if with_tail else "")
 

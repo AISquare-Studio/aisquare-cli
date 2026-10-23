@@ -287,3 +287,55 @@ def test_nothing_needs_you_shortens_rather_than_runs_off(board: dict[str, Any]) 
 
     assert drive_at(50, go) == board_mod.NOTHING_SHORT
     assert drive_at(140, go) == NOTHING_NEEDS_YOU
+
+
+def test_in_the_shell_the_strip_still_fits_after_the_terminal_shrinks_to_80(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #324, round 2 (the tmux walk): at 160 columns the counts read "🔔 1
+    waiting"; shrunk to 80, where `asq`'s board is 49 wide, they read "🔔 1" but each button
+    kept its 14-odd cells, and 👀 and ⛔ ran off the strip. The real shell, its Board tab
+    shown, the terminal shrunk: every count shown lies inside the strip."""
+    from textual.widgets import TabbedContent
+
+    from aisquare.cli.ui.app import FleetApp
+    from aisquare.cli.ui.sidebar import ProjectSelected
+    from tests.test_ui_spawn import register
+
+    project = register(tmp_path / "alpha", project_id="prj_alpha")
+    events = [_event(1, "ses_manager", "question", "staging or prod first?")]
+    monkeypatch.setattr(
+        team_service,
+        "board_read",
+        lambda **_k: team_service.BoardRead(project, [MANAGER, CODER], BOARD_TASKS, events, {}),
+    )
+    monkeypatch.setattr(fleet_service, "list_agents", lambda project, live_only=True: [])
+
+    async def run() -> tuple[int, list[tuple[str, int]]]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=None)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await pilot.pause()
+            await settle_page(app)
+            app.post_message(ProjectSelected(project.id))
+            await settle_page(app)
+            app.query_one(f"#project-{project.id}", TabbedContent).active = "tab-board"
+            await settle_page(app)
+            await pilot.resize_terminal(80, 40)
+            await settle_page(app)
+            await pilot.pause()
+            strip = app.query_one(board_mod.NeedsYouStrip)
+            shown = [
+                (str(child.id), child.region.right)
+                for child in strip.children
+                if child.display and isinstance(child, Button)
+            ]
+            return strip.region.right, shown
+
+    right, shown = asyncio.run(run())
+    assert [name for name, _ in shown] == [
+        "needs-you-waiting",
+        "needs-you-question",
+        "needs-you-review",
+        "needs-you-blocked",
+    ]
+    assert all(end <= right for _, end in shown), f"past the strip's edge {right}: {shown}"

@@ -63,6 +63,68 @@ LIVE_USAGE = {
     "limits": [{"kind": "session", "percent": 3, "severity": "normal"}],
 }
 
+#: Shaped like what the same endpoint answered on 2026-10-23 (Claude Code 2.1.309; "W0
+#: results" in docs/plans/handoff-p0-reliability.md): both windows with every field, the
+#: per-model ``seven_day_*`` keys (null on every account asked), and ``limits[]``, where the
+#: per-model window really is: a ``weekly_scoped`` entry whose ``scope`` names the model.
+#: The values are invented. The real answer also carried ``extra_usage``, ``spend``,
+#: ``seven_day_breakdown``, ``pace`` and seventeen opaque keys, all left out here.
+LIVE_USAGE_FULL = {
+    "five_hour": {
+        "utilization": 37.0,
+        "resets_at": "2026-10-23T20:00:00.412000+00:00",
+        "limit_dollars": None,
+        "used_dollars": None,
+        "remaining_dollars": None,
+        "locked_reason": None,
+    },
+    "seven_day": {
+        "utilization": 58.0,
+        "resets_at": "2026-10-27T03:00:00.412000+00:00",
+        "limit_dollars": None,
+        "used_dollars": None,
+        "remaining_dollars": None,
+        "locked_reason": None,
+    },
+    "seven_day_oauth_apps": None,
+    "seven_day_opus": None,
+    "seven_day_sonnet": None,
+    "seven_day_cowork": None,
+    "seven_day_omelette": None,
+    "limits": [
+        {
+            "kind": "session",
+            "group": "session",
+            "percent": 37,
+            "severity": "normal",
+            "resets_at": "2026-10-23T20:00:00.412000+00:00",
+            "scope": None,
+            "is_active": False,
+        },
+        {
+            "kind": "weekly_all",
+            "group": "weekly",
+            "percent": 58,
+            "severity": "normal",
+            "resets_at": "2026-10-27T03:00:00.412000+00:00",
+            "scope": None,
+            "is_active": True,
+        },
+        {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 23,
+            "severity": "normal",
+            "resets_at": "2026-10-27T03:00:00.413000+00:00",
+            "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None},
+            "is_active": False,
+        },
+    ],
+    "weekly_scoped_shares": [
+        {"limit_index": 2, "used_percent_of_weekly": 9, "allowance_percent_of_weekly": 40}
+    ],
+}
+
 
 # --------------------------------------------------------------------------- fixtures
 
@@ -483,6 +545,23 @@ def test_usage_parses_the_live_payload_and_sends_the_token_only_to_the_usage_end
     assert headers["Authorization"] == "Bearer sk-ant-oat01-secret"
     assert headers["anthropic-beta"] == service.OAUTH_BETA
     assert timeout == service.USAGE_TIMEOUT_SECONDS
+
+
+def test_usage_reads_the_two_windows_out_of_the_w0_shape_and_ignores_the_rest(
+    fake_home: Path,
+) -> None:
+    # The W0 shape: both windows with every field, the per-model nulls, and a `limits[]`
+    # whose per-model entry carries a `scope` object. The parser still reads five_hour and
+    # seven_day and nothing else.
+    account = core.create_account()
+    _sign_in(account, "two@example.com")
+
+    usage = service.usage(account, now=NOW, fetch=_Fetch(body=LIVE_USAGE_FULL))
+
+    assert usage.available and usage.reason is None
+    assert usage.session_percent == 37.0 and usage.week_percent == 58.0
+    assert usage.session_resets_at == datetime(2026, 10, 23, 20, 0, 0, 412000, tzinfo=UTC)
+    assert usage.week_resets_at == datetime(2026, 10, 27, 3, 0, 0, 412000, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(

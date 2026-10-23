@@ -304,6 +304,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tmux as before. Polling is quicker too: typing no longer holds frames back
   until you stop, and an echo that takes longer than 50 ms no longer waits half a
   second to show.
+- The P0 reliability plan (`docs/plans/handoff-p0-reliability.md`, "W0 results") now
+  records what was measured on a live box before its prompt-delivery work starts. On
+  Claude Code 2.1.309 and 2.1.223, a typed prompt's first Enter is taken as soon as the
+  input box is drawn, and the reported 30–50 s delay did not reproduce. An Enter sent
+  before the box is drawn is dropped, and the prompt stays unsent in the input box.
+  A prompt passed on the command line runs as the first turn, alone, with `--resume`
+  or after `--`. The results also record the inbox socket's message line and when a
+  message is delivered or held, and that the usage endpoint reports a per-model window
+  in `limits[]`. `tests/test_claude_accounts.py` gains a fixture shaped like the
+  endpoint's answer of 2026-10-23, with invented values.
 
 ### Fixed
 

@@ -1186,7 +1186,8 @@ class StartCaptain(Activatable):
 
     def __init__(self) -> None:
         super().__init__(Text("▶ Start captain"), id="captain-empty")
-        self.selection_key = "captain-start"  # Enter from the keyboard; never highlighted
+        # No selection key, as the ★ has none: the keyboard cursor's walk (pinned by the
+        # shell's tests) stays as it was, and the line is the mouse's way to a start.
         self.tooltip = "No captain running — start one (aisquare captain)"
 
     def message(self) -> Message:

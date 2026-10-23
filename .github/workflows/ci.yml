@@ -110,6 +110,26 @@ jobs:
         env:
           AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
 
+  lock:
+    # CI installs with pip and ci/constraints.txt, so nothing else here reads uv.lock,
+    # and it drifted from pyproject.toml unnoticed: `uv run --frozen` then raised
+    # `ModuleNotFoundError: yaml` on every persona path (#278). One job, OS- and
+    # Python-independent, so one leg rather than the matrix. uv is pinned, so a uv
+    # release cannot turn this red on its own; a relock with a newer uv still checks.
+    name: lock (uv.lock matches pyproject.toml)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.13.0"
+          enable-cache: false
+
+      - name: Check the lock
+        run: uv lock --check
+
   ambient:
     # WHY THIS JOB EXISTS.
     #

@@ -269,7 +269,12 @@ def session_ended(
 
 
 def turn_stopped(
-    cwd: Path | None, *, session_id: str | None = None, stop_hook_active: bool = False
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    stop_hook_active: bool = False,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> team_service.StopDecision | None:
     """Mark the session as waiting for input, and close this turn's metrics row.
 
@@ -280,7 +285,9 @@ def turn_stopped(
     if session_id is None:
         return None
     try:
-        decision = team_service.hook_stop(session_id, cwd, stop_hook_active=stop_hook_active)
+        decision = team_service.hook_stop(
+            session_id, cwd, stop_hook_active=stop_hook_active, model=model, effort=effort
+        )
     finally:
         # After the team update, never before: a metrics failure must not cost the
         # board its state change (or the manager its decisions), and close_turn

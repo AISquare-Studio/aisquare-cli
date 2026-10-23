@@ -188,6 +188,51 @@ def codex_agent(
     return Codex(agent, project, home, tmux, monkeypatch), task
 
 
+# --- the model and effort a turn ran with reach the row (SCOPE 0.8.2, A8) -----------------
+
+
+def test_a_codex_turns_effort_reaches_its_session_and_a_later_one_replaces_it(
+    codex_agent: tuple[Codex, TeamTask],
+) -> None:
+    """Codex's hooks carry no effort and its start none at all (0.162.1, M8): the adapter
+    reads the turn's off the rollout's newest ``turn_context`` at a prompt and a stop. The
+    session existed by then, and only its creation recorded a model or an effort, so the
+    info line of a live Codex row never showed one (the L4 live check, board seq 1880). A
+    prompt and a stop now record what they report on the session that exists; a value not
+    reported keeps the one before."""
+    from tests.test_codex_contract import ROLLOUT, TURN_CONTEXT
+
+    codex, _task = codex_agent
+    rollout = codex.home / "sessions" / f"rollout-{THREAD_ONE}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text(
+        "".join(f"{line}\n" for line in ROLLOUT.read_text(encoding="utf-8").splitlines()[:74]),
+        encoding="utf-8",
+    )
+    codex.start(THREAD_ONE)
+
+    def recorded() -> tuple[str | None, str | None]:
+        with store_session() as store:
+            session = store.get_session(codex.board_id(THREAD_ONE))
+        assert session is not None
+        return session.model, session.effort
+
+    assert recorded() == ("gpt-test", None), "its start names a model and no effort"
+    with rollout.open("a", encoding="utf-8") as handle:
+        handle.write(TURN_CONTEXT + "\n")
+    codex.hook("UserPromptSubmit", THREAD_ONE, prompt="go", turn_id="turn-1", model="gpt-test")
+    assert recorded() == ("gpt-test", "high")
+    lower = json.loads(TURN_CONTEXT)
+    lower["payload"]["effort"] = "low"
+    with rollout.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(lower) + "\n")
+    codex.hook("Stop", THREAD_ONE, turn_id="turn-1", stop_hook_active=False)
+    # The stop names no model of its own, so the rollout's turn says it: local-fixture.
+    assert recorded() == ("local-fixture", "low")
+    status = fleet_service.status_of(_row(codex.agent.id))
+    assert status.session is not None and status.session.effort == "low"
+
+
 # --- /clear keeps the claims (acceptance 6) ----------------------------------------------
 
 

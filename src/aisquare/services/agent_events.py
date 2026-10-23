@@ -194,7 +194,11 @@ def _dispatch(
         )
     if event.kind == "stop":
         decision = hooks.turn_stopped(
-            cwd, session_id=session_id, stop_hook_active=event.stop_hook_active
+            cwd,
+            session_id=session_id,
+            stop_hook_active=event.stop_hook_active,
+            model=event.model,
+            effort=event.effort,
         )
         _deliver_owed_nudge(_nudge_owed_after(adapter, session_id))
         if decision is None:

@@ -1443,6 +1443,7 @@ class ContextStore(Protocol):
     def touch_session(
         self, session_id: str, *, cursor: int | None = None, state: str | None = None
     ) -> None: ...
+    def set_session_model(self, session_id: str, model: str | None, effort: str | None) -> None: ...
     def replace_session_state(self, session_id: str, expected: str, state: str) -> bool: ...
     def mark_handover(self, session_id: str, *, held_after: datetime) -> bool: ...
     def mark_attention(self, session_id: str) -> bool: ...
@@ -2907,6 +2908,24 @@ class SqliteStore:
         self._conn.execute(
             f"UPDATE team_session SET {', '.join(sets)} WHERE id = ?",
             (*params, session_id),
+        )
+        self._commit()
+
+    @_session_write
+    def set_session_model(self, session_id: str, model: str | None, effort: str | None) -> None:
+        """The model and effort a session's turn reported, on a session that exists: each one
+        given replaces the old (a mid-session change is recorded), one not given keeps it.
+
+        :meth:`upsert_session` records them when a session starts, and an agent whose start
+        names no effort (Codex: its turn's effort is read off the rollout at a prompt and a
+        stop) records it here.
+        """
+        if model is None and effort is None:
+            return
+        self._conn.execute(
+            "UPDATE team_session SET model = COALESCE(?, model), effort = COALESCE(?, effort) "
+            "WHERE id = ?",
+            (model, effort, self._canonical_session_id(session_id)),
         )
         self._commit()
 

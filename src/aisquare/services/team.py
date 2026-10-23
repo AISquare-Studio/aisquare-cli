@@ -2184,6 +2184,10 @@ def hook_prompt_heartbeat(
                 fleet=_cycle_project(store, project, cwd, session.id, named=named),
             )
         session = agent_sessions.adopt_local_session(store, session)
+        # What this turn runs with, where the start said nothing of it (Codex's effort).
+        store.set_session_model(
+            session.id, harness.clean_model_id(model), harness.clean_effort(effort)
+        )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
         # that only rides along with unrelated teammate traffic would go unseen for
@@ -2236,7 +2240,12 @@ def hook_prompt_heartbeat(
 
 
 def hook_stop(
-    session_id: str, cwd: Path | None, *, stop_hook_active: bool = False
+    session_id: str,
+    cwd: Path | None,
+    *,
+    stop_hook_active: bool = False,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> StopDecision | None:
     """The session finished its turn: it is now waiting for input.
 
@@ -2269,6 +2278,10 @@ def hook_stop(
         if session is None:
             return None
         store.renew_leases(session.id, _now() + timedelta(minutes=orchestrator.lease_minutes()))
+        # The model and effort the turn ran with, as its stop reports them (Codex's rollout).
+        store.set_session_model(
+            session.id, harness.clean_model_id(model), harness.clean_effort(effort)
+        )
         if session.state == HANDOVER_STATE:
             # `fleet switch`, or `fleet restart` of a running agent, marked it and typed
             # `/exit`, which an agent mid-turn runs once the turn is over. `waiting`

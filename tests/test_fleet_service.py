@@ -1382,6 +1382,82 @@ def test_spawn_suffixes_a_label_a_live_agent_holds(
     assert third.agent.label == "coder-auth" and third.notes == []
 
 
+def test_a_held_label_of_24_characters_suffixes_to_one_of_24(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#291: the suffix was appended to the whole label, so a live agent holding a label of
+    24 characters handed the next spawn `coder-authentication-ref-2`, 26 characters, a
+    label `is_label` refuses. The stem is trimmed so that `<stem>-N` fits."""
+    held = "coder-authentication-ref"
+    assert len(held) == 24 and fleet_service.is_label(held)
+    fleet_service.spawn(project, "coder", worktree=False, label=held)
+
+    second = fleet_service.spawn(project, "coder", worktree=False, label=held).agent
+    third = fleet_service.spawn(project, "coder", worktree=False, label=held).agent
+
+    assert (second.label, third.label) == ("coder-authentication-r-2", "coder-authentication-r-3")
+    assert fleet_service.is_label(second.label) and fleet_service.is_label(third.label)
+
+
+def test_a_long_custom_role_with_a_task_gets_a_label_that_fits(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#291: `<role>-<task short id>` was never measured, so a role bound with `team bind`
+    whose name is near 24 characters made a label longer than any `--label` may be. The
+    role is trimmed and the task's short id kept whole: it is what names the task."""
+    from aisquare.services import settings as settings_service
+
+    role = "platform-security-auditor"
+    settings_service.bind_role(role, agent_bin="claude")
+    task = _add_task(project, "Audit the token store")
+    short = task.id.removeprefix("tsk_")[:8]
+
+    first = fleet_service.spawn(project, role, worktree=False, task_id=task.id).agent
+    second = fleet_service.spawn(project, role, worktree=False, task_id=task.id).agent
+    untasked = fleet_service.spawn(project, role, worktree=False).agent
+
+    assert first.label == f"platform-securi-{short}"
+    assert second.label == "platform-security-audi-2", "the suffix trims the role as well"
+    assert untasked.label == "platform-security-audi-1"
+    for agent in (first, second, untasked):
+        assert fleet_service.is_label(agent.label), agent.label
+
+
+def test_a_long_bound_role_with_an_underscore_is_trimmed_and_kept_as_it_is(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#291 trims to 24 characters and no further: a bound role's own characters stay its
+    labels' (`test_a_forks_numbered_label_is_generated_as_a_spawns_is_not_checked_as_a_typed_one`
+    is the control), so the trim never turns a spawn that worked into a refusal."""
+    from aisquare.services import settings as settings_service
+
+    settings_service.bind_role("data_engineering_pipeline", agent_bin="claude")
+
+    agent = fleet_service.spawn(project, "data_engineering_pipeline", worktree=False).agent
+
+    assert agent.label == "data_engineering_pipel-1"
+
+
+def test_an_over_long_label_is_refused_with_a_label_that_fits(project: ProjectInfo) -> None:
+    """#291: the manager adds the task first and spawns second, so a refusal that only says
+    "not valid" left the task without an agent until someone noticed. It names the limit
+    and a label that passes `is_label`, which the manager can retry with in the same turn."""
+    with pytest.raises(FleetError) as refused:
+        fleet_service.next_label(project, "coder", wanted="coder-authentication-refactor")
+    assert str(refused.value) == (
+        "label 'coder-authentication-refactor' is 29 characters — at most 24; "
+        "try 'coder-authentication-ref'"
+    )
+    assert fleet_service.is_label("coder-authentication-ref")
+    # A label broken some other way keeps the whole rule, and gets a suggestion when one exists.
+    with pytest.raises(FleetError) as broken:
+        fleet_service.next_label(project, "coder", wanted="Coder.Auth")
+    assert str(broken.value).endswith("no '.', ':' or spaces; try 'coder-auth'")
+    with pytest.raises(FleetError) as hopeless:
+        fleet_service.next_label(project, "coder", wanted="9")
+    assert "not valid" in str(hopeless.value) and "try" not in str(hopeless.value)
+
+
 def test_spawn_retries_the_label_when_the_live_index_trips(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

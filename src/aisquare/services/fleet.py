@@ -1069,9 +1069,15 @@ def _fixed_label(role: str, wanted: str | None) -> str | None:
     so all three go by one copy of them.
     """
     if wanted is not None and not is_label(wanted):
+        # The manager adds the task before it spawns for it: a refusal it can retry from in
+        # the same turn names a label that fits, where there is one (#291).
+        fits = slugify(wanted, limit=24)
+        try_it = f"; try {fits!r}" if is_label(fits) else ""
+        if len(wanted) > 24 and re.fullmatch(r"[a-z][a-z0-9-]*", wanted):
+            raise FleetError(f"label {wanted!r} is {len(wanted)} characters — at most 24{try_it}")
         raise FleetError(
             f"label {wanted!r} is not valid — lowercase letters, digits and '-', "
-            "2 to 24 characters, no '.', ':' or spaces"
+            f"2 to 24 characters, no '.', ':' or spaces{try_it}"
         )
     if wanted == MANAGER_LABEL and role != "manager":
         raise FleetError(f"the label {MANAGER_LABEL!r} is reserved for the manager role")
@@ -1095,24 +1101,33 @@ def next_label(
     store: ContextStore | None = None,
 ) -> str:
     """The label a new agent gets: the asked one, or ``<role>-<task>`` / ``<role>-<n>``,
-    suffixed ``-2``, ``-3`` while a LIVE agent already holds it (§5.7)."""
+    suffixed ``-2``, ``-3`` while a LIVE agent already holds it (§5.7).
+
+    The stem before a suffix is trimmed so the whole stays within 24 characters: a held
+    label of 24 suffixed to 26, and a long bound role made a ``<role>-<task>`` no
+    ``--label`` may be (#291). A bound role's characters are its own and kept as they are
+    (``data_eng-1``): only a label somebody typed is checked against the rule.
+    """
     fixed = _fixed_label(role, wanted)
     if fixed is not None:
         return fixed
+
+    def fitted(stem: str, suffix: str) -> str:
+        return stem[: 24 - len(suffix)].rstrip("-") + suffix
 
     def pick(store: ContextStore) -> str:
         live = {agent.label for agent in store.fleet_agents(project.id, live_only=True)}
         if wanted is not None:
             base = wanted
         elif task_id:
-            base = f"{role}-{task_id.removeprefix('tsk_')[:TASK_SHORT]}"
+            base = fitted(role, f"-{task_id.removeprefix('tsk_')[:TASK_SHORT]}")
         else:
-            base = f"{role}-1"
+            base = fitted(role, "-1")
         if base not in live:
             return base
         stem = wanted if wanted is not None else role
         for n in range(2, 1000):
-            candidate = f"{stem}-{n}"
+            candidate = fitted(stem, f"-{n}")
             if candidate not in live:
                 return candidate
         raise FleetError(f"no free label for {stem!r}")

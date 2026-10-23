@@ -311,6 +311,15 @@ def test_the_lane_rules_substitute_commands_run_as_written() -> None:
     assert "aisquare fleet spawn coder --task <id> --as abcd1234" in manager
 
 
+def test_the_manager_cycle_names_the_label_limit() -> None:
+    """#291: the manager adds a task, then spawns for it, so a label it learns is too long
+    only from the spawn's refusal leaves that task without an agent. The cycle says so first."""
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
+    assert (
+        "Labels are unique, descriptive and at most 24 characters (coder-auth, not coder-2)."
+    ) in manager
+
+
 def test_no_role_reads_never_merge_twice() -> None:
     """The manager's and reviewer's cycles already forbid merging; the lane rule
     adds the prohibition only where the core does not say it, so no briefing

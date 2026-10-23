@@ -354,6 +354,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads in the background and only repaints on the UI thread: with four projects
   of three agents each, a tick holds the UI for about 2 ms, where it held it for
   about 117 ms.
+- **No agent label is longer than 24 characters, and the manager is told the
+  limit** (#291). A label a live agent held at 24 characters was suffixed to 26
+  (`coder-authentication-ref-2`), and a role bound with `team bind` whose name
+  was near 24 characters made a `<role>-<task>` label longer than any `--label`
+  may be. The stem before `-2`, `-3` … or the task's short id is now trimmed so
+  the whole fits (`coder-authentication-r-2`). An over-long `--label` is refused
+  with one that fits (`label 'coder-authentication-refactor' is 29 characters
+  — at most 24; try 'coder-authentication-ref'`), so a manager that has already
+  added the task retries in the same turn instead of leaving the task without an
+  agent, and the manager's cycle now says "at most 24 characters".
 
 ## [0.8.2] - 2026-10-19
 

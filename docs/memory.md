@@ -4,9 +4,9 @@
 claude-code` installs lifecycle hooks into `~/.claude/settings.json` (merged
 carefully — your existing hooks are never touched). From then on, each session
 begins with a directive pointing Claude at a packed snapshot of the codebase
-(structure-only skeleton first, full contents on demand — orders of magnitude
-cheaper than grepping around), your in-scope context entries, and the
-project's prompt history.
+(a structure-only skeleton, read first when it fits one Read; a per-file index
+into the rest, opened on demand — orders of magnitude cheaper than grepping
+around), your in-scope context entries, and the project's prompt history.
 
 **Your agent remembers what you tell it.** `aisquare remember "prefer pytest
 over unittest"` persists across every session and every project. Context
@@ -84,13 +84,21 @@ cheap thing agents read first), and a **per-file index** (char offsets +
 token counts, so an agent can open one file's slice of the pack instead of
 all of it). Re-run with `--refresh` after big changes.
 
+The session-start directive says "read this FIRST" only of a skeleton of at
+most 25 000 tokens, the most Claude Code's Read tool returns in one call by
+default (the pack when there is no skeleton). A bigger one is named with its
+size and "never read it from the top": the agent finds the files it needs in
+the index and reads only their slices, so a skeleton read whole is never
+carried by every later request.
+
 A pack has to fit a **token budget**: `[snapshot] max_tokens` in
 `~/.aisquare/config.toml`, 150 000 by default (the cap the server packs with).
 The full pack is tried first, then a compressed one; when even that is over,
 the compressed pack is kept as the **skeleton** with its per-file index and the
 full pack is skipped — `onboard` and `aisquare doctor` both say `snapshot:
 skeleton only: 2030000 tokens, 1234 files indexed; full pack skipped over
-budget 150000 (10990000 tokens)`, and agents are oriented from it as usual.
+budget 150000 (10990000 tokens)`, and agents are oriented from it through its
+index, told its size and never to read it from the top.
 The budget gates only the full pack: an agent is handed paths and opens slices
 through the index, never a whole pack in a prompt. To keep the full pack too,
 raise the budget or leave more out, then re-pack:

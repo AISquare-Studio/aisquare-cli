@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from aisquare.core.version import __version__
 from aisquare.core.workspace import current_project
 from aisquare.services import hooks as hooks_service
 from aisquare.services import install_route
+from tests import snapshot_repos
 
 _PACK = '<files>\n<file path="a.py">\nprint("hi")\n</file>\n</files>\n'
 
@@ -167,10 +169,128 @@ def test_session_start_directive_points_at_the_skeleton_when_the_full_pack_was_s
 
     result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
     assert result.exit_code == 0, result.output
-    assert "packed skeleton" in result.stdout
+    assert "index into a skeleton" in result.stdout
     assert str(meta.skeleton_path) in result.stdout
     assert str(meta.index_path) in result.stdout
     assert "pack.repomix.xml" not in result.stdout
+
+
+def _pack_measuring(monkeypatch: pytest.MonkeyPatch, *, full: int, compressed: int) -> None:
+    """Repomix stubbed: the full pack is ``full`` tokens, the compressed one ``compressed``."""
+    from aisquare.core import snapshot
+
+    monkeypatch.setattr(
+        snapshot,
+        "_run_repomix",
+        lambda _root, *, compress, ignore=(): (_PACK, "compressed" if compress else "full"),
+    )
+    monkeypatch.setattr(
+        snapshot, "_total_tokens", lambda _text, out: compressed if out == "compressed" else full
+    )
+
+
+def test_an_over_budget_skeleton_is_never_read_first(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#282: a 1.497M-token skeleton against the 150k budget was still "read this FIRST".
+
+    An agent that obeys pages through a file larger than its whole context. It is
+    told the size and sent to the index, which names each file's slice.
+    """
+    from aisquare.core import snapshot
+
+    _pack_measuring(monkeypatch, full=10_990_000, compressed=1_497_000)
+    meta = snapshot.generate(current_project(work_dir).id, work_dir)
+    assert meta.status == "skeleton_only"
+
+    result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
+    assert result.exit_code == 0, result.output
+    assert "read this FIRST" not in result.stdout
+    assert "1,497,000 tokens, over the 150,000-token budget" in result.stdout
+    assert "never read it from the top" in result.stdout
+    index_at = result.stdout.index(str(meta.index_path))
+    assert index_at < result.stdout.index(str(meta.skeleton_path))  # the index comes first
+
+
+@pytest.mark.parametrize(
+    ("full", "compressed", "read_first", "named"),
+    [
+        (120_000, 20_000, True, "skeleton"),  # the skeleton is what is measured, not the pack
+        (120_000, 25_000, True, "skeleton"),  # one default Read, exactly
+        (140_000, 90_000, False, "skeleton"),
+        (200_000, 20_000, True, "pack"),  # compressed pack kept, no skeleton beside it
+        (200_000, 90_000, False, "pack"),
+    ],
+)
+def test_a_skeleton_is_read_first_only_when_one_read_holds_it(
+    runner: CliRunner,
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    full: int,
+    compressed: int,
+    read_first: bool,
+    named: str,
+) -> None:
+    """Under the budget, "read this FIRST" still cost up to 150k tokens, carried by every
+    later request. Only a file one default Read returns (25k tokens) is read first."""
+    from aisquare.core import snapshot
+
+    _pack_measuring(monkeypatch, full=full, compressed=compressed)
+    meta = snapshot.generate(current_project(work_dir).id, work_dir)
+    assert meta.status == "ready"
+    assert meta.skeleton_path.exists() is (named == "skeleton")
+
+    result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
+    assert result.exit_code == 0, result.output
+    assert str(meta.pack_path) in result.stdout
+    assert str(meta.index_path) in result.stdout
+    assert ("read this FIRST" in result.stdout) is read_first
+    if not read_first:
+        assert f"The {named} is {compressed:,} tokens" in result.stdout
+        assert "never read it from the top" in result.stdout
+
+
+def test_a_skeleton_left_by_an_earlier_pack_is_not_measured_or_named(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repo that grew past the budget keeps its compressed pack and no new skeleton, but the
+    last run's skeleton stays on disk with no size on the meta. Measured, it read as 0 tokens:
+    "read this FIRST", naming a file that no longer matches the tree."""
+    from aisquare.core import snapshot
+
+    project_id = current_project(work_dir).id
+    _pack_measuring(monkeypatch, full=120_000, compressed=20_000)
+    stale = snapshot.generate(project_id, work_dir).skeleton_path
+    _pack_measuring(monkeypatch, full=200_000, compressed=90_000)
+    meta = snapshot.generate(project_id, work_dir)
+    assert meta.status == "ready" and meta.compressed and stale.exists()
+
+    result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
+    assert result.exit_code == 0, result.output
+    assert "read this FIRST" not in result.stdout
+    assert "The pack is 90,000 tokens" in result.stdout
+    assert str(stale) not in result.stdout
+
+
+@pytest.mark.parametrize("shape", sorted(snapshot_repos.SHAPES))
+def test_the_snapshot_fixture_repos_are_the_same_tree_every_time(
+    tmp_path: Path, shape: str
+) -> None:
+    """The handoff's before/after runs compare packs of these repos (§1.7), so a second
+    write must give the tree the first did."""
+    trees = []
+    for run in ("first", "second"):
+        root = snapshot_repos.write(tmp_path / run, shape)
+        tree = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD^{tree}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        trees.append(tree.stdout.strip())
+    assert trees[0] == trees[1]
+    modules, _functions = snapshot_repos.SHAPES[shape]
+    assert len(list((tmp_path / "first" / "ledger").glob("part_*.py"))) == modules
 
 
 _REAL_WHICH = shutil.which

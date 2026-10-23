@@ -10,7 +10,9 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -284,13 +286,13 @@ def test_a_walk_outside_git_never_enters_an_ignored_tree(
     (root / "node_modules" / "deep" / "x.py").write_text("def vendored():\n    pass\n")
     (root / "a.py").write_text("def mine():\n    pass\n", encoding="utf-8")
     entered: list[str] = []
-    real_walk = code_index.os.walk
+    real_walk = os.walk
 
-    def spy(top: object, **kwargs: object) -> object:
-        for current, dirs, files in real_walk(top, **kwargs):  # type: ignore[call-overload]
+    def spy(top: Path, **kwargs: Any) -> Iterator[tuple[str, list[str], list[str]]]:
+        for current, dirs, files in real_walk(top, **kwargs):
             entered.append(Path(current).name)
             yield current, dirs, files
 
-    monkeypatch.setattr(code_index.os, "walk", spy)
+    monkeypatch.setattr(os, "walk", spy)
     assert code_index.listed_files(root) == ["a.py"]
     assert "node_modules" not in entered and "deep" not in entered

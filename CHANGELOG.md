@@ -162,9 +162,9 @@ adapter.**
   session-start briefing that survives `/clear`, so a persona holds over a long
   session as hook context alone may not (plan §9, #210). `[persona]
   system_prompt = false` keeps the briefing alone; an `--append-system-prompt`
-  of either spelling on the operator's line wins. codex, aider and any wrapper
-  not named `claude` have no seam this launcher knows and get the briefing
-  alone, said in one dim line, as is a cache the launch cannot write. The
+  of either spelling on the operator's line wins. An agent whose adapter has no
+  seam gets the briefing alone, said in one dim line, as is a cache the launch
+  cannot write (Codex's seam: the entry below). The
   system prompt is the launch's for the life of the process, `/clear`
   included: a persona attached since reaches the agent through the briefing
   until a restart replays the row's. `fleet restart` and `fleet switch` replay the
@@ -172,6 +172,33 @@ adapter.**
   the day; one that no longer resolves steps down to the role's current
   default, then to none, each said on the receipt and never a refusal (owner
   decision, 2026-09-24; supersedes #209).
+- **Personas on every coding agent, through its adapter** (#113's 0.8.2 lane L2:
+  the adapter slots `system_prompt_args`, `skill_dirs`, `headless_call` and
+  `headless_answer`, so a third agent needs no edit in the persona code):
+  - `launch --persona` on Codex adds the block as `-c developer_instructions=…`
+    after the operator's own `developer_instructions` from its config layers,
+    which that `-c` would otherwise drop (measured on 0.162.1: the value lands in
+    the request's developer message). A `-c developer_instructions=` on the
+    operator's line wins. The seam is the bound agent's whatever its binary is
+    called: a wrapper bound as Claude Code gets Claude Code's flag, as it gets the
+    adapter's other launch arguments. A Codex thread keeps the system prompt it
+    began with across `codex resume`, so a persona attached since reaches a
+    restarted Codex through the briefing.
+  - `persona export --skill --user|--project --agent <agent>` writes into that
+    agent's first skill directory of the scope, by default the agent a launch here
+    picks. Codex's are `~/.agents/skills`, which every Codex home reads, and
+    `<repo>/.agents/skills`. `persona import --list` (and *Browse skills* in
+    `asq`) reads every skill directory of every agent and names the agents that
+    read each (`--json` adds `roots`). The Export dialog offers each agent's
+    personal and project skills.
+  - The `manager` import engine runs the manager role's own agent on the
+    manager's account for that agent. With the manager bound to Codex it used to
+    start `codex -p …`, which is Codex's `--profile`, and fail; it now runs
+    `codex exec --ephemeral --skip-git-repo-check --sandbox read-only -c
+    features.hooks=false --output-schema <file> -o <file> -` and reads the
+    draft from `-o`. The answer's schema is the strict form (every field
+    required, no other), which Codex's strict structured output needs. An agent
+    with no headless call is a reason for the ladder, which goes on to `api`.
 - **Stop an agent from `asq`.** The agent view's header gains a compact **Stop**
   button, and `x` with the sidebar focused stops the selected agent — both open
   one dialog (*Stop* · *Force* · *Cancel*) over `services.fleet.stop`, the same

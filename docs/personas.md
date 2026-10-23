@@ -2,10 +2,10 @@
 
 A persona is *how* an agent works — a skeptic that reproduces before it
 believes, a minimalist that makes the smallest change — written down once and
-given to an agent when it starts. In aisquare a persona **is a Claude Code
-skill**: the same directory is `--persona skeptic` to the fleet and `/skeptic`
-in Claude Code, byte for byte. There is no aisquare format to learn and nothing
-to convert.
+given to an agent when it starts. In aisquare a persona **is a skill** in the
+format Claude Code and Codex both read: the same directory is `--persona skeptic`
+to the fleet, `/skeptic` in Claude Code and a skill Codex lists, byte for byte.
+There is no aisquare format to learn and nothing to convert.
 
 This guide covers what ships today: the persona catalogue, the
 `aisquare persona` commands — importing anything, a skill or not — running an
@@ -76,10 +76,13 @@ two layers hold the same name the higher one wins, and `persona list` marks the
 winner `(shadows bundled)`. A directory that does not load is listed as
 `✗ <path>: <reason>` and never hides the others.
 
-Claude Code's own skill directories — `<config dir>/skills/` and
-`<repo>/.claude/skills/` — are **not** a layer: most skills are workflows, not
-personalities. They are where `persona import` finds skills and where
-`persona export --skill` puts personas.
+The coding agents' own skill directories are **not** a layer: most skills are
+workflows, not personalities. They are where `persona import` finds skills and
+where `persona export --skill` puts personas. Each agent names its own (its
+adapter's `skill_dirs`): Claude Code reads `<config dir>/skills/` and
+`<repo>/.claude/skills/`; Codex reads `~/.agents/skills/` (under every Codex
+home) and `$CODEX_HOME/skills/`, then `<repo>/.agents/skills/` and
+`<repo>/.codex/skills/`.
 
 ## The bundled four
 
@@ -148,20 +151,31 @@ role's default persona, and an agent running as a persona carries a dim
 ### The system prompt, and the switch
 
 The persona reaches the agent on two channels. The session-start briefing
-carries it as one block, once, and survives `/clear`. For Claude Code the
-launch also appends the same block to the default system prompt with
-`--append-system-prompt-file` (a file under `~/.aisquare/cache/persona-prompts/`;
-the name travels in the environment, never the body), so the persona holds
-over a long session as hook context alone may not. `[persona] system_prompt =
-false` keeps the briefing alone and appends nothing, for a session whose system
-prompt must stay exactly the binary's own; an `--append-system-prompt` of either
-spelling on your own line wins over the launch's. Other harnesses — codex, aider,
-a wrapper not named `claude` — have no system-prompt seam this launcher knows
-(codex reads `AGENTS.md`, aider its own prompts), so they get the briefing alone
-and the launch says so in one dim line, as it does when it cannot write the file.
+carries it as one block, once, and survives `/clear`. The launch also adds the
+same block to the agent's system prompt through its adapter's seam
+(`system_prompt_args`), so the persona holds over a long session as hook context
+alone may not:
+
+- **Claude Code** appends it with `--append-system-prompt-file` (a file under
+  `~/.aisquare/cache/persona-prompts/`; the name travels in the environment,
+  never the body). An `--append-system-prompt` of either spelling on your own
+  line wins over the launch's.
+- **Codex** takes it as `-c developer_instructions=…`, after your own
+  `developer_instructions` from its config (`config.toml`, the `-p` profile),
+  which that `-c` would otherwise replace. The body is in the argument list,
+  which other local users can read; a persona is no secret. A
+  `-c developer_instructions=` on your own line wins over the launch's.
+
+`[persona] system_prompt = false` keeps the briefing alone, for a session whose
+system prompt must stay exactly the binary's own. An agent with no seam gets the
+briefing alone, and the launch says so in one dim line, as it does when it
+cannot write Claude Code's file or when your own line set the seam. The seam
+follows the agent a role is bound to, whatever its binary is called.
 The system prompt is the launch's for the life of the process: `/clear` keeps
 it, and a persona attached since reaches the agent through the briefing alone
-until a restart. A restart or hand-over replays the row's
+until a restart. A Codex thread keeps the system prompt it began with when it
+resumes, so a restart of a Codex agent whose persona changed since still has its
+first persona in the system prompt, and the new one through the briefing. A restart or hand-over replays the row's
 persona: the one it was spawned with or given since; if that no longer resolves,
 the role's current default; if that does not either, none — said on the receipt,
 never a refusal.
@@ -189,9 +203,8 @@ For the selected persona:
   parses; it saves through the same writer as `persona edit`, so a refused edit
   leaves the file as it was. `Enter` on any row opens it too; a bundled persona
   opens read-only, with *Save as…* to copy it into your layer or the project's.
-- **Export…** (`x`) writes it into Claude Code's personal skills, the
-  project's `.claude/skills`, or a directory — after either skills target it is
-  `/<name>` in Claude Code.
+- **Export…** (`x`) writes it into a coding agent's personal or project skills
+  (one choice per agent, its first skill directory of each), or a directory.
 - **Remove** (`Del`) asks once, naming the directory it deletes.
 - **Validate** (`v`) reports the rule a directory breaks, or its warnings.
 
@@ -200,7 +213,7 @@ an invalid row cannot be attached or exported, and Edit is how you fix it.
 
 Above the list, **+ Import…** (`i`) is `persona import` as a form: a source
 (a skill directory, a `SKILL.md` or `.md` file, or a skill name — *Browse
-skills* lists Claude Code's skills and marks the ones already imported), the
+skills* lists every agent's skills and marks the ones already imported), the
 layer, a name, *Condense*, the engine and model for the LLM path, and *Force*.
 Progress appears under the form while it runs; a draft an LLM wrote is shown in
 full — engine, model, size, frontmatter, body, what it dropped — before *Save*
@@ -290,7 +303,9 @@ line names the links it skipped (`skipped_links` under `--json`; the dialogs in
 itself a link is refused (`symlink_refused`), since there is no persona without
 it — replace it with a real file.
 
-`import --list` marks a skill `imported` when a user or project persona's
+`import --list` reads every skill directory of every coding agent, the personal
+ones first, and names the agents that read each skill (`--json` adds `roots`, the
+directories it read). It marks a skill `imported` when a user or project persona's
 `.persona.json` names that skill as its source, whatever the persona was called.
 A persona of the same name that did not come from it (a bundled one, say) is
 not an import: the row ends `(name taken by bundled careful)`, which is why
@@ -323,10 +338,15 @@ never as instructions.
 
 The engines, tried in this order unless `--engine` picks one:
 
-1. **manager** — the fleet's own Claude Code, headless, under the manager role's
-   binding (`team bind manager`), so the manager's account pays. One turn, no
-   tools, run from the aisquare home with the environment stripped of any role,
-   team or tracing identity.
+1. **manager** — the manager role's own coding agent, headless, as `team bind
+   manager` binds it (agent, binary and account), so the manager's account pays.
+   One turn, no session kept, the agent's hooks off, run from the aisquare home
+   with the environment stripped of any role, team or tracing identity. Claude
+   Code runs `claude -p` with no tools and the answer's schema; Codex runs
+   `codex exec --ephemeral --sandbox read-only -c features.hooks=false
+   --output-schema …` and the draft is read from its `-o` file. Claude Code
+   rides the manager's model ladder; Codex runs its default unless a model is
+   pinned for it.
 2. **api** — the Anthropic API through the official SDK, installed with
    `pip install 'aisquare-cli[llm]'`. Credentials are the SDK's own
    (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `ant auth login`); aisquare
@@ -362,13 +382,18 @@ aisquare persona export skeptic
 aisquare persona export skeptic --to ./persona-copies
 aisquare persona export skeptic --skill --user
 aisquare persona export skeptic --skill --project
+aisquare persona export skeptic --skill --user --agent codex
 ```
 
 With no destination the `SKILL.md` is printed. `--to DIR` writes the whole
-directory as `DIR/<name>/`. `--skill --user` writes it into Claude Code's
-personal skills (`$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`), and
-`--skill --project` into the repository's `.claude/skills` — after either, the
-persona is `/<name>` in Claude Code. An existing target is refused unless you
+directory as `DIR/<name>/`. `--skill --user` writes it into a coding agent's
+personal skills and `--skill --project` into the repository's, the first skill
+directory of that scope the agent reads. `--agent` picks the agent; without it,
+the one a launch here picks (the project's agent, else your default). For Claude
+Code that is `$CLAUDE_CONFIG_DIR/skills` (else `~/.claude/skills`) or
+`.claude/skills`, after which the persona is `/<name>`; for Codex it is
+`~/.agents/skills`, which every Codex home reads, or `.agents/skills`. An
+existing target is refused unless you
 pass `--force`. `--to` and `--skill` leave symbolic links out of the copy as
 import does and name the ones they skipped; a persona whose `SKILL.md` is itself
 a link is refused.

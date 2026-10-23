@@ -93,6 +93,7 @@ from tests import bundled_personas, fakebin
 from tests.cycles import unscoped
 from tests.fsperms import can_deny_reads, can_symlink, remove_tree
 from tests.projects import add_project
+from tests.unix_listener import Accepting
 
 PYTHON_LAUNCHER = "python3"
 """What ``pane_current_command`` reads while ``python -m aisquare launch`` is resolving."""
@@ -8180,9 +8181,8 @@ def _socket_file(name: str, *, listening: bool) -> Iterator[Path]:
     listening, or stale, as tmux leaves it when its server exits. Under ``/tmp``, as an
     AF_UNIX path is small (about 100 bytes). Skips where tmux cannot run.
 
-    A listening one accepts every connect, as tmux's server does. One that only listened
-    kept each probe in its backlog, and macOS refuses a connect once the backlog is full
-    (Linux queues it): a plan's probe and then the run's read a live socket as stale."""
+    A listening one accepts every connect, as tmux's server does (``tests.unix_listener``):
+    one that only listened was read as stale by the second probe on macOS."""
     import tempfile
 
     if not hasattr(socket, "AF_UNIX") or not hasattr(os, "getuid"):
@@ -8191,27 +8191,18 @@ def _socket_file(name: str, *, listening: bool) -> Iterator[Path]:
     path = base / f"tmux-{os.getuid()}" / name
     path.parent.mkdir()
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    done = threading.Event()
-
-    def accept() -> None:
-        while not done.is_set():
-            with suppress(TimeoutError):
-                server.accept()[0].close()
-
-    acceptor = threading.Thread(target=accept, daemon=True)
+    accepting: Accepting | None = None
     try:
         server.bind(str(path))
         server.listen(1)
-        if not listening:
-            server.close()
+        if listening:
+            accepting = Accepting(server)
         else:
-            server.settimeout(0.05)
-            acceptor.start()
+            server.close()
         yield path
     finally:
-        done.set()
-        if acceptor.is_alive():
-            acceptor.join()
+        if accepting is not None:
+            accepting.close()
         server.close()
         shutil.rmtree(base, ignore_errors=True)
 

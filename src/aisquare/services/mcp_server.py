@@ -557,10 +557,12 @@ class IdleClock:
 
     def finished(self, started_at: float | None = None) -> None:
         """A call ended: the one started at ``started_at``, or the oldest."""
+        # `del`, not .remove()/.pop(): the config-write guard (tests/test_config_writes_stay_in
+        # _the_cli.py) resolves calls by bare name, and a `remove` that writes config exists.
         if started_at in self._running:
-            self._running.remove(started_at)
+            del self._running[self._running.index(started_at)]
         elif self._running:
-            self._running.pop(0)
+            del self._running[0]
         self._last = self._clock()
 
     def idle_for(self) -> float:

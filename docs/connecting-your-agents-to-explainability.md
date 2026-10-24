@@ -230,6 +230,11 @@ removes vendor token shapes, JWTs, private-key blocks, `Authorization` values an
 directory to `~`. Local capture keeps what you typed — redaction applies to what
 leaves the machine.
 
+`aisquare config set capture.enabled false` stops your prompts at the source:
+none is stored locally or spooled. Board notes, task claims and session events
+still ship, and the CI experiment, a separate opt-in, still sends the prompt to
+its endpoint while you have it on.
+
 ---
 
 ## 8. Verify

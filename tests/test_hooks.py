@@ -476,3 +476,79 @@ def test_the_plugin_page_names_the_log_command_the_uvx_route_prints(
     assert printed.startswith(f"uvx --python {_PYTHON} --from aisquare-cli=="), printed
     assert f"`{documented}`" in text
     assert "gets memory with nothing else installed" not in text
+
+
+def _spooled_prompts() -> list[str]:
+    from aisquare.core import outbox
+
+    return [path.read_text(encoding="utf-8") for path in outbox.pending()]
+
+
+def test_capture_off_stores_no_prompt_and_spools_none(
+    runner: CliRunner, work_dir: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#268: ``capture.enabled = false`` stored every prompt anyway, and ``log`` listed it.
+    Off, no prompt row and nothing in the Explainability spool; the turn row is still
+    opened, without text."""
+    from aisquare.core import insights
+
+    monkeypatch.setattr(insights, "shipping_enabled", lambda: True)
+    _add(work_dir)
+    set_ = runner.invoke(app, ["config", "set", "capture.enabled", "false"])
+    assert set_.exit_code == 0, set_.output
+    assert "no longer stored" in set_.stdout
+    _prompt(runner, work_dir)
+    assert _logged(runner) == []
+    assert not any("add a test for X" in record for record in _spooled_prompts())
+    with store_session() as store:
+        assert len(store.turn_metrics(project_id=current_project(work_dir).id)) == 1
+
+
+def test_capture_on_still_stores_and_spools_the_prompt(
+    runner: CliRunner, work_dir: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core import insights
+
+    monkeypatch.setattr(insights, "shipping_enabled", lambda: True)
+    _add(work_dir)
+    _prompt(runner, work_dir)
+    assert _logged(runner) == ["add a test for X"]
+    assert any("add a test for X" in record for record in _spooled_prompts())
+
+
+def test_capture_off_still_delivers_the_teammate_delta(
+    runner: CliRunner, work_dir: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delta is coordination, not capture: it reaches the session with capture off."""
+    from aisquare.services import team as team_service
+
+    monkeypatch.setattr(team_service, "hook_prompt_heartbeat", lambda *a, **k: "TEAM DELTA")
+    _add(work_dir)
+    assert runner.invoke(app, ["config", "set", "capture.enabled", "false"]).exit_code == 0
+    payload = json.dumps({"prompt": "add a test for X", "cwd": str(work_dir), "session_id": "s1"})
+    result = runner.invoke(app, ["hook", "user-prompt-submit"], input=payload)
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "TEAM DELTA"
+    assert _logged(runner) == []
+
+
+def test_an_unreadable_config_records_no_prompt(
+    runner: CliRunner, work_dir: Path, isolated_home: Path
+) -> None:
+    """Privacy fails closed: a config that cannot be read may have said off, so nothing is
+    recorded, and one line on stderr says so."""
+    _add(work_dir)
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    (isolated_home / "config.toml").write_text("[capture\nenabled = ", encoding="utf-8")
+    payload = json.dumps({"prompt": "add a test for X", "cwd": str(work_dir)})
+    result = runner.invoke(app, ["hook", "user-prompt-submit"], input=payload)
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert result.stderr.count("\n") == 1 and "capture" in result.stderr
+    with store_session() as store:
+        assert store.recent_prompts(current_project(work_dir).id) == []
+
+
+def test_capture_set_under_json_prints_only_the_value(runner: CliRunner) -> None:
+    got = runner.invoke(app, ["--json", "config", "set", "capture.enabled", "false"])
+    assert _json(got.stdout) == {"capture.enabled": "false"}

@@ -362,10 +362,19 @@ def test_flush_all_joins_every_saver_against_one_deadline(
 def test_flush_all_closes_a_saver_that_misses_the_deadline_and_names_what_was_cut_off(
     isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The theme's write is real and must land inside the deadline, and an fsynced write
-    is slow on the Windows leg: there the deadline and the width's slow write are scaled
-    together (``budget``, tests/budgets.py)."""
-    writer = _Writer(delay=lambda value: budget(0.8) if value == 34 else 0.0)
+    """The width's write is held until ``flush_all`` has returned, so it misses the deadline
+    whatever the clock does. The theme's write is real and must land inside the deadline: the
+    deadline is quit's own (``JOIN_S``), not one cut to fit under a width that slept 0.8 s.
+    Under 0.2 s, a real locked and fsynced write on a loaded runner outlasted it (CI's
+    proxy-down leg; on a laptop, 1 in 300 writes took 565 ms beside a disk being fsynced)."""
+    cut = threading.Event()
+
+    def held(value: object) -> float:
+        if value == 34:
+            cut.wait(30.0)
+        return 0.0
+
+    writer = _Writer(delay=held)
     monkeypatch.setattr(autosave_mod, "update_state", writer)
     monkeypatch.setattr(Autosave, "DEBOUNCE", 5.0)
     savers: list[Autosave] = []
@@ -378,7 +387,10 @@ def test_flush_all_closes_a_saver_that_misses_the_deadline_and_names_what_was_cu
             savers.extend((width, theme))
             width.remember(34)
             theme.remember("nord")
-            unsaved = Autosave.flush_all(pilot.app, timeout=budget(0.2))
+            try:
+                unsaved = Autosave.flush_all(pilot.app)
+            finally:
+                cut.set()
             assert unsaved == [
                 "the width was not saved: the write of 34 did not finish before the app closed"
             ]

@@ -6422,10 +6422,8 @@ def test_the_settings_tab_follows_a_rename_made_on_the_card_or_in_a_shell(
 class PasteRecordingPane(TerminalPane):
     """A live pane on the test's socket whose ``_forward`` records instead of sending."""
 
-    def __init__(self) -> None:
-        super().__init__(
-            "%9", server=TmuxServer(PRIVATE_SOCKET, binary=sys.executable), id="paste-pane"
-        )
+    def __init__(self, id: str = "paste-pane") -> None:
+        super().__init__("%9", server=TmuxServer(PRIVATE_SOCKET, binary=sys.executable), id=id)
         self.forwarded: list[tuple[str, str | bytes]] = []
 
     def _forward(self, kind: Any, value: str | bytes) -> bool:
@@ -6483,6 +6481,82 @@ def test_a_paste_with_no_live_pane_on_screen_is_one_toast_and_no_tmux_call(
     tmux_calls = drive(go)
     assert toasts == ["nothing to paste into — open an agent first"]
     assert not any("paste" in " ".join(argv) or "buffer" in " ".join(argv) for argv in tmux_calls)
+
+
+def test_a_paste_with_two_live_panes_on_screen_says_to_pick_one(
+    tmp_path: Path, script: Script
+) -> None:
+    """With two live panes on screen the router does not guess, and the toast said "nothing to
+    paste into" (#340's review): it says what to do instead."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    toasts: list[str] = []
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, str | bytes]]:
+        app = fleet_app(pilot)
+        real_notify = app.notify
+
+        def notify(message: str, **kwargs: Any) -> None:
+            toasts.append(message)
+            real_notify(message, **kwargs)
+
+        app.notify = notify  # type: ignore[method-assign]
+        first = PasteRecordingPane()
+        await app.content.add_content(first, set_current=True)
+        second = PasteRecordingPane(id="paste-pane-2")
+        await app.screen.mount(second)
+        app.sidebar.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("/tmp/shot.png"))
+        await settle(app)
+        return [*first.forwarded, *second.forwarded]
+
+    forwarded = drive(go)
+    assert forwarded == []
+    pastes = [toast for toast in toasts if "paste" in toast]  # not the fake panes' own
+    assert pastes == ["2 panes on screen — click the one to paste into, then paste again"]
+
+
+def test_a_windows_path_pasted_under_wsl_is_converted_off_the_ui_thread(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`wslpath` may take its whole 2 s timeout, and the paste ran it on the UI thread, so
+    a slow one froze asq (#340's review). It runs in a worker now, and the paste reaches
+    the agent, converted, when it answers."""
+    import subprocess
+    from types import SimpleNamespace
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+    shot = tmp_path / "c" / "shot.png"
+    shot.parent.mkdir(parents=True)
+    shot.write_bytes(b"png")
+    on_ui_thread: list[bool] = []
+
+    run = subprocess.run  # patched on the module, so every other caller gets the real one
+
+    def wslpath(argv: list[str], **kwargs: Any) -> Any:
+        if argv[:1] != ["wslpath"]:
+            return run(argv, **kwargs)
+        on_ui_thread.append(threading.current_thread() is threading.main_thread())
+        return SimpleNamespace(returncode=0, stdout=f"{shot}\n", stderr="")
+
+    monkeypatch.setattr("aisquare.cli.ui.terminal.subprocess.run", wslpath)
+    monkeypatch.setattr("aisquare.cli.ui.terminal.in_wsl", lambda environ: True)
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, str | bytes]]:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        pane.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("C:\\shot.png"))
+        await settle(app)
+        app.post_message(events.Paste("/tmp/plain.png"))  # no worker for a path as sent
+        await settle(app)
+        return pane.forwarded
+
+    forwarded = drive(go)
+    assert on_ui_thread == [False], "asked once, off the UI thread"
+    assert forwarded == [("paste", str(shot)), ("paste", "/tmp/plain.png")]
 
 
 def test_a_paste_into_a_dialogs_input_never_reaches_a_pane_and_nothing_passes_a_dialog(

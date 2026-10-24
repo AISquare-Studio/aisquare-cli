@@ -1600,17 +1600,19 @@ whether the running fleet server still has a prefix key.
 - **Drag a file onto the window.** Your terminal hands it to `asq` as a paste of the
   file's path, quoted the way that terminal quotes it. It goes to the agent on screen
   whether the pane or the sidebar had the keyboard, and the pane takes the keyboard
-  with it. A text field or a dialog keeps its own pastes. With no agent on screen, or
-  more than one live pane, nothing is sent and one toast says "nothing to paste into
-  — open an agent first". Under WSL, a drop that is one Windows path (`C:\…`) of a
-  file that exists becomes its Linux path through `wslpath -u`; every other path
-  reaches Claude Code exactly as the terminal sent it.
+  with it. A text field or a dialog keeps its own pastes. With no agent on screen,
+  nothing is sent and one toast says "nothing to paste into — open an agent first";
+  with more than one live pane, it says how many and to click the one you mean, then
+  paste again. Under WSL, a drop that is one Windows path (`C:\…`) of a file that
+  exists becomes its Linux path through `wslpath -u`, asked off the UI thread so asq
+  never waits on it; every other path reaches Claude Code exactly as the terminal
+  sent it.
 - **Ctrl+V** pastes an image from the clipboard (Alt+V on Windows and WSL; Cmd+V in
   iTerm2). The key reaches the pane, and Claude Code reads the clipboard itself,
   which is why each spawn carries this shell's display variables (below).
 - **Type the file's path** in your message.
 
-Claude Code's own Remote Control (#289)
+Claude Code's own Remote Control ([remote](remote.md#claude-codes-own-remote-control))
 is another way: the Claude app can attach a photo to the session. To record what your
 terminal sends on a drop or a paste (#288), start `asq` with
 `AISQUARE_PASTE_LOG=/tmp/paste.log`: each paste adds one line, with its length, its

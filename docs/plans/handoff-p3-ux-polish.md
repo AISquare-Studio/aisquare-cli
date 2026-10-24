@@ -942,10 +942,11 @@ Every workstream, its PR, and what was measured. Reduced scale throughout (the o
 - **P3-W1x** (#349, squash ea753719): 80-column fixes from the UI walks. Welcome's Sign in is reachable by keyboard, the Spawn dialog's Remote control note wraps, the persona editor's buttons stay on an 80x30 screen, and the Personas tab's Import and New buttons are visible. Also from #335's review: `docs/remote.md` covers who can drive an agent, the doctor's `remote control` row reads the fleet server's environment, and the fix line says tracing is turned off machine-wide (board task #50). Scale/measurement: none (unit/pilot tests only); the body gives layout figures (49 columns available against about 86 needed, and dialog row counts 37/32 at 80x30). Not done here: `docs/remote.md` was not walked. Item 5 moved to P3-FU2.
 - **P3-FU2** (#352, squash cd6c909e): `persona import --from-dir` skips non-skill and repository files (README, LICENSE, …) as `skipped` rather than spending an engine on them, and `-` may appear only once in a batch. A paste with several live panes now tells the user to click one, and `wslpath` runs off the UI thread. The captain audit masks dash-joined codes, and the Images paragraph links Remote Control again (board task #53). Scale/measurement: engine calls for a sample `--from-dir` library went from **4** before to **1** after. Token counts were not measured (no live engine was run). Not done here: two live panes and the WSL conversion could not be walked (asq shows one view; the author was on macOS).
 - **P3-W2a** (#357, squash 87cf98f6): `HeadroomSummary` gains fleet week figures. The sidebar status line shows the fleet's share left (`● 3× claude 58%`). One `summary_sentence` appears on the Accounts page and after `accounts usage`, which also gains an `all` row. `--json accounts usage --summary` returns `{accounts, summary}` (#287). Scale/measurement: none (unit/pilot tests only). The handoff's acceptance case is pinned: `week_percent_left` 45.0 and `weeks_left` 0.9. Not done here: #49's `weekly_scoped` parsing has not landed.
-- **P3-W2b** (#359, squash 5188caa9): a `TeamStrip` under the Manager tab's info line counts live non-manager agents per role and state, using the sidebar's icons. It adds no reads, is hidden when only the manager runs, and opens the Board tab on click (#287). Scale/measurement: none (unit/pilot tests only). Not done here:
+- **P3-W2b** (#359, squash 5188caa9): a `TeamStrip` under the Manager tab's info line counts live non-manager agents per role and state, using the sidebar's icons. It adds no reads, is hidden when only the manager runs, and opens the Board tab on click (#287). Scale/measurement: none (unit/pilot tests only). Not done here: nothing.
 - **P3-W2c** (#362, squash 467fa675): `asq-statusline` (standard library only) records each Claude Code session's rate limits and prints a one-line status. `accounts statusline --install/--wrap/--uninstall` and `aisquare uninstall` manage it. The usage cache ingests these readings, so the endpoint is asked less. `accounts sessions` and the Accounts page's "Sessions on this machine" list the device's sessions (#287). Scale/measurement: import cost **20.3 ms** (median of 9, range 19.2 to 22.4; target ≤ 30 ms) against 173 ms for the full CLI. A whole run took **50 ms** wall (49 to 52). Live run at reduced scale: Claude Code 2.1.310, one session on slot 4, one prompt; the status line read `acct 4 · 5h 9% · wk 7% · ctx 4%` against the endpoint's 10%/7%. Not done here: the one-hour endpoint-request baseline (4 agents on 3 accounts) was not measured.
 - **P3-W5** (#370, squash 40f3b4f0): `fleet adopt <session-id|transcript>` resumes a hand-started conversation as a fleet agent, on its own account and in its own directory, keeping its session id. Refusal codes are `held`, `owned_by_the_fleet`, `not_onboarded`, `no_such_conversation` and `not_on_a_known_account`. `fleet adopt --list` is the picker, and the manager cycle gains one sentence. Adds the phase C docs (#290). Scale/measurement: none (unit/pilot tests only). Not done here: phase A (`accounts adopt <dir>`) is out of scope by owner decision. asq's *Adopt a conversation…* is #378.
 - **P3-W5 (asq)** (#378, squash 00831dbd): the Accounts page's *Adopt a conversation…* under *Sessions on this machine* opens `fleet adopt --list` as a picker, read in a worker; a conversation a `claude` still holds, or whose directory is no onboarded project, says why and cannot be picked, and Enter on another adopts it in a worker (a writer in the hand-over table) (#290). Scale/measurement: none (a pilot test). Walked by reviewer-a at 80x30 and 200x50 (UI evidence on task #45).
+- **P3 flakes** (#390, squash ea4e9a80): two real bugs found by the Windows leg. `fleet adopt`'s liveness check sent Ctrl-C on Windows (`os.kill(pid, 0)` is `CTRL_C_EVENT` there); it now opens the process and reads its exit code. The captain's code mask `gate._CODE` masked six digits inside ids (task and session ids, SHAs); a letter, digit or underscore touching the digits now keeps them. The persona editor pane is POSIX-only, and Edit opens the text box on Windows even with a `tmux` on PATH. The rest is test-only (the adopt transcript-folder slug, the statusline `.EXE` name, a read-cache wait race). Scale/measurement: full-matrix runs on the branch; Windows leg 11,917 pass in run 40084115053, the rest P0's and P2's, fixed by the syncs. Not done here: nothing.
 
 ## Owner calls taken
 
@@ -967,6 +968,7 @@ The consequential ones (security, a default a user notices, privacy, cost, or ha
 | 8 | **The manager's adopt sentence** (#370) | One sentence in the manager's cycle ("on request only…"). It costs tokens on every prompt. | move it to an on-request skill |
 | 9 | **`persona import --from-dir`** (#352) | Reads skill directories, `SKILL.md`, and non-repository `.md`/`.markdown`/`.txt`. A README, LICENSE or CHANGELOG is listed `skipped` (never a refusal) and spends no engine: 4 engine calls became 1 on the sample library. | name the file on the command line to import it anyway |
 | 10 | **Task keys for non-ASCII titles** (#314) | No store migration. A legacy-key lookup keeps re-adds idempotent, but a pre-upgrade task keyed `task` is not found again (CHANGELOG *Upgrading*). Emoji-only titles key `t-<hash>`. | code change; hard to reverse once keys are stored |
+| 11 | **A code typed against letters is not masked** (#390) | The captain's audit masks a code alone, spaced (`123 456`) or dash-joined (`code-123456`); `code123456` is kept whole, so that ids with six digits in a row (task and session ids, SHAs) are never masked. | drop the `(?<![\w])`/`(?![\w])` guards in `gate._CODE` |
 
 ### Every call
 
@@ -991,7 +993,7 @@ The consequential ones (security, a default a user notices, privacy, cost, or ha
 | P3-W6d | #317 | 3. Pin read | Strictly at start; unreadable `state.json` refuses the forget | code change |
 | P3-W8 | #318 | 1. Forced command | Recommended as hygiene, not confinement; dedicated user is the boundary | docs change |
 | P3-W8 | #318 | 2. Watching B | `ssh -t` with the human's own key (`restrict` gives no tty) | docs change |
-| P3-W8 | #318 | 3. Not done here | Two-machine walk waived to post-main live run; #293 not edited | n/a (deferred) |
+| P3-W8 | #318 | 3. Not done here | Two-machine walk waived to post-main live run; #293 now titled postponed | n/a (deferred) |
 | P3-W1 | #324 | 1. Clearing the intent | Single-use; leaving Accounts drops it | code change |
 | P3-W1 | #324 | 2. Cancel after landing / failed hooks | Both count as abandoned; nothing reopens | code change |
 | P3-W1 | #324 | 3. Next step's project | First listed project if no manager live; else "spawn under a project" | code change |
@@ -1051,7 +1053,7 @@ The consequential ones (security, a default a user notices, privacy, cost, or ha
 | P3-W2a | #357 | 2. `all` row | Percent USED, mean over usable accounts | code change |
 | P3-W2a | #357 | 3. "of N accounts" | Counts accounts whose week was read | code change |
 | P3-W2a | #357 | 4. Reset format | Via `format_reset`: `in 2d 4h (Thu 14:00)` | code change |
-| P3-W2a | #357 | 5. #49 `weekly_scoped` | Not landed; uses shared 7-day window | lands with #49 |
+| P3-W2a | #357 | 5. #49 `weekly_scoped` | Parsing in through the rc/p0 sync (#392); the fleet's week figure still uses the shared 7-day window | follow-up: read the per-family window |
 | P3-W2a | #357 | 6. Narrow line | Figure gives way to the ⚠ | code change |
 | P3-W2a | #357 | 7. `week_resets_soonest` | Object `{slot, resets_at}`, not tuple | code change |
 | P3-W2b | #359 | 1. Manager counted? | No | code change |
@@ -1079,6 +1081,8 @@ The consequential ones (security, a default a user notices, privacy, cost, or ha
 | P3-W5 | #378 | 1. Picker vs a button per session | A picker over `fleet adopt --list` (the sessions view lists mostly live sessions, which adopt refuses) | code change |
 | P3-W5 | #378 | 2. Rows that cannot be adopted | Listed, disabled, with the reason | code change |
 | P3-W5 | #378 | 3. Role | `coder`, the CLI's default; no role picker | code change |
+| P3 flakes | #390 | 1. A code typed against letters | `code123456` is not masked; a spoken or dash-joined code is | drop the `(?<![\w])`/`(?![\w])` guards in `gate._CODE` |
+| P3 flakes | #390 | 2. Persona editor pane | POSIX-only; Windows always gets the text box, even with `tmux` on PATH | code change |
 
 Note: #334's owner calls are an unnumbered bullet list; each bullet is one row above.
 
@@ -1092,7 +1096,7 @@ To the owner's single post-main live run (manager, seq after 1135), or a follow-
 - #316: W7b (trimming the persona from session-start output near the 10,000-character cap) was skipped and left to P1 WS-1's lean role context work.
 - #316: `/doctor prompt-audit` and the hook cap were not re-measured.
 - #318: the two-machine (or VM) acceptance walk was waived by the manager and joins the post-main live run.
-- #318: issue #293's title and body were not edited; whoever owns the issue sets "postponed" and links the sketch.
+- #318: issue #293's title now says postponed ("Multi-machine fleet (postponed): design sketch, and an SSH runbook to use until then").
 - #324: the novice first-run measurement on the RC build (empty `AISQUARE_HOME`, recorded on the issue) is owed. It needs a person.
 - #326: the #210 close comment is drafted for the owner to post (the issue was not closed). The #213 won't-do close text is also provided.
 - #326: `persona new <name> --from <parent>` is suggested as a possible new issue (#213 direction).
@@ -1105,7 +1109,7 @@ To the owner's single post-main live run (manager, seq after 1135), or a follow-
 - #352: two live panes on screen and the WSL conversion could not be walked (test-only).
 - #352: keys typed during `wslpath` are left for a report from a WSL user.
 - #352: per-call token counts were not measured (no live engine).
-- #357: #49's `weekly_scoped` per-family parsing landed in P0 (#350) and reaches this train at the next rc/p0 sync; until then the week figures use the shared 7-day window.
+- #357: #49's `weekly_scoped` per-family parsing landed in P0 (#350) and is in this train through the rc/p0 syncs (#392). The fleet's week figure still uses the shared 7-day window; reading the per-family window is a follow-up.
 - #362: the one-hour usage-endpoint baseline (4 agents, 3 accounts, before and after) is deferred and needs the owner's go for a larger or longer live run.
 - #370: phase A (`accounts adopt <dir>`) is out by owner scope.
 - #370: the manager cycle sentence could move to an on-request skill if its per-prompt cost matters.

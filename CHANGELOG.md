@@ -215,8 +215,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     minutes (RFC 4226's throttle), audited on the home board. Each further lock
     with no correct code between doubles the last, up to 24 hours.
   - The window's id joins each gated call's `captain_action` event. Every audit
-    masks a code in the owner's words, joined to a word or trailed by a dash too
-    (`code-123456`), and `unlock`'s masks it in its arguments; a date, a longer
+    masks a code in the owner's words, dash-joined to a word or trailed by a dash
+    too (`code-123456`), and `unlock`'s masks it in its arguments; a date, a longer
     number, a dashed phone number and the digits inside an id (a task or session
     id, a commit SHA) are left as said.
   - `aisquare captain gate enroll` writes the secret (mode 0600) and prints the QR.

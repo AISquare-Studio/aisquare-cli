@@ -2440,18 +2440,18 @@ def remote_one_press_exit(
     the ``confirm_exit`` hint, naming the agent, which the page asks again in.
 
     It may be there when its screen, read as plain text (``TmuxServer.screen_text``, as
-    ``fleet._idle_screen`` reads it), shows that prompt, or when nothing says it does not:
-    a screen tmux would not show, an agent whose prompt is not read off its screen, or keys
-    sent ahead of the exit key in the same body, which may empty the draft it shows. Codex
-    keeps that prompt on screen through a turn, where its Ctrl-D exits too and its Ctrl-C
-    opens a *Cancel task* / *Exit* choice: both are asked then as well. The double-press
-    guard alone let one Ctrl-C through to a Codex at its empty prompt, which it exits
-    (0.162.1). Only a key some agent exits on asks the row's agent, and only its agent's
-    key reads the screen: Claude Code asks for a second press, and its rows read nothing.
+    ``AgentScreen.at_empty_prompt`` reads it), shows that prompt, or when nothing says it
+    does not: a screen tmux would not show, an agent whose prompt is not read off its
+    screen, or keys sent ahead of the exit key in the same body, which may empty the draft
+    it shows. Codex keeps that prompt on screen through a turn, where its Ctrl-D exits too
+    and its Ctrl-C opens a *Cancel task* / *Exit* choice: both are asked then as well. The
+    double-press guard alone let one Ctrl-C through to a Codex at its empty prompt, which it
+    exits (0.162.1). Only a key some agent exits on asks the row's agent, and only its
+    agent's key reads the screen: Claude Code asks for a second press, and its rows read
+    nothing.
     """
     from aisquare.core.agent_adapters import adapters, recorded_adapter
     from aisquare.core.tmux import TmuxError
-    from aisquare.services import fleet as fleet_service
 
     exiting = {key for adapter in adapters() for key in adapter.capabilities.one_press_exits}
     if not exiting.intersection(keys):
@@ -2477,7 +2477,7 @@ def remote_one_press_exit(
                 f"{label}'s screen could not be read to see whether {name} is at its empty prompt"
             )
         else:
-            if not fleet_service._idle_screen(adapter, screen):
+            if not screen_of(adapter).at_empty_prompt(screen):
                 return None
             said = f"{label} is at {name}'s empty prompt"
     reason = f"{said}, where one {key} can exit it"

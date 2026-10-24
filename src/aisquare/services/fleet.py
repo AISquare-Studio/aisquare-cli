@@ -6845,7 +6845,7 @@ def tell(
             gone = _socket_gone(pane)
             if gone is not None:
                 return TellResult("no", noted(gone, agent))
-            if adapter is None or not screen_of(adapter).idle_prompt_mark:
+            if adapter is None or not screen_of(adapter).reads_empty_prompt:
                 return TellResult("no", noted("no confirmed waiting native session", agent))
             if status.state == "waiting" and _hooks_fresh(session, _now()):
                 # Its hooks say waiting, its screen does not: a dialog of the agent's
@@ -7041,11 +7041,12 @@ def _at_its_prompt(
     An agent whose pane reads its readiness (``capabilities.reads_pane_readiness``) is
     there when it reads ``waiting``. Another is there when its own hooks freshly say
     ``waiting`` — and when they say nothing fresh (none fire before its first prompt, as
-    Codex's do not), when its pane is quiet (``waiting``) — and, for an agent with an
-    empty-prompt mark (``AgentScreen.idle_prompt_mark``), the last line on its screen is
-    at that prompt (:func:`_idle_screen`), however fresh its hooks. Quiet alone is not
-    enough: Codex's folder-trust and hook-review dialogs print nothing either, and an
-    Enter there answers them for the human (``enter continue`` on the folder's). Nor are
+    Codex's do not), when its pane is quiet (``waiting``) — and, for an agent whose empty
+    prompt is read off its screen (``AgentScreen.reads_empty_prompt``), its screen shows
+    it at that prompt (``AgentScreen.at_empty_prompt``), however fresh its hooks. Quiet
+    alone is not enough: Codex's folder-trust and hook-review dialogs print nothing
+    either, and an Enter there answers them for the human (``enter continue`` on the
+    folder's). Nor are
     fresh hooks: after a turn's ``Stop`` Codex opens dialogs of its own, its ``Switch to
     gpt-6-luna for lower credit usage?`` past a turn near its limit, where the Enter
     after a typed line picked the cheaper model for the agent and the line was lost
@@ -7056,31 +7057,19 @@ def _at_its_prompt(
     adapter = recorded_adapter(agent.agent)
     if adapter is not None and adapter.capabilities.reads_pane_readiness:
         return True
-    mark = screen_of(adapter).idle_prompt_mark if adapter is not None else None
+    reads = adapter is not None and screen_of(adapter).reads_empty_prompt
     if _hooks_fresh(session, now):
         if session is None or session.state != "waiting":
             return False
-    elif not mark:
+    elif not reads:
         return False
-    if adapter is None or not mark:
+    if adapter is None or not reads:
         return True
     try:
         screen = pane.screen()
     except TmuxError:
         return False
-    return _idle_screen(adapter, screen)
-
-
-def _idle_screen(adapter: AgentAdapter, screen: Sequence[str]) -> bool:
-    """Whether ``screen`` shows ``adapter``'s agent at its empty prompt: its own reading
-    (``AgentScreen.idle_on_screen``), else its last line starting with its empty-prompt
-    mark (``AgentScreen.idle_prompt_mark``)."""
-    idle = screen_of(adapter).idle_on_screen
-    if idle is not None:
-        return idle(screen)
-    mark = screen_of(adapter).idle_prompt_mark
-    last = next((line.strip() for line in reversed(screen) if line.strip()), "")
-    return bool(mark) and last.startswith(mark or "")
+    return screen_of(adapter).at_empty_prompt(screen)
 
 
 def pane_is_the_agent(srv: TmuxServer, pane_id: str) -> bool:
@@ -7690,25 +7679,23 @@ def _exit_withheld(pane: PlacedPane, agent: FleetAgent) -> str | None:
     """Why :func:`_stop_row` types no exit command into ``agent``'s pane, or ``None`` to
     type it.
 
-    An agent with an empty-prompt mark (``AgentScreen.idle_prompt_mark``) whose screen
-    does not show it at that prompt (:func:`_idle_screen`) is showing something its Enter
-    answers: a dialog of its own — Codex's ``Switch to gpt-6-luna for lower credit
-    usage?`` after a turn near its limit, where ``/exit`` and its Enter picked the cheaper
-    model and exited nothing (measured on 0.162.1) — or a draft the exit command would
-    join. Its window is then
-    killed at once, as ``--force`` kills it, and the receipt says why. A screen tmux
-    cannot read is no such evidence: the exit command is typed, as it always was. Never
-    raises.
+    An agent whose empty prompt is read off its screen (``AgentScreen.reads_empty_prompt``)
+    and whose screen does not show it there (``AgentScreen.at_empty_prompt``) is showing
+    something its Enter answers: a dialog of its own — Codex's ``Switch to gpt-6-luna for
+    lower credit usage?`` after a turn near its limit, where ``/exit`` and its Enter picked
+    the cheaper model and exited nothing (measured on 0.162.1) — or a draft the exit command
+    would join. Its window is then killed at once, as ``--force`` kills it, and the receipt
+    says why. A screen tmux cannot read is no such evidence: the exit command is typed, as
+    it always was. Never raises.
     """
     adapter = recorded_adapter(agent.agent)
-    mark = screen_of(adapter).idle_prompt_mark if adapter is not None else None
-    if adapter is None or not mark:
+    if adapter is None or not screen_of(adapter).reads_empty_prompt:
         return None
     try:
         screen = pane.screen()
     except TmuxError:
         return None
-    if _idle_screen(adapter, screen):
+    if screen_of(adapter).at_empty_prompt(screen):
         return None
     return (
         f"its pane showed {adapter.label} at a dialog or a draft, not its empty prompt, "
@@ -7725,7 +7712,7 @@ Codex 0.162.1 redraws it within a poll (measured under tmux 3.7c)."""
 def _dismissed(pane: PlacedPane, agent: FleetAgent, withheld: str) -> tuple[str | None, str | None]:
     """Press ``agent``'s ``dismiss_key`` once at the dialog :func:`_exit_withheld` withheld
     the exit command from (``withheld``, why), and read its screen until its empty prompt
-    is back (:func:`_idle_screen`), for up to :data:`_DISMISS_WAIT`.
+    is back (``AgentScreen.at_empty_prompt``), for up to :data:`_DISMISS_WAIT`.
 
     Returns ``(what was pressed, why the window is killed)``: ``(pressed, None)`` with the
     prompt back, where :func:`_stop_row` types the exit command and the agent's
@@ -7748,7 +7735,7 @@ def _dismissed(pane: PlacedPane, agent: FleetAgent, withheld: str) -> tuple[str 
     while True:
         _sleep(_POLL_INTERVAL)
         try:
-            if _idle_screen(adapter, pane.screen()):
+            if screen_of(adapter).at_empty_prompt(pane.screen()):
                 return pressed, None
         except TmuxError:
             break

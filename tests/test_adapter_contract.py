@@ -1921,7 +1921,7 @@ def test_an_agent_with_no_screen_still_runs_and_is_never_typed_into_on_its_scree
 ) -> None:
     """An adapter that declares no screen (the Gemini-shaped one: its screens are unmeasured)
     reads as ``NO_SCREEN``: never at its prompt, never ready, nothing drawn, nothing modal,
-    no empty prompt Remote could read; the fleet's own readers take it so."""
+    no empty prompt the fleet or Remote could read."""
     from aisquare.core.agent_adapters.types import NO_SCREEN
 
     assert gemini_shaped.screen is None and screen_of(gemini_shaped) is NO_SCREEN
@@ -1929,7 +1929,6 @@ def test_an_agent_with_no_screen_still_runs_and_is_never_typed_into_on_its_scree
     screen = screen_of(gemini_shaped)
     assert not (screen.at_empty_prompt(rows) or screen.ready(rows) or screen.drawn(rows))
     assert screen.modal(rows) is None and not screen.reads_empty_prompt
-    assert not fleet_service._idle_screen(gemini_shaped, rows)
 
 
 def test_the_guide_names_every_member_of_the_protocol() -> None:

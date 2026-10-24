@@ -3316,11 +3316,11 @@ def _needs_snapshot(
 
     The pane of an agent whose adapter reads its empty prompt off its screen
     (:func:`_needs_screen_reader`) is read too, once it is the agent's, as plain text
-    (``TmuxServer.screen_text``, as ``fleet._idle_screen`` reads it; the capture the phone
-    draws keeps its escapes, and ``? for shortcuts`` came bold): what the predicates go by
-    for it (:func:`_needs_screen_drawn`). One tmux would not show is ``screen_unread``:
-    unknown is not an empty prompt, and the agent is one nothing here reads
-    (:func:`needs_unseen`), typed into only behind an Escape.
+    (``TmuxServer.screen_text``, as ``AgentScreen.at_empty_prompt`` reads it; the capture
+    the phone draws keeps its escapes, and ``? for shortcuts`` came bold): what the
+    predicates go by for it (:func:`_needs_screen_drawn`). One tmux would not show is
+    ``screen_unread``: unknown is not an empty prompt, and the agent is one nothing here
+    reads (:func:`needs_unseen`), typed into only behind an Escape.
     """
     from aisquare.core.tmux import TmuxError
 
@@ -3548,15 +3548,14 @@ def _needs_screen_drawn(snap: AgentNow) -> bool | None:
     """Whether the agent's screen (:attr:`AgentNow.screen`) shows something drawn over its
     empty prompt, where a typed line and its Enter would answer it: ``True`` for a screen
     neither at that prompt nor running a turn (``AgentScreen.working_on_screen``),
-    ``False`` for its empty prompt in a quiet pane (``fleet._idle_screen``), and ``None``
-    where the screen does not settle it: none was read, or a turn is on it.
+    ``False`` for its empty prompt in a quiet pane (``AgentScreen.at_empty_prompt``), and
+    ``None`` where the screen does not settle it: none was read, or a turn is on it.
 
     Codex's empty prompt holds through a turn, its status line above the composer, so the
     pane's quiet tells a turn from rest; a dialog of its own replaces that prompt (its
     folder-trust and hook-review dialogs, ``Switch to gpt-6-luna for lower credit usage?``
     after a turn's ``Stop``, its approval view), and so does a draft in its composer, which
     a typed line would join (measured on 0.162.1)."""
-    from aisquare.services import fleet as fleet_service
 
     status = snap.status
     if snap.screen is None or status is None:
@@ -3564,7 +3563,7 @@ def _needs_screen_drawn(snap: AgentNow) -> bool | None:
     adapter = _needs_screen_reader(status)
     if adapter is None:
         return None
-    if fleet_service._idle_screen(adapter, snap.screen):
+    if screen_of(adapter).at_empty_prompt(snap.screen):
         return False if snap.pane_quiet is True else None
     working = screen_of(adapter).working_on_screen
     return None if working is not None and working(snap.screen) else True
@@ -3580,7 +3579,6 @@ def needs_screen_at_rest(snap: AgentNow) -> bool:
     the pane busy for :data:`fleet.ACTIVITY_WINDOW`), it was the second: Codex opened its
     transcript, where Enter rewinds, the tell ended 409 ``still_busy`` and left it there
     (review r16 of #113, 2/8)."""
-    from aisquare.services import fleet as fleet_service
 
     status = snap.status
     if snap.screen is None or status is None or not snap.pane_is_agent:
@@ -3589,7 +3587,7 @@ def needs_screen_at_rest(snap: AgentNow) -> bool:
     working = None if adapter is None else screen_of(adapter).working_on_screen
     if adapter is None or working is None:
         return False
-    return fleet_service._idle_screen(adapter, snap.screen) and not working(snap.screen)
+    return screen_of(adapter).at_empty_prompt(snap.screen) and not working(snap.screen)
 
 
 def needs_item_current(snap: AgentNow, item_id: str) -> bool:

@@ -23,6 +23,7 @@ import sys
 import tomllib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path, PureWindowsPath
@@ -807,6 +808,46 @@ def test_a_codex_dialog_after_its_stop_gets_no_keystroke_though_its_hooks_say_wa
     assert tmux.typed == [], "no /exit, whose Enter would pick the cheaper model"
     assert receipt.killed is not None and "dialog" in receipt.killed, receipt
     assert manager.pane_id in tmux.killed and receipt.agent.ended_at is not None
+
+
+def test_an_agent_that_reads_its_prompt_by_its_screen_alone_gets_the_same_checks(
+    tmux: FakeTmux,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    codex_on_path: Path,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r18 of #113, findings 3 and 13: ``tell``, the manager's nudge and ``stop``
+    asked for ``idle_prompt_mark`` alone, so an agent that reads its empty prompt with
+    ``idle_on_screen`` (as ``AgentScreen`` allows, "in place of" the mark) got no screen
+    check. With fresh ``waiting`` hooks its line, its Enter and ``/exit`` went into the
+    dialog it opened after its ``Stop``; with none it was never at its prompt. Codex's
+    screen without its mark is such an agent: the fleet asks ``reads_empty_prompt`` and
+    ``at_empty_prompt``, as Remote does."""
+    adapter = get_adapter("codex")
+    monkeypatch.setattr(type(adapter), "screen", replace(screen_of(adapter), idle_prompt_mark=None))
+    assert screen_of(adapter).reads_empty_prompt and not screen_of(adapter).idle_prompt_mark
+    manager = _waiting_manager_on("codex", project, tmux, tmp_path / "codex-home", monkeypatch)
+    tmux.screens[manager.pane_id] = RATE_LIMIT_DIALOG
+
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is False
+    told = fleet_service.tell(project, manager.label, "carry on")
+    assert not told.delivered and "hooks say waiting" in told.how, told
+    assert tmux.typed == []
+
+    later = datetime.now(tz=UTC) + team_service._STALE_AFTER + timedelta(minutes=1)
+    monkeypatch.setattr(fleet_service, "_now", lambda: later)
+    tmux.screens[manager.pane_id] = IDLE_PROMPT
+    assert fleet_service.nudge_manager(project.id, reason="task_review") is True, (
+        "its quiet pane at its empty prompt is its prompt, hooks fresh or not"
+    )
+    typed = len(tmux.typed)
+
+    tmux.screens[manager.pane_id] = RATE_LIMIT_DIALOG
+    receipt = fleet_service.stop(project, manager.label, grace=0)
+
+    assert tmux.typed[typed:] == [], "no /exit, whose Enter would answer the dialog"
+    assert receipt.killed is not None and "dialog" in receipt.killed, receipt
 
 
 def test_tell_to_a_codex_agent_names_a_socket_that_is_gone(

@@ -266,17 +266,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   update` under *⚙ Settings*, until asq runs that version or a newer one, with
   one toast the first time each release is found. The row opens a confirm
   dialog with the live agent count, which asks PyPI again as it opens and keeps
-  its button off until PyPI answers (or the lookup's 5 s timeout passes, after
-  which it says "the newest release", the last check's number as that; nothing
-  newer closes it with a toast); *Restart & update* hands the terminal to
+  its button off until PyPI answers, for 5 s at most by the clock (after which
+  it says "the newest release", the last check's number as that, and a later
+  answer is ignored; nothing newer closes it with a toast); *Restart & update*
+  hands the terminal to
   `aisquare upgrade` the way Doctor's Update does, with no y/N and unpinned, and
   asq reopens by itself on the new version, in the view it had open. The fleet's tmux panes
   and their sessions keep running; the agents alive at the press are recorded,
   and any whose pane is gone after the reopen is restarted on its session
   (`fleet restart`). The toast says `✓ aisquare 0.8.3 — 2 agents reattached`,
   and names each restart and its reason. The record is that reopen's alone: a
-  reopen that cannot start drops it, and one older than ten minutes is never
-  acted on. A failed install stays on screen with
+  reopen that cannot start drops it, and one not taken within ten minutes of
+  the run handing back to asq is never acted on. A failed install stays on
+  screen with
   "Press Enter to go back to asq", and the old version reopens. Homebrew, pip
   and pipx installs get the row and a dialog with the command that updates
   them; a checkout or an editable install is never checked. A failed lookup

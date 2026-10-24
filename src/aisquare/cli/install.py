@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -313,7 +314,12 @@ def _one_click_lines(plan: lifecycle_service.UpgradePlan) -> None:
 
 
 def _reopen(
-    reopen: bool, *, one_click: bool = False, failed: bool = False, installed: bool = False
+    reopen: bool,
+    *,
+    one_click: bool = False,
+    failed: bool = False,
+    installed: bool = False,
+    started: datetime | None = None,
 ) -> None:
     """Hand the terminal back to asq (``--reopen``: what asq's Update and Uninstall run).
 
@@ -329,7 +335,8 @@ def _reopen(
     waits for Enter, so the failure is read first, and it opens asq all the same: the
     version that was installed, whose agents were never touched. ``installed`` is a run that
     installed the new release, which a reopen that cannot start then says. A one-click run
-    that stays in the shell drops the press's record (:func:`_drop_press`).
+    that stays in the shell drops the press's record (:func:`_drop_press`); one that reopens
+    renews it, as the run that began at ``started`` (:func:`_renew_press`).
     """
     if not reopen or get_state().json_output or not _stdin_is_a_terminal():
         return
@@ -341,16 +348,18 @@ def _reopen(
                 _drop_press()
             return
     if one_click:
-        _reopen_after_one_click(failed=failed, installed=installed)
+        _reopen_after_one_click(failed=failed, installed=installed, started=started)
     else:
         selfcli.exec_self(["ui"])
 
 
-def _reopen_after_one_click(*, failed: bool, installed: bool) -> None:
+def _reopen_after_one_click(*, failed: bool, installed: bool, started: datetime | None) -> None:
     """Open asq again as :data:`ONE_CLICK_REOPEN`. A reopen that cannot start says so as itself:
     after a run that installed the update is done and only the reopen failed, which an error
     raised from here reported as the upgrade's own; after one with nothing newer to install,
     nothing was (review of #301)."""
+    if started is not None:
+        _renew_press(started)
     try:
         selfcli.exec_self(list(ONE_CLICK_REOPEN))
     except OSError as exc:
@@ -374,6 +383,17 @@ def _drop_press() -> None:
     :data:`~aisquare.services.updates.PRESS_KEEPS` ages out."""
     try:
         updates_service.forget_press()
+    except Exception:
+        return
+
+
+def _renew_press(started: datetime) -> None:
+    """Start the press's ten minutes again as the run hands over to the reopen
+    (``updates.renew_press``): a failed run's "Press Enter" can be read for longer, and the
+    reopen then said nothing of the agents (review of #301, N3). A store that will not take
+    it leaves the press's own time."""
+    try:
+        updates_service.renew_press(started)
     except Exception:
         return
 
@@ -442,18 +462,27 @@ def upgrade(
     # Every way the run can end goes back to asq: a failure the command reports, a Ctrl-C in
     # uv's run and an error nobody expected alike, said first and read before Enter. Left
     # to the exception, the last two ended in a shell with no asq (review of #301, m2).
+    started = datetime.now(UTC)  # the press hands over at once: a record fresh now is ours
     try:
-        _upgrade(check=False, version=version, yes=True, dry_run=False, reopen=True, one_click=True)
+        _upgrade(
+            check=False,
+            version=version,
+            yes=True,
+            dry_run=False,
+            reopen=True,
+            one_click=True,
+            started=started,
+        )
     except typer.Exit as exc:
         if exc.exit_code:
-            _reopen(True, one_click=True, failed=True)
+            _reopen(True, one_click=True, failed=True, started=started)
         raise
     except KeyboardInterrupt:
         stderr_console().print(
             f"✗ the upgrade was interrupted. Run it again by hand: {_by_hand(version)}",
             markup=False,
         )
-        _reopen(True, one_click=True, failed=True)
+        _reopen(True, one_click=True, failed=True, started=started)
         raise
     except Exception as exc:
         stderr_console().print(traceback.format_exc().rstrip(), markup=False, highlight=False)
@@ -462,7 +491,7 @@ def upgrade(
             f"by hand: {_by_hand(version)}",
             markup=False,
         )
-        _reopen(True, one_click=True, failed=True)
+        _reopen(True, one_click=True, failed=True, started=started)
         raise
 
 
@@ -474,8 +503,10 @@ def _upgrade(
     dry_run: bool,
     reopen: bool,
     one_click: bool = False,
+    started: datetime | None = None,
 ) -> None:
-    """:func:`upgrade`, its flags read. ``one_click`` reopens asq at once on success."""
+    """:func:`upgrade`, its flags read. ``one_click`` reopens asq at once on success, as the
+    run that began at ``started``."""
     json_output = get_state().json_output
     try:
         plan = lifecycle_service.upgrade_plan(version, check=check)
@@ -527,7 +558,7 @@ def _upgrade(
                 f"aisquare {plan.current} is up to date (PyPI's latest is "
                 f"{plan.latest_version}) — nothing to do"
             )
-        _reopen(reopen, one_click=one_click)
+        _reopen(reopen, one_click=one_click, started=started)
         return
     if dry_run or not yes:
         _emit_plan(plan)
@@ -548,7 +579,7 @@ def _upgrade(
         )
         if not typer.confirm(f"{move}{during}?", default=False):
             _say("nothing changed")
-            _reopen(reopen, one_click=one_click)
+            _reopen(reopen, one_click=one_click, started=started)
             return
     elif not json_output:
         _fleet_lines(plan, one_click=one_click)  # --yes skips the plan, not what it costs the fleet
@@ -587,7 +618,7 @@ def _upgrade(
     _emit_report(report)
     if any(not hook.ok for hook in report.hooks):
         raise typer.Exit(1)
-    _reopen(reopen, one_click=one_click, installed=True)
+    _reopen(reopen, one_click=one_click, installed=True, started=started)
 
 
 # --- uninstall ---------------------------------------------------------------------------

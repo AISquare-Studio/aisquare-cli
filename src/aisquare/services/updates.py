@@ -18,7 +18,8 @@ newer (the plan's ``up_to_date``: a version ahead of PyPI's is offered nothing).
 The update is ``aisquare upgrade``'s, handed the terminal as Doctor's Update hands it. At the
 press, :func:`agents_alive_now` reads every agent's row and pane again, and
 :func:`record_press` writes down the ones alive then; the asq that reopens takes that record
-once (:func:`take_press`), within :data:`PRESS_KEEPS` of the press, and
+once (:func:`take_press`), within :data:`PRESS_KEEPS` of the run's hand-over to it
+(:func:`renew_press`), and
 :func:`reattach_agents` restarts each one whose pane is gone through ``fleet.restart``, which
 resumes its session when the transcript is on disk. Agents outlive asq on the fleet's tmux
 server, so normally every one is still there. Nothing else is ever restarted: an ordinary
@@ -55,10 +56,10 @@ ASK_EVERY_SECONDS = 3600.0
 """How often asq asks :func:`check_for_release` while it runs: a failed lookup's retry, at
 most hourly."""
 PRESS_KEEPS = timedelta(minutes=10)
-"""How long the press's record holds. The reopen it is for follows within the install's run;
-one older is a record no reopen took (an exec into asq that failed, say), and a
-``ui --after-update`` typed long after must not restart agents for a click long ago
-(tester's review of #301)."""
+"""How long the press's record holds, from the press and again from the run's hand-over to
+the reopen (:func:`renew_press`). One older is a record no reopen took (an exec into asq that
+failed, say), and a ``ui --after-update`` typed long after must not restart agents for a
+click long ago (tester's review of #301)."""
 
 _CHECKOUTS = frozenset({install_route.EDITABLE, install_route.LOCAL_SOURCE})
 
@@ -244,6 +245,32 @@ def forget_press() -> None:
     """Drop the record :func:`record_press` wrote: the hand-over it was for did not happen."""
     with store_session() as store:
         store.set_ui_state(PRESSED_KEY, None)
+
+
+def renew_press(started: datetime, now: datetime | None = None) -> None:
+    """Start the record's :data:`PRESS_KEEPS` again at ``now``, as the one-click run that began
+    at ``started`` hands over to the reopen. A failed run waits at "Press Enter" while its
+    output is read, which can take longer than that, and the reopen then said nothing of the
+    agents (review of #301, N3).
+
+    Only a record within :data:`PRESS_KEEPS` of ``started`` is the run's, since the press
+    hands over at once. An older one is a press no reopen took, with this run typed by hand,
+    and one that cannot be read is no press: both are left for :func:`take_press` to forget,
+    never renewed.
+    """
+    with store_session() as store:
+        raw = store.ui_state(PRESSED_KEY)
+        if raw is None:
+            return
+        try:
+            payload = json.loads(raw)
+            at = datetime.fromisoformat(str(payload["at"]))
+        except (ValueError, KeyError, TypeError):
+            return
+        if at.tzinfo is None or started - at > PRESS_KEEPS:
+            return
+        payload["at"] = (now or datetime.now(UTC)).isoformat()
+        store.set_ui_state(PRESSED_KEY, json.dumps(payload))
 
 
 def take_press(now: datetime | None = None) -> Press | None:

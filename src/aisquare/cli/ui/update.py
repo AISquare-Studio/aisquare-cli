@@ -2,12 +2,13 @@
 
 It opens on the release the last check found, which can be a day old, says it is checking,
 and asks PyPI again (``services.updates.refresh_latest``, off the UI thread as the dialog
-opens). *Restart & update* waits for that answer, which the lookup's own 5 s timeout bounds:
-the update installs uv's newest, unpinned, exactly as ``aisquare upgrade`` does, so a number
-named before PyPI answered could be one the update does not install (a probe named 0.9.1 and
-installed 0.9.2). An ask that found no answer leaves the button on, worded as "the newest
-release" with the last check's number as that, never as the one installed. An answer that
-nothing is newer closes the dialog (``FleetApp._update_refreshed``). Unpinned on purpose: a
+opens). *Restart & update* waits for that answer, for :data:`REFRESH_DEADLINE_SECONDS` at
+most: the update installs uv's newest, unpinned, exactly as ``aisquare upgrade`` does, so a
+number named before PyPI answered could be one the update does not install (a probe named
+0.9.1 and installed 0.9.2). An ask that found no answer, or none by then, leaves the button
+on, worded as "the newest release" with the last check's number as that, never as the one
+installed. An answer that nothing is newer closes the dialog (``FleetApp._update_refreshed``).
+Only the answer to the open dialog's own ask counts, and only by then. Unpinned on purpose: a
 pinned receipt (``aisquare-cli==0.8.3``) would hold every later ``uv tool upgrade`` back, a
 lasting change to the install nobody asked for (review of #301).
 
@@ -55,8 +56,13 @@ CHECK_WORKER = "update-check"
 
 CHECKING = "checking PyPI for the newest release…"
 """The dialog's status line while its ask of PyPI runs."""
-UNCONFIRMED = "not confirmed: PyPI could not be asked just now"
+UNCONFIRMED = "not confirmed: PyPI did not answer just now"
 """The status line when that ask found no answer: the number shown is the last check's."""
+REFRESH_DEADLINE_SECONDS = 5.0
+"""How long the dialog waits for its ask's answer, by the clock: past it, the ask counts as
+one that found none, and its answer is dropped when it lands. The lookup's own timeout
+(``install_route.LOOKUP_TIMEOUT_SECONDS``) is per read, with DNS outside it: a server
+trickling its answer held the button off for 36 s (review of #301, m5)."""
 
 
 def agents_line(live: int) -> str:

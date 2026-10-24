@@ -105,11 +105,12 @@ out, a row shows under *⚙ Settings*, and a toast says so once per release:
 
 Click the row, or move to it with ↓ and press Enter. The dialog says what
 happens and how many agents are running, and asks PyPI again as it opens.
-*Restart & update* stays off until PyPI answers (the lookup gives up after 5
-seconds), and the dialog then names the release PyPI answered. If PyPI could
-not be asked, the button comes on all the same and the dialog says it installs
-the newest release, with the last check's number given as that. If PyPI says
-you already run the newest, the dialog closes and a toast says so.
+*Restart & update* stays off until PyPI answers, for 5 seconds at most, and the
+dialog then names the release PyPI answered. If PyPI does not answer by then,
+the button comes on all the same and the dialog says it installs the newest
+release, with the last check's number given as that; an answer that comes later
+is ignored, as is one for a dialog already closed. If PyPI says you already run
+the newest, the dialog closes and a toast says so.
 
 *Restart & update* closes asq, runs `aisquare upgrade` without asking again,
 and reopens asq on the new version in the view you had open. It installs
@@ -124,9 +125,10 @@ running when you press the button; after the reopen, any whose pane is gone is
 restarted on its session, as `aisquare fleet restart` does, and the toast says
 what it found: `✓ aisquare 0.8.3 — 2 agents reattached`, plus each restart and
 its reason. That record is for this reopen only: if asq cannot open again, or
-you stay in the shell, it is dropped, and one older than ten minutes is never
-acted on. If the install fails, its output stays on screen until you press
-Enter, and the version you had reopens.
+you stay in the shell, it is dropped, and one the reopen does not take within
+ten minutes of the update handing back to asq is never acted on. If the install
+fails, its output stays on screen until you press Enter, and the version you
+had reopens.
 
 On Homebrew, pip or pipx the row still shows, and the dialog gives the command
 that updates that install instead of a restart button. A source checkout or an

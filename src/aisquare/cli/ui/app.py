@@ -111,6 +111,7 @@ from aisquare.cli.ui.update import (
     PLAN_WORKER,
     PRESS_WORKER,
     REATTACH_WORKER,
+    REFRESH_DEADLINE_SECONDS,
     REFRESH_WORKER,
     UpdateScreen,
 )
@@ -856,6 +857,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._refreshed: tuple[str | None] | None = None
         """PyPI's answer to the update dialog's own ask (``updates.refresh_latest``), once it
         has landed: ``(None,)`` when the lookup found none. ``None`` while it is out."""
+        self._refresh_worker: Worker[str | None] | None = None
+        """That ask, while its answer still counts: only its answer reaches the dialog and the
+        row. Let go when the dialog closes and at the deadline, so a late answer, or one for a
+        dialog closed since, changes nothing (review of #301, m4, m5)."""
+        self._refresh_deadline: Timer | None = None
+        """The ask's deadline (``REFRESH_DEADLINE_SECONDS``), stopped once it is let go."""
         self._press_worker: Worker[updates_service.Press] | None = None
         """*Restart & update*'s read and record of the agents alive at the press: only its
         answer hands over (:meth:`_update_pressed`)."""
@@ -2371,17 +2378,42 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             thread=True,
             exit_on_error=False,
         )
-        self.run_worker(
+        # An earlier dialog's ask can still be out: opened, closed with Esc and opened again,
+        # its answer enabled Restart while this one's was out (review of #301, m4).
+        self._let_go_of_refresh()
+        self._refresh_worker = ask = self.run_worker(
             updates_service.refresh_latest,
             name=REFRESH_WORKER,
             group=REFRESH_WORKER,
             thread=True,
             exit_on_error=False,
         )
+        self._refresh_deadline = self.set_timer(
+            REFRESH_DEADLINE_SECONDS, lambda: self._refresh_overdue(ask)
+        )
+
+    def _let_go_of_refresh(self) -> None:
+        """Count no answer of the dialog's ask from here on, and stop its deadline."""
+        self._refresh_worker = None
+        if self._refresh_deadline is not None:
+            self._refresh_deadline.stop()
+            self._refresh_deadline = None
+
+    def _refresh_overdue(self, ask: Worker[str | None]) -> None:
+        """``REFRESH_DEADLINE_SECONDS`` passed with ``ask`` unanswered: it found no answer, as
+        a lookup that failed finds none. The lookup's own timeout is per read, so a server
+        trickling its answer held *Restart & update* off for 36 s (review of #301, m5)."""
+        if ask is not self._refresh_worker:
+            return  # answered, or its dialog closed
+        self._let_go_of_refresh()
+        self._refreshed = (None,)
+        if isinstance(self.screen, UpdateScreen):
+            self.screen.show_latest(None)
 
     def _update_refreshed(self, event: Worker.StateChanged) -> None:
         """PyPI's answer to the dialog's ask: the number the dialog and the row show. An ask
-        that failed leaves the last check's number, said as unconfirmed.
+        that failed leaves the last check's number, said as unconfirmed. The answer to an ask
+        let go (:meth:`_let_go_of_refresh`) is dropped.
 
         An answer that nothing is newer than the version that runs takes the row away and
         says so, and closes the dialog, or keeps it from opening (:meth:`_update_planned`
@@ -2389,9 +2421,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         the row went in silence (review of #301, m2)."""
         if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR):
             return
-        found = event.worker.result if event.state is WorkerState.SUCCESS else None
-        if found is not None and not isinstance(found, str):
+        if event.worker is not self._refresh_worker:
             return
+        self._let_go_of_refresh()
+        result = event.worker.result if event.state is WorkerState.SUCCESS else None
+        found = result if isinstance(result, str) else None
         self._refreshed = (found,)
         offer = self.release
         screen = self.screen if isinstance(self.screen, UpdateScreen) else None
@@ -2429,6 +2463,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Open the update dialog on the plan read for it, or say why it could not be read."""
         offer = self.release
         if event.state is WorkerState.ERROR:
+            self._let_go_of_refresh()  # no dialog opens to take its answer
             self.notify(
                 f"could not read how aisquare updates here: {event.worker.error}",
                 severity="error",
@@ -2459,7 +2494,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         Read again rather than taken from the frame on screen, which is up to a refresh old:
         an agent that exited since would have been restarted after the reopen (review of
         #301, m1). The projects asked of are the frame's, the ones the dialog counted from.
+        Closed either way, the dialog's ask is let go: its answer, landing later, is dropped.
         """
+        self._let_go_of_refresh()
         if not confirmed or any(
             worker.name == PRESS_WORKER and not worker.is_finished for worker in self.workers
         ):

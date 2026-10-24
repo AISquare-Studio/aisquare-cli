@@ -14,6 +14,7 @@ import asyncio
 import dataclasses
 import threading
 from collections.abc import Awaitable, Callable, Collection
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar, TypeVar
 
@@ -39,9 +40,12 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.update import (
     CHECK_WORKER,
+    CHECKING,
     PLAN_WORKER,
     PRESS_WORKER,
+    REFRESH_DEADLINE_SECONDS,
     REFRESH_WORKER,
+    UNCONFIRMED,
     UpdateScreen,
 )
 from aisquare.cli.ui.views.doctor import DoctorView
@@ -123,9 +127,11 @@ class Fresh:
 @pytest.fixture(autouse=True)
 def fresh(monkeypatch: pytest.MonkeyPatch) -> Fresh:
     """The dialog's ask of PyPI as it opens: PyPI says the release the row offers unless a
-    test says otherwise."""
+    test says otherwise. Its deadline is a minute, so a test that holds the ask on a loaded
+    runner is not overtaken by it; the deadline's own test sets it short."""
     stand_in = Fresh()
     monkeypatch.setattr(updates, "refresh_latest", stand_in)
+    monkeypatch.setattr(ui_app, "REFRESH_DEADLINE_SECONDS", 60.0)
     return stand_in
 
 
@@ -151,10 +157,11 @@ def _drive(
     return asyncio.run(run())
 
 
-async def _toasts(app: FleetApp) -> list[str]:
+async def _toasts(app: FleetApp, *, group: str | None = None) -> list[str]:
+    """The toasts on screen once the page settles: ``group``'s workers alone, when given."""
     from textual.widgets._toast import Toast
 
-    await settle_page(app)
+    await settle_page(app, group=group)
     return [toast.render().plain for toast in app.screen.query(Toast)]
 
 
@@ -575,7 +582,7 @@ def test_the_dialog_asks_pypi_as_it_opens_and_restart_waits_for_the_answer(
     assert after == title
     assert says in said and "checking" not in said
     if answer is None:
-        assert said.endswith("not confirmed: PyPI could not be asked just now")
+        assert said.endswith("not confirmed: PyPI did not answer just now")
     assert enabled is True
     if answer == "0.9.2":
         assert row == "⬆︎ 0.9.2 · restart to update", "the row follows PyPI's answer"
@@ -628,6 +635,164 @@ def test_pypi_saying_nothing_is_newer_closes_the_dialog_and_says_so(
     assert stacked is False, "no dialog, open or opening"
     assert release is None and row is False, "the row goes"
     assert updates.take_press() is None
+
+
+class Asks:
+    """``updates.refresh_latest`` asked by one dialog after another: each ask held by its own
+    gate, and given its own answer."""
+
+    def __init__(self, *answers: str | None) -> None:
+        self.answers = list(answers)
+        self.gates = [threading.Event() for _ in answers]
+        self.asked = 0
+        self.landed = 0
+
+    def __call__(self) -> str | None:
+        ask = self.asked
+        self.asked += 1
+        self.gates[ask].wait(30)
+        self.landed += 1
+        return self.answers[ask]
+
+
+def _looks(screen: UpdateScreen) -> tuple[str, bool, str]:
+    """The dialog's title, whether *Restart & update* is off, and what it says."""
+    return (
+        str(screen.query_one("#update-box").border_title),
+        screen.query_one("#update-confirm", Button).disabled,
+        shown(screen.query_one("#update-text", Static)),
+    )
+
+
+async def _open(app: FleetApp) -> UpdateScreen:
+    """Activate the ⬆ row and wait for the dialog, its ask held."""
+    app.sidebar.focus()
+    app.query_one(UpdateRow).activate()
+    await settle_until(app, lambda: isinstance(app.screen, UpdateScreen), group=PLAN_WORKER)
+    screen = app.screen
+    assert isinstance(screen, UpdateScreen), f"the dialog opened, not {screen!r}"
+    return screen
+
+
+async def _lands(app: FleetApp, asks: Asks, ask: int) -> None:
+    """Let ``ask`` answer, and wait until its answer has been handled."""
+    landed = asks.landed + 1
+    asks.gates[ask].set()
+    await settle_until(app, lambda: asks.landed == landed, group=PLAN_WORKER)
+    await settle_page(app, group=PLAN_WORKER)
+
+
+@pytest.mark.parametrize("closed_lands", ["while-this-one-asks", "after-this-one-answered"])
+def test_a_closed_dialogs_answer_never_reaches_the_next_dialog(
+    tmp_path: Path,
+    script: Script,  # noqa: F811
+    planned: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    closed_lands: str,
+) -> None:
+    """Opened, closed with Esc and opened again: the first dialog's ask is still out, and its
+    answer is the closed dialog's. Taken as the open one's, a 0.9.1 turned *Restart & update*
+    on while this dialog's own ask, which would say 0.9.2, was out, and a first ask that failed
+    and landed last turned a confirmed 0.9.2 into "not confirmed" (review of #301, m4)."""
+    _two_alive(tmp_path, script)
+    first = "0.9.1" if closed_lands == "while-this-one-asks" else None
+    asks = Asks(first, "0.9.2")
+    monkeypatch.setattr(updates, "refresh_latest", asks)
+    order = [0, 1] if closed_lands == "while-this-one-asks" else [1, 0]
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[list[Any], int, str]:
+        await _open(app)
+        await pilot.press("escape")
+        await settle_page(app, group=PLAN_WORKER)
+        screen = await _open(app)
+        seen = []
+        for ask in order:
+            await _lands(app, asks, ask)
+            seen.append(_looks(screen))
+        return seen, asks.asked, shown(app.query_one(UpdateRow))
+
+    seen, asked, row = _drive(body)
+
+    assert asked == 2, "control: each dialog asked"
+    confirmed = ("Update aisquare 0.9.0 → 0.9.2", False)
+    if closed_lands == "while-this-one-asks":
+        title, off, said = seen[0]
+        assert (title, off) == ("Update aisquare 0.9.0", True), seen[0]
+        assert said.endswith(CHECKING), "the closed dialog's 0.9.1 named nothing"
+    else:
+        assert seen[0][:2] == confirmed, "control: this dialog's own answer was named"
+    assert seen[-1][:2] == confirmed, seen[-1]
+    assert "installs 0.9.2" in seen[-1][2] and UNCONFIRMED not in seen[-1][2]
+    assert row == "⬆︎ 0.9.2 · restart to update"
+
+
+def test_an_answer_for_a_dialog_closed_since_changes_nothing(
+    tmp_path: Path,
+    script: Script,  # noqa: F811
+    planned: list[dict[str, Any]],
+    fresh: Fresh,
+) -> None:
+    """The dialog closed with its ask out, and none opened since: PyPI's answer, that nothing
+    is newer, lands with no dialog to answer. The row and the toasts stay as the dialog left
+    them; the lookup recorded itself as a check, which the next hourly ask reads."""
+    _two_alive(tmp_path, script)
+    fresh.answer = "0.9.0"
+    fresh.gate.clear()
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[list[str], bool, bool, list[str]]:
+        await _open(app)
+        await pilot.press("escape")
+        before = await _toasts(app, group=PLAN_WORKER)  # the ask still held
+        out = any(w.group == REFRESH_WORKER and not w.is_finished for w in app.workers)
+        fresh.gate.set()
+        await settle_page(app)
+        return before, out, app.query_one(UpdateRow).display, await _toasts(app)
+
+    before, out, row, after = _drive(body)
+
+    assert fresh.asked == 1 and out is True, "control: the ask was out as the dialog closed"
+    assert row is True, "the row stays"
+    assert after == before and not any("nothing to update" in toast for toast in after), after
+
+
+def test_an_ask_unanswered_after_five_seconds_counts_as_unanswered(
+    tmp_path: Path,
+    script: Script,  # noqa: F811
+    planned: list[dict[str, Any]],
+    fresh: Fresh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """By the clock, not by the lookup's own timeout, which is per read with DNS outside it:
+    a server trickling its answer held *Restart & update* off for 36 s (review of #301, m5).
+    Past the deadline the button is on and the dialog says it is not confirmed; PyPI's answer,
+    landing after, changes nothing. Here the deadline is cut to 0.3 s."""
+    assert REFRESH_DEADLINE_SECONDS == 5.0, "what docs/install.md says"
+    monkeypatch.setattr(ui_app, "REFRESH_DEADLINE_SECONDS", 0.3)
+    _two_alive(tmp_path, script)
+    fresh.answer = "0.9.2"
+    fresh.gate.clear()
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[Any, ...]:
+        screen = await _open(app)
+        held = _looks(screen)
+        await settle_until(
+            app,
+            lambda: not screen.query_one("#update-confirm", Button).disabled,
+            group=PLAN_WORKER,
+        )
+        overdue = _looks(screen)
+        fresh.gate.set()
+        await settle_page(app)
+        return held, overdue, _looks(screen), shown(app.query_one(UpdateRow))
+
+    held, overdue, landed, row = _drive(body)
+
+    assert held[:2] == ("Update aisquare 0.9.0", True), "control: off while the ask is out"
+    assert overdue[:2] == ("Update aisquare 0.9.0", False), "on once the deadline passed"
+    assert overdue[2].startswith(_LAST_CHECKED) and overdue[2].endswith(UNCONFIRMED), overdue
+    assert fresh.asked == 1, "control: the ask landed, the one there was"
+    assert landed == overdue, "the answer after the deadline named nothing"
+    assert row == "⬆︎ 0.9.1 · restart to update"
 
 
 def test_a_row_pressed_while_the_dialog_or_a_press_is_open_opens_no_second_one(
@@ -1062,6 +1227,43 @@ def test_a_ctrl_c_at_a_failed_one_clicks_prompt_stays_in_the_shell(
     assert result.exit_code == 1
     assert terminal.prompts == [_ENTER] and terminal.reopened == []
     assert _state(updates.PRESSED_KEY) is None, "no record left behind"
+
+
+@pytest.mark.parametrize("pressed", ["read-at-length", "days-before-the-run"])
+def test_a_failed_one_clicks_reopen_renews_the_press_it_was_handed(
+    runner: CliRunner,
+    tool: Tool,  # noqa: F811
+    machine: Machine,  # noqa: F811
+    terminal: Terminal,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    pressed: str,
+) -> None:
+    """The ten minutes start again as the run hands over to the reopen. A failure read at
+    "Press Enter" for longer than that left a record the reopen dropped as too old, and it
+    said nothing of the agents (review of #301, N3): here the run began 11 minutes before
+    the Enter, a second after the press. A record already days old when the run began is no
+    press of this run's (``upgrade --one-click`` typed by hand), and is never renewed."""
+    machine.installer_exit = 1
+    if pressed == "read-at-length":
+        read_for = timedelta(minutes=11)
+        readings = [datetime.now(UTC) - read_for]  # the run's start; the Enter is read now
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> Any:
+                return readings.pop(0) if readings else datetime.now(tz)
+
+        monkeypatch.setattr(install_cli, "datetime", Clock)
+        updates.record_press([], datetime.now(UTC) - read_for - timedelta(seconds=1))
+    else:
+        updates.record_press([], datetime.now(UTC) - timedelta(days=2))
+
+    result = runner.invoke(cli_app, ["upgrade", "--one-click"])
+
+    assert result.exit_code == 1 and terminal.prompts == [_ENTER], result.output
+    assert terminal.reopened == [["ui", "--after-update"]], "control: the run handed over"
+    taken = updates.take_press()
+    assert (taken is not None) is (pressed == "read-at-length"), taken
 
 
 @pytest.mark.parametrize(

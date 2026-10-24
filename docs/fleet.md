@@ -1884,6 +1884,50 @@ typing the letter.
 
 ---
 
+## Upgrading
+
+### To the release with verified first messages (store schema 34)
+
+**The store migrates itself on first open, from v33 to v34, in one step.** v34 adds
+three nullable columns: `team_session.prompted_at` (the session's last
+`UserPromptSubmit`), `fleet_agent.first_prompt` (`pending`, `acked` or `unsent`) and
+`fleet_agent.first_prompt_at` (when that last changed). The step has no script of its
+own: the columns are checked for by presence and added only where absent, as every
+step from v15 on is, so a store that another build already carried past v33 converges
+too. Nothing is rewritten. An agent spawned before the upgrade has no first-message
+state, reads as "not tracked", and is never reported as a message not taken.
+
+**No config migration.** Every new key has a default, and a key you never set
+follows it:
+
+| Key | Default | What it changes |
+| --- | --- | --- |
+| `[fleet] first_prompt` | `argv` | A Claude Code agent's first message rides its command line. `type` types it instead, once the input box is drawn, and never puts it on a command line. |
+| `[fleet] prompt_ack_seconds` | `45` | How long `fleet spawn`, `restart` and `switch` wait for the agent to take its first message. |
+| `[fleet] busy_quiet_seconds` | `30` | How long a `working` agent's pane may stay quiet before one capture checks whether it is idle. |
+| `[fleet] draft_quiet_seconds` | `10` | How long after your last keystroke in a pane the fleet waits before typing into it. |
+| `[fleet] deliver_notes_at_turn_end` | `true` | A note addressed to a busy agent is handed over when its turn ends. |
+| `[accounts] prefer` | `priority` | Of the accounts under the switch threshold, which one a spawn's pick and a hand-over take: the first by priority, or with `reset-soonest` the one whose week resets first. |
+
+**What you will notice.**
+
+- `fleet spawn`, `restart` and `switch` take up to `prompt_ack_seconds` longer and end
+  with `✓ first message taken`, or say it was not.
+- A just-spawned agent reads `waiting` until its first prompt, not `working`.
+- `fleet switch` refuses to move an agent that was just moved, unless you add `--force`.
+  One usage limit now moves an agent once.
+- `capture.enabled = false` now stops prompt capture: `aisquare log` stays empty and
+  nothing is spooled ([reference](reference.md#configuration-keys)).
+- `aisquare doctor` gains a `fleet-delivery` row.
+- **On a shared machine**, a first message on the command line can be read by other
+  local users in `ps` while the agent runs. `aisquare config set fleet.first_prompt
+  type` keeps it off the command line.
+
+**Moving back** to 0.8.2 or earlier with `aisquare upgrade --version <v>` is safe. An
+older build opens a v34 store as it is, without migrating it down, and never reads the
+three columns. It ignores the new config keys and types first messages as it always
+did.
+
 ## Troubleshooting
 
 **An agent reads `attention`: "first prompt not taken".** Its first message

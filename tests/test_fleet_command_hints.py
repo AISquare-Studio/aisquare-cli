@@ -20,9 +20,12 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "aisquare"
 
-_HAND_BUILT = re.compile(r"\baisquare fleet (?!(?:reap|shutdown) --all\b|(?:gate|capacity)\b)[a-z]")
+_HAND_BUILT = re.compile(
+    r"\baisquare fleet (?!(?:reap|shutdown) --all\b|(?:gate|capacity)\b|adopt\b)[a-z]"
+)
 """``aisquare fleet`` and a word: any verb, except those that walk every project: ``reap
---all``, ``shutdown --all``, and ``gate`` and ``capacity``, which take no ``--project`` (#283)."""
+--all``, ``shutdown --all``, ``gate`` and ``capacity``, which take no ``--project`` (#283),
+and ``adopt``, which finds the project from the conversation's directory (#290)."""
 
 _NO_PROJECT_IN_QUESTION = (
     "the fleet UI's refusal: it covers every project, and the listing it points to is the "

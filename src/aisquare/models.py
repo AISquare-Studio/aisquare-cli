@@ -475,6 +475,27 @@ class StatuslineSite(BaseModel):
     error: str | None = None
 
 
+class AdoptableConversation(BaseModel):
+    """A Claude Code conversation on one of the CLI's accounts that no fleet row owns (#290):
+    what ``fleet adopt --list`` shows and ``fleet adopt`` takes."""
+
+    session_id: str
+    transcript_path: str
+    slot: int
+    """The account whose config dir holds the transcript: the one it resumes on."""
+    account: str
+    cwd: str | None = None
+    """The directory the conversation ran in, as its transcript records it."""
+    project_id: str | None = None
+    """The onboarded project that holds :attr:`cwd`; ``None`` when none does."""
+    last_activity: datetime
+    """When the transcript was last written."""
+    first_prompt: str | None = None
+    """The first thing the user typed, cut to a line."""
+    held_by: int | None = None
+    """The pid of a live ``claude`` still holding the session; ``None`` when none does."""
+
+
 class ClaudeAccountStatus(BaseModel):
     """Everything the Accounts page shows about one slot, minus the usage it fetches live."""
 

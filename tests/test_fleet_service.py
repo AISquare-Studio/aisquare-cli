@@ -4911,7 +4911,7 @@ def test_a_fleet_agents_cycle_names_its_own_project_under_a_hub(
     board = team_service.hook_session_start(session_id, project.root, "startup")
 
     assert "Your standing cycle (manager)" in board
-    commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+    commands = re.findall(r"aisquare fleet (?!adopt\b)[a-z]+(?: --project [\w.-]+)?", board)
     assert {command.split()[2] for command in commands} == {
         "spawn",
         "tell",
@@ -4951,7 +4951,7 @@ def test_under_a_hub_a_session_with_no_fleet_row_names_its_own_directorys_projec
 
     for board in (started, joined):
         assert "`aisquare fleet reap --project calm-otter` again, then" in board
-        commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+        commands = re.findall(r"aisquare fleet (?!adopt\b)[a-z]+(?: --project [\w.-]+)?", board)
         assert commands and all(c.endswith(f"--project {named.codename}") for c in commands)
         assert team_project(hub).id not in board
 
@@ -4962,7 +4962,8 @@ def test_under_a_hub_a_session_with_no_fleet_row_names_its_own_directorys_projec
     assert "Your standing cycle (manager)" in loose
     assert "`aisquare fleet reap --project <project>` again, then" in loose
     assert "The fleet commands below name <project>:" in loose
-    assert not re.search(r"aisquare fleet [a-z]+(?! --project)\b", loose), loose
+    # `fleet adopt` (#290) takes no --project: the conversation's own directory names it.
+    assert not re.search(r"aisquare fleet (?!adopt\b)[a-z]+(?! --project)\b", loose), loose
 
 
 def test_under_a_hub_a_session_with_no_project_is_told_a_pause_to_fill_in_not_the_hubs(
@@ -5021,7 +5022,7 @@ def test_a_cycle_with_no_fleet_row_names_its_project_by_its_codename(
     joined = team_service.hook_prompt_heartbeat("sess-late-6", project.root)
 
     for board in (started, joined):
-        commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+        commands = re.findall(r"aisquare fleet (?!adopt\b)[a-z]+(?: --project [\w.-]+)?", board)
         assert commands and all(c.endswith("--project calm-otter") for c in commands), board
         assert project.id not in board
 
@@ -5086,7 +5087,7 @@ def test_a_cycle_whose_project_cannot_be_read_still_gets_its_board(
 
     for board in (started, joined):
         assert "Your standing cycle (manager)" in board
-        commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
+        commands = re.findall(r"aisquare fleet (?!adopt\b)[a-z]+(?: --project [\w.-]+)?", board)
         assert commands and all(c.endswith(f"--project {project.id}") for c in commands), board
     warned = [r.getMessage() for r in caplog.records if r.name == "aisquare.services.team"]
     assert len(warned) == 2 and all("OperationalError: database is locked" in w for w in warned)

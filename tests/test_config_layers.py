@@ -262,6 +262,11 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "deny_tools": list(FLEET_DENY_TOOLS),
             "first_prompt": "argv",
             "prompt_ack_seconds": 45.0,
+            # The idle check's quiet window (P0-W1b, #123).
+            "busy_quiet_seconds": 30,
+            # The delivery guards (P0-W2, #276).
+            "draft_quiet_seconds": 10.0,
+            "deliver_notes_at_turn_end": True,
             "roles": {
                 role: {
                     "deny_tools": [],

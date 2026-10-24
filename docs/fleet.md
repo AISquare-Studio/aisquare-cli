@@ -108,7 +108,10 @@ tmux can see and its row says so (`no hooks`).
    them (`docs/personas.md`).
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
-   state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
+   state chip — **▶ working**, **⏸ waiting** (a fresh agent reads waiting until its
+   first prompt starts a turn, and one whose pane has been quiet for
+   `busy_quiet_seconds` with Claude Code idle at its prompt reads *idle (the board
+   said working)*: a turn ended with Esc fires no hook), **🔔 NEEDS YOU** (with a terminal
    bell), **⏳ limited** (parked on a Claude usage limit, with the reset time),
    **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it. The header
@@ -407,6 +410,34 @@ Under `--json`, `typed` is `yes`, `no`, `unsent` or `maybe` beside `delivered`:
 `unsent` when the text is at its prompt and tmux refused its Enter (press Enter in
 its pane to send it), `maybe` when tmux did not answer in time with the text or its
 Enter, which may still arrive. Neither is to be told again: read the agent's pane.
+
+**Never over a draft.** Nothing the fleet types goes into a pane while its input
+box holds something a human typed and has not sent, or while someone has typed
+into the pane in `asq` within `[fleet] draft_quiet_seconds` (10). That covers a
+tell, the manager's nudge, a typed first message and the Remote's paste.
+Claude Code's own dim words in an empty box (its placeholder, its suggestion
+after a turn) are not a draft. A tell held back this way is filed as a note and
+says why ("a draft is in its input box, which nothing types over"). A draft
+that appears in the instant the tell is pasted, a human typing between the check
+and the paste, stops it before its Enter: the text stays in the box with the
+draft, unsent, and the tell says so ("a draft appeared in its input box while
+the text was being typed; ours is in the box with it, unsent, and nothing was
+sent") and is filed as a note. A manager's
+nudge waits, and goes out once the box is clear: `asq` retries it as it
+refreshes, and the next board write does too. If the human sends the draft
+first, that prompt hands the manager the same board update, and the nudge is
+dropped.
+
+**A note reaches a busy agent at the end of its turn.** A note addressed to an
+agent's label or role (`fleet tell` to a busy agent, `aisquare note --to
+<label|role>`) is handed to it by its `Stop` hook when the turn it was working
+on ends, the way the manager is woken: the board update as the reason it keeps
+going. It used to wait for the agent's next prompt, which an agent that had
+finished might never get. It is guarded like the manager's wake-up: not on a
+turn that is already continuing from a stop hook, and at most `[fleet]
+max_continuations_per_hour` times an hour. Only an addressed note does this;
+the rest of the board rides along with one, and waits for the next prompt
+otherwise. `[fleet] deliver_notes_at_turn_end = false` turns it off.
 
 `aisquare persona attach <name> --to <label>` types a persona's briefing into a
 waiting agent the same way, and keeps the persona on the agent's row so a `/clear`
@@ -1185,6 +1216,8 @@ max_agents_per_project = 4                # the manager (and you) cannot exceed 
 worktree_dir = ".aisquare-worktrees"      # relative to the repo root; kept out of git via .git/info/exclude
 disable_native_agent_teams = true         # exports CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0 into fleet launches
 max_continuations_per_hour = 30           # cap on the manager's Stop-hook continuations
+busy_quiet_seconds = 30                   # a "working" row whose pane printed nothing this long is
+                                          # checked once: an idle Claude Code prompt reads waiting
 deny_tools = ["Artifact", "ArtifactComments", "Workflow", "ReportFindings",
               "ShareOnboardingGuide", "PushNotification", "ScheduleWakeup", "SendFeedback"]
                                           # every role launches without these, wherever it starts
@@ -1574,6 +1607,16 @@ extended keys on so shift+enter and friends reach Claude Code, mouse off (the
 UI owns the mouse), monitor-activity on. One server for every project; one
 session per project; one window per agent.
 
+**The typing lease.** When you type into an agent's pane in `asq`, it touches
+`~/.aisquare/run/typing/<socket>-<server>-<pane>`, at most once a second.
+`<server>` is a digest of the socket's real path, so another `asq` server at
+another path, whose pane ids repeat this one's, is never held by it. For `[fleet]
+draft_quiet_seconds` (10) after your last key, no fleet write types into that
+pane: not a nudge, a tell, a typed first message or the Remote's paste. The
+input box is read too, so a draft you leave there holds them off for as long as
+it stays (see [`fleet tell`](#fleet-tell)). Typing through `tmux attach` leaves
+no lease, and the input box covers it.
+
 **Each agent is asked of its own server.** A spawn records the socket its
 server says it listens on, and every fleet command — `fleet ls` and the UI,
 `tell`, `stop`, `restart`, `switch`, `reap`, `shutdown`, and the doctor — asks
@@ -1943,6 +1986,50 @@ so pressing Esc and immediately typing `p` switches the model instead of
 typing the letter.
 
 ---
+
+## Upgrading
+
+### To the release with verified first messages (store schema 34)
+
+**The store migrates itself on first open, from v33 to v34, in one step.** v34 adds
+three nullable columns: `team_session.prompted_at` (the session's last
+`UserPromptSubmit`), `fleet_agent.first_prompt` (`pending`, `acked` or `unsent`) and
+`fleet_agent.first_prompt_at` (when that last changed). The step has no script of its
+own: the columns are checked for by presence and added only where absent, as every
+step from v15 on is, so a store that another build already carried past v33 converges
+too. Nothing is rewritten. An agent spawned before the upgrade has no first-message
+state, reads as "not tracked", and is never reported as a message not taken.
+
+**No config migration.** Every new key has a default, and a key you never set
+follows it:
+
+| Key | Default | What it changes |
+| --- | --- | --- |
+| `[fleet] first_prompt` | `argv` | A Claude Code agent's first message rides its command line. `type` types it instead, once the input box is drawn, and never puts it on a command line. |
+| `[fleet] prompt_ack_seconds` | `45` | How long `fleet spawn`, `restart` and `switch` wait for the agent to take its first message. |
+| `[fleet] busy_quiet_seconds` | `30` | How long a `working` agent's pane may stay quiet before one capture checks whether it is idle. |
+| `[fleet] draft_quiet_seconds` | `10` | How long after your last keystroke in a pane the fleet waits before typing into it. |
+| `[fleet] deliver_notes_at_turn_end` | `true` | A note addressed to a busy agent is handed over when its turn ends. |
+| `[accounts] prefer` | `priority` | Of the accounts under the switch threshold, which one a spawn's pick and a hand-over take: the first by priority, or with `reset-soonest` the one whose week resets first. |
+
+**What you will notice.**
+
+- `fleet spawn`, `restart` and `switch` take up to `prompt_ack_seconds` longer and end
+  with `✓ first message taken`, or say it was not.
+- A just-spawned agent reads `waiting` until its first prompt, not `working`.
+- `fleet switch` refuses to move an agent that was just moved, unless you add `--force`.
+  One usage limit now moves an agent once.
+- `capture.enabled = false` now stops prompt capture: `aisquare log` stays empty and
+  nothing is spooled ([reference](reference.md#configuration-keys)).
+- `aisquare doctor` gains a `fleet-delivery` row.
+- **On a shared machine**, a first message on the command line can be read by other
+  local users in `ps` while the agent runs. `aisquare config set fleet.first_prompt
+  type` keeps it off the command line.
+
+**Moving back** to 0.8.2 or earlier with `aisquare upgrade --version <v>` is safe. An
+older build opens a v34 store as it is, without migrating it down, and never reads the
+three columns. It ignores the new config keys and types first messages as it always
+did.
 
 ## Troubleshooting
 

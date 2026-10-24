@@ -3242,6 +3242,13 @@ class FakeTmux:
         """Asked where the row's spawn recorded its server (``TmuxServer.at``): this one."""
         return self
 
+    socket = "asq"
+    """Its name, as a real server's."""
+
+    def socket_path(self) -> Path:
+        """Where its socket is, as a real server's: the key of the pane's typing lease (P0-W2)."""
+        return Path("/run/fake/tmux-1000/asq")
+
     def __init__(
         self,
         *,

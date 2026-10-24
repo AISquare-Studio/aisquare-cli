@@ -198,6 +198,11 @@ CAPTAIN_AUDIT_KINDS: frozenset[str] = frozenset({"captain_action"})
 #: reason that only says "here is news" is an invitation to loop.
 WAKEUP_CLOSE = "If nothing needs you, stop."
 
+NOTE_KINDS: frozenset[str] = frozenset({"note", "decision", "question", "result"})
+"""What ``aisquare note --kind`` writes, and so what turn-end delivery hands an agent a note
+addressed to it as (P0-W2, #276). A task added for a role names the role too, and is not a
+note: the pool reaches an agent through its cycle, never by keeping it going."""
+
 
 def _addressed_to_manager(to_role: str | None) -> bool:
     """Whether a board write is addressed to the manager (``--to manager``).
@@ -314,6 +319,17 @@ class NoSuchTaskNumber(KeyError):
 
     def __str__(self) -> str:
         return f"no task #{self.number} on this board ({self.board})"
+
+
+class TurnEndDeliveryError(RuntimeError):
+    """A non-manager's turn-end delivery failed (P0-W2); the row still says ``waiting``.
+
+    Raised only after the session is marked waiting, as :class:`ManagerWakeupError` is, so the
+    CLI reports its own cost line (the notes wait for the agent's next prompt)."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(f"turn-end delivery failed ({type(cause).__name__}: {cause})")
+        self.cause = cause
 
 
 class ManagerWakeupError(RuntimeError):
@@ -2057,10 +2073,15 @@ def _board_reading(store: ContextStore, session: TeamSession) -> tuple[bool, Rel
     if context == "none":
         return False, None
     tasks = {t.id for t in store.team_tasks(session.project_id) if t.claimed_by == session.id}
-    named = _hook_named_row(store)
+    # The window's row, else the one bound to the session: a Stop or a prompt asked from
+    # outside its window still reads as that agent.
+    named = _hook_named_row(store) or store.fleet_agent_for_session(session.id)
     if named is not None and named.task_id:
         tasks.add(named.task_id)
-    names = tuple(n for n in {session.role, session.label or ""} if n)
+    # Its fleet label too: `fleet tell` files a note to the label, which the session row's
+    # own `label` (`team join --label`) is not (sync #365).
+    row_label = named.label if named is not None else ""
+    names = tuple(sorted(n for n in {session.role, session.label or "", row_label} if n))
     return True, Relevance(task_ids=tuple(sorted(tasks)), names=names)
 
 
@@ -2126,20 +2147,22 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
+        if source != _COMPACT_SOURCE:
+            # A session that just started, cleared or resumed sits at its prompt until
+            # something is typed — whose own hook says `working`. Left at the upsert's
+            # `working`, the row read busy for its whole fresh window: `say` refused to
+            # type into the captain (T2 fix round), and every other role's `fleet tell`
+            # filed a note its idle agent never read (#123). A compaction can come
+            # mid-turn, so it keeps what the turn said; a hand-over's mark is kept by
+            # `touch_session` itself.
+            store.touch_session(session.id, state="waiting")
+            session = store.get_session(session.id) or session
         if experimental.captain_role(base_role(session.role)):
             # Bound like every fleet row (rule 1 of the fleet-row section), or a
             # `/clear` left the row on the ended id and `say` waited on a session that
             # would never answer. The captain has no task, so there is nothing to brief.
             _assignment(store, session.id, project.id, named=named)
             _settle_owed_persona(store, session)  # this start briefs the persona itself
-            if source != _COMPACT_SOURCE:
-                # A captain that just started, cleared or resumed sits at its prompt
-                # until something is typed — whose own hook says `working`. Left at
-                # the upsert's `working`, the row read busy for its whole fresh window
-                # and `say` refused to type into it (T2 fix round). A compaction can
-                # come mid-turn, so it keeps what the turn said.
-                store.touch_session(session.id, state="waiting")
-                session = store.get_session(session.id) or session
             # The captain's own briefing (T2, 13121): it has no shell, so no `aisquare
             # task …` protocol lines, and the home board's captain_action lines are the
             # OWNER's audit, not the captain's context.
@@ -2316,8 +2339,15 @@ def hook_stop(
     (Claude Code is already continuing on a stop hook, so this turn's news waits
     for the next prompt's delta or a nudge — nothing is lost, only deferred), the
     hourly cap in ``[fleet] max_continuations_per_hour``, and the cursor itself,
-    which is why the same events can never wake it twice. Every other role gets
-    ``None`` and exactly the behaviour it always had.
+    which is why the same events can never wake it twice.
+
+    Every other role is handed the NOTES ADDRESSED TO IT at the end of its turn (P0-W2,
+    #276; ``[fleet] deliver_notes_at_turn_end``, on by default): a note to its label or
+    its role (``note --to``, ``fleet tell`` to a busy agent) past its cursor keeps it going
+    with the same delta its next prompt would carry, under the same three guards. A note
+    sent while it worked used to wait for a prompt that might never come. Nothing else
+    keeps it going: the rest of the board rides along with an addressed note, and waits
+    for the next prompt otherwise.
 
     The wake-up is an extra on top of the contract, so it fails open on its own:
     the row is marked waiting first, then :class:`ManagerWakeupError` carries the
@@ -2358,6 +2388,14 @@ def hook_stop(
             else:
                 if decision is not None:
                     return decision
+        else:
+            try:
+                handed = _turn_end_delivery(store, session, stop_hook_active=stop_hook_active)
+            except Exception as exc:  # waiting is the contract; the delivery is the extra
+                failure = TurnEndDeliveryError(exc)
+            else:
+                if handed is not None:
+                    return handed
         # Over a hand-over's mark the store keeps the mark: this can be the turn
         # of an agent `fleet switch` is exiting, whose SessionEnd must still park
         # the claims (review of the #205 fold, round 1).
@@ -2371,9 +2409,67 @@ def hook_stop(
         # After the row says waiting, never before: nudge_manager refuses every
         # other state. Outside the `with` too — it opens its own connection.
         _nudge_manager(manager, reason=deferred, board=session.project_id)
+    if isinstance(failure, TurnEndDeliveryError):
+        raise failure
     if failure is not None:
         raise ManagerWakeupError(failure)
     return None
+
+
+def _turn_end_delivery(
+    store: ContextStore, me: TeamSession, *, stop_hook_active: bool
+) -> StopDecision | None:
+    """Keep a non-manager going on the notes addressed to it, or ``None`` to let it wait.
+
+    Addressed means the note's ``--to`` names the session's role (or the role its seat is
+    numbered from: ``coder2`` is a ``coder``), or the label of the fleet row the session runs
+    in, which is what ``fleet tell`` files a note to. The decision is the manager's
+    (:func:`_wakeup`): the delta its next prompt would carry, its cursor moved past it,
+    ``stop_hook_active`` and ``[fleet] max_continuations_per_hour`` holding it to one turn and
+    a cap. ``[fleet] deliver_notes_at_turn_end = false`` turns it off."""
+    if not deliver_notes_at_turn_end():
+        return None
+    row = store.fleet_agent_for_session(me.id)
+    names = {me.role, base_role(me.role), me.label or "", row.label if row is not None else ""}
+    to = {name.strip().lower() for name in names if name.strip()}
+
+    def addressed(event: TeamEvent) -> bool:
+        return event.kind in NOTE_KINDS and (event.to_role or "").strip().lower() in to
+
+    # The agent is told who it is: its briefing names its session and its role, not the
+    # label a `fleet tell` addresses, and live (P0-W2) a coder read "→ busy-head" as
+    # someone else's note and left it.
+    you = row.label if row is not None else me.role
+    # Its board context, as its prompt's delta reads the board (P1 WS-2): `relevant` keeps
+    # its tasks, what is addressed to it and decisions. `none` reads no board at all, but a
+    # note addressed to it is no board update: it is handed that and nothing else, or a
+    # `fleet tell` to a busy cold reviewer never reached it (sync #365, W2's check).
+    reads, relevant = _board_reading(store, me)
+    if not reads:
+        # Asked IN the query, before its LIMIT: kept after it, a note behind a page of
+        # others never reached a cold reviewer, whose prompts read no board at all (review
+        # of #365, round 2).
+        relevant = Relevance(names=tuple(sorted(to)), decisions=False)
+    return _wakeup(
+        store,
+        me,
+        stop_hook_active=stop_hook_active,
+        wakes=addressed,
+        relevant=relevant,
+        keep=None if reads else addressed,
+        act=(
+            f"You are {you}: what is addressed to {you} or to {base_role(me.role)} is "
+            "addressed to you. Act on it, then carry on with your cycle."
+        ),
+    )
+
+
+def deliver_notes_at_turn_end() -> bool:
+    """``[fleet] deliver_notes_at_turn_end``; a config that will not load keeps the default."""
+    try:
+        return load_config().fleet.deliver_notes_at_turn_end
+    except Exception:
+        return FleetSettings().deliver_notes_at_turn_end
 
 
 def _own_manager_row(store: ContextStore, session: TeamSession) -> str | None:
@@ -2412,7 +2508,9 @@ def _count(raw: str | None) -> int:
         return 0
 
 
-def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
+def _wake_candidates(
+    store: ContextStore, me: TeamSession, relevant: Relevance | None = None
+) -> list[TeamEvent]:
     """The board since a manager's cursor, exactly as its next prompt would read it.
 
     One function so the wake-up and the deferral below can never disagree about
@@ -2422,6 +2520,8 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
     out IN the query: a Stop that wakes nobody moves no cursor, so dropped after the
     LIMIT, a run of audit lines was the whole page at every Stop, and the result behind
     it woke nobody until something else was written (review of #240, finding 11).
+    ``relevant`` is ``me``'s board context (:func:`_board_reading`), applied in the query
+    as the prompt's delta applies it: a manager reads everything.
     """
     return store.events_since(
         me.project_id,
@@ -2429,6 +2529,7 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
         exclude_session=me.id,
         exclude_kinds=HUMAN_BOARD_KINDS,
         exclude_actor=me.id,
+        relevant=relevant,
         limit=_DELTA_LIMIT * 3 + 1,
     )
 
@@ -2465,12 +2566,35 @@ def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
 def _manager_wakeup(
     store: ContextStore, me: TeamSession, *, stop_hook_active: bool
 ) -> StopDecision | None:
-    """Keep a manager going on fresh board decisions, or ``None`` to let it wait.
+    """Keep a manager going on fresh board decisions (:func:`wake_class` ``wake``), or
+    ``None``."""
+    return _wakeup(
+        store, me, stop_hook_active=stop_hook_active, wakes=lambda e: wake_class(e, me) == "wake"
+    )
 
-    Reads the delta exactly as :func:`hook_prompt_heartbeat` does — same source,
-    same exclusions, same limit — because the reason IS that delta, delivered a
-    turn early. Muted deltas (``AISQUARE_TEAM_DELTA=0``) mute this too: it is the
-    same injection through a different door.
+
+def _wakeup(
+    store: ContextStore,
+    me: TeamSession,
+    *,
+    stop_hook_active: bool,
+    wakes: Callable[[TeamEvent], bool],
+    act: str | None = None,
+    relevant: Relevance | None = None,
+    keep: Callable[[TeamEvent], bool] | None = None,
+) -> StopDecision | None:
+    """Keep ``me`` going on the board since its cursor when an event there ``wakes`` it, or
+    ``None`` to let it wait: the manager's wake-up (§7.3) and every other role's turn-end
+    delivery (P0-W2) alike. ``act`` is the reason's last instruction (the manager's, by
+    default). ``relevant`` and ``keep`` are ``me``'s board context, as its prompt's delta
+    reads it (P1 WS-2): ``relevant`` in the query, ``keep`` on what it returned.
+
+    Reads the delta as :func:`hook_prompt_heartbeat` does — same source, same
+    exclusions, same limit, the same board context (``relevant``) — because the reason IS
+    that delta, delivered a turn early. One exception, ``keep``: an agent whose board
+    context is ``none`` reads no delta at all, and its turn end hands it only the notes
+    addressed to it (sync #365). Muted deltas (``AISQUARE_TEAM_DELTA=0``) mute this too:
+    it is the same injection through a different door.
 
     Order of the writes matters. The hourly counter is bumped BEFORE the cursor
     moves and the row flips to ``working``: a lost increment costs one of thirty
@@ -2479,8 +2603,10 @@ def _manager_wakeup(
     """
     if stop_hook_active or not orchestrator.delta_enabled():
         return None
-    events = _wake_candidates(store, me)
-    if not any(wake_class(event, me) == "wake" for event in events):
+    events = _wake_candidates(store, me, relevant)
+    if keep is not None:
+        events = [event for event in events if keep(event)]
+    if not any(wakes(event) for event in events):
         return None
     key = continuation_key(me.id, _now())
     used = _count(store.get_meta(key))
@@ -2494,7 +2620,9 @@ def _manager_wakeup(
     store.set_meta(key, str(used + 1))
     store.touch_session(me.id, cursor=shown[-1].seq, state="working")
     return StopDecision(
-        reason=_render_wakeup(shown, authors, truncated=truncated, board=board, numbers=numbers),
+        reason=_render_wakeup(
+            shown, authors, truncated=truncated, board=board, numbers=numbers, act=act
+        ),
         cursor=shown[-1].seq,
     )
 
@@ -4274,9 +4402,11 @@ def _render_wakeup(
     truncated: bool,
     board: str,
     numbers: Mapping[str, int] | None = None,
+    act: str | None = None,
 ) -> str:
     """The Stop reason: the delta in the same lines the prompt hook would have used,
-    framed as the instruction Claude Code continues the turn with.
+    framed as the instruction Claude Code continues the turn with (``act``: the manager's
+    by default, an agent's own for a note handed over at its turn's end).
 
     Bounded in OUTPUT COST, not only in events (:class:`StopDecision` says what
     going over costs). Each event line gets a share derived from the remaining
@@ -4298,9 +4428,10 @@ def _render_wakeup(
         f"{count} board update(s) from your fleet arrived while you were finishing this turn "
         f"(board {board}):"
     )
+    act = act or "Act on what needs the manager — reopen, re-spec, spawn, report."
     frame = [
         *(["… more waiting — run `aisquare board` for the full picture."] if truncated else []),
-        f"Act on what needs the manager — reopen, re-spec, spawn, report. {WAKEUP_CLOSE}",
+        f"{act} {WAKEUP_CLOSE}",
     ]
     spent = _output_cost(head) + sum(_output_cost(line) + 2 for line in frame)
     share = max((_WAKEUP_REASON_BUDGET - spent) // max(len(events), 1) - 4, _ELLIPSIS_COST)

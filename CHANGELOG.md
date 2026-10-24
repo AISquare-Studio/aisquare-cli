@@ -314,7 +314,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not to be fast). No test needed a group: each one already has a home, a tmux folder and
   a `claude` stand-in of its own. What a test left running wrote outside every home is
   still reported under workers: each worker hands its notes to the controller, which
-  prints the summary. Run serially with `pytest -p no:xdist`.
+  prints the summary. Run serially with `pytest -p no:xdist`. A killed run (a timeout,
+  `kill`, a worker that dies) runs no teardown, and its tmux servers lived on with a pane
+  each, 55 on one box, some days old. The suite's private folders under `/tmp` are now
+  named for the process that made them (`asqtx<pid>-…`), and each run starts by ending
+  the servers in, and removing, every folder whose process is gone; a folder of a run
+  still going is never touched.
 - **CI checks that `uv.lock` matches `pyproject.toml` (#278).** A new `lock` job
   runs `uv lock --check` on a pinned uv, and `make check` runs it too where `uv` is
   on PATH (`make lockcheck`). The lock had drifted unseen: CI installs with pip, so
@@ -410,11 +415,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   box, so the agent sat idle with its message unsent, and the board read it
   `working`. A Claude Code agent now gets its first message on its command line
   (`claude -- "<message>"`), in a file only you can read that its launch deletes,
-  so the row's recorded launch never holds it and a restart replays no old message.
+  so the row's recorded launch never holds it and a restart replays no old message;
+  the launch takes only a file the fleet wrote, in its own folder, and reads nothing
+  else.
   Any other binary, and every agent under `[fleet] first_prompt = "type"`, has it
   typed once Claude Code's input box is drawn, checked in the box, and sent again
   only while the text is provably still waiting there. The row reads `pending` until
-  the agent's `UserPromptSubmit` takes it. `fleet spawn`, `restart` and `switch` wait
+  the agent's turn takes it: its `UserPromptSubmit`, or its `Stop` if that hook
+  could not record the prompt. `fleet spawn`, `restart` and `switch` wait
   `[fleet] prompt_ack_seconds` (45) for that and say so, and their `--json` adds
   `prompt_delivery` and `prompt_acked`. A message still pending past that wait at an
   idle input box reads `attention` ("first prompt not taken", with the `fleet tell`
@@ -424,18 +432,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The store migrates to schema v34, which adds three nullable columns:
   `team_session.prompted_at`, `fleet_agent.first_prompt` and
   `fleet_agent.first_prompt_at`. A row from before them reads as "not tracked".
+  And `fleet spawn coder --task <id>` with no `--prompt` typed nothing, so the coder
+  waited at an empty prompt: its first message is now a kickoff that names the task
+  as its ASSIGNED TO YOU block does, a `--prompt` beside `--task` following it.
   (#122)
-- **`fleet spawn coder --task <id>` gives the coder its task.** With no `--prompt`
-  it typed nothing, and the coder waited at an empty prompt. Its first message is
-  now a kickoff that names the task as its ASSIGNED TO YOU block does; a `--prompt`
-  beside `--task` follows it. The manager's cycle says `--task` delivers the task.
-  (#122)
+- **Nothing the fleet types lands in your draft.** A board write that woke the
+  manager typed its nudge into the manager's input box whatever was there. A human
+  halfway through a message in `asq` had the nudge appended to the draft, and its
+  Enter sent both. Every typed write now reads the input box first and types nothing
+  while it holds a draft, or while you have typed into the pane in `asq` within
+  `[fleet] draft_quiet_seconds` (10). That covers the manager's nudge, `fleet tell`,
+  a typed first message and the Remote's paste. Claude Code's own dim placeholder
+  and suggestion are not a draft. A nudge held back goes out once the box is clear
+  (`asq` retries it as it refreshes); if you send the draft first, your prompt
+  carries the same board update and the nudge is dropped. A tell held back is filed
+  as a note and says why. A draft that appears while the text is being pasted
+  stops it before its Enter, and the tell or the first message's note says so: "a
+  draft appeared in its input box while the text was being typed; ours is in the
+  box with it, unsent, and nothing was sent". And a note reaches a busy agent at the end of its turn: a
+  note to an agent's label or role, including a `fleet tell` to an agent that was
+  working, waited for the agent's next prompt, which one that had finished might
+  never get. Its `Stop` hook now hands it the notes addressed to it when the turn
+  ends, as the manager is kept going on fresh board decisions, with the same
+  guards: not on a turn already continuing from a stop hook, and at most `[fleet]
+  max_continuations_per_hour` an hour. `[fleet] deliver_notes_at_turn_end = false`
+  turns it off. (#276)
 - **A coder that claims a task sees its contract.** `task claim` and `task next
   --claim` printed the title line alone, and the contract (`--detail`) was a
   separate `task show` that nothing named, so people pasted contracts into coders'
   panes. A claim now prints the contract, the reason the task was last reopened
-  (which was lost the moment a reopened task was claimed again) and `aisquare task
-  show <ref>`. `task next` without `--claim` says when a task has a contract. The
+  (which was lost the moment a reopened task was claimed again) and the command
+  that shows it again, `aisquare task show 2`: the bare number, which a shell keeps
+  (`#2` starts a comment). `task next` without `--claim` says when a task has a contract. The
   coder's cycle names `task show`, the manager's says the contract belongs in
   `--detail`, and `--detail`'s help says it is the contract. `--json` is unchanged.
   (#74)
@@ -460,25 +488,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   switch` while the hand-over was already moving the agent, and once that had
   finished the manager's switch moved the replacement again: two `switched` for
   one limit. The line is now a `limited_handing_over` event, *moving it to another
-  account automatically*, that wakes nobody, the manager's cycle acts on `handover_failed` instead, a
-  replacement minutes old is refused without `--force`, and `switched` is news on
-  the next delta, not a wake-up. And a pick read only the five-hour and seven-day
-  windows: the per-family weeks (`seven_day_opus`, `seven_day_sonnet`), `limits[]`
-  and a window's `locked_reason` were dropped, so an Opus agent was moved onto an
-  account whose Opus week was spent and refused at once. They are read now, a
-  family week counting for an agent of that family, and every limit an agent hits
-  is remembered on its account until the reset it named, so no pick by headroom
-  sends an agent back before then. (#277)
-
-- **A killed test run no longer leaves its tmux servers running.** Teardown ends every
-  server a test starts, but a run that is killed (a timeout, `kill`, an xdist worker that
-  dies) runs no teardown, and its servers lived on with a pane each: 55 were found on one
-  box, some days old. The suite's private folders under `/tmp` are now named for the
-  process that made them (`asqtx<pid>-…`), and each run starts by ending the servers in,
-  and removing, every folder whose process is gone; a folder of a run still going is
-  never touched. `test_live_a_server_under_another_tmux_tmpdir_is_reached_at_the_path_it_said`
-  also ends its server when it fails before its old `try`: its folder is one that neither
-  the `live` fixture nor `no_real_fleet` looks in.
+  account automatically*, that wakes nobody; the manager's cycle acts on
+  `handover_failed` instead; a replacement minutes old is refused without
+  `--force`; and `switched` is news on the next delta, not a wake-up. And a pick
+  read only the five-hour and seven-day windows. The per-family week (Opus, Sonnet,
+  Fable), which the usage endpoint sends as a `limits[]` entry of kind
+  `weekly_scoped` (the `seven_day_opus` and `seven_day_sonnet` keys come null), and
+  a window's `locked_reason` were dropped, so an Opus agent was moved onto an
+  account whose Opus week was spent and refused at once. They are read now
+  (`weekly_all` counts as the shared week), and an account whose family week is
+  spent is skipped for that family by every headroom pick, a switch by hand
+  included. Every limit an agent hits is remembered on its account until the reset
+  it named, so no pick by headroom sends an agent back before then. (#277)
+- **An idle agent reads waiting, not working.** A session start wrote `working`,
+  and only the captain was set back to `waiting`, so a just-spawned agent sitting
+  at an empty prompt read busy for up to 30 minutes: `fleet tell` filed a note it
+  never read, and an agent whose first prompt was never submitted looked busy to
+  everyone who could have reached it. Every role now reads `waiting` from its
+  session start until a prompt starts a turn (a compaction keeps what the turn
+  said). And a `working` row whose pane has printed nothing for `[fleet]
+  busy_quiet_seconds` (30) is checked once: if Claude Code sits idle at its prompt —
+  a turn ended with Esc fires no hook — it reads ⏸ waiting, *idle (the board said
+  working)*, and a `fleet tell` is typed into it instead of filed. (#123)
 
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for

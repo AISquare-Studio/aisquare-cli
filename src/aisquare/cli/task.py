@@ -56,7 +56,9 @@ def _emit_task(task: TeamTask, *, verb: str, contract: bool = False, peek: bool 
         typer.echo(json.dumps(payload))
     else:
         console = stdout_console()
-        ref = f"#{task.number}" if task.number is not None else task.id
+        # A bare number, never `#N`: in a shell `#` starts a comment, so a copied
+        # `aisquare task show #2` ran `task show` with no ref (P0-FU, #51).
+        ref = str(task.number) if task.number is not None else task.id
         console.print(
             f"✓ {verb}: {team_service.task_label(task)} [{task.status}] {task.title}"
             f"{receipt_suffix(delivery)}",

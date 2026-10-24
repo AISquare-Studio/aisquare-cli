@@ -4712,10 +4712,13 @@ def _event_values(event: TeamEvent) -> tuple[object, ...]:
 
 class Relevance(NamedTuple):
     """What a ``relevant`` board context keeps (P1 WS-2, #279): events on these tasks,
-    events addressed to these names (a role or a label, any case), and decisions."""
+    events addressed to these names (a role or a label, any case), and decisions unless
+    ``decisions`` is off: what a ``none`` agent's turn end asks for, the notes addressed to
+    it and nothing else (sync #365)."""
 
     task_ids: tuple[str, ...] = ()
     names: tuple[str, ...] = ()
+    decisions: bool = True
 
 
 def _relevant_clause(relevant: Relevance | None) -> tuple[str, list[str]]:
@@ -4724,7 +4727,7 @@ def _relevant_clause(relevant: Relevance | None) -> tuple[str, list[str]]:
     the relevant one is behind (review of #240, finding 11's rule)."""
     if relevant is None:
         return "", []
-    terms = ["kind = 'decision'"]
+    terms = ["kind = 'decision'"] if relevant.decisions else []
     params: list[str] = []
     if relevant.task_ids:
         terms.append(f"task_id IN ({', '.join('?' * len(relevant.task_ids))})")
@@ -4732,6 +4735,8 @@ def _relevant_clause(relevant: Relevance | None) -> tuple[str, list[str]]:
     if relevant.names:
         terms.append(f"lower(to_role) IN ({', '.join('?' * len(relevant.names))})")
         params += [name.strip().lower() for name in relevant.names]
+    if not terms:
+        return "AND 0 ", []  # keeps nothing: no task, no name, no decisions
     return f"AND ({' OR '.join(terms)}) ", params
 
 

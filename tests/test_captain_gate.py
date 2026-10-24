@@ -259,6 +259,12 @@ def test_a_code_said_alongside_another_command_is_masked_in_that_tools_audit() -
         ("on 2026-10-23 at 12:30", "on 2026-10-23 at 12:30"),
         ("ticket 1234567", "ticket 1234567"),
         ("stop coder-1 and look at PR 339", "stop coder-1 and look at PR 339"),
+        # A code joined to a word or trailed by a dash is still a code (review of #339).
+        ("code-123456", "code-******"),
+        ("unlock 123456- and press", "unlock ******- and press"),
+        ("unlock 123-456-", "unlock ******-"),
+        ("call +1-555-123-4567", "call +1-555-123-4567"),
+        ("build 2026-10-23-1", "build 2026-10-23-1"),
     ],
 )
 def test_redact_masks_a_code_but_not_a_date_or_a_longer_number(words: str, kept: str) -> None:

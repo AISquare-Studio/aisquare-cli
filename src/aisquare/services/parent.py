@@ -209,11 +209,17 @@ def route_up(store: ContextStore, event: TeamEvent) -> list[str]:
             if origin_task is not None and store.get_meta(f"linked_all_done:{origin[0]}") is None:
                 number = f"#{origin_task.number}" if origin_task.number else origin_task.id
                 linked = store.linked_tasks(origin[0])
+                dropped = sum(1 for task in linked if task.status == "dropped")
+                closed = (
+                    f"are closed ({len(linked) - dropped} done, {dropped} dropped)"
+                    if dropped
+                    else "are done"
+                )
                 team_service._emit(
                     store,
                     origin[1],
                     "linked_all_done",
-                    f"all {len(linked)} tasks delegated from {number} are done: "
+                    f"all {len(linked)} tasks delegated from {number} {closed}: "
                     f"close {number} when it is ({origin_task.title})",
                     task_id=origin[0],
                     to_role="manager",

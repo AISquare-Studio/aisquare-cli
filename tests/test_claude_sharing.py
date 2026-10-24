@@ -878,6 +878,22 @@ def test_a_refusal_names_the_link_as_written_without_windows_prefix(
     assert f"links to {theirs} — not ours to replace" in (refused.detail or ""), refused.detail
 
 
+def test_a_refusal_names_a_share_as_written(
+    skilled: tuple[ClaudeAccount, ...], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link to a share reads back on Windows as ``UNC`` under the extended-length prefix
+    (review of #386): the refusal names it by its two leading backslashes, as typed."""
+    _plain, second, _third = skilled
+    theirs = tmp_path / "someone-elses-agents"
+    theirs.mkdir()
+    (second.config_dir / "agents").symlink_to(theirs, target_is_directory=True)
+    monkeypatch.setattr(os, "readlink", lambda path: "\\\\?\\UNC\\srv\\team\\agents")
+
+    [refused] = [c for c in service.enable_share(["agents"], now=NOW) if c.account.slot == 2]
+
+    assert "links to \\\\srv\\team\\agents — not ours" in (refused.detail or ""), refused.detail
+
+
 def test_on_windows_a_directory_is_a_junction_when_a_symlink_needs_a_privilege(
     skilled: tuple[ClaudeAccount, ...], monkeypatch: pytest.MonkeyPatch
 ) -> None:

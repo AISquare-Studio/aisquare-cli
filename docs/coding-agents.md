@@ -1129,9 +1129,11 @@ Welcome, upgrade and uninstall) ask its adapter and never compare its name:
 `match` case on either name anywhere outside that package, and holds a ratchet on the
 rest of the agent-specific shapes there: a comparison with a constant naming an agent
 (`AGENT`, `CODEX`, `DEFAULT_AGENT`, `DEFAULT_AGENT_BINARY` and any module constant set to
-an agent's id or binary), a call of `harness.is_default_agent` outside `core/harness.py`,
-and a string constant that is an agent's binary, one of its variables, files or folders,
-or one of its flags. Its `BASELINE` counts each per file; a new one fails with its
+an agent's id or binary), a call of an `is_default_agent` (the binary-name predicate, gone:
+a binary is the agent its name runs, `agent_adapters.adapter_for_binary`, and that agent's
+adapter answers), and a string constant that is an agent's binary, one of its variables,
+files or folders, or one of its flags. The first three are none outside the package. Its
+`BASELINE` counts the rest per file; a new one fails with its
 `file:line`, and a change that removes one lowers the count (aisquare's own options, prose
 naming a variable and a provider's API key are not counted). Keep unsupported capabilities
 explicit instead of copying another agent's flags or claiming hookless detection is

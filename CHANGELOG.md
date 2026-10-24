@@ -24,7 +24,17 @@ adapter.**
   [the parity matrix](docs/coding-agents.md#parity-with-claude-code).
 - [Adding a terminal agent](docs/coding-agents.md#adding-a-terminal-agent):
   one adapter file and one registration line, held to a conformance suite
-  that a synthetic third agent passes.
+  that a synthetic third agent passes. A new agent touches nine files, and the
+  suite asserts it: no shared module decides by an agent's name or a binary's,
+  and an agent whose only seams are its variables and settings files (as Gemini
+  CLI's are) is launched through a settings layer of its own, its transcript
+  read where a later line completes a record, its usage read as the windows its
+  plan has, and its telemetry and screen by its own readers.
+- The sidebar's `#slot·%` and the agent info line show the account's window
+  that limits it: its five-hour figure, unless its week is fuller, which the
+  headroom pick already ranked it by. An agent with no automatic reviewer of
+  its own runs the built-in `workspace:auto` as `workspace:ask`, and its
+  spawn's receipt says so.
 - The captain reads each agent's pane by that agent's own screens. On a Codex
   agent, `paste` and `press` at its folder-trust dialog are refused (*trust this
   folder first*): before, read with Claude Code's shapes, it showed no prompt,

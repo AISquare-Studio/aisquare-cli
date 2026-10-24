@@ -43,6 +43,7 @@ from aisquare.models import (
     UNKNOWN_KEY_UID,
     ClaudeAccountRecord,
     ContextEntry,
+    EndedBy,
     FleetAgent,
     LaunchSpec,
     PendingRevocation,
@@ -51,12 +52,14 @@ from aisquare.models import (
     ProjectGroup,
     ProjectInfo,
     PromptRecord,
+    SessionUsage,
     TaskStatus,
     TeamEvent,
     TeamSession,
     TeamTask,
     TraceDestination,
     TurnMetric,
+    TurnUsage,
     UsageSample,
 )
 
@@ -1022,21 +1025,87 @@ _SCHEMA_V32 = ""
 # in :data:`_PRODUCTS`, added only where absent, and a row from before them keeps NULL,
 # which reads as no persona.
 _SCHEMA_V33 = ""
-# v34 (P0-W1a, #122): whether a fleet agent's first message started a turn. The session's
+# v34 (#38): how a fleet agent's row ended — ``stopped`` when aisquare ended it on purpose
+# (``fleet stop``, Stop all, ``shutdown``, a hand-over's old row), ``died`` when a read or
+# ``reap`` recorded a death nobody asked for (killed, crashed, its server gone). Restart all
+# brings the second back and leaves the first. The column is the whole step, so the script
+# is empty: it is in :data:`_PRODUCTS`, and a row from before it keeps NULL, which
+# ``services.fleet`` reads by its exit status.
+_SCHEMA_V34 = ""
+# v35 (token metrics, #346): what every session actually spent, read off its transcript.
+#
+# ``usage_session`` is one row per agent session the hooks saw, carrying the scan's
+# STATE (byte offsets, the message ids already counted, the first-edit flag) beside its
+# running totals: a Stop reads only what was appended since the last one. ``usage_turn``
+# is one row per Stop-delimited stretch, and names the ``metric`` row it closed when
+# there was one (``trace_id``). The breakdowns (per model, per tool) are JSON because
+# they are read whole and never queried into; the totals beside them are columns, for
+# a reader with sqlite3 and nothing else.
+#
+# #346 stamped this step v34 on its own branch, beside #38's v34 here (#42 merged the
+# two). A store that ran #346's branch reads v34 with these tables and no
+# ``fleet_agent.ended_by``: the presence pass (:func:`_converge_by_presence`) adds the
+# column before this step, which then finds its tables and indexes in place. A store
+# that ran #38's v34 gets them here. Every statement is ``IF NOT EXISTS`` either way.
+_SCHEMA_V35 = """
+CREATE TABLE IF NOT EXISTS usage_session (
+    session_id      TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL,
+    transcript_path TEXT,
+    state           TEXT NOT NULL DEFAULT '{}',
+    usage           TEXT NOT NULL DEFAULT '{}',
+    turns           INTEGER NOT NULL DEFAULT 0,
+    total_tokens    INTEGER NOT NULL DEFAULT 0,
+    weighted        REAL NOT NULL DEFAULT 0,
+    cost_usd        REAL NOT NULL DEFAULT 0,
+    started_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    ended_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS usage_session_project ON usage_session (project_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS usage_turn (
+    id           TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL,
+    project_id   TEXT NOT NULL,
+    trace_id     TEXT,
+    seq          INTEGER NOT NULL,
+    trigger      TEXT NOT NULL CHECK (trigger IN ('stop', 'stop_failure', 'session_end')),
+    recorded_at  TEXT NOT NULL,
+    usage        TEXT NOT NULL,
+    total_tokens INTEGER NOT NULL,
+    weighted     REAL NOT NULL,
+    cost_usd     REAL NOT NULL,
+    scan_ms      REAL
+);
+CREATE INDEX IF NOT EXISTS usage_turn_session ON usage_turn (session_id, seq);
+"""
+# v36 (P0-W1a, #122): whether a fleet agent's first message started a turn. The session's
 # last ``UserPromptSubmit`` (``team_session.prompted_at``), and on the agent's row where its
 # first message stands (``fleet_agent.first_prompt``: pending, acked, unsent) and since when
 # (``first_prompt_at``). Nullable: a row from before them reads as "not tracked", never as
 # a message that was not taken. The columns are the whole step, so the script is empty:
 # they are in :data:`_PRODUCTS`, added only where absent.
-_SCHEMA_V34 = ""
+#
+# rc/p0-reliability stamped this step v34, beside main's #38 v34 and #346 v35 (the sync
+# of main 8eb18a8a moved it here). A store that ran rc/p0 reads v34 with these columns and
+# neither ``fleet_agent.ended_by`` nor the usage tables: the presence pass
+# (:func:`_converge_by_presence`) adds the column, the ladder runs v35's ``IF NOT EXISTS``
+# script, and this step finds its columns in place.
+_SCHEMA_V36 = ""
 
-# P1 WS-2 (#279): who caused a board event (``team_event.actor``) and its details as JSON
-# (``team_event.meta``), so a manager's own stop wakes nobody and an exit says its status.
-# Step 35, after P0-W1a's 34 (the numbers are reserved per train). Both columns are
-# nullable and in :data:`_PRODUCTS`, added only where absent, so a store another line
-# stamped v34 still gains them; a row from before them reads NULL: no actor (the agent's
-# own act, or unknown) and no details.
-_SCHEMA_V35_WS2 = ""
+# v37, P1 WS-2 (#279): who caused a board event (``team_event.actor``) and its details as
+# JSON (``team_event.meta``), so a manager's own stop wakes nobody and an exit says its
+# status. Both columns are nullable and in :data:`_PRODUCTS`, added only where absent, so a
+# store another line stamped at any version still gains them; a row from before them reads
+# NULL: no actor (the agent's own act, or unknown) and no details.
+#
+# rc/p1-token-diet stamped this step v35, after its own v34 (P0-W1a, now v36): the sync of
+# main 8eb18a8a moved it here, after main's v34 and v35. A store that ran rc/p1 reads v35
+# with P0-W1a's and these columns and neither ``fleet_agent.ended_by`` nor the usage
+# tables: the presence pass adds the column, v35's ``IF NOT EXISTS`` script makes the
+# tables, and v36 and this step find their columns in place.
+_SCHEMA_V37 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1073,7 +1142,9 @@ _MIGRATIONS = (
     _SCHEMA_V32,
     _SCHEMA_V33,
     _SCHEMA_V34,
-    _SCHEMA_V35_WS2,
+    _SCHEMA_V35,
+    _SCHEMA_V36,
+    _SCHEMA_V37,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1131,14 +1202,16 @@ _PRODUCTS: dict[int, _Products] = {
     32: _Products(
         columns=(("team_session", "persona", "TEXT"), ("fleet_agent", "persona", "TEXT"))
     ),
-    33: _Products(
+    33: _Products(columns=(("fleet_agent", "ended_by", "TEXT"),)),
+    34: _Products(("usage_session", "usage_session_project", "usage_turn", "usage_turn_session")),
+    35: _Products(
         columns=(
             ("team_session", "prompted_at", "TEXT"),
             ("fleet_agent", "first_prompt", "TEXT"),
             ("fleet_agent", "first_prompt_at", "TEXT"),
         )
     ),
-    34: _Products(columns=(("team_event", "actor", "TEXT"), ("team_event", "meta", "TEXT"))),
+    36: _Products(columns=(("team_event", "actor", "TEXT"), ("team_event", "meta", "TEXT"))),
 }
 
 _PROJECT_COLUMNS = (
@@ -1222,7 +1295,7 @@ _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
     "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
-    "board", "persona", "first_prompt", "first_prompt_at",
+    "board", "persona", "ended_by", "first_prompt", "first_prompt_at",
 )  # fmt: skip
 _FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
 
@@ -1291,7 +1364,7 @@ class ContextStore(Protocol):
     def promote(self, entry_id: str) -> ContextEntry: ...
     def ensure_project(self, project: ProjectInfo) -> None: ...
     def onboard_project(
-        self, project: ProjectInfo, *, codename: str | None = None
+        self, project: ProjectInfo, *, codename: str | None = None, explicit: bool = False
     ) -> ProjectInfo: ...
     def list_projects(
         self, *, all: bool = False, include_forgotten: bool = False
@@ -1350,6 +1423,7 @@ class ContextStore(Protocol):
     def team_tasks(
         self, project_id: str, *, status: TaskStatus | None = None
     ) -> list[TeamTask]: ...
+    def has_team_task_in(self, project_id: str, statuses: Collection[TaskStatus]) -> bool: ...
     def claim_task(self, task_id: str, session_ref: str, lease_until: datetime) -> bool: ...
     def renew_leases(self, session_id: str, lease_until: datetime) -> None: ...
     def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask: ...
@@ -1374,8 +1448,26 @@ class ContextStore(Protocol):
     def turn_metrics(
         self, *, project_id: str | None = None, session_id: str | None = None, limit: int = 500
     ) -> list[TurnMetric]: ...
+    def session_usage(self, session_id: str) -> SessionUsage | None: ...
+    def record_usage(
+        self,
+        session: SessionUsage,
+        turn: TurnUsage | None,
+        *,
+        previous_state: str | None,
+        metric_counts: tuple[int, int, int] | None = None,
+    ) -> bool: ...
+    def session_usages(
+        self,
+        *,
+        project_id: str | None = None,
+        session_id: str | None = None,
+        limit: int = 10_000,
+    ) -> list[SessionUsage]: ...
+    def turn_usages(self, session_id: str) -> list[TurnUsage]: ...
     def get_meta(self, key: str) -> str | None: ...
     def set_meta(self, key: str, value: str) -> None: ...
+    def delete_meta(self, key: str) -> None: ...
     def list_meta(self, prefix: str) -> dict[str, str]: ...
     def add_signal_events(
         self, writes: Sequence[tuple[TeamEvent, str, dict[str, Any]]]
@@ -1434,6 +1526,9 @@ class ContextStore(Protocol):
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
     def codenames_in_use(self) -> set[str]: ...
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
+    def upsert_fleet_agent_unless_stopped(
+        self, agent: FleetAgent, replaces: str
+    ) -> FleetAgent | None: ...
     def mark_prompted(
         self, session_id: str, at: datetime, *, agent_id: str | None = None
     ) -> bool: ...
@@ -1445,7 +1540,7 @@ class ContextStore(Protocol):
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
-    def fleet_label_heads(self) -> list[FleetAgent]: ...
+    def fleet_label_heads(self, project_id: str | None = None) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
     def fleet_agent_boards(self, project_id: str, *, live_only: bool = False) -> list[str]: ...
     def fleet_board(self, project_id: str) -> str | None: ...
@@ -1503,11 +1598,14 @@ class ContextStore(Protocol):
     def fleet_agent_by_label(
         self, project_id: str, label: str, *, live_only: bool = True
     ) -> FleetAgent | None: ...
-    def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent: ...
+    def end_fleet_agent(
+        self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
+    ) -> FleetAgent: ...
     def set_fleet_agent_persona(self, agent_id: str, persona: str | None) -> FleetAgent: ...
     def end_fleet_agent_if_live(
-        self, agent_id: str, *, exit_status: int | None = None
+        self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
     ) -> FleetAgent | None: ...
+    def mark_fleet_agent_stopped(self, agent_id: str) -> FleetAgent: ...
     def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool: ...
     def record_fleet_agent_branch(self, agent_id: str, branch: str | None) -> None: ...
     # The Claude account registry (v15, #145): the arrangement of the slots.
@@ -1604,6 +1702,7 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         branch=row["branch"],
         board=row["board"],  # never NULL as read (`_FLEET_AGENT_READ`)
         persona=row["persona"],
+        ended_by=row["ended_by"],
         first_prompt=row["first_prompt"],
         first_prompt_at=_maybe_dt(row["first_prompt_at"]),
     )
@@ -1671,6 +1770,64 @@ def _row_to_prompt(row: sqlite3.Row) -> PromptRecord:
 
 def _maybe_dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
+
+
+_SESSION_USAGE_COLUMNS = (
+    "session_id, project_id, transcript_path, state, usage, turns, total_tokens, weighted, "
+    "cost_usd, started_at, updated_at, ended_at"
+)
+_TURN_USAGE_COLUMNS = (
+    "id, session_id, project_id, trace_id, seq, trigger, recorded_at, usage, total_tokens, "
+    "weighted, cost_usd, scan_ms"
+)
+
+
+def _like_prefix(prefix: str) -> str:
+    """``prefix`` as a LIKE pattern matching itself and anything after it, literally."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"{escaped}%"
+
+
+def _json_object(raw: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _row_to_session_usage(row: sqlite3.Row) -> SessionUsage:
+    return SessionUsage(
+        session_id=row["session_id"],
+        project_id=row["project_id"],
+        transcript_path=row["transcript_path"],
+        state=row["state"],
+        usage=_json_object(row["usage"]),
+        turns=row["turns"],
+        total_tokens=row["total_tokens"],
+        weighted=row["weighted"],
+        cost_usd=row["cost_usd"],
+        started_at=datetime.fromisoformat(row["started_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+        ended_at=_maybe_dt(row["ended_at"]),
+    )
+
+
+def _row_to_turn_usage(row: sqlite3.Row) -> TurnUsage:
+    return TurnUsage(
+        id=row["id"],
+        session_id=row["session_id"],
+        project_id=row["project_id"],
+        trace_id=row["trace_id"],
+        seq=row["seq"],
+        trigger=row["trigger"],
+        recorded_at=datetime.fromisoformat(row["recorded_at"]),
+        usage=_json_object(row["usage"]),
+        total_tokens=row["total_tokens"],
+        weighted=row["weighted"],
+        cost_usd=row["cost_usd"],
+        scan_ms=row["scan_ms"],
+    )
 
 
 def _row_to_metric(row: sqlite3.Row) -> TurnMetric:
@@ -2032,7 +2189,9 @@ class SqliteStore:
         )
         self._conn.commit()
 
-    def onboard_project(self, project: ProjectInfo, *, codename: str | None = None) -> ProjectInfo:
+    def onboard_project(
+        self, project: ProjectInfo, *, codename: str | None = None, explicit: bool = False
+    ) -> ProjectInfo:
         """Register the project ON PURPOSE: shown from now on, and revived if forgotten.
 
         ``init``, ``project onboard`` / ``link`` / ``switch``, the sidebar's
@@ -2048,8 +2207,12 @@ class SqliteStore:
         whose session and branch were named by it before anything was written. A row's own
         codename is kept; one another project holds raises ``sqlite3.IntegrityError`` and
         writes nothing.
+
+        ``explicit`` is the owner's own "add this folder": ``init`` (the TUI's ``+`` runs it)
+        and ``project onboard``. Only that makes the aisquare home one of their projects
+        (the owner's decision D5, 2026-10-23); a forget hides it again, as any project.
         """
-        if is_the_home(project.root):
+        if is_the_home(project.root) and not explicit:
             # The aisquare home's row is the captain's HOME BOARD (services.captain):
             # captured so it can hold the captain's row and events, never one of the
             # owner's projects — a spawn, a codename, a rename or a launch's
@@ -2227,8 +2390,9 @@ class SqliteStore:
         foreign_keys = ON``; the counts say what each table gave up. Every table
         whose foreign key references ``project`` is found in the schema
         (:meth:`_tables_referencing_project`), so a table a later migration adds
-        is purged without being listed here. The team tables, ``fleet_agent``
-        and ``metric`` carry no FK, so the schema cannot name them: they are
+        is purged without being listed here. The team tables, ``fleet_agent``,
+        ``metric`` and the token-usage tables carry no FK, so the schema cannot
+        name them: they are
         listed, and deleted by ``project_id`` the way every read of them is
         keyed; the metric rows are written even with the CI test bed off, and
         left behind they resurfaced in ``metrics list --all`` and in the
@@ -2261,7 +2425,15 @@ class SqliteStore:
                     f'DELETE FROM "{table}" WHERE "{column}" = ?', (project_id,)
                 )
                 removed[table] = removed.get(table, 0) + cursor.rowcount
-            for table in ("team_event", "team_task", "team_session", "fleet_agent", "metric"):
+            for table in (
+                "team_event",
+                "team_task",
+                "team_session",
+                "fleet_agent",
+                "metric",
+                "usage_turn",
+                "usage_session",
+            ):
                 if table in removed:
                     continue  # it has gained the FK, and went above
                 cursor = self._conn.execute(
@@ -2310,8 +2482,9 @@ class SqliteStore:
         """Delete the ``team_meta`` rows keyed by the project or by its sessions.
 
         Inside the caller's transaction, in statements of at most
-        :data:`_META_BATCH` sessions each (five terms per session): one statement
-        per purge was the shape SQLite refused at 500 sessions.
+        :data:`_META_BATCH` sessions each (one term per :data:`_SESSION_META_KINDS` and
+        one for its continuations): one statement per purge was the shape SQLite refused at
+        500 sessions.
         """
         removed = self._conn.execute(
             "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",
@@ -2891,6 +3064,19 @@ class SqliteStore:
             ).fetchall()
         return [_row_to_task(row) for row in rows]
 
+    def has_team_task_in(self, project_id: str, statuses: Collection[TaskStatus]) -> bool:
+        """Whether the board holds a task in any of ``statuses``: one ``EXISTS`` on the
+        ``(project_id, status)`` index, never the board's every task read and decoded."""
+        wanted = sorted(statuses)
+        if not wanted:
+            return False
+        marks = ", ".join("?" for _ in wanted)
+        row = self._conn.execute(
+            f"SELECT EXISTS (SELECT 1 FROM team_task WHERE project_id = ? AND status IN ({marks}))",
+            (project_id, *wanted),
+        ).fetchone()
+        return bool(row[0])
+
     def claim_task(self, task_id: str, session_ref: str, lease_until: datetime) -> bool:
         """Atomically claim a task; exactly one concurrent claimer wins.
 
@@ -3159,6 +3345,130 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_metric(row) for row in rows]
 
+    # --- session token usage, read off the transcript by the hooks ---------------------
+
+    def session_usage(self, session_id: str) -> SessionUsage | None:
+        """The session's usage row, with the scan state the next Stop resumes from."""
+        row = self._conn.execute(
+            f"SELECT {_SESSION_USAGE_COLUMNS} FROM usage_session WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return _row_to_session_usage(row) if row is not None else None
+
+    def record_usage(
+        self,
+        session: SessionUsage,
+        turn: TurnUsage | None,
+        *,
+        previous_state: str | None,
+        metric_counts: tuple[int, int, int] | None = None,
+    ) -> bool:
+        """Write a scan's result as ONE transaction; ``False`` when another writer won.
+
+        The session row is a compare-and-set on the state the scan started from
+        (``previous_state``; ``None`` for a session with no row yet): two hooks
+        that scanned the same bytes — a Stop and a SessionEnd racing — cannot
+        both count them, and the loser writes nothing at all, its turn row
+        included. ``metric_counts`` (tokens in, tokens out, tool calls) fill the
+        CI test bed's columns on the ``metric`` row the turn closed: the
+        transcript is the evidence those columns were waiting for.
+        """
+        values = (
+            session.project_id,
+            session.transcript_path,
+            session.state,
+            json.dumps(session.usage, separators=(",", ":")),
+            session.turns,
+            session.total_tokens,
+            session.weighted,
+            session.cost_usd,
+            session.updated_at.isoformat(),
+            session.ended_at.isoformat() if session.ended_at else None,
+        )
+        try:
+            if previous_state is None:
+                cursor = self._conn.execute(
+                    "INSERT INTO usage_session (project_id, transcript_path, state, usage, turns, "
+                    "total_tokens, weighted, cost_usd, updated_at, ended_at, session_id, "
+                    "started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (session_id) DO NOTHING",
+                    (*values, session.session_id, session.started_at.isoformat()),
+                )
+            else:
+                cursor = self._conn.execute(
+                    "UPDATE usage_session SET project_id = ?, transcript_path = ?, state = ?, "
+                    "usage = ?, turns = ?, total_tokens = ?, weighted = ?, cost_usd = ?, "
+                    "updated_at = ?, ended_at = ? WHERE session_id = ? AND state = ?",
+                    (*values, session.session_id, previous_state),
+                )
+            if cursor.rowcount == 0:
+                self._conn.rollback()
+                return False
+            if turn is not None:
+                self._conn.execute(
+                    f"INSERT INTO usage_turn ({_TURN_USAGE_COLUMNS}) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        turn.id,
+                        turn.session_id,
+                        turn.project_id,
+                        turn.trace_id,
+                        turn.seq,
+                        turn.trigger,
+                        turn.recorded_at.isoformat(),
+                        json.dumps(turn.usage, separators=(",", ":")),
+                        turn.total_tokens,
+                        turn.weighted,
+                        turn.cost_usd,
+                        turn.scan_ms,
+                    ),
+                )
+                if turn.trace_id is not None and metric_counts is not None:
+                    self._conn.execute(
+                        "UPDATE metric SET tokens_in = ?, tokens_out = ?, tool_calls = ? "
+                        "WHERE trace_id = ?",
+                        (*metric_counts, turn.trace_id),
+                    )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        return True
+
+    def session_usages(
+        self,
+        *,
+        project_id: str | None = None,
+        session_id: str | None = None,
+        limit: int = 10_000,
+    ) -> list[SessionUsage]:
+        """Sessions' usage rows, most recently updated first. ``session_id`` matches
+        a prefix, as the board's short ids are typed."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if session_id is not None:
+            clauses.append("session_id LIKE ? ESCAPE '\\'")
+            params.append(_like_prefix(session_id))
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        params.append(max(1, int(limit)))
+        rows = self._conn.execute(
+            f"SELECT {_SESSION_USAGE_COLUMNS} FROM usage_session {where}"
+            "ORDER BY updated_at DESC, session_id DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
+        return [_row_to_session_usage(row) for row in rows]
+
+    def turn_usages(self, session_id: str) -> list[TurnUsage]:
+        """One session's turn rows, in order."""
+        rows = self._conn.execute(
+            f"SELECT {_TURN_USAGE_COLUMNS} FROM usage_turn WHERE session_id = ? ORDER BY seq",
+            (session_id,),
+        ).fetchall()
+        return [_row_to_turn_usage(row) for row in rows]
+
     def get_meta(self, key: str) -> str | None:
         row = self._conn.execute("SELECT value FROM team_meta WHERE key = ?", (key,)).fetchone()
         return str(row[0]) if row is not None else None
@@ -3169,6 +3479,10 @@ class SqliteStore:
             "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+        self._conn.commit()
+
+    def delete_meta(self, key: str) -> None:
+        self._conn.execute("DELETE FROM team_meta WHERE key = ?", (key,))
         self._conn.commit()
 
     def list_meta(self, prefix: str) -> dict[str, str]:
@@ -3491,9 +3805,31 @@ class SqliteStore:
         :meth:`mark_first_prompt_unsent`), so an upsert of a row read before its
         ``UserPromptSubmit`` cannot put an ``acked`` message back to ``pending``.
         """
-        self._conn.execute(
+        stored = self._upsert_fleet_agent(agent, None)
+        assert stored is not None  # nothing guards it
+        return stored
+
+    def upsert_fleet_agent_unless_stopped(
+        self, agent: FleetAgent, replaces: str
+    ) -> FleetAgent | None:
+        """:meth:`upsert_fleet_agent` for the row that brings ``replaces`` back: nothing is
+        written, and ``None`` returned, when that row is recorded stopped by then. One
+        statement, so an owner's ``fleet stop`` that lands at any point before the new row
+        exists wins (last delta review of #274, m3)."""
+        return self._upsert_fleet_agent(agent, replaces)
+
+    def _upsert_fleet_agent(
+        self, agent: FleetAgent, unless_stopped: str | None
+    ) -> FleetAgent | None:
+        guard = (
+            "WHERE NOT EXISTS (SELECT 1 FROM fleet_agent WHERE id = ? AND ended_by = 'stopped') "
+            if unless_stopped is not None
+            else "WHERE true "  # INSERT … SELECT … ON CONFLICT needs a WHERE to parse
+        )
+        cursor = self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+            f"{guard}"
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
@@ -3525,11 +3861,15 @@ class SqliteStore:
                 agent.branch,
                 agent.board if agent.board is not None else agent.project_id,
                 agent.persona,
+                agent.ended_by,
                 agent.first_prompt,
                 agent.first_prompt_at.isoformat() if agent.first_prompt_at else None,
+                *((unless_stopped,) if unless_stopped is not None else ()),
             ),
         )
         self._conn.commit()
+        if cursor.rowcount == 0:
+            return None
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
@@ -4133,7 +4473,7 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 
-    def fleet_label_heads(self) -> list[FleetAgent]:
+    def fleet_label_heads(self, project_id: str | None = None) -> list[FleetAgent]:
         """Every live fleet row, and the newest row of each label, live or ended, in every
         project, forgotten ones' included, oldest first: the rows a ``fleet stop`` or a
         ``restart`` by label acts on (:meth:`fleet_agent_by_label`), ended or not.
@@ -4147,12 +4487,18 @@ class SqliteStore:
         ``label``, and was quadratic in a project's rows: 4.6 s at 20 000, on every
         ``project forget`` and ``prune`` and doctor's capture-off line at each ``asq`` start
         (review of #259, round 37, 4/7). Two rows of a label stamped alike, which that
-        query gave both of, give the one of the greater id."""
+        query gave both of, give the one of the greater id.
+
+        ``project_id`` keeps it to one project's rows, in the query: a restart's plan asks
+        for one project, once per project and again per row (final delta review, n5)."""
+        scope, args = ("WHERE project_id = ?", (project_id,)) if project_id else ("", ())
         rows = self._conn.execute(
             f"SELECT {self._fleet_agent_read} FROM fleet_agent WHERE id IN ("
             "SELECT id FROM (SELECT id, ended_at, ROW_NUMBER() OVER ("
             "PARTITION BY project_id, label ORDER BY created_at DESC, id DESC) AS newest "
-            "FROM fleet_agent) WHERE ended_at IS NULL OR newest = 1) ORDER BY created_at, id"
+            f"FROM fleet_agent {scope}) WHERE ended_at IS NULL OR newest = 1) "
+            "ORDER BY created_at, id",
+            args,
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 
@@ -4344,9 +4690,11 @@ class SqliteStore:
         ).fetchone()
         return _row_to_fleet_agent(row) if row is not None else None
 
-    def end_fleet_agent(self, agent_id: str, *, exit_status: int | None = None) -> FleetAgent:
+    def end_fleet_agent(
+        self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
+    ) -> FleetAgent:
         """Mark an agent ended (idempotent: an already-ended row keeps its first end)."""
-        self.end_fleet_agent_if_live(agent_id, exit_status=exit_status)
+        self.end_fleet_agent_if_live(agent_id, exit_status=exit_status, ended_by=ended_by)
         agent = self.get_fleet_agent(agent_id)
         if agent is None:
             raise KeyError(agent_id)
@@ -4375,9 +4723,11 @@ class SqliteStore:
         return updated
 
     def end_fleet_agent_if_live(
-        self, agent_id: str, *, exit_status: int | None = None
+        self, agent_id: str, *, exit_status: int | None = None, ended_by: EndedBy
     ) -> FleetAgent | None:
         """End a LIVE agent's row and return it; ``None`` when it was already ended.
+
+        ``ended_by`` is how (v34, #38): ``stopped`` on aisquare's word, ``died`` otherwise.
 
         The UPDATE is a compare-and-set on ``ended_at IS NULL``, for a caller that
         announces the end: every fleet read records a dead pane (#138), so two
@@ -4386,14 +4736,28 @@ class SqliteStore:
         for the other to land in (review of #138).
         """
         cursor = self._conn.execute(
-            "UPDATE fleet_agent SET ended_at = ?, exit_status = ? "
+            "UPDATE fleet_agent SET ended_at = ?, exit_status = ?, ended_by = ? "
             "WHERE id = ? AND ended_at IS NULL",
-            (_now_iso(), exit_status, agent_id),
+            (_now_iso(), exit_status, ended_by, agent_id),
         )
         self._conn.commit()
         if cursor.rowcount == 0:
             return None
         return self.get_fleet_agent(agent_id)
+
+    def mark_fleet_agent_stopped(self, agent_id: str) -> FleetAgent:
+        """Record an ENDED row as stopped on aisquare's word (#38): a 💤 row whose window
+        ``fleet stop`` removed, which Restart all must then leave. A live row is untouched:
+        its end is written with how it ended."""
+        self._conn.execute(
+            "UPDATE fleet_agent SET ended_by = 'stopped' WHERE id = ? AND ended_at IS NOT NULL",
+            (agent_id,),
+        )
+        self._conn.commit()
+        agent = self.get_fleet_agent(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+        return agent
 
     def forget_fleet_agent_server_start(self, agent_id: str, started: datetime) -> bool:
         """Clear a LIVE row's recorded server start while it is still ``started``; whether it did.
@@ -4710,9 +5074,12 @@ def _event_values(event: TeamEvent) -> tuple[object, ...]:
     )
 
 
-_SESSION_META_KINDS: tuple[str, ...] = ("nudge", "compact", "compact-refused", "compact-armed")
+_SESSION_META_KINDS: tuple[str, ...] = (
+    "nudge", "unbriefed", "compact", "compact-refused", "compact-armed"
+)  # fmt: skip
 """The ``team_meta`` keys kept per session as ``<kind>:<session id>``: the manager's nudge
-debounce, and the quiet compaction's mark, its newest refusal and its latest arm (P1 WS-4)."""
+debounce, the solo session's not-yet-briefed mark (#346), and the quiet compaction's mark,
+its newest refusal and its latest arm (P1 WS-4)."""
 
 
 class Relevance(NamedTuple):

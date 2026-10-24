@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -716,6 +716,30 @@ def test_the_idle_clock_stands_still_while_a_tool_call_runs() -> None:
     idle.finished()
     tick.now += 400
     assert idle.idle_for() == 0, "one of two calls is still running"
+
+
+def test_a_hung_tool_call_keeps_the_server_awake_only_up_to_its_cap() -> None:
+    """Review of #240, R1-F4: plain ``aisquare serve --stdio`` too. A call that never returns,
+    with an orphaned client (pipe open, no EOF), held idle_for() at 0 for ever; main's
+    watchdog closed the process after --close-after."""
+    tick = Tick()
+    idle = mcp_server.IdleClock(tick)
+    hung = idle.started()
+    tick.now += mcp_server.CALL_CAP_S - 1
+    assert idle.idle_for() == 0, "a long real call is still activity"
+    tick.now += 1 + 300
+    assert idle.idle_for() == 300, "past its cap the deadline runs"
+    late = idle.started()
+    assert idle.idle_for() == 0, "a fresh call alongside it is activity again"
+    idle.finished(late)
+    tick.now += 5
+    assert idle.idle_for() == 5 and idle.in_flight == 1
+    idle.finished(hung)
+    assert idle.in_flight == 0
+
+
+def test_the_cap_outlasts_the_longest_call_the_captain_makes() -> None:
+    assert actions.ASK_TIMEOUT_MAX + actions.UI_TIMEOUT_S < mcp_server.CALL_CAP_S
 
 
 def test_the_stdio_runner_counts_a_tool_call_in_flight_for_its_whole_run(
@@ -1784,6 +1808,27 @@ def test_a_receipt_that_cannot_be_read_never_turns_a_done_stop_into_an_error(
     assert event["said"] == "stopped coder-1 (receipt unknown: database is locked)"
 
 
+def test_a_stop_that_only_marked_an_ended_agent_says_so(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final delta review of #274, n4: an agent that had ended with no window left is only
+    recorded as stopped (``StopReceipt.marked_only``); the captain said "stopped" as for a
+    running agent. It says what was done, and the result carries it."""
+    real = fleet_rec.stop
+
+    def marked(project: ProjectInfo, label: str, **kwargs: Any) -> fleet.StopReceipt:
+        return replace(real(project, label, **kwargs), marked_only=True)
+
+    monkeypatch.setattr(fleet, "stop", marked)
+    result = ok(actions.stop("alpha", "coder-1", confirm=True, utterance="stop coder-1"))
+    assert result["marked_only"] is True
+    said = audit(alpha.id)[-1]["said"]
+    assert said.startswith("marked coder-1 stopped: it had already ended"), said
+
+
 def test_a_restart_whose_replacement_re_picked_its_label_still_gets_its_receipt(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
@@ -2392,6 +2437,47 @@ def test_paste_refuses_a_busy_pane(
         "refused: coder-1 is working"
     )
     assert fleet_rec.panes["%1"].pastes == []
+
+
+# --- full control: the captain unblocks an agent on its own ------------------------------
+#
+# The owner's decision, 2026-10-23, closing #240 R1-F3 as by design: the captain's purpose is
+# complete control of the agents' CLIs, so it can always unblock them, permission prompts
+# included, whether or not the owner is there. No owner words are asked for any of these:
+# a review that brings a gate back on press, approve_prompt, unblock or a submitted paste
+# fails here.
+
+
+@pytest.mark.parametrize("call", ["press yes", "approve_prompt", "unblock"])
+def test_the_captain_approves_a_permission_chooser_with_no_owner_words(
+    call: str, alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, CHOOSER, **{"1": IDLE})
+    target = {"project": "alpha", "label": "coder-1"}
+    if call == "press yes":
+        ok(actions.press("alpha", "coder-1", "yes", utterance=""))
+    else:
+        ok(actions.act(call, target, utterance=""))
+    assert pane.keys == [("1",)], "the chooser's Yes, pressed"
+    assert audit(alpha.id)[-1]["ok"] is True
+
+
+def test_the_captain_submits_a_paste_into_a_pane_at_a_prompt_with_no_owner_words(
+    alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, CHOOSER, **{"Enter": IDLE})
+    result = ok(actions.paste("alpha", "coder-1", "go on", submit=True, utterance=""))
+    assert pane.typed == [("paste", "go on"), ("keys", "Enter")]
+    assert result["submitted"] is True
+
+
+@pytest.mark.parametrize("key", ["enter", "1", "2"])
+def test_the_captain_presses_any_answering_key_at_a_prompt_with_no_owner_words(
+    key: str, alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet, clock: Clock
+) -> None:
+    pane = _at(fleet_rec, CHOOSER, **{"Enter": IDLE, "1": IDLE, "2": IDLE})
+    ok(actions.press("alpha", "coder-1", key, utterance=""))
+    assert pane.keys == [(actions.KEYS[key],)]
 
 
 # --- ui ---------------------------------------------------------------------------------

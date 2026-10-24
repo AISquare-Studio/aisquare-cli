@@ -1306,7 +1306,7 @@ def _coder_row(work: Path, *, exit_status: int | None, label: str = "coder-x") -
                 created_at=datetime.now(tz=UTC),
             )
         )  # fmt: skip
-        return store.end_fleet_agent(row.id, exit_status=exit_status)
+        return store.end_fleet_agent(row.id, exit_status=exit_status, ended_by="stopped")
 
 
 def _exits(

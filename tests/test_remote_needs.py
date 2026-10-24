@@ -4818,7 +4818,7 @@ def test_a_result_on_a_board_the_stopped_manager_never_read_stays_a_card(
 
     assert results() == [("board_result", "coder-1")], "no manager reads the hub's board"
     with store_session() as store:
-        store.end_fleet_agent("agt_p_manager")
+        store.end_fleet_agent("agt_p_manager", ended_by="stopped")
 
     assert results() == [("board_result", "coder-1")]
 
@@ -6221,7 +6221,7 @@ def test_under_a_hub_a_projects_needs_read_no_other_projects_rows(
     assert reads == [("list", "beta"), ("ended", "beta"), ("day", "hub"), ("sessions", "hub")]
     assert set(tmux.asked) == {"%beta-coder-1"}, "no other agent's pane"
     with store_session() as store:
-        store.end_fleet_agent("agt_alpha_manager")
+        store.end_fleet_agent("agt_alpha_manager", ended_by="stopped")
     reads.clear()
     assert [item.kind for item in needs_agent_now(projects["alpha"], "manager").items] == [
         "manager_down"

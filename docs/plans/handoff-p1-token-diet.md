@@ -193,7 +193,7 @@ lands, a PR may use a throwaway script that applies the same definitions.
   defaults depend on it.
 - **Protocol:** the same task script, the same fleet shape and the same Claude Code version
   on both sides. Report raw totals and per-hour rates, never percentages alone. Attach the
-  JSON from `aisquare metrics tokens --json` (proposed, WS-0) to the PR.
+  JSON from `aisquare metrics ledger --json` (proposed, WS-0) to the PR.
 - **Baseline run (owned by WS-0, before any other workstream merges):** one scratch fleet
   on b26dd140. Shape: a small fixture repo; one manager, two coders, one tester and one
   reviewer; a fixed script of five tasks added with `aisquare task add`, one of which
@@ -217,7 +217,7 @@ lands, a PR may use a throwaway script that applies the same definitions.
     trains are on main.
   - Kickoff: the manager's goal was typed into its pane by hand. `fleet tell` filed it as
     a note, because the board read the idle manager as `working` (#123, P0).
-  - Ledger: `aisquare --json metrics tokens --all` over that home, counts only, is
+  - Ledger: `aisquare --json metrics ledger --all` over that home, counts only, is
     attached to the WS-0 PR. The store's `continuations:` key agrees with its 4 wakes.
   - **Known gaps; do not compare against this run for them:**
     - No request came after a gap longer than the cache TTL, so it shows no
@@ -250,7 +250,7 @@ WS-4 reuses it). The command prints one row per session plus a total; `--json` e
 ledger objects; add it to `IMPLEMENTED`:
 
 ```text
-aisquare metrics tokens [--project P | --all] [--session ID] [--since 2h] [--role R]
+aisquare metrics ledger [--project P | --all] [--session ID] [--since 2h] [--role R]
 ```
 
 Then run the baseline (§1.7) on b26dd140 and attach its ledger JSON to the WS-0 PR.
@@ -908,7 +908,7 @@ bills are "leaping from $20 or $100 a month … to $2,000 or even $5,000".
 
 - Version: minor bump (0.9.0 expected): store schema step 34, config step 3, new default
   tool sets. Coordinate the number with P0, which may ship a patch first.
-- CHANGELOG `[Unreleased]`, house voice. Added: `team show`, `metrics tokens`,
+- CHANGELOG `[Unreleased]`, house voice. Added: `team show`, `metrics ledger`,
   `--board-context`, `fleet stop --as`, start pack, brief blocks, quiet compaction (off).
   Changed: wake rules, delta line format, lean tool and skill defaults. Fixed: reviewer
   deny list survives `extra_args`; over-budget snapshot directive.
@@ -948,7 +948,7 @@ bills are "leaping from $20 or $100 a month … to $2,000 or even $5,000".
 Every live run was at **reduced scale** (owner decision 2026-10-23): at most 5 Claude
 sessions, at most 30 minutes, a scratch `AISQUARE_HOME` and a scratch tmux socket, never
 the real `asq` socket, `~/.aisquare` or a working fleet. Every count below is the §1.7
-method (`aisquare metrics tokens`) unless the row says otherwise. The full baseline run
+method (`aisquare metrics ledger`) unless the row says otherwise. The full baseline run
 as written in §1.7 happens once, after all four trains are on `main`.
 
 | Workstream | PR | Scale | Before | After |
@@ -956,7 +956,7 @@ as written in §1.7 happens once, after all four trains are on `main`.
 | WS-0 ledger and baseline | #319 | 4 agents (1 manager, 2 coders, 1 reviewer), 3 tasks, 10.5 min, Claude Code 2.1.309, Opus 5.5, socket `asqbl` | — | **the baseline:** 106 requests, 5,666,363 input tokens (97% cache reads); first requests 38,220–40,026; the manager's 37 requests 2,014,301 tokens, 4 wakes (2 took no action) costing 346,949; 20 delta blocks (21,723 chars) carried for 311,384 chars; no compaction |
 | WS-1 lean role context | #311 | a real fleet coder, paired: 1 agent per side, 6 requests each, sockets `asqpb`/`asqpa`, 2.1.309 | first request **39,270** tokens; 244,320 over 6 requests; `/context` 26.9k (tools 21.6k, skills 2.5k) | first request **19,315** (−19,955 on every request, −51%); 124,520 over 6 requests; `/context` 9.9k (tools 7.4k, skills 100). Over the baseline's 106 requests: about −1.8M to −2.1M (32–37%) |
 | WS-2 wake and delta diet | #336, #365 | replay, counts only, on a copy of the WS-0 baseline store | 19 wake-class events (the old `MANAGER_WAKE_KINDS`) | **16 (−16%)**: the run's 3 clean `agent_exited` are now info. The ≥ 80% target is **not demonstrated at this scale** (owner call 9). Every update is one line of ≤ 160 chars, the rest one `team show` away |
-| WS-3 over-budget snapshot | #299 | 12 headless `claude -p` sessions, ≤ 4 at a time, ≤ 10 min each, 2.1.309 | the skeleton read from line 1 in 2 of 2 `between` runs; context at end 44,493 · 44,257 | read from line 1 in **0 of 2**; context at end **26,331 · 26,096**. The read-first limit is 12,000 tokens, not the handoff's 25,000: one default Read held 14,163 (owner call 10) |
+| WS-3 over-budget snapshot | #299 | 12 headless `claude -p` sessions, ≤ 4 at a time, ≤ 10 min each, 2.1.309 | the skeleton read from line 1 in 2 of 2 `between` runs; context at end 44,493 · 44,257 | **Superseded on main by #346**: session start no longer points agents at the pack, so the directive this row measured is gone and WS-3's code and tests were dropped when main was merged in (#56). As measured: read from line 1 in **0 of 2**; context at end **26,331 · 26,096**. The read-first limit is 12,000 tokens, not the handoff's 25,000: one default Read held 14,163 (owner call 10) |
 | WS-4 manager hygiene | #361 | start pack: a read-only copy of a live fleet's store, rendered in a scratch home; `/compact`: 1 `claude` (2.1.310), socket `asqws4probe`, ~3 min | the board: 6,810 chars showing **8** of 22 open tasks, and a fresh manager re-read the open contracts (53,771 chars) | the start pack: 8,010 chars with **all 22**. A pasted `/compact <instructions>` compacts on one Enter and fires only SessionStart(`compact`), same session id. Quiet compaction **ships off**; manager input per hour with it on is not measured (deferred) |
 | WS-5ab per-task verification, model ladder | #338 | tests | testers raced for the review pool; `fleet spawn` ignored the ladder | one tester per task at its review, which stops after its verdict; `fleet spawn` runs `--model`/`--effort` from the cached probe. Not a token item; no live run |
 | WS-5d xdist (landed via P0) | #309 | CI runners | `Test (pytest)` 42–56 min per Linux leg | 16–22 min with `-n auto` (P0's Results) |
@@ -982,7 +982,7 @@ The owner approves the train on these. Each row is one call: the default this tr
 | 7 | Under `none`, a note addressed to the agent still reaches it at its turn's end, nothing else of the board | asked in the query, before its limit | #365 (manager decision) | Code |
 | 8 | The captain's and the phone's stops act as `user`; `fleet stop --as` with an unknown session keeps the string as the actor | as built | #336 | Code |
 | 9 | Merge WS-2 below its ≥ 80% wake-reduction target | 19 → 16 (−16%) on the 10-minute baseline; the full-scale run after `main` (manager decision seq 1435) | #336 | — |
-| 10 | The skeleton's read-first limit | 12,000 tokens (one default Read held 14,163), not 25,000; one constant in `services/hooks.py` | #299 | Code |
+| 10 | The skeleton's read-first limit | **Withdrawn**: superseded on main by #346, which removed the session-start pointer to the pack (12,000 tokens as built) | #299 | — |
 | 11 | Q8: quiet-point compaction | **off** (`quiet_compact_at = 0`) | #361 | `aisquare config set fleet.quiet_compact_at 400000` |
 | 12 | Q9: a contract missing a brief block | warns | #361 | `aisquare config set team.brief_strict true` |
 | 13 | Q10: a resume prompt after a quiet compaction | off | #361 | `aisquare config set fleet.quiet_compact_resume true` |
@@ -990,6 +990,7 @@ The owner approves the train on these. Each row is one call: the default this tr
 | 15 | Where the state file lives | per fleet project, `~/.aisquare/projects/<id>/manager/state.md` | #361 | Code |
 | 16 | Q11: per-task verification and the spawn ladder | built (b) rather than deleting the dead path; the model is recorded in `LaunchSpec`, so a restart never drifts | #338 | Code; arguments that name a model or effort are the caller's |
 | 17 | A tester spawned for a task stops after its one verdict | as built; the pool tester still repeats | #338 | Code |
+| 18 | Main's `metrics tokens` (usage the hooks record: raw, cost-weighted, USD) keeps the name; this train's transcript ledger is `metrics ledger` | as merged from `main` (manager decision seq 2038) | #56 | Code |
 
 ### Deferred to the post-main live run (owner decision 2026-10-23)
 
@@ -1004,7 +1005,8 @@ The owner approves the train on these. Each row is one call: the default this tr
 ### Release checklist (§8), as done
 
 - Version: the minor bump with P0's, coordinated at release. The store schema step is
-  **35** (reserved for P1; P0's W1a took 34), and the config step is 3.
+  **v37** (stamped 35 on this train, reserved for P1 after P0's W1a; the sync of `main`
+  8eb18a8a (#56) moved it past main's v34 and v35 and P0's v36), and the config step is 3.
 - CHANGELOG `[Unreleased]`: one entry per workstream, in the house voice (this PR).
 - Migration notes: `docs/fleet.md` "Upgrading", *To the release with the token diet*.
 - Rollout defaults: as in owner calls 1, 2, 6 and 11; each flips with the line given.

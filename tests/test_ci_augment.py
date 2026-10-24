@@ -95,7 +95,7 @@ def test_off_returns_exactly_the_team_delta_for_a_session(
     context = hooks_service.session_start_context(tmp_path, session_id=SESSION)
     assert "Retrieved by aisquare" not in context
     assert "aisquare-collective-intelligence" not in context
-    assert context.startswith("<aisquare-context>"), "main's own directive, and nothing after it"
+    assert context == "", "no directive any more, and nothing after it"
     assert stub.call_count == 0 and stub.descriptor_fetches == 0
 
 

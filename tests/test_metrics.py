@@ -428,7 +428,8 @@ def test_metrics_show_reports_the_token_gap(
     _prompt(tmp_path)
     result = runner.invoke(app, ["metrics", "show"])
     assert result.exit_code == 0, result.output
-    assert "no token counts recorded" in result.stdout
+    assert "no token counts on these turns yet" in result.stdout
+    assert "aisquare metrics tokens" in result.stdout
     assert "baseline (never asked)" in result.stdout
 
 

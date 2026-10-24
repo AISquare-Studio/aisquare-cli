@@ -57,8 +57,9 @@ EveryAgent = Annotated[
     typer.Option(
         "--all",
         help="Every running agent in every project's fleet, not one label (not with a label "
-        "or --project). Exited (💤) agents are left as they are, and so is the agent running "
-        "this command.",
+        "or --project). A restart also brings back every agent that died (killed, crashed, "
+        "its server gone) and leaves one stopped on purpose; a stop leaves exited (💤) agents "
+        "as they are. The agent running this command is left either way.",
     ),
 ]
 ManagersOnly = Annotated[
@@ -175,7 +176,8 @@ def spawn(
     role: Annotated[
         str,
         typer.Argument(
-            help=f"Role to run: {', '.join(fleet_service.FLEET_ROLES)}, or a bound one."
+            help=f"Role to run: {', '.join(fleet_service.FLEET_ROLES)}, a bound one, or "
+            f"{fleet_service.PLAIN_ROLE} for none (a plain Claude Code session)."
         ),
     ],
     label: Annotated[
@@ -365,10 +367,13 @@ def restart(
     mode, arguments — not as the role's config reads today; --permission-mode
     changes the mode, and later restarts keep it.
 
-    With --all, every running agent in every project is restarted so, one line
-    each by project, then a count; --managers restarts the managers alone. It
-    exits 1 when any of them failed, and 130 when interrupted, after saying how
-    far it got.
+    With --all, every running agent in every project is restarted so, and so is
+    every one that died without being stopped (killed, crashed, its tmux server
+    gone); one stopped on purpose is left. One line each by project, then a
+    count of running and dead; --managers restarts the managers alone, and a
+    restarted manager is told which of its team died and the command that
+    brings each back. It exits 1 when any of them failed, and 130 when
+    interrupted, after saying how far it got.
     """
     label = _one_or_every(
         ctx,
@@ -568,7 +573,13 @@ def stop(
         typer.echo(json.dumps(_stop_json(receipt)))
     else:
         console = stdout_console()
-        console.print(f"✓ stopped {agent.label} ({agent.id})")
+        if receipt.marked_only:
+            console.print(
+                f"✓ marked {agent.label} ({agent.id}) stopped — it had already ended and no "
+                "window of its was left; Restart all leaves it"
+            )
+        else:
+            console.print(f"✓ stopped {agent.label} ({agent.id})")
         for line in _stop_notes(receipt, target):
             console.print(f"  {line}", markup=False)
     if receipt.release_failed:
@@ -711,7 +722,15 @@ def _bulk_lines(receipt: fleet_service.BulkReceipt) -> list[str]:
     elif receipt.outcome == "failed":
         said, mark = f"failed — {receipt.why}", "✗"
     elif isinstance(result, fleet_service.RestartReceipt):
-        before = "stopped and " if result.was_running else ""
+        if receipt.dead:  # apart from the running ones (#38)
+            # The row as the restart ended it: one no listing had recorded yet holds its
+            # exit only there (n6).
+            code = (
+                agent.exit_status if agent.exit_status is not None else result.replaced.exit_status
+            )
+            before = f"was dead{f' (exit {code})' if code is not None else ''}, "
+        else:
+            before = "stopped and " if result.was_running else ""
         said, mark = f"{before}restarted — {result.how}", "✓"
     else:
         said, mark = "stopped", "✓"
@@ -736,6 +755,7 @@ def _bulk_json(report: fleet_service.BulkReport) -> dict[str, object]:
             "agent": receipt.agent.model_dump(mode="json"),
             "outcome": receipt.outcome,
             "why": receipt.why,
+            "was": "dead" if receipt.dead else "running",  # when the plan was read (#38)
         }
         result = receipt.result
         if isinstance(result, fleet_service.RestartReceipt):
@@ -799,6 +819,9 @@ def _stop_json(receipt: fleet_service.StopReceipt) -> dict[str, object]:
         "agent": receipt.agent.model_dump(mode="json"),
         "claims_released": [task.id for task in receipt.released],
         "release_failed": receipt.release_failed,
+        # An ended agent with no window left was only recorded as stopped (#38): the JSON
+        # says so as the human line does (final delta review, n4).
+        "marked_only": receipt.marked_only,
     }
 
 

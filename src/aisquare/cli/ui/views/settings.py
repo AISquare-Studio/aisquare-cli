@@ -200,7 +200,7 @@ class SettingsView(VerticalScroll):
                 "The nickname is the name every list shows; blank shows the folder name. ",
                 ("aisquare project rename", "bold"),
                 " sets the same. The settings for every project — roles, the fleet, "
-                "accounts — are in App settings.",
+                "accounts — are in App settings ▸ Agent settings.",
             ),
             id="settings-note",
         )

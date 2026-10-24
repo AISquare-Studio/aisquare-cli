@@ -34,7 +34,9 @@ from aisquare.models import Pool, RedactionLevel
 
 
 class CaptureSettings(BaseModel):
-    """Settings for the background capture pipeline."""
+    """Prompt capture. ``enabled`` off: the ``UserPromptSubmit`` hook neither stores the
+    prompt (``aisquare log``) nor spools it for Explainability (#268); the turn's metrics
+    row, without text, and the teammate delta still happen."""
 
     enabled: bool = True
 
@@ -622,6 +624,14 @@ class FleetSettings(BaseModel):
     ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0`` into fleet launches so a manager
     cannot spawn help the sidebar cannot see; ``max_continuations_per_hour`` caps
     how often the manager's Stop hook may keep it going on new board events.
+
+    ``first_prompt`` is how an agent's first message reaches it (P0-W1a, #122):
+    ``argv``, Claude Code's own command line (``claude -- "<prompt>"``), for a Claude
+    Code agent, and typed into its input box for any other binary; ``type`` types it
+    for every agent (``services.delivery``). ``prompt_ack_seconds`` is how long
+    ``fleet spawn``, ``restart`` and ``switch`` wait for the agent's
+    ``UserPromptSubmit`` to say the first message started a turn, and how long a
+    listing gives a first message before it reads the agent ``attention``.
     """
 
     tmux_socket: str = "asq"
@@ -630,6 +640,8 @@ class FleetSettings(BaseModel):
     worktree_dir: str = ".aisquare-worktrees"
     disable_native_agent_teams: bool = True
     max_continuations_per_hour: int = 30
+    first_prompt: Literal["argv", "type"] = "argv"
+    prompt_ack_seconds: float = Field(default=45.0, ge=0)
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
     pane_clipboard: Literal["off", "on"] = "off"
     """Whether a program in an agent's pane may set your clipboard (OSC 52, tmux's
@@ -733,6 +745,13 @@ class AccountsSettings(BaseModel):
     Both defaults were ``default`` and ``wait`` through 0.8.0; a file those builds
     saved keeps either only where it differs from them (``_V1_DEFAULTS``).
 
+    ``prefer`` orders the accounts under ``switch_at`` (#277): ``priority``, the default,
+    takes the first in the operator's order; ``reset-soonest`` takes the one whose weekly
+    window resets first, priority breaking ties, so a week's allowance is spent before it
+    lapses rather than draining accounts with days still to run. It applies to a launch's
+    pick and to a hand-over's. The week is the shared seven-day window's reset, for every
+    agent: a family week (Opus, Sonnet) only ever makes an account read fuller.
+
     ``share_trust``, on by default, copies a folder's trust into the account a launch
     runs on when any other account has it, so an agent never waits at Claude Code's
     "trust this folder?" for a folder the human already said yes to on another login.
@@ -747,6 +766,7 @@ class AccountsSettings(BaseModel):
     switch_at: int = Field(default=85, ge=1, le=100)
     on_limit: Literal["wait", "switch"] = "switch"
     wait_if_reset_within_minutes: int = Field(default=15, ge=0)
+    prefer: Literal["priority", "reset-soonest"] = "priority"
     share_trust: bool = True
     share_settings: bool = False
 

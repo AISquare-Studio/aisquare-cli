@@ -423,6 +423,8 @@ aisquare config set accounts.pick headroom   # the default: spawns take, in prio
 aisquare config set accounts.pick default    # …or every spawn on the machine default
 aisquare config set accounts.switch_at 85    # the line (default 85 %)
 aisquare config set accounts.on_limit wait   # when an agent hits its limit, leave it parked (default: switch)
+aisquare config set accounts.prefer reset-soonest   # under the line, the account whose week ends
+                                             # first (default: priority, the first in order)
 aisquare fleet switch coder-auth             # move one by hand: same label, task and worktree,
                                              # on the account with headroom, resuming its session
 aisquare fleet switch coder-auth --to work --fresh   # a named account, and a fresh session with a
@@ -431,14 +433,20 @@ aisquare fleet switch coder-auth --to work --fresh   # a named account, and a fr
 
 When an agent's turn ends on a usage limit — Claude Code's `StopFailure` hook,
 `You've hit your session limit · resets 12:30am` — its row shows **⏳ limited**
-with the reset time, the manager is woken with the one command that moves it,
-and Claude Code's own wait-and-continue at the reset is left in place. With
-`on_limit = switch`, the default, and a second signed-in account to go to, the fleet
-hands the agent over on its own: it stops the
+with the reset time, and Claude Code's own wait-and-continue at the reset is left
+in place. With `on_limit = switch`, the default, and a second signed-in account to
+go to, the fleet hands the agent over on its own — the `limited` line says so and
+wakes no manager, and a hand-over that cannot go ahead posts `handover_failed`,
+which does — and otherwise the manager is woken with the one command that moves
+it. One limit moves an agent once: `fleet switch` refuses a replacement the
+hand-over started minutes ago unless given `--force`. The hand-over stops the
 agent, starts it again on the account with the most headroom, and resumes the
 same session by its transcript (`claude --resume <path>`), unless the limit
 lifts within `wait_if_reset_within_minutes` (a reset ten minutes away is cheaper
-than a cold start). Every usage reading is kept, so `accounts usage` and the
+than a cold start). A pick counts the account's per-family weeks for an agent of
+that family (Opus and Sonnet limits apply to that family alone) and skips an
+account that refused with a limit until the reset it named. Every usage reading
+is kept, so `accounts usage` and the
 Accounts page can say *≈ 40 min to the limit* at the current pace, and
 `doctor --live` warns when every account is over the line.
 

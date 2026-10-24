@@ -2345,7 +2345,7 @@ VIEWS.project = (route, main) => {
         const by = p.session_id ? authors.get(p.session_id) || "an agent" : "you";
         const to = isText(p.to_role) ? " → " + plainText(p.to_role) : "";
         card.appendChild(el("p", "muted", plainText(kind) + " · " + by + to + " · " + ago(event.ts, now)));
-        card.appendChild(el("p", "text", kind === "limited" && typeof p.text === "string" ? p.text.replace(RESET_SAID, "") : p.text));
+        card.appendChild(el("p", "text", (kind === "limited" || kind === "limited_handing_over") && typeof p.text === "string" ? p.text.replace(RESET_SAID, "") : p.text));
         list.appendChild(card);
       }
       return undefined;

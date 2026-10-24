@@ -883,9 +883,10 @@ class OnboardReport(BaseModel):
     snapshot: Snapshot | None = None
     snapshot_note: str | None = None
     """Why this run packed nothing, as ``onboard`` says it: off, or the pack failed
-    and why. ``None`` when a pack was made or reused, or not asked for (``init``).
-    Set beside a ``snapshot``, it is a ``--refresh`` that failed: that is the last
-    pack, kept."""
+    and why. ``None`` when a pack was made or reused, or not asked for (``init``),
+    except in the aisquare home, which says why it is never packed, asked or not. Set
+    beside a ``snapshot``, it is a ``--refresh`` that failed: that is the last pack,
+    kept."""
     warning: str | None = None
     """``project_service.HOME_WARNING`` when this onboarding made the aisquare home a
     project (D5), said once; else ``None``."""

@@ -201,7 +201,9 @@ def initialize(
         report = project_service.onboard(path, refresh=False, pack=False)
         onboarded = len(report.seeded)
         if report.snapshot is None:
-            notes.append(f"Snapshot: {SNAPSHOT_OPT_IN}.")
+            # The home's own sentence where it has one: it is never packed, so the opt-in
+            # line would name a `project onboard` that packs nothing there (D5, #42).
+            notes.append(f"Snapshot: {report.snapshot_note or SNAPSHOT_OPT_IN}.")
 
     for agent in agents:
         try:

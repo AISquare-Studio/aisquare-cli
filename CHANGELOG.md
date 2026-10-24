@@ -17,6 +17,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which is otherwise refused. New event **`handover_failed`**: the automatic
   hand-over could not move a limited agent, with the reason and the `fleet
   switch` that would; it wakes the manager. (#277)
+- **`aisquare task next --task <ref>`** returns that task when it is in `--status` and
+  ready, and nothing else. A tester or ui-tester spawned for a task (`fleet spawn tester
+  --task <id>`) verifies that one task and stops after its verdict; the manager spawns one
+  per task at its review, and the validator stays the single final gate (#129).
+- **`fleet spawn` runs the role's model ladder**, as `team spawn` does: `--model` and
+  `--effort` from the cached probe (never a probe at spawn), recorded so a restart or
+  switch starts the same model, and shown in `fleet ls --json`'s `launch_spec`. Arguments
+  that already name a model or an effort are yours, and another binary gets neither
+  (#129).
+
 - **`aisquare team show <seq>`** prints one board event in full: who wrote it and who
   caused it, the task, the addressee, its details and the whole text. Every update an
   agent reads is now one line that ends in this command when there is more (#279).

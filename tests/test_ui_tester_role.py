@@ -176,7 +176,7 @@ def test_the_manager_names_the_build_when_it_spawns_a_ui_tester() -> None:
     measures a page instead of running a suite, so it fails SILENTLY against the
     wrong tree."""
     text = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
-    assert "fleet spawn ui-tester --prompt" in text
+    assert "fleet spawn ui-tester --task <id> --prompt" in text
     assert "branch or worktree" in text and "URL" in text
 
 

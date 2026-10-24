@@ -3252,6 +3252,12 @@ def spawn(
     # adding today's would double them (or add ones the agent never had).
     role_args = [] if spec is not None else list(role_config.extra_args)
     extra = list(agent_args)
+    # The role's model and effort down its ladder (#129 b), as `team spawn` launches them:
+    # the fleet path never asked, so every agent ran on the account's default model.
+    # Recorded in the spec's own fields, not its arguments (the role's and the caller's),
+    # so a restart or switch starts the model it recorded.
+    ladder = _ladder(role, resolution.binary, [*role_args, *extra], spec)
+    model_flags = [] if ladder is None else ["--model", ladder[0], "--effort", ladder[1]]
     if replayed_args:
         # Filtered on the way OUT as well as on the way in: a spec written before
         # session choices were left out of it still holds them, and a board
@@ -3340,7 +3346,7 @@ def spawn(
         # path, so the command tmux carries and the row records never holds the text.
         prompt_file = delivery.write_prompt_file(agent_id, first)
         flags += [delivery.FIRST_PROMPT_FLAG, str(prompt_file)]
-    command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
+    command = selfcli.argv_for(["launch", role, *flags, *role_args, *model_flags, *extra])
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
     if experimental.captain_role(role):
         # The launcher activates a board BEFORE it hands the agent its `-e` pairs,
@@ -3543,6 +3549,8 @@ def spawn(
                 command=list(command),
                 recorded_by=__version__,
                 hub=hub,
+                model=ladder[0] if ladder is not None else None,
+                effort=ladder[1] if ladder is not None else None,
                 board_context=reads,
             ),
             socket_path=socket_path,
@@ -5275,6 +5283,32 @@ def _note_board(store: ContextStore, project: ProjectInfo, label: str) -> str | 
     for its fallback (review of #259, round 31, 6/7)."""
     agent = store.fleet_agent_by_label(project.id, label, live_only=True)
     return None if agent is None else _board_of_row(agent)
+
+
+#: The agent flags that choose a model or an effort; one already in a spawn's arguments
+#: (the binding's, the role's ``extra_args``, the caller's) is the caller's choice.
+_MODEL_FLAGS = ("--model", "--effort")
+
+
+def _ladder(
+    role: str, binary: str, args: Sequence[str], spec: LaunchSpec | None
+) -> tuple[str, str] | None:
+    """``(model, effort)`` a spawn passes (#129 b), when the binary is the default agent
+    and no ``--model`` or ``--effort`` is in the binding's arguments, the role's
+    ``extra_args`` or the caller's: what ``spec`` recorded on a replay, else ``role``'s
+    ladder resolved with the cached probe only (``probe=False``: never the 150 s probe at
+    spawn). ``None`` otherwise, and for an untiered role.
+    """
+    if not harness.is_default_agent(binary):
+        return None
+    bound = harness.resolve_profile(role).args
+    if any(arg in _MODEL_FLAGS or arg.startswith(tuple(f"{f}=" for f in _MODEL_FLAGS))
+           for arg in [*bound, *args]):  # fmt: skip
+        return None
+    if spec is not None and spec.model is not None and spec.effort is not None:
+        return spec.model, spec.effort
+    resolved = harness.resolve_model(role, probe=False)
+    return None if resolved is None else (resolved.model, resolved.effort)
 
 
 def _board_context(

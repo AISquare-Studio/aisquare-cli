@@ -1362,6 +1362,7 @@ class ContextStore(Protocol):
         role: str | None = None,
         status: TaskStatus = "todo",
         prefer: str | None = None,
+        only: str | None = None,
     ) -> TeamTask | None: ...
     def task_statuses(self, project_id: str) -> dict[str, str]: ...
     def adopt_fleet_agent_session(
@@ -2989,8 +2990,12 @@ class SqliteStore:
         role: str | None = None,
         status: TaskStatus = "todo",
         prefer: str | None = None,
+        only: str | None = None,
     ) -> TeamTask | None:
         """The oldest *ready* task in ``status`` a session of ``role`` could pick up.
+
+        ``only`` narrows the pool to that one task id, under the same rules (``task next
+        --task``: a tester spawned for one task takes it and nothing else, #129 a).
 
         Tasks without a role hint are available to every role; tasks with one
         only match sessions of that role (or an unfiltered query). A ``todo``
@@ -3006,6 +3011,9 @@ class SqliteStore:
         if role is not None:
             clauses.append("(role IS NULL OR role = ?)")
             params.append(role)
+        if only is not None:
+            clauses.append("id = ?")
+            params.append(only)
         order = "ORDER BY id"
         if prefer is not None:
             order = "ORDER BY (id = ?) DESC, id"

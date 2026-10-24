@@ -1,6 +1,7 @@
 """Codex CLI integration, tested on 0.164.0 and 0.162.1; native hooks keep the real terminal UI."""
 
 import json
+import math
 import os
 import re
 import sys
@@ -1319,12 +1320,15 @@ class CodexAdapter:
 
     def settings_layer(self, settings: Mapping[str, Any], file: Path) -> LaunchPart | None:
         """Its ``-c`` overrides, the top layer of its config, one a leaf (``a.b=<TOML>``):
-        no file. None of its slots answers settings today; they spell their ``-c``."""
+        no file. Each value is the TOML Codex parses back as it was (:func:`_toml_value`),
+        and ``ValueError`` refuses what a ``-c`` cannot say: a ``None`` (TOML has none) and
+        a key that is not bare, which Codex would split on its dots into another path. None
+        of its slots answers settings today; they spell their ``-c``."""
         return LaunchPart(
             tuple(
                 arg
                 for key, value in _leaves(settings)
-                for arg in ("-c", f"{key}={json.dumps(value)}")
+                for arg in ("-c", f"{key}={_toml_value(value)}")
             )
         )
 
@@ -1443,15 +1447,55 @@ class CodexAdapter:
 
 
 def _leaves(settings: Mapping[str, Any], prefix: str = "") -> list[tuple[str, Any]]:
-    """Each leaf of ``settings``, by its dotted key, as a ``-c`` override names it."""
+    """Each leaf of ``settings``, by its dotted key, as a ``-c`` override names it, an empty
+    table one too. ``ValueError`` for a key that is not bare: Codex splits a ``-c`` key on
+    every dot and reads no quotes, so ``my.server`` would name another path."""
     found: list[tuple[str, Any]] = []
     for key, value in settings.items():
+        if not isinstance(key, str) or not _BARE_KEY.fullmatch(key):
+            raise ValueError(f"a Codex -c key is bare keys joined by dots, not {key!r}")
         dotted = f"{prefix}{key}"
-        if isinstance(value, Mapping):
+        if isinstance(value, Mapping) and value:
             found += _leaves(value, f"{dotted}.")
         else:
             found.append((dotted, value))
     return found
+
+
+def _toml_value(value: object) -> str:
+    """``value``, a leaf of a settings document, as the TOML value a ``-c`` override parses
+    back as it was (Codex parses ``_x_ = <value>``, and takes one that does not parse as a
+    bare string): a string as :func:`_toml_string`, a list as an array, a mapping as an
+    inline table (an array of tables included). ``ValueError`` for ``None``, which TOML has
+    no value for, and for what a JSON document does not hold."""
+    if value is None:
+        raise ValueError("a Codex -c value is TOML, which has no null")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        if not -(2**63) <= value < 2**63:
+            raise ValueError(f"a TOML integer is 64-bit, not {value}")
+        return str(value)
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "nan"
+        return repr(value) if math.isfinite(value) else ("inf" if value > 0 else "-inf")
+    if isinstance(value, str):
+        return _toml_string(value)
+    if isinstance(value, Mapping):
+        pairs = (f"{_inline_key(key)} = {_toml_value(item)}" for key, item in value.items())
+        return "{" + ", ".join(pairs) + "}"
+    if isinstance(value, list | tuple):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    raise ValueError(f"a Codex -c value is TOML, not {type(value).__name__}")
+
+
+def _inline_key(key: object) -> str:
+    """``key`` of an inline table: bare where it may be, else quoted (TOML parses this one,
+    where Codex's own key splitting does not reach)."""
+    if not isinstance(key, str):
+        raise ValueError(f"a TOML key is a string, not {key!r}")
+    return key if _BARE_KEY.fullmatch(key) else _toml_string(key)
 
 
 def _toml_features(path: Path) -> dict[str, Any]:

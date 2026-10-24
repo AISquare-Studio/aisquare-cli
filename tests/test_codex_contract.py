@@ -1039,3 +1039,81 @@ def test_the_adapter_installs_its_event_set() -> None:
         for hook in get_adapter("codex").capabilities.hooks
         if hook.event in {"SessionEnd", "Interrupt"}
     )
+
+
+def _override(argument: str) -> tuple[list[str], object]:
+    """A ``-c`` argument as Codex reads it (0.162.1, ``config_override``): the key split on
+    every dot, and the value TOML when ``_x_ = <value>`` parses, else the text as written."""
+    key, _, raw = argument.partition("=")
+    try:
+        value: object = tomllib.loads(f"_x_ = {raw}")["_x_"]
+    except tomllib.TOMLDecodeError:
+        value = raw
+    return key.split("."), value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param('on "quoted" \\ and\nnewline \x7f \U0001f600', id="string"),
+        pytest.param(True, id="bool"),
+        pytest.param(-42, id="int"),
+        pytest.param(0.25, id="float"),
+        pytest.param(["a", 1, False], id="array"),
+        pytest.param([{"name": "x", "args": ["--y"]}, {"weird key": 2}], id="array-of-tables"),
+        pytest.param([[1, 2], []], id="nested-arrays"),
+        pytest.param({}, id="empty-table"),
+    ],
+)
+def test_codex_settings_layer_writes_each_value_as_the_toml_codex_reads_back(
+    value: object, tmp_path: Path
+) -> None:
+    """Review r18 of #113, finding 9: ``settings_layer`` wrote each leaf as
+    ``-c key=<json.dumps(value)>``. JSON is not TOML: a list of tables did not parse, and
+    Codex took it as a string. Each leaf is now the TOML value Codex parses back as it was."""
+    layer = CodexAdapter().settings_layer({"tools": {"web": {"leaf": value}}}, tmp_path / "f")
+    assert layer is not None and layer.args[0] == "-c" and len(layer.args) == 2
+    assert _override(layer.args[1]) == (["tools", "web", "leaf"], value)
+    assert not (tmp_path / "f").exists()
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        pytest.param({"a": None}, id="null"),
+        pytest.param({"a": [1, None]}, id="null-in-an-array"),
+        pytest.param({"mcp_servers": {"my.server": {"enabled": False}}}, id="dotted-key"),
+        pytest.param({"a b": 1}, id="non-bare-key"),
+    ],
+)
+def test_codex_settings_layer_refuses_what_a_c_override_cannot_say(
+    settings: dict[str, object], tmp_path: Path
+) -> None:
+    """TOML has no null, which ``json.dumps`` wrote as ``null`` and Codex read as the string
+    ``"null"``; and Codex splits a ``-c`` key on every dot, so ``my.server`` named another
+    path. Both are refused, as the adapter refuses such a server name elsewhere."""
+    with pytest.raises(ValueError):
+        CodexAdapter().settings_layer(settings, tmp_path / "f")
+
+
+def test_a_codex_launch_carrying_a_setting_its_c_cannot_say_is_refused_not_launched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A carried ``AISQUARE_LAUNCH_SETTINGS`` reaching a Codex launch launched it with
+    ``-c features.x=null``, which Codex reads as the string ``"null"``; the launch now ends
+    with the refusal and runs nothing."""
+    from importlib import import_module
+    from unittest.mock import Mock
+
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    monkeypatch.setenv(agent_launch.LAUNCH_SETTINGS_ENV, json.dumps({"features": {"x": None}}))
+
+    result = CliRunner().invoke(app, ["launch", "coder", "--agent", "codex"])
+
+    assert result.exit_code != 0 and "no null" in result.output, result.output
+    assert not execute.called

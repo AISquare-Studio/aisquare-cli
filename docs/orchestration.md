@@ -371,6 +371,11 @@ with it off where it can, and its panel says when it could not.
 cards and quick answers, notifications on iPhone, the security model, and a
 checklist for before you leave the desk.
 
+**Long waits.** A manager waiting on CI, a review or an agent's dialog does not poll
+for it with Monitor or `sleep` loops, each of which is a turn that re-sends its whole
+context. `aisquare watch --detach` runs one watcher for the fleet, and its `watch:` board
+lines wake the manager with counts and a file path ([fleet](fleet.md#watching-the-fleet)).
+
 ### Tuning (environment variables)
 
 Orchestration has no config files — a handful of env knobs:

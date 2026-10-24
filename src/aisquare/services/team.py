@@ -3023,6 +3023,16 @@ def hook_note(project_id: str, text: str, *, session_id: str | None = None) -> N
         _emit(store, project_id, "note", text, session_id=session_id)
 
 
+def watch_event(board_id: str, text: str) -> None:
+    """``aisquare watch``'s one line for a project with new items (P2-W2, #284): kind
+    ``watch``, addressed to the manager, so it wakes it (:func:`wake_class`) and a working
+    manager is handed it at its turn's end. Counts and a path, never an excerpt."""
+    if not orchestrator.team_enabled():
+        return
+    with store_session() as store:
+        _emit(store, board_id, "watch", text, to_role=MANAGER_ROLE)
+
+
 def hook_notice(project_id: str, text: str, *, session_id: str | None = None) -> None:
     """A human-only feed line from a worker (:data:`HUMAN_BOARD_KINDS`): no agent is briefed
     with it or woken by it."""

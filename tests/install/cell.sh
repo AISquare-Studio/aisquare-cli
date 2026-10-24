@@ -11,10 +11,11 @@
 #
 # THREE RUNS, and the sequence is the test rather than an accident:
 #
-#   1. bare machine, --no-project, --with node. Nothing but a downloader is
-#      preinstalled, so this is the run that exercises the §5 package matrix —
-#      tmux, gh, git and the optional Node all come from the platform's own
-#      manager (Node through NodeSource or fnm where that one is too old).
+#   1. bare machine, --no-project, --with chrome-devtools. Nothing but a
+#      downloader is preinstalled, so this is the run that exercises the §5
+#      package matrix — tmux, gh, git and the extra's Node all come from the
+#      platform's own manager (Node through NodeSource or fnm where that one is
+#      too old). The extra registers its MCP only where Claude Code is installed.
 #   2. with a project. A local wheel is always installed, never short-circuited,
 #      so this run registers the project. THIS is the run the acceptance
 #      criterion is asserted against.
@@ -138,7 +139,7 @@ cd "$WORKDIR"
 
 set +e
 # shellcheck disable=SC2086  # AGENT_FLAG is deliberately word-split (or empty).
-sh "$INSTALLER" --yes --no-project --with node $AGENT_FLAG
+sh "$INSTALLER" --yes --no-project --with chrome-devtools $AGENT_FLAG
 run1=$?
 set -e
 printf '\nrun 1 exit: %s\n' "$run1"
@@ -155,11 +156,25 @@ head1 "installed: $(aisquare --version)"
 # names which one.
 aisquare --version >/dev/null || fail "aisquare --version does not run"
 
-# Node, which run 1 chose with --with node. It is optional, so no doctor row goes
-# amber without it and run 2's "exactly [brain]" gate could not see a failed
-# install. Checked by name.
+# Node, which run 1 chose with --with chrome-devtools. It is optional, so no
+# doctor row goes amber without it and run 2's "exactly [brain]" gate could not
+# see a failed install. Checked by name.
 command -v node >/dev/null 2>&1 ||
-    fail "node absent after run 1 — the installer's Node extra failed (no doctor row names Node)"
+    fail "node absent after run 1 — the installer's Chrome DevTools extra failed (no doctor row names Node)"
+
+# The extra's MCP, read from the file `claude mcp add --scope user` writes (`claude
+# mcp get` would start the server to health-check it). Under --no-agent, every
+# cell but one, Claude Code is left alone and nothing is registered; the cell
+# with Claude Code installed for real must have it.
+CLAUDE_JSON="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"
+if [ "$SKIP_AGENT" = 1 ]; then
+    if [ -f "$CLAUDE_JSON" ] && grep -q '"chrome-devtools"' "$CLAUDE_JSON"; then
+        fail "run 1 registered the Chrome DevTools MCP under --no-agent"
+    fi
+else
+    grep -q '^    "chrome-devtools": ' "$CLAUDE_JSON" 2>/dev/null ||
+        fail "the Chrome DevTools MCP is not registered after run 1 chose it with Claude Code installed"
+fi
 
 # The install shape the `install` doctor check wants (§3.1): a real binary on
 # PATH, outside any virtualenv.

@@ -8,15 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **`install.sh` offers Node as an opt-in extra, for browser tools** (#399, the owner's
-  decision of 2026-10-24). Node 22.12+ is no longer installed for aisquare, which never
-  runs it, but for tools like the Chrome DevTools MCP (`npx chrome-devtools-mcp`, whose
-  floor 22.12 is). It is asked about with its own prompt, which defaults to no, or
-  chosen without asking with `--with node`; `--yes`, a run with no terminal and
+- **`install.sh` offers the Chrome DevTools MCP as an opt-in extra** (#399, the owner's
+  decisions of 2026-10-24). Node 22.12+ is no longer installed for aisquare, which never
+  runs it, but for the MCP, whose floor 22.12 is. Chosen, the extra installs Node, then
+  registers the MCP with Claude Code at user scope, as the package's own guide does:
+  `claude mcp add chrome-devtools --scope user npx chrome-devtools-mcp@latest`. The
+  summary says how to undo it (`claude mcp remove -s user chrome-devtools`). It skips
+  the registration in one line under `--no-agent`, without Claude Code, or when the MCP
+  (or the chrome-devtools-mcp plugin) is already there, and a failed registration only
+  warns. It is asked about with its own prompt, which defaults to no, or chosen without
+  asking with `--with chrome-devtools`; `--yes`, a run with no terminal and
   `--no-system-deps` install no extra unless named. The extras are a list
   (`OPTIONAL_EXTRAS`), so more can be added the same way. A machine without Node is
-  current, and the run exits 2 only when an extra you chose did not install. The script
-  registers no MCP server.
+  current, and the run exits 2 only when an extra you chose did not install. Doctor's
+  browser tools row names the same command.
 
 ### Removed
 

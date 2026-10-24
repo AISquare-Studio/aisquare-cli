@@ -2524,7 +2524,8 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
         f"no browser MCP/plugin declared in {len(dirs)} config dir(s) or {_short_path(mcp_json)}; "
         f"{chrome_note}. Without one the ui-tester reopens UI tasks as 'not browser-verified' "
         "rather than passing them on code alone — add the Chrome DevTools MCP with "
-        "`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp`, or install the "
+        "`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp@latest` (what "
+        "install.sh --with chrome-devtools runs), or install the "
         "Claude in Chrome extension (claude.ai/chrome)",
     )
 

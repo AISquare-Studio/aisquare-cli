@@ -74,10 +74,18 @@ RECOMMENDED_TMUX_MINOR=5
 
 MIN_NODE_MAJOR=22
 MIN_NODE_MINOR=12
-# The optional Node extra's floor. chrome-devtools-mcp@1.12.0 declares "engines":
-# {"node": "^20.19.0 || ^22.12.0 || >=23"}, and 22 is the line NodeSource and fnm
-# are asked for, so 22.12. Debian 12 ships Node 18 and Ubuntu 22.04 ships 12,
-# which is why this is a real floor and not a formality (§1.4).
+# The Chrome DevTools extra's Node floor. chrome-devtools-mcp@1.12.0 declares
+# "engines": {"node": "^20.19.0 || ^22.12.0 || >=23"}, and 22 is the line
+# NodeSource and fnm are asked for, so 22.12. Debian 12 ships Node 18 and Ubuntu
+# 22.04 ships 12, which is why this is a real floor and not a formality (§1.4).
+# The MCP is registered as @latest, so a release that raises its engines needs
+# this raised with it.
+
+# The Chrome DevTools MCP as its own guide has Claude Code register it
+# (ChromeDevTools/chrome-devtools-mcp, docs/client-configurations.md, read
+# 2026-10-24): `claude mcp add chrome-devtools --scope user npx chrome-devtools-mcp@latest`.
+DEVTOOLS_MCP_NAME="chrome-devtools"
+DEVTOOLS_MCP_PACKAGE="chrome-devtools-mcp@latest"
 
 # --- optional extras --------------------------------------------------------
 #
@@ -85,10 +93,10 @@ MIN_NODE_MINOR=12
 #: a prompt that defaults to no, and installed only when chosen there or named
 #: with `--with NAME`. `--yes`, a run with no terminal and `--no-system-deps`
 #: choose none unless named. To add one, add its name here and three functions
-#: beside `install_node`: `extra_<name>_line` (what the prompt and the plan call
-#: it), `extra_<name>_current` (true when there is nothing to do) and
-#: `install_<name>`.
-OPTIONAL_EXTRAS="node"
+#: beside `install_chrome_devtools`, with the name's dashes as underscores (see
+#: `extra_call`): `extra_<name>_line` (what the prompt and the plan call it),
+#: `extra_<name>_current` (true when there is nothing to do) and `install_<name>`.
+OPTIONAL_EXTRAS="chrome-devtools"
 
 # `brain` is always expected to be amber when this finishes — gbrain is out of
 # scope (§0.4). `expected_amber` adds to it when the run asked for no project.
@@ -137,6 +145,10 @@ GIT_ACTION=""    # install | current
 CLAUDE_ACTION="" # install | update
 
 CHOSEN_EXTRAS="" # named with --with, or said yes to at their prompt
+# The Chrome DevTools MCP in Claude Code's config: registered | absent (survey),
+# or skipped once register_devtools_mcp has said why it did not register it.
+DEVTOOLS_MCP=""
+DEVTOOLS_MCP_ADDED=0 # 1 when this run registered it, so the summary says how to undo it
 
 INSTALLED_LIST=""
 UPGRADED_LIST=""
@@ -212,6 +224,12 @@ aisquare_home_shown() {
 claude_settings_shown() {
     _cs_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
     shown_path "${_cs_dir%/}/settings.json"
+}
+# Where `claude mcp add --scope user` writes: ~/.claude.json, or .claude.json in
+# CLAUDE_CONFIG_DIR when that is set (measured with Claude Code 2.1.310).
+claude_json() {
+    _cj_dir=${CLAUDE_CONFIG_DIR:-$HOME}
+    printf '%s' "${_cj_dir%/}/.claude.json"
 }
 
 # ---------------------------------------------------------------------------
@@ -617,6 +635,8 @@ survey() {
     have gh && GH_VERSION=$(version_of_gh || true)
     have git && GIT_VERSION=$(version_of_git || true)
     have node && NODE_VERSION=$(version_of_node || true)
+    DEVTOOLS_MCP=absent
+    devtools_mcp_registered && DEVTOOLS_MCP=registered
 
     _report uv "$UV_VERSION"
     _report aisquare "$CLI_VERSION"
@@ -625,6 +645,11 @@ survey() {
     _report gh "$GH_VERSION"
     _report git "$GIT_VERSION"
     _report Node "$NODE_VERSION"
+    if [ "$DEVTOOLS_MCP" = registered ]; then
+        note "Chrome DevTools MCP — registered with Claude Code"
+    else
+        note "Chrome DevTools MCP — not registered"
+    fi
 }
 
 _report() {
@@ -797,7 +822,7 @@ short_circuit() {
     # An extra is optional, so one nobody asked for never makes work; one named
     # with --with does, until it is there.
     for _sc_extra in $CHOSEN_EXTRAS; do
-        "extra_${_sc_extra}_current" || return 1
+        extra_call current "$_sc_extra" || return 1
     done
     # Only when we would have installed it: under --no-agent an absent Claude
     # Code IS the requested state, and demanding it here meant a second run
@@ -861,8 +886,8 @@ short_circuit() {
         note "doctor: every check ok"
     fi
     for _sc_offer in $OPTIONAL_EXTRAS; do
-        "extra_${_sc_offer}_current" ||
-            note "optional: $("extra_${_sc_offer}_line") — rerun with --with $_sc_offer"
+        extra_call current "$_sc_offer" ||
+            note "optional: $(extra_call line "$_sc_offer") — rerun with --with $_sc_offer"
     done
     say ""
     say "Nothing to do. Open the fleet UI with: ${C_BOLD}asq${C_RESET}"
@@ -904,11 +929,11 @@ banner() {
         _plan="$_plan$_bn_nl  skip     tmux/gh/git (--no-system-deps)"
     fi
     for _bn_extra in $OPTIONAL_EXTRAS; do
-        "extra_${_bn_extra}_current" && continue
+        extra_call current "$_bn_extra" && continue
         if extra_chosen "$_bn_extra"; then
-            _plan="$_plan$_bn_nl  install  $("extra_${_bn_extra}_line") (--with $_bn_extra)"
+            _plan="$_plan$_bn_nl  install  $(extra_call line "$_bn_extra") (--with $_bn_extra)"
         elif extras_are_asked; then
-            _plan="$_plan$_bn_nl  offer    $("extra_${_bn_extra}_line") (optional, asked below)"
+            _plan="$_plan$_bn_nl  offer    $(extra_call line "$_bn_extra") (optional, asked below)"
         fi
     done
 
@@ -953,6 +978,16 @@ banner() {
     note "$(printf '%-33s %s' "$(aisquare_home_shown)/" "config.toml, context.db, projects/")"
     if [ "$WANT_AGENT" = 1 ]; then
         note "$(printf '%-33s %s' "$(claude_settings_shown)" "MERGED — aisquare's hook groups only")"
+    fi
+    # register_devtools_mcp's one write, for a run that can make it: the extra
+    # chosen or still to be asked about, the MCP not there, and not --no-agent.
+    if [ "$WANT_AGENT" = 1 ] && [ "$DEVTOOLS_MCP" = absent ]; then
+        _bn_mcp="ADDED — the $DEVTOOLS_MCP_NAME MCP server (user scope)"
+        if extra_chosen chrome-devtools; then
+            note "$(printf '%-33s %s' "$(shown_path "$(claude_json)")" "$_bn_mcp")"
+        elif extras_are_asked; then
+            note "$(printf '%-33s %s' "$(shown_path "$(claude_json)")" "$_bn_mcp, if you choose it below")"
+        fi
     fi
     say ""
 
@@ -1022,7 +1057,8 @@ Open a new shell and rerun, or add it by hand:
 
 # tiktoken STAYS, though this tree no longer uses it (#399). This script installs
 # the latest RELEASE, and every release up to 0.9.0 has a `tiktoken` doctor row
-# that goes amber without it on a machine with Node, which the Node extra makes.
+# that goes amber without it on a machine with Node, which the Chrome DevTools
+# extra makes.
 # Measured in the container matrix: run 4 upgraded to the release, its doctor
 # called tiktoken unexpected, and the run exited 2. Drop `--with tiktoken` here
 # once a release without that row is the latest on PyPI.
@@ -1422,15 +1458,15 @@ install_git() {
 # stop to ask me", and an extra is never installed unasked.
 install_extras() {
     for _ie_extra in $OPTIONAL_EXTRAS; do
-        if ! "extra_${_ie_extra}_current" && ! extra_chosen "$_ie_extra"; then
+        if ! extra_call current "$_ie_extra" && ! extra_chosen "$_ie_extra"; then
             if ! extras_are_asked ||
-                ! confirm "Install $("extra_${_ie_extra}_line")?" n; then
-                note "not installing $("extra_${_ie_extra}_line") — optional; --with $_ie_extra adds it"
+                ! confirm "Install $(extra_call line "$_ie_extra")?" n; then
+                note "not installing $(extra_call line "$_ie_extra") — optional; --with $_ie_extra adds it"
                 continue
             fi
             CHOSEN_EXTRAS="$CHOSEN_EXTRAS $_ie_extra"
         fi
-        "install_$_ie_extra"
+        extra_call install "$_ie_extra"
     done
 }
 
@@ -1455,18 +1491,65 @@ choose_extra() {
     esac
 }
 
-extra_node_line() {
-    printf 'Node %s.%s+, for browser tools like the Chrome DevTools MCP' \
-        "$MIN_NODE_MAJOR" "$MIN_NODE_MINOR"
+# `extra_call WHAT NAME`: extra NAME's `extra_<name>_line` or `_current`, or its
+# `install_<name>` for WHAT=install. A POSIX function name has no dashes, so the
+# name's are underscores there; NAME itself is what `--with` takes.
+extra_call() {
+    _ec_fn=$(printf '%s' "$2" | tr '-' '_')
+    case "$1" in
+        install) "install_$_ec_fn" ;;
+        *) "extra_${_ec_fn}_$1" ;;
+    esac
 }
 
-extra_node_current() { _node_ok; }
+# --- chrome-devtools: Node, then the MCP registered with Claude Code --------
 
-# Node is the optional extra for browser tools: the Chrome DevTools MCP is started
-# with `npx chrome-devtools-mcp`, which doctor's browser tools row names, and
-# aisquare itself never runs Node. Nothing registers the MCP; Claude Code's
-# `claude mcp add` does, as the user chooses. Node is the awkward install, and it
-# gets stated rules rather than a guess.
+extra_chrome_devtools_line() {
+    if [ "$WANT_AGENT" = 1 ]; then
+        printf 'the Chrome DevTools MCP for browser tools: Node %s.%s+, registered with Claude Code' \
+            "$MIN_NODE_MAJOR" "$MIN_NODE_MINOR"
+    else
+        printf 'the Chrome DevTools MCP for browser tools: Node %s.%s+ (--no-agent: not registered with Claude Code)' \
+            "$MIN_NODE_MAJOR" "$MIN_NODE_MINOR"
+    fi
+}
+
+# Nothing to do: Node at the floor, and the MCP registered, not this run's to
+# register (--no-agent), or already answered for by register_devtools_mcp, whose
+# failure only warns.
+extra_chrome_devtools_current() {
+    _node_ok || return 1
+    [ "$WANT_AGENT" = 0 ] || [ "$DEVTOOLS_MCP" != absent ]
+}
+
+# The Node half. The MCP half is register_devtools_mcp, after install_claude, so
+# a Claude Code this run installs is there to take it.
+install_chrome_devtools() { install_node; }
+
+# True when Claude Code already has the Chrome DevTools MCP: a user-scope server
+# of that name in .claude.json, or the chrome-devtools-mcp plugin enabled, which
+# brings its own (and whose guide says not to have both). Read from the files,
+# because `claude mcp get` and `claude mcp list` start every server they show to
+# health-check it: measured with Claude Code 2.1.310, 30 seconds and an
+# `npx chrome-devtools-mcp@latest` download each. Claude Code writes the file
+# with two-space indents, so a user-scope server is a key at four, and a project's
+# local servers, deeper in, do not match. A file laid out some other way reads as
+# absent, and `claude mcp add` then answers that it exists, which
+# register_devtools_mcp reports the same way.
+devtools_mcp_registered() {
+    grep -q "^    \"$DEVTOOLS_MCP_NAME\": " "$(claude_json)" 2>/dev/null && return 0
+    _dr_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+    grep -q '"chrome-devtools-mcp@[^"]*": *true' "${_dr_dir%/}/settings.json" 2>/dev/null
+}
+
+devtools_mcp_add_shown() {
+    printf 'claude mcp add %s --scope user npx %s' "$DEVTOOLS_MCP_NAME" "$DEVTOOLS_MCP_PACKAGE"
+}
+
+# Node is the Chrome DevTools extra's first half: the MCP is started with
+# `npx chrome-devtools-mcp@latest`, which doctor's browser tools row names, and
+# aisquare itself never runs Node. Node is the awkward install, and it gets
+# stated rules rather than a guess.
 #
 # THREE SOURCES, tried in order, each with a measured reason for its place:
 #
@@ -1494,7 +1577,7 @@ install_node() {
         note "Node $NODE_VERSION — current"
         # Only for a run that chose it: npm is a package of its own, and an extra
         # nobody asked for installs nothing.
-        if extra_chosen node; then _ensure_npx || true; fi
+        if extra_chosen chrome-devtools; then _ensure_npx || true; fi
         SKIPPED_LIST="$SKIPPED_LIST node"
         return 0
     fi
@@ -1701,6 +1784,59 @@ install_claude() {
     else
         warn "Claude Code installed but \`claude\` is not on PATH yet. Open a new shell."
     fi
+}
+
+# The Chrome DevTools extra's second half: `claude mcp add` at user scope, as the
+# package's own guide gives it, for a run that chose the extra and nothing else.
+# Each reason not to is one line. A failure warns and never fails the install:
+# browser tools are optional, and doctor's browser tools row is green either way.
+# `claude mcp add` refuses a name it already has, so its answer is the check
+# behind the survey's, and nothing is ever registered twice.
+register_devtools_mcp() {
+    extra_chosen chrome-devtools || return 0
+    if [ "$WANT_AGENT" = 0 ]; then
+        note "Chrome DevTools MCP not registered: --no-agent leaves Claude Code alone. To add it: $(devtools_mcp_add_shown)"
+        return 0
+    fi
+    if [ "$DEVTOOLS_MCP" = registered ]; then
+        note "Chrome DevTools MCP — already registered with Claude Code, left as it is"
+        return 0
+    fi
+    DEVTOOLS_MCP=skipped
+    if [ "$DRY_RUN" = 1 ]; then
+        printf '  %swould run:%s %s\n' "$C_DIM" "$C_RESET" "$(devtools_mcp_add_shown)"
+        return 0
+    fi
+    if ! _node_ok; then
+        # install_node has warned, and the summary names the extra.
+        note "Chrome DevTools MCP not registered: there is no Node $MIN_NODE_MAJOR.$MIN_NODE_MINOR+ to start it"
+        return 0
+    fi
+    if ! have npx; then
+        warn "Chrome DevTools MCP not registered: Node is here but npx is not, so it could not start.
+         Install npm ($(pkg_hint npm)), then: $(devtools_mcp_add_shown)"
+        return 0
+    fi
+    if ! have claude; then
+        note "Chrome DevTools MCP not registered: Claude Code is not installed. Once it is: $(devtools_mcp_add_shown)"
+        return 0
+    fi
+    step "Registering the Chrome DevTools MCP with Claude Code (user scope)"
+    if _rd_out=$(claude mcp add "$DEVTOOLS_MCP_NAME" --scope user npx "$DEVTOOLS_MCP_PACKAGE" </dev/null 2>&1); then
+        DEVTOOLS_MCP=registered
+        DEVTOOLS_MCP_ADDED=1
+        good "Chrome DevTools MCP registered: npx $DEVTOOLS_MCP_PACKAGE"
+        return 0
+    fi
+    case "$_rd_out" in
+        *"already exists"*)
+            DEVTOOLS_MCP=registered
+            note "Chrome DevTools MCP — already registered with Claude Code, left as it is"
+            return 0
+            ;;
+    esac
+    warn "could not register the Chrome DevTools MCP: $(printf '%s\n' "$_rd_out" | first_line)
+         Browser tools are optional; everything else works. To add it: $(devtools_mcp_add_shown)"
 }
 
 # ---------------------------------------------------------------------------
@@ -2107,6 +2243,8 @@ summary() {
     [ -n "$INSTALLED_LIST" ] && note "installed:$INSTALLED_LIST"
     [ -n "$UPGRADED_LIST" ] && note "upgraded:$UPGRADED_LIST"
     [ -n "$SKIPPED_LIST" ] && note "already current:$SKIPPED_LIST"
+    [ "$DEVTOOLS_MCP_ADDED" = 1 ] &&
+        note "registered: the $DEVTOOLS_MCP_NAME MCP with Claude Code — to undo: claude mcp remove -s user $DEVTOOLS_MCP_NAME"
 
     if [ "$DRY_RUN" = 1 ]; then
         say ""
@@ -2134,7 +2272,7 @@ summary() {
     # still not there. No doctor row can say so: an extra is optional, so no row
     # goes amber without it. That knowledge is this script's, and it exits 2.
     for _sm_extra in $CHOSEN_EXTRAS; do
-        "extra_${_sm_extra}_current" && continue
+        extra_call current "$_sm_extra" && continue
         _unexpected="$_unexpected $_sm_extra"
         UNEXPECTED=$((UNEXPECTED + 1))
     done
@@ -2229,9 +2367,9 @@ summary() {
         fi
         # Each its own line, since no doctor row names it.
         for _sm_failed in $CHOSEN_EXTRAS; do
-            "extra_${_sm_failed}_current" ||
+            extra_call current "$_sm_failed" ||
                 printf '  %s — you chose %s, and it did not install (see the warning above)\n' \
-                    "$_sm_failed" "$("extra_${_sm_failed}_line")"
+                    "$_sm_failed" "$(extra_call line "$_sm_failed")"
         done
     fi
 
@@ -2312,9 +2450,11 @@ Options
       --no-agent       Skip Claude Code.
       --no-system-deps Skip tmux, gh and git, and ask about no optional extra.
       --with EXTRA     Install an optional extra without asking. One for now:
-                       node (Node 22.12+, for browser tools like the Chrome
-                       DevTools MCP). Without it each extra is asked about,
-                       defaulting to no; --yes asks nothing.
+                       chrome-devtools (Node 22.12+, and the Chrome DevTools
+                       MCP registered with Claude Code at user scope; undo
+                       with: claude mcp remove -s user chrome-devtools).
+                       Without it each extra is asked about, defaulting to
+                       no; --yes asks nothing.
       --project DIR    Register DIR as the project (default: $PWD if a git repo).
       --no-project     Machine setup only; register nothing.
       --version V      Pin aisquare-cli to V (default: latest).
@@ -2460,6 +2600,7 @@ main() {
     install_git
     install_extras
     install_claude
+    register_devtools_mcp
     init_home
     run_doctor
     summary

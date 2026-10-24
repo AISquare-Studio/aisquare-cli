@@ -116,7 +116,8 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 - [Claude Code](https://claude.com/claude-code) for the agents, and tmux 3.2+
   for the fleet.
 - Node 22.12+, optional, for browser tools like the Chrome DevTools MCP; the one-liner
-  offers it (`--with node` installs it without asking). aisquare itself never runs Node.
+  offers both, Node and the MCP registered with Claude Code (`--with chrome-devtools`
+  installs them without asking). aisquare itself never runs Node.
 
 The package is `aisquare-cli`; the command is `aisquare`, with `asq` as the
 short alias.

@@ -493,14 +493,16 @@ def test_no_unescaped_backticks_in_double_quotes() -> None:
 def test_every_optional_extra_has_its_three_functions(source: str) -> None:
     """``OPTIONAL_EXTRAS`` names functions rather than holding them: the plan, the prompt
     and the install call ``extra_<name>_line``, ``extra_<name>_current`` and
-    ``install_<name>`` by a name built at run time. An extra added to the list without
-    one fails only on the machine of whoever picks it, so each is asserted here."""
+    ``install_<name>`` by a name built at run time, with its dashes as underscores
+    (``extra_call``). An extra added to the list without one fails only on the machine of
+    whoever picks it, so each is asserted here."""
     match = re.search(r'^OPTIONAL_EXTRAS="([^"]*)"$', source, re.MULTILINE)
     assert match, "install.sh no longer declares OPTIONAL_EXTRAS"
     extras = match.group(1).split()
-    assert extras == ["node"], extras
+    assert extras == ["chrome-devtools"], extras
     for name in extras:
-        for function in (f"extra_{name}_line", f"extra_{name}_current", f"install_{name}"):
+        fn = name.replace("-", "_")
+        for function in (f"extra_{fn}_line", f"extra_{fn}_current", f"install_{fn}"):
             assert re.search(rf"^{function}\(\) ", source, re.MULTILINE), function
 
 

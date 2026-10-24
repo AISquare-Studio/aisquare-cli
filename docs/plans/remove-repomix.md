@@ -30,11 +30,21 @@ The handoff's three questions, answered:
 3. **Keep `install.sh`'s Node step?** Yes, as an opt-in for the Chrome DevTools MCP, built
    so more optional packages can be added: a small list of optional extras, one prompt
    each. Every line that said the packer needs Node says the new reason. Doctor must not
-   go amber over a missing Node. `install.sh` and `install.ps1` set up no MCP today (both
-   checked), so none is added: registering one is an owner question in the PR body.
+   go amber over a missing Node. `install.sh` and `install.ps1` set up no MCP then (both
+   checked), so registering one went to the owner as a question.
 
 Later the same day: #274 merged into `main`, so #399 is not retargeted; its base stays
-`main`, and `origin/main` is merged into it (merge commits only).
+`main`, and `origin/main` is merged into it (merge commits only). And the owner answered
+the MCP question:
+
+4. **Register the Chrome DevTools MCP?** Yes, opt-in. When the user chooses the Chrome
+   DevTools extra, `install.sh` installs Node and then registers the MCP with Claude Code
+   at user scope. It skips in one line when Claude Code is missing or the MCP is already
+   registered; a failed registration warns, never fails the install, and doctor stays
+   green. The survey and the plan line name it, and the summary says how to undo it
+   (`claude mcp remove -s user chrome-devtools`). Never when the extra is not chosen,
+   under `--yes` without it, or in a CI cell that does not opt in; the matrix grades what
+   it graded.
 
 ## What #399 does
 
@@ -93,13 +103,14 @@ own any more.
 - **Doctor** loses its packer, `tiktoken` and `snapshot` rows, the Node floor and
   `_has_module`. `tests/test_doctor_needs_no_node.py` runs the whole doctor with no
   `node`, `npx` or `npm` on PATH: no row is about them and nothing amber names them.
-  Doctor's browser tools row may still name `npx chrome-devtools-mcp`: it is green, and it
-  is advice for a tool the user picks.
+  Doctor's browser tools row names the command `install.sh --with chrome-devtools` runs,
+  `npx chrome-devtools-mcp@latest`: it is green, and it is advice for a tool the user
+  picks.
 - **tiktoken** counted pack tokens and nothing else, and it was never a dependency in
   `pyproject.toml`, so `uv.lock` does not change. `install.sh` still adds it, on
   purpose: the script installs the latest *release*, and a release up to 0.9.0 has a
   `tiktoken` doctor row that goes amber without it on a machine with Node, which the
-  Node extra makes. The container matrix measured it: run 4 upgraded to the release,
+  Chrome DevTools extra makes. The container matrix measured it: run 4 upgraded to the release,
   its doctor called tiktoken unexpected, and the run exited 2. So `--with tiktoken`
   stays, with a comment saying when to drop it, and Remote's fallback hint matches.
 - **The one-click fix** `project onboard --refresh` stays in `onboarding.KNOWN_FIXES`: a
@@ -107,12 +118,15 @@ own any more.
   stays tested. No doctor row names it today; the tests' fixtures say they stand in for
   one.
 
-### `install.sh`: Node as an opt-in extra
+### `install.sh`: the Chrome DevTools MCP as an opt-in extra
 
-- `OPTIONAL_EXTRAS="node"` lists the extras. Each has three functions, called by a name
-  built at run time: `extra_<name>_line` (what the prompt and the plan call it),
-  `extra_<name>_current` (true when there is nothing to do) and `install_<name>`.
-  `test_every_optional_extra_has_its_three_functions` holds the list to that.
+- `OPTIONAL_EXTRAS="chrome-devtools"` lists the extras. Each has three functions, called
+  by a name built at run time with its dashes as underscores (`extra_call`):
+  `extra_<name>_line` (what the prompt and the plan call it), `extra_<name>_current`
+  (true when there is nothing to do) and `install_<name>`.
+  `test_every_optional_extra_has_its_three_functions` holds the list to that. The extra
+  was `node` until the owner's fourth decision: it now writes Claude Code's config, so
+  its flag says what it adds.
 - Each extra that is not already there is asked about with its own prompt, which defaults
   to no, or chosen without asking with `--with NAME`. `--yes`, a run with no terminal and
   `--no-system-deps` choose none unless named. An unknown name is refused.
@@ -120,18 +134,41 @@ own any more.
   `^20.19.0 || ^22.12.0 || >=23`, and NodeSource and fnm are asked for the 22 line. The
   three sources (platform package, NodeSource, fnm) are unchanged. npm is installed beside
   Node only for a run that chose it.
-- Node no longer blocks the short-circuit; a current machine without it is told
-  `optional: … — rerun with --with node`. Exit 2 means an extra the run chose did not
-  install; no doctor row can say so.
+- Node no longer blocks the short-circuit; a current machine without the extra is told
+  `optional: … — rerun with --with chrome-devtools`. Exit 2 means an extra the run chose
+  did not install (its Node); no doctor row can say so.
+- **The registration** (`register_devtools_mcp`) runs after `install_claude`, so a Claude
+  Code the run installs is there to take it, and only for a run that chose the extra. It
+  runs the package's own command, `claude mcp add chrome-devtools --scope user npx
+  chrome-devtools-mcp@latest` (its `docs/client-configurations.md`, read 2026-10-24;
+  npm's latest is 1.12.0, whose engines set the Node floor). One line instead, and no
+  call, under `--no-agent`, in a dry run, with no Node 22.12+, or without Claude Code;
+  a warning when Node has no npx. `claude mcp add` refusing an existing name is the same
+  one line; any other failure warns with the command to run by hand, and the run's
+  status is untouched. The summary prints the undo command when this run registered it.
+- **"Already registered"** is read from the files, not asked of `claude`: `claude mcp get`
+  and `claude mcp list` start every server they show to health-check it (measured with
+  Claude Code 2.1.310: 30 seconds and an `npx chrome-devtools-mcp@latest` download each).
+  A user-scope server is a key at four spaces in `${CLAUDE_CONFIG_DIR:-~}/.claude.json`,
+  as Claude Code writes it (a project's local servers sit deeper and do not count), and
+  an enabled chrome-devtools-mcp plugin counts, since its guide says not to have both.
+  Checked against files the real `claude mcp add` wrote: user scope, local scope only,
+  and `CLAUDE_CONFIG_DIR`. The survey reports it, and the extra is current when Node is
+  at the floor and the MCP is registered (or `--no-agent`).
+- The banner's "Written to" names `~/.claude.json` for a run that will register it.
 - `expected_amber` drops the packer's row and `snapshot`. The edits stay in the Node step,
   the packer's lines and their summary and plan lines, away from #59's pin lines.
-- The container cells pass `--with node` on run 1, so the Node install paths keep their
-  coverage on the five distributions.
+- The container cells pass `--with chrome-devtools` on run 1, so the Node install paths
+  keep their coverage on the five distributions. Every matrix cell runs `--no-agent`, so
+  none registers anything, and run 1 asserts that; the one cell with Claude Code installed
+  for real asserts the registration is in its `.claude.json`. Runs 2 to 4 name no extra.
 
 ### Docs and decks
 
 - `docs/memory.md`, `docs/reference.md`, `README.md`, `SECURITY.md`, `docs/captain.md`,
-  `docs/fleet.md` and `docs/install.md` describe what ships: no pack, Node optional.
+  `docs/fleet.md` and `docs/install.md` describe what ships: no pack, and the Chrome
+  DevTools MCP optional. `docs/install.md` says the server sends Google usage statistics
+  unless `CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS` is set, as its README says.
 - The three decks: the doctor capture's two rows for the packer and tiktoken become
   `self-invocation` and `browser tools` (eighteen green still), the session capture's
   "snapshot skeleton" goes, and every sentence and figure label that promised a skeleton
@@ -174,9 +211,6 @@ own any more.
 - Drop `--with tiktoken` from `install.sh` (its comment above `install_cli` says why it
   stays), the cells' run 4 and Remote's fallback hint, once a release without the
   `tiktoken` doctor row is the latest on PyPI.
-- **Owner question:** should `install.sh`, when Node is chosen, also register the Chrome
-  DevTools MCP (`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp`)? It does
-  not today, and #399 adds nothing.
 - The decks still say session start hands over the project's prompt history; #346 removed
   that line too. Left for the owner, with the generator's templates.
 - `install.sh`'s short-circuit does not look at the project: a current machine set up with

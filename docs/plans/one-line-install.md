@@ -2,7 +2,8 @@
 
 > **Since then (#399):** the codebase snapshot and its packer are gone from the CLI,
 > with doctor's rows for them, so every mention of them below is history. `install.sh` keeps
-> its Node step as an opt-in extra for browser tools (`--with node`), with a 22.12 floor.
+> its Node step, with a 22.12 floor, as half of an opt-in extra (`--with chrome-devtools`)
+> that also registers the Chrome DevTools MCP with Claude Code.
 >
 > **Status: IMPLEMENTED**, 2026-09-08, on this same branch. `install.sh`,
 > `install.ps1`, `tests/install/`, `.github/workflows/install.yml` and the three

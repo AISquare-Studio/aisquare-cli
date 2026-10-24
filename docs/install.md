@@ -16,10 +16,13 @@ curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/i
 macOS, Linux and WSL2. It installs [uv](https://docs.astral.sh/uv/), a Python
 3.13 for the CLI alone, `aisquare-cli`, tmux, gh, git and
 [Claude Code](https://claude.com/claude-code), then registers the git repo you
-ran it from and wires Claude Code's hooks. It offers Node 22.12+ too, defaulting to
-no: aisquare does not need it, browser tools like the Chrome DevTools MCP
-(`npx chrome-devtools-mcp`) do. Running it again is a no-op: it
-reports what is current and installs nothing.
+ran it from and wires Claude Code's hooks. It offers the Chrome DevTools MCP too,
+defaulting to no: Node 22.12+, then the MCP registered with Claude Code at user scope
+(`claude mcp add chrome-devtools --scope user npx chrome-devtools-mcp@latest`; undo with
+`claude mcp remove -s user chrome-devtools`). aisquare does not need it; browser tools
+do. The server sends Google usage statistics unless
+`CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS` is set, as its README says. Running it again is
+a no-op: it reports what is current and installs nothing.
 
 On **Windows**, everything runs inside WSL2 — the UI gives each agent a real
 tmux pane and Windows has no tmux. This does both steps for you, in PowerShell:
@@ -59,7 +62,7 @@ curl -fsSL .../install.sh | sh -s -- --yes --no-agent
 | `--dry-run` | Print every command, run none. |
 | `--no-agent` | Skip Claude Code. |
 | `--no-system-deps` | Skip tmux, gh and git, and ask about no optional extra. |
-| `--with node` | Install the optional Node 22.12+ without asking. `--yes` alone asks nothing and installs no extra. |
+| `--with chrome-devtools` | Install the optional Chrome DevTools MCP without asking: Node 22.12+, then the MCP registered with Claude Code (not under `--no-agent`, nor when it is already registered). `--yes` alone asks nothing and installs no extra. |
 | `--project DIR` | Register `DIR` instead of the current directory. |
 | `--no-project` | Set up the machine, register nothing. |
 | `--offline` | Do not ask PyPI what the latest version is. |

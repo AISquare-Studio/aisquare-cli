@@ -451,7 +451,7 @@ def test_sudo_is_not_used_when_already_root(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# the Node extra's floor — §1.4/§6.3, the boundary that matters
+# the Chrome DevTools extra's Node floor — §1.4/§6.3, the boundary that matters
 # ---------------------------------------------------------------------------
 
 
@@ -466,7 +466,7 @@ def test_sudo_is_not_used_when_already_root(tmp_path: Path) -> None:
         ("v26.7.0", "current"),
     ],
 )
-def test_the_node_extra_is_current_from_the_browser_tools_floor(
+def test_the_chrome_devtools_extra_is_current_from_its_node_floor(
     tmp_path: Path, node_version: str, expected: str
 ) -> None:
     """chrome-devtools-mcp declares `^20.19.0 || ^22.12.0 || >=23`, and the extra installs
@@ -474,11 +474,13 @@ def test_the_node_extra_is_current_from_the_browser_tools_floor(
 
     An off-by-one here is invisible on every developer machine — they are all far
     above the floor — and would surface only on the one distribution shipping
-    exactly 22.11.
+    exactly 22.11. Under --no-agent, so the Node half is all there is to the extra.
     """
     stubs = stub_dir(tmp_path, "bin", "node", body=f'printf "{node_version}\\n"')
     result = sh(
-        "survey >/dev/null 2>&1; if extra_node_current; then echo current; else echo install; fi",
+        "WANT_AGENT=0; survey >/dev/null 2>&1; "
+        "if extra_call current chrome-devtools; then echo current; else echo install; fi",
+        env={"HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": ""},
         path=f"{stubs}:{base_path(tmp_path)}",
     )
     assert result.stdout.strip() == expected, (
@@ -645,13 +647,15 @@ def test_no_project_beats_a_repo_underfoot(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_dry_run_runs_nothing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("extra", [[], ["--with", "chrome-devtools"]], ids=["plain", "with-extra"])
+def test_dry_run_runs_nothing(tmp_path: Path, extra: list[str]) -> None:
     """Against a PATH of stubs that record being called and then FAIL.
 
     `--dry-run` is not a nicety: it is how a person decides whether to trust a
     script they are about to pipe into a shell, and how a reviewer reads this
     one. If any of it actually executed, the flag would be a lie told to exactly
-    the most cautious user.
+    the most cautious user. With the Chrome DevTools extra too, whose `claude mcp
+    add` writes Claude Code's own config.
     """
     log = tmp_path / "calls.log"
     mutators = (
@@ -685,13 +689,17 @@ def test_dry_run_runs_nothing(tmp_path: Path) -> None:
             'case "$1" in --version) printf "aisquare 0.6.0\\n"; exit 0 ;; esac\nexit 1'
         ),
     )
+    (tmp_path / "home").mkdir()
     result = sh(
-        "main --dry-run --yes --no-project --offline",
+        " ".join(["main --dry-run --yes --no-project --offline", *extra]),
+        env={"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": ""},
         path=f"{stubs}:{cli}:{base_path(tmp_path)}",
     )
 
     assert result.returncode == 0, f"--dry-run should exit 0:\n{result.stdout}\n{result.stderr}"
     assert "would run:" in result.stdout, result.stdout
+    mcp = f"would run: claude {_MCP_ADD}"
+    assert (mcp in result.stdout) is bool(extra), result.stdout
 
     calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
     # Reading a version is not a mutation, and `survey` is allowed to do it —
@@ -1277,8 +1285,8 @@ def test_the_short_circuit_fires_for_a_current_no_project_machine(
     )
     assert "except brain (gbrain is out of scope)" in result.stdout, result.stdout
     offered = (
-        "optional: Node 22.12+, for browser tools like the Chrome DevTools MCP"
-        " — rerun with --with node"
+        "optional: the Chrome DevTools MCP for browser tools: Node 22.12+ (--no-agent: not"
+        " registered with Claude Code) — rerun with --with chrome-devtools"
     )
     assert (offered in result.stdout) is not node, result.stdout
     calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
@@ -1493,23 +1501,24 @@ def _summary_then_handoff(
     )
 
 
-#: What the summary says of the Node extra when it was chosen and is not there.
+#: What the summary says of the Chrome DevTools extra when it was chosen and its Node is
+#: not there.
 _NODE_FAILED = (
-    "node — you chose Node 22.12+, for browser tools like the Chrome DevTools MCP, "
-    "and it did not install"
+    "chrome-devtools — you chose the Chrome DevTools MCP for browser tools: Node 22.12+, "
+    "registered with Claude Code, and it did not install"
 )
 
 
 def test_an_extra_this_run_chose_and_could_not_install_is_unexpected(tmp_path: Path) -> None:
-    """Node chosen, by `--with node` or at its prompt, and still missing after the run: exit
-    2, and the summary names it.
+    """The Chrome DevTools extra chosen, by `--with chrome-devtools` or at its prompt, and its
+    Node still missing after the run: exit 2, and the summary names it.
 
     No doctor row can: Node is optional, so a machine without it is green (review of #244,
     finding 1, when the packer's row was what turned a failed Node install into exit 2).
-    The installer knows it was asked for Node, so it says so itself.
+    The installer knows it was asked for the extra, so it says so itself.
     """
     result = _summary_then_handoff(
-        tmp_path, "CHOSEN_EXTRAS=node; NODE_VERSION=; DOCTOR_AMBER=brain"
+        tmp_path, "CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=; DOCTOR_AMBER=brain"
     )
 
     assert result.returncode == 2, result.stdout
@@ -1520,14 +1529,14 @@ def test_an_extra_this_run_chose_and_could_not_install_is_unexpected(tmp_path: P
 @pytest.mark.parametrize(
     ("assignments", "unexpected"),
     [
-        ("CHOSEN_EXTRAS=node; NODE_VERSION=22.12.0; DOCTOR_AMBER=brain", 0),
+        ("CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=22.12.0; DOCTOR_AMBER=brain", 0),
         # Not chosen: a machine with no Node is what the opt-in leaves.
         ("CHOSEN_EXTRAS=; NODE_VERSION=; DOCTOR_AMBER=brain", 0),
         ("WANT_SYSTEM_DEPS=0; CHOSEN_EXTRAS=; NODE_VERSION=; DOCTOR_AMBER=brain", 0),
         # --dry-run installs nothing, so nothing failed to install.
-        ("CHOSEN_EXTRAS=node; NODE_VERSION=; DOCTOR_AMBER=brain; DRY_RUN=1", 0),
+        ("CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=; DOCTOR_AMBER=brain; DRY_RUN=1", 0),
         # Chosen, and what the run left is below the floor: it did not install.
-        ("CHOSEN_EXTRAS=node; NODE_VERSION=22.11.0; DOCTOR_AMBER=brain", 1),
+        ("CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=22.11.0; DOCTOR_AMBER=brain", 1),
     ],
     ids=["installed", "not-chosen", "no-system-deps", "dry-run", "too-old"],
 )
@@ -1547,9 +1556,11 @@ def test_a_missing_extra_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None
     #257). The pointer follows only checks the doctor explains, and the extra's line,
     which points at the warning its step printed, comes after it.
     """
-    alone = _summary_then_handoff(tmp_path, "CHOSEN_EXTRAS=node; NODE_VERSION=; DOCTOR_AMBER=brain")
+    alone = _summary_then_handoff(
+        tmp_path, "CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=; DOCTOR_AMBER=brain"
+    )
     both = _summary_then_handoff(
-        tmp_path, "CHOSEN_EXTRAS=node; NODE_VERSION=; DOCTOR_AMBER='brain python'"
+        tmp_path, "CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=; DOCTOR_AMBER='brain python'"
     )
 
     assert _NODE_FAILED in alone.stdout
@@ -1557,7 +1568,7 @@ def test_a_missing_extra_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None
     assert alone.returncode == 2
     pointer = both.stdout.index("the full detail and a fix for each: aisquare doctor")
     assert both.stdout.index("  python\n") < pointer < both.stdout.index(_NODE_FAILED)
-    assert "  node\n" not in both.stdout, "an extra is not listed as a doctor check"
+    assert "  chrome-devtools\n" not in both.stdout, "an extra is not listed as a doctor check"
     assert both.returncode == 2
 
 
@@ -1583,10 +1594,10 @@ def test_exit_2_is_documented_for_an_extra_that_did_not_install(tmp_path: Path) 
     [
         ("ASSUME_YES=1", False),  # --yes asks nothing, so it chooses nothing
         ("ASSUME_YES=0", False),  # no terminal to ask on: the default, no
-        ("ASSUME_YES=1; CHOSEN_EXTRAS=node", True),  # --with node needs no prompt
-        ("ASSUME_YES=1; WANT_SYSTEM_DEPS=0; CHOSEN_EXTRAS=node", True),  # named wins
+        ("ASSUME_YES=1; CHOSEN_EXTRAS=chrome-devtools", True),  # --with needs no prompt
+        ("ASSUME_YES=1; WANT_SYSTEM_DEPS=0; CHOSEN_EXTRAS=chrome-devtools", True),  # named wins
     ],
-    ids=["yes", "no-terminal", "with-node", "with-node-no-system-deps"],
+    ids=["yes", "no-terminal", "with", "with-no-system-deps"],
 )
 def test_an_extra_is_installed_only_when_chosen(
     tmp_path: Path, assignments: str, installed: bool
@@ -1599,7 +1610,7 @@ def test_an_extra_is_installed_only_when_chosen(
 
     assert ("NODE-INSTALLED" in result.stdout) is installed, result.stdout + result.stderr
     if not installed:
-        assert "optional; --with node adds it" in result.stdout + result.stderr
+        assert "optional; --with chrome-devtools adds it" in result.stdout + result.stderr
 
 
 def test_a_current_extra_is_reported_and_its_npm_left_alone_unless_chosen(
@@ -1621,11 +1632,11 @@ def test_a_current_extra_is_reported_and_its_npm_left_alone_unless_chosen(
 
     assert "Node 22.12.0 — current" in run("")
     assert not log.exists(), "npm was installed for a run that did not choose Node"
-    assert "Node 22.12.0 — current" in run("node")
+    assert "Node 22.12.0 — current" in run("chrome-devtools")
     assert "npm" in log.read_text(encoding="utf-8"), "a run that chose Node gets its npx"
 
 
-@pytest.mark.parametrize("flag", [["--with", "node"], ["--with=node"]])
+@pytest.mark.parametrize("flag", [["--with", "chrome-devtools"], ["--with=chrome-devtools"]])
 def test_with_chooses_an_extra_and_refuses_one_there_is_not(
     tmp_path: Path, flag: list[str]
 ) -> None:
@@ -1633,28 +1644,46 @@ def test_with_chooses_an_extra_and_refuses_one_there_is_not(
     chosen = sh(f'parse_args {quoted}; printf "[%s]\\n" "$CHOSEN_EXTRAS"', path=base_path(tmp_path))
     refused = sh("parse_args --with nope; echo PARSED", path=base_path(tmp_path))
 
-    assert chosen.stdout.strip() == "[ node]", chosen.stdout + chosen.stderr
+    assert chosen.stdout.strip() == "[ chrome-devtools]", chosen.stdout + chosen.stderr
     assert refused.returncode != 0 and "PARSED" not in refused.stdout
-    assert "--with nope: not an optional extra (there is: node)" in refused.stderr
+    assert "--with nope: not an optional extra (there is: chrome-devtools)" in refused.stderr
 
 
 def test_the_plan_names_an_extra_only_as_it_will_happen(tmp_path: Path) -> None:
-    """Chosen: the plan says it installs. Not chosen, with nothing to ask on: nothing is
-    promised. Already there: not named at all."""
+    """Chosen: the plan says it installs, and what it registers with Claude Code is listed
+    with what the run writes. Not chosen, with nothing to ask on: nothing is promised.
+    Already there: not named at all. Under --no-agent the plan says the MCP is not
+    registered."""
 
     def plan(assignments: str) -> str:
         return sh(
-            f"CLI_ACTION=current; CLI_VERSION=0.9.0; UV_VERSION=0.12.3; WANT_AGENT=0; "
-            f"WANT_SYSTEM_DEPS=0; {assignments}; banner",
+            f"CLI_ACTION=current; CLI_VERSION=0.9.0; UV_VERSION=0.12.3; WANT_AGENT=1; "
+            f"WANT_SYSTEM_DEPS=0; DEVTOOLS_MCP=absent; {assignments}; banner",
+            env={"HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": ""},
             path=base_path(tmp_path),
             no_terminal=True,
         ).stdout
 
-    assert "install  Node 22.12+, for browser tools like the Chrome DevTools MCP (--with node)" in (
-        plan("NODE_VERSION=; CHOSEN_EXTRAS=node")
+    chosen = plan("NODE_VERSION=; CHOSEN_EXTRAS=chrome-devtools")
+    assert (
+        "install  the Chrome DevTools MCP for browser tools: Node 22.12+, registered with"
+        " Claude Code (--with chrome-devtools)"
+    ) in chosen
+    assert (
+        "~/.claude.json                    ADDED — the chrome-devtools MCP server (user scope)"
+        in (chosen)
     )
-    assert "Node" not in plan("NODE_VERSION=; CHOSEN_EXTRAS=")
-    assert "Node" not in plan("NODE_VERSION=26.7.0; CHOSEN_EXTRAS=node")
+    # Node already there, the MCP not: the extra still has its registration to do.
+    assert "(--with chrome-devtools)" in plan("NODE_VERSION=26.7.0; CHOSEN_EXTRAS=chrome-devtools")
+    no_agent = plan("WANT_AGENT=0; NODE_VERSION=; CHOSEN_EXTRAS=chrome-devtools")
+    assert "Node 22.12+ (--no-agent: not registered with Claude Code)" in no_agent
+    assert ".claude.json" not in no_agent
+    for nothing in (
+        plan("NODE_VERSION=; CHOSEN_EXTRAS="),
+        plan("NODE_VERSION=26.7.0; DEVTOOLS_MCP=registered; CHOSEN_EXTRAS=chrome-devtools"),
+        plan("WANT_AGENT=0; NODE_VERSION=26.7.0; CHOSEN_EXTRAS=chrome-devtools"),
+    ):
+        assert "Chrome DevTools" not in nothing and ".claude.json" not in nothing, nothing
 
 
 def test_the_fnm_warning_says_what_a_shell_without_its_node_still_gets(tmp_path: Path) -> None:
@@ -1680,6 +1709,279 @@ def test_the_fnm_warning_says_what_a_shell_without_its_node_still_gets(tmp_path:
     assert "fnm env --use-on-cd" in warning, "control: this is the warning in question"
     assert "`npx chrome-devtools-mcp` cannot start there" in warning
     assert "snapshot" not in warning
+
+
+# ---------------------------------------------------------------------------
+# the Chrome DevTools MCP — registered with Claude Code for a run that chose it
+# ---------------------------------------------------------------------------
+
+#: What `register_devtools_mcp` runs, as the package's own guide gives it.
+_MCP_ADD = "mcp add chrome-devtools --scope user npx chrome-devtools-mcp@latest"
+_MCP_UNDO = "to undo: claude mcp remove -s user chrome-devtools"
+
+#: `.claude.json` as Claude Code 2.1.310 writes it: two-space indents, a user-scope
+#: server under the top-level mcpServers and a project's local ones under projects.
+_USER_SCOPE = """{
+  "numStartups": 1,
+  "mcpServers": {
+    "chrome-devtools": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "chrome-devtools-mcp@latest"
+      ],
+      "env": {}
+    }
+  }
+}
+"""
+_LOCAL_SCOPE = """{
+  "projects": {
+    "/work/proj": {
+      "mcpServers": {
+        "chrome-devtools": {
+          "type": "stdio",
+          "command": "npx",
+          "args": [
+            "chrome-devtools-mcp@latest"
+          ],
+          "env": {}
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _fake_claude(
+    tmp_path: Path, *, answer: str = "Added stdio MCP server chrome-devtools", status: int = 0
+) -> tuple[Path, Path]:
+    """A `claude` that logs each call and answers anything but --version as told, beside
+    the `node` and `npx` the registration needs. Returns its directory and its log."""
+    log = tmp_path / "claude.log"
+    stubs = tmp_path / "claudebin"
+    stubs.mkdir(exist_ok=True)
+    for name, body in (
+        (
+            "claude",
+            f'printf "%s\\n" "$*" >>"{log}"\n'
+            'case "$1" in --version) echo "2.1.310 (Claude Code)"; exit 0 ;; esac\n'
+            f"printf '%s\\n' '{answer}'\nexit {status}",
+        ),
+        ("node", 'echo "v22.12.0"'),
+        ("npx", "exit 0"),
+    ):
+        script = stubs / name
+        script.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        script.chmod(0o755)
+    return stubs, log
+
+
+def _mcp_adds(log: Path) -> list[str]:
+    calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    return [call for call in calls if call.startswith("mcp ")]
+
+
+def _register(
+    tmp_path: Path, assignments: str = "", *, path: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """A run that chose the extra, with Claude Code to register it with: the survey, the
+    step, then the summary and its exit status. ``assignments`` say what differs."""
+    environment = {"HOME": str(tmp_path / "home"), "CLAUDE_CONFIG_DIR": ""}
+    environment.update(env or {})
+    return sh(
+        "DRY_RUN=0; WANT_AGENT=1; WANT_PROJECT=1; PROJECT_DIR=/p; DOCTOR_AMBER=brain; "
+        "CHOSEN_EXTRAS=chrome-devtools; survey; "
+        f"{assignments or ':'}; register_devtools_mcp; summary; "
+        'echo "WARNINGS=$WARNINGS UNEXPECTED=$UNEXPECTED"; handoff',
+        env=environment,
+        path=path,
+        no_terminal=True,
+    )
+
+
+def test_a_run_that_chose_the_extra_registers_the_mcp_once(tmp_path: Path) -> None:
+    """Once, with the guide's command, and the summary says how to undo it. A second pass
+    in the same run finds it registered and adds nothing."""
+    stubs, log = _fake_claude(tmp_path)
+
+    result = _register(tmp_path, "register_devtools_mcp", path=f"{stubs}:{base_path(tmp_path)}")
+
+    assert _mcp_adds(log) == [_MCP_ADD]
+    assert "Chrome DevTools MCP — not registered" in result.stdout, "the survey names it"
+    assert "✓ Chrome DevTools MCP registered: npx chrome-devtools-mcp@latest" in result.stdout
+    assert "already registered with Claude Code, left as it is" in result.stdout
+    assert f"registered: the chrome-devtools MCP with Claude Code — {_MCP_UNDO}" in result.stdout
+    assert "WARNINGS=0 UNEXPECTED=0" in result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("where", ["user-scope", "claude-config-dir", "plugin", "claude-says-so"])
+def test_an_mcp_already_registered_is_left_alone_in_one_line(tmp_path: Path, where: str) -> None:
+    """In the user config, in CLAUDE_CONFIG_DIR's, or brought by the chrome-devtools-mcp
+    plugin, the survey sees it and `claude` is never asked. Laid out so the survey cannot,
+    `claude mcp add` refuses it, and that refusal is the same one line, not a warning."""
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    env: dict[str, str] = {}
+    answer, status = "Added stdio MCP server chrome-devtools", 0
+    if where == "user-scope":
+        (home / ".claude.json").write_text(_USER_SCOPE, encoding="utf-8")
+    elif where == "claude-config-dir":
+        config = tmp_path / "config"
+        config.mkdir()
+        (config / ".claude.json").write_text(_USER_SCOPE, encoding="utf-8")
+        env["CLAUDE_CONFIG_DIR"] = str(config)
+    elif where == "plugin":
+        (home / ".claude" / "settings.json").write_text(
+            '{\n  "enabledPlugins": {\n    "chrome-devtools-mcp@chrome-devtools-plugins": true\n'
+            "  }\n}\n",
+            encoding="utf-8",
+        )
+    else:
+        answer, status = "MCP server chrome-devtools already exists in user config", 1
+    stubs, log = _fake_claude(tmp_path, answer=answer, status=status)
+
+    result = _register(tmp_path, path=f"{stubs}:{base_path(tmp_path)}", env=env)
+
+    said = [line for line in result.stdout.splitlines() if "Chrome DevTools MCP" in line]
+    assert said[-1].strip() == (
+        "Chrome DevTools MCP — already registered with Claude Code, left as it is"
+    ), result.stdout
+    assert _mcp_adds(log) == ([_MCP_ADD] if where == "claude-says-so" else [])
+    if where != "claude-says-so":
+        assert "Chrome DevTools MCP — registered with Claude Code" in result.stdout, "survey"
+    assert _MCP_UNDO not in result.stdout, "nothing this run registered is undone"
+    assert "WARNINGS=0 UNEXPECTED=0" in result.stdout
+    assert result.returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("claude_json", "settings", "in_config_dir"),
+    [
+        (_LOCAL_SCOPE, None, False),  # a project's own server is not the user's
+        (None, '{"enabledPlugins": {"chrome-devtools-mcp@chrome-devtools-plugins": false}}', False),
+        (_USER_SCOPE, None, True),  # in ~/.claude.json while Claude Code reads elsewhere
+        (None, None, False),
+    ],
+    ids=["local-scope-only", "plugin-disabled", "outside-claude-config-dir", "no-config"],
+)
+def test_what_claude_code_would_not_load_reads_as_not_registered(
+    tmp_path: Path, claude_json: str | None, settings: str | None, in_config_dir: bool
+) -> None:
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    if claude_json is not None:
+        (home / ".claude.json").write_text(claude_json, encoding="utf-8")
+    if settings is not None:
+        (home / ".claude" / "settings.json").write_text(settings, encoding="utf-8")
+    env = {
+        "HOME": str(home),
+        "CLAUDE_CONFIG_DIR": str(tmp_path / "elsewhere") if in_config_dir else "",
+    }
+
+    result = sh(
+        "survey; if devtools_mcp_registered; then echo REGISTERED; else echo ABSENT; fi",
+        env=env,
+        path=base_path(tmp_path),
+    )
+
+    assert result.stdout.splitlines()[-1] == "ABSENT", result.stdout
+    assert "Chrome DevTools MCP — not registered" in result.stdout
+
+
+def test_without_claude_code_the_mcp_is_skipped_in_one_line(tmp_path: Path) -> None:
+    """Claude Code missing, here because its install failed: nothing to register with.
+    One line, no warning of its own, and the run's status is not touched by it."""
+    stubs, _ = _fake_claude(tmp_path)
+    (stubs / "claude").unlink()
+
+    result = _register(tmp_path, path=f"{stubs}:{base_path(tmp_path)}")
+
+    said = [line.strip() for line in result.stdout.splitlines() if "MCP" in line]
+    assert said[-1] == (
+        "Chrome DevTools MCP not registered: Claude Code is not installed. Once it is: "
+        "claude mcp add chrome-devtools --scope user npx chrome-devtools-mcp@latest"
+    ), result.stdout
+    assert "WARNINGS=0 UNEXPECTED=0" in result.stdout
+    assert result.returncode == 0
+
+
+def test_a_failed_registration_warns_and_never_fails_the_install(tmp_path: Path) -> None:
+    """Browser tools are optional, so `claude mcp add` failing is a warning with the
+    command to run by hand, and the run exits 0 with nothing unexpected."""
+    stubs, log = _fake_claude(tmp_path, answer="Error: config is locked", status=1)
+
+    result = _register(tmp_path, path=f"{stubs}:{base_path(tmp_path)}")
+
+    warning = " ".join(result.stderr.split())
+    assert _mcp_adds(log) == [_MCP_ADD]
+    assert "could not register the Chrome DevTools MCP: Error: config is locked" in warning
+    assert f"To add it: claude {_MCP_ADD}" in warning
+    assert _MCP_UNDO not in result.stdout and "did not install" not in result.stdout
+    assert "WARNINGS=1 UNEXPECTED=0" in result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("assignments", "says"),
+    [
+        ("CHOSEN_EXTRAS=", None),
+        # --yes, as the CI cells run without --with: nothing asked, nothing chosen.
+        (
+            "CHOSEN_EXTRAS=; ASSUME_YES=1; install_node() { :; }; install_extras >/dev/null",
+            None,
+        ),
+        ("WANT_AGENT=0", "Chrome DevTools MCP not registered: --no-agent leaves Claude Code alone"),
+        ("DRY_RUN=1", f"would run: claude {_MCP_ADD}"),
+        (
+            "NODE_VERSION=",
+            "Chrome DevTools MCP not registered: there is no Node 22.12+ to start it",
+        ),
+        ("NODE_VERSION=22.11.0", "there is no Node 22.12+ to start it"),
+    ],
+    ids=["not-chosen", "yes-without-the-extra", "no-agent", "dry-run", "no-node", "old-node"],
+)
+def test_claude_is_asked_to_register_only_for_a_run_that_chose_it_and_can(
+    tmp_path: Path, assignments: str, says: str | None
+) -> None:
+    stubs, log = _fake_claude(tmp_path)
+
+    result = _register(tmp_path, assignments, path=f"{stubs}:{base_path(tmp_path)}")
+
+    assert _mcp_adds(log) == [], result.stdout
+    if says is None:
+        assert "Chrome DevTools MCP —" in result.stdout, "control: the survey ran"
+        assert "registered:" not in result.stdout and "MCP not registered" not in result.stdout
+    else:
+        assert says in result.stdout, result.stdout
+
+
+def test_node_without_npx_is_not_registered_and_says_what_to_install(tmp_path: Path) -> None:
+    """A Node with no npx cannot start the MCP (npm is its own package on several
+    distributions), so registering it would leave Claude Code a server that fails."""
+    stubs, log = _fake_claude(tmp_path)
+    (stubs / "npx").unlink()
+
+    result = _register(tmp_path, "PKG=apt", path=f"{stubs}:{base_path(tmp_path)}")
+
+    warning = " ".join(result.stderr.split())
+    assert _mcp_adds(log) == []
+    assert "Node is here but npx is not" in warning
+    assert "Install npm (sudo apt install npm)" in warning
+    assert "WARNINGS=1 UNEXPECTED=0" in result.stdout
+    assert result.returncode == 0
+
+
+def test_the_mcp_is_registered_after_claude_code_is_installed(source_text: str) -> None:
+    """After install_claude, so a Claude Code this run installs is there to take it, and
+    after the Node half; before init, whose doctor reads the result."""
+    body = source_text.split("\nmain() {\n", 1)[1].split("\n}\n", 1)[0]
+    steps = re.findall(r"^    ([a-z_]+)$", body, re.MULTILINE)
+    assert steps.index("install_extras") < steps.index("install_claude")
+    assert steps.index("install_claude") < steps.index("register_devtools_mcp")
+    assert steps.index("register_devtools_mcp") < steps.index("init_home")
 
 
 def test_a_version_pin_moves_a_machine_that_is_ahead_of_it(tmp_path: Path) -> None:

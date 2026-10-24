@@ -857,6 +857,9 @@ class OnboardReport(BaseModel):
     """Outcome of ``project onboard``: the facts it seeded."""
 
     seeded: list[ContextEntry] = Field(default_factory=list)
+    markers_read: bool = True
+    """``False`` for a plain run on a project already onboarded: the markers were not
+    read, so "no new facts" would be a claim nobody checked. ``--refresh`` reads them."""
     warning: str | None = None
     """``project_service.HOME_WARNING`` when this onboarding made the aisquare home a
     project (D5), said once; else ``None``."""

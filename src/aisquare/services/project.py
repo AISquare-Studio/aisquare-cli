@@ -1023,7 +1023,8 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
         _, warning = onboard_on_purpose(store, project)  # the deliberate add (#139)
         project_entries = store.entries("project", project_id=project.id)
         already_onboarded = any(entry.source == "onboard" for entry in project_entries)
-        if not (already_onboarded and not refresh):
+        markers_read = refresh or not already_onboarded
+        if markers_read:
             existing = {entry.text for entry in project_entries}
             for fact in facts:
                 if fact in existing:
@@ -1031,4 +1032,4 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
                 seeded.append(
                     store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
                 )
-    return OnboardReport(seeded=seeded, warning=warning)
+    return OnboardReport(seeded=seeded, markers_read=markers_read, warning=warning)

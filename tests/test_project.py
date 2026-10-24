@@ -173,17 +173,22 @@ def test_onboard_and_refresh_seed_facts_and_start_nothing_but_git(
     (proj / "Makefile").touch()
     plain = runner.invoke(app, ["project", "onboard"])
     refreshed = runner.invoke(app, ["--json", "project", "onboard", "--refresh"])
-    again = runner.invoke(app, ["--json", "project", "onboard", "--refresh"])
+    again = runner.invoke(app, ["project", "onboard", "--refresh"])
 
     assert first.exit_code == 0, first.output
     assert "seeded 1 project fact(s):\n  - Python project (pyproject.toml).\n" in first.stdout
-    assert plain.stdout == "✓ onboarded — no new project facts to seed\n", plain.output
+    # The Makefile is new, and a plain run does not read the markers: it says so rather
+    # than "no new facts" (review of #399, m2).
+    assert plain.stdout == "✓ already onboarded; --refresh reads the markers again\n", plain.output
     report = _json(refreshed.stdout)
-    assert set(report) == {"seeded", "warning"}
+    assert set(report) == {"seeded", "markers_read", "warning"}
+    assert report["markers_read"] is True
     assert [entry["text"] for entry in report["seeded"]] == [
         "Has a Makefile — check its targets for build/test commands."
     ]
-    assert _json(again.stdout)["seeded"] == [], "a refresh never duplicates a fact"
+    assert again.stdout == "✓ onboarded — no new project facts to seed\n", (
+        "a refresh never duplicates a fact, and says it read them"
+    )
     assert set(started) <= {"git"}, started
     assert not (paths.project_data_dir(project_id_for(proj.resolve())) / "snapshot").exists()
 

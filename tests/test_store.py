@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, tzinfo
@@ -2858,6 +2859,46 @@ def test_old_packs_go_once_and_nothing_outside_projects_is_followed(
     with store_session():
         pass
     assert again.exists(), "it ran once"
+
+
+@pytest.mark.parametrize("damage", ["looping", "unreadable", "resolve-raises"])
+def test_a_projects_dir_the_cleanup_cannot_read_never_breaks_the_open(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    """The cleanup is best effort, so ``projects/`` in any state it cannot read leaves the
+    open working: a symlink to itself (Python 3.11 and 3.12 raise ``RuntimeError`` from
+    ``resolve()``, not ``OSError``; review of #399), a directory this user cannot list,
+    and, on every Python, a ``resolve()`` that raises ``RuntimeError``. Nothing is
+    recorded as done, so a later open tries again."""
+    projects = paths.aisquare_home() / "projects"
+    if damage == "looping":
+        projects.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            projects.symlink_to(projects)
+        except OSError:
+            pytest.skip("this filesystem cannot make symlinks")
+    elif damage == "unreadable":
+        if os.name != "posix" or os.geteuid() == 0:
+            pytest.skip("needs POSIX permissions that bind this user")
+        _old_pack("prj_a")
+        projects.chmod(0)
+    else:
+        _old_pack("prj_a")
+        resolve = Path.resolve
+
+        def loop(self: Path, strict: bool = False) -> Path:
+            if self.name == "projects":
+                raise RuntimeError(f"Symlink loop from {str(self)!r}")
+            return resolve(self, strict)
+
+        monkeypatch.setattr(Path, "resolve", loop)
+    try:
+        with store_session() as store:
+            store.list_projects()
+    finally:
+        if damage == "unreadable":
+            projects.chmod(0o700)
+    assert not (paths.cache_dir() / "old-packs-removed").exists()
 
 
 # --- the reads a poller makes every few seconds (remote's needs scan) -------------------------

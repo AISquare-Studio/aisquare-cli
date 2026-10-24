@@ -547,8 +547,8 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
     store another line stamped past 17 without ever running it.
     "On purpose" is read off what the row already carries: context entries, a
     codename (it entered the fleet), linked repos, board activity, a fleet
-    agent — and a codebase snapshot on disk, which ``project onboard`` and
-    ``init`` wrote up to 0.9 (:func:`_snapshot_on_disk`). Everything else — the
+    agent — and a codebase snapshot on disk, which ``project onboard`` wrote up to
+    0.9 and ``init`` up to 0.8 (:func:`_snapshot_on_disk`). Everything else — the
     23 of 27 registrations on the reporting machine that held nothing but
     captured prompts — stays hidden, reachable through ``project list --all``.
 
@@ -584,8 +584,8 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
 def _snapshot_on_disk(project_id: str) -> bool:
     """Whether the project's old pack is on disk; one that cannot be looked at is no evidence.
 
-    Builds up to 0.9 packed a project on ``project onboard`` and ``init``, and wrote
-    ``projects/<id>/snapshot/snapshot.json`` beside the pack. The packer is gone,
+    Builds up to 0.9 packed a project on ``project onboard`` (up to 0.8, on ``init``
+    too), and wrote ``projects/<id>/snapshot/snapshot.json`` beside the pack. The packer is gone,
     but a store from 0.6 or older still reaches this backfill, and for a project the
     owner added and never used, that file is its only mark. So the check is a plain
     path, with no packer to import, and :func:`_remove_old_packs` deletes the packs
@@ -620,7 +620,9 @@ def _remove_old_packs() -> None:
     Only a directory named ``snapshot``, directly in a project's data directory, and
     only while it resolves to one inside ``projects/``: a symlink is never followed out
     of the home, and ``brain/`` beside it is never touched. Best effort: what cannot be
-    deleted stays, and the open goes on.
+    deleted stays, and the open goes on. ``RuntimeError`` too: on Python 3.11 and 3.12
+    ``Path.resolve()`` raises it for a symlink loop, and a ``projects/`` that points at
+    itself made every command a traceback (review of #399).
     """
     marker = paths.cache_dir() / _OLD_PACKS_REMOVED
     try:
@@ -629,7 +631,7 @@ def _remove_old_packs() -> None:
         inside = (paths.aisquare_home() / "projects").resolve()
         for project in inside.iterdir() if inside.is_dir() else ():
             pack = project / "snapshot"
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(OSError, RuntimeError):
                 if (
                     pack.is_dir()
                     and not pack.is_symlink()
@@ -637,7 +639,7 @@ def _remove_old_packs() -> None:
                 ):
                     shutil.rmtree(pack, ignore_errors=True)
         marker.touch()
-    except OSError:
+    except (OSError, RuntimeError):
         pass
 
 

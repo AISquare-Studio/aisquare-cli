@@ -291,6 +291,28 @@ def test_a_config_with_the_retired_snapshot_section_loads_and_the_next_save_drop
     assert load_config(target).fleet.max_agents_per_project == 6
 
 
+def test_doctor_says_once_that_the_snapshot_section_is_no_longer_read(
+    isolated_home: Path,
+) -> None:
+    """The one-time note: doctor's config row, green, names the section until the save
+    that drops it, then says nothing of it (review of #399, m6: an empty ``retired``
+    failed no test)."""
+    from aisquare.models import CheckStatus
+    from aisquare.services import diagnostics
+
+    ensure_home()
+    config_path().write_text("[snapshot]\nmax_tokens = 300000\n", encoding="utf-8")
+
+    row = diagnostics._check_config()
+    assert row.status is CheckStatus.ok, "nothing is wrong: the section is ignored"
+    assert row.detail == (
+        "config.toml is valid; [snapshot] is no longer read (aisquare no longer packs a "
+        "codebase), and the next save drops it"
+    )
+    save_config(load_config())
+    assert diagnostics._check_config().detail == "config.toml is valid"
+
+
 def test_the_retired_snapshot_keys_are_unknown_to_config_get_and_set(runner: CliRunner) -> None:
     for argv in (["get", "snapshot.max_tokens"], ["set", "snapshot.ignore", "**/x/**"]):
         result = runner.invoke(app, ["--json", "config", *argv])

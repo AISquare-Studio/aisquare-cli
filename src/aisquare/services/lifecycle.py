@@ -116,7 +116,7 @@ def initialize(
     assume_yes: bool,
     explainability: bool | None = None,
 ) -> SetupReport:
-    """Set up ``~/.aisquare``, register & snapshot the project, and connect agents.
+    """Set up ``~/.aisquare``, register the project, and connect agents.
 
     Idempotent and non-interactive: safe to re-run (``assume_yes`` is therefore
     moot for now). ``reinit`` resets ``config.toml`` to defaults. Agents named via

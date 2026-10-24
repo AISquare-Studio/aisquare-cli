@@ -697,6 +697,10 @@ def emit_onboard(report: OnboardReport) -> None:
     if report.warning is not None:
         # The one line adding the aisquare home says (D5): a warning, never a refusal.
         stderr_console().print(f"warning: {report.warning}", style="yellow", markup=False)
+    if not report.markers_read:
+        # Said as what happened: the markers were not read (review of #399).
+        console.print("✓ already onboarded; --refresh reads the markers again")
+        return
     if not report.seeded:
         console.print("✓ onboarded — no new project facts to seed")
         return

@@ -478,6 +478,64 @@ def test_the_plugin_page_names_the_log_command_the_uvx_route_prints(
     assert "gets memory with nothing else installed" not in text
 
 
+# --- the symbol index at session start (#285) -------------------------------------------
+
+
+def _index(work_dir: Path) -> str:
+    from aisquare.core import code_index
+
+    (work_dir / "mod.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    project_id = current_project(work_dir).id
+    code_index.build(project_id, work_dir)
+    return project_id
+
+
+def test_the_directive_names_the_code_commands_only_where_there_is_an_index(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    def started() -> str:
+        result = runner.invoke(
+            app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)})
+        )
+        assert result.exit_code == 0, result.output
+        return result.stdout
+
+    assert "aisquare code" not in started()
+    _index(work_dir)
+    said = started()
+    assert "`aisquare code find <name>`" in said and "`aisquare code similar <name>`" in said
+    lines = [line for line in said.splitlines() if "aisquare code" in line]
+    assert len(lines) == 2, "two lines at most"
+
+
+def test_a_session_start_refreshes_the_index_detached_and_at_most_once_a_minute(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.conftest import REAL_REFRESH_CODE_INDEX
+
+    started: list[tuple[list[str], Path | None]] = []
+    monkeypatch.setattr(
+        hooks_service, "_detach", lambda argv, *, cwd=None: started.append((argv, cwd))
+    )
+    project = current_project(work_dir)
+
+    REAL_REFRESH_CODE_INDEX(project)
+    assert started == [], "no index: building one is onboard's, not a session start's"
+
+    _index(work_dir)
+    REAL_REFRESH_CODE_INDEX(project)
+    REAL_REFRESH_CODE_INDEX(project)
+    [(argv, cwd)] = started
+    assert argv[-3:] == ["--quiet", "code", "index"] and cwd == project.root
+
+    from aisquare.core import code_index
+
+    stamp = code_index.code_dir(project.id) / "refreshed"
+    os.utime(stamp, (stamp.stat().st_mtime - 61, stamp.stat().st_mtime - 61))
+    REAL_REFRESH_CODE_INDEX(project)
+    assert len(started) == 2, "a minute on, the next session start refreshes again"
+
+
 def _spooled_prompts() -> list[str]:
     from aisquare.core import outbox
 

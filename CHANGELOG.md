@@ -8,6 +8,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A symbol index, and `aisquare code` to ask it before grepping** (#285, phase A of
+  #91). `aisquare code find <name>` lists definitions (exact, then case-insensitive,
+  then prefix, then by name part), `code refs <name> [--defs]` every use, and
+  `code similar <name|path:line>` the like-named definitions to check before writing
+  a helper; `code index [--full] [--status]` builds, refreshes or describes it. Every
+  command takes `--json`, and `aisquare serve` offers the same as the MCP tool
+  `code_lookup`, registered only where the project has an index. The index is its own
+  SQLite file under `~/.aisquare/projects/<id>/code/`, built at `project onboard`
+  (and `init`) from git's file list less the snapshot's ignore list, and refreshed
+  incrementally: on this repository a full build takes about 4 s and a one-file
+  refresh 0.03 s. Python is parsed with the standard library; TypeScript and
+  JavaScript need the new optional extra `aisquare-cli[code]` (tree-sitter and the
+  grammars' own wheels, so nothing is downloaded); other languages are listed as not
+  indexed. Where a project has an index, the session-start directive names the
+  commands in two lines and starts a detached incremental refresh, at most once a
+  minute per project. `aisquare doctor` has a `code index` row. `[code] enabled` and
+  `max_file_kb` (1024) are the keys.
+
 - **The fleet admits a spawn against the machine, not only the project** (#283).
   `[fleet] max_agents_total` (0, no budget) caps the live agents across every
   project, the captain excluded, and its refusal names each project's count;

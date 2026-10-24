@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import claude_sharing, experimental, harness, orchestrator, paths
+from aisquare.core import claude_sharing, code_index, experimental, harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
@@ -153,6 +153,8 @@ def doctor(
         _check_tmux(),
         _check_gh(),
         _check_snapshot(cwd),
+        # Never warns, so it moves no actionable row out of the sidebar's first three.
+        _check_code_index(cwd),
         _check_brain(cwd),
         _check_harness(cwd),
         _check_self_invocation(cwd),
@@ -3011,6 +3013,35 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         "no codebase snapshot for the active project",
         "Pack one: aisquare project onboard",
     )
+
+
+def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
+    """``code index``: the active project's symbol index (#285) — symbols, files, age, parsers.
+
+    Ok whatever it finds, deliberately: an index is optional (agents grep without one),
+    and one a commit behind still answers for most of the tree. The line says how to
+    build or refresh it, and which languages no installed parser reads.
+    """
+    name = "code index"
+    absent = _uncreated_home(name)
+    if absent is not None:
+        return absent
+    try:
+        with store_session() as store:
+            project = active_project(store, cwd)
+        found = code_index.status(project.id, current_head=snapshot_core.head_sha(project.root))
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    if not found.exists:
+        return _ok(name, "none yet — `aisquare code index` builds one (agents grep without it)")
+    parsers = ", ".join(f"{parser} {count}" for parser, count in sorted(found.parsers.items()))
+    detail = f"{found.symbols} symbols in {found.files} files ({parsers}), built {found.built_at}"
+    if found.stale:
+        detail += " — a commit behind the checkout; `aisquare code index` refreshes it"
+    if found.not_indexed:
+        missing = ", ".join(f"{lang} {n}" for lang, n in sorted(found.not_indexed.items()))
+        detail += f"; not indexed: {missing}"
+    return _ok(name, detail)
 
 
 def _check_brain(cwd: Path | None = None) -> DoctorCheck:

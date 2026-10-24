@@ -127,3 +127,53 @@ or worktree found below the root — another project's checkout is never packed
 into this one. The repo's own `.gitignore` and a `.repomixignore` at the repo
 root apply on top, read by Repomix itself. A smaller pack is also a cheaper one
 for every agent that reads it.
+
+### Symbol index
+
+Beside the snapshot, each project has a **symbol index**: where a name is
+defined, who uses it, and what already looks like it. An agent asks it before it
+greps, and before it writes a helper:
+
+```sh
+aisquare code find spawn                 # definitions: exact, then case-insensitive, prefix, name parts
+aisquare code refs nudge_manager --defs  # every use, its definitions first
+aisquare code similar parse_duration     # like-named definitions: run it before writing a helper
+aisquare code index --status             # what the index holds, and whether it is behind the checkout
+```
+
+Every command takes `--json`, and the MCP server (`aisquare serve`) offers the
+same as one tool, `code_lookup(query, mode, limit)`, once the project has an
+index. `similar` also takes `path:line` of a definition.
+
+The index is built when a project is onboarded (`init`, `project onboard`,
+`--refresh` rebuilds it). Where one exists, each session start names the commands
+in its directive (two lines) and starts an incremental refresh in the background,
+at most once a minute per project, never on the hook's own time.
+`aisquare code index` brings it up to date by hand: only
+files whose size, time or content moved are read again, deleted files are
+dropped, and a change of parser rebuilds it all. On aisquare-cli itself (500
+Python files) a full build takes about 4 s and a one-file refresh 0.03 s. It
+lives in `~/.aisquare/projects/<id>/code/index.db`, apart from the memory store;
+it is a cache of the checkout, so deleting it loses nothing. It is the project's
+root checkout that is indexed: a coder in a fleet worktree asks the same index.
+
+What it reads: git's file list (tracked, plus untracked files that are not
+ignored), less the snapshot's ignore list above, binaries, and files over
+`[code] max_file_kb` (1024). Python is parsed with the standard library, with
+nothing to install. TypeScript and JavaScript need the optional extra:
+
+```text
+pip install --upgrade "aisquare-cli[code]"
+```
+
+which brings tree-sitter and the two grammars' wheels, each with its compiled
+grammar and its own tags query: nothing is downloaded when the index is built,
+and nothing leaves the machine. Other languages are listed as not indexed
+(`index --status`, the doctor's `code index` row). `[code] enabled = false`
+stops the build at onboard; `aisquare code index` still builds one by hand.
+
+For definitions and references through a language server instead, Claude Code
+has official code-intelligence plugins per language (for Python,
+`pyright-lsp@claude-plugins-official`, with the server binary on `PATH`).
+Plugins are installed per Claude config directory, so each account slot the
+fleet uses needs it once.

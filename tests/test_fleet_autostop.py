@@ -26,7 +26,7 @@ from aisquare.core import harness, selfcli
 from aisquare.core.config import load_config, save_config
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo, TeamSession
-from aisquare.services import autostop
+from aisquare.services import autostop, delivery
 from aisquare.services import fleet as fleet_service
 from aisquare.services import hooks as hooks_service
 from aisquare.services import team as team_service
@@ -175,6 +175,11 @@ def _queued(agent: FleetAgent, tmux: FakeTmux) -> None:
         store.set_task_status(task.id, "review")
 
 
+def _typing(agent: FleetAgent, tmux: FakeTmux) -> None:
+    """Someone typed into its pane in ``asq`` a moment ago (P0-W2's typing lease)."""
+    delivery.touch_typing_lease(tmux, agent.pane_id)
+
+
 def _printing(agent: FleetAgent, tmux: FakeTmux) -> None:
     tmux.output_at[agent.pane_id] = datetime.now(tz=UTC) + LATER
 
@@ -189,8 +194,9 @@ def _printing(agent: FleetAgent, tmux: FakeTmux) -> None:
         (_claim, "it holds a claim"),
         (_queued, "a task is queued that a reviewer would take"),
         (_printing, "its pane printed within the idle window"),
+        (_typing, "someone is typing in its pane"),
     ],
-    ids=["draft", "unread-note", "attention", "limited", "claim", "queued", "printing"],
+    ids=["draft", "unread-note", "attention", "limited", "claim", "queued", "printing", "typing"],
 )
 def test_each_condition_keeps_a_finished_reviewer(
     tmux: FakeTmux,

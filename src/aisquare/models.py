@@ -829,6 +829,9 @@ class OnboardReport(BaseModel):
     pack failed and why. ``None`` when a pack was made or reused. Set beside a
     ``snapshot``, it is a ``--refresh`` that failed: that is the last pack, kept,
     and agents still get it."""
+    code_index: str | None = None
+    """The symbol index's line (#285): what this onboard built or refreshed, or why not.
+    ``None`` with ``[code] enabled = false``."""
 
 
 class ProjectForgetReport(BaseModel):

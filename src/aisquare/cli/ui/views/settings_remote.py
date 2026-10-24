@@ -179,7 +179,7 @@ class RemoteSection(Vertical):
     RemoteSection #settings-remote-qr { height: auto; width: auto; margin-top: 1; }
     RemoteSection #settings-remote-password { height: auto; margin-top: 1; }
     RemoteSection #settings-remote-advanced { margin-top: 1; }
-    RemoteSection #settings-remote-write-hint { height: auto; color: $text-muted; }
+    RemoteSection #settings-remote-write-hint { width: 1fr; height: auto; color: $text-muted; }
     RemoteSection #settings-remote-auto-off { width: 18; }
     RemoteSection #settings-remote-devices { height: 6; }
     RemoteSection .remote-adv-row { height: auto; margin-bottom: 1; }

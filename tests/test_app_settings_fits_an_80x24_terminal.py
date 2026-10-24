@@ -18,7 +18,7 @@ line per field.
 
 from __future__ import annotations
 
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widget import Widget
@@ -118,9 +118,12 @@ TABS = {
 
 
 def test_at_80x24_every_row_of_every_tab_ends_inside_the_tab_folded_and_unfolded() -> None:
-    """Each row (a ``Horizontal``) of each tab, with its folds closed as it opens and then
-    all opened, is scrolled to and every part of it shown is inside the tab's body, left
-    to right: no select arrow, field or switch cut off at the edge (#44, m4)."""
+    """Each part of each tab, with its folds closed as it opens and then all opened, is
+    scrolled to and is inside the tab's body, left to right: every child of a row
+    (a ``Horizontal`` or a ``Vertical``) and every ``Static`` (``Label`` included). No select
+    arrow, field, switch or line of text is cut off at the edge (#44, m4). Rows were
+    ``Horizontal``s alone, and Remote's write hint, a ``Static`` in a ``Vertical`` row, ran
+    to column 151 (final delta review, m3)."""
 
     async def go(pilot: Pilot[None]) -> tuple[dict[str, int], list[str]]:
         app = fleet_app(pilot)
@@ -137,21 +140,28 @@ def test_at_80x24_every_row_of_every_tab_ends_inside_the_tab_folded_and_unfolded
                     for fold in body.query(Collapsible):
                         fold.collapsed = False
                     await settle(app)
-                shown = [row for row in body.query(Horizontal) if _shown(row, body)]
+                shown = [row for row in body.query(Horizontal) if _shown(row, body)] + [
+                    row for row in body.query(Vertical) if _shown(row, body)
+                ]
                 rows[f"{tab} {'folded' if folded else 'unfolded'}"] = len(shown)
+                parts: dict[int, Widget] = {}
                 for row in shown:
-                    row.scroll_visible(animate=False, top=True)
+                    parts.update({id(part): part for part in row.children})
+                parts.update({id(text): text for text in body.query(Static) if _shown(text, body)})
+                for part in parts.values():
+                    if not _shown(part, body):
+                        continue
+                    part.scroll_visible(animate=False, top=True)
                     await settle(app)
+                    if part.region.area == 0:
+                        continue
                     port = body.scrollable_content_region
-                    for part in row.children:
-                        if not part.display or part.region.area == 0:
-                            continue
-                        if part.region.x < port.x or part.region.right > port.right:
-                            name = part.id or f"{type(part).__name__} in {row.id or 'a row'}"
-                            cut.append(
-                                f"{tab}: {name} spans {part.region.x}..{part.region.right},"
-                                f" the tab {port.x}..{port.right}"
-                            )
+                    if part.region.x < port.x or part.region.right > port.right:
+                        name = part.id or f"{type(part).__name__} in {part.parent}"
+                        cut.append(
+                            f"{tab}: {name} spans {part.region.x}..{part.region.right},"
+                            f" the tab {port.x}..{port.right}"
+                        )
         return rows, cut
 
     rows, cut = drive(go, size=(80, 24))

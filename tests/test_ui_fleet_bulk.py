@@ -33,6 +33,7 @@ from aisquare.core.tmux import Completed
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from tests import toast_log
+from tests.fleet_fakes import list_agents_as
 from tests.test_ui_shell import seed, settle, shown, status
 from tests.ui_workers import settle_page
 
@@ -76,7 +77,7 @@ def script(monkeypatch: pytest.MonkeyPatch) -> Script:
         found = next((status for status in listed if status.agent.id == agent.id), None)
         return found or FleetAgentStatus(agent=agent, state="lost")
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     monkeypatch.setattr(fleet_service, "status_of", one)
     return agents
 

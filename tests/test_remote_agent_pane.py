@@ -563,7 +563,10 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     assert read.status_code == 200 and took < 1.0, f"the read waited {took:.2f} s"
     assert [status for status, _ in answers] == [409] * taps and tmux.sent == []
     slowest = max(elapsed for _, elapsed in answers)
-    assert slowest < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.0, slowest
+    # One lock wait each, plus scheduling. The regression this guards, taps serialised on a
+    # shared pool, costs at least two waits (2 x 2 s); +1.0 missed by 7 ms on a loaded CI
+    # runner (#329's run 40013797813), so the slack is 1.5 s: still under a second wait.
+    assert slowest < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.5, slowest
 
 
 def test_keys_queued_behind_actions_holding_every_write_thread_are_not_typed_as_one_ends(
@@ -723,10 +726,28 @@ def test_a_row_replaced_while_its_key_waits_for_the_agents_lock_gets_nothing(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The pin is judged against the row read under the lock, where the key is typed: the
-    row read before it may be replaced while the key waits out an action."""
+    row read before it may be replaced while the key waits out an action.
+
+    The row is replaced once the key is waiting for the lock, which the lock says, not a
+    sleep; and the key may wait as long as that takes. A 0.3 s sleep and the product's 2 s
+    wait made it ``busy`` on a loaded windows runner (rc/p2 run 40087287175)."""
     tmux = _serving(monkeypatch, Tmux(OLDER))
     action = remote_agent_lock(project.id, "coder-1")
     assert action.acquire(blocking=False)
+    monkeypatch.setattr(remote_server, "SEND_KEYS_LOCK_WAIT_SECONDS", 60.0)
+    waiting = threading.Event()
+
+    class Announcing:
+        """The agent's lock, saying when the key starts to wait for it."""
+
+        def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+            waiting.set()
+            return action.acquire(blocking, timeout)
+
+        def release(self) -> None:
+            action.release()
+
+    monkeypatch.setattr(remote_server, "remote_agent_lock", lambda *_args: Announcing())
     outcome: list[object] = []
 
     def tap() -> None:
@@ -739,8 +760,8 @@ def test_a_row_replaced_while_its_key_waits_for_the_agents_lock_gets_nothing(
     tapper = threading.Thread(target=tap)
     try:
         tapper.start()
-        time.sleep(0.3)  # the key read coder-1's row, and waits for the lock
-        _replace(project)
+        assert waiting.wait(30), "the key never reached the agent's lock"
+        _replace(project)  # the key read coder-1's row, and waits for the lock
     finally:
         action.release()
         tapper.join(10)

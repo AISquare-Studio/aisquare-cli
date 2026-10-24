@@ -299,6 +299,9 @@ aisquare remote needs
 aisquare --json remote needs
 ```
 
+`aisquare watch` reads the same scan, your dismissals included, for the fleet's
+managers ([fleet](fleet.md#watching-the-fleet)).
+
 | kind | means |
 | --- | --- |
 | permission | an agent waits for you to allow a tool (a Bash command, an edit), or shows one of Claude Code's own dialogs |

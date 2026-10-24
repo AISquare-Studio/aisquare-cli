@@ -26,13 +26,19 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, Final, NamedTuple
+from typing import Any, Final, Literal, NamedTuple
 
-from aisquare.core import brain, experimental, harness, insights, orchestrator, workspace
+from aisquare.core import brain, experimental, harness, insights, orchestrator, paths, workspace
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
-from aisquare.core.store import AmbiguousIdError, ContextStore, store_session, unmet_needs
+from aisquare.core.store import (
+    AmbiguousIdError,
+    ContextStore,
+    Relevance,
+    store_session,
+    unmet_needs,
+)
 from aisquare.core.tmux import TmuxError
 from aisquare.models import (
     CLOSED_STATUSES,
@@ -123,13 +129,13 @@ def base_role(role: str) -> str:
     return harness.base_role(role)
 
 
-#: The board events worth waking a manager for: a sub-agent's verdict or hand-off
+#: The board kinds worth waking a manager for: a sub-agent's verdict or hand-off
 #: (``task_review``, ``task_done``), a task that needs the manager back
-#: (``task_blocked``, ``task_reopened``), a result or a question on the board, and
-#: an agent that went away (``agent_exited`` is the fleet's, emitted wherever a
-#: fleet row ends: ``fleet.stop`` — and so ``fleet shutdown`` — and ``fleet.reap``).
-#: A plain note, a decision or a claim is news, not a decision the manager has to
-#: make — it arrives with the next prompt's delta like everyone else's.
+#: (``task_blocked``, ``task_reopened``), a result or a question on the board, and an
+#: agent parked on a usage limit (#146: switch it, or wait). An exit is not a kind that
+#: wakes: :func:`wake_class` wakes for one that failed or left a claim open (P1 WS-2,
+#: #279). A plain note, a decision, a claim, a clean exit, a switch or a restart is news,
+#: not a decision the manager has to make — it arrives with the next wake or prompt delta.
 MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
     {
         "task_review",
@@ -138,13 +144,31 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
         "task_reopened",
         "result",
         "question",
-        "agent_exited",
         # #146: an agent parked on a usage limit needs a decision (switch it, or
-        # wait), and the hand-over that moved one is news the manager acts on.
+        # wait) — unless the automatic hand-over is moving it, which is its own kind,
+        # `LIMITED_HANDING_OVER`, and no wake (#277). A hand-over that moved one is
+        # news, not a decision: `switched` arrives with the next delta. One that could
+        # not is the manager's to act on: `handover_failed`.
         "limited",
-        "switched",
+        "handover_failed",
+        # P0-W1a (#122): an agent whose first message never started a turn sits idle
+        # until someone tells it again or restarts it.
+        "prompt_unsent",
     }
 )
+
+#: The kind of the usage-limit line when the automatic hand-over is about to move the agent
+#: (``on_limit = "switch"``): the manager has nothing to do, so it is no wake kind. Woken by
+#: a ``limited`` line, a manager following its cycle switched the agent too — once the
+#: hand-over had finished, it moved the replacement again (#277). Its own KIND, not a
+#: phrase in the text: a reworded line must not change who is woken (review of #304).
+LIMITED_HANDING_OVER = "limited_handing_over"
+#: Every kind a usage-limit line is written as, for the readers that show one.
+LIMITED_KINDS: frozenset[str] = frozenset({"limited", LIMITED_HANDING_OVER})
+#: What that line says of the hand-over.
+HANDING_OVER_SAID = "moving it to another account automatically"
+
+WakeClass = Literal["own", "wake", "info"]
 
 #: Event kinds written for the HUMAN board only: the 🔔 transition and a Claude
 #: Code notification's feed line (#153). They never reach a teammate's prompt
@@ -174,6 +198,11 @@ CAPTAIN_AUDIT_KINDS: frozenset[str] = frozenset({"captain_action"})
 #: reason that only says "here is news" is an invitation to loop.
 WAKEUP_CLOSE = "If nothing needs you, stop."
 
+NOTE_KINDS: frozenset[str] = frozenset({"note", "decision", "question", "result"})
+"""What ``aisquare note --kind`` writes, and so what turn-end delivery hands an agent a note
+addressed to it as (P0-W2, #276). A task added for a role names the role too, and is not a
+note: the pool reaches an agent through its cycle, never by keeping it going."""
+
 
 def _addressed_to_manager(to_role: str | None) -> bool:
     """Whether a board write is addressed to the manager (``--to manager``).
@@ -187,19 +216,64 @@ def _addressed_to_manager(to_role: str | None) -> bool:
     return (to_role or "").strip().lower() == MANAGER_ROLE
 
 
-def _wakes_manager(event: TeamEvent) -> bool:
-    """Whether one board event is something the manager has to come back for (§7.3).
+def wake_class(event: TeamEvent, me: TeamSession) -> WakeClass:
+    """What one board event is to the manager ``me`` (P1 WS-2, #279; fleet-tui §7.3).
 
-    Two ways in. Its KIND is one of :data:`MANAGER_WAKE_KINDS` — a verdict, a
-    hand-off, a result, a question, an exit. Or it is ADDRESSED to the manager:
-    §7.3 path 2 counts ``note --to manager`` as wake-worthy, and a mailbox that
-    delivers only while the recipient happens to be idle is not a mailbox. The
-    same note written while the manager is WORKING has no other path — path 2
-    refuses a working manager by design, and 'note' is not a wake kind — so
-    without this it would sit past the cursor until an unrelated event arrived.
-    Unaddressed news (a plain note, a decision, a claim) still waits its turn.
+    - ``own``: ``me`` caused it (its ``actor``): its own ``fleet stop``, written under the
+      stopped agent's session. Never shown to it, and left out in the query
+      (``exclude_actor``), as what it wrote is (``exclude_session``).
+    - ``wake``: a kind of :data:`MANAGER_WAKE_KINDS`; or addressed to the manager (§7.3
+      path 2: a mailbox that delivers only while the recipient is idle is not one); or an
+      exit that failed (a non-zero status, or none: a kill or a loss) or that left a claim
+      open (``meta.released``, owner Q4: an orphaned task).
+    - ``info``: everything else — a clean exit, a switch, a restart, a claim, a note, a
+      decision. It stays past the cursor and rides along with the next wake or delta.
+
+    Every Stop's wake-up, its deferral, and the nudges of an exit read this one rule, so
+    none of them disagrees about what is worth a manager's turn: each such turn re-sends
+    the manager's whole context to act on nothing.
     """
-    return event.kind in MANAGER_WAKE_KINDS or _addressed_to_manager(event.to_role)
+    if event.actor is not None and event.actor == me.id:
+        return "own"
+    if event.kind in MANAGER_WAKE_KINDS or _addressed_to_manager(event.to_role):
+        return "wake"
+    if event.kind == "agent_exited" and exit_wakes(
+        event.meta if event.meta is not None else _exit_meta_from_text(event.text)
+    ):
+        return "wake"
+    return "info"
+
+
+#: An exit's text as ``services.fleet._emit_exit`` wrote it before the details were stored:
+#: ``coder-1 exited (0)``, ``(?)`` for no status, ``: <why>`` after it when there was one.
+_EXIT_TEXT = re.compile(r" exited \((-?\d+|\?)\)(?:: (.+))?$")
+
+
+def _exit_meta_from_text(text: str) -> dict[str, object] | None:
+    """The details of an exit written before ``meta`` existed, read from its text, so an
+    upgrade does not wake a manager once for every clean exit past its cursor (review of
+    #336, 4). ``None`` for a text that does not say: that exit wakes, nothing says it was
+    clean."""
+    found = _EXIT_TEXT.search(text.split(" — stopped by ")[0])
+    if found is None:
+        return None
+    status = None if found.group(1) == "?" else int(found.group(1))
+    return {"status": status, "released": 0, "why": found.group(2)}
+
+
+def exit_wakes(meta: Mapping[str, object] | None) -> bool:
+    """Whether an ``agent_exited`` with these details wakes a manager (:func:`wake_class`).
+
+    A failed exit (a non-zero status, or none: a kill or a loss), one that released an
+    open claim, or one with a reason beyond its status (``why``: a hand-over whose
+    replacement did not start) does. An exit from before the details (no ``meta``) does
+    too: nothing says it was clean."""
+    if meta is None:
+        return True
+    status = meta.get("status")
+    released = meta.get("released")
+    # A reason beyond its status (a hand-over whose replacement did not start) wakes too.
+    return status != 0 or (isinstance(released, int) and released > 0) or bool(meta.get("why"))
 
 
 class TeamDisabledError(RuntimeError):
@@ -245,6 +319,17 @@ class NoSuchTaskNumber(KeyError):
 
     def __str__(self) -> str:
         return f"no task #{self.number} on this board ({self.board})"
+
+
+class TurnEndDeliveryError(RuntimeError):
+    """A non-manager's turn-end delivery failed (P0-W2); the row still says ``waiting``.
+
+    Raised only after the session is marked waiting, as :class:`ManagerWakeupError` is, so the
+    CLI reports its own cost line (the notes wait for the agent's next prompt)."""
+
+    def __init__(self, cause: Exception) -> None:
+        super().__init__(f"turn-end delivery failed ({type(cause).__name__}: {cause})")
+        self.cause = cause
 
 
 class ManagerWakeupError(RuntimeError):
@@ -374,6 +459,8 @@ def _emit(
     session_id: str | None = None,
     task_id: str | None = None,
     to_role: str | None = None,
+    actor: str | None = None,
+    meta: dict[str, object] | None = None,
 ) -> TeamEvent:
     """Write one board event — and, when configured, spool it for the gateway.
 
@@ -381,7 +468,8 @@ def _emit(
     here and not at each of the twenty call sites: an insight the board records
     but the gateway never hears about is exactly the gap #50 exists to close.
     It runs after the commit and cannot raise, so a full disk costs a span, not
-    a note.
+    a note. ``actor`` is who caused it when not its author (:attr:`TeamEvent.actor`),
+    ``meta`` its details (:attr:`TeamEvent.meta`).
     """
     stored = store.add_team_event(
         TeamEvent(
@@ -393,6 +481,8 @@ def _emit(
             task_id=task_id,
             to_role=to_role,
             created_at=_now(),
+            actor=actor,
+            meta=meta,
         )
     )
     insights.record_team_event(
@@ -555,22 +645,34 @@ def _record_delivery(event: TeamEvent, board: _Board) -> TeamEvent:
     return stored
 
 
-def session_account(transcript_path: str | None) -> str | None:
+def session_account(transcript_path: str | None, row: FleetAgent | None = None) -> str | None:
     """Which agent config dir (account) a session runs under, or ``None``.
 
-    Derived from the transcript path in the hook payload
-    (``<config-dir>/projects/<slug>/<session>.jsonl``) rather than from
-    ``CLAUDE_CONFIG_DIR``: the variable only reaches us if the agent happens to
-    export it to hook subprocesses, whereas the transcript path is always in
-    the payload and names the directory unambiguously. Falls back to the
-    variable when the path has an unexpected shape.
+    Asked in the order that cannot be fooled by a shared directory (P2-W7, #198):
+
+    1. the fleet ``row``'s ``account_slot``: the account the launch chose, recorded;
+    2. ``CLAUDE_CONFIG_DIR`` in the hook's environment, which the launch sets for that
+       account;
+    3. the transcript path in the payload (``<config-dir>/projects/<slug>/<id>.jsonl``),
+       for a session nothing launched: under a shared root (a slot's ``projects/``
+       linked to the plain claude's, #198's workaround) it names the shared directory,
+       not the account.
     """
+    if row is not None and row.account_slot is not None:
+        from aisquare.core import claude_accounts as accounts_core  # lazy: no import cycle
+
+        account = accounts_core.find_account(row.account_slot)
+        if account is not None:
+            return str(account.config_dir)
+    env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if env:
+        return env
     if transcript_path:
         path = Path(transcript_path)
         # …/<config-dir>/projects/<project-slug>/<session-id>.jsonl
         if len(path.parents) >= 3 and path.parents[1].name == "projects":
             return str(path.parents[2])
-    return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or None
+    return None
 
 
 def slot_labels_via(store: ContextStore) -> Mapping[int, str]:
@@ -1051,6 +1153,37 @@ def verify_receipt(
         return VerifyResult(event=event, board_id=board.id, board_name=board.name, line=line)
 
 
+@dataclass(frozen=True)
+class ShownEvent:
+    """One board event with everything around it (``aisquare team show``, P1 WS-2, #279)."""
+
+    event: TeamEvent | None
+    board_id: str
+    board_name: str
+    elsewhere: str | None = None
+    author: TeamSession | None = None
+    task: TeamTask | None = None
+
+
+def show_event(
+    receipt: str, *, session_ref: str | None = None, cwd: Path | None = None
+) -> ShownEvent:
+    """The event ``receipt`` names, in full: what an agent's one-line update points at.
+
+    Found as :func:`verify_receipt` finds it — a seq or an event id, on the caller's
+    board — and a receipt on another board is refused the same way, naming that board.
+    """
+    _require_enabled()
+    with store_session() as store:
+        found = verify_receipt(receipt, session_ref=session_ref, cwd=cwd)
+        event = found.event
+        if event is None:
+            return ShownEvent(None, found.board_id, found.board_name, found.elsewhere)
+        author = store.get_session(event.session_id) if event.session_id else None
+        task = store.get_task(event.task_id) if event.task_id else None
+        return ShownEvent(event, found.board_id, found.board_name, author=author, task=task)
+
+
 _SIGNAL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _SIGNAL_VALUE = re.compile(r"\S{1,128}")
 
@@ -1315,6 +1448,33 @@ def set_focus(text: str, session_ref: str, cwd: Path | None = None) -> TeamSessi
     return updated
 
 
+_ROUTED: ContextVar[list[str] | None] = ContextVar("aisquare_routed", default=None)
+"""The parent projects a board write routed something to (P2-W6), whose managers are
+nudged once the write is committed (:func:`_flush_routed`)."""
+
+
+def _route_up(store: ContextStore, event: TeamEvent) -> None:
+    """Inside a board write: send ``event`` up to its group's parent when the group's rules
+    say so (``services.parent``), and remember whom to wake. Never costs the write."""
+    from aisquare.services import parent as parent_service  # lazy: it imports this module
+
+    try:
+        woken = parent_service.route_up(store, event)
+    except Exception:  # routing is an extra; the member's own write stands
+        return
+    if woken:
+        _ROUTED.set([*(_ROUTED.get() or []), *woken])
+
+
+def _flush_routed() -> None:
+    """Nudge the parent managers this call's writes routed to; outside the store session,
+    as every nudge is. Debounced like any other (5 s)."""
+    woken = _ROUTED.get() or []
+    _ROUTED.set(None)
+    for project_id in dict.fromkeys(woken):
+        _nudge_manager(project_id, reason="routed", board=project_id)
+
+
 def add_note(
     text: str,
     *,
@@ -1366,6 +1526,7 @@ def add_note(
             task_id=task_id,
             to_role=to_role,
         )
+        _route_up(store, event)
         wakes = kind in ("result", "question") or _addressed_to_manager(to_role)
         manager = (
             _nudge_target(store, session.id if session else None, board.id, cwd)
@@ -1384,7 +1545,63 @@ def add_note(
         # 'note' is not a MANAGER_WAKE_KIND either, so its Stop hook did not
         # deliver it and it sat past the cursor until some unrelated event.
         _nudge_manager(manager, reason=f"{kind}_to_manager", board=board.id)
+    _flush_routed()
     return stored
+
+
+class Brief(NamedTuple):
+    """A task contract as ``task add`` builds it (P1 WS-4, #281): the detail, with the rules
+    files it cites appended, and the ``[team] brief_blocks`` it lacks."""
+
+    detail: str
+    missing_blocks: list[str]
+
+
+class BriefRefused(ValueError):
+    """``task add`` will not add this contract: a rules file it cites does not exist, or
+    ``[team] brief_strict`` and a block is missing. The message says which."""
+
+
+def build_brief(detail: str, *, rules: Sequence[str] = (), cwd: Path | None = None) -> Brief:
+    """The contract ``task add`` stores: ``detail``, then ``Rules: .aisquare/rules/<name>.md,
+    …`` for each of ``rules``, checked against ``[team] brief_blocks`` (P1 WS-4, #281).
+
+    A brief that pastes its scripts and rule text rides every later request of the manager
+    that wrote it; one that cites them by path does not. ``rules`` are names (``testing``)
+    or paths (``.aisquare/rules/testing.md``), looked up under the project's principal
+    checkout (:func:`rules_dir`), so a worktree cites what the manager wrote. A missing one
+    refuses (:class:`BriefRefused`), named. A block is present when ``<label>:`` appears in
+    the detail, in any case; a missing one is returned to be warned about, and refuses under
+    ``[team] brief_strict``.
+    """
+    settings = load_config().team
+    root = workspace.find_project_root(cwd or Path.cwd())
+    root = workspace.worktree_principal(root) or root
+    cited: list[str] = []
+    for given in (part.strip() for name in rules for part in name.split(",")):
+        if not given:
+            continue
+        name = Path(given).name
+        name = name if name.endswith(".md") else f"{name}.md"
+        if not (rules_dir(root) / name).is_file():
+            raise BriefRefused(f"--rules {given}: no rules file at {rules_dir(root) / name}")
+        if (cited_as := f".aisquare/rules/{name}") not in cited:
+            cited.append(cited_as)
+    text = detail.rstrip()
+    if cited:
+        text = f"{text}\n\nRules: {', '.join(cited)}" if text else f"Rules: {', '.join(cited)}"
+    missing = [
+        block
+        for block in settings.brief_blocks
+        if not re.search(rf"(?im)\b{re.escape(block)}\s*:", text)
+    ]
+    if missing and settings.brief_strict:
+        raise BriefRefused(
+            "the contract has no "
+            + ", ".join(f"{block}:" for block in missing)
+            + " block ([team] brief_strict is on; brief_blocks lists them)"
+        )
+    return Brief(text, missing)
 
 
 def add_task(
@@ -1396,17 +1613,33 @@ def add_task(
     needs: list[str] | None = None,
     session_ref: str | None = None,
     cwd: Path | None = None,
+    project: str | None = None,
+    origin: str | None = None,
 ) -> tuple[TeamTask, bool]:
     """Add a shared task; idempotent on its key (re-adding returns the original).
 
     ``needs`` are task refs (prefixes fine) this task depends on; ``task
     next`` will not hand it out until they are resolved.
+
+    ``project`` and ``origin`` are a parent manager's delegation (P2-W6, #199): the task goes
+    on ``project``'s board, a member of a group whose parent is the writer's board, and
+    ``origin`` is the task on that parent board it was delegated from, which its status
+    changes route up to (``services.parent``). ``ValueError`` names what does not fit.
     """
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
         board = _board(store, session, cwd, write=True)
+        origin_task: TeamTask | None = None
+        if origin is not None:
+            origin_task = find_task(store, origin, board.id)
+            if origin_task is None or origin_task.project_id != board.id:
+                raise ValueError(f"--origin {origin}: no such task on this board ({board.name})")
+        if project is not None:
+            board = _delegated_board(store, project, board)
+        elif origin_task is not None:
+            raise ValueError("--origin goes with --project: the member the task is delegated to")
         resolved_needs: list[str] = []
         for ref in needs or []:
             needed = find_task(store, ref, board.id)
@@ -1435,6 +1668,8 @@ def add_task(
         )
         event = None
         if created:
+            if origin_task is not None:
+                store.set_task_origin(task.id, origin_task.id, origin_task.project_id)
             event = _emit(
                 store,
                 board.id,
@@ -1457,6 +1692,25 @@ def add_task(
         Delivery(seq=None, board_id=board.id, board_name=board.name, warning=board.warning)
     )
     return fresh, created
+
+
+def _delegated_board(store: ContextStore, ref: str, parent: _Board) -> _Board:
+    """The board of the member ``ref`` names, which the writer's board must parent."""
+    from aisquare.services import parent as parent_service  # lazy: it imports this module
+
+    found = store.find_projects(ref)
+    if len(found) != 1:
+        raise ValueError(
+            f"--project {ref}: {'no such project' if not found else 'more than one project'}"
+        )
+    member = found[0]
+    over = parent_service.parent_of(store, member.id)
+    if over is None or over.project.id != parent.id:
+        raise ValueError(
+            f"--project {ref}: not a member of a group this board ({parent.name}) parents; "
+            "`aisquare project group parent <group> <project>` names a group's parent"
+        )
+    return _board_of(store, member.id)
 
 
 def list_tasks(status: TaskStatus | None = None, cwd: Path | None = None) -> list[TeamTask]:
@@ -1526,6 +1780,29 @@ def stopped_because(task: TeamTask) -> str | None:
     try:
         with store_session() as store:
             events = store.filtered_events(task.project_id, kind=kind, task_id=task.id, limit=1)
+    except Exception:
+        return None
+    if not events:
+        return None
+    prefix = f"{task.title} — "
+    text = events[-1].text
+    return text[len(prefix) :] if text.startswith(prefix) else None
+
+
+def last_feedback(task: TeamTask) -> str | None:
+    """The reason given at the task's newest ``task reopen``, whatever its status now (#74).
+
+    :func:`stopped_because` answers for the CURRENT status only, which is right for
+    ``task show`` and wrong for a claim: a reopened task is ``doing`` once claimed, and
+    the reason it bounced was gone exactly when the coder picking it up needed it.
+    ``None`` when it was never reopened, or reopened with no reason. Fails open, as
+    :func:`stopped_because` does: a claim never fails for its decoration.
+    """
+    try:
+        with store_session() as store:
+            events = store.filtered_events(
+                task.project_id, kind="task_reopened", task_id=task.id, limit=1
+            )
     except Exception:
         return None
     if not events:
@@ -1610,6 +1887,7 @@ def _finish_task(
             session_id=session.id if session else None,
             task_id=updated.id,
         )
+        _route_up(store, event)
         board = _board_of(store, updated.project_id)
     _record_delivery(event, board)
     return updated, board, manager
@@ -1632,6 +1910,7 @@ def finish_task(
     )
     distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_done", board=board.id)
+    _flush_routed()
     return task
 
 
@@ -1643,6 +1922,7 @@ def review_task(ref: str, *, note: str | None = None, session_ref: str | None = 
     )
     distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_review", board=board.id)
+    _flush_routed()
     return task
 
 
@@ -1669,10 +1949,12 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
             session_id=session.id if session else None,
             task_id=reopened.id,
         )
+        _route_up(store, event)
         board = _board_of(store, reopened.project_id)
     _record_delivery(event, board)
     distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_reopened", board=board.id)
+    _flush_routed()
     return reopened
 
 
@@ -1683,11 +1965,14 @@ def next_task(
     claim: bool = False,
     session_ref: str | None = None,
     cwd: Path | None = None,
+    task_ref: str | None = None,
 ) -> TeamTask | None:
     """The oldest pickable task for a role — the heart of a looped session.
 
     With ``claim`` (only valid for ``todo``), the returned task is atomically
-    claimed; a race with another looper simply moves on to the next task.
+    claimed; a race with another looper simply moves on to the next task. ``task_ref``
+    (``--task``: a board number or an id) returns that task when it is in ``status`` and
+    ready, and nothing else (#129 a): a tester spawned for one review takes that one.
     """
     _require_enabled()
     _DELIVERY.set(None)
@@ -1706,9 +1991,15 @@ def next_task(
         # together raced for the same one while their own sat idle.
         row = _fleet_row_hint(store, session, claim=claim)
         prefer = row.task_id if row is not None else None
+        only = None
+        if task_ref is not None:
+            named = find_task(store, task_ref, board.id)
+            if named is None:
+                raise KeyError(task_ref)
+            only = named.id
         picked: TeamTask | None = None
         while True:
-            task = store.next_task(board.id, role=role, status=status, prefer=prefer)
+            task = store.next_task(board.id, role=role, status=status, prefer=prefer, only=only)
             if task is None or not claim:
                 picked = task
                 break
@@ -1740,6 +2031,7 @@ def block_task(ref: str, *, reason: str, session_ref: str | None = None) -> Team
     )
     distill_service.spawn_drain(root=board.root, board=board.id)
     _nudge_manager(manager, reason="task_blocked", board=board.id)
+    _flush_routed()
     return task
 
 
@@ -1747,6 +2039,7 @@ def drop_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     """Drop a task that is no longer worth doing (``task drop``)."""
     _require_enabled()
     task, _, _ = _finish_task(ref, "dropped", "task_dropped", session_ref=session_ref, wakes=False)
+    _flush_routed()
     return task
 
 
@@ -1856,15 +2149,80 @@ def _shared_row_banner(
     )
 
 
-def _briefing_events(store: ContextStore, project_id: str) -> list[TeamEvent]:
+def _transcript_to_keep(known: TeamSession | None, transcript_path: str | None) -> str | None:
+    """The transcript a session start records: the one reported, unless the row already names
+    a transcript ON DISK and the reported one is not (P0-W3b).
+
+    Measured by P0-W0 on Claude Code 2.1.309 and 2.1.223: ``claude --resume <path>`` under
+    another ``CLAUDE_CONFIG_DIR`` — every resumed ``fleet switch`` and usage-limit hand-over —
+    hands ``SessionStart`` a path under the NEW account's ``projects/`` that is never created;
+    the records keep going to the original file, and ``UserPromptSubmit`` hands that one.
+    Recorded, the missing path raised :func:`_shared_row_banner` at every prompt, and the next
+    restart or switch found no file to resume and started fresh. Two paths that both exist
+    are two transcripts, and recorded as before: the banner is for them.
+    """
+    if known is None or not known.transcript_path or not transcript_path:
+        return transcript_path
+    if transcript_path == known.transcript_path or Path(transcript_path).is_file():
+        return transcript_path
+    return known.transcript_path if Path(known.transcript_path).is_file() else transcript_path
+
+
+def _heals(session: TeamSession, transcript_path: str | None) -> bool:
+    """Whether a prompt's ``transcript_path`` should replace the row's: the row's is not on
+    disk and the prompt's is (:func:`_transcript_to_keep`'s other half)."""
+    recorded = session.transcript_path
+    if not transcript_path or not recorded or transcript_path == recorded:
+        return False
+    return not Path(recorded).is_file() and Path(transcript_path).is_file()
+
+
+def _briefing_events(
+    store: ContextStore, project_id: str, session: TeamSession | None = None
+) -> list[TeamEvent]:
     """The recent updates an agent is briefed with: the board's last :data:`_BOARD_EVENTS`
     that are an agent's to read, :data:`HUMAN_BOARD_KINDS` left out in the query.
 
     Read unfiltered, the five were whatever came last — and after the owner had asked
     the captain about the board a few times, that was five audit lines carrying the
     owner's words, with the decisions and results pushed out (review of #240, finding 11).
+    ``session``'s board context (:func:`_board_reading`) applies: ``none`` reads none, so a
+    reviewer meant to judge a change cold is not briefed with the others' verdicts first.
     """
-    return store.recent_events(project_id, exclude_kinds=HUMAN_BOARD_KINDS, limit=_BOARD_EVENTS)
+    reads, relevant = (True, None) if session is None else _board_reading(store, session)
+    if not reads:
+        return []
+    return store.recent_events(
+        project_id, exclude_kinds=HUMAN_BOARD_KINDS, relevant=relevant, limit=_BOARD_EVENTS
+    )
+
+
+def _board_reading(store: ContextStore, session: TeamSession) -> tuple[bool, Relevance | None]:
+    """``(whether session reads the board's events at all, what it keeps of them)`` by its
+    board context (``AISQUARE_BOARD_CONTEXT``, P1 WS-2, #279).
+
+    ``all``: every event, as before. ``none``: none — no recent updates at start, an empty
+    delta with the cursor still moving; its assignment, tasks, protocol and cycle stay.
+    ``relevant``: events on the tasks it claimed or was assigned, those addressed to its
+    role or label, and decisions — chosen in the query, so forty others cannot hide one. A
+    manager reads everything, whatever the variable says: the board is its job.
+    """
+    context = orchestrator.board_context()
+    if context == "all" or session.role == MANAGER_ROLE:
+        return True, None
+    if context == "none":
+        return False, None
+    tasks = {t.id for t in store.team_tasks(session.project_id) if t.claimed_by == session.id}
+    # The window's row, else the one bound to the session: a Stop or a prompt asked from
+    # outside its window still reads as that agent.
+    named = _hook_named_row(store) or store.fleet_agent_for_session(session.id)
+    if named is not None and named.task_id:
+        tasks.add(named.task_id)
+    # Its fleet label too: `fleet tell` files a note to the label, which the session row's
+    # own `label` (`team join --label`) is not (sync #365).
+    row_label = named.label if named is not None else ""
+    names = tuple(sorted(n for n in {session.role, session.label or "", row_label} if n))
+    return True, Relevance(task_ids=tuple(sorted(tasks)), names=names)
 
 
 def hook_session_start(
@@ -1898,13 +2256,17 @@ def hook_session_start(
         project_service.capture(store, project)
         known = store.get_session(session_id)
         now = _now()
+        asked_persona, persona_note, named = _asked_persona(store, project.id)
+        # The account the session runs on: its fleet row's first (P2-W7), else the reported
+        # path's, even where the transcript recorded is the original file (`_transcript_to_keep`).
+        account = session_account(transcript_path, named)
+        transcript_path = _transcript_to_keep(known, transcript_path)
         # Computed before upsert_session(), which overwrites transcript_path.
         collision = _shared_row_banner(known, transcript_path, now)
         # Self-reported by the payload — validated before it can reach any
         # other session's injected context.
         model = harness.clean_model_id(model)
         effort = harness.clean_effort(effort)
-        asked_persona, persona_note, named = _asked_persona(store, project.id)
         session = store.upsert_session(
             TeamSession(
                 id=session_id,
@@ -1914,7 +2276,7 @@ def hook_session_start(
                 last_seen_at=now,
                 cursor=store.latest_seq(project.id),
                 transcript_path=transcript_path,
-                account=session_account(transcript_path),
+                account=account,
                 model=model,
                 effort=effort,
                 # Recorded as ASKED, loadable or not (§3.7): this pane's fleet row
@@ -1925,20 +2287,24 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
+        if source != _COMPACT_SOURCE or _take_quiet_compaction(store, session, source):
+            # A session that just started, cleared or resumed sits at its prompt until
+            # something is typed — whose own hook says `working`. Left at the upsert's
+            # `working`, the row read busy for its whole fresh window: `say` refused to
+            # type into the captain (T2 fix round), and every other role's `fleet tell`
+            # filed a note its idle agent never read (#123). A compaction can come
+            # mid-turn, so it keeps what the turn said; a hand-over's mark is kept by
+            # `touch_session` itself. One rule for every source (P1 WS-4, #281): the
+            # compaction the quiet compaction typed into a manager waiting at its prompt ran
+            # no turn, and left at `working` the manager was one no nudge reached.
+            store.touch_session(session.id, state="waiting")
+            session = store.get_session(session.id) or session
         if experimental.captain_role(base_role(session.role)):
             # Bound like every fleet row (rule 1 of the fleet-row section), or a
             # `/clear` left the row on the ended id and `say` waited on a session that
             # would never answer. The captain has no task, so there is nothing to brief.
             _assignment(store, session.id, project.id, named=named)
             _settle_owed_persona(store, session)  # this start briefs the persona itself
-            if source != _COMPACT_SOURCE:
-                # A captain that just started, cleared or resumed sits at its prompt
-                # until something is typed — whose own hook says `working`. Left at
-                # the upsert's `working`, the row read busy for its whole fresh window
-                # and `say` refused to type into it (T2 fix round). A compaction can
-                # come mid-turn, so it keeps what the turn said.
-                store.touch_session(session.id, state="waiting")
-                session = store.get_session(session.id) or session
             # The captain's own briefing (T2, 13121): it has no shell, so no `aisquare
             # task …` protocol lines, and the home board's captain_action lines are the
             # OWNER's audit, not the captain's context.
@@ -1950,22 +2316,36 @@ def hook_session_start(
         assigned = _assignment(store, session.id, project.id, named=named)
         _settle_owed_persona(store, session)  # this start briefs the persona itself
         fleet = _cycle_project(store, project, cwd, session.id, named=named)
+        persona_root = _directory_root(cwd) if session.persona and fleet is None else None
+        if base_role(session.role) == MANAGER_ROLE:
+            # Every source: a compaction, a restart and a resume all start from this, not
+            # from the board a new manager then re-read in full (P1 WS-4, #281).
+            return collision + _start_pack(
+                store,
+                project,
+                session,
+                assigned=assigned,
+                persona_note=persona_note,
+                fleet=fleet,
+                persona_root=persona_root,
+            )
         # Presence is board state, not feed traffic: /clear cycles, resumes and
         # ephemeral `claude -p` children would otherwise spam join/left pairs.
         return collision + _render_board(
             project,
             store.team_sessions(project.id),
             store.team_tasks(project.id),
-            _briefing_events(store, project.id),
+            _briefing_events(store, project.id, session),
             me=session,
             assigned=assigned,
             briefing=True,
             persona_note=persona_note,
             # Asked only when the briefing needs it: one git call, which a session with no
             # persona, or one whose cycle names its project, never pays.
-            persona_root=_directory_root(cwd) if session.persona and fleet is None else None,
+            persona_root=persona_root,
             labels=lambda: slot_labels_via(store),
             fleet=fleet,
+            links=_link_marks(project.id, store),
         )
 
 
@@ -1982,6 +2362,12 @@ def hook_prompt_heartbeat(
     A session unknown to the orchestrator but prompting inside an *active* project
     joins right here (the orchestrator may have been activated after it started) and
     receives the full board + protocol instead of a delta.
+
+    Every prompt stamps the session's ``prompted_at`` and takes its fleet row's first
+    message (``store.mark_prompted``, P0-W1a): the acknowledgement ``fleet spawn``,
+    ``restart`` and ``switch`` wait for, and a typed delivery asks before it presses Enter
+    again. The row is the window's own (``AISQUARE_FLEET_AGENT``), else the one bound to the
+    session. One indexed update, no tmux call.
     """
     if not orchestrator.team_enabled():
         return ""
@@ -1999,6 +2385,8 @@ def hook_prompt_heartbeat(
             # `capture_prompt` had captured already (review of #259, round 19).
             project_service.capture(store, project)
             now = _now()
+            # Read before the row is written, for its account (P2-W7) as for the binding.
+            named = _hook_named_row(store)
             session = store.upsert_session(
                 TeamSession(
                     id=session_id,
@@ -2008,22 +2396,23 @@ def hook_prompt_heartbeat(
                     last_seen_at=now,
                     cursor=store.latest_seq(project.id),
                     transcript_path=transcript_path,
-                    account=session_account(transcript_path),
+                    account=session_account(transcript_path, named),
                     model=harness.clean_model_id(model),
                     effort=harness.clean_effort(effort),
+                    prompted_at=now,
                 )
             )
+            store.mark_prompted(session.id, now, agent_id=orchestrator.env_fleet_agent())
             # This door binds a fleet row too (an agent that started before the
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
-            # under its old holder on this very board (review of #135).
-            named = _hook_named_row(store)
+            # under its old holder on this very board (review of #135). Read above.
             assigned = _assignment(store, session.id, project.id, named=named)
             return _render_board(
                 project,
                 store.team_sessions(project.id),
                 store.team_tasks(project.id),
-                _briefing_events(store, project.id),
+                _briefing_events(store, project.id, session),
                 me=session,
                 assigned=assigned,
                 labels=lambda: slot_labels_via(store),
@@ -2034,6 +2423,13 @@ def hook_prompt_heartbeat(
         # that only rides along with unrelated teammate traffic would go unseen for
         # exactly as long as the two agents were quiet, which is when the
         # interleaved claims do their damage.
+        if _heals(session, transcript_path):
+            # A row that recorded a transcript which never appeared, this prompt's being
+            # the one on disk (P0-W3b, a row written before `_transcript_to_keep`): pointed
+            # at it, so the next restart resumes it and no banner reads it as a second agent.
+            assert transcript_path is not None  # `_heals` says so
+            store.set_transcript_path(session.id, transcript_path)
+            session = session.model_copy(update={"transcript_path": transcript_path})
         collision = _shared_row_banner(session, transcript_path, _now())
         # The fleet-row bind the start hook could not make is tried again here,
         # and the briefing it was owed comes with it (rule 2, second half).
@@ -2043,6 +2439,7 @@ def hook_prompt_heartbeat(
         briefing += _owed_persona_briefing(store, session)
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         store.renew_leases(session.id, lease)
+        store.mark_prompted(session.id, _now(), agent_id=orchestrator.env_fleet_agent())
         # The board's newest seq, read BEFORE the delta: with nothing to deliver the
         # cursor moves there, past the rows the query left out. Read first, it cannot
         # pass an event the delta did not see — whatever is written after has a later seq.
@@ -2051,14 +2448,17 @@ def hook_prompt_heartbeat(
         # teammate context — left out IN the query, so the limit counts what is
         # delivered: dropped after it, a run of audit lines was the whole page, prompt
         # after prompt, with a coder's result behind it (review of #240, finding 11).
+        reads, relevant = _board_reading(store, session)
         events = store.events_since(
             session.project_id,
             session.cursor,
             exclude_session=session.id,
             exclude_kinds=HUMAN_BOARD_KINDS,
+            exclude_actor=session.id,
+            relevant=relevant,
             limit=_DELTA_LIMIT * 3 + 1,
         )
-        if not events or not orchestrator.delta_enabled():
+        if not events or not orchestrator.delta_enabled() or not reads:
             # Nothing delivered is still something read: the cursor moves past it, the
             # left-out rows included, rather than stay in front of them for every later
             # prompt to scan again.
@@ -2069,14 +2469,14 @@ def hook_prompt_heartbeat(
         truncated = len(events) > _DELTA_LIMIT
         shown = events[:_DELTA_LIMIT]
         store.touch_session(session.id, cursor=shown[-1].seq, state="working")
-        roles = {s.id: s.role for s in store.team_sessions(session.project_id)}
+        authors = authors_of(store.team_sessions(session.project_id))
         board = _board_of(store, session.project_id).name
         # One read, and only when a line names a task: this runs on every prompt.
         numbers = store.task_numbers(session.project_id) if any(e.task_id for e in shown) else {}
         return (
             collision
             + briefing
-            + _render_delta(shown, roles, truncated=truncated, board=board, numbers=numbers)
+            + _render_delta(shown, authors, truncated=truncated, board=board, numbers=numbers)
         )
 
 
@@ -2096,8 +2496,15 @@ def hook_stop(
     (Claude Code is already continuing on a stop hook, so this turn's news waits
     for the next prompt's delta or a nudge — nothing is lost, only deferred), the
     hourly cap in ``[fleet] max_continuations_per_hour``, and the cursor itself,
-    which is why the same events can never wake it twice. Every other role gets
-    ``None`` and exactly the behaviour it always had.
+    which is why the same events can never wake it twice.
+
+    Every other role is handed the NOTES ADDRESSED TO IT at the end of its turn (P0-W2,
+    #276; ``[fleet] deliver_notes_at_turn_end``, on by default): a note to its label or
+    its role (``note --to``, ``fleet tell`` to a busy agent) past its cursor keeps it going
+    with the same delta its next prompt would carry, under the same three guards. A note
+    sent while it worked used to wait for a prompt that might never come. Nothing else
+    keeps it going: the rest of the board rides along with an addressed note, and waits
+    for the next prompt otherwise.
 
     The wake-up is an extra on top of the contract, so it fails open on its own:
     the row is marked waiting first, then :class:`ManagerWakeupError` carries the
@@ -2138,17 +2545,88 @@ def hook_stop(
             else:
                 if decision is not None:
                     return decision
+        else:
+            try:
+                handed = _turn_end_delivery(store, session, stop_hook_active=stop_hook_active)
+            except Exception as exc:  # waiting is the contract; the delivery is the extra
+                failure = TurnEndDeliveryError(exc)
+            else:
+                if handed is not None:
+                    return handed
         # Over a hand-over's mark the store keeps the mark: this can be the turn
         # of an agent `fleet switch` is exiting, whose SessionEnd must still park
         # the claims (review of the #205 fold, round 1).
         store.touch_session(session.id, state="waiting")
+        # A turn ended, and only a prompt starts one: the first message was taken even if its
+        # UserPromptSubmit could not record it (P0-W1a; review of #330, round 1).
+        store.take_first_prompt(
+            _now(), session_id=session.id, agent_id=orchestrator.env_fleet_agent()
+        )
     if deferred is not None and manager is not None:
         # After the row says waiting, never before: nudge_manager refuses every
         # other state. Outside the `with` too — it opens its own connection.
         _nudge_manager(manager, reason=deferred, board=session.project_id)
+    if isinstance(failure, TurnEndDeliveryError):
+        raise failure
     if failure is not None:
         raise ManagerWakeupError(failure)
     return None
+
+
+def _turn_end_delivery(
+    store: ContextStore, me: TeamSession, *, stop_hook_active: bool
+) -> StopDecision | None:
+    """Keep a non-manager going on the notes addressed to it, or ``None`` to let it wait.
+
+    Addressed means the note's ``--to`` names the session's role (or the role its seat is
+    numbered from: ``coder2`` is a ``coder``), or the label of the fleet row the session runs
+    in, which is what ``fleet tell`` files a note to. The decision is the manager's
+    (:func:`_wakeup`): the delta its next prompt would carry, its cursor moved past it,
+    ``stop_hook_active`` and ``[fleet] max_continuations_per_hour`` holding it to one turn and
+    a cap. ``[fleet] deliver_notes_at_turn_end = false`` turns it off."""
+    if not deliver_notes_at_turn_end():
+        return None
+    row = store.fleet_agent_for_session(me.id)
+    names = {me.role, base_role(me.role), me.label or "", row.label if row is not None else ""}
+    to = {name.strip().lower() for name in names if name.strip()}
+
+    def addressed(event: TeamEvent) -> bool:
+        return event.kind in NOTE_KINDS and (event.to_role or "").strip().lower() in to
+
+    # The agent is told who it is: its briefing names its session and its role, not the
+    # label a `fleet tell` addresses, and live (P0-W2) a coder read "→ busy-head" as
+    # someone else's note and left it.
+    you = row.label if row is not None else me.role
+    # Its board context, as its prompt's delta reads the board (P1 WS-2): `relevant` keeps
+    # its tasks, what is addressed to it and decisions. `none` reads no board at all, but a
+    # note addressed to it is no board update: it is handed that and nothing else, or a
+    # `fleet tell` to a busy cold reviewer never reached it (sync #365, W2's check).
+    reads, relevant = _board_reading(store, me)
+    if not reads:
+        # Asked IN the query, before its LIMIT: kept after it, a note behind a page of
+        # others never reached a cold reviewer, whose prompts read no board at all (review
+        # of #365, round 2).
+        relevant = Relevance(names=tuple(sorted(to)), decisions=False)
+    return _wakeup(
+        store,
+        me,
+        stop_hook_active=stop_hook_active,
+        wakes=addressed,
+        relevant=relevant,
+        keep=None if reads else addressed,
+        act=(
+            f"You are {you}: what is addressed to {you} or to {base_role(me.role)} is "
+            "addressed to you. Act on it, then carry on with your cycle."
+        ),
+    )
+
+
+def deliver_notes_at_turn_end() -> bool:
+    """``[fleet] deliver_notes_at_turn_end``; a config that will not load keeps the default."""
+    try:
+        return load_config().fleet.deliver_notes_at_turn_end
+    except Exception:
+        return FleetSettings().deliver_notes_at_turn_end
 
 
 def _own_manager_row(store: ContextStore, session: TeamSession) -> str | None:
@@ -2187,7 +2665,9 @@ def _count(raw: str | None) -> int:
         return 0
 
 
-def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
+def _wake_candidates(
+    store: ContextStore, me: TeamSession, relevant: Relevance | None = None
+) -> list[TeamEvent]:
     """The board since a manager's cursor, exactly as its next prompt would read it.
 
     One function so the wake-up and the deferral below can never disagree about
@@ -2197,12 +2677,16 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
     out IN the query: a Stop that wakes nobody moves no cursor, so dropped after the
     LIMIT, a run of audit lines was the whole page at every Stop, and the result behind
     it woke nobody until something else was written (review of #240, finding 11).
+    ``relevant`` is ``me``'s board context (:func:`_board_reading`), applied in the query
+    as the prompt's delta applies it: a manager reads everything.
     """
     return store.events_since(
         me.project_id,
         me.cursor,
         exclude_session=me.id,
         exclude_kinds=HUMAN_BOARD_KINDS,
+        exclude_actor=me.id,
+        relevant=relevant,
         limit=_DELTA_LIMIT * 3 + 1,
     )
 
@@ -2231,7 +2715,7 @@ def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
     if not orchestrator.delta_enabled():
         return None
     for event in _wake_candidates(store, me):
-        if _wakes_manager(event):
+        if wake_class(event, me) == "wake":
             return f"deferred:{event.kind}"
     return None
 
@@ -2239,12 +2723,35 @@ def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
 def _manager_wakeup(
     store: ContextStore, me: TeamSession, *, stop_hook_active: bool
 ) -> StopDecision | None:
-    """Keep a manager going on fresh board decisions, or ``None`` to let it wait.
+    """Keep a manager going on fresh board decisions (:func:`wake_class` ``wake``), or
+    ``None``."""
+    return _wakeup(
+        store, me, stop_hook_active=stop_hook_active, wakes=lambda e: wake_class(e, me) == "wake"
+    )
 
-    Reads the delta exactly as :func:`hook_prompt_heartbeat` does — same source,
-    same exclusions, same limit — because the reason IS that delta, delivered a
-    turn early. Muted deltas (``AISQUARE_TEAM_DELTA=0``) mute this too: it is the
-    same injection through a different door.
+
+def _wakeup(
+    store: ContextStore,
+    me: TeamSession,
+    *,
+    stop_hook_active: bool,
+    wakes: Callable[[TeamEvent], bool],
+    act: str | None = None,
+    relevant: Relevance | None = None,
+    keep: Callable[[TeamEvent], bool] | None = None,
+) -> StopDecision | None:
+    """Keep ``me`` going on the board since its cursor when an event there ``wakes`` it, or
+    ``None`` to let it wait: the manager's wake-up (§7.3) and every other role's turn-end
+    delivery (P0-W2) alike. ``act`` is the reason's last instruction (the manager's, by
+    default). ``relevant`` and ``keep`` are ``me``'s board context, as its prompt's delta
+    reads it (P1 WS-2): ``relevant`` in the query, ``keep`` on what it returned.
+
+    Reads the delta as :func:`hook_prompt_heartbeat` does — same source, same
+    exclusions, same limit, the same board context (``relevant``) — because the reason IS
+    that delta, delivered a turn early. One exception, ``keep``: an agent whose board
+    context is ``none`` reads no delta at all, and its turn end hands it only the notes
+    addressed to it (sync #365). Muted deltas (``AISQUARE_TEAM_DELTA=0``) mute this too:
+    it is the same injection through a different door.
 
     Order of the writes matters. The hourly counter is bumped BEFORE the cursor
     moves and the row flips to ``working``: a lost increment costs one of thirty
@@ -2253,8 +2760,10 @@ def _manager_wakeup(
     """
     if stop_hook_active or not orchestrator.delta_enabled():
         return None
-    events = _wake_candidates(store, me)
-    if not any(_wakes_manager(event) for event in events):
+    events = _wake_candidates(store, me, relevant)
+    if keep is not None:
+        events = [event for event in events if keep(event)]
+    if not any(wakes(event) for event in events):
         return None
     key = continuation_key(me.id, _now())
     used = _count(store.get_meta(key))
@@ -2262,13 +2771,15 @@ def _manager_wakeup(
         return None
     truncated = len(events) > _DELTA_LIMIT
     shown = events[:_DELTA_LIMIT]
-    roles = {s.id: s.role for s in store.team_sessions(me.project_id)}
+    authors = authors_of(store.team_sessions(me.project_id))
     board = _board_of(store, me.project_id).name
     numbers = store.task_numbers(me.project_id) if any(e.task_id for e in shown) else {}
     store.set_meta(key, str(used + 1))
     store.touch_session(me.id, cursor=shown[-1].seq, state="working")
     return StopDecision(
-        reason=_render_wakeup(shown, roles, truncated=truncated, board=board, numbers=numbers),
+        reason=_render_wakeup(
+            shown, authors, truncated=truncated, board=board, numbers=numbers, act=act
+        ),
         cursor=shown[-1].seq,
     )
 
@@ -2397,6 +2908,7 @@ def hook_stop_failure(
     error: str | None,
     message: str | None,
     details: str | None,
+    handing_over: bool = False,
 ) -> TurnFailure | None:
     """The turn ended on an API error — Claude Code's ``StopFailure`` (#146).
 
@@ -2415,6 +2927,12 @@ def hook_stop_failure(
     ``waiting``, unless ``fleet switch`` has marked it :data:`HANDOVER_STATE` —
     with a ``turn_failed`` feed line naming it, so the board does not show a
     session as mid-turn for thirty minutes because its turn died.
+
+    ``handing_over`` is the hook's decision (``services.hooks.turn_failed``) that the
+    automatic hand-over will move this agent: the ``limited`` line then says so
+    (:data:`HANDING_OVER_SAID`) instead of naming ``fleet switch``, and no manager is
+    nudged — one limit, one switch (#277). A hand-over that then fails says so with
+    ``handover_failed`` (:func:`hook_handover_failed`), which does wake it.
     """
     if not orchestrator.team_enabled():
         return None
@@ -2455,24 +2973,27 @@ def hook_stop_failure(
             # The row just read names the manager's project (`_nudge_target`'s rule); asked
             # again there, the same row was read twice (review of #259, round 25, 8/10).
             manager = (
-                agent.project_id
+                None
+                if handing_over
+                else agent.project_id
                 if agent is not None
                 else _nudge_target(store, None, session.project_id)
             )
             _emit(
                 store,
                 session.project_id,
-                "limited",
+                LIMITED_HANDING_OVER if handing_over else "limited",
                 _limited_text(
                     label,
                     text,
                     notice,
                     project=store.get_project(agent.project_id) if agent is not None else None,
+                    handing_over=handing_over,
                 ),
                 session_id=session.id,
             )
         refreshed = store.get_session(session.id) or session
-    if manager is not None:  # not already limited
+    if manager is not None:  # not already limited, and no hand-over coming
         # After the row says limited, never before, and outside the `with`
         # (it opens its own connection): path 2 types into a WAITING manager;
         # a working one reads the event on its next delta or its own Stop. The manager of
@@ -2524,9 +3045,11 @@ def _limited_text(
     notice: claude_accounts_core.LimitNotice | None,
     *,
     project: ProjectInfo | None,
+    handing_over: bool = False,
 ) -> str:
     """The feed line: what stopped, when it lifts, and the one command that moves it — for a
-    fleet agent, whose ``project`` the command names (review of #259, round 21)."""
+    fleet agent, whose ``project`` the command names (review of #259, round 21). With the
+    automatic hand-over coming (``handing_over``), no command: the fleet moves it (#277)."""
     if notice is None:
         head = f"{label} is rate limited: {message}"
     else:
@@ -2534,12 +3057,36 @@ def _limited_text(
         if notice.resets_at is not None:
             # The one formatter (#152; review of #205, finding 9).
             head += f" · resets {claude_accounts_core.format_reset(notice.resets_at, now=_now())}"
-    if project is not None:
+    if handing_over:
+        head += f' — {HANDING_OVER_SAID} (`on_limit = "switch"`)'
+    elif project is not None:
         head += (
             f" — `{project_service.fleet_command('switch', project, label)}` moves it to the "
             "account with the most headroom (or wait for the reset)"
         )
     return head
+
+
+def hook_handover_failed(
+    project_id: str, text: str, *, session_id: str | None = None, label: str | None = None
+) -> None:
+    """The automatic hand-over could not move a limited agent: a ``handover_failed`` event
+    (a wake kind) naming ``fleet switch`` or the reset, and a waiting manager nudged, as a
+    ``limited`` line nudged it before the hand-over took that over (#277)."""
+    if not orchestrator.team_enabled():
+        return
+    with store_session() as store:
+        _emit(store, project_id, "handover_failed", text, session_id=session_id)
+        session = store.get_session(session_id) if session_id is not None else None
+        agent = store.fleet_agent_for_session(session_id) if session_id is not None else None
+        manager = (
+            agent.project_id
+            if agent is not None
+            else _nudge_target(store, None, session.project_id if session else project_id)
+        )
+    if manager is not None:
+        who = label or (short_id(session_id) if session_id else "an agent")
+        _nudge_manager(manager, reason=f"{who}: usage-limit hand-over failed", board=project_id)
 
 
 def hook_note(project_id: str, text: str, *, session_id: str | None = None) -> None:
@@ -2548,6 +3095,101 @@ def hook_note(project_id: str, text: str, *, session_id: str | None = None) -> N
         return
     with store_session() as store:
         _emit(store, project_id, "note", text, session_id=session_id)
+
+
+def watch_event(board_id: str, text: str) -> None:
+    """``aisquare watch``'s one line for a project with new items (P2-W2, #284): kind
+    ``watch``, addressed to the manager, so it wakes it (:func:`wake_class`) and a working
+    manager is handed it at its turn's end. Counts and a path, never an excerpt."""
+    if not orchestrator.team_enabled():
+        return
+    with store_session() as store:
+        _emit(store, board_id, "watch", text, to_role=MANAGER_ROLE)
+
+
+def hook_notice(project_id: str, text: str, *, session_id: str | None = None) -> None:
+    """A human-only feed line from a worker (:data:`HUMAN_BOARD_KINDS`): no agent is briefed
+    with it or woken by it."""
+    if not orchestrator.team_enabled():
+        return
+    with store_session() as store:
+        _emit(store, project_id, "notice", text, session_id=session_id)
+
+
+# --- the quiet compaction's mark (P1 WS-4, #281) ------------------------------------------
+#
+# ``services.quiet_compact`` types ``/compact`` into a quiet manager. A slash command runs no
+# turn, so nothing says it was taken but the compaction's own SessionStart (source
+# ``compact``): the worker leaves a mark under ``compact:<session>`` before it types, and
+# that SessionStart acknowledges it. The mark is also the cooldown's clock. Refusals are kept
+# under ``compact-refused:<session>``, the newest one, for `team_meta` readers and tests.
+
+QUIET_COMPACT_ACK: Final = timedelta(minutes=10)
+"""How long after the mark a ``compact`` SessionStart is taken as the quiet compaction's:
+past it, a compaction is Claude Code's own (auto or idle), and the row keeps what its turn
+said."""
+
+
+class QuietMark(NamedTuple):
+    """When the quiet compaction typed ``/compact`` into a manager, and when its compaction
+    started, if it has."""
+
+    typed_at: datetime
+    acked_at: datetime | None
+
+
+def compact_mark_key(session_id: str) -> str:
+    return f"compact:{session_id}"
+
+
+def compact_refusal_key(session_id: str) -> str:
+    return f"compact-refused:{session_id}"
+
+
+def compact_arm_key(session_id: str) -> str:
+    """The token of the manager's latest Stop (``services.quiet_compact.arm``): a worker
+    whose token it is no longer stands down."""
+    return f"compact-armed:{session_id}"
+
+
+def read_quiet_mark(store: ContextStore, session_id: str) -> QuietMark | None:
+    """The quiet compaction's mark on ``session_id``, or ``None`` (none, or unreadable)."""
+    raw = store.get_meta(compact_mark_key(session_id))
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        typed = datetime.fromisoformat(data["typed_at"])
+        acked = datetime.fromisoformat(data["acked_at"]) if data.get("acked_at") else None
+    except (ValueError, KeyError, TypeError):
+        return None
+    return QuietMark(typed, acked)
+
+
+def write_quiet_mark(store: ContextStore, session_id: str, mark: QuietMark) -> None:
+    store.set_meta(
+        compact_mark_key(session_id),
+        json.dumps(
+            {
+                "typed_at": mark.typed_at.isoformat(),
+                "acked_at": mark.acked_at.isoformat() if mark.acked_at else None,
+            }
+        ),
+    )
+
+
+def _take_quiet_compaction(store: ContextStore, session: TeamSession, source: str | None) -> bool:
+    """Whether this SessionStart is the compaction the quiet compaction typed: a ``compact``
+    start of a session whose mark is unacknowledged and under :data:`QUIET_COMPACT_ACK` old.
+    It is acknowledged here, once."""
+    if source != _COMPACT_SOURCE:
+        return False
+    mark = read_quiet_mark(store, session.id)
+    now = _now()
+    if mark is None or mark.acked_at is not None or now - mark.typed_at > QUIET_COMPACT_ACK:
+        return False
+    write_quiet_mark(store, session.id, mark._replace(acked_at=now))
+    return True
 
 
 def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = None) -> None:
@@ -2822,6 +3464,19 @@ def age_text(when: datetime, now: datetime) -> str:
     return minutes_text(max(0, int((now - when).total_seconds() // 60)))
 
 
+def _link_marks(project_id: str, store: ContextStore | None = None) -> dict[str, str]:
+    """The board's linked-task marks (``parent.link_marks``); none when it cannot be read."""
+    from aisquare.services import parent as parent_service  # lazy: it imports this module
+
+    try:
+        if store is not None:
+            return parent_service.link_marks(store, project_id)
+        with store_session() as opened:
+            return parent_service.link_marks(opened, project_id)
+    except Exception:
+        return {}
+
+
 def render_board(
     project: ProjectInfo,
     sessions: list[TeamSession],
@@ -2832,7 +3487,13 @@ def render_board(
     from aisquare.services import claude_accounts as accounts_service  # lazy: no import cycle
 
     return _render_board(
-        project, sessions, tasks, events, me=None, labels=accounts_service.slot_labels
+        project,
+        sessions,
+        tasks,
+        events,
+        me=None,
+        labels=accounts_service.slot_labels,
+        links=_link_marks(project.id),
     )
 
 
@@ -2849,6 +3510,7 @@ def _render_board(
     labels: Mapping[int, str] | Callable[[], Mapping[int, str]] | None = None,
     fleet: ProjectInfo | None = None,
     persona_root: Path | None = None,
+    links: Mapping[str, str] | None = None,
 ) -> str:
     """The board, and for ``me`` the protocol and its role's cycle, whose fleet commands
     name ``fleet`` (:func:`_cycle_project`). ``briefing`` is SessionStart's alone: it adds
@@ -2918,35 +3580,293 @@ def _render_board(
                 if waiting
                 else ""
             )
-            lines.append(f"  - {task_label(task)} [{task.status}{claim}] {task.title}{waits}")
+            link = f" {links[task.id]}" if links and task.id in links else ""
+            lines.append(f"  - {task_label(task)} [{task.status}{claim}] {task.title}{waits}{link}")
         if len(open_tasks) > _BOARD_TASKS:
             lines.append(f"  … {len(open_tasks) - _BOARD_TASKS} more — `aisquare task list`")
     if events:
-        roles = {s.id: s.role for s in sessions}
         lines.append("recent updates:")
-        lines.extend(f"  - {event_line(event, roles, numbers)}" for event in events)
+        if me is None:  # the human board keeps every event's full text
+            roles = {s.id: s.role for s in sessions}
+            lines.extend(f"  - {event_line(event, roles, numbers)}" for event in events)
+        else:
+            authors = authors_of(sessions)
+            lines.extend(f"  - {short_line(event, authors, numbers)}" for event in events)
     if me is not None:
-        lines += [
-            "Protocol: check this board before starting work; teammate updates",
-            "arrive automatically on each prompt. Tasks are shared and idempotent —",
-            'e.g. `aisquare task add "wire auth flow"` (safe to re-run). Claim before',
-            f"working: `aisquare task claim <id> --as {short_id(me.id)}`; finish with",
-            f"`aisquare task done <id> --as {short_id(me.id)}`. Share decisions/results:",
-            f'`aisquare note "…" --as {short_id(me.id)}`. Full board: `aisquare board`.',
-            "Every ✓ prints a receipt (seq N); `aisquare team verify <seq>` re-checks it.",
-            *_role_cycle(me, fleet),
-        ]
-        if briefing and me.persona:
-            # The session's own project, whose layer the persona was checked against
-            # at spawn and launch: the cycle's (its fleet row's, else its directory's
-            # when registered), else ``persona_root``, the directory's own. The
-            # board's is the hub's under one (review of #201, F1 and F6).
-            root = fleet.root if fleet is not None else (persona_root or project.root)
-            lines += _persona_briefing(me.persona, root)
-        if briefing and persona_note:
-            lines.append(persona_note)
+        lines += _protocol_lines(
+            project,
+            me,
+            assigned=assigned,
+            briefing=briefing,
+            persona_note=persona_note,
+            fleet=fleet,
+            persona_root=persona_root,
+        )
     lines.append("</aisquare-team>")
     return "\n".join(lines)
+
+
+def _protocol_lines(
+    project: ProjectInfo,
+    me: TeamSession,
+    *,
+    assigned: Assignment | None,
+    briefing: bool,
+    persona_note: str | None,
+    fleet: ProjectInfo | None,
+    persona_root: Path | None,
+) -> list[str]:
+    """The protocol, ``me``'s role cycle and, at a briefing, its persona: what closes the
+    board (:func:`_render_board`) and a manager's start pack (:func:`_start_pack`)."""
+    lines = [
+        "Protocol: check this board before starting work; teammate updates",
+        "arrive automatically on each prompt. Tasks are shared and idempotent —",
+        'e.g. `aisquare task add "wire auth flow"` (safe to re-run). Claim before',
+        f"working: `aisquare task claim <id> --as {short_id(me.id)}`; finish with",
+        f"`aisquare task done <id> --as {short_id(me.id)}`. Share decisions/results:",
+        f'`aisquare note "…" --as {short_id(me.id)}`. Full board: `aisquare board`.',
+        "Every ✓ prints a receipt (seq N); `aisquare team verify <seq>` re-checks it.",
+        "Updates arrive one line each (#seq …); `aisquare team show <seq>` prints one in full.",
+        *_role_cycle(me, fleet, assigned.task if assigned is not None else None),
+    ]
+    if briefing and me.persona:
+        # The session's own project, whose layer the persona was checked against
+        # at spawn and launch: the cycle's (its fleet row's, else its directory's
+        # when registered), else ``persona_root``, the directory's own. The
+        # board's is the hub's under one (review of #201, F1 and F6).
+        root = fleet.root if fleet is not None else (persona_root or project.root)
+        lines += _persona_briefing(me.persona, root)
+    if briefing and persona_note:
+        lines.append(persona_note)
+    return lines
+
+
+# --- the manager's start pack (P1 WS-4, #281) ---------------------------------------------
+
+_START_PACK_BUDGET: Final = 20_000
+"""The most a manager's start pack injects, in characters: every SessionStart's, a compaction's
+included. A new manager rebuilt its picture by re-reading the board, task details and files,
+and every request re-sent what it read (#281)."""
+_STATE_CLIP: Final = harness.STATE_FILE_MAX
+"""How much of the state file the pack quotes, the length the manager cycle asks it to keep
+(one number, review of #361); the rest is a pointer to the file."""
+_RULES_CLIP: Final = 1_500
+"""How much of the pack the rules index may take: one line per file, never its content."""
+_PACK_QUESTIONS: Final = 5
+"""How many unanswered questions the pack names, the newest."""
+_QUESTION_LOOKBACK: Final = 200
+"""How many of the board's latest events the unanswered questions are read from."""
+
+
+def rules_dir(root: Path) -> Path:
+    """A project's rules files: ``.aisquare/rules/*.md`` under its root, which a task
+    contract cites by path (``task add --rules``) and the start pack indexes."""
+    return root / ".aisquare" / "rules"
+
+
+def _state_lines(path: Path, now: datetime) -> list[str]:
+    """The pack's resume section: the state file, clipped, with its age; or where to write
+    one."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        written = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+    except OSError:
+        return [f"Resume: no state file yet: write one at {path} before you stop."]
+    head = f"Resume: your state file {path} (written {age_text(written, now)} ago):"
+    if len(text) > _STATE_CLIP:
+        clipped = text[:_STATE_CLIP].rstrip()
+        return [head, clipped, f"… clipped at {_STATE_CLIP:,} chars; the rest is in {path}"]
+    return [head, text or "(empty)"]
+
+
+def _rules_lines(root: Path) -> list[str]:
+    """The pack's rules index: ``.aisquare/rules/<name>.md — <first line>``, never content."""
+    try:
+        files = sorted(rules_dir(root).glob("*.md"))
+    except OSError:
+        files = []
+    if not files:
+        return []
+    lines = ["rules (cite by path; read one when a task needs it):"]
+    used = len(lines[0])
+    for index, path in enumerate(files):
+        try:
+            first = next(
+                (
+                    ln.strip().lstrip("#").strip()
+                    for ln in path.open(encoding="utf-8")
+                    if ln.strip()
+                ),
+                "",
+            )
+        except (OSError, UnicodeDecodeError):
+            first = ""
+        line = f"  - .aisquare/rules/{path.name}" + (f" — {first[:120]}" if first else "")
+        if used + len(line) > _RULES_CLIP:
+            lines.append(f"  … {len(files) - index} more in {rules_dir(root)}")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return lines
+
+
+def _parent_briefing(store: ContextStore, project_id: str) -> list[str]:
+    """A parent manager's block in its start pack (P2-W6, #199): its groups, members and
+    the delegation verbs, at most 600 chars; nothing for a project that parents none."""
+    from aisquare.services import parent as parent_service
+
+    try:
+        return parent_service.briefing(store, project_id)
+    except Exception:  # the pack goes out without it
+        return []
+
+
+def _unanswered(events: Sequence[TeamEvent], authors: Mapping[str, str]) -> list[TeamEvent]:
+    """The newest :data:`_PACK_QUESTIONS` questions nobody has answered: no later event is
+    addressed to the asker (its label or role), and the asker has not written again since."""
+    answered: set[str] = set()  # authors since addressed, or who wrote again
+    open_: list[TeamEvent] = []
+    for event in sorted(events, key=lambda e: e.seq, reverse=True):
+        author = event.session_id or ""
+        if event.kind == "question" and author not in answered and len(open_) < _PACK_QUESTIONS:
+            open_.append(event)
+        if author:
+            answered.add(author)
+        addressed = (event.to_role or "").strip().lower()
+        if addressed:
+            answered.update(sid for sid, n in authors.items() if n.strip().lower() == addressed)
+    return sorted(open_, key=lambda e: e.seq)
+
+
+def _start_pack(
+    store: ContextStore,
+    project: ProjectInfo,
+    me: TeamSession,
+    *,
+    assigned: Assignment | None,
+    persona_note: str | None,
+    fleet: ProjectInfo | None,
+    persona_root: Path | None,
+) -> str:
+    """A manager's context at every SessionStart, in place of the plain board: at most
+    :data:`_START_PACK_BUDGET` characters (P1 WS-4, #281).
+
+    Resume: its state file (:func:`paths.manager_state_file`), clipped at
+    :data:`_STATE_CLIP`. Open items: EVERY open task as one line (the board stops at
+    :data:`_BOARD_TASKS`), the newest unanswered questions, the live agents with their task
+    and account, and how many wake events wait past its cursor. Rules: the project's
+    ``.aisquare/rules/*.md`` by path and first line. Then the protocol and the cycle, as on
+    the board. The open items take what the budget leaves, each line whole, and say how many
+    did not fit and where they are.
+    """
+    now = _now()
+    home = fleet or project
+    tasks = store.team_tasks(project.id)
+    sessions = store.team_sessions(project.id)
+    agents = store.fleet_agents(home.id, live_only=True)
+    numbers = {t.id: t.number for t in tasks if t.number is not None}
+    labels = {a.session_id: a.label for a in agents if a.session_id}
+    authors = {**authors_of(sessions), **labels}
+    head = [
+        "<aisquare-team>",
+        f"You are team session {short_id(me.id)} (role: {me.role}) in "
+        f"project {project.root.name or project.id}. This is your start pack: your state, "
+        "every open item and the rules, in place of the board.",
+    ]
+    if assigned is not None:
+        head += _assignment_lines(assigned, me)
+    head += _state_lines(paths.manager_state_file(home.id), now)
+    tail = _rules_lines(home.root)
+    tail += _parent_briefing(store, home.id)
+    tail += _protocol_lines(
+        project,
+        me,
+        assigned=assigned,
+        briefing=True,
+        persona_note=persona_note,
+        fleet=fleet,
+        persona_root=persona_root,
+    )
+    tail.append("</aisquare-team>")
+    head += _open_items(store, project, me, sessions, agents, numbers, authors)
+    items = _task_lines(tasks, numbers, labels, _link_marks(project.id, store))
+    room = _START_PACK_BUDGET - sum(len(line) + 1 for line in (*head, *tail))
+    kept: list[str] = []
+    for index, line in enumerate(items):
+        pointer = f"  … {len(items) - index} more open tasks — `aisquare task list`"
+        if room - (len(line) + 1) < len(pointer) + 1:
+            kept.append(pointer)
+            break
+        kept.append(line)
+        room -= len(line) + 1
+    return "\n".join([*head, *kept, *tail])
+
+
+def _open_items(
+    store: ContextStore,
+    project: ProjectInfo,
+    me: TeamSession,
+    sessions: Sequence[TeamSession],
+    agents: Sequence[FleetAgent],
+    numbers: Mapping[str, int],
+    authors: Mapping[str, str],
+) -> list[str]:
+    """The start pack's short open items, which are never cut: the unanswered questions, the
+    live agents, and how many wake events wait past the manager's cursor."""
+    lines: list[str] = []
+    asked = _unanswered(
+        store.recent_events(project.id, exclude_kinds=HUMAN_BOARD_KINDS, limit=_QUESTION_LOOKBACK),
+        authors,
+    )
+    if asked:
+        lines.append("unanswered questions:")
+        lines += [f"  - {short_line(event, authors, numbers)}" for event in asked]
+    live = {s.id: s for s in sessions if s.ended_at is None}
+    others = [agent for agent in agents if agent.session_id != me.id]
+    if others:
+        lines.append("live agents:")
+        for agent in others:
+            session = live.get(agent.session_id or "")
+            state = session.state if session is not None else "starting"
+            number = numbers.get(agent.task_id) if agent.task_id else None
+            on = f" #{number}" if number is not None else ""
+            slot = f" [account {agent.account_slot}]" if agent.account_slot is not None else ""
+            lines.append(f"  - {agent.label} {agent.role} {state}{on}{slot}")
+    pending = [
+        e
+        for e in store.events_since(project.id, me.cursor, exclude_session=me.id, limit=500)
+        if wake_class(e, me) == "wake"
+    ]
+    lines.append(f"wake events pending past your cursor: {len(pending)}")
+    return lines
+
+
+def _task_lines(
+    tasks: Sequence[TeamTask],
+    numbers: Mapping[str, int],
+    labels: Mapping[str, str],
+    links: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Every open task, one line each, ``#n [status @label] title ⧗ needs #m``: the start
+    pack's part that takes what the budget leaves."""
+    statuses = {t.id: t.status for t in tasks}
+    open_tasks = [t for t in tasks if t.status in ("todo", "doing", "review", "blocked")]
+    if not open_tasks:
+        return ["open tasks: none"]
+    lines = [f"open tasks ({len(open_tasks)} of {len(tasks)}):"]
+    for task in open_tasks:
+        holder = ""
+        if task.claimed_by:
+            holder = f" @{labels.get(task.claimed_by) or short_id(task.claimed_by)}"
+        waiting = unmet_needs(task, statuses)
+        waits = (
+            " ⧗ needs " + ", ".join(f"#{numbers[n]}" if n in numbers else n[-8:] for n in waiting)
+            if waiting
+            else ""
+        )
+        link = f" {links[task.id]}" if links and task.id in links else ""
+        lines.append(f"  - {task_label(task)} [{task.status}{holder}] {task.title}{waits}{link}")
+    return lines
 
 
 # --- the fleet row: which SESSION is which AGENT ---------------------------------------
@@ -3467,7 +4387,49 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
     ]
 
 
-def _role_cycle(me: TeamSession, project: ProjectInfo | None) -> list[str]:
+def kickoff_prompt(
+    task: TeamTask,
+    *,
+    role: str,
+    label: str,
+    session_id: str | None,
+    statuses: Mapping[str, str],
+) -> str:
+    """The first message of an agent spawned for ``task`` (P0-W1a, #122): ``You are
+    <label>.``, then the lines its ASSIGNED TO YOU block carries (:func:`_assignment_lines`),
+    worked out as the block works them out at its session start (:func:`_resolve_assignment`),
+    so the kickoff and the block never disagree. A context block starts no turn; this does.
+    ``statuses`` are the board's task statuses, for what a ``todo`` task still waits on."""
+    now = _now()
+    me = TeamSession(
+        id=session_id or label,
+        project_id=task.project_id,
+        role=role,
+        started_at=now,
+        last_seen_at=now,
+    )
+    mine = task.claimed_by is not None and task.claimed_by == session_id
+    waiting_on = unmet_needs(task, statuses) if task.status == "todo" else []
+    expired = task.claim_expires_at is not None and task.claim_expires_at < now
+    assignment = Assignment(task, mine, waiting_on, task.status == "doing" and not mine and expired)
+    return "\n".join([f"You are {label}.", *_assignment_lines(assignment, me)])
+
+
+def _has_parent(project_id: str) -> bool:
+    """Whether ``project_id``'s group has a parent manager (P2-W6): its manager asks the
+    parent before the human. A store that cannot be read says no."""
+    from aisquare.services import parent as parent_service  # lazy: it imports this module
+
+    try:
+        with store_session() as store:
+            return parent_service.parent_of(store, project_id) is not None
+    except Exception:
+        return False
+
+
+def _role_cycle(
+    me: TeamSession, project: ProjectInfo | None, task: TeamTask | None = None
+) -> list[str]:
     """The standing work cycle for a role — injected so nobody has to paste it.
 
     The cycles themselves live in :mod:`aisquare.core.harness` (one source of
@@ -3488,16 +4450,31 @@ def _role_cycle(me: TeamSession, project: ProjectInfo | None) -> list[str]:
     name, under a hub the hub project's own pause, a manager kept spawning in the project the
     human then named while ``fleet pause`` paused that one (review of #259, round 27, 6/7).
     """
+    # The task it was spawned for, as the board numbers it — bare, never `#12`: in a shell a
+    # word that starts with `#` begins a comment, and `--task #12 --as …` ran as `--task`
+    # alone (review of #338). A tester's cycle verifies that one and stops (#129 a).
+    spawned_for = None if task is None else (task.id if task.number is None else str(task.number))
+    # Its fleet project's, else its board's: under a hub, one manager per project.
+    state_file = str(paths.manager_state_file(project.id if project else me.project_id))
+    escalate = base_role(me.role) == MANAGER_ROLE and _has_parent(
+        project.id if project else me.project_id
+    )
     if project is not None:
         return harness.role_cycle(
             base_role(me.role),
             short_id(me.id),
             fleet=lambda verb: project_service.fleet_command(verb, project),
             paused=harness.pause_signal(project.id, me.project_id),
+            task=spawned_for,
+            state_file=state_file,
+            escalate_to_parent=escalate,
         )
     cycle = harness.role_cycle(
         base_role(me.role),
         short_id(me.id),
+        task=spawned_for,
+        state_file=state_file,
+        escalate_to_parent=escalate,
         fleet=lambda verb: (
             install_route.command_line(["aisquare", "fleet", verb, "--project"])
             + f" {_NO_CYCLE_PROJECT}"
@@ -3850,22 +4827,54 @@ def event_line(
     return f"{who} {kind}{target}:{task} {event.text}"
 
 
+#: How much of an event's first line an agent-facing line shows (P1 WS-2, #279): the rest
+#: is one command away (``aisquare team show <seq>``), and an injected line is carried by
+#: every later request until compaction.
+SHORT_TEXT = 160
+
+
+def short_line(
+    event: TeamEvent, authors: Mapping[str, str], numbers: Mapping[str, int] | None = None
+) -> str:
+    """``#812 coder-auth review #12: PR #300 ready … → aisquare team show 812`` — one event
+    as an agent reads it (P1 WS-2, #279): its seq, who wrote it (``authors``: a session id →
+    its label, else its role; ``cli`` for none), the kind, the addressee, the task's board
+    number (its id when it has none), and the first line of the text up to
+    :data:`SHORT_TEXT` characters. Anything more is marked, with the command that prints it.
+    The human board (``aisquare board``) keeps full text (:func:`event_line`)."""
+    who = authors.get(event.session_id, "?") if event.session_id else "cli"
+    target = f" → {event.to_role}" if event.to_role else ""
+    number = (numbers or {}).get(event.task_id) if event.task_id else None
+    task = f" #{number}" if number is not None else (f" {event.task_id}" if event.task_id else "")
+    first, _, rest = event.text.strip().partition("\n")
+    first = first.rstrip()
+    more = bool(rest.strip()) or len(first) > SHORT_TEXT
+    text = first[:SHORT_TEXT].rstrip() if len(first) > SHORT_TEXT else first
+    pointer = f" … → aisquare team show {event.seq}" if more else ""
+    return f"#{event.seq} {who} {event.kind.replace('task_', '')}{target}{task}: {text}{pointer}"
+
+
+def authors_of(sessions: Sequence[TeamSession]) -> dict[str, str]:
+    """Session id → how :func:`short_line` names its author: its label, else its role."""
+    return {s.id: s.label or s.role for s in sessions}
+
+
 def _render_delta(
     events: list[TeamEvent],
-    roles: dict[str, str],
+    authors: Mapping[str, str],
     *,
     truncated: bool,
     board: str,
     numbers: Mapping[str, int] | None = None,
 ) -> str:
-    """The per-prompt delta. Each line names its board (fix 5 of the fleet-board card,
-    tsk_01m3k89bkhpj): two fleets' updates once mixed in one delta, because the seats of
-    both registered on a third board, and no line said which board it came from."""
+    """The per-prompt delta: one :func:`short_line` per event. The board is named once, in
+    the block's header: one delta reads one board (fix 5 of the fleet-board card,
+    tsk_01m3k89bkhpj, put it on every line)."""
     count = f"{len(events)}{'+' if truncated else ''}"
     lines = [
-        "<aisquare-team-delta>",
+        f'<aisquare-team-delta board="{board}">',
         f"{count} teammate update(s) since your last prompt:",
-        *(f"- [{board}] {event_line(event, roles, numbers)}" for event in events),
+        *(f"- {short_line(event, authors, numbers)}" for event in events),
     ]
     if truncated:
         lines.append("… more waiting — run `aisquare board` for the full picture.")
@@ -3880,11 +4889,11 @@ def _render_delta(
 #: at all and the wake-up is silently gone.
 _WAKEUP_REASON_BUDGET = 8_000
 
-#: The most one rendered event line may cost. Board text is unbounded and the
-#: coder's own cycle asks for ``--note "how to verify + evidence"``, so one 2 KB
-#: note must not crowd out the other nine events — every event the reason shows
-#: has to stay legible, because ``_manager_wakeup`` advances the cursor past all
-#: of them and nothing will show them again.
+#: The most one rendered event line may cost. Each is a :func:`short_line` now, its text
+#: cut at :data:`SHORT_TEXT` with ``aisquare team show <seq>`` naming the rest, so this
+#: clips only what a line in a non-Latin script costs once JSON escapes it: every event
+#: the reason shows has to stay legible, because ``_manager_wakeup`` advances the cursor
+#: past all of them.
 _WAKEUP_LINE_BUDGET = 400
 
 
@@ -3934,14 +4943,16 @@ _ELLIPSIS_COST = _output_cost("…")
 
 def _render_wakeup(
     events: list[TeamEvent],
-    roles: dict[str, str],
+    authors: Mapping[str, str],
     *,
     truncated: bool,
     board: str,
     numbers: Mapping[str, int] | None = None,
+    act: str | None = None,
 ) -> str:
     """The Stop reason: the delta in the same lines the prompt hook would have used,
-    framed as the instruction Claude Code continues the turn with.
+    framed as the instruction Claude Code continues the turn with (``act``: the manager's
+    by default, an agent's own for a note handed over at its turn's end).
 
     Bounded in OUTPUT COST, not only in events (:class:`StopDecision` says what
     going over costs). Each event line gets a share derived from the remaining
@@ -3959,21 +4970,21 @@ def _render_wakeup(
     rather than assumed.
     """
     count = f"{len(events)}{'+' if truncated else ''}"
-    head = f"{count} board update(s) from your fleet arrived while you were finishing this turn:"
+    head = (
+        f"{count} board update(s) from your fleet arrived while you were finishing this turn "
+        f"(board {board}):"
+    )
+    act = act or "Act on what needs the manager — reopen, re-spec, spawn, report."
     frame = [
         *(["… more waiting — run `aisquare board` for the full picture."] if truncated else []),
-        f"Act on what needs the manager — reopen, re-spec, spawn, report. {WAKEUP_CLOSE}",
+        f"{act} {WAKEUP_CLOSE}",
     ]
     spent = _output_cost(head) + sum(_output_cost(line) + 2 for line in frame)
     share = max((_WAKEUP_REASON_BUDGET - spent) // max(len(events), 1) - 4, _ELLIPSIS_COST)
     per_line = min(_WAKEUP_LINE_BUDGET, share)
-    # The board label is inside the clipped text, so the budget above still holds.
     lines = [
         head,
-        *(
-            f"- {_clip(f'[{board}] {event_line(event, roles, numbers)}', per_line)}"
-            for event in events
-        ),
+        *(f"- {_clip(short_line(event, authors, numbers), per_line)}" for event in events),
         *frame,
     ]
     return "\n".join(lines)

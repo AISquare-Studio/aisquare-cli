@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from aisquare.core.version import __version__
 from aisquare.core.workspace import current_project
 from aisquare.services import hooks as hooks_service
 from aisquare.services import install_route
+from tests import snapshot_repos
 
 _PACK = '<files>\n<file path="a.py">\nprint("hi")\n</file>\n</files>\n'
 
@@ -167,10 +169,162 @@ def test_session_start_directive_points_at_the_skeleton_when_the_full_pack_was_s
 
     result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
     assert result.exit_code == 0, result.output
-    assert "packed skeleton" in result.stdout
+    assert "index into a skeleton" in result.stdout
     assert str(meta.skeleton_path) in result.stdout
     assert str(meta.index_path) in result.stdout
     assert "pack.repomix.xml" not in result.stdout
+
+
+def _pack_measuring(monkeypatch: pytest.MonkeyPatch, *, full: int, compressed: int) -> None:
+    """Repomix stubbed: the full pack is ``full`` tokens, the compressed one ``compressed``."""
+    from aisquare.core import snapshot
+
+    monkeypatch.setattr(
+        snapshot,
+        "_run_repomix",
+        lambda _root, *, compress, ignore=(): (_PACK, "compressed" if compress else "full"),
+    )
+    monkeypatch.setattr(
+        snapshot, "_total_tokens", lambda _text, out: compressed if out == "compressed" else full
+    )
+
+
+def test_an_over_budget_skeleton_is_never_read_first(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#282: a 1.497M-token skeleton against the 150k budget was still "read this FIRST".
+
+    An agent that obeys pages through a file larger than its whole context. It is
+    told the size and sent to the index, which names each file's slice.
+    """
+    from aisquare.core import snapshot
+
+    _pack_measuring(monkeypatch, full=10_990_000, compressed=1_497_000)
+    meta = snapshot.generate(current_project(work_dir).id, work_dir)
+    assert meta.status == "skeleton_only"
+
+    result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
+    assert result.exit_code == 0, result.output
+    assert "read this FIRST" not in result.stdout
+    assert "1,497,000 tokens, over the 150,000-token budget" in result.stdout
+    assert "never read it from the top" in result.stdout
+    index_at = result.stdout.index(str(meta.index_path))
+    assert index_at < result.stdout.index(str(meta.skeleton_path))  # the index comes first
+
+
+@pytest.mark.parametrize(
+    ("full", "compressed", "read_first", "named"),
+    [
+        (120_000, 8_000, True, "skeleton"),  # the skeleton is what is measured, not the pack
+        (120_000, 12_000, True, "skeleton"),  # at the limit
+        (120_000, 20_000, False, "skeleton"),  # two default Reads of the `between` fixture
+        (140_000, 90_000, False, "skeleton"),
+        (200_000, 8_000, True, "pack"),  # compressed pack kept, no skeleton beside it
+        (200_000, 90_000, False, "pack"),
+    ],
+)
+def test_a_skeleton_is_read_first_only_when_one_read_holds_it(
+    runner: CliRunner,
+    work_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    full: int,
+    compressed: int,
+    read_first: bool,
+    named: str,
+) -> None:
+    """Under the budget, "read this FIRST" still cost up to 150k tokens, carried by every
+    later request. One default Read of the `between` fixture held 14,163 of the tokens the
+    meta counts, so only a file of at most 12,000 is read first."""
+    from aisquare.core import snapshot
+
+    _pack_measuring(monkeypatch, full=full, compressed=compressed)
+    meta = snapshot.generate(current_project(work_dir).id, work_dir)
+    assert meta.status == "ready"
+    assert meta.skeleton_path.exists() is (named == "skeleton")
+
+    result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
+    assert result.exit_code == 0, result.output
+    assert str(meta.pack_path) in result.stdout
+    assert str(meta.index_path) in result.stdout
+    assert ("read this FIRST" in result.stdout) is read_first
+    if not read_first:
+        assert f"The {named} is {compressed:,} tokens" in result.stdout
+        assert "never read it from the top" in result.stdout
+    # A compressed pack holds signatures, not every file's contents, and is said to.
+    label = "Pack (compressed: structure + signatures" if meta.compressed else "Full pack (every"
+    assert f"- {label}" in result.stdout
+
+
+def test_a_full_pack_whose_skeleton_failed_is_not_called_a_skeleton(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The skeleton beside a full pack is best-effort. Without it, the pack read first holds
+    every file's contents, and the directive says so instead of calling it the skeleton."""
+    from aisquare.core import snapshot
+
+    def repomix(_root: Path, *, compress: bool, ignore: Any = ()) -> tuple[str, str]:
+        if compress:
+            raise OSError("repomix: killed")
+        return _PACK, "full"
+
+    monkeypatch.setattr(snapshot, "_run_repomix", repomix)
+    monkeypatch.setattr(snapshot, "_total_tokens", lambda _text, _out: 8_000)
+    meta = snapshot.generate(current_project(work_dir).id, work_dir)
+    assert meta.status == "ready" and not meta.compressed and not meta.skeleton_path.exists()
+
+    result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
+    assert result.exit_code == 0, result.output
+    assert (
+        f"- Full pack (every file's contents, read this FIRST): {meta.pack_path}" in result.stdout
+    )
+    assert "Skeleton" not in result.stdout
+
+
+def test_a_skeleton_left_by_an_earlier_pack_is_not_measured_or_named(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repo that grew past the budget keeps its compressed pack and no new skeleton, but the
+    last run's skeleton stays on disk with no size on the meta. Measured, it read as 0 tokens:
+    "read this FIRST", naming a file that no longer matches the tree."""
+    from aisquare.core import snapshot
+
+    project_id = current_project(work_dir).id
+    _pack_measuring(monkeypatch, full=120_000, compressed=20_000)
+    stale = snapshot.generate(project_id, work_dir).skeleton_path
+    _pack_measuring(monkeypatch, full=200_000, compressed=90_000)
+    meta = snapshot.generate(project_id, work_dir)
+    assert meta.status == "ready" and meta.compressed
+    # Removed at the source since P2-W5x; a snapshot directory a build before it packed
+    # still has one, which the directive must not name either.
+    assert not stale.exists()
+    stale.write_text("<files>skeleton of an older tree</files>", encoding="utf-8")
+
+    result = runner.invoke(app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)}))
+    assert result.exit_code == 0, result.output
+    assert "read this FIRST" not in result.stdout
+    assert "The pack is 90,000 tokens" in result.stdout
+    assert str(stale) not in result.stdout
+
+
+@pytest.mark.parametrize("shape", sorted(snapshot_repos.SHAPES))
+def test_the_snapshot_fixture_repos_are_the_same_tree_every_time(
+    tmp_path: Path, shape: str
+) -> None:
+    """The handoff's before/after runs compare packs of these repos (§1.7), so a second
+    write must give the tree the first did."""
+    trees = []
+    for run in ("first", "second"):
+        root = snapshot_repos.write(tmp_path / run, shape)
+        tree = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD^{tree}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        trees.append(tree.stdout.strip())
+    assert trees[0] == trees[1]
+    modules, _functions = snapshot_repos.SHAPES[shape]
+    assert len(list((tmp_path / "first" / "ledger").glob("part_*.py"))) == modules
 
 
 _REAL_WHICH = shutil.which
@@ -322,3 +476,138 @@ def test_the_plugin_page_names_the_log_command_the_uvx_route_prints(
     assert printed.startswith(f"uvx --python {_PYTHON} --from aisquare-cli=="), printed
     assert f"`{documented}`" in text
     assert "gets memory with nothing else installed" not in text
+
+
+# --- the symbol index at session start (#285) -------------------------------------------
+
+
+def _index(work_dir: Path) -> str:
+    from aisquare.core import code_index
+
+    (work_dir / "mod.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    project_id = current_project(work_dir).id
+    code_index.build(project_id, work_dir)
+    return project_id
+
+
+def test_the_directive_names_the_code_commands_only_where_there_is_an_index(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    def started() -> str:
+        result = runner.invoke(
+            app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)})
+        )
+        assert result.exit_code == 0, result.output
+        return result.stdout
+
+    assert "aisquare code" not in started()
+    _index(work_dir)
+    said = started()
+    assert "`aisquare code find <name>`" in said and "`aisquare code similar <name>`" in said
+    lines = [line for line in said.splitlines() if "aisquare code" in line]
+    assert len(lines) == 2, "two lines at most"
+
+
+def test_a_session_start_refreshes_the_index_detached_and_at_most_once_a_minute(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.conftest import REAL_REFRESH_CODE_INDEX, REAL_START_CODE_INDEX
+
+    started: list[tuple[list[str], Path | None]] = []
+    monkeypatch.setattr(hooks_service, "start_code_index", REAL_START_CODE_INDEX)
+    monkeypatch.setattr(
+        hooks_service, "_detach", lambda argv, *, cwd=None: started.append((argv, cwd))
+    )
+    project = current_project(work_dir)
+
+    REAL_REFRESH_CODE_INDEX(project)
+    assert started == [], "no index: building one is onboard's, not a session start's"
+
+    _index(work_dir)
+    REAL_REFRESH_CODE_INDEX(project)
+    REAL_REFRESH_CODE_INDEX(project)
+    [(argv, cwd)] = started
+    assert argv[-3:] == ["--quiet", "code", "index"] and cwd == project.root
+
+    from aisquare.core import code_index
+
+    stamp = code_index.code_dir(project.id) / "refreshed"
+    os.utime(stamp, (stamp.stat().st_mtime - 61, stamp.stat().st_mtime - 61))
+    REAL_REFRESH_CODE_INDEX(project)
+    assert len(started) == 2, "a minute on, the next session start refreshes again"
+
+
+def _spooled_prompts() -> list[str]:
+    from aisquare.core import outbox
+
+    return [path.read_text(encoding="utf-8") for path in outbox.pending()]
+
+
+def test_capture_off_stores_no_prompt_and_spools_none(
+    runner: CliRunner, work_dir: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#268: ``capture.enabled = false`` stored every prompt anyway, and ``log`` listed it.
+    Off, no prompt row and nothing in the Explainability spool; the turn row is still
+    opened, without text."""
+    from aisquare.core import insights
+
+    monkeypatch.setattr(insights, "shipping_enabled", lambda: True)
+    _add(work_dir)
+    set_ = runner.invoke(app, ["config", "set", "capture.enabled", "false"])
+    assert set_.exit_code == 0, set_.output
+    assert "no longer stored" in set_.stdout
+    _prompt(runner, work_dir)
+    assert _logged(runner) == []
+    assert not any("add a test for X" in record for record in _spooled_prompts())
+    with store_session() as store:
+        assert len(store.turn_metrics(project_id=current_project(work_dir).id)) == 1
+
+
+def test_capture_on_still_stores_and_spools_the_prompt(
+    runner: CliRunner, work_dir: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core import insights
+
+    monkeypatch.setattr(insights, "shipping_enabled", lambda: True)
+    _add(work_dir)
+    _prompt(runner, work_dir)
+    assert _logged(runner) == ["add a test for X"]
+    assert any("add a test for X" in record for record in _spooled_prompts())
+
+
+def test_capture_off_still_delivers_the_teammate_delta(
+    runner: CliRunner, work_dir: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delta is coordination, not capture: it reaches the session with capture off."""
+    from aisquare.services import team as team_service
+
+    monkeypatch.setattr(team_service, "hook_prompt_heartbeat", lambda *a, **k: "TEAM DELTA")
+    _add(work_dir)
+    assert runner.invoke(app, ["config", "set", "capture.enabled", "false"]).exit_code == 0
+    payload = json.dumps({"prompt": "add a test for X", "cwd": str(work_dir), "session_id": "s1"})
+    result = runner.invoke(app, ["hook", "user-prompt-submit"], input=payload)
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "TEAM DELTA"
+    assert _logged(runner) == []
+
+
+def test_an_unreadable_config_records_no_prompt(
+    runner: CliRunner, work_dir: Path, isolated_home: Path
+) -> None:
+    """Privacy fails closed: a config that cannot be read may have said off, so nothing is
+    recorded, and one line on stderr says so."""
+    _add(work_dir)
+    isolated_home.mkdir(parents=True, exist_ok=True)
+    (isolated_home / "config.toml").write_text("[capture\nenabled = ", encoding="utf-8")
+    payload = json.dumps({"prompt": "add a test for X", "cwd": str(work_dir)})
+    result = runner.invoke(app, ["hook", "user-prompt-submit"], input=payload)
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert result.stderr.count("\n") == 1 and "capture" in result.stderr
+    with store_session() as store:
+        assert store.recent_prompts(current_project(work_dir).id) == []
+
+
+def test_capture_set_under_json_prints_only_the_value(runner: CliRunner) -> None:
+    got = runner.invoke(app, ["--json", "config", "set", "capture.enabled", "false"])
+    assert _json(got.stdout) == {"capture.enabled": "false"}

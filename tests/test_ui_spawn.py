@@ -81,6 +81,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
+from tests.fleet_fakes import list_agents_as
 from tests.ui_workers import settle_page, settle_workers
 
 T = TypeVar("T")
@@ -369,7 +370,7 @@ def fleet(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[FleetAgentStatus]]:
     def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return list(agents.get(project.id, []))
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     return agents
 
 
@@ -1161,7 +1162,7 @@ def test_pick_opens_the_picker_in_new_order_and_fills_who_runs_it(
     git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, spawns: SpawnRecorder
 ) -> None:
     settings_service.bind_role("coder2", agent_bin="claude2")
-    monkeypatch.setattr(fleet_service, "list_agents", lambda project, *, live_only=True: [])
+    list_agents_as(monkeypatch, lambda project, *, live_only=True: [])
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = []
@@ -1458,8 +1459,11 @@ def test_take_over_locks_the_label_and_task_to_the_teammates_and_asks_first(
         await pilot.click("#take-over-no")
         await settle(pilot)
         assert isinstance(host.screen, SpawnDialog) and hand_offs.calls == []
-        await pilot.click("#spawn-submit")
-        await settle(pilot)
+        # Pressed, not clicked, and the question awaited: a click right after the question
+        # closed opened nothing on windows-latest (`NoMatches: '#take-over-yes' on
+        # SpawnDialog()`, rc/p0 run 39985702872), the dialog not yet hit-testable again.
+        submit(dialog).press()
+        await wait_for_screen(pilot, spawn_module.ConfirmTakeOverScreen)
         await pilot.click("#take-over-yes")
         await settle(pilot)
         return list(host.results)

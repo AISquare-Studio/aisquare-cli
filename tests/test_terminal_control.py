@@ -387,7 +387,11 @@ def test_real_tmux_a_killed_control_client_hands_the_pane_to_polling_within_a_se
             assert pid is not None
             os.kill(pid, signal.SIGKILL)
             killed = time.monotonic()
-            live.run("send-keys", "-t", pane_id, "-l", "after the kill")
+            try:
+                live.run("send-keys", "-t", pane_id, "-l", "after the kill")
+            except TmuxError as exc:
+                _skip_if_tmux_34_crashed(exc)
+                raise
             await wait_until(pilot, lambda: "after the kill" in screen_text(pane)[0], timeout=1.0)
             return time.monotonic() - killed, pane._link is None, list(host.notices)
 
@@ -396,6 +400,18 @@ def test_real_tmux_a_killed_control_client_hands_the_pane_to_polling_within_a_se
     assert polling
     assert took < 1.0
     assert notices == [], notices
+
+
+def _skip_if_tmux_34_crashed(exc: TmuxError) -> None:
+    """tmux 3.4's server itself sometimes dies once its control client is SIGKILLed, about
+    one CI run in four: the next command says ``server exited unexpectedly``. That is
+    tmux's crash, not the pane's fallback, which then has no server to poll. Skipped on
+    3.4 alone, naming it; on any other version, or any other error, the test fails."""
+    version = subprocess.run(
+        [shutil.which("tmux") or "tmux", "-V"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    if "server exited unexpectedly" in str(exc) and version.startswith("tmux 3.4"):
+        pytest.skip(f"{version}'s server crashed after its control client was killed")
 
 
 @_needs_tmux
@@ -1671,9 +1687,13 @@ def test_a_control_client_that_will_not_start_leaves_the_pane_polling_and_is_not
 def test_polling_continuous_input_does_not_postpone_the_next_frame(
     tmp_path: Path,
 ) -> None:
-    """A key every 15 ms for 600 ms: frames keep coming at the fast cadence while the
+    """A key every 15 ms for a second: frames keep coming at the fast cadence while the
     keys do. Each key used to stop the frame timer and arm a new one 50 ms out, so
-    none came until the typing stopped."""
+    none came until the typing stopped: 0 or 1 frames however long the keys go on.
+
+    The floor is 6 of the ~20 a second at 50 ms; on Windows, 2. A loaded windows runner
+    gave 2 in 600 ms (rc/p1 push run 40074661474), its timers a 15.6 ms tick apart, and 2
+    is still more than the regression ever gives."""
     fake = FakeTmux()
     fake.panes["%1"] = FakePane(screen=["$ "])
 
@@ -1686,13 +1706,14 @@ def test_polling_continuous_input_does_not_postpone_the_next_frame(
             await pilot.pause(0.6)
             captures = len(fake.captures)
             start = time.monotonic()
-            while time.monotonic() - start < 0.6:
+            while time.monotonic() - start < 1.0:
                 pane.post_message(events.Key("x", "x"))
                 await asyncio.sleep(0.015)
             return len(fake.captures) - captures
 
     during = run(drive())
-    assert during >= 6, during  # ~12 at 50 ms; 0 or 1 when every key re-armed the timer
+    floor = 2 if sys.platform == "win32" else 6
+    assert during >= floor, during  # ~20 at 50 ms; 0 or 1 when every key re-armed the timer
 
 
 def test_polling_an_echo_slower_than_one_tick_shows_without_the_idle_wait(

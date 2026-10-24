@@ -71,7 +71,10 @@ def capture_on() -> bool:
     """``[projects] capture``: whether a directory a hooked session merely runs in gets a
     row of its own, captured and unlisted (#139). Off by default since 0.8.1; an unreadable
     config costs the setting, never the hook, as every section's does, and is read again on
-    the next ask (review of #259, round 18).
+    the next ask (review of #259, round 18). The default it falls back to is off, so an
+    unreadable config captures nothing more: the same direction as ``capture.enabled``,
+    which fails closed on purpose (``hooks.capture_prompt``, #268): both record less, never
+    more.
 
     Asked twice a SessionStart, once a prompt, and on asq's UI thread every refresh tick:
     :func:`~aisquare.core.config.load_config` parses the file again only when it changed."""
@@ -1013,7 +1016,29 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
                     store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
                 )
     snapshot, note = _ensure_snapshot(project, refresh=refresh)
-    return OnboardReport(seeded=seeded, snapshot=snapshot, snapshot_note=note)
+    return OnboardReport(
+        seeded=seeded,
+        snapshot=snapshot,
+        snapshot_note=note,
+        code_index=_ensure_code_index(project, refresh=refresh),
+    )
+
+
+def _ensure_code_index(project: ProjectInfo, *, refresh: bool) -> str | None:
+    """Start building or refreshing the symbol index (#285) detached, as one line for the
+    report; ``None`` when ``[code] enabled`` is off. Never inline: a first index of a large
+    checkout takes minutes, and the onboard (and ``init``) returns at once. Incremental
+    unless ``refresh``; never fails the onboard."""
+    from aisquare.services import code as code_service  # lazy: onboard imports this module
+    from aisquare.services import hooks as hooks_service  # lazy: hooks imports this module
+
+    if not code_service.settings().enabled:
+        return None
+    try:
+        hooks_service.start_code_index(project, full=refresh)
+    except Exception as exc:  # an index is optional; the onboard is not
+        return f"not started ({exc}) — build it with `aisquare code index`"
+    return "building in the background — `aisquare code index --status` says when it is ready"
 
 
 def snapshot_settings() -> SnapshotSettings:

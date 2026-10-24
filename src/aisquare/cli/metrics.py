@@ -1,4 +1,5 @@
-"""``aisquare metrics`` — what the CI test bed recorded, per turn."""
+"""``aisquare metrics`` — what the CI test bed recorded, per turn, and what each agent
+session spent in tokens (``metrics tokens``)."""
 
 from __future__ import annotations
 
@@ -6,8 +7,15 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import emit_metrics_summary, emit_turn_metrics, refuse_conflicting_scope
+from aisquare.cli.common import (
+    emit_metrics_summary,
+    emit_token_ledger,
+    emit_turn_metrics,
+    parse_since,
+    refuse_conflicting_scope,
+)
 from aisquare.services import metrics as metrics_service
+from aisquare.services import token_ledger
 
 app = typer.Typer(
     help="Inspect per-turn metrics recorded by the CI test bed.", no_args_is_help=True
@@ -56,3 +64,27 @@ def list_(
     emit_turn_metrics(
         metrics_service.recent(project_id=project_id, session_id=session, limit=limit)
     )
+
+
+@app.command("tokens")
+def tokens(
+    session: Annotated[str | None, typer.Option("--session", help=_SESSION_HELP)] = None,
+    project: Annotated[str | None, typer.Option("--project", help=_PROJECT_HELP)] = None,
+    all_projects: Annotated[bool, typer.Option("--all", help=_ALL_HELP)] = False,
+    since: Annotated[
+        str | None,
+        typer.Option("--since", help="Only what happened after: 15m, 2h, or an ISO time."),
+    ] = None,
+    role: Annotated[
+        str | None,
+        typer.Option("--role", help="Only this role's sessions (a seat counts as its role)."),
+    ] = None,
+) -> None:
+    """What each agent session spent in tokens, counted from its transcript: one row per
+    session and a total. Counts only, never text (docs/plans/handoff-p1-token-diet.md §1.7)."""
+    project_id = _scope(project, all_projects, session)
+    rows = token_ledger.ledger(
+        token_ledger.sessions(project_id, session=session, role=role),
+        since=parse_since(since) if since is not None else None,
+    )
+    emit_token_ledger(rows, token_ledger.total(rows))

@@ -106,6 +106,7 @@ from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
 from tests import guard_clock, toast_log
+from tests.fleet_fakes import list_agents_as
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
 from tests.ui_workers import settle_page
 
@@ -194,7 +195,7 @@ def script(monkeypatch: pytest.MonkeyPatch) -> Script:
     def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return list(agents.get(project.id, []))
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     return agents
 
 
@@ -681,7 +682,13 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
         }
         await pilot.resize_terminal(140, 30)
         await settle(app)
+        # Until the header has followed the resize: one settle read the 90-column layout
+        # on windows-latest (`37 > 60`, run 40013597204), the reflow still to come.
         seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
+        deadline = time.monotonic() + FLEET_HOLD_S
+        while seen["wide"][0] <= 60 and time.monotonic() < deadline:
+            await pilot.pause(0.05)
+            seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
         return seen
 
     seen = drive(
@@ -2796,7 +2803,7 @@ def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
         with store_session() as store:
             yield store
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[str, str, bool]:
         app = fleet_app(pilot)
@@ -2816,6 +2823,48 @@ def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
     main = threading.main_thread()
     assert all(t is not main for seen in threads.values() for t in seen), threads
     assert row_a.rstrip().endswith("▶") and row_b.rstrip().endswith("▶")  # …and painted
+
+
+def test_a_tick_that_changed_nothing_repaints_no_row_and_a_change_repaints_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With 50 listed projects every tick repainted every card, 15 ms of the UI thread at
+    50 (#83): a card shown what it already shows is skipped, and one agent's change costs
+    that agent's row."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None), ("prj_c", "gamma", None))
+    answer = {"prj_a": "waiting", "prj_b": "waiting", "prj_c": "waiting"}
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        return [status(project.id, "manager", "manager", answer[project.id])]
+
+    list_agents_as(monkeypatch, fake)
+    painted: list[str] = []
+    show = AgentRow.show
+
+    def counting(row: AgentRow, fresh: FleetAgentStatus) -> None:
+        painted.append(fresh.agent.id)
+        show(row, fresh)
+
+    monkeypatch.setattr(AgentRow, "show", counting)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str]:
+        app = fleet_app(pilot)
+        app.refresh_data()
+        await settle(app)
+        painted.clear()
+        app.refresh_data()  # the same answer
+        await settle(app)
+        same = list(painted)
+        painted.clear()
+        answer["prj_b"] = "working"
+        app.refresh_data()
+        await settle(app)
+        return same, list(painted), shown(row_for(app, "agt_b_manager"))
+
+    same, changed, row_b = drive(go)
+    assert same == []
+    assert changed == ["agt_b_manager"]
+    assert row_b.rstrip().endswith("▶")
 
 
 def test_ticks_while_a_fleet_read_is_in_flight_start_no_second_read_and_cost_one_after_it(
@@ -2849,7 +2898,7 @@ def test_ticks_while_a_fleet_read_is_in_flight_start_no_second_read_and_cost_one
             with counting:
                 running[0] -= 1
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[int, str, str]:
         app = fleet_app(pilot)
@@ -2915,7 +2964,7 @@ def test_a_frame_painted_late_leaves_the_owed_read_to_the_read_in_flight(
             with counting:
                 running[0] -= 1
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> int:
         app = fleet_app(pilot)
@@ -2974,7 +3023,7 @@ def test_a_fleet_read_that_hangs_labels_the_frame_kept_once_it_has_waited_long_e
             gate.wait(FLEET_HOLD_S)
         return [status(project.id, "manager", "manager", "working")]
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[bool, str, str, bool]:
         app = fleet_app(pilot)
@@ -3014,7 +3063,7 @@ def test_agent_errors_fail_open_with_the_cost_shown(
             raise fleet_service.FleetUnavailable("tmux 3.1 is too old (need 3.2)")
         return list(healthy)
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[int, bool, str, int, bool, dict[str, str]]:
         app = fleet_app(pilot)
@@ -3058,7 +3107,7 @@ def test_a_fleet_read_that_failed_open_keeps_the_live_manager_pane(
             raise failure[0]
         return list(live)
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     State = tuple[str | None, bool, bool, str]
 
     async def go(pilot: Pilot[None]) -> tuple[State, State, str, State]:
@@ -3297,6 +3346,7 @@ class StopRecorder:
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         self.calls.append((project.id, label, force, agent_id))
         if self.refuse is not None:
@@ -3358,7 +3408,7 @@ def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
             raise failing[0]
         return list(live)
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[str, list[str]]:
         app = fleet_app(pilot)
@@ -3555,11 +3605,12 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         stopped.append(True)
         return fleet_service.StopReceipt(ended(live.agent), [])
 
-    monkeypatch.setattr(fleet_service, "list_agents", list_agents)
+    list_agents_as(monkeypatch, list_agents)
     monkeypatch.setattr(fleet_service, "stop", stop)
 
     async def go(pilot: Pilot[None]) -> tuple[list[str], int, str | None]:
@@ -3781,6 +3832,7 @@ def test_the_app_stays_live_while_a_stop_is_in_flight(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         entered.set()
         if not release.wait(10):
@@ -3831,10 +3883,11 @@ def test_a_refusal_re_reads_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         raise fleet_service.FleetError("tmux did not answer, so its row is left live")
 
-    monkeypatch.setattr(fleet_service, "list_agents", list_agents)
+    list_agents_as(monkeypatch, list_agents)
     monkeypatch.setattr(fleet_service, "stop", refusing_stop)
 
     async def go(pilot: Pilot[None]) -> tuple[int, bool]:

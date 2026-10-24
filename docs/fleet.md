@@ -998,11 +998,37 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   shared nor replaced — the command says which setting stopped it. `aisquare
   accounts settings --sync` links them now, `--unshare` gives each its own copy
   back.
+- **Memory, skills, agents, commands, CLAUDE.md.** Opt-in, `[accounts] share`
+  (empty by default), turned on and off with `aisquare accounts share`:
+  - `memory`: every launch, the plain claude's included, gets
+    `--settings '{"autoMemoryDirectory": "~/.aisquare/claude-shared/memory/<project>"}'`,
+    so a memory saved on one account is read on every other. The first
+    `--enable memory` merges what each account already remembered there: nothing
+    overwritten, a file that differs kept as `<name>.slot<N>.md`, `MEMORY.md`
+    merged by line. The directory is outside every `.claude` path on purpose:
+    since Claude Code 2.1.280 every auto-memory write into a linked `.claude`
+    directory asks for approval nothing can give.
+  - `skills`, `agents`, `commands`, `claude_md`: each managed account's entry
+    becomes a link to the plain claude's (a junction on Windows, and a copy of
+    `CLAUDE.md`), its own kept beside it as `<entry>.own-<stamp>`;
+    `--disable` puts it back exactly. An entry already linked somewhere else is
+    yours and is left alone. A launch on an account added since links it.
+  - `plugins`: experimental. MCP logins and the plugin store are per account.
+  - Transcripts are never shared. A linked `projects/` makes every auto-memory
+    write prompt, and the shortest `cleanupPeriodDays` would sweep them all. A
+    session moved to another account resumes by its transcript's path instead
+    (verified on Claude Code 2.1.309:
+    [cross-account resume](runbooks/cross-account-resume.md)).
+
+  `aisquare doctor`'s `claude-accounts sharing` line says what is shared and
+  warns about an account that does not share a part that is on, a link it
+  did not make, or a `projects/` that is a symlink. A session is attributed to
+  the account its fleet row launched it on, whatever its transcript's path says.
 
 Nothing on this page writes into Claude Code's login: the email and plan
 are read from what Claude Code recorded, and a token is never refreshed by the
-CLI. Claude Code refreshes it on the account's next session. The two things the
-accounts share (above) are the only writes into an account's directory.
+CLI. Claude Code refreshes it on the account's next session. What the
+accounts share (above) is the only thing written into an account's directory.
 
 Everything the page does is a command, and every reporting one takes `--json`:
 
@@ -1034,6 +1060,9 @@ aisquare accounts settings             # what each account's settings.json is: s
 aisquare accounts settings --sync      # link every managed account's settings.json to the plain claude's
 aisquare accounts settings --unshare   # each linked account gets its own copy back
 aisquare config set accounts.share_settings true # keep them linked at every launch (off by default)
+aisquare accounts share --status       # what every account shares: memory, skills, agents, commands, CLAUDE.md
+aisquare accounts share --enable memory,skills   # one memory per project and one skills/ for every account
+aisquare accounts share --disable skills         # each account gets its own skills/ back, as it was
 aisquare fleet switch coder-auth       # move one now: resumes its session on the account with room
 aisquare fleet restart manager         # an exited (or stuck) agent, back under its label, session resumed
                                        # …launched as it was first launched: the row records the

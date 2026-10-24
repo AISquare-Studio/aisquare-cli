@@ -75,6 +75,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "switch",
         )
     ),
+    ("accounts", "share"),
     ("explainability", "status"),
     ("explainability", "env"),
     ("explainability", "enable"),

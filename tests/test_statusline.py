@@ -210,9 +210,45 @@ def test_uninstall_takes_out_ours_and_puts_a_wrapped_one_back_as_it_was(tmp_path
     assert agent_core.remove_statusline(ours) is True
     assert agent_core.remove_statusline(wrapped) is True
     assert agent_core.remove_statusline(theirs) is False
-    assert "statusLine" not in _settings(ours)
+    assert not (ours / "settings.json").exists(), "ours made the file; it goes with ours"
     assert _settings(wrapped)["statusLine"] == own
     assert _settings(theirs)["statusLine"] == own
+
+
+def test_uninstall_gives_back_the_file_byte_for_byte_and_no_file_where_there_was_none(
+    tmp_path: Path,
+) -> None:
+    """Review of #362's walk: --uninstall re-wrote the file (an inline object came back as
+    an indented block), and where there had been no settings.json it left '{}'."""
+    none, compact, wrapped = tmp_path / "none", tmp_path / "compact", tmp_path / "wrapped"
+    for directory, body in (
+        (compact, '{"model":"opus",  "theme": "dark"}'),
+        (wrapped, '{"statusLine": {"type": "command", "command": "my-line", "padding": 2}}\n'),
+    ):
+        directory.mkdir()
+        (directory / "settings.json").write_text(body)
+    originals = {d: (d / "settings.json").read_bytes() for d in (compact, wrapped)}
+
+    agent_core.install_statusline(none)
+    agent_core.install_statusline(compact)
+    agent_core.install_statusline(wrapped, wrap=True)
+    for directory in (none, compact, wrapped):
+        assert agent_core.remove_statusline(directory) is True
+
+    assert not (none / "settings.json").exists()
+    for directory, original in originals.items():
+        assert (directory / "settings.json").read_bytes() == original
+    assert not list(tmp_path.rglob("*" + agent_core.STATUSLINE_KEPT)), "the copies go too"
+
+
+def test_a_file_changed_since_the_install_keeps_its_change(tmp_path: Path) -> None:
+    (tmp_path / "settings.json").write_text('{"model": "opus"}')
+    agent_core.install_statusline(tmp_path)
+    settings = _settings(tmp_path)
+    settings["theme"] = "dark"  # the user's edit, after ours went in
+    (tmp_path / "settings.json").write_text(json.dumps(settings))
+    agent_core.remove_statusline(tmp_path)
+    assert _settings(tmp_path) == {"model": "opus", "theme": "dark"}
 
 
 def test_accounts_statusline_installs_on_each_account_and_says_so(runner: CliRunner) -> None:
@@ -243,7 +279,7 @@ def test_aisquare_uninstall_removes_the_status_line_it_set() -> None:
     plan = lifecycle.uninstall_plan()
     assert second.config_dir in plan.statuslines
     lifecycle.uninstall(plan)
-    assert "statusLine" not in _settings(second.config_dir)
+    assert not (second.config_dir / "settings.json").exists(), "ours made it; it goes"
 
 
 # --------------------------------------------------------------------------- the readings
@@ -265,6 +301,24 @@ def test_a_status_line_reading_is_served_from_the_cache_and_spares_a_fetch(
     with store_session() as store:
         [sample] = store.usage_samples(account.slot, since=NOW - timedelta(hours=1))
     assert sample.token_fingerprint is not None
+
+
+def test_a_reading_without_its_week_never_shadows_the_endpoints_spent_week(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #362: a record with no seven_day was ingested as a sample with no week, so
+    the cache served an account whose week the endpoint reads spent as one with room
+    (headroom 100 -> 10, no fetch). Both windows, or the endpoint is asked."""
+    monkeypatch.setattr(service, "_now", lambda: NOW)
+    account = _slot("a@example.com", "tok-a")
+    _record("s-a", config_dir=str(account.config_dir), seven_day=None)
+    fetch = _Usage({"tok-a": _payload(10.0, week=100.0)})
+
+    readings = service.cached_usage([account], now=NOW, fetch=fetch)
+
+    assert fetch.calls == ["tok-a"], "the endpoint was asked"
+    assert readings[account.slot].week_percent == 100.0
+    assert service.ingest_statusline([account], now=NOW) == 0
 
 
 def test_an_old_or_already_recorded_reading_is_not_ingested_twice(

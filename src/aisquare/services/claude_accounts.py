@@ -1841,7 +1841,10 @@ def ingest_statusline(
     moment = now or _now()
     newest: dict[int, StatuslineSession] = {}
     for session in _read_statusline_records(moment):
-        if session.slot is None or session.session_percent is None:
+        # Both windows, or none: a sample stands for a whole reading, and one without its
+        # week (a payload that left `seven_day` out) would be served as an account with
+        # its week to spare, over the endpoint's reading of it spent (review of #362).
+        if session.slot is None or session.session_percent is None or session.week_percent is None:
             continue
         if (moment - session.updated_at).total_seconds() > max_age:
             continue

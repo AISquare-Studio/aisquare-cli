@@ -509,6 +509,9 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
 
 STATUSLINE_PROGRAM = "asq-statusline"
 STATUSLINE_WRAP = "--wrap"  # aisquare.statusline.WRAP_FLAG, not imported: it is the lean module
+STATUSLINE_KEPT = ".aisquare-statusline"
+"""The suffix of the copy of a ``settings.json`` as it was before ours went in, beside it:
+removing ours puts those bytes back where they still say what is left (review of #362)."""
 
 
 @dataclass(frozen=True)
@@ -592,6 +595,9 @@ def install_statusline(config_dir: Path, *, wrap: bool = False) -> StatusLineEnt
     else:
         return StatusLineEntry("foreign", theirs, path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    kept = path.with_name(path.name + STATUSLINE_KEPT)
+    if path.exists() and not kept.exists():
+        kept.write_bytes(path.read_bytes())
     _write_settings(path, settings)
     return StatusLineEntry("ours" if kind == "none" else kind, theirs, path)
 
@@ -615,8 +621,27 @@ def remove_statusline(config_dir: Path | None = None) -> bool:
         settings["statusLine"] = {**entry, "command": theirs}
     else:
         return False
-    _write_settings(path, settings)
+    kept = path.with_name(path.name + STATUSLINE_KEPT)
+    try:
+        before: Any = json.loads(kept.read_bytes()) if kept.exists() else None
+    except (OSError, ValueError):
+        before = None
+    if before == settings:
+        # The file as it was, byte for byte: what is left is what was there.
+        _write_settings_bytes(path, kept.read_bytes())
+    elif not kept.exists() and not settings:
+        path.unlink()  # there was no file before ours, and nothing else is in it
+    else:
+        _write_settings(path, settings)  # changed since: what is left, written whole
+    with contextlib.suppress(FileNotFoundError):
+        kept.unlink()
     return True
+
+
+def _write_settings_bytes(path: Path, body: bytes) -> None:
+    """``body`` over ``path``, replaced as :func:`_write_settings` replaces it."""
+    with atomic.replacement(Path(os.path.realpath(path))) as pending:
+        pending.publish(body)  # bytes land exactly as given
 
 
 def ambient_hook_dir(name: str) -> Path | None:

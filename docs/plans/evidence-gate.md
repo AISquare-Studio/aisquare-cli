@@ -132,9 +132,11 @@ nonignored files, file by file.
   `node_modules`, virtual environments), but only among untracked files.
 - A nested repository or submodule contributes its own content, not only its
   recorded commit.
-- Because identity is kept per file, a file that did not exist before the
-  command (`pytest --junitxml=report.xml`) is new output and is ignored. A
-  pre-existing file that changed or vanished makes the pass stale.
+- No file is exempt as a check's output (owner's decision, 2026-10-24). A file
+  that is new, changed or gone, during the run or since, refuses or stales the
+  pass, whoever wrote it. Check output goes in a gitignored directory
+  (`--junitxml=reports/a.xml`) or outside the checkout. Identity is kept per
+  file so the refusal can name the paths and the remedy.
 - A worktree is fingerprinted as its own files, under the board's one project.
 
 **The store.** Main is at schema v33. The brief table takes the next free
@@ -180,7 +182,7 @@ new PRs need, because a fresh implementation can make every one of them again.
 | 2 | A non-git working directory under `~` fingerprinted the whole home directory. | The fingerprint refuses the home tree. |
 | 2 | Edits, new files and commits inside a submodule or nested repo never changed the fingerprint. | Nested content changes the fingerprint. |
 | 2 | The generated-directory filter dropped tracked source under any path named `venv`, `node_modules` and the like. | The filter applies to untracked files only. |
-| 2 | A check that wrote a per-run output file into the checkout could never pass. | Per-file identity ignores new files. |
+| 2 | A check that wrote a per-run output file into the checkout could never pass, and every rule that exempted such files let a source edit through (an edit made while any run was in flight counted as its output). | No file is exempt (owner's decision): an un-ignored `--junitxml=a.xml` is refused, naming it with the remedy (gitignore it, delete it, or write it outside the checkout); a report written to a gitignored directory passes, re-runs included. |
 | 2 | A pass was judged against the recorder's checkout, not the report's. | A pass is compared with the report's own source root. |
 | 2 | An interrupted run that still exited 0 was recorded as a pass. | `interrupted_by` refuses the pass. |
 | 2 | Re-sending an identical `brief update` bumped revisions, made evidence stale and reopened tasks. | A no-op update changes nothing. |

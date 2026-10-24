@@ -451,6 +451,52 @@ def test_a_calls_result_in_a_later_patch_line_reaches_its_tail_and_its_page(
         unregister(adapter.id)
 
 
+@pytest.mark.parametrize("cut", ["limit", "budget"])
+def test_a_calls_result_on_the_newer_page_reaches_the_page_its_call_is_on(
+    cut: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r18 of #113, finding 2: ``records`` folded a ``$patch`` only within one page's
+    walk back from its end, so a call whose result line sat on the newer page rendered
+    bare there (``run_shell_command``, not ``· success``). The pager hands the reader the
+    lines past its page's end (``ahead``), which it reads on through only until it has the
+    result: whether the page ends at its ``limit`` or at ``SCAN_BUDGET`` between a large
+    call and its patch."""
+    from aisquare.core.agent_adapters.transcripts import CHUNK
+    from aisquare.services import transcript
+
+    adapter = GeminiShapedAdapter()
+    register(adapter)
+    try:
+        log = tmp_path / "session.jsonl"
+        big = "x" * 200_000 if cut == "budget" else ""
+        call = {"id": "c1", "name": "run_shell_command", "args": {"command": "make", "pad": big}}
+        lines = [
+            {"type": "user", "content": "test it"},
+            {"type": "gemini", "content": "", "toolCalls": [call]},
+            {"type": "gemini", "content": "Running." + " " * (70_000 if big else 0)},
+            {"$patch": {"toolCalls": [{"id": "c1", "status": "success", "result": "ok"}]}},
+            {"type": "gemini", "content": "All green."},
+        ]
+        log.write_text("".join(json.dumps(r) + "\n" for r in lines), encoding="utf-8")
+        whole = "\n".join(transcript.read_page(log, agent=adapter.id, width=60).lines)
+        assert "run_shell_command · success" in whole, "one page: the walk folds it"
+
+        if cut == "budget":
+            monkeypatch.setattr(transcript, "SCAN_BUDGET", 4 * CHUNK)
+        limit = 2 if cut == "limit" else 10
+        newer = transcript.read_page(log, agent=adapter.id, width=60, limit=limit)
+        assert "All green." in "\n".join(newer.lines) and newer.more and newer.cursor
+        assert "run_shell_command" not in "\n".join(newer.lines), "the call is on page 2"
+        older = transcript.read_page(
+            log, agent=adapter.id, width=60, limit=limit, before=newer.cursor
+        )
+        shown = "\n".join(older.lines)
+        assert "run_shell_command · success" in shown, shown
+        assert "All green." not in shown and not older.more, "nothing of page 1 again"
+    finally:
+        unregister(adapter.id)
+
+
 # --- the files a new agent touches ---------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parents[1]

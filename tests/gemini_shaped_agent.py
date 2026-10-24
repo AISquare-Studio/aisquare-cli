@@ -140,20 +140,32 @@ class GeminiShapedTranscript:
     speaker = "gemini"
 
     def records(
-        self, lines: Iterable[tuple[int, bytes]]
+        self, lines: Iterable[tuple[int, bytes]], ahead: Iterable[tuple[int, bytes]] = ()
     ) -> Iterator[tuple[int, dict[str, Any] | None]]:
         """Newest first, as read: a ``$patch`` line, newer than the record whose calls it
-        answers, is held until that record is reached and folded into its calls by id."""
+        answers, is held until that record is reached and folded into its calls by id, the
+        newest patch of a call winning. A call whose patch the walk has not passed reads on
+        through the lines ``ahead`` (the newer pages') until it has it, or they end."""
         patches: dict[str, dict[str, Any]] = {}
+        later = iter(ahead)
         for offset, raw in lines:
             record = parse_line(raw)
             patch = record.get("$patch") if record is not None else None
             if isinstance(patch, dict):
                 for call in _calls(patch):
-                    patches.setdefault(str(call.get("id")), {}).update(call)
+                    held = patches.setdefault(str(call.get("id")), {})
+                    held.update({**call, **held})  # read backwards: the held one is newer
                 yield offset, None
                 continue
             if record is not None and _calls(record):
+                for call in _calls(record):
+                    while str(call.get("id")) not in patches:
+                        if (line := next(later, None)) is None:
+                            break
+                        newer = parse_line(line[1]) or {}
+                        if isinstance(newer.get("$patch"), dict):
+                            for result in _calls(newer["$patch"]):
+                                patches.setdefault(str(result.get("id")), {}).update(result)
                 record = {
                     **record,
                     "toolCalls": [

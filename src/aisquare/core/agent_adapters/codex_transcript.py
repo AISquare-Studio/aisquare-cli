@@ -128,9 +128,9 @@ class CodexTranscript:
     speaker = SPEAKER
 
     def records(
-        self, lines: Iterable[tuple[int, bytes]]
+        self, lines: Iterable[tuple[int, bytes]], ahead: Iterable[tuple[int, bytes]] = ()
     ) -> Iterator[tuple[int, dict[str, Any] | None]]:
-        return one_per_line(lines)  # one whole record a line
+        return one_per_line(lines)  # one whole record a line: none read ahead
 
     def tail_facts(self, file: Path, size: int, budget: int, written: datetime) -> TranscriptTail:
         return _rollout_tail(file, size, budget, written)

@@ -843,7 +843,7 @@ class AgentTranscript(Protocol):
         ...
 
     def records(
-        self, lines: Iterable[tuple[int, bytes]]
+        self, lines: Iterable[tuple[int, bytes]], ahead: Iterable[tuple[int, bytes]] = ()
     ) -> Iterator[tuple[int, dict[str, Any] | None]]:
         """The transcript's records from its ``lines``, newest first as they are given
         (``transcripts.lines_backwards``: ``(offset, line)``), each at its line's offset, and
@@ -851,7 +851,12 @@ class AgentTranscript(Protocol):
         line of another record's (Gemini CLI's ``{"$patch": …}`` that brings a tool call its
         result), which it folds into that record before handing it on. What the Transcript
         tab's pager reads (``services.transcript.read_page``) and a reader's own tail walk may.
-        ``transcripts.one_per_line`` for one whole record a line (Claude Code's, Codex's)."""
+        ``ahead`` is the lines after the first of ``lines``, oldest first
+        (``transcripts.lines_forward``), read only as far as the reader asks: the pager's are
+        the newer pages', where a later line of a record on this page may sit, and a reader
+        that folds one reads on through them until it has it. Nothing of ``ahead`` is
+        yielded. ``transcripts.one_per_line`` for one whole record a line (Claude Code's,
+        Codex's), which reads nothing ahead."""
         ...
 
     def page_lines(self, record: dict[str, Any], width: int) -> list[str]:

@@ -168,6 +168,32 @@ def lines_backwards(file: Path, end: int, *, budget: int) -> Iterator[tuple[int,
             yield 0, pending
 
 
+def lines_forward(file: Path, start: int, *, budget: int) -> Iterator[tuple[int, bytes]]:
+    """``(offset, line)`` oldest first from ``start`` on, read only as far as they are asked
+    for and at most ``budget`` bytes: the lines past a page's end that a reader folding a
+    later line into an earlier record reads ahead into (``AgentTranscript.records``). A line
+    the budget cuts is not yielded; the file's last line is, as :func:`lines_backwards`
+    yields it, written whole or not (a half-written one parses as no record)."""
+    with file.open("rb") as handle:
+        handle.seek(start)
+        position = start
+        pending = b""
+        scanned = 0
+        while scanned < budget:
+            block = handle.read(min(CHUNK, budget - scanned))
+            if not block:
+                if pending.strip():
+                    yield position, pending
+                return
+            scanned += len(block)
+            pending += block
+            while (newline := pending.find(b"\n")) != -1:
+                line, pending = pending[:newline], pending[newline + 1 :]
+                if line.strip():
+                    yield position, line
+                position += newline + 1
+
+
 def parse_line(raw: bytes) -> dict[str, Any] | None:
     """One JSONL record, or ``None`` for anything that cannot be one usefully.
 
@@ -413,6 +439,7 @@ __all__ = [
     "first_question",
     "kept_input",
     "lines_backwards",
+    "lines_forward",
     "one_per_line",
     "parse_line",
     "question_lines",

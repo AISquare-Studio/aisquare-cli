@@ -57,6 +57,7 @@ from aisquare.core.agent_adapters.transcripts import (
     PendingTool,
     TranscriptTail,
     lines_backwards,
+    lines_forward,
     parse_line,
     record_time,
 )
@@ -76,7 +77,9 @@ SCAN_BUDGET = 2_000_000
 
 A page of 200 turns is a few hundred KB of an ordinary transcript. This stops a
 file whose tail is one enormous pasted attachment from turning a page request
-into an 18 MB read; the page comes back short with ``more`` true instead.
+into an 18 MB read; the page comes back short with ``more`` true instead. As
+many again bound what a reader reads ahead past the page's end, for a record
+whose later line is on the newer page (``AgentTranscript.records``' ``ahead``).
 """
 
 
@@ -132,7 +135,10 @@ def read_page(
     row's ``agent`` renders them (:func:`reader_of`; an agent with none has an empty page).
 
     Reads backwards from the end (or from ``before``) in blocks, so a page costs
-    the bytes it needs rather than the size of the file.
+    the bytes it needs rather than the size of the file. A reader that folds a later line
+    into an earlier record (a call's result, Gemini CLI's ``$patch``) is handed the lines
+    after ``before`` as well, which it reads on through only until it has that line: a
+    call on this page whose result is on the newer one still shows how it ended.
     """
     limit = max(1, min(limit, LIMIT_CAP))
     width = max(20, width)
@@ -154,7 +160,8 @@ def read_page(
     reached_start = False
     try:
         walked = lines_backwards(file, end, budget=SCAN_BUDGET)
-        for offset, record in reader.records(walked):  # the agent's own records, folded
+        ahead = lines_forward(file, end, budget=SCAN_BUDGET)  # read only if asked
+        for offset, record in reader.records(walked, ahead):  # its own records, folded
             oldest = offset
             if offset == 0:
                 reached_start = True

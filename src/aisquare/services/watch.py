@@ -303,45 +303,70 @@ class Watcher:
             items += made
         return items
 
-    def scan(self, now: datetime, notes: list[str] | None = None) -> list[WatchItem]:
-        """Everything worth a look right now, across every project."""
+    def scan(
+        self, now: datetime, notes: list[str] | None = None, failed: set[str] | None = None
+    ) -> list[WatchItem]:
+        """Everything worth a look right now, across every project. Each look is guarded:
+        one that raises is a note and the others go on, and its name joins ``failed``, so
+        the tick keeps what it had seen of it (review of #377, 1)."""
         notes = notes if notes is not None else []
-        return [
-            *self.needs(now),
-            *self.stale(now),
-            *self.github(now, notes),
-            *self.commands(now, notes),
+        failed = failed if failed is not None else set()
+        looks: list[tuple[str, Callable[[], list[WatchItem]]]] = [
+            ("needs", lambda: self.needs(now)),
+            ("stale", lambda: self.stale(now)),
+            ("github", lambda: self.github(now, notes)),
+            ("sources", lambda: self.commands(now, notes)),
         ]
+        items: list[WatchItem] = []
+        for name, look in looks:
+            try:
+                items += look()
+            except Exception as exc:  # one look's failure never costs the others
+                failed.add(name)
+                notes.append(f"{name}: {type(exc).__name__}: {exc}")
+        return items
 
     # -- one tick -------------------------------------------------------------------------
 
     def tick(self, now: datetime | None = None) -> TickReport:
         """Scan, then for each project with new items: the detail file, one ``watch`` event
-        to its manager, one nudge. Then, with ``[watch] auto_stop``, the finished workers."""
+        to its manager, one nudge. Then, with ``[watch] auto_stop``, the finished workers.
+
+        An item is marked seen only once its project's delivery went through: a delivery
+        that raises (a busy store, say) is a note, and its items are new again next tick
+        (review of #377, 2). What a failed look had seen stays seen."""
         now = now or _now()
         notes: list[str] = []
-        items = self.scan(now, notes)
+        failed: set[str] = set()
+        items = self.scan(now, notes, failed)
         watch_dir().mkdir(parents=True, exist_ok=True)
         with locking.holding(_state_lock(), wait_s=STATE_LOCK_WAIT):
-            state = read_state()
-            seen = set(state.get("seen") or [])
-            new = [item for item in items if item.id not in seen]
-            _write_state(
-                {
-                    **state,
-                    "seen": sorted({item.id for item in items}),
-                    "last_scan_at": now.isoformat(timespec="seconds"),
-                }
-            )
+            seen = set(read_state().get("seen") or [])
+        new = [item for item in items if item.id not in seen]
         report = TickReport(at=now, items=items, new=new, notes=notes)
         by_project: dict[str, list[WatchItem]] = {}
         for item in new:
             by_project.setdefault(item.project_id, []).append(item)
+        undelivered: set[str] = set()
         for project_id, found in by_project.items():
-            path = _write_detail(project_id, found, now)
-            report.files[project_id] = path
-            if _deliver(project_id, found, path):
-                report.nudged.append(project_id)
+            try:
+                path = _write_detail(project_id, found, now)
+                report.files[project_id] = path
+                if _deliver(project_id, found, path):
+                    report.nudged.append(project_id)
+            except Exception as exc:  # the news waits for the next tick
+                undelivered |= {item.id for item in found}
+                notes.append(f"delivery to {project_id} failed: {type(exc).__name__}: {exc}")
+        kept = {i for i in seen if _look_of(i) in failed}
+        with locking.holding(_state_lock(), wait_s=STATE_LOCK_WAIT):
+            state = read_state()
+            _write_state(
+                {
+                    **state,
+                    "seen": sorted(({item.id for item in items} - undelivered) | kept),
+                    "last_scan_at": now.isoformat(timespec="seconds"),
+                }
+            )
         if self.settings.auto_stop:
             with contextlib.suppress(Exception):  # a stop never costs the tick its news
                 from aisquare.services import autostop
@@ -352,6 +377,17 @@ class Watcher:
                     if done.stopped
                 ]
         return report
+
+
+def _look_of(item_id: str) -> str:
+    """Which look an item id came from (:meth:`Watcher.scan`'s names)."""
+    if item_id.startswith("needs:"):
+        return "needs"
+    if item_id.startswith("stale:"):
+        return "stale"
+    if item_id.startswith("source:"):
+        return "sources"
+    return "github"
 
 
 def _run_source(command: Sequence[str]) -> list[dict[str, Any]]:
@@ -408,6 +444,10 @@ def _write_detail(project_id: str, items: Sequence[WatchItem], now: datetime) ->
     folder.mkdir(parents=True, exist_ok=True)
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
     path = folder / f"{stamp}.json"
+    n = 1
+    while path.exists():  # a second writer in the same second (`--once` beside the loop)
+        n += 1
+        path = folder / f"{stamp}-{n}.json"
     body = {
         "project_id": project_id,
         "at": now.isoformat(timespec="seconds"),
@@ -474,7 +514,12 @@ def running_pid() -> int | None:
         os.close(fd)
 
 
-def run(*, interval: float | None = None, on_tick: Callable[[TickReport], None]) -> None:
+def run(
+    *,
+    interval: float | None = None,
+    on_tick: Callable[[TickReport], None],
+    on_error: Callable[[str], None] = lambda said: None,
+) -> None:
     """The watcher's loop, holding this home's lock for its whole life; returns on
     SIGTERM or SIGINT. Raises :class:`AlreadyWatching`."""
     watch_dir().mkdir(parents=True, exist_ok=True)
@@ -500,7 +545,10 @@ def run(*, interval: float | None = None, on_tick: Callable[[TickReport], None])
         watcher = Watcher()
         every = interval or watcher.settings.interval_seconds
         while not stop:
-            on_tick(watcher.tick())
+            try:
+                on_tick(watcher.tick())
+            except Exception as exc:  # one bad tick never ends the watcher (review of #377)
+                on_error(f"{type(exc).__name__}: {exc}")
             waited = 0.0
             while not stop and waited < every:
                 _sleep(min(1.0, every - waited))

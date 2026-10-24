@@ -222,7 +222,9 @@ def open_pull_requests(repo: str, cache: Cache) -> list[PrState]:
                 "checks": None if kept.get("head") != head else kept.get("checks"),
             }
         if kept.get("checks") is None and head:
-            kept["checks"] = _checks(cache.get(f"repos/{repo}/commits/{head}/check-runs"))
+            kept["checks"] = _checks(
+                cache.get(f"repos/{repo}/commits/{head}/check-runs?per_page=100")
+            )
         cache.data["prs"][key] = kept
         out.append(
             PrState(

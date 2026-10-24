@@ -91,7 +91,11 @@ def watch(
         _print_tick(watch_service.Watcher().tick())
         return
     try:
-        watch_service.run(interval=interval, on_tick=_print_tick)
+        watch_service.run(
+            interval=interval,
+            on_tick=_print_tick,
+            on_error=lambda said: stderr_console().print(f"aisquare watch: {said}", markup=False),
+        )
     except watch_service.AlreadyWatching as exc:
         fail(str(exc), error="already_watching")
 

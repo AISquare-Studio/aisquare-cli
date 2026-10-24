@@ -73,7 +73,7 @@ def _pr(updated: str = "2026-10-24T10:00:00Z") -> dict[str, Any]:
 def _github(gh: FakeGitHub, *, reviews: list[dict[str, Any]], runs: list[dict[str, Any]]) -> None:
     gh.set(f"repos/{REPO}/pulls?state=open&per_page=100", [_pr()])
     gh.set(f"repos/{REPO}/pulls/12/reviews?per_page=100", reviews)
-    gh.set(f"repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
+    gh.set(f"repos/{REPO}/commits/{HEAD}/check-runs?per_page=100", {"check_runs": runs})
 
 
 APPROVED = [{"id": 7, "state": "APPROVED", "user": {"login": "reviewer-a"}}]

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 import sys
 from dataclasses import replace
@@ -274,3 +275,72 @@ def test_the_doctor_row_shows_the_last_looks_age(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(watch_service, "running_pid", lambda: 4242)
     stale = diagnostics._check_watcher()
     assert stale.status.value == "warn" and "running (pid 4242)" in stale.detail
+
+
+# --- review of #377 ----------------------------------------------------------------------------
+
+
+def test_a_failed_delivery_keeps_the_news_for_the_next_tick(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Major 2: ``seen`` was written before delivery, so a delivery that raised (a busy
+    store) lost the item for good. It is marked seen only once delivered."""
+    fleet_service.spawn(project, "manager")
+    watcher = _watcher(project, Fleet(agents=[_trust_prompt(project, "coder-1")]))
+    real = team_service.watch_event
+
+    def busy(board: str, text: str) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(team_service, "watch_event", busy)
+    first = watcher.tick(NOW)
+    assert any("delivery to" in note and "database is locked" in note for note in first.notes)
+    assert _watch_events(project.id) == []
+
+    monkeypatch.setattr(team_service, "watch_event", real)
+    second = watcher.tick(NOW + timedelta(minutes=1))
+    assert [item.kind for item in second.new] == ["permission"]
+    assert len(_watch_events(project.id)) == 1
+
+
+def test_a_failing_look_is_a_note_and_the_others_go_on(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Major 1: one look that raises is a note; the rest still deliver, and what the failed
+    look had seen is not announced again when it comes back."""
+    fleet = Fleet(agents=[_trust_prompt(project, "coder-1")])
+    watcher = _watcher(project, fleet)
+    assert len(watcher.tick(NOW).new) == 1
+
+    def broken() -> Any:
+        raise RuntimeError("tmux went away")
+
+    watcher._needs_sources = broken
+    down = watcher.tick(NOW + timedelta(minutes=1))
+    assert any(note.startswith("needs: RuntimeError: tmux went away") for note in down.notes)
+    watcher._needs_sources = lambda: _needs(project, fleet)
+    back = watcher.tick(NOW + timedelta(minutes=2))
+    assert back.new == [], "seen survived the failed look"
+
+
+def test_one_bad_tick_never_ends_the_watcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Stop(BaseException):
+        pass
+
+    ticks: list[str] = []
+    errors: list[str] = []
+
+    def tick(self: watch_service.Watcher, now: datetime | None = None) -> Any:
+        ticks.append("tick")
+        if len(ticks) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        raise Stop
+
+    monkeypatch.setattr(watch_service.Watcher, "tick", tick)
+    monkeypatch.setattr(watch_service, "_sleep", lambda seconds: None)
+    with pytest.raises(Stop):
+        watch_service.run(interval=1, on_tick=lambda report: None, on_error=errors.append)
+    assert ticks == ["tick", "tick"] and errors == ["OperationalError: database is locked"]

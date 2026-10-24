@@ -38,7 +38,7 @@ from aisquare.cli.ui.app import FleetApp, HelpScreen
 from aisquare.cli.ui.remote_control import READ_ONLY_REASON, RemoteController, load_remote_state
 from aisquare.cli.ui.views import remote as remote_view
 from aisquare.cli.ui.views.remote import RemotePanel, qr_text
-from aisquare.core import paths, state_file
+from aisquare.core import clipboard, paths, state_file
 from aisquare.core import tmux as tmux_core
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import read_state, update_state
@@ -463,6 +463,11 @@ def test_copy_puts_the_link_on_the_native_clipboard_beside_osc52_and_says_so_onc
     # Pinned, so sys.platform is never patched while Remote's threads run (review of
     # #266, round 1): remote_server takes macOS-only paths, through libc, on "darwin".
     board = install(tmp_path, monkeypatch, platform=None, pin=True)
+    # The fake tool is a fresh interpreter, and on a loaded box it outlived the shipped
+    # 2 s: the write was killed, OSC 52 alone still made "Link copied", and the board read
+    # [] (#40, seq 1294). What is pinned here is where the link goes, not that bound,
+    # which test_clipboard pins.
+    monkeypatch.setattr(clipboard, "WRITE_TIMEOUT", 15.0)
 
     async def go(pilot: Pilot[None]) -> tuple[str | None, list[str], list[str]]:
         app = pilot.app
@@ -481,11 +486,11 @@ def test_copy_puts_the_link_on_the_native_clipboard_beside_osc52_and_says_so_onc
         monkeypatch.setattr(app._driver, "write", writes.append)
         told = toast_log.record(app)
         modal.query_one("#remote-copy", Button).press()
-        for _ in range(100):
+        for _ in range(400):  # the toast is raised once the native write is over
             if told:
                 break
             await pilot.pause(0.05)
-        await pilot.pause(0.2)
+        await pilot.pause(0.2)  # a second toast would land by now
         return app.remote.link_url(), list(told), [w for w in writes if "\x1b]52;" in w]
 
     link, told, osc52 = drive(go, tunnel=fake_tunnel_factory(url=f"https://{TEXT}.ngrok-free.dev"))

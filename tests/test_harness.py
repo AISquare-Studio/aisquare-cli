@@ -1626,6 +1626,22 @@ def test_spawn_printed_command_joins_each_paste_to_its_own_run(
     assert started[0] != started[1], "a second paste must not reuse the first session's id"
 
 
+@pytest.mark.parametrize("role", ["tester", "runner", "validator"])
+def test_the_checking_roles_name_the_memory_gate_only_when_it_is_set(role: str) -> None:
+    """#283: `fleet gate` is in the tester's and validator's cycle once `[fleet]
+    test_gate_mb` is set, and not before: a line naming a gate nobody configured is noise."""
+    from aisquare.core.config import load_config, save_config
+
+    assert "fleet gate" not in " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
+    config = load_config()
+    config.fleet.test_gate_mb = 4096
+    save_config(config)
+    assert "aisquare fleet gate -- <command>" in " ".join(
+        harness.role_cycle(role, "abcd1234", fleet=unscoped)
+    )
+    assert "fleet gate" not in " ".join(harness.role_cycle("coder", "abcd1234", fleet=unscoped))
+
+
 def test_the_coder_cycle_names_task_show_and_the_manager_puts_the_contract_in_detail() -> None:
     """#74: the coder was told to read a contract no command it ran had printed, and nothing
     named `task show`; the manager pasted contracts into spawn prompts instead."""

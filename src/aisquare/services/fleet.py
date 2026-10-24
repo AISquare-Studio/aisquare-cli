@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import json
 import os
 import re
 import shutil
@@ -43,7 +44,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
@@ -57,6 +58,7 @@ from aisquare.core import (
     personas,
     selfcli,
 )
+from aisquare.core import memory as memory_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
@@ -201,6 +203,19 @@ class NoSuchProject(FleetError):
 
 class NoSuchAgent(FleetError):
     """No live agent with that label in this project."""
+
+
+class CapacityRefused(FleetError):
+    """A spawn the machine has no room for (#283): ``code`` says which limit.
+
+    ``capacity_project`` (``max_agents_per_project``), ``capacity_fleet``
+    (``max_agents_total``, every project's live agents) or ``capacity_memory``
+    (``min_free_mb``, or the kernel's memory pressure at critical).
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class EndedMeanwhile(NoSuchAgent):
@@ -3029,6 +3044,7 @@ def spawn(
     start_point: str | None = None,
     fork: bool = False,
     hub: str | None = None,
+    admit: bool = True,
     kickoff: bool = True,
     ack_wait: float = 0.0,
     board_context: str | None = None,
@@ -3255,11 +3271,19 @@ def spawn(
                 "`aisquare captain` attaches to it"
             )
     if len(live) >= config.max_agents_per_project:
-        raise FleetError(
+        raise CapacityRefused(
+            "capacity_project",
             f"{_name(project)} already runs {len(live)} agents "
             f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
-            "or raise the limit in [fleet]"
+            "or raise the limit in [fleet]",
         )
+    # The machine's own limits (#283), after the project's: the fleet-wide budget and
+    # the memory floor. Before the store opens below and before any window.
+    # ``admit`` is False for a live 1:1 replacement (a restart of a running agent, a
+    # switch: `_respawn(takes_over=True)`): its own seat and memory are freed as it
+    # starts, and refused after the stop, the agent was lost (review of #323).
+    if admit and not experimental.captain_role(role):
+        notes.extend(_admit(config))
     # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
     # 5/8), and the refusals above need neither.
     board, hub = (
@@ -3646,6 +3670,7 @@ def spawn(
             wanted=label,
             notes=notes,
             cap=config.max_agents_per_project,
+            total=0 if experimental.captain_role(role) else config.max_agents_total,
             onboard=onboard,
             codename=codename,
         )
@@ -4340,6 +4365,7 @@ def _record(
     cap: int,
     onboard: bool,
     codename: str,
+    total: int = 0,
 ) -> FleetAgent:
     """Write the row; on a live-label collision re-pick the label and retry.
 
@@ -4365,7 +4391,14 @@ def _record(
     """
     try:
         return _write_row(
-            agent, project, wanted=wanted, notes=notes, cap=cap, onboard=onboard, codename=codename
+            agent,
+            project,
+            wanted=wanted,
+            notes=notes,
+            cap=cap,
+            total=total,
+            onboard=onboard,
+            codename=codename,
         )
     except FleetError:
         _kill_unrecorded(srv, agent.pane_id)
@@ -4393,6 +4426,7 @@ def _write_row(
     cap: int,
     onboard: bool,
     codename: str,
+    total: int = 0,
 ) -> FleetAgent:
     """The store half of :func:`_record`: onboard, insert, relabelling past a live collision."""
     with store_session() as store:
@@ -4405,6 +4439,7 @@ def _write_row(
                 agent = _relabel(agent, project, store, wanted=wanted, notes=notes)
                 continue
             _verify_cap(store, stored, cap)
+            _verify_budget(store, stored, total)
             return stored
     raise FleetError(f"could not record {agent.label!r}: every label tried was taken")
 
@@ -4487,6 +4522,271 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
         "spawn took the last slot while this one was starting; stop one, or raise the "
         "limit in [fleet]"
     )
+
+
+def _verify_budget(store: ContextStore, stored: FleetAgent, total: int) -> None:
+    """Back the row out if it is past ``max_agents_total`` (#283); ``0`` is no budget.
+
+    :func:`_verify_cap`'s settlement, over every project's live rows: the same total
+    order (``created_at, id``), so N parallel spawns at the budget's last seat settle to
+    exactly the budget, whichever projects they are in. The captain is not counted.
+    """
+    if total <= 0:
+        return
+    live = sorted(
+        (agent for agent in store.live_fleet_agents() if agent.role != CAPTAIN_ROLE),
+        key=lambda agent: (agent.created_at, agent.id),
+    )
+    if len(live) <= total or all(agent.id != stored.id for agent in live[total:]):
+        return
+    store.end_fleet_agent(stored.id)
+    raise CapacityRefused(
+        "capacity_fleet",
+        f"that would be {len(live)} live agents across the fleet (max_agents_total = "
+        f"{total}) — another spawn took the last seat while this one was starting; stop "
+        "one, or raise the budget in [fleet]",
+    )
+
+
+# --- admission: the machine's own limits (#283) ------------------------------------
+
+_ADMISSION_LOG_MAX = 1024 * 1024
+"""``admission.jsonl`` is rotated to ``admission.jsonl.1`` past this size."""
+MEMORY_MARGIN_MB = 512
+"""What a memory refusal adds to ``min_free_mb`` for :data:`MEMORY_MARGIN_MINUTES`."""
+MEMORY_MARGIN_MINUTES = 5
+_MEMORY_REFUSED_META = "fleet:memory_refused_at"
+
+
+def _admit(config: FleetSettings) -> list[str]:
+    """The fleet-wide budget and the memory floor for one spawn: its notes, or a refusal.
+
+    Raises :class:`CapacityRefused` (``capacity_fleet`` naming each project's count;
+    ``capacity_memory`` naming the numbers and ``aisquare fleet capacity``). After a
+    memory refusal the floor is ``min_free_mb + 512`` for five minutes, so admission
+    does not flap on a box hovering at the line. Unknown headroom admits, with a note.
+    Each refusal, and each admission that fills the budget, is one line in
+    ``~/.aisquare/fleet/admission.jsonl``.
+    """
+    notes: list[str] = []
+    counts = _live_per_project() if config.max_agents_total > 0 else {}
+    live_total = sum(counts.values())
+    head = memory_core.headroom()
+    record: dict[str, object] = {
+        "live_total": live_total,
+        "max_agents_total": config.max_agents_total,
+        "available_mb": head.available_mb,
+        "pressure": head.pressure,
+        "min_free_mb": config.min_free_mb,
+    }
+    if config.max_agents_total > 0 and live_total >= config.max_agents_total:
+        each = ", ".join(f"{name} {count}" for name, count in sorted(counts.items()))
+        _log_admission("capacity_fleet", record)
+        raise CapacityRefused(
+            "capacity_fleet",
+            f"{live_total} live agents across the fleet (max_agents_total = "
+            f"{config.max_agents_total}): {each} — stop one (`aisquare fleet capacity` lists "
+            "them), or raise the budget in [fleet]",
+        )
+    floor = _memory_floor(config.min_free_mb)
+    if config.min_free_mb > 0 and head.pressure == "critical":
+        _memory_refused(record, f"memory pressure is critical ({_said(head)})")
+    if config.min_free_mb > 0 and head.available_mb is not None and head.available_mb < floor:
+        why = f"{head.available_mb} MB available, {floor} MB needed"
+        if floor != config.min_free_mb:
+            why += (
+                f" (min_free_mb = {config.min_free_mb}, plus {MEMORY_MARGIN_MB} for "
+                f"{MEMORY_MARGIN_MINUTES} min after a refusal)"
+            )
+        else:
+            why += " (min_free_mb)"
+        _memory_refused(record, why)
+    if head.pressure == "warn":
+        notes.append(f"memory pressure is warn ({_said(head)}) — admitted; heavy runs may swap")
+    if not head.known and config.min_free_mb > 0:
+        notes.append("could not read this machine's memory — admitted without the floor")
+    if config.max_agents_total > 0 and live_total + 1 >= config.max_agents_total:
+        _log_admission("admitted-at-budget", record)
+    return notes
+
+
+def _said(head: memory_core.Headroom) -> str:
+    available = f"{head.available_mb} MB available" if head.available_mb is not None else ""
+    psi = f"PSI some avg10 {head.psi_some_avg10:g}" if head.psi_some_avg10 is not None else ""
+    return ", ".join(part for part in (available, psi) if part) or head.source
+
+
+def _memory_floor(min_free_mb: int) -> int:
+    """``min_free_mb``, or ``min_free_mb + 512`` within five minutes of a memory refusal."""
+    if min_free_mb <= 0:
+        return 0
+    try:
+        with store_session() as store:
+            said = store.get_meta(_MEMORY_REFUSED_META)
+        refused = datetime.fromisoformat(said) if said else None
+    except Exception:  # a meta that cannot be read is no recent refusal
+        refused = None
+    if refused is not None and _now() - refused < timedelta(minutes=MEMORY_MARGIN_MINUTES):
+        return min_free_mb + MEMORY_MARGIN_MB
+    return min_free_mb
+
+
+def _live_per_project() -> dict[str, int]:
+    """Live agents per project, the captain excluded: what the fleet-wide budget counts.
+
+    Counted by project id and named as lists name a project, with its root beside the
+    name where two share it: two checkouts of one repo, neither nicknamed, are two
+    projects, and one entry for both read as one project over its cap (review of #323).
+    """
+    counts: dict[str, int] = {}
+    rows: dict[str, ProjectInfo | None] = {}
+    with store_session() as store:
+        for agent in store.live_fleet_agents():
+            if agent.role == CAPTAIN_ROLE:
+                continue
+            if agent.project_id not in rows:
+                rows[agent.project_id] = store.get_project(agent.project_id, include_forgotten=True)
+            counts[agent.project_id] = counts.get(agent.project_id, 0) + 1
+    names = {pid: _name(row) if row is not None else pid[:12] for pid, row in rows.items()}
+    shared = {name for name in names.values() if list(names.values()).count(name) > 1}
+    labelled: dict[str, int] = {}
+    for pid, count in counts.items():
+        row = rows[pid]
+        label = names[pid]
+        if label in shared:
+            label = f"{label} ({row.root if row is not None else pid[:12]})"
+        labelled[label] = count
+    return dict(sorted(labelled.items()))
+
+
+def _memory_refused(record: Mapping[str, object], why: str) -> NoReturn:
+    with contextlib.suppress(Exception), store_session() as store:
+        store.set_meta(_MEMORY_REFUSED_META, _now().isoformat())
+    _log_admission("capacity_memory", record)
+    raise CapacityRefused(
+        "capacity_memory",
+        f"not enough memory to start another agent: {why} — see `aisquare fleet capacity`, "
+        "or lower min_free_mb in [fleet] (0 turns the floor off)",
+    )
+
+
+def _log_admission(outcome: str, record: Mapping[str, object]) -> None:
+    """One JSON line per refusal and per admission at the budget; never fails a spawn."""
+    with contextlib.suppress(OSError):
+        log = paths.aisquare_home() / "fleet" / "admission.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        if log.is_file() and log.stat().st_size > _ADMISSION_LOG_MAX:
+            log.replace(log.with_name(log.name + ".1"))
+        line = {"at": _now().isoformat(timespec="seconds"), "outcome": outcome, **record}
+        with log.open("a", encoding="utf-8") as out:
+            out.write(json.dumps(line) + "\n")
+
+
+@dataclass(frozen=True)
+class CapacityReport:
+    """``aisquare fleet capacity``: the machine's headroom against every admission limit."""
+
+    headroom: memory_core.Headroom
+    min_free_mb: int
+    """The floor a spawn needs now: ``min_free_mb``, or ``+512`` just after a refusal."""
+    max_agents_total: int
+    max_agents_per_project: int
+    live: dict[str, int]
+    """Live agents per project (by the name lists use), the captain excluded."""
+    admits: bool
+    reason: str
+
+    @property
+    def live_total(self) -> int:
+        return sum(self.live.values())
+
+    def as_json(self) -> dict[str, Any]:
+        head = self.headroom
+        return {
+            "available_mb": head.available_mb,
+            "total_mb": head.total_mb,
+            "pressure": head.pressure,
+            "psi_some_avg10": head.psi_some_avg10,
+            "source": head.source,
+            "min_free_mb": self.min_free_mb,
+            "max_agents_total": self.max_agents_total,
+            "max_agents_per_project": self.max_agents_per_project,
+            "live_total": self.live_total,
+            "live": self.live,
+            "admits": self.admits,
+            "reason": self.reason,
+        }
+
+
+def capacity() -> CapacityReport:
+    """What the next spawn would meet: the same reads :func:`_admit` makes, nothing written."""
+    config = settings()
+    live = _live_per_project()
+    head = memory_core.headroom()
+    floor = _memory_floor(config.min_free_mb)
+    total = sum(live.values())
+    admits, reason = True, "a spawn would be admitted"
+    if config.max_agents_total > 0 and total >= config.max_agents_total:
+        admits, reason = False, f"the fleet is at max_agents_total = {config.max_agents_total}"
+    elif config.min_free_mb > 0 and head.pressure == "critical":
+        admits, reason = False, "memory pressure is critical"
+    elif config.min_free_mb > 0 and head.available_mb is not None and head.available_mb < floor:
+        admits, reason = False, f"{head.available_mb} MB available, {floor} MB needed"
+    elif head.pressure == "warn":
+        reason = "a spawn would be admitted, with a warning: memory pressure is warn"
+    elif not head.known:
+        reason = "a spawn would be admitted: this machine's memory cannot be read"
+    return CapacityReport(
+        headroom=head,
+        min_free_mb=floor,
+        max_agents_total=config.max_agents_total,
+        max_agents_per_project=config.max_agents_per_project,
+        live=live,
+        admits=admits,
+        reason=reason,
+    )
+
+
+GATE_POLL_SECONDS = 5.0
+GATE_EXIT = 75
+"""``fleet gate``'s exit at the deadline: ``EX_TEMPFAIL``, "try again later"."""
+
+
+@dataclass(frozen=True)
+class GateResult:
+    """What ``fleet gate`` waited for and what it found."""
+
+    passed: bool
+    available_mb: int | None
+    needed_mb: int
+    waited_seconds: float
+    pressure: str
+
+
+def gate_floor(min_free_mb: int | None = None) -> int:
+    """``--min-free-mb``, else ``test_gate_mb``, else ``min_free_mb``."""
+    if min_free_mb is not None:
+        return min_free_mb
+    config = settings()
+    return config.test_gate_mb or config.min_free_mb
+
+
+def wait_for_memory(needed_mb: int, wait_seconds: float) -> GateResult:
+    """Poll the headroom every 5 s until ``needed_mb`` is available (and pressure is not
+    critical), or ``wait_seconds`` have passed. Unknown headroom passes: the gate cannot
+    hold a run on a number it cannot read."""
+    started = _monotonic()
+    while True:
+        head = memory_core.headroom()
+        enough = head.available_mb is None or head.available_mb >= needed_mb
+        if enough and head.pressure != "critical":
+            return GateResult(
+                True, head.available_mb, needed_mb, _monotonic() - started, head.pressure
+            )
+        waited = _monotonic() - started
+        if waited >= wait_seconds:
+            return GateResult(False, head.available_mb, needed_mb, waited, head.pressure)
+        _sleep(min(GATE_POLL_SECONDS, max(wait_seconds - waited, 0.0)))
 
 
 def _type_prompt(
@@ -7571,6 +7871,8 @@ def _respawn(
         own_worktree=agent.cwd if agent.worktree else None,
         own_branch=agent.branch,
         board_and_hub=board_and_hub,
+        # A hand-over replaces a running agent 1:1: admitted as the agent it replaces.
+        admit=not takes_over,
         # Its own first line, never a kickoff: the resume line and the hand-off prompt
         # both name the task already.
         kickoff=False,

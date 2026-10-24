@@ -2654,6 +2654,48 @@ def _verdict(values: Mapping[str, str], ours: set[str], live: str | None) -> Rou
     return "ours-stale"
 
 
+def _shown_url(url: str) -> str:
+    """``url`` as output may carry it: no userinfo, no query, no fragment.
+
+    A gateway URL can hold ``user:token@`` or a ``?key=`` (the operator's, never
+    ours), and the doctor's line is what lands in a pasted bug report. Done on the
+    text rather than through a parser so an unparsable URL is cut as well. The authority
+    is what follows ``scheme://`` (or ``//``, or nothing: ``user:token@host`` is cut too)
+    up to the first ``/``, ``?`` or ``#``, and its userinfo runs to its LAST ``@``, so a
+    password holding one goes whole (review of #356).
+    """
+    lead, authority, rest = _URL_AUTHORITY.match(url.strip()).groups()  # type: ignore[union-attr]
+    shown = (lead or "") + authority.rpartition("@")[2] + rest
+    return re.split(r"[?#]", shown, maxsplit=1)[0]
+
+
+_URL_AUTHORITY = re.compile(r"((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)?([^/?#]*)(.*)", re.DOTALL)
+"""A URL's lead (``scheme://`` or ``//``, if any), its authority, and the rest; it matches
+any text."""
+
+
+def _cleaned(values: Mapping[str, str], ours: set[str]) -> dict[str, str | None]:
+    """What ``reset`` changes in one place: each routing variable's new value, ``None`` to remove.
+
+    Only what is ours goes. The base URL only when it IS a proxy of ours: beside our
+    headers, the operator's own gateway is kept. The headers lose only our lines
+    (``X-Agent-Name``, ``X-Pipeline-Id``, ``X-AISquare-Key``); another header there,
+    an auth header for that gateway say, stays, and the variable goes only when
+    nothing else is left in it.
+    """
+    changed: dict[str, str | None] = {}
+    base = (values.get(ROUTING_VARS[0]) or "").strip()
+    if base and _normal_url(base) in ours:
+        changed[ROUTING_VARS[0]] = None
+    headers = values.get(ROUTING_VARS[1])
+    if headers and _OUR_HEADER.search(headers):
+        kept = [
+            line for line in headers.splitlines() if line.strip() and not _OUR_HEADER.match(line)
+        ]
+        changed[ROUTING_VARS[1]] = "\n".join(kept) or None
+    return changed
+
+
 def _source(
     kind: str,
     where: str,
@@ -2673,7 +2715,7 @@ def _source(
         kind=kind,
         where=where,
         variables=tuple(present),
-        base_url=present.get(ROUTING_VARS[0]),
+        base_url=_shown_url(present[ROUTING_VARS[0]]) if ROUTING_VARS[0] in present else None,
         verdict=verdict,
         fix={
             "foreign": "yours — left as it is",
@@ -2747,19 +2789,27 @@ def _fleet_tmux_server() -> FleetServer:
 
 
 def _server_env(server: FleetServer) -> dict[str, str] | None:
-    """The running server's global environment; ``None`` when there is no server to ask."""
+    """The routing variables in the running server's global environment; ``None`` with no server.
+
+    Asked one name at a time: ``show-environment -g`` prints each value raw, and
+    ``ANTHROPIC_CUSTOM_HEADERS`` is newline-separated by design, so a listing read
+    line by line kept only its first header. Asked by name, the value is everything
+    after ``NAME=`` (measured on tmux 3.5a); an unset name is tmux's "unknown variable".
+    """
     try:
         if not server.available() or server.server_absent():
             return None
-        held: dict[str, str] = {}
-        for line in server.run("show-environment", "-g").splitlines():
-            if line.startswith("-") or "=" not in line:
-                continue  # `-NAME` is an unset marker
-            key, _, value = line.partition("=")
-            held[key] = value
-        return held
     except Exception:  # a tmux that will not answer is no source
         return None
+    held: dict[str, str] = {}
+    for var in ROUTING_VARS:
+        try:
+            line = server.run("show-environment", "-g", var)
+        except Exception:
+            continue
+        if line.startswith(f"{var}="):
+            held[var] = line[len(var) + 1 :].removesuffix("\n")
+    return held
 
 
 def _rc_home() -> Path:
@@ -2917,10 +2967,12 @@ def reset_routing(
 ) -> RoutingReset:
     """Tracing off (targets kept), and every leftover of ours removed where it can be.
 
-    Settings files lose the two keys (a ``settings.json.bak-<stamp>`` copy kept
-    first; written under Claude Code's own ``<file>.lock``, by rename through a
-    symlink); bindings lose them from ``env`` and ``env_files``; the fleet tmux
-    server has them unset globally. A shell cannot be changed from here: its
+    Only what is ours goes (:func:`_cleaned`): a proxy URL of ours, and our header
+    lines. Settings files are edited with a ``settings.json.bak-<stamp>`` copy kept
+    first, under Claude Code's own ``<file>.lock``, by rename through a symlink;
+    bindings in ``env`` (an ``env_files`` entry is dropped only when its file holds
+    nothing but ours, since the file is never edited); the fleet tmux server's
+    global environment in place. A shell cannot be changed from here: its
     ``unset`` line and the rc files that mention the variables are returned to
     print. A ``foreign`` gateway is never touched. ``dry_run`` plans and changes
     nothing.
@@ -2928,6 +2980,7 @@ def reset_routing(
     srv = server if server is not None else _fleet_tmux_server()
     config = load_config()
     tracing_was_on = config.explainability.enabled
+    ours = _our_proxies(config.explainability)
     planned = [
         source
         for source in routing_sources(env=env, server=srv, tracing_on=False)
@@ -2941,7 +2994,7 @@ def reset_routing(
         removed=fixable if dry_run else [],
         failed=[],
         backups=[],
-        shell_unset=f"unset {' '.join(ROUTING_VARS)}" if in_shell else None,
+        shell_unset=_shell_line(os.environ if env is None else env, ours) if in_shell else None,
         rc_files=rc_files_mentioning() if in_shell or planned else [],
         remaining=[],
     )
@@ -2954,16 +3007,26 @@ def reset_routing(
     for source in fixable:
         try:
             if source.kind == "settings" and source.path is not None:
-                backup = _drop_settings_env(source.path, stamp)
+                backup = _drop_settings_env(source.path, stamp, ours)
                 if backup is not None:
                     report.backups.append(backup)
-            elif source.kind in ("binding", "env-file") and source.role is not None:
-                profile = config.team.profiles[source.role]
-                for var in ROUTING_VARS:
-                    (profile.env if source.kind == "binding" else profile.env_files).pop(var, None)
+            elif source.kind == "binding" and source.role is not None:
+                _apply(config.team.profiles[source.role].env, ours)
+            elif source.kind == "env-file" and source.role is not None and source.path:
+                [variable] = source.variables
+                held = source.path.read_text(encoding="utf-8").rstrip("\r\n")
+                if _cleaned({variable: held}, ours).get(variable, held) is not None:
+                    raise OSError(
+                        f"{source.path} holds more than ours — remove our lines from it "
+                        f"yourself, or the binding's env_files.{variable}"
+                    )
+                config.team.profiles[source.role].env_files.pop(variable, None)
             elif source.kind == "tmux":
-                for var in source.variables:
-                    srv.run("set-environment", "-g", "-u", var)
+                for var, value in _cleaned(_server_env(srv) or {}, ours).items():
+                    if value is None:
+                        srv.run("set-environment", "-g", "-u", var)
+                    else:
+                        srv.run("set-environment", "-g", var, value)
         except Exception as exc:
             report.failed.append((source, str(exc)))
         else:
@@ -2974,8 +3037,34 @@ def reset_routing(
     return report
 
 
-def _drop_settings_env(path: Path, stamp: str) -> Path | None:
-    """Remove the routing keys from a settings file's ``env``; the backup kept, or ``None``.
+def _shell_line(env: Mapping[str, str], ours: set[str]) -> str:
+    """What to type in the shell: ``unset`` for what is ours, an ``export`` for headers kept."""
+    changed = _cleaned(env, ours)
+    gone = [var for var, value in changed.items() if value is None]
+    line = f"unset {' '.join(gone)}" if gone else ""
+    if changed.get(ROUTING_VARS[1]):
+        # The kept headers are the operator's own, so not shown here: name what to drop.
+        kept = (
+            "; then re-export ANTHROPIC_CUSTOM_HEADERS without our X-Agent-Name, "
+            "X-Pipeline-Id and X-AISquare-Key lines"
+        )
+        line = (line + kept) if line else kept.removeprefix("; then ")
+    return line
+
+
+def _apply(env: dict[str, str], ours: set[str]) -> bool:
+    """:func:`_cleaned` applied to ``env`` in place; whether anything changed."""
+    changed = _cleaned(env, ours)
+    for var, value in changed.items():
+        if value is None:
+            env.pop(var, None)
+        else:
+            env[var] = value
+    return bool(changed)
+
+
+def _drop_settings_env(path: Path, stamp: str, ours: set[str]) -> Path | None:
+    """Remove what is ours from a settings file's ``env``; the backup kept, or ``None``.
 
     A file aisquare does not own, so: Claude Code's ``<file>.lock`` taken as it
     takes it, the file re-read under it, a copy kept beside it first, and the
@@ -2991,11 +3080,18 @@ def _drop_settings_env(path: Path, stamp: str) -> Path | None:
             raw = target.read_bytes()
             data = json.loads(raw.decode("utf-8"))
             env = data.get("env") if isinstance(data, dict) else None
-            if not isinstance(env, dict) or not any(var in env for var in ROUTING_VARS):
+            if not isinstance(env, dict):
+                return None
+            routing = {k: v for k, v in env.items() if k in ROUTING_VARS and isinstance(v, str)}
+            if not _cleaned(routing, ours):
                 return None
             backup = _keep_beside(target, f"{target.name}.bak-{stamp}")
+            _apply(routing, ours)
             for var in ROUTING_VARS:
-                env.pop(var, None)
+                if var in routing:
+                    env[var] = routing[var]
+                else:
+                    env.pop(var, None)
             body = json.dumps(data, indent=2, ensure_ascii=False)
             if raw.endswith(b"\n"):
                 body += "\n"

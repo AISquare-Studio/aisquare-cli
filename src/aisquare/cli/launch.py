@@ -171,6 +171,24 @@ never sits in argv, which ``ps`` shows (the name travels as ``AISQUARE_PERSONA``
 _SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
 
 
+def _shared_memory(binary: str, args: Sequence[str]) -> list[str]:
+    """``[accounts] share = ["memory"]``: the shared auto-memory directory for this folder,
+    as ``--settings`` (P2-W7, #198). Claude Code only, and not over a ``--settings`` the
+    operator's line already carries, which wins; either is said in one dim line."""
+    wanted = claude_accounts_service.memory_settings_args(Path.cwd())
+    if not wanted:
+        return []
+    if any(arg == "--settings" or arg.startswith("--settings=") for arg in args):
+        stderr_console().print(
+            "accounts: memory is not shared into this launch — its own --settings wins",
+            style="dim",
+        )
+        return []
+    if not harness.is_default_agent(binary):
+        return []
+    return wanted
+
+
 def _persona_system_prompt(
     name: str, project: ProjectInfo | None, binary: str, args: Sequence[str]
 ) -> list[str]:
@@ -628,7 +646,16 @@ def launch(
         if persona is not None
         else []
     )
-    argv = [resolution.binary, *profile.args, *role_args, *persona_args, *ctx.args, *pinned_id]
+    memory_args = _shared_memory(resolution.binary, [*profile.args, *role_args, *ctx.args])
+    argv = [
+        resolution.binary,
+        *profile.args,
+        *role_args,
+        *persona_args,
+        *memory_args,
+        *ctx.args,
+        *pinned_id,
+    ]
     # The first message (P0-W1a, #122), last: Claude Code's positional prompt, after `--`.
     # Read from a file and the file deleted, so the window's command, which tmux carries and
     # the row records, never holds the text, and a replay of that command finds no file and

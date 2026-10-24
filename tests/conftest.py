@@ -830,6 +830,21 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def roomy_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every spawn in the suite sees plenty of memory, whatever the runner has (#283).
+
+    ``min_free_mb`` is on by default, so a CI runner short of 2 GB would otherwise refuse
+    the spawn a test is about. A test of admission sets its own headroom; the probes'
+    own tests call ``linux_headroom`` / ``darwin_headroom`` with their fixtures.
+    """
+    from aisquare.core import memory
+
+    monkeypatch.setattr(
+        memory, "headroom", lambda: memory.Headroom(65_536, 131_072, "normal", None, "test")
+    )
+
+
+@pytest.fixture(autouse=True)
 def no_detached_root_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     """No in-process test starts the detached worker that posts a Run's root (#129 e).
 
@@ -992,6 +1007,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         f"{NEEDS_CAPTAIN}: needs the experimental captain on; skipped when "
         f"{SUITE_CAPTAIN_ENV}=off runs the suite with it off, as it ships",
+    )
+    config.addinivalue_line(
+        "markers",
+        "e2e: drives a real, signed-in Claude Code (and spends tokens); skipped unless the "
+        "test's own variables name what to drive",
     )
 
 

@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import experimental, harness, orchestrator, paths
+from aisquare.core import claude_sharing, experimental, harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
@@ -33,6 +33,7 @@ from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project, git_common_root
 from aisquare.models import (
     CheckStatus,
+    ClaudeAccount,
     DoctorCheck,
     FleetAgent,
     InjectionRecord,
@@ -173,6 +174,8 @@ def doctor(
         # fleet-board card): it can warn, so it waits with the other late rows.
         _check_fleet_server_env(cwd=cwd),
         *_check_manager_board_context(),
+        # Can warn (memory below the floor, pressure at warn), so it waits with the late rows.
+        _check_fleet_capacity(),
         *_experiment_checks(),
         # Only while the experimental captain is off: one ok row saying how to turn it
         # on. On, doctor is as it was before the switch.
@@ -1373,9 +1376,67 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         ]
     return [
         _ok("claude-accounts", detail),
+        *_optional(_claude_accounts_sharing_check(managed)),
         *_claude_account_default_checks(),
         *_claude_account_limit_checks(),
     ]
+
+
+def _claude_accounts_sharing_check(managed: Sequence[ClaudeAccount]) -> DoctorCheck | None:
+    """``claude-accounts sharing`` (P2-W7, #198): what ``[accounts] share`` gives each slot.
+
+    Warns on a part that is on but a slot does not share (linked elsewhere, a broken
+    link, or its own entry still there), and on a slot whose ``projects/`` is a symlink:
+    since Claude Code 2.1.280 every auto-memory write there asks for approval that no
+    allow rule, hook or auto mode can give (anthropics/claude-code#98044), and a shared
+    ``projects/`` is swept by the shortest ``cleanupPeriodDays``. ``None`` when nothing
+    is shared and no ``projects/`` is linked. Read-only.
+    """
+    name = "claude-accounts sharing"
+    try:
+        knobs = claude_accounts_service.accounts_settings()
+        source = claude_accounts_core.default_account().config_dir
+        linked_dirs = [
+            account for account in managed if os.path.islink(account.config_dir / "projects")
+        ]
+        if not knobs.share and not linked_dirs:
+            return None
+        problems: list[str] = []
+        for account in linked_dirs:
+            problems.append(
+                f"slot {account.slot}'s projects/ is a symlink: every auto-memory write asks "
+                "for approval (Claude Code 2.1.280+)"
+            )
+        for part in knobs.share:
+            if part not in claude_sharing.LINKED_PARTS:
+                continue
+            for account in managed:
+                state = claude_sharing.part_state(account.config_dir, part, source)
+                entry = claude_sharing.part_entry(account.config_dir, part)
+                if state == "shared" and not entry.exists():
+                    problems.append(f"slot {account.slot}'s {entry.name} is a broken link")
+                elif state == "elsewhere":
+                    problems.append(f"slot {account.slot}'s {entry.name} links elsewhere")
+                elif state == "own":
+                    problems.append(f"slot {account.slot}'s {entry.name} is its own")
+                elif state == "none":
+                    problems.append(f"slot {account.slot} has no {entry.name} linked yet")
+        memory = (
+            f"; memory in {claude_accounts_service.shared_memory_root()}"
+            if "memory" in knobs.share
+            else ""
+        )
+        detail = f"sharing {', '.join(knobs.share) or 'nothing'}{memory}"
+        if problems:
+            return _warn(
+                name,
+                f"{detail} — " + "; ".join(problems),
+                "aisquare accounts share --enable <parts> links what is missing; a link "
+                "elsewhere or a symlinked projects/ is yours to undo (keep transcripts apart)",
+            )
+        return _ok(name, detail)
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
 
 
 def _arranges_an_account() -> bool:
@@ -2288,6 +2349,40 @@ def _stale_server_environment(srv: tmux_core.TmuxServer, env: Mapping[str, str])
     held = _server_environment(srv)
     current = tmux_core.desktop_environment(env)
     return [var for var, value in current.items() if held.get(var) != value]
+
+
+def _check_fleet_capacity() -> DoctorCheck:
+    """``fleet capacity``: memory headroom and live agents against admission's limits (#283).
+
+    What the next ``fleet spawn`` would meet, read as ``aisquare fleet capacity`` reads it:
+    ok with the numbers; warn when a spawn would be refused (below ``min_free_mb``,
+    critical pressure, the fleet at ``max_agents_total``) or memory pressure is at warn.
+    Read-only, and it does not bring a home into being.
+    """
+    name = "fleet capacity"
+    try:
+        if (uncreated := _uncreated_home(name)) is not None:
+            return uncreated
+        report = fleet_service.capacity()
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    head = report.headroom
+    memory = (
+        f"{head.available_mb} MB available" if head.available_mb is not None else "memory unread"
+    )
+    budget = f" of {report.max_agents_total}" if report.max_agents_total else ""
+    detail = (
+        f"{memory}, pressure {head.pressure}, floor {report.min_free_mb or 'off'}; "
+        f"{report.live_total}{budget} agents live — {report.reason}"
+    )
+    if not report.admits or head.pressure == "warn":
+        return _warn(
+            name,
+            detail,
+            "aisquare fleet capacity lists the live agents — stop one, free memory, or "
+            "change max_agents_total / min_free_mb in [fleet]",
+        )
+    return _ok(name, detail)
 
 
 def _check_anthropic_routing(server: explainability_ops.FleetServer | None = None) -> DoctorCheck:

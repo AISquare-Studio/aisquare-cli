@@ -265,7 +265,10 @@ follows as a `⚠` line.
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
 
 Refused, with the reason in the message: a second `manager`, more agents than
-`max_agents_per_project`, `--worktree` in a project that is not a git
+`max_agents_per_project`, more live agents across every project than
+`max_agents_total`, less available memory than `min_free_mb` or memory pressure
+at critical (see [Capacity](#capacity); `--json` errors `capacity_project`,
+`capacity_fleet`, `capacity_memory`), `--worktree` in a project that is not a git
 repository, an unknown role, a `--task` that is already done or dropped, a
 persona the project does not have (the known names are listed; a stale
 `[fleet.roles.<role>].persona` default names its key). All of these are checked
@@ -1023,11 +1026,37 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   shared nor replaced — the command says which setting stopped it. `aisquare
   accounts settings --sync` links them now, `--unshare` gives each its own copy
   back.
+- **Memory, skills, agents, commands, CLAUDE.md.** Opt-in, `[accounts] share`
+  (empty by default), turned on and off with `aisquare accounts share`:
+  - `memory`: every launch, the plain claude's included, gets
+    `--settings '{"autoMemoryDirectory": "~/.aisquare/claude-shared/memory/<project>"}'`,
+    so a memory saved on one account is read on every other. The first
+    `--enable memory` merges what each account already remembered there: nothing
+    overwritten, a file that differs kept as `<name>.slot<N>.md`, `MEMORY.md`
+    merged by line. The directory is outside every `.claude` path on purpose:
+    since Claude Code 2.1.280 every auto-memory write into a linked `.claude`
+    directory asks for approval nothing can give.
+  - `skills`, `agents`, `commands`, `claude_md`: each managed account's entry
+    becomes a link to the plain claude's (a junction on Windows, and a copy of
+    `CLAUDE.md`), its own kept beside it as `<entry>.own-<stamp>`;
+    `--disable` puts it back exactly. An entry already linked somewhere else is
+    yours and is left alone. A launch on an account added since links it.
+  - `plugins`: experimental. MCP logins and the plugin store are per account.
+  - Transcripts are never shared. A linked `projects/` makes every auto-memory
+    write prompt, and the shortest `cleanupPeriodDays` would sweep them all. A
+    session moved to another account resumes by its transcript's path instead
+    (verified on Claude Code 2.1.309:
+    [cross-account resume](runbooks/cross-account-resume.md)).
+
+  `aisquare doctor`'s `claude-accounts sharing` line says what is shared and
+  warns about an account that does not share a part that is on, a link it
+  did not make, or a `projects/` that is a symlink. A session is attributed to
+  the account its fleet row launched it on, whatever its transcript's path says.
 
 Nothing on this page writes into Claude Code's login: the email and plan
 are read from what Claude Code recorded, and a token is never refreshed by the
-CLI. Claude Code refreshes it on the account's next session. The two things the
-accounts share (above) are the only writes into an account's directory.
+CLI. Claude Code refreshes it on the account's next session. What the
+accounts share (above) is the only thing written into an account's directory.
 
 Everything the page does is a command, and every reporting one takes `--json`:
 
@@ -1059,6 +1088,9 @@ aisquare accounts settings             # what each account's settings.json is: s
 aisquare accounts settings --sync      # link every managed account's settings.json to the plain claude's
 aisquare accounts settings --unshare   # each linked account gets its own copy back
 aisquare config set accounts.share_settings true # keep them linked at every launch (off by default)
+aisquare accounts share --status       # what every account shares: memory, skills, agents, commands, CLAUDE.md
+aisquare accounts share --enable memory,skills   # one memory per project and one skills/ for every account
+aisquare accounts share --disable skills         # each account gets its own skills/ back, as it was
 aisquare fleet switch coder-auth       # move one now: resumes its session on the account with room
 aisquare fleet restart manager         # an exited (or stuck) agent, back under its label, session resumed
                                        # …launched as it was first launched: the row records the
@@ -1192,6 +1224,10 @@ max_agents_per_project = 4                # the manager (and you) cannot exceed 
 worktree_dir = ".aisquare-worktrees"      # relative to the repo root; kept out of git via .git/info/exclude
 disable_native_agent_teams = true         # exports CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0 into fleet launches
 max_continuations_per_hour = 30           # cap on the manager's Stop-hook continuations
+max_agents_total = 0                      # live agents across every project, captain excluded; 0 = no budget
+min_free_mb = 2048                        # refuse a spawn below this much available memory; 0 = off
+test_gate_mb = 0                          # `fleet gate`'s floor; 0 = min_free_mb
+test_gate_wait_minutes = 15               # how long `fleet gate` waits for it
 pane_clipboard = "off"                    # "on": a program in a pane may set your clipboard (OSC 52)
 busy_quiet_seconds = 30                   # a "working" row whose pane printed nothing this long is
                                           # checked once: an idle Claude Code prompt reads waiting
@@ -1239,6 +1275,51 @@ persona = "minimalist"                    # checked at spawn: a name the project
 A role or a key your file leaves out takes its default above; a role the table
 above does not name gets `auto`, no worktree and no extra args. A config file that will not parse costs you the customisation and
 never the fleet: the defaults apply and nothing refuses.
+
+### Capacity
+
+A spawn is admitted against three limits, in this order, each checked before any
+window opens:
+
+1. **`max_agents_per_project`** (4): the project's live agents.
+2. **`max_agents_total`** (0, no budget): live agents across every project, the
+   captain excluded and managers counted. The refusal names each project's count.
+3. **`min_free_mb`** (2048): available memory. Below it, or with the kernel's
+   memory pressure at critical, the spawn is refused with both numbers; at warn
+   pressure it is admitted with a note on the receipt. After a memory refusal
+   the floor is `min_free_mb + 512` for five minutes, so admission does not flap
+   on a machine hovering at the line. `0` turns the floor off.
+
+Available memory is `MemAvailable` from `/proc/meminfo` on Linux, with PSI
+(`/proc/pressure/memory`, `some avg10`: warn at 10, critical at 40) when the
+kernel has it; on macOS it is `vm_stat`'s free + inactive + speculative pages,
+and the pressure is `kern.memorystatus_vm_pressure_level`, which wins because
+that figure ignores the compressor. Under WSL2 these are the VM's numbers,
+capped by `.wslconfig`. Where neither can be read, admission admits and says so.
+
+```text
+aisquare fleet capacity [--json]
+```
+
+shows the headroom, the pressure, the floor in force, and the live agents
+against each limit, and whether the next spawn would be admitted; `aisquare
+doctor` has the same as its `fleet capacity` row. Every refusal, and every
+admission that fills the budget, is a line in `~/.aisquare/fleet/admission.jsonl`
+(rotated at 1 MB).
+
+**The test-run gate.** A heavy run (the full suite, a build) can wait for memory
+instead of pushing the machine into swap:
+
+```text
+aisquare fleet gate [--min-free-mb N] [--wait 15m] [--json] [-- CMD …]
+```
+
+It polls every 5 s. With the headroom it runs `CMD` and exits with its code
+(with no `CMD`, exits 0); at the deadline it runs nothing and exits **75**,
+`not run: <available> MB available, <N> MB needed for <wait>`. The floor is
+`--min-free-mb`, else `test_gate_mb`, else `min_free_mb`; the wait is
+`test_gate_wait_minutes`. Once `test_gate_mb` is set, the tester's and the
+validator's cycles tell them to run heavy checks through it.
 
 **Model, effort and binary per role stay where they already live** — one home
 per concept: `aisquare team harness` (the ladder and the effort offsets),

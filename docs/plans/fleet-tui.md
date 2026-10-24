@@ -844,7 +844,9 @@ launched by hand), path 2 is a no-op and path 1 still works.
 
 ### 7.4 Guardrails
 
-`max_agents_per_project` (default 4) · `fleet pause` (a signal the cycle
+`max_agents_per_project` (default 4) · `max_agents_total` and `min_free_mb`
+(#283: a fleet-wide budget and a memory floor, [docs/fleet.md](../fleet.md#capacity)) ·
+`fleet pause` (a signal the cycle
 respects) · kill / restart per agent from the UI · claims already lease-expire
 when an agent dies · a task reopened twice returns to the manager (existing
 planner rule) · reviewer is `--restricted` · a human merges · the hourly

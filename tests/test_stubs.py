@@ -73,8 +73,11 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "pause",
             "resume",
             "switch",
+            "capacity",
+            "gate",
         )
     ),
+    ("accounts", "share"),
     ("explainability", "status"),
     ("explainability", "env"),
     ("explainability", "enable"),

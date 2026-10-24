@@ -116,6 +116,13 @@ class RoleProfile(BaseModel):
     ``--chrome`` is how the role silently degrades on the second machine."""
 
 
+PLAIN_ROLE = "agent"
+"""The role-less agent: a plain, general-purpose Claude Code session (the Spawn dialog's
+*(none)* role). ``launch`` and ``fleet spawn`` accept it so the agent joins the board and
+its fleet row, and nothing here profiles it, so it gets no standing cycle, no mission and no
+ladder: :func:`role_cycle` is empty and the model is the session's own."""
+
+
 #: The role -> model x effort matrix. Order within a ladder is the fallback order;
 #: effort is relative to the session base (default ``high``), never hardcoded.
 ROLE_PROFILES: dict[str, RoleProfile] = {

@@ -25,7 +25,7 @@ import pytest
 from textual.color import Color, rgb_to_lab
 from textual.geometry import Region
 from textual.pilot import Pilot
-from textual.widgets import Button, Static
+from textual.widgets import Button, Static, TabbedContent
 
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.sidebar import (
@@ -42,8 +42,15 @@ from aisquare.cli.ui.sidebar import (
     headroom_dot,
     status_line_text,
 )
-from aisquare.cli.ui.views.app_settings import AppSettingsView
+from aisquare.cli.ui.views.app_settings import (
+    AGENT_TAB,
+    PREFERENCES_TAB,
+    REMOTE_TAB,
+    AppSettingsView,
+)
+from aisquare.cli.ui.views.settings_captain import CaptainToggle
 from aisquare.cli.ui.views.settings_hub import SettingsHubView
+from aisquare.cli.ui.views.settings_remote import RemoteSection
 from aisquare.core import claude_accounts as core
 from aisquare.core.store import store_session
 from aisquare.models import (
@@ -113,26 +120,31 @@ def _shown(widget: Static) -> str:
 def test_the_sidebar_has_the_projects_then_settings_and_its_status_and_nothing_else(
     captain_off: None,
 ) -> None:
-    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str, bool, bool]:
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], list[str], str, bool, bool]:
         app = _app(pilot)
         sidebar = app.sidebar
         sections = [child.id or type(child).__name__ for child in sidebar.children]
         others = app.query_one(OthersSection)
-        inside = [type(child).__name__ for child in others.children]
+        # Remote's chip (#33) is there too, and shows only while Remote is on: off, as here,
+        # it takes no row.
+        inside = [type(child).__name__ for child in others.children if child.display]
+        order = [type(child).__name__ for child in others.children]
         return (
             sections,
             inside,
+            order,
             _shown(app.query_one(SettingsRow)),
             app.query_one(StatusLine).can_focus,
             app.query_one(UpdateRow).display,
         )
 
-    sections, inside, settings, focusable, offered = _drive(go)
+    sections, inside, order, settings, focusable, offered = _drive(go)
     assert sections == ["fleet-header", "projects-notice", "projects", "others"]
+    assert inside == ["SettingsRow", "StatusLine"]
     # The ⬆ row (tests/test_ui_update_row.py) sits between the two, and shows only while a
     # newer release is offered: never here, as the suite runs from a checkout, which the
     # release check never checks (services.updates.route_is_checked).
-    assert inside == ["SettingsRow", "UpdateRow", "StatusLine"]
+    assert order.index("SettingsRow") < order.index("UpdateRow") < order.index("StatusLine")
     assert offered is False
     assert settings == "⚙︎ Settings"  # ⚙ in its text (monotone) presentation
     assert not focusable
@@ -219,8 +231,42 @@ def test_the_keyboard_reaches_settings_and_walks_the_hubs_links_but_never_the_st
     keys, first, second, current = _drive(go)
     assert keys[-1] == SETTINGS_KEY and "" not in keys  # the status line is no row
     assert first == "hub-app-settings"  # opened from the keyboard: the first link has it
-    assert second == "hub-accounts"
-    assert current == "accounts"
+    assert second == "hub-remote"  # Remote control, then Captain, under App settings (#41)
+    assert current == "app-settings"
+
+
+def test_remote_control_and_captain_open_app_settings_on_their_own_tab_and_leave_the_hub() -> None:
+    """The owner's placement (#41): Remote in its own tab, the Captain box atop Agent
+    settings — and the hub still has one obvious way in to each, a link that lands there."""
+
+    async def go(pilot: Pilot[None]) -> dict[str, object]:
+        app = _app(pilot)
+        seen: dict[str, object] = {}
+        await pilot.click(app.query_one(SettingsRow))
+        await settle_page(app)
+        hub = app.query_one(SettingsHubView)
+        seen["hub holds"] = (len(hub.query(RemoteSection)), len(hub.query(CaptainToggle)))
+        for stem in ("remote", "captain"):
+            # From the other tab each time, so the link is what brings its tab forward.
+            if app.query("#app-settings"):
+                app.query_one("#app-settings-tabs", TabbedContent).active = PREFERENCES_TAB
+            await pilot.click(app.query_one(SettingsRow))
+            await settle_page(app)
+            await pilot.click(f"#hub-{stem}")
+            await settle_page(app)
+            tabs = app.query_one("#app-settings-tabs", TabbedContent)
+            seen[stem] = (app.content.current, app.sidebar.selected_key, tabs.active)
+        view = app.query_one(AppSettingsView)
+        seen["remote in"] = [node.id for node in view.query_one(RemoteSection).ancestors]
+        seen["captain first"] = view.query_one("#agent-settings").children[0].id
+        return seen
+
+    seen = _drive(go)
+    assert seen["hub holds"] == (0, 0)
+    assert seen["remote"] == ("app-settings", SETTINGS_KEY, REMOTE_TAB)
+    assert seen["captain"] == ("app-settings", SETTINGS_KEY, AGENT_TAB)
+    assert isinstance(seen["remote in"], list) and REMOTE_TAB in seen["remote in"]
+    assert seen["captain first"] == "settings-captain"
 
 
 def test_the_hub_is_titled_settings_and_says_what_each_link_opens() -> None:
@@ -231,14 +277,22 @@ def test_the_hub_is_titled_settings_and_says_what_each_link_opens() -> None:
         hub = app.query_one(SettingsHubView)
         return (
             _shown(hub.query_one("#settings-title", Static)),
-            [str(button.label) for button in hub.query(Button).results(Button)],
+            [str(button.label) for button in hub.query(".hub-link").results(Button)],
             [_shown(about) for about in hub.query(".hub-about").results(Static)],
         )
 
     title, links, about = _drive(go)
     assert title.endswith("Settings")
-    assert links == ["App settings", "Accounts", "Doctor", "Restart all…", "Stop all…"]
-    assert len(about) == 4 and all(about)  # the Fleet section's two share one line
+    assert links == [
+        "App settings",
+        "Remote control",
+        "Captain",
+        "Accounts",
+        "Doctor",
+        "Restart all…",
+        "Stop all…",
+    ]
+    assert len(about) == 6 and all(about)  # the Fleet section's two share one line
 
 
 # --- what the doctor found (review of #261, m9) ----------------------------------------

@@ -757,6 +757,22 @@ class UpdatesSettings(BaseModel):
     check: bool = True
 
 
+class UiSettings(BaseModel):
+    """``[ui]`` — how ``asq`` shows things to the person at it: the *User preferences* tab
+    of App settings.
+
+    ``always_show_project_path`` puts each project's directory (``~/work/api``) under its
+    name in the sidebar. Off, the default, the directory is shown only when two projects
+    share a name, to tell them apart.
+
+    Read from the config file alone, like ``[fleet]``: there is no ``AISQUARE_UI_*``
+    variable. ``asq`` reads it once at start and again when App settings saves, reloads
+    or resets — not on every refresh tick.
+    """
+
+    always_show_project_path: bool = False
+
+
 class AppConfig(BaseModel):
     """Root configuration object persisted at ``~/.aisquare/config.toml``."""
 
@@ -775,6 +791,7 @@ class AppConfig(BaseModel):
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
     experimental: ExperimentalSettings = Field(default_factory=ExperimentalSettings)
     persona: PersonaSettings = Field(default_factory=PersonaSettings)
+    ui: UiSettings = Field(default_factory=UiSettings)
 
 
 def _dumped(model: BaseModel) -> dict[str, Any]:

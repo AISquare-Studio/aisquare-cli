@@ -52,6 +52,7 @@ from tests.test_ui_spawn import (
     SpawnRecorder,
     drive,
     note,
+    open_advanced,
     receipt_for,
     select,
     settle,
@@ -230,6 +231,7 @@ def test_a_click_on_import_or_pick_during_a_spawn_opens_nothing_and_the_receipt_
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = []
+        await open_advanced(pilot)  # unfolded, or the click lands on nothing at all
         try:
             await spawn_and_hold(pilot, held)
             await pilot.click(button)
@@ -411,6 +413,7 @@ def test_new_account_on_a_dialog_that_is_not_spawning_still_leaves_for_the_accou
     """The control: with no spawn to wait for, *+ New account* is the navigation it was."""
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        await open_advanced(pilot)
         await pilot.click("#spawn-pick")
         await wait_for_screen(pilot, AttachTargetScreen)
         await settle(pilot)

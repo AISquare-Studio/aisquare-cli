@@ -17,9 +17,19 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
-from textual.widgets import Button, Input, Select, Static, Switch
+from textual.widgets import Button, Collapsible, Input, Select, Static, Switch, TabbedContent
 
-from aisquare.cli.ui.views.app_settings import AppSettingsView, ConfirmReset
+from aisquare.cli.ui.remote_control import RemoteController
+from aisquare.cli.ui.views.app_settings import (
+    AGENT_ADVANCED,
+    AGENT_TAB,
+    PREFERENCES_ADVANCED,
+    PREFERENCES_TAB,
+    REMOTE_TAB,
+    AppSettingsView,
+    ConfirmReset,
+    UiSettingsChanged,
+)
 from aisquare.core import paths
 from aisquare.core.config import AppConfig, load_config, overrides, save_config
 from aisquare.services import fleet as fleet_service
@@ -34,10 +44,17 @@ class AppHost(App[None]):
 
     def __init__(self) -> None:
         super().__init__()
+        self.remote = RemoteController()
+        """What ``FleetApp.remote`` is: the one Remote the *Remote* tab is a view over."""
         self.notices: list[tuple[str, str]] = []
+        self.ui_told: list[bool] = []
+        """``always_show_project_path`` of each ``UiSettingsChanged`` the form posted."""
 
     def compose(self) -> ComposeResult:
         yield AppSettingsView(id="app-settings")
+
+    def on_ui_settings_changed(self, event: UiSettingsChanged) -> None:
+        self.ui_told.append(event.ui.always_show_project_path)
 
     def notify(
         self,
@@ -110,16 +127,26 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml() -> None:
 
 
 def test_settings_rejects_a_bad_agent_cap_and_writes_nothing() -> None:
-    async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
+    """And shows the field: Save pressed from *User preferences* brings *Agent settings* to the
+    front with its *Advanced* open, where the agent cap is folded (#41)."""
+
+    async def scenario(
+        pilot: Pilot[None], host: AppHost
+    ) -> tuple[list[tuple[str, str]], str, bool]:
         await pilot.pause()
         host.query_one("#max-agents", Input).value = "0"
+        tabs = host.query_one("#app-settings-tabs", TabbedContent)
+        tabs.active = PREFERENCES_TAB
+        await settle(pilot)
         host.query_one("#save-settings", Button).press()
         await settle(pilot)
-        return host.notices
+        field = host.query_one("#max-agents", Input)
+        return host.notices, tabs.active, field.region.area > 0
 
-    notices = drive(scenario)
+    notices, active, field_shown = drive(scenario)
     assert any("at least 1" in m and severity == "error" for m, severity in notices), notices
     assert not paths.config_path().exists()  # a refused form never reaches the writer
+    assert (active, field_shown) == (AGENT_TAB, True), "the refused field, unfolded"
 
 
 def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_profile() -> None:
@@ -763,3 +790,227 @@ def test_the_form_says_why_it_lists_no_personas_when_they_cannot_be_read(
         "'/h/.aisquare/personas'"
     )
     assert prompts == ["(none)"]  # no names, and the form is still up
+
+
+# --- the two tabs and User preferences ---------------------------------------------------
+
+
+def test_the_form_opens_on_agent_settings_beside_a_user_preferences_tab() -> None:
+    """The roles, fleet and accounts are *Agent settings*, shown first; *User preferences*
+    holds *Always show project directory*, off by default, with its one line of why. Save,
+    Reload and Reset all sit under the tabs, on screen whichever is open."""
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> dict[str, object]:
+        tabs = host.query_one("#app-settings-tabs", TabbedContent)
+        seen: dict[str, object] = {
+            "labels": [
+                str(tabs.get_tab(pane).label) for pane in (AGENT_TAB, PREFERENCES_TAB, REMOTE_TAB)
+            ],
+            "active": tabs.active,
+            "agent fields": all(
+                host.query_one(f"#{AGENT_TAB}").query(wid)
+                for wid in ("#role-perm-coder", "#max-agents", "#accounts-pick")
+            ),
+            "switch": host.query_one("#ui-always-show-path", Switch).value,
+            "about": str(host.query_one("#ui-always-show-path-about", Static).render()),
+            "from a shell": str(host.query_one("#preferences-from-a-shell", Static).render()),
+            "in preferences": bool(
+                host.query_one(f"#{PREFERENCES_TAB}").query("#ui-always-show-path")
+            ),
+        }
+        tabs.active = PREFERENCES_TAB
+        await settle(pilot)
+        seen["buttons shown"] = all(
+            host.query_one(wid, Button).region.area > 0
+            for wid in ("#save-settings", "#reload-settings", "#reset-settings")
+        )
+        return seen
+
+    seen = drive(scenario)
+    assert seen["labels"] == ["Agent settings", "User preferences", "Remote"]
+    assert seen["active"] == AGENT_TAB
+    assert seen["agent fields"] is True
+    assert seen["in preferences"] is True
+    assert seen["switch"] is False, "off by default: the sidebar keeps today's rule"
+    assert seen["about"] == (
+        "Show each project's path under its name in the sidebar. "
+        "Off: shown only when two projects share a name."
+    )
+    assert seen["from a shell"] == (
+        "Set from a shell (aisquare config set ui.always_show_project_path true), a preference "
+        "shows after Reload here or when asq next starts, not live."
+    )
+    assert seen["buttons shown"] is True
+
+
+def test_always_show_project_directory_saves_itself_alone_and_tells_the_app() -> None:
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
+        await pilot.pause()
+        host.query_one("#ui-always-show-path", Switch).value = True
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return host.notices
+
+    host_notices = drive(scenario)
+    assert any(m.startswith("✓ settings saved") for m, _ in host_notices), host_notices
+    assert _config_toml()["ui"] == {"always_show_project_path": True}  # the bytes
+    assert overrides(load_config()) == {"ui": {"always_show_project_path": True}}, (
+        "nothing on the other tab was written"
+    )
+
+    async def reopened(pilot: Pilot[None], host: AppHost) -> tuple[bool, list[bool]]:
+        await pilot.pause()
+        shown = host.query_one("#ui-always-show-path", Switch).value
+        host.query_one("#max-agents", Input).value = "6"  # a change on the other tab
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return shown, host.ui_told
+
+    shown, told = drive(reopened)
+    assert shown is True, "the form opened on what the file holds"
+    assert told == [True], "the save told the app what [ui] holds now"
+    assert load_config().ui.always_show_project_path is True, "an untouched preference stands"
+    assert load_config().fleet.max_agents_per_project == 6
+
+
+def test_turning_the_preference_off_again_leaves_no_ui_table() -> None:
+    settings_service.set_value("ui.always_show_project_path", "true")
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> list[bool]:
+        await pilot.pause()
+        host.query_one("#ui-always-show-path", Switch).value = False
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return host.ui_told
+
+    assert drive(scenario) == [False]
+    assert "ui" not in _config_toml(), "the default is kept by leaving the key out"
+    assert load_config().ui.always_show_project_path is False
+
+
+def test_reload_reads_the_preference_a_shell_set_meanwhile() -> None:
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[bool, list[bool]]:
+        await pilot.pause()
+        settings_service.set_value("ui.always_show_project_path", "true")  # from a shell
+        host.query_one("#reload-settings", Button).press()
+        await settle(pilot)
+        return host.query_one("#ui-always-show-path", Switch).value, host.ui_told
+
+    assert drive(scenario) == (True, [True])
+
+
+def test_reload_over_an_unreadable_config_says_so_as_it_shows_the_defaults() -> None:
+    """#274 delta review 2, n2: every field, the Captain and ``[ui]`` reset to the defaults
+    when the file cannot be read, so Reload says why rather than resetting silently."""
+    settings_service.set_value("ui.always_show_project_path", "true")
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[bool, list[tuple[str, str]]]:
+        await pilot.pause()
+        paths.config_path().write_text("[ui\nnot toml", encoding="utf-8")  # broken meanwhile
+        host.query_one("#reload-settings", Button).press()
+        await settle(pilot)
+        return host.query_one("#ui-always-show-path", Switch).value, host.notices
+
+    shown, notices = drive(scenario)
+    assert shown is False, "the defaults, as the first open shows them"
+    [(said, severity)] = [notice for notice in notices if "unreadable" in notice[0]]
+    assert severity == "warning"
+    assert said.startswith("config unreadable — showing the defaults, nothing saved: ")
+
+
+def test_reset_all_turns_always_show_project_directory_off() -> None:
+    settings_service.set_value("ui.always_show_project_path", "true")
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[bool, bool, list[bool]]:
+        await pilot.pause()
+        before = host.query_one("#ui-always-show-path", Switch).value
+        host.query_one("#reset-settings", Button).press()
+        await settle(pilot)
+        host.screen.query_one("#reset-confirm", Button).press()
+        await settle(pilot)
+        return before, host.query_one("#ui-always-show-path", Switch).value, host.ui_told
+
+    before, after, told = drive(scenario)
+    assert (before, after) == (True, False)
+    assert told == [False], "the app is told the preference is off again"
+    assert not paths.config_path().exists() and load_config().ui.always_show_project_path is False
+
+
+#: Per tab, what shows as it opens (the owner's bare minimum, #41) and what its *Advanced*
+#: folds — the list posted to the board before the fold was built.
+IN_VIEW = {
+    AGENT_TAB: ("#captain-toggle", "#accounts-pick", "#accounts-on-limit"),
+    PREFERENCES_TAB: (
+        "#ui-always-show-path",
+        "#ui-always-show-path-about",
+        "#updates-check",
+        "#updates-check-about",
+    ),
+    REMOTE_TAB: ("#settings-remote-title",),
+}
+FOLDED = {
+    AGENT_TAB: (
+        "#role-perm-coder",
+        "#role-acct-coder",
+        "#escape-key",
+        "#max-agents",
+        "#worktree-dir",
+        "#native-teams",
+        "#accounts-switch-at",
+        "#accounts-wait-minutes",
+        "#accounts-share-trust",
+        "#accounts-share-settings",
+        "#agent-settings-note",
+    ),
+    PREFERENCES_TAB: ("#preferences-from-a-shell",),
+    REMOTE_TAB: ("#settings-remote-regen", "#settings-remote-write", "#settings-remote-auto-off"),
+}
+ADVANCED = {
+    AGENT_TAB: f"#{AGENT_ADVANCED}",
+    PREFERENCES_TAB: f"#{PREFERENCES_ADVANCED}",
+    REMOTE_TAB: "#settings-remote-advanced",
+}
+
+
+def test_each_tab_shows_the_bare_minimum_and_folds_the_rest_under_advanced() -> None:
+    """The fold (#41): what a new user needs shows, the rest is one click on *Advanced* away;
+    the Captain box tops *Agent settings*; Save, Reload and Reset all hide on *Remote*, whose
+    controls act at once, and come back on the form's tabs."""
+
+    def area(host: AppHost, wid: str) -> int:
+        return host.query_one(wid).region.area
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> dict[str, object]:
+        tabs = host.query_one("#app-settings-tabs", TabbedContent)
+        seen: dict[str, object] = {
+            "first": host.query_one("#agent-settings").children[0].id,
+        }
+        for tab in (AGENT_TAB, PREFERENCES_TAB, REMOTE_TAB):
+            tabs.active = tab
+            await settle(pilot)
+            seen[f"{tab} in view"] = [wid for wid in IN_VIEW[tab] if area(host, wid) == 0]
+            seen[f"{tab} folded"] = [wid for wid in FOLDED[tab] if area(host, wid) > 0]
+            seen[f"{tab} buttons"] = area(host, "#save-settings") > 0
+            host.query_one(ADVANCED[tab], Collapsible).collapsed = False
+            await settle(pilot)
+            hidden: list[str] = []
+            for wid in FOLDED[tab]:
+                host.query_one(wid).scroll_visible(animate=False)
+                await settle(pilot)
+                if area(host, wid) == 0:
+                    hidden.append(wid)
+            seen[f"{tab} unfolded"] = hidden
+        tabs.active = AGENT_TAB
+        await settle(pilot)
+        seen["buttons back"] = area(host, "#save-settings") > 0
+        return seen
+
+    seen = drive(scenario)
+    assert seen["first"] == "settings-captain"
+    for tab in (AGENT_TAB, PREFERENCES_TAB, REMOTE_TAB):
+        assert seen[f"{tab} in view"] == [], f"{tab}: shown as it opens"
+        assert seen[f"{tab} folded"] == [], f"{tab}: folded until Advanced is opened"
+        assert seen[f"{tab} unfolded"] == [], f"{tab}: shown once Advanced is opened"
+    assert (seen[f"{AGENT_TAB} buttons"], seen[f"{PREFERENCES_TAB} buttons"]) == (True, True)
+    assert seen[f"{REMOTE_TAB} buttons"] is False, "nothing on Remote for Save to save"
+    assert seen["buttons back"] is True

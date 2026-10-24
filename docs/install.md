@@ -138,7 +138,8 @@ editable install is never checked. To turn the check off:
 aisquare config set updates.check false
 ```
 
-or switch off *check daily* under App settings ▸ updates.
+or switch off *Check for a new release daily* under App settings ▸ User preferences
+▸ Updates.
 
 Remove it with `aisquare uninstall`. It takes aisquare's hooks out of Claude
 Code, then removes the package of a uv tool install, whatever it was installed

@@ -1885,3 +1885,31 @@ def test_the_limited_line_says_who_moves_the_agent() -> None:
     from aisquare.services import remote_needs
 
     assert remote_needs.LIMITED_EVENT_KINDS == team_service.LIMITED_KINDS
+
+
+@pytest.mark.parametrize("role", ["coder", "manager", "reviewer"])
+def test_a_session_start_reads_waiting_for_every_role_until_its_first_prompt(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """#123: the start upsert wrote `working`, and only the captain was set back to
+    `waiting`. A just-spawned idle agent then read busy for the row's whole fresh window,
+    `fleet tell` filed a note it never read, and an agent whose first prompt was never
+    submitted looked busy to everyone who could have reached it."""
+    monkeypatch.setenv("AISQUARE_ROLE", role)
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+
+    def state() -> str:
+        with store_session() as store:
+            session = store.get_session(CODER)
+            assert session is not None
+            return session.state
+
+    assert state() == "waiting"
+    _prompt(runner, CODER, work_dir)
+    assert state() == "working"
+    # A compaction can come mid-turn, so it keeps what the turn said (the control).
+    _start(runner, CODER, work_dir, source="compact")
+    assert state() == "working"
+    _start(runner, CODER, work_dir, source="resume")
+    assert state() == "waiting"

@@ -255,6 +255,11 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
         "fleet": {
             "first_prompt": "argv",
             "prompt_ack_seconds": 45.0,
+            # The idle check's quiet window (P0-W1b, #123).
+            "busy_quiet_seconds": 30,
+            # The delivery guards (P0-W2, #276).
+            "draft_quiet_seconds": 10.0,
+            "deliver_notes_at_turn_end": True,
             "roles": {
                 role: {"board_context": "none" if role == "reviewer" else "all"}
                 for role in ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")

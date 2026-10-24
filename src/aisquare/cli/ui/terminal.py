@@ -213,6 +213,7 @@ from aisquare.core.tmux_control import (
     StampUnknown,
     sent_stamp,
 )
+from aisquare.services import delivery
 from aisquare.services import fleet as fleet_service
 
 CURSOR = Style(reverse=True)
@@ -1260,6 +1261,9 @@ class TerminalPane(Widget, can_focus=True):
         self._held: list[_Input] | None = None
         """Input typed while :meth:`_recover_input` waits to run, in order; ``None`` when
         no recovery is waiting."""
+        self._leased: tuple[_ServerKey, str, float] | None = None
+        """The typing lease last touched: server, pane, and when (``time.monotonic``) —
+        once a second at most (:meth:`_typing`)."""
         self._resize_timer: Timer | None = None
         self._resize_retry: float = self.RESIZE_RETRY
         self._synced: tuple[str, int, int] | None = None
@@ -2581,6 +2585,8 @@ class TerminalPane(Widget, can_focus=True):
         pane_id, server = self.pane_id, self.server
         if pane_id is None or server is None:
             return False
+        if kind in ("key", "text", "paste"):
+            self._typing(server, pane_id)
         self._unconfirmed = False  # new input: the notice of the last recovery has been read
         link = self._control_link()  # first: finding the client ended begins a recovery
         if self._held is not None:
@@ -2607,6 +2613,19 @@ class TerminalPane(Widget, can_focus=True):
                 self._inflight.append(item)
                 return True
         return self._polled(_Input(0, server, pane_id, kind, value))
+
+    def _typing(self, server: TmuxServer, pane_id: str) -> None:
+        """Say someone is typing into this pane (``delivery.touch_typing_lease``): every fleet
+        write keeps out of it for ``[fleet] draft_quiet_seconds`` after the last key, a
+        nudge or a tell never typed into a draft the box reader cannot see (P0-W2, #276).
+        Once a second at most: a key reaches the screen in about a millisecond, and a file
+        touch per key would not."""
+        now = time.monotonic()
+        last = self._leased
+        if last is not None and last[:2] == (_server_key(server), pane_id) and now - last[2] < 1.0:
+            return
+        self._leased = (_server_key(server), pane_id, now)
+        delivery.touch_typing_lease(server, pane_id)
 
     def _over_pipe(self, link: _Control, item: _Input) -> bool:
         """``item`` down the pipe, stamped; False for a paste the pipe cannot carry."""

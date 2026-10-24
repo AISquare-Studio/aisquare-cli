@@ -100,10 +100,6 @@ that mode, Claude Code's classifier, not you, approves each tool call.
   on the first session. If no Python 3.11 to 3.13 is installed, uv first
   downloads a CPython build from Astral (python-build-standalone), unless uv's
   `python-downloads` setting (`UV_PYTHON_DOWNLOADS`) is `manual` or `never`.
-- **Snapshots.** Packing a snapshot (`aisquare init`, `aisquare project
-  onboard`) runs `npx --yes repomix` when no `repomix` is installed, which
-  fetches the latest Repomix from npm. With tiktoken installed, the first token
-  count downloads its encoding from OpenAI's blob store.
 - **Plan usage.** Wherever the CLI shows or checks a Claude account's plan
   usage, or picks an account by headroom, it reads that usage from Anthropic with the
   account's own sign-in.

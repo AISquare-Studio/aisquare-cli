@@ -23,8 +23,8 @@ instead of cold. The memory also works on its own, without the UI.
 ## Quickstart 1: memory only
 
 Needs [uv](https://docs.astral.sh/uv/) and
-[Claude Code](https://claude.com/claude-code); no installer, no tmux. Node 22+
-is optional and adds an on-demand codebase snapshot. Run `init` inside your repo:
+[Claude Code](https://claude.com/claude-code); no installer, no tmux. Run `init`
+inside your repo:
 
 ```sh
 UV_PYTHON_DOWNLOADS=automatic uv tool install --python 3.13 aisquare-cli
@@ -50,8 +50,8 @@ curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/i
 ```
 
 macOS, Linux and WSL2. It installs uv, a Python 3.13 for the CLI alone,
-`aisquare-cli`, tmux, gh, git, Node and Claude Code, then registers the git repo
-you ran it from and wires Claude Code's hooks. Running it again is a no-op.
+`aisquare-cli`, tmux, gh, git and Claude Code, offers Node for browser tools,
+then registers the git repo you ran it from and wires Claude Code's hooks. Running it again is a no-op.
 [Install](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/install.md)
 has the PowerShell line that sets up WSL2 on Windows, how to read the script
 before you run it, and how to install by hand.
@@ -115,7 +115,8 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 - Python 3.11+ if you install by hand (the one-liner brings its own 3.13).
 - [Claude Code](https://claude.com/claude-code) for the agents, and tmux 3.2+
   for the fleet.
-- Node 22+, optional, for a codebase snapshot packed on demand (`aisquare project onboard`).
+- Node 22.12+, optional, for browser tools like the Chrome DevTools MCP; the one-liner
+  offers it (`--with node` installs it without asking). aisquare itself never runs Node.
 
 The package is `aisquare-cli`; the command is `aisquare`, with `asq` as the
 short alias.

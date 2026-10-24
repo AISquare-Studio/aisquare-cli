@@ -428,7 +428,7 @@ figcaption { font-size: 11px; margin-top: 8px; }
         <h1>Govern a fleet of coding agents by talking to one of them.</h1>
         <p class="lede">Type <span class="mono" style="color:var(--ink)">asq</span> and you get one full-screen view over every project you have registered and every agent running in it. On the right sits a <strong>manager</strong> you task in prose. It turns your goal into contracts, spawns coders, testers and reviewers, reopens what fails, and posts <span class="mono">READY</span> with the PRs and the evidence &#8212; then stops, because the merge is a human's.</p>
         <div class="install"><span class="sig">$</span>curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh</div>
-        <p class="note">One line, on macOS, Linux and WSL2. It works out what the machine already has, installs only the gaps &#8212; uv, a private Python, tmux, git, <span class="mono">gh</span>, Node, Claude&nbsp;Code &#8212; registers the repo you ran it in, wires the hooks, and offers to open the UI. Run it again and it installs nothing.</p>
+        <p class="note">One line, on macOS, Linux and WSL2. It works out what the machine already has, installs only the gaps &#8212; uv, a private Python, tmux, git, <span class="mono">gh</span>, Claude&nbsp;Code &#8212; registers the repo you ran it in, wires the hooks, and offers to open the UI. Run it again and it installs nothing.</p>
       </div>
       <div style="display:flex;flex-direction:column;gap:18px">
         <div>
@@ -449,7 +449,7 @@ figcaption { font-size: 11px; margin-top: 8px; }
     <div class="layers">
       <div class="layer l1">
         <div><span class="lname">Memory</span><span class="ltag">everyone &#183; zero commands</span></div>
-        <p>Every session begins already oriented: a packed snapshot of the codebase, the context entries in scope, the project's prompt history. <strong>This half needs nothing else on this page.</strong> If you only ever use it, you are using aisquare correctly.</p>
+        <p>Every session begins already oriented: the context entries in scope, the project's prompt history. <strong>This half needs nothing else on this page.</strong> If you only ever use it, you are using aisquare correctly.</p>
       </div>
       <div class="layer l2">
         <div><span class="lname">Orchestration</span><span class="ltag">opt-in, per repo</span></div>
@@ -470,11 +470,11 @@ figcaption { font-size: 11px; margin-top: 8px; }
     <div class="head">
       <p class="eyebrow">the layer that works on its own</p>
       <h2>A blank agent is an expensive agent.</h2>
-      <p class="lede">Connecting Claude&nbsp;Code writes five lifecycle hooks into its settings &#8212; merged carefully, never clobbering yours. From then on every session opens on a directive pointing at a structure-only skeleton of the repo, your in-scope context, and what you have asked for here before.</p>
+      <p class="lede">Connecting Claude&nbsp;Code writes five lifecycle hooks into its settings &#8212; merged carefully, never clobbering yours. From then on every session opens on your in-scope context and what you have asked for here before.</p>
     </div>
 
     <figure>
-      <div class="figwrap"><svg viewBox="0 0 960 292" role="img" aria-label="Two timelines of a session's first minutes. Without aisquare the agent spends them on rediscovery — listing, grepping, reading files, asking questions and guessing conventions — before any work starts. With aisquare a single SessionStart hook hands it the packed snapshot, the context entries, the prompt history and prior decisions, and the work starts immediately.">
+      <div class="figwrap"><svg viewBox="0 0 960 292" role="img" aria-label="Two timelines of a session's first minutes. Without aisquare the agent spends them on rediscovery — listing, grepping, reading files, asking questions and guessing conventions — before any work starts. With aisquare a single SessionStart hook hands it the context entries, the prompt history and prior decisions, and the work starts immediately.">
   <defs>
     <marker id="cd-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
@@ -518,19 +518,19 @@ figcaption { font-size: 11px; margin-top: 8px; }
   <rect x="130" y="170" width="336" height="52" rx="2" fill="#5aa9ff" opacity="0.13"/>
   <rect x="130" y="170" width="336" height="52" rx="2" fill="none" stroke="#5aa9ff" stroke-width="1.4"/>
   <text x="144" y="192" fill="#5aa9ff" font-size="11" font-weight="700">SessionStart &#183; one payload</text>
-  <text x="144" y="208" fill="currentColor" opacity="0.75" font-size="10">skeleton &#183; context &#183; prompt history &#183; prior decisions</text>
+  <text x="144" y="208" fill="currentColor" opacity="0.75" font-size="10">context &#183; prompt history &#183; prior decisions</text>
 
   <rect x="470" y="170" width="470" height="52" rx="2" fill="#9fe33a" opacity="0.16"/>
   <rect x="470" y="170" width="470" height="52" rx="2" fill="none" stroke="#9fe33a" stroke-width="1.3"/>
   <text x="705" y="200" fill="#9fe33a" font-size="11.5" font-weight="700" text-anchor="middle" letter-spacing="0.05em">WORK</text>
-  <text x="130" y="236" fill="currentColor" opacity="0.5" font-size="10.5">the skeleton first, full file contents only on demand &#8212; an index of char</text>
-  <text x="130" y="250" fill="currentColor" opacity="0.5" font-size="10.5">offsets and token counts makes that one file, not the whole pack</text>
+  <text x="130" y="236" fill="currentColor" opacity="0.5" font-size="10.5">the conventions and decisions it needs arrive with the session, so its first</text>
+  <text x="130" y="250" fill="currentColor" opacity="0.5" font-size="10.5">tool call is the work, not a search for what this repo expects</text>
 
   <line x1="130" y1="266" x2="936" y2="266" stroke="currentColor" opacity="0.3" stroke-width="1" marker-end="url(#cd-a)"/>
   <text x="130" y="284" fill="currentColor" opacity="0.45" font-size="10" letter-spacing="0.12em">THE SESSION&#8217;S FIRST MINUTES</text>
 </svg>
 </div>
-      <figcaption><b>The same prompt, in the same repo, on the same model.</b> The skeleton comes first and full file contents only on demand; a per-file index of character offsets and token counts lets an agent open one file's slice of the pack instead of the whole thing.</figcaption>
+      <figcaption><b>The same prompt, in the same repo, on the same model.</b> What the repo expects arrives with the session, in your in-scope context, so an agent starts on the work instead of rediscovering it.</figcaption>
     </figure>
 
     <div class="duo">
@@ -546,7 +546,7 @@ figcaption { font-size: 11px; margin-top: 8px; }
         <p class="note">Nothing else is required reading. Context lives in two pools &#8212; <span class="mono">user</span> follows you everywhere, <span class="mono">project</span> is scoped to one repo &#8212; both searchable, exportable and injected consistently.</p>
       </div>
       <div style="display:flex;flex-direction:column;gap:20px">
-        <div class="pull">Set a repo's conventions up once and every worktree of it starts oriented.<span class="src">&#8212; identity comes from the git common dir, so branches checked out side by side share one context pool, one snapshot and one board</span></div>
+        <div class="pull">Set a repo's conventions up once and every worktree of it starts oriented.<span class="src">&#8212; identity comes from the git common dir, so branches checked out side by side share one context pool and one board</span></div>
         <div class="facts g2" style="border:1px solid var(--line)">
           <div><h4>Prompt history, per project</h4><p><span class="mono">aisquare log</span> is your own captured prompts &#8212; how <em>you</em> tend to ask, available to the next blank session.</p></div>
           <div><h4>Long-term recall</h4><p>Decisions and outcomes distil into a per-project brain off the hot path. <span class="mono">recall "what did we decide about auth?"</span> searches it across weeks.</p></div>
@@ -1222,7 +1222,7 @@ validator  <span class="c">fable&#8594;opus</span>          <span class="y">effo
   <rect x="690" y="30" width="250" height="116" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" opacity="0.5"/>
   <text x="704" y="52" fill="currentColor" font-size="12.5" font-weight="700" letter-spacing="0.07em">ONE SQLITE FILE</text>
   <text x="704" y="74" fill="currentColor" opacity="0.75" font-size="10.5">~/.aisquare/context.db &#183; WAL</text>
-  <text x="704" y="94" fill="currentColor" opacity="0.6" font-size="10">context &#183; snapshots &#183; prompts &#183; tasks</text>
+  <text x="704" y="94" fill="currentColor" opacity="0.6" font-size="10">context &#183; prompts &#183; tasks &#183; sessions</text>
   <text x="704" y="108" fill="currentColor" opacity="0.6" font-size="10">events &#183; sessions &#183; signals</text>
   <text x="704" y="130" fill="#9fe33a" opacity="0.9" font-size="10" font-weight="700">no daemon &#183; no account &#183; no cloud</text>
 
@@ -1270,7 +1270,7 @@ validator  <span class="c">fable&#8594;opus</span>          <span class="y">effo
         <h4><span class="dot"></span>Now &#183; v0.6.0</h4>
         <ul>
           <li>The fleet UI and the manager loop, end to end</li>
-          <li>Memory: two pools, packed snapshots, prompt history</li>
+          <li>Memory: two pools, prompt history</li>
           <li>Board: contracts, leased claims, receipts, signals</li>
           <li>Model ladder per role, probed, with effort offsets</li>
           <li>Several accounts driving one board</li>

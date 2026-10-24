@@ -31,7 +31,7 @@ concurrency-tested against racing parallel sessions):
 ├── fleet-tmux.conf  # the fleet's private tmux server config (regenerated, not yours)
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
-├── projects/     # per-project data — snapshot/ (Repomix pack), brain/ (gbrain)
+├── projects/     # per-project data — brain/ (gbrain), explainability-key
 ├── cache/        # disposable (e.g. last_injection.json)
 └── log/          # capture and diagnostic logs
 ```

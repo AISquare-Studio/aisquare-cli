@@ -1,5 +1,9 @@
 # One-line install — `curl … | sh` to a green doctor and the fleet UI
 
+> **Since then (#399):** the codebase snapshot and its packer are gone from the CLI,
+> with doctor's rows for them, so every mention of them below is history. `install.sh` keeps
+> its Node step as an opt-in extra for browser tools (`--with node`), with a 22.12 floor.
+>
 > **Status: IMPLEMENTED**, 2026-09-08, on this same branch. `install.sh`,
 > `install.ps1`, `tests/install/`, `.github/workflows/install.yml` and the three
 > doctor fixes of §6 are all in the tree. What the plan got WRONG is recorded in

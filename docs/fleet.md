@@ -1293,7 +1293,7 @@ and `Esc` clears the marks. Pinned projects and groups sit in a **📌 Pinned**
 section at the top, in pin order; a group header carries the roll-up of its
 members' agents, so a folded group still tells you something is running. A
 group shares **nothing**:
-context, prompts, snapshots, boards and explainability settings stay per
+context, prompts, boards and explainability settings stay per
 project, and deleting a group never deletes a project. Forgetting a project
 takes it out of its group and off the pin: added again, it comes back loose, at
 the end. The same layer from a shell, with the same store state:
@@ -1365,7 +1365,7 @@ remote; the slug is the task title lowercased, runs of anything but `[a-z0-9]`
 collapsed to `-`, clipped to 32 characters. A spawn without a task uses
 `fleet/<codename>/<label>`. Its worktree lives at
 `<repo>/.aisquare-worktrees/<label>`, excluded through `.git/info/exclude`, and
-shares the principal repo's board, context and snapshot for free — that is the
+shares the principal repo's board and context for free — that is the
 worktree resolution the memory layer already had. **A non-git project cannot
 have worktrees:** `fleet spawn coder --worktree` there refuses with
 "not a git repository — spawn without --worktree or pick a repo inside it",

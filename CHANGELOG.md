@@ -6,6 +6,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`install.sh` offers Node as an opt-in extra, for browser tools** (#399, the owner's
+  decision of 2026-10-24). Node 22.12+ is no longer installed for aisquare, which never
+  runs it, but for tools like the Chrome DevTools MCP (`npx chrome-devtools-mcp`, whose
+  floor 22.12 is). It is asked about with its own prompt, which defaults to no, or
+  chosen without asking with `--with node`; `--yes`, a run with no terminal and
+  `--no-system-deps` install no extra unless named. The extras are a list
+  (`OPTIONAL_EXTRAS`), so more can be added the same way. A machine without Node is
+  current, and the run exits 2 only when an extra you chose did not install. The script
+  registers no MCP server. It installs `aisquare-cli` without `--with tiktoken`.
+
+### Removed
+
+- **The codebase snapshot, and Repomix with it** (#399; the owner's decision of
+  2026-10-24: nothing on the AISquare platform reads a CLI pack). No pack is made,
+  read or reported, and the CLI never runs Node. `aisquare project onboard` keeps its
+  other job: the first run seeds one fact per marker it finds at the root, a plain
+  second run seeds nothing, and `--refresh` adds only the facts that are new; it starts
+  no process but the `git rev-parse` that finds the root. `init` makes no pack and says
+  nothing about one. Doctor's `repomix`, `tiktoken` and `snapshot` rows are gone, so a
+  machine with no Node and no tiktoken has nothing amber over them.
+  - **Old packs are deleted once**, by the first command that opens the store: every
+    `~/.aisquare/projects/<id>/snapshot/`, the aisquare home's included, and nothing
+    else (never `brain/`, never a symlink's target). It runs after the store's
+    migrations, because a store from 0.6 or older still reads a project's pack as the
+    mark of a project you added (#139): such a project stays listed, then its pack goes.
+  - **A `config.toml` with `[snapshot]` still loads.** Doctor's config row says the
+    section is no longer read (green), and the next save drops it.
+    `aisquare config get/set snapshot.*` answer `unknown config key`.
+  - **tiktoken** counted pack tokens and nothing else. The one-liner no longer adds it.
+    An install that has it (an older `install.sh`, or `--with tiktoken`) keeps a
+    harmless unused package: `aisquare upgrade` re-installs what the tool's receipt
+    names, and `uv tool install --force aisquare-cli` drops it.
+
 ### Added
 
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]

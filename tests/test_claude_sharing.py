@@ -1031,3 +1031,64 @@ def test_the_doctor_row_warns_on_a_part_a_slot_does_not_share_and_a_linked_proje
     assert row is not None and row.status.value == "warn"
     assert "slot 3 has no skills linked yet" in row.detail
     assert "slot 2's projects/ is a symlink" in row.detail
+
+
+# --- review of #360's minors -------------------------------------------------------------
+
+
+@pytest.mark.skipif(not can_symlink(), reason="needs symlinks")
+def test_sharing_a_part_the_plain_claude_has_none_of_keeps_the_slots_own_in_sight(
+    tmp_path: Path,
+) -> None:
+    """Linked to an empty skills/ the plain claude was given, a slot's own skills vanished
+    from it. What the slot has and the plain claude lacks goes there first, never over an
+    entry it has; the slot's own copy is kept beside as before."""
+    plain, slot = tmp_path / "plain", tmp_path / "slot"
+    (slot / "skills" / "deploy").mkdir(parents=True)
+    (slot / "skills" / "deploy" / "SKILL.md").write_text("mine\n")
+    (slot / "skills" / "review").mkdir()
+    (slot / "skills" / "review" / "SKILL.md").write_text("slot's review\n")
+    (plain / "skills" / "review").mkdir(parents=True)
+    (plain / "skills" / "review" / "SKILL.md").write_text("plain's review\n")
+
+    kept = sharing.link_part(slot, "skills", plain, now=NOW)
+
+    seen = slot / "skills"
+    assert (seen / "deploy" / "SKILL.md").read_text() == "mine\n", "the slot's own, in sight"
+    assert (seen / "review" / "SKILL.md").read_text() == "plain's review\n", "never over it"
+    assert kept is not None and (kept / "review" / "SKILL.md").read_text() == "slot's review\n"
+
+
+def test_a_differing_note_is_kept_under_a_name_that_stays_markdown(tmp_path: Path) -> None:
+    """The fallback was ``note.slotb.md-2``, which no longer reads as a .md, and the note
+    named the first candidate, not the file written."""
+    target, a, b = tmp_path / "shared", tmp_path / "a", tmp_path / "b"
+    for directory, body in ((a, "one\n"), (b, "two\n")):
+        directory.mkdir()
+        (directory / "note.md").write_text(body)
+    target.mkdir()
+    (target / "note.md").write_text("zero\n")
+    (target / "note.slotb.md").write_text("an older different copy\n")
+
+    notes = sharing.merge_memory([("slota", a), ("slotb", b)], target)
+
+    assert (target / "note.slota.md").read_text() == "one\n"
+    assert (target / "note.slotb-2.md").read_text() == "two\n"
+    assert ("slotb", "note.md differed: kept as note.slotb-2.md") in notes
+    assert sharing.merge_memory([("slotb", b)], target) == [], "the same bytes: kept once"
+
+
+def test_merging_memory_md_keeps_its_blank_lines(tmp_path: Path) -> None:
+    target, a, b = tmp_path / "shared", tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (a / "MEMORY.md").write_text("# Index\n\n- [one](one.md)\n\n- [two](two.md)\n")
+    (b / "MEMORY.md").write_text("# Index\n\n- [two](two.md)\n\n## Later\n\n- [three](three.md)\n")
+
+    sharing.merge_memory([("a", a), ("b", b)], target)
+
+    # The first index whole, blank lines and all; then what the second adds, its own blank
+    # lines kept between its new lines.
+    assert (target / "MEMORY.md").read_text() == (
+        "# Index\n\n- [one](one.md)\n\n- [two](two.md)\n## Later\n\n- [three](three.md)\n"
+    )

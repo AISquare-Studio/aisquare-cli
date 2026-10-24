@@ -24,12 +24,13 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import insights, orchestrator, paths, selfcli
+from aisquare.core import code_index, insights, orchestrator, paths, selfcli
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import spawn as spawn_core
 from aisquare.core.config import load_config
@@ -40,6 +41,7 @@ from aisquare.core.workspace import active_project
 from aisquare.models import FleetAgent, ProjectInfo, TeamSession
 from aisquare.services import auto_mode, ci_augment, install_route, quiet_compact
 from aisquare.services import claude_accounts as claude_accounts_service
+from aisquare.services import code as code_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import project as project_service
@@ -97,6 +99,7 @@ def session_start_context(
         recorded = project_service.tracked(store, project)
         stored = store.get_project(project.id) is not None
     directive = _directive(project.id, has_prompts=has_prompts)
+    _refresh_code_index(project)
     block = build_block(entries, project) if entries else ""
     team_block = (
         team_service.hook_session_start(
@@ -422,7 +425,35 @@ def _hand_over_if_configured(failure: team_service.TurnFailure, plan: _HandOverP
         )
 
 
-def _detach(argv: list[str]) -> None:
+CODE_REFRESH_EVERY_SECONDS = 60.0
+"""A session start refreshes a project's symbol index at most this often (#285)."""
+
+
+def _refresh_code_index(project: ProjectInfo) -> None:
+    """Start a detached incremental ``aisquare code index`` in ``project``'s root (#285).
+
+    Never inline: the refresh reads only files whose size or time moved, but it lists
+    the checkout with git, and this is the session-start path. Only where an index
+    exists (building one is ``onboard``'s or the operator's) and ``[code] enabled``,
+    and at most once a minute per project, by the mtime of a stamp beside the index:
+    a fleet starting ten agents starts one refresh. Silent on any failure.
+    """
+    try:
+        if not code_index.exists(project.id) or not code_service.settings().enabled:
+            return
+        stamp = code_index.code_dir(project.id) / "refreshed"
+        try:
+            if time.time() - stamp.stat().st_mtime < CODE_REFRESH_EVERY_SECONDS:
+                return
+        except FileNotFoundError:
+            pass
+        stamp.touch()
+        _detach(selfcli.argv_for(["--quiet", "code", "index"]), cwd=project.root)
+    except Exception:  # an index is optional; a session start never fails for it
+        return
+
+
+def _detach(argv: list[str], *, cwd: Path | None = None) -> None:
     """Start ``argv`` in its own session, no terminal, without this agent's own identity.
 
     Run inline, the hand-over died with its caller: the hook is a child of the
@@ -445,6 +476,7 @@ def _detach(argv: list[str]) -> None:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
         env=env,
+        cwd=cwd,
     )
 
 
@@ -728,6 +760,13 @@ def _directive(project_id: str, *, has_prompts: bool) -> str:
             f"- Per-file index into the skeleton (char offsets + token counts): {snap.index_path}",
             f"- Skeleton (structure + signatures): {snap.skeleton_path}",
             "Open source files directly for implementation detail.",
+        ]
+    if code_index.exists(project_id):
+        # The symbol index (#285): two lines at most, and only where there is one to ask.
+        lines += [
+            "Before grepping, ask the symbol index: `aisquare code find <name>`, "
+            "`aisquare code refs <name>`;",
+            "before writing a helper, run `aisquare code similar <name>` for one that exists.",
         ]
     if has_prompts:
         lines.append(

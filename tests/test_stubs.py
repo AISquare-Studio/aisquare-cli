@@ -77,6 +77,10 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "gate",
         )
     ),
+    ("code", "find"),
+    ("code", "refs"),
+    ("code", "similar"),
+    ("code", "index"),
     ("accounts", "share"),
     ("explainability", "status"),
     ("explainability", "env"),

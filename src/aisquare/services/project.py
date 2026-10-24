@@ -1016,7 +1016,30 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
                     store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
                 )
     snapshot, note = _ensure_snapshot(project, refresh=refresh)
-    return OnboardReport(seeded=seeded, snapshot=snapshot, snapshot_note=note)
+    return OnboardReport(
+        seeded=seeded,
+        snapshot=snapshot,
+        snapshot_note=note,
+        code_index=_ensure_code_index(project, refresh=refresh),
+    )
+
+
+def _ensure_code_index(project: ProjectInfo, *, refresh: bool) -> str | None:
+    """Build or refresh the symbol index (#285), as one line for the report; ``None`` when
+    ``[code] enabled`` is off. Incremental unless ``refresh``; never fails the onboard."""
+    from aisquare.services import code as code_service  # lazy: onboard imports this module
+
+    if not code_service.settings().enabled:
+        return None
+    try:
+        built = code_service.build_index(project, full=refresh)
+    except Exception as exc:  # an index is optional; the onboard is not
+        return f"not built ({exc}) — retry with `aisquare code index`"
+    line = f"{built.symbols} symbols in {built.files} files ({built.seconds:.1f}s)"
+    if built.not_indexed:
+        missing = ", ".join(f"{lang} {n}" for lang, n in sorted(built.not_indexed.items()))
+        line += f"; not indexed: {missing}"
+    return line
 
 
 def snapshot_settings() -> SnapshotSettings:

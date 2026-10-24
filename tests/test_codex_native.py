@@ -375,6 +375,22 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
                     "capture-pane", "-p", "-t", receipt.agent.pane_id
                 )
                 assert status.session.agent == "codex"
+                # Its Stop hook says waiting before its screen is at rest (the store test's
+                # `at_rest`): the tell waits for its empty prompt, its pane quiet 2 s, as a tell
+                # in between is rightly refused (1 of 5 live runs under load).
+                codex_screen = screen_of(get_adapter("codex"))
+
+                def at_rest() -> bool:
+                    pane = receipt.agent.pane_id
+                    rows = srv.run("capture-pane", "-p", "-t", pane).splitlines()
+                    facts = srv.pane_facts(pane)
+                    output = None if facts is None else facts.last_output
+                    quiet = output is not None and datetime.now(UTC) - output > timedelta(seconds=2)
+                    return codex_screen.ready(rows) and quiet
+
+                deadline = time.monotonic() + 20
+                while not at_rest() and time.monotonic() < deadline:
+                    time.sleep(0.2)
                 assert fleet.tell(
                     project, receipt.agent.label, "second interactive fixture"
                 ).delivered

@@ -87,7 +87,7 @@ aisquare doctor                        # is everything wired? (and how to fix an
 One agent above every project: the **captain** runs every fleet for you, and you
 talk to it, typed or spoken. `aisquare captain` starts it (or attaches to it),
 and `aisquare captain say "what is up"` asks it what needs you, across every
-board. Every effect is one of its 24 tools, each leaving one audit event with
+board. Every effect is one of its 26 tools, each leaving one audit event with
 your words; `stop`, `spawn` and `restart` happen only when your words name what
 they act on, and a refusal is said, never faked.
 

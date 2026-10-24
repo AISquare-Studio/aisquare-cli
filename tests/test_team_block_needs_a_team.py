@@ -300,17 +300,22 @@ def test_a_plain_agent_with_a_persona_is_a_member_in_both_places(
     assert "<aisquare-team>" in _start(runner, SOLO, work_dir)
 
 
-def test_the_mcp_servers_own_row_is_no_teammate(runner: CliRunner, work_dir: Path) -> None:
-    """#45, m1, the reviewer's repro: a solo session calls ``team_board()``, which writes the
-    MCP server's own row (``mcp:<client>:<project>``). Read as a live teammate, it brought
-    the session the board on its next prompt, a new role-less session read a team, and the
-    server's instructions turned TEAM, for ``_STALE_AFTER``."""
+def test_the_mcp_servers_own_row_is_no_teammate(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#45, m1, the reviewer's repro: a solo session calls ``team_board()``, which writes its
+    own MCP server's row. Read as a live teammate, it brought the session the board on its
+    next prompt, a new role-less session read a team, and the server's instructions turned
+    TEAM, for ``_STALE_AFTER``. Its server is the one Claude Code started for it, which says
+    so (``CLAUDE_CODE_SESSION_ID``, #48)."""
     _team_on(runner)
     assert "<aisquare-team>" not in _start(runner, SOLO, work_dir)
+    monkeypatch.setenv(team_service.HOST_SESSION_ENV, SOLO)  # SOLO's own MCP server
     mcp_server.team_board()
+    monkeypatch.delenv(team_service.HOST_SESSION_ENV)
     with store_session() as store:
         ids = [s.id for s in store.team_sessions(current_project().id)]
-    assert any(i.startswith(team_service.CLIENT_SESSION_PREFIX) for i in ids), ids
+    assert any(team_service.hosting_session(i) == SOLO for i in ids), ids
 
     assert _prompt(runner, SOLO, work_dir) == ""
     # The session ends; the server's row stays live. The next client's server, and the next
@@ -357,3 +362,42 @@ def test_a_pruned_solo_session_leaves_no_unbriefed_mark(runner: CliRunner, work_
     assert [pruned.id for pruned in report.pruned] == [SOLO]
     with store_session() as store:
         assert store.get_meta(team_service._unbriefed(SOLO)) is None
+
+
+# --- #48: a remote teammate over `aisquare serve` is a member (final review MAJOR-1) ----
+
+
+@pytest.mark.parametrize(
+    "client",
+    [
+        {"AISQUARE_SERVE_CLIENT": "desktop", "AISQUARE_SERVE_ROLE": "browser-debugger"},
+        {"AISQUARE_SERVE_ROLE": "browser-debugger"},
+        {},  # Claude Desktop over `serve --stdio`, no name set: `mcp:remote:<project>`
+        {team_service.HOST_SESSION_ENV: "eeee5555-0000-0000-0000-000000000000"},
+    ],
+    ids=["named client", "a role set", "nameless desktop", "a claude code session, no hooks"],
+)
+def test_a_remote_teammate_over_serve_makes_the_board_a_team(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, client: dict[str, str]
+) -> None:
+    """The final review's MAJOR-1: #46 skipped every ``mcp:`` row, and a remote teammate's
+    row is one (docs/orchestration.md, *Remote agents over MCP*). A hand-run session beside
+    it read solo: no block, the SOLO line, nothing on its prompts. Only a Claude Code
+    session's own server row, whose session is on the board, is skipped; a hosting session
+    with no row of its own (aisquare's hooks not installed) has only that row, and counts."""
+    _team_on(runner)
+    assert "<aisquare-team>" not in _start(runner, SOLO, work_dir)  # alone, before it
+
+    for name, value in client.items():
+        monkeypatch.setenv(name, value)
+    mcp_server.note_add("checking the login page")  # the remote teammate works
+    for name in client:
+        monkeypatch.delenv(name)
+
+    assert "<aisquare-team>" in _prompt(runner, SOLO, work_dir), "the board, once a team forms"
+    # SOLO ends: the remote teammate's row alone is on the board, and it is a team for the
+    # next client's server and the next hand-run session.
+    ended = json.dumps({"cwd": str(work_dir), "session_id": SOLO, "reason": "exit"})
+    assert runner.invoke(app, ["hook", "session-end"], input=ended).exit_code == 0
+    assert mcp_server.server_instructions() == mcp_server.TEAM_INSTRUCTIONS
+    assert "<aisquare-team>" in _start(runner, OTHER, work_dir)

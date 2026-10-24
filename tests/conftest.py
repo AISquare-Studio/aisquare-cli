@@ -195,6 +195,10 @@ AMBIENT_ENV_VARS = (
     # (`core.claude_accounts.keychain_service`), which it hands to the teammates it
     # spawns: a suite run from one of those would name every account's item after it.
     "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    # Claude Code hands it to the MCP servers it starts, and to every shell a session runs:
+    # a suite run from inside Claude Code would name every virtual MCP row after that
+    # session (`mcp_server.client_session_id`, #48).
+    "CLAUDE_CODE_SESSION_ID",
     "AISQUARE_TEAM",
     "AISQUARE_ROLE",
     # Exported by `launch --persona`; a fleet agent running the suite has one.

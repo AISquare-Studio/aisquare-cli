@@ -91,14 +91,23 @@ _log = logging.getLogger(__name__)
 
 
 def client_session_id(project_id: str) -> str:
-    """The virtual team-session id remote calls act as, scoped per project.
+    """The virtual team-session id remote calls act as, scoped per project: the named
+    client's (``AISQUARE_SERVE_CLIENT``), else the hosting Claude Code session's
+    (``mcp:cc-<session id>``, :data:`~aisquare.services.team.HOST_SESSION_ENV`), else
+    ``remote``.
 
     A global id would pin the session row to the first project ever served —
     every other project's board would render the remote unattributed while
     the first kept a phantom live session forever.
     """
-    client = os.environ.get("AISQUARE_SERVE_CLIENT", "").strip() or "remote"
-    prefix = team_service.CLIENT_SESSION_PREFIX  # which the board's team test skips
+    client = os.environ.get("AISQUARE_SERVE_CLIENT", "").strip()
+    if not client:
+        # Started by a Claude Code session for its own tools: its row says whose, so the
+        # board's team test can tell it from a remote teammate's (#48). Any other client
+        # with no name (Claude Desktop) is "remote", a teammate.
+        host = os.environ.get(team_service.HOST_SESSION_ENV, "").strip()
+        client = f"{team_service.HOSTED_CLIENT}{host}" if host else "remote"
+    prefix = team_service.CLIENT_SESSION_PREFIX
     return f"{prefix}{client}:{project_id.removeprefix('prj_')[:6]}"
 
 

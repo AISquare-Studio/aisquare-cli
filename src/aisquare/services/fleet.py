@@ -103,7 +103,14 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import auto_mode, delivery, explainability_ops, install_route, pane_idle
+from aisquare.services import (
+    auto_mode,
+    autostop,
+    delivery,
+    explainability_ops,
+    install_route,
+    pane_idle,
+)
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import project as project_service
@@ -3285,7 +3292,7 @@ def spawn(
     # switch: `_respawn(takes_over=True)`): its own seat and memory are freed as it
     # starts, and refused after the stop, the agent was lost (review of #323).
     if admit and not experimental.captain_role(role):
-        notes.extend(_admit(config))
+        notes.extend(_admit_or_make_room(config))
     # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
     # 5/8), and the refusals above need neither.
     board, hub = (
@@ -4630,6 +4637,27 @@ def _admit(config: FleetSettings) -> list[str]:
     return notes
 
 
+def _admit_or_make_room(config: FleetSettings) -> list[str]:
+    """:func:`_admit`; refused, and with ``[fleet] auto_stop_finished`` on, stop the workers
+    that have finished on every project and ask once more (P2-W1b, #283). A seat a finished
+    tester still held was a refusal the manager then had to stop it for. Whatever was stopped
+    is said in the notes; refused again, the second refusal is the answer."""
+    try:
+        return _admit(config)
+    except CapacityRefused:
+        if not config.auto_stop_finished:
+            raise
+        stopped = [
+            item.verdict
+            for item in autostop.reap_finished(autostop.every_project())
+            if item.stopped
+        ]
+        if not stopped:
+            raise
+    made = ", ".join(f"{v.agent.label} ({v.reason})" for v in stopped)
+    return [f"stopped finished workers to make room: {made}", *_admit(config)]
+
+
 def _said(head: memory_core.Headroom) -> str:
     available = f"{head.available_mb} MB available" if head.available_mb is not None else ""
     psi = f"PSI some avg10 {head.psi_some_avg10:g}" if head.psi_some_avg10 is not None else ""
@@ -5833,12 +5861,15 @@ def stop(
     nudge: bool = True,
     live_only: bool = False,
     actor: str | None = None,
+    reason: str | None = None,
 ) -> StopReceipt:
     """``/exit`` the agent named ``label``, wait ``grace`` seconds, then kill its window.
 
     Resolves the LIVE row by label and hands it to :func:`_stop_row`; the
     documentation of what a stop is — and of ``handover`` — lives there. ``actor`` is who
-    asked (``fleet stop --as``; ``user`` for asq or a shell with no session).
+    asked (``fleet stop --as``; ``user`` for asq or a shell with no session). ``reason`` is
+    why, said on the ``agent_exited`` beside the actor and kept in its ``meta``: unlike a
+    ``why``, it wakes nobody (``auto-stop``'s, P2-W1b).
 
     With no live row, an ENDED agent's window may still be on the server
     (``remain-on-exit``), which is what the UI's 💤 row and its Stop button
@@ -5875,7 +5906,14 @@ def stop(
                 raise  # no such row, or no window of its own left (gone, or a reused id)
             return StopReceipt(ended, [])
     return _stop_row(
-        project, agent, force=force, grace=grace, handover=handover, nudge=nudge, actor=actor
+        project,
+        agent,
+        force=force,
+        grace=grace,
+        handover=handover,
+        nudge=nudge,
+        actor=actor,
+        reason=reason,
     )
 
 
@@ -5888,6 +5926,7 @@ def _stop_row(
     handover: bool = False,
     nudge: bool = True,
     actor: str | None = None,
+    reason: str | None = None,
 ) -> StopReceipt:
     """``/exit`` the agent in ``agent``'s pane, wait ``grace`` seconds, then kill its window.
 
@@ -6120,7 +6159,7 @@ def _stop_row(
         if not handover:
             released, release_failed = _release_or_say(store, ended, why="agent stopped")
             wakes = _emit_exit(
-                store, ended, actor=actor, force=force, released=len(released)
+                store, ended, actor=actor, force=force, released=len(released), reason=reason
             ) and not _managers_own(store, ended, actor)
     # Outside the store session, as ``reap`` does: the nudge types into a pane
     # and must not hold the write lock the woken manager's own hooks will want.
@@ -9518,9 +9557,12 @@ def _emit_exit(
     actor: str | None = None,
     force: bool = False,
     released: int = 0,
+    reason: str | None = None,
 ) -> bool:
     """The ``agent_exited`` board event (§7.3), with ``why`` after the status when the
     status does not say it all; whether it wakes the manager (``team.exit_wakes``).
+    ``reason`` is why its stopper stopped it (``auto-stop``'s finished verdict, P2-W1b):
+    said after the actor and kept as ``meta.reason``, it is not a ``why`` and wakes nobody.
 
     P1 WS-2 (#279): ``actor`` is who stopped it (a session id, ``user``, ``usage-limit``;
     ``None`` for its own exit or a death found), named in the text — ``coder-auth exited
@@ -9534,7 +9576,10 @@ def _emit_exit(
         "released": released,
         "why": why,
     }
+    if reason is not None:
+        meta["reason"] = reason
     by = f" — stopped by {_actor_name(store, actor)}" if actor is not None else ""
+    by += f" ({reason})" if reason else ""
     text = (
         f"{agent.label} exited ({status})"
         + (f": {why}" if why else "")

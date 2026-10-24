@@ -1107,6 +1107,30 @@ _GATE_LINE = (
 )
 
 
+def _auto_stop_line() -> list[str]:
+    """The manager's line on auto-stop (P2-W1b, #283): the fleet stops these itself. None
+    while ``auto_stop_finished`` is off."""
+    roles = _auto_stop_roles()
+    if not roles:
+        return []
+    return [
+        f"Finished workers of these roles stop by themselves ({', '.join(roles)}; the exit "
+        "says auto-stop): stop the others, coders included, yourself."
+    ]
+
+
+def _auto_stop_roles() -> list[str]:
+    """``[fleet] auto_stop_roles`` while ``auto_stop_finished`` is on, else none (#283). An
+    unreadable config names none."""
+    try:
+        from aisquare.core.config import load_config
+
+        fleet = load_config().fleet
+    except Exception:
+        return []
+    return list(fleet.auto_stop_roles) if fleet.auto_stop_finished else []
+
+
 def _test_gate_on() -> bool:
     """Whether ``[fleet] test_gate_mb`` is set (#283): only then do the checking roles'
     cycles name ``fleet gate``. An unreadable config names nothing."""
@@ -1272,6 +1296,7 @@ def _role_cycle_core(
             "and removes the agent's worktree once its work is pushed. When the validator's",
             f"gate is PASS: `{fleet('reap')}` again, then",
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
+            *_auto_stop_line(),
             "Never write code. Never merge. Blocked twice on one task? Ask the human:",
             f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',
             "(coder-auth, not coder-2).",

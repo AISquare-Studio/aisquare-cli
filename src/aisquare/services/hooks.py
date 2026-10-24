@@ -219,7 +219,27 @@ def turn_stopped(
     # Last, and it swallows its own errors too: auto-mode refusals in the
     # transcript's tail put the row in attention with one board line (#150).
     auto_mode.record_refusals(session_id)
+    if decision is None:
+        _arm_auto_stop(session_id)
     return decision
+
+
+def _arm_auto_stop(session_id: str) -> None:
+    """A fleet worker's Stop arms its auto-stop (P2-W1b, #283): ``autostop.arm`` writes the
+    turn's token and starts the worker when the agent may have finished. Never costs a
+    Stop: it swallows its own errors. Imported here, not at the top: a Stop of any agent
+    imports this module, and the auto-stop is only a fleet worker's."""
+    with contextlib.suppress(Exception):
+        from aisquare.services import autostop
+
+        autostop.arm(session_id, detach=_detach)
+
+
+def auto_stop(session_id: str, *, after: float, token: str) -> str:
+    """The auto-stop's worker (``aisquare hook auto-stop``): see :func:`autostop.check`."""
+    from aisquare.services import autostop
+
+    return autostop.check(session_id, after=after, token=token)
 
 
 def needs_attention(

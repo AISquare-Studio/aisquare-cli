@@ -265,6 +265,10 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "min_free_mb": 2048,
             "test_gate_mb": 0,
             "test_gate_wait_minutes": 15,
+            # Auto-stop of finished workers (P2-W1b, #283).
+            "auto_stop_finished": True,
+            "auto_stop_idle_minutes": 5.0,
+            "auto_stop_roles": ["tester", "reviewer", "validator", "ui-tester"],
             "deny_tools": list(FLEET_DENY_TOOLS),
             "first_prompt": "argv",
             "prompt_ack_seconds": 45.0,

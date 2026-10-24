@@ -1080,7 +1080,7 @@ def _role_cycle_core(
             "by itself at the reset the event names. Usage figures are the share USED",
             "(40% used = 60% left); headroom is what is left. An agent whose task is done,",
             "with no queued task that fits it:",
-            f"`{fleet('stop')} <label>`, then `{fleet('reap')}` — it records the exit",
+            f"`{fleet('stop')} <label> --as {sid}`, then `{fleet('reap')}` — it records the exit",
             "and removes the agent's worktree once its work is pushed. When the validator's",
             f"gate is PASS: `{fleet('reap')}` again, then",
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',

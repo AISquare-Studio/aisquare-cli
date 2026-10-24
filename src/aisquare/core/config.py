@@ -306,6 +306,11 @@ class FleetRoleSettings(BaseModel):
     """The persona every spawn of this role gets unless ``--persona`` names another
     (docs/plans/spawn-personas.md §3.8). Checked at spawn, not at load: a name the
     project does not have refuses the spawn with this key in the message."""
+    board_context: Literal["all", "relevant", "none"] = "all"
+    """What of the board an agent of this role reads (P1 WS-2, #279): ``all``; ``relevant``
+    (its own tasks, what is addressed to it, decisions); ``none`` (no recent updates at
+    start and no per-prompt deltas — the reviewer's default, so it judges a change cold).
+    ``fleet spawn --board-context`` overrides it per spawn. A manager reads ``all``."""
 
 
 def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
@@ -334,7 +339,9 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
         "manager": FleetRoleSettings(),
         "coder": FleetRoleSettings(worktree=True),
         "tester": FleetRoleSettings(),
-        "reviewer": FleetRoleSettings(worktree=True, extra_args=list(REVIEWER_ARGS)),
+        "reviewer": FleetRoleSettings(
+            worktree=True, extra_args=list(REVIEWER_ARGS), board_context="none"
+        ),
         "validator": FleetRoleSettings(),
         "ui-tester": FleetRoleSettings(),
     }

@@ -69,6 +69,7 @@ aisquare
 │                                 [--effort LEVEL] · harness
 │                   bind <role> [--bin CMD] [--env KEY=VALUE]… [--arg A]…
 │                               [--unset KEY] [--account A] [--clear-account] [--clear]
+│                   show <seq>   — one board event in full (author, actor, task, details)
 ├── task            add · list · show · next [--role R] [--status S] [--claim]
 │                   claim · review [--note] · reopen --reason · done [--note]
 │                   block --reason · drop · release        (all with [--as SESSION])
@@ -85,8 +86,9 @@ aisquare
 │                   install-page <dist>   — the fleet on your phone (docs/remote.md)
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
 │                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]
-│                             [-- agent args]
-│                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
+│                             [--board-context all|relevant|none] [-- agent args]
+│                   ls [--all] · status · tell <label> <text>
+│                   stop <label> [--force] [--as SESSION]
 │                   restart <label> [--fresh] [--permission-mode M]
 │                   switch <label> [--to A] [--fresh] [--reason R]
 │                   shutdown [--all] [--yes] [--force] [--forget] · attach

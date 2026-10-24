@@ -188,9 +188,10 @@ def _persona_system_prompt(
     alone may not (docs/plans/spawn-personas.md §9; gh #210). Claude Code takes the block's
     file (``--append-system-prompt-file``); Codex takes its text as ``-c
     developer_instructions=…`` after the operator's own, from the config dir this launch
-    runs in. The system prompt is the LAUNCH's, for the life of the process: ``/clear``
-    keeps it, and a persona attached since (``persona attach``) reaches the agent through
-    the hook alone, which briefs the persona the fleet row names at every session start. A
+    runs in and the trusted project it runs in. The system prompt is the LAUNCH's, for the
+    life of the process: ``/clear`` keeps it, and a persona attached since (``persona
+    attach``) reaches the agent through the hook alone, which briefs the persona the fleet
+    row names at every session start. A
     restart replays the row's persona, so the two agree again from it on (review of #240),
     except on an agent whose resumed thread keeps its first system prompt
     (``capabilities.resume_keeps_system_prompt``: Codex's). ``[persona] system_prompt =
@@ -224,7 +225,8 @@ def _persona_system_prompt(
     digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:12]
     path = paths.aisquare_home() / "cache" / "persona-prompts" / f"{name}-{digest}.md"
     adapter = selected.adapter
-    seam = adapter.system_prompt_args(path, block, args, agent_launch._launch_home(selected, env))
+    home = agent_launch._launch_home(selected, env)
+    seam = adapter.system_prompt_args(path, block, args, home, cwd=Path.cwd())
     if seam is None:
         stderr_console().print(
             f"persona {name}: no system-prompt seam for {adapter.label} on this launch (it "

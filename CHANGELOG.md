@@ -196,8 +196,9 @@ adapter.**
   the adapter slots `system_prompt_args`, `skill_dirs`, `headless_call` and
   `headless_answer`, so a third agent needs no edit in the persona code):
   - `launch --persona` on Codex adds the block as `-c developer_instructions=…`
-    after the operator's own `developer_instructions` from its config layers,
-    which that `-c` would otherwise drop (measured on 0.162.1: the value lands in
+    after the operator's own `developer_instructions` from its config layers (a
+    trusted project's `.codex/config.toml` among them), which that `-c` would
+    otherwise drop (measured on 0.162.1: the value lands in
     the request's developer message). A `-c developer_instructions=` on the
     operator's line wins. The seam is the bound agent's whatever its binary is
     called: a wrapper bound as Claude Code gets Claude Code's flag, as it gets the

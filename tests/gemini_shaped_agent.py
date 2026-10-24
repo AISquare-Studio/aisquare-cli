@@ -601,7 +601,7 @@ class GeminiShapedAdapter:
         return []
 
     def system_prompt_args(
-        self, block: Path, text: str, args: Sequence[str], home: Path
+        self, block: Path, text: str, args: Sequence[str], home: Path, *, cwd: Path
     ) -> list[str] | None:
         return None  # GEMINI_SYSTEM_MD replaces its prompt: no seam beside it
 

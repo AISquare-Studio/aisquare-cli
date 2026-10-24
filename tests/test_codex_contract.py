@@ -568,18 +568,52 @@ def test_the_persona_is_codexs_developer_instructions_after_the_operators_own(
     home = _home(tmp_path)
     block = tmp_path / "block.md"
     text = 'Persona "skeptic":\n\tline two \\ ✓ \x7f'
-    assert _developer_instructions(codex.system_prompt_args(block, text, [], home)) == text
+    assert (
+        _developer_instructions(codex.system_prompt_args(block, text, [], home, cwd=tmp_path))
+        == text
+    )
     (home / "config.toml").write_text(
         'developer_instructions = """\nAlways answer in English.\n"""\n', encoding="utf-8"
     )
-    seam = codex.system_prompt_args(block, text, [], home)
+    seam = codex.system_prompt_args(block, text, [], home, cwd=tmp_path)
     assert _developer_instructions(seam) == f"Always answer in English.\n\n{text}"
     (home / "work.config.toml").write_text(
         'developer_instructions = "Work rules."\n', encoding="utf-8"
     )
-    seam = codex.system_prompt_args(block, text, ["-p", "work"], home)
+    seam = codex.system_prompt_args(block, text, ["-p", "work"], home, cwd=tmp_path)
     assert _developer_instructions(seam) == f"Work rules.\n\n{text}"
     assert str(block) not in " ".join(seam or []), "Codex takes the text, not the file"
+
+
+def test_the_persona_keeps_a_trusted_projects_developer_instructions(tmp_path: Path) -> None:
+    """Review r17 of #113, finding 7: the seam's ``-c`` replaces every layer's value, so it
+    carries the one Codex would have used: a trusted project's ``.codex/config.toml`` over
+    the user's and the profile's, the folder nearest ``cwd`` over its root's (measured on
+    0.162.1 and 0.164.0). An untrusted project's is not read, as Codex reads none."""
+    home = _home(tmp_path)
+    (home / "config.toml").write_text('developer_instructions = "User rules."\n', encoding="utf-8")
+    (home / "work.config.toml").write_text('developer_instructions = "Work."\n', encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "sub" / ".codex").mkdir(parents=True)
+    (repo / ".codex").mkdir()
+    (repo / ".codex" / "config.toml").write_text(
+        'developer_instructions = "Never push to main."\n', encoding="utf-8"
+    )
+    block, text = tmp_path / "block.md", "Persona."
+
+    def seam(*args: str, cwd: Path = repo) -> str:
+        return _developer_instructions(codex.system_prompt_args(block, text, args, home, cwd=cwd))
+
+    assert seam() == f"User rules.\n\n{text}", "untrusted: the project's is not read"
+    _trust(home, repo)
+    assert seam() == f"Never push to main.\n\n{text}"
+    assert seam("-p", "work") == f"Never push to main.\n\n{text}", "over the profile too"
+    (repo / "sub" / ".codex" / "config.toml").write_text(
+        'developer_instructions = "Sub rules."\n', encoding="utf-8"
+    )
+    assert seam(cwd=repo / "sub") == f"Sub rules.\n\n{text}"
+    assert seam("-C", "sub") == f"Sub rules.\n\n{text}", "-C moves the launch's cwd"
 
 
 @pytest.mark.parametrize(
@@ -593,9 +627,14 @@ def test_the_persona_is_codexs_developer_instructions_after_the_operators_own(
 def test_the_operators_own_developer_instructions_argument_wins(
     args: list[str], tmp_path: Path
 ) -> None:
-    assert codex.system_prompt_args(tmp_path / "b.md", "persona", args, _home(tmp_path)) is None
+    assert (
+        codex.system_prompt_args(tmp_path / "b.md", "persona", args, _home(tmp_path), cwd=tmp_path)
+        is None
+    )
     after_the_boundary = ["--", *args]
-    assert codex.system_prompt_args(tmp_path / "b.md", "p", after_the_boundary, tmp_path)
+    assert codex.system_prompt_args(
+        tmp_path / "b.md", "p", after_the_boundary, tmp_path, cwd=tmp_path
+    )
 
 
 def test_codex_reads_skills_from_the_users_agents_dir_its_home_and_the_repository(
@@ -806,13 +845,14 @@ def test_every_server_of_the_operators_that_codex_would_load_is_switched_off(
     user = ["system", "home", "profiled", "managed", "flagged", "inline"]
     assert off(cwd, launch) == user, "an untrusted project's layers are not read"
     _trust(layers, repo)
-    assert off(cwd, launch) == [*user[:4], "root", "mid", *user[4:]]
-    assert off(tmp_path, ["-C", str(cwd)]) == ["system", "home", "managed", "root", "mid"]
+    # The managed layer is over the project's (`_config_layers`).
+    assert off(cwd, launch) == [*user[:3], "root", "mid", *user[3:]]
+    assert off(tmp_path, ["-C", str(cwd)]) == ["system", "home", "root", "mid", "managed"]
     plain = tmp_path / "plain" / "cwd"
     _server(plain.parent / ".codex" / "config.toml", "parent")
     _server(plain / ".codex" / "config.toml", "own")
     _trust(layers, plain)
-    assert off(plain, []) == ["system", "home", "managed", "own"], "outside git, cwd's alone"
+    assert off(plain, []) == ["system", "home", "own", "managed"], "outside git, cwd's alone"
     with (layers / "config.toml").open("a", encoding="utf-8") as handle:
         handle.write('[mcp_servers."my server"]\ncommand = "/opt/mine"\n')
     with pytest.raises(ValueError, match="'my server'"):

@@ -161,8 +161,9 @@ alone may not:
   never the body). An `--append-system-prompt` of either spelling on your own
   line wins over the launch's.
 - **Codex** takes it as `-c developer_instructions=…`, after your own
-  `developer_instructions` from its config (`config.toml`, the `-p` profile),
-  which that `-c` would otherwise replace. The body is in the argument list,
+  `developer_instructions` from its config (`config.toml`, the `-p` profile, a
+  trusted project's `.codex/config.toml`), which that `-c` would otherwise
+  replace. The body is in the argument list,
   which other local users can read; a persona is no secret. A
   `-c developer_instructions=` on your own line wins over the launch's.
 

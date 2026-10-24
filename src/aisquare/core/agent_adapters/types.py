@@ -1065,11 +1065,12 @@ class AgentAdapter(Protocol):
         ...
 
     def system_prompt_args(
-        self, block: Path, text: str, args: Sequence[str], home: Path
+        self, block: Path, text: str, args: Sequence[str], home: Path, *, cwd: Path
     ) -> list[str] | None:
         """Launch arguments that add ``text`` to the agent's system prompt for the session,
         beside its own (``aisquare launch --persona``: the persona's briefing, which the file
-        ``block`` holds), for an agent launched with ``args`` from config dir ``home``.
+        ``block`` holds), for an agent launched with ``args`` from config dir ``home`` in
+        ``cwd``.
         ``None`` where ``args`` already set that seam, the operator's, or where the agent has
         none: the session-start hook alone briefs the persona then. An agent that takes the
         text itself rather than the file puts it in argv, which every local user can read:

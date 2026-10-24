@@ -497,7 +497,7 @@ class ClaudeCodeAdapter:
         return []
 
     def system_prompt_args(
-        self, block: Path, text: str, args: Sequence[str], home: Path
+        self, block: Path, text: str, args: Sequence[str], home: Path, *, cwd: Path
     ) -> list[str] | None:
         """``--append-system-prompt-file <block>``, appended to Claude Code's default system
         prompt for the life of the process (``/clear`` keeps it; a restart passes it again);

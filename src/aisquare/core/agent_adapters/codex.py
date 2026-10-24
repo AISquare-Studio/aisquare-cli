@@ -1266,7 +1266,7 @@ class CodexAdapter:
         return MappingProxyType({})
 
     def system_prompt_args(
-        self, block: Path, text: str, args: Sequence[str], home: Path
+        self, block: Path, text: str, args: Sequence[str], home: Path, *, cwd: Path
     ) -> list[str] | None:
         """``-c developer_instructions=<text>``: measured on 0.162.1 with a loopback provider
         (``exec`` and the TUI alike), the value is the first part of the request's second
@@ -1274,8 +1274,10 @@ class CodexAdapter:
         ``model_instructions_file`` would REPLACE that base prompt, so it is not the seam.
 
         The ``-c`` replaces the operator's own ``developer_instructions`` (measured: theirs
-        was then absent from the request), so the value is theirs, from ``home``'s config
-        layers (:func:`_developer_instructions`), a blank line, then ``text``. ``None`` where
+        was then absent from the request), so the value is theirs, from every config layer of
+        a session from ``home`` in ``cwd``, a trusted project's included
+        (:func:`_developer_instructions`; review r17 of #113, finding 7), a blank line, then
+        ``text``. ``None`` where
         ``args`` set ``developer_instructions`` themselves. A thread keeps the value of its
         first turn across ``codex resume`` and ignores a new one
         (``capabilities.resume_keeps_system_prompt``)."""
@@ -1283,7 +1285,7 @@ class CodexAdapter:
             parsed = config_assignment(item.value)
             if parsed is not None and parsed[0] == "developer_instructions":
                 return None
-        own = _developer_instructions(home, args)
+        own = _developer_instructions(home, args, cwd)
         value = f"{own.rstrip()}\n\n{text}" if own and own.strip() else text
         return ["-c", f"developer_instructions={_toml_string(value)}"]
 
@@ -1423,13 +1425,13 @@ def _user_layers(home: Path, args: Sequence[str]) -> list[Path]:
     return files
 
 
-def _developer_instructions(home: Path, args: Sequence[str]) -> str | None:
+def _developer_instructions(home: Path, args: Sequence[str], cwd: Path) -> str | None:
     """The operator's own ``developer_instructions``, as Codex layers its config for a session
-    launched with ``args`` from ``home`` (:func:`_user_layers`), the last that sets it a
-    string winning; ``None`` when none does."""
+    launched with ``args`` from ``home`` in ``cwd`` (:func:`_config_layers`), the last that
+    sets it a string winning; ``None`` when none does."""
     found = None
-    for path in _user_layers(home, args):
-        value = _read_toml(path).get("developer_instructions")
+    for table in _config_layers(home, args, cwd):
+        value = table.get("developer_instructions")
         if isinstance(value, str):
             found = value
     return found
@@ -1461,16 +1463,25 @@ def _project_layers(
     return [folder / ".codex" / "config.toml" for folder in reversed(walk[: walk.index(root) + 1])]
 
 
+def _config_layers(home: Path, args: Sequence[str], cwd: Path) -> list[dict[str, Any]]:
+    """The config tables Codex layers for a session launched with ``args`` from ``home`` in
+    ``cwd``, lowest first: its user layers (:func:`_user_layers`) with its project's
+    (:func:`_project_layers`) over them and under the administrator's :data:`MANAGED_CONFIG`.
+    Measured on 0.162.1 and 0.164.0: a trusted project's ``developer_instructions`` won
+    over ``config.toml``'s and the ``-p`` profile's, and the folder nearest ``cwd`` over its
+    root's."""
+    user = [_read_toml(path) for path in _user_layers(home, args)]
+    *below, managed = user
+    return [*below, *map(_read_toml, _project_layers(user, args, cwd)), managed]
+
+
 def _mcp_servers(home: Path, args: Sequence[str], cwd: Path) -> list[str]:
     """The MCP servers Codex's config hands a session launched with ``args`` from ``home`` in
     ``cwd``, by name, in the order its layers first name them: every ``mcp_servers`` table of
-    its user layers (:func:`_user_layers`), its project's (:func:`_project_layers`), then its
-    ``-c`` overrides in ``args`` (``mcp_servers.<name>.…``, or a whole ``mcp_servers``
-    inline table)."""
-    user = [_read_toml(path) for path in _user_layers(home, args)]
-    tables = [*user, *map(_read_toml, _project_layers(user, args, cwd))]
+    its config layers (:func:`_config_layers`), then its ``-c`` overrides in ``args``
+    (``mcp_servers.<name>.…``, or a whole ``mcp_servers`` inline table)."""
     names: dict[str, None] = {}
-    for table in tables:
+    for table in _config_layers(home, args, cwd):
         servers = table.get("mcp_servers")
         if isinstance(servers, dict):
             names.update(

@@ -813,14 +813,16 @@ def test_the_system_prompt_seam_names_the_block_and_stands_down_before_the_opera
     text = '## Persona: skeptic\nQuestion every claim, "quoted" or not. ✓'
     block = tmp_path / "skeptic-0123456789ab.md"
     block.write_text(text + "\n", encoding="utf-8")
-    seam = adapter.system_prompt_args(block, text, [], home)
+    seam = adapter.system_prompt_args(block, text, [], home, cwd=tmp_path)
     if seam is None:
         return  # no seam: the session-start hook alone briefs the persona
     assert seam and all(isinstance(arg, str) for arg in seam)
     named = _named(seam)
     assert str(block) in named or text in named, f"{adapter.id}'s seam names neither"
-    assert adapter.system_prompt_args(block, text, seam, home) is None, "the operator's wins"
-    assert adapter.system_prompt_args(block, text, ["--verbose", *seam], home) is None
+    assert adapter.system_prompt_args(block, text, seam, home, cwd=tmp_path) is None, (
+        "the operator's wins"
+    )
+    assert adapter.system_prompt_args(block, text, ["--verbose", *seam], home, cwd=tmp_path) is None
 
 
 def test_only_an_agent_with_a_system_seam_keeps_it_across_a_resume(
@@ -831,7 +833,9 @@ def test_only_an_agent_with_a_system_seam_keeps_it_across_a_resume(
     ``system_prompt_args`` has a seam has one to keep."""
     keeps = adapter.capabilities.resume_keeps_system_prompt
     assert isinstance(keeps, bool)
-    seam = adapter.system_prompt_args(tmp_path / "b.md", "persona", [], _home(adapter, tmp_path))
+    seam = adapter.system_prompt_args(
+        tmp_path / "b.md", "persona", [], _home(adapter, tmp_path), cwd=tmp_path
+    )
     assert seam is not None or not keeps, f"{adapter.id} keeps a system prompt it cannot set"
 
 

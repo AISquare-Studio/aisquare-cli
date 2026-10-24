@@ -434,8 +434,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v27 a project's nickname, v28 which token took a usage reading (its fingerprint),
     # v29 a task's number on its board, v30 its unique index, v31 the branch of a fleet
     # agent's worktree (review of #259, round 15), v32 the board a fleet agent reads (round 25),
-    # v33 the persona a session and a fleet agent run as (#201)
-    assert version == SCHEMA_VERSION == 33
+    # v33 the persona a session and a fleet agent run as (#201), v34 a fleet agent's first
+    # message and a session's last prompt (P0-W1a, #122)
+    assert version == SCHEMA_VERSION == 34
 
 
 def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -> None:
@@ -1258,6 +1259,12 @@ def test_a_foreign_store_a_build_without_the_pass_carried_on_converges_too(
 _SCHEMAS = Path(__file__).parent / "fixtures" / "store_schemas"
 _RC_V21_SCHEMAS = ("rc_v21_owner_home.sql", "rc_v21_owner_asqui.sql", "rc_v21_fresh.sql")
 _PERSONA_COLUMNS = {("column", "team_session.persona"), ("column", "fleet_agent.persona")}
+_FIRST_PROMPT_COLUMNS = {
+    ("column", "team_session.prompted_at"),
+    ("column", "fleet_agent.first_prompt"),
+    ("column", "fleet_agent.first_prompt_at"),
+}
+"""v34's products (P0-W1a): no dump of an older store holds them, every store reaches them."""
 # Main's v22 to v24 by name: SQLite's automatic index for the primary key is left out.
 _MAINS_STEPS_PAST_21 = {
     ("table", "pending_revocation"),
@@ -1447,7 +1454,7 @@ def test_mains_v24_store_gains_the_persona_columns_and_keeps_every_row() -> None
     finally:
         raw.close()
     assert (version, missing) == (SCHEMA_VERSION, [])
-    assert shape == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS
+    assert shape == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | _FIRST_PROMPT_COLUMNS
     assert shape == _built(SCHEMA_VERSION), "not the schema a fresh store has"
     assert after == before, "a row the store held changed on a column it had"
     assert agent is not None and (agent.persona, agent.account_slot) == (None, 1)
@@ -1515,11 +1522,13 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     by it."""
     fresh = _built(SCHEMA_VERSION)
 
-    assert SCHEMA_VERSION == 33
-    assert fresh == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS
+    assert SCHEMA_VERSION == 34
+    v34 = _FIRST_PROMPT_COLUMNS
+    assert fresh == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | v34
     for schema in _RC_V21_SCHEMAS:
-        assert fresh == _replayed_shape(schema) | _MAINS_STEPS_PAST_21 | _mains_steps_past_24()
-    assert fresh == _replayed_shape("rc_v24_fresh.sql") | _mains_steps_past_24()
+        steps = _MAINS_STEPS_PAST_21 | _mains_steps_past_24() | v34
+        assert fresh == _replayed_shape(schema) | steps
+    assert fresh == _replayed_shape("rc_v24_fresh.sql") | _mains_steps_past_24() | v34
     open_store().close()
     raw = sqlite3.connect(str(_db_path()))
     try:
@@ -1620,7 +1629,7 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
     _schema_again, rows_again = _contents(db)
     version, shape, notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 33, label
+    assert version == SCHEMA_VERSION == 34, label
     assert shape == _built(SCHEMA_VERSION), label
     assert notnull == {"team_session": 0, "fleet_agent": 0}, label
     assert old_session is not None and old_session.persona == persona, label
@@ -1631,11 +1640,11 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
 
 
 def test_a_fresh_store_is_built_with_the_persona_step() -> None:
-    """No file at all: v1 to v33, the same shape as every cohort above reaches."""
+    """No file at all: v1 to v34, the same shape as every cohort above reaches."""
     open_store().close()
     version, shape, notnull = _persona_shape(_db_path())
 
-    assert version == SCHEMA_VERSION == 33
+    assert version == SCHEMA_VERSION == 34
     assert shape == _built(SCHEMA_VERSION)
     assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
     assert notnull == {"team_session": 0, "fleet_agent": 0}
@@ -3148,8 +3157,11 @@ def test_a_fleet_row_is_read_as_the_columns_it_is_written_with_whatever_follows_
     SQL. Both lists come from one tuple, and a read names each column as it is written."""
     later = (*store_module._FLEET_AGENT_FIELDS, "later")
     read = store_module._read_list(later, {"board": "COALESCE(board, project_id)"})
-    # `persona` (v33) is the column that came after it, and is read as written.
-    assert read.endswith(", COALESCE(board, project_id) AS board, persona, later"), read
+    # `persona` (v33) and the first message's two (v34) are the columns that came after it,
+    # and are read as written.
+    assert read.endswith(
+        ", COALESCE(board, project_id) AS board, persona, first_prompt, first_prompt_at, later"
+    ), read
 
     cursor = store._conn.execute(  # type: ignore[attr-defined]
         f"SELECT {store_module._FLEET_AGENT_READ} FROM fleet_agent LIMIT 0"

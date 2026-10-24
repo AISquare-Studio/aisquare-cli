@@ -263,7 +263,16 @@ def test_spawn_json_carries_the_documented_keys(
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"agent", "asked_label", "tmux_session", "notes"}
+    assert set(payload) == {
+        "agent",
+        "asked_label",
+        "tmux_session",
+        "notes",
+        # How the first message went (P0-W1a): as restart and switch say it.
+        "prompt_typed",
+        "prompt_delivery",
+        "prompt_acked",
+    }
     assert payload["asked_label"] == "coder-auth"
     assert payload["tmux_session"] == SESSION
     assert payload["notes"] == receipt.notes
@@ -330,6 +339,7 @@ def test_spawn_consumes_its_own_options_and_forwards_nothing_else(
         "spawned_by": "mgr-session",
         "account": None,
         "persona": None,
+        "ack_wait": 45.0,  # [fleet] prompt_ack_seconds: the CLI waits for the first turn
     }
 
 
@@ -1312,7 +1322,10 @@ def test_restart_and_stop_of_one_label_are_as_they_were(
     assert runner.invoke(app, ["fleet", "stop", "coder-auth"]).exit_code == 0
 
     assert restart.calls == [
-        ((PROJECT, "coder-auth"), {"fresh": False, "spawned_by": "user", "permission_mode": None})
+        (
+            (PROJECT, "coder-auth"),
+            {"fresh": False, "spawned_by": "user", "permission_mode": None, "ack_wait": 45.0},
+        )
     ]
     assert stop.calls == [((PROJECT, "coder-auth"), {"force": False})]
     assert bulk.calls == []

@@ -236,6 +236,7 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "on_limit": "switch",
             "share_trust": True,
             "share_settings": False,
+            "prefer": "priority",  # added by P0-W3 (#277)
         },
         "projects": {"capture": False},
         # The persona train and the captain's switch, added since (#201, #240).
@@ -244,6 +245,16 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "import": {"engine": "auto", "api_model": "claude-opus-5"},
         },
         "experimental": {"captain": False},
+        # The first message's two (P0-W1a, #122).
+        "fleet": {
+            "first_prompt": "argv",
+            "prompt_ack_seconds": 45.0,
+            # The idle check's quiet window (P0-W1b, #123).
+            "busy_quiet_seconds": 30,
+            # The delivery guards (P0-W2, #276).
+            "draft_quiet_seconds": 10.0,
+            "deliver_notes_at_turn_end": True,
+        },
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

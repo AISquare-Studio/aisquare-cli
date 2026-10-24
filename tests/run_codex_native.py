@@ -9,7 +9,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-CODEX_VERSION = "codex-cli 0.162.1"
+CODEX_VERSION = "codex-cli 0.164.0"
 NATIVE_MODULE = Path(__file__).with_name("test_codex_native.py")
 
 

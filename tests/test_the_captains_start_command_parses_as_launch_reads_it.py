@@ -113,3 +113,53 @@ def test_the_captains_environment_is_launchs_and_never_its_agents(
 def test_both_agents_can_be_the_captain() -> None:
     """The parametrization above is not vacuous: Claude Code and Codex confine."""
     assert {"claude-code", "codex"} <= set(_confinable())
+
+
+#: The agent arguments 0.8.2's ``brain.launch_args`` gave the captain, which its row's spec
+#: recorded and the census carried over: its environment, and its confinement as it was
+#: then, a ``--mcp-config`` naming the ``mcp.json`` that release wrote.
+def _recorded_by_0_8_2() -> list[str]:
+    return [
+        *brain.launch_args(Path(_hub())),
+        "--strict-mcp-config",
+        "--mcp-config",
+        str(paths.aisquare_home() / "captain" / "mcp.json"),
+        "--tools",
+        "",
+        "--allowedTools",
+        f"mcp__{brain.SERVER}__*",
+    ]
+
+
+def _per_start(native: list[str]) -> list[str]:
+    """``native`` less what each launch gives anew: Claude Code's ``--session-id``, and the
+    restart's prompt, which Codex takes after a ``--``."""
+    kept = native[: native.index("--")] if "--" in native else list(native)
+    if "--session-id" in kept:
+        at = kept.index("--session-id")
+        del kept[at : at + 2]
+    return kept
+
+
+@pytest.mark.needs_captain
+@pytest.mark.parametrize("captain_on_its_agent", _confinable(), indirect=True)
+def test_a_captain_row_0_8_2_recorded_restarts_with_todays_arguments_alone(
+    tmux: FakeTmux, captain_on_its_agent: str
+) -> None:
+    """Review r17 of #113, finding 6: a captain's agent arguments are derived at every
+    launch, never replayed. A 0.8.2 row replayed its old confinement after today's, two
+    ``--mcp-config`` values, one a frozen ``mcp.json`` (no start at all once that file is
+    gone)."""
+    agent = brain.start().agent
+    _, fresh = _as_launch_reads(tmux.spawned[-1]["command"])
+    record = launch_seal.read(agent.id)
+    assert isinstance(record, launch_seal.LaunchRecord)
+    old = record.spec.model_copy(update={"extra_args": _recorded_by_0_8_2(), "recorded_by": None})
+    assert launch_seal.write(record.model_copy(update={"spec": old})) is None
+
+    fleet_service.restart(captain_state.home_project(), "captain")
+
+    pairs, native = _as_launch_reads(tmux.spawned[-1]["command"])
+    assert pairs == _pairs()
+    assert _per_start(native) == _per_start(fresh), native
+    assert "mcp.json" not in " ".join(native)

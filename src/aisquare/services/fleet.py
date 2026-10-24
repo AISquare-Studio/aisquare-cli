@@ -1831,23 +1831,6 @@ def _the_captains_environment(project: ProjectInfo) -> list[str]:
     return brain.launch_args(project.root)
 
 
-def _without_the_captains_environment(args: Sequence[str]) -> list[str]:
-    """``args`` less the captain's ``-e`` pairs (:func:`_the_captains_environment`), which a
-    captain's row recorded among its agent's arguments before they were ``launch``'s."""
-    from aisquare.services.captain import brain
-
-    keys = {f"{key}=" for key in brain.LAUNCH_ENV}
-    kept: list[str] = []
-    at = 0
-    while at < len(args):
-        if args[at] == "-e" and at + 1 < len(args) and args[at + 1].startswith(tuple(keys)):
-            at += 2
-            continue
-        kept.append(args[at])
-        at += 1
-    return kept
-
-
 def _fixed_label(role: str, wanted: str | None) -> str | None:
     """The one label ``role`` may run under, the manager's or the captain's, else ``None``.
 
@@ -4136,7 +4119,7 @@ def spawn(
         if permission_mode is None:
             permission_mode = spec.permission_mode or ""
         worktree = worktree if worktree is not None else spec.worktree
-        if replayed_args:
+        if replayed_args and not experimental.captain_role(role):
             agent_args = _replayed_args(role, spec, config)
     if experimental.captain_role(role) and not _is_the_captains_launch(cwd):
         # `fleet spawn captain` on the home was a captain with every tool, in the
@@ -4188,17 +4171,16 @@ def spawn(
     from aisquare.core.agent_adapters.types import fleet_extra_args
 
     # A replayed spec already holds the role's arguments as they were at spawn;
-    # adding today's would double them (or add ones the agent never had).
+    # adding today's would double them (or add ones the agent never had). The
+    # captain's are never replayed (above): its tools and its environment are given at
+    # every launch (below), and a row 0.8.2 recorded holds its old confinement, a
+    # second --mcp-config naming a frozen mcp.json (review r17 of #113, finding 6).
     role_args = (
         []
-        if spec is not None
+        if spec is not None and not experimental.captain_role(role)
         else fleet_extra_args(selected.adapter, role_config.extra_args, role_config.agent_args)
     )
     extra = list(agent_args)
-    if experimental.captain_role(role):
-        # The captain's environment is its window's `launch`'s, given at every launch
-        # (below); a row that recorded it among its agent's arguments replays without it.
-        extra = _without_the_captains_environment(extra)
     if replayed_args:
         # Filtered on the way OUT as well as on the way in: a spec written before
         # session choices were left out of it still holds them, and the board session

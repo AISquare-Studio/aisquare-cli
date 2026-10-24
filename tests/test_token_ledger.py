@@ -267,7 +267,7 @@ def test_a_large_transcript_streams_in_bounded_memory(tmp_path: Path) -> None:
         ("asq fleet ls", True),
         ("/srv/.venv/bin/aisquare fleet status", True),
         ("aisquare log", False),  # the PROMPT log, not the board
-        ("aisquare team show", False),  # no such command
+        ("aisquare team show 812", True),  # one event in full (P1 WS-2, #279)
         ("aisquare task next --role coder --claim --as x", False),
         ("aisquare note 'merged #12'", False),
         ("aisquare task list && aisquare note x", False),
@@ -281,6 +281,25 @@ def test_a_board_read_is_what_the_fleet_reads_the_board_with(command: str, reads
     """Review of #319: the rule behind every no-action wake missed `team log`, `task next`
     and reads behind a `cd`, and took the prompt log for the board."""
     assert token_ledger.is_board_read(command) is reads
+
+
+@pytest.mark.parametrize(
+    "opening",
+    ["<aisquare-team-delta>", '<aisquare-team-delta board="repo">'],
+    ids=["before-ws2", "board-in-the-header"],
+)
+def test_a_delta_block_is_counted_whatever_its_opening_tag_names(opening: str) -> None:
+    """Review of #336: WS-2's header names the board, and an exact match on the bare tag
+    counted every delta after it as none: 0 blocks, 0 characters, WS-2's own after-number."""
+    block = f"{opening}\n- #3 coder note: x\n</aisquare-team-delta>"
+
+    def hook(content: str) -> dict[str, Any]:
+        attachment = {"type": "hook_success", "hookEvent": "UserPromptSubmit", "content": content}
+        return {"type": "attachment", "attachment": attachment}
+
+    assert token_ledger._deltas(hook(block)) == [block]
+    assert token_ledger._deltas(hook(f"{block}\n{block}")) == [block, block]
+    assert token_ledger._deltas(hook("<aisquare-team-deltaX>")) == []
 
 
 def test_latest_context_reads_the_last_request_from_the_tail(tmp_path: Path) -> None:

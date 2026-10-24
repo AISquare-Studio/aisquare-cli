@@ -172,6 +172,7 @@ def doctor(
         # Beside the fleet terminal row, which reads the same running server (fix 4 of the
         # fleet-board card): it can warn, so it waits with the other late rows.
         _check_fleet_server_env(cwd=cwd),
+        *_check_manager_board_context(),
         *_experiment_checks(),
         # Only while the experimental captain is off: one ok row saying how to turn it
         # on. On, doctor is as it was before the switch.
@@ -2143,6 +2144,28 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
         # Failing open costs this line its verdict, not the operator anything
         # else: the fleet re-checks tmux on its first spawn and says so then.
         return _ok(name, f"not evaluated ({exc}) — the fleet checks again on its first spawn")
+
+
+def _check_manager_board_context() -> list[DoctorCheck]:
+    """A warn row when ``[fleet.roles.manager] board_context`` is not ``all``, else none.
+
+    The board is the manager's job: a spawn gives it ``all`` whatever the key says, and
+    says so in its notes (P1 WS-2, #279). This is where the key's own reader hears it.
+    """
+    try:
+        manager = load_config().fleet.roles.get("manager")
+    except Exception:  # an unreadable config has its own row
+        return []
+    if manager is None or manager.board_context == "all":
+        return []
+    return [
+        _warn(
+            "manager board context",
+            f"fleet.roles.manager.board_context = {manager.board_context!r} is ignored: "
+            "a manager reads the whole board",
+            "aisquare config set fleet.roles.manager.board_context all",
+        )
+    ]
 
 
 def _check_fleet_terminal(

@@ -27,6 +27,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which is otherwise refused. New event **`handover_failed`**: the automatic
   hand-over could not move a limited agent, with the reason and the `fleet
   switch` that would; it wakes the manager. (#277)
+- **`aisquare team show <seq>`** prints one board event in full: who wrote it and who
+  caused it, the task, the addressee, its details and the whole text. Every update an
+  agent reads is now one line that ends in this command when there is more (#279).
+- **`fleet stop --as SESSION`**, and every `agent_exited` names who stopped the agent
+  (`coder-auth exited (0) — stopped by manager`, `(--force)`), with its status, the
+  claims its end released and `--force` in its details. A stop with no `--as` acts for
+  the fleet window it runs in, else for `user` (#214, #279).
+- **Per-agent board context.** `[fleet.roles.<role>] board_context = "all" | "relevant" |
+  "none"` and `fleet spawn --board-context`, kept by `restart` and `switch`. `relevant`
+  keeps an agent's own tasks, what is addressed to its role or label, and decisions;
+  `none` gives no recent updates at start and no deltas. The reviewer's default is
+  `none`, so it judges a change cold; a manager reads `all`, and doctor says when its
+  key says otherwise (#279).
 
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
@@ -323,6 +336,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nothing read it, and `uv run --frozen` failed on every persona path for want of
   `pyyaml`. The `voice` extra had drifted the same way since (the xdist change
   relocked it). A dependency change without its relock now fails CI.
+
+- **A manager wakes for decisions, not news** (#279). A clean exit, a switch, a restart
+  and the manager's own `fleet stop` no longer cost it a turn: they wait past its
+  cursor and ride along with the next wake. An exit still wakes it when it failed, was
+  killed or lost, released a claim, or was a hand-over that did not start, and asq's
+  Stop on an agent that exits cleanly types no nudge into a waiting manager. Every
+  board update an agent reads is one line, `#<seq> <who> <kind>[ #<task>]: <first line>`,
+  with the board named once in the block's header; the human board (`aisquare board`)
+  keeps full text. The store moves to the next schema step (reserved 35, after P0's 34)
+  for the events' `actor` and `meta` columns, nullable, so an older row reads as no
+  actor and no details.
 - The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
   adds the two persona columns, `team_session.persona` (the persona a session was
   launched as) and `fleet_agent.persona` (the one an agent was spawned with or given

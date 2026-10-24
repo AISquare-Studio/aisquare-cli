@@ -147,7 +147,12 @@ def test_an_entry_the_user_added_to_a_mapping_is_written_with_only_what_it_sets(
     save_config(config, target)
     written = _file(target)
     assert written["team"] == {"profiles": {"coder": {"account": "2"}}}
-    designer = {"permission_mode": "auto", "worktree": False, "extra_args": []}
+    designer = {
+        "permission_mode": "auto",
+        "worktree": False,
+        "extra_args": [],
+        "board_context": "all",
+    }
     assert written["fleet"] == {"roles": {**_ROLES, "designer": designer}}
     loaded = load_config(target)
     assert loaded.team.profiles == {"coder": RoleLaunchProfile(account="2")}
@@ -246,12 +251,17 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
         },
         "experimental": {"captain": False},
         # The first message's two (P0-W1a, #122), the idle check's quiet window (P0-W1b, #123),
-        # and whether a pane's program may set the clipboard (P2-W3, #101).
+        # whether a pane's program may set the clipboard (P2-W3, #101), and what of the board
+        # each role reads (P1 WS-2, #279): the reviewer judges cold.
         "fleet": {
             "first_prompt": "argv",
             "prompt_ack_seconds": 45.0,
             "busy_quiet_seconds": 30,
             "pane_clipboard": "off",
+            "roles": {
+                role: {"board_context": "none" if role == "reviewer" else "all"}
+                for role in ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")
+            },
         },
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()

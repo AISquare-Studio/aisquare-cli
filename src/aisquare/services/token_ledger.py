@@ -47,14 +47,17 @@ from aisquare.models import TeamSession
 WAKE_MARKER = "board update(s) from your fleet arrived while you were finishing this turn"
 
 DELTA_OPEN, DELTA_CLOSE = "<aisquare-team-delta>", "</aisquare-team-delta>"
+#: A delta block's opening tag, with or without attributes: since P1 WS-2 (#279) the block
+#: names its board, ``<aisquare-team-delta board="…">``, and an exact match counted none.
+_DELTA_OPENING = re.compile(r"<aisquare-team-delta(?:\s[^>]*)?>")
 
 #: One command that only reads the board, as the fleet's cycles run them: ``board``,
-#: ``team log|status|signals|verify``, ``task list|show|next`` (``next`` without
+#: ``team log|status|signals|verify|show``, ``task list|show|next`` (``next`` without
 #: ``--claim``) and ``fleet ls|status``, after any global flag (``--json``). Not ``aisquare
 #: log``, which is the PROMPT log, and nothing that writes.
 BOARD_READ = re.compile(
     r"^(?:\S*/)?(?:aisquare|asq)(?:\s+(?:--json|--no-color|--quiet|-q|--verbose|-v))*\s+"
-    r"(?:board|team\s+(?:log|status|signals|verify)|task\s+(?:list|show|next)"
+    r"(?:board|team\s+(?:log|status|signals|verify|show)|task\s+(?:list|show|next)"
     r"|fleet\s+(?:ls|status))(?:\s|$)"
 )
 
@@ -357,12 +360,13 @@ def _deltas(entry: dict[str, Any]) -> list[str]:
         text = attachment.get(field)
         if not isinstance(text, str):
             continue
-        start = text.find(DELTA_OPEN)
-        while start != -1:
+        opening = _DELTA_OPENING.search(text)
+        while opening is not None:
+            start = opening.start()
             end = text.find(DELTA_CLOSE, start)
             stop = len(text) if end == -1 else end + len(DELTA_CLOSE)
             found.append(text[start:stop])
-            start = text.find(DELTA_OPEN, stop)
+            opening = _DELTA_OPENING.search(text, stop)
         if found:
             break  # `stdout` repeats `content` when both are set
     return found

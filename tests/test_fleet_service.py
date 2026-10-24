@@ -848,6 +848,12 @@ def _events(project: ProjectInfo, kind: str) -> list[str]:
         return [e.text for e in store.recent_events(project.id, limit=50) if e.kind == kind]
 
 
+def _board_events(project: ProjectInfo, kind: str) -> list[TeamEvent]:
+    """:func:`_events` as the events themselves, actor and details included."""
+    with store_session() as store:
+        return [e for e in store.recent_events(project.id, limit=50) if e.kind == kind]
+
+
 def _fleet(verb: str, project: ProjectInfo, *words: str) -> str:
     """``project_service.fleet_command`` for ``project`` as the store holds it now: a spawn
     gives it its codename, which the commands a refusal or a note gives then name."""
@@ -887,6 +893,7 @@ def test_spawn_manager_builds_the_launch_command_and_records_the_row(
         "AISQUARE_TEAM_HUB": "",  # no hub here, so none from the server either
         "AISQUARE_EXPLAINABILITY_TARGET": "",  # nor a deployment override
         "AISQUARE_PERSONA": "",  # no persona: blank, never the server's (review of #201, F3)
+        "AISQUARE_BOARD_CONTEXT": "all",  # the role's, per window (P1 WS-2, #279)
     }
     assert spawned["cwd"] == project.root and agent.cwd == project.root and not agent.worktree
     assert agent.pane_id == "%1" and agent.binary == "claude" and agent.spawned_by == "user"
@@ -1943,7 +1950,65 @@ def test_spawn_can_keep_native_agent_teams_on(
         "AISQUARE_TEAM_HUB": "",
         "AISQUARE_EXPLAINABILITY_TARGET": "",
         "AISQUARE_PERSONA": "",
+        "AISQUARE_BOARD_CONTEXT": "all",
     }
+
+
+def _window_env(tmux: FakeTmux) -> dict[str, str]:
+    """The environment the newest window was opened with."""
+    env = tmux.spawned[-1]["env"]
+    assert isinstance(env, dict)
+    return env
+
+
+def test_a_reviewer_reads_no_board_by_default_and_a_flag_is_recorded_for_its_restart(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """P1 WS-2 (#279): the reviewer's default board context is `none`, so it judges a change
+    cold; `--board-context` overrides it, per window, and the spec a restart or switch
+    replays keeps it."""
+    reviewer = fleet_service.spawn(project, "reviewer").agent
+    assert _window_env(tmux)["AISQUARE_BOARD_CONTEXT"] == "none"
+    assert reviewer.launch_spec is not None and reviewer.launch_spec.board_context == "none"
+
+    told = fleet_service.spawn(project, "reviewer", label="reviewer-all", board_context="all")
+    assert _window_env(tmux)["AISQUARE_BOARD_CONTEXT"] == "all"
+    spec = told.agent.launch_spec
+    assert spec is not None and spec.board_context == "all"
+    role = fleet_service.role_settings("reviewer")
+    assert fleet_service._board_context("reviewer", None, spec, role) == "all", "a replay keeps it"
+
+
+def test_a_manager_is_refused_a_board_context_narrower_than_all(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    with pytest.raises(FleetError, match="a manager reads the whole board"):
+        fleet_service.spawn(project, "manager", board_context="none")
+    with pytest.raises(FleetError, match="--board-context must be one of all, relevant, none"):
+        fleet_service.spawn(project, "coder", board_context="some")
+    assert tmux.spawned == []
+
+
+def test_fleet_stop_acts_for_its_as_else_its_own_window_else_the_user(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The actor an exit names (P1 WS-2, #279): `--as`, else the session of the fleet row
+    whose window the command runs in (a manager's), else `user`."""
+    now = datetime.now(UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(id="ses_manager_1", project_id=project.id, role="manager",
+                        started_at=now, last_seen_at=now)
+        )  # fmt: skip
+        store.upsert_fleet_agent(
+            FleetAgent(id="agt_mgr", project_id=project.id, label="manager", role="manager",
+                       pane_id="%1", session_id="ses_manager_1", cwd=project.root,
+                       created_at=now)
+        )  # fmt: skip
+    assert fleet_service.acting_as() == "user"
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_mgr")
+    assert fleet_service.acting_as() == "ses_manager_1"
+    assert fleet_service.acting_as("ses_manager_1") == "ses_manager_1"
 
 
 def test_spawn_without_tmux_is_fleet_unavailable(
@@ -3373,6 +3438,32 @@ def test_stop_exits_gracefully_and_records_the_status(
     assert ended.ended_at is not None and ended.exit_status == 0
     assert tmux.killed == [agent.pane_id]
     assert fleet_service.list_agents(project) == []
+
+
+def test_a_managers_own_stop_says_so_and_nudges_nobody_and_a_kill_by_anyone_else_does(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1 WS-2 (#279): a manager's `fleet stop` names it as the actor, with --force in the
+    details, and types no nudge into it; a kill by anyone else is a death it must hear of,
+    and a clean stop by the human is news for its next wake, not a nudge."""
+    manager = fleet_service.spawn(project, "manager").agent
+    _coder(project, label="coder-a")
+    _coder(project, label="coder-b")
+    _coder(project, label="coder-c")
+    nudges = _recorded_nudges(monkeypatch)
+
+    fleet_service.stop(project, "coder-a", force=True, actor=manager.session_id)
+    assert nudges == []
+    fleet_service.stop(project, "coder-b", force=True, actor="user")
+    assert nudges == ["coder-b exited"]
+    fleet_service.stop(project, "coder-c", actor="user")
+    assert nudges == ["coder-b exited"], "a clean stop is news, not a nudge"
+
+    exits = {e.text.split(" ")[0]: e for e in _board_events(project, "agent_exited")}
+    assert exits["coder-a"].actor == manager.session_id
+    assert exits["coder-a"].meta == {"status": None, "force": True, "released": 0, "why": None}
+    assert exits["coder-a"].text == "coder-a exited (?) — stopped by manager (--force)"
+    assert exits["coder-c"].text == "coder-c exited (0) — stopped by user"
 
 
 def test_stop_outwaits_the_dead_without_status_gap(
@@ -15512,7 +15603,8 @@ def test_a_listing_whose_write_lands_after_a_stop_read_its_row_is_not_announced_
 
     assert landed and receipt.agent.id == coder.id and receipt.agent.ended_at is not None
     assert _events(project, "agent_exited") == [f"{coder.label} exited (0)"]  # once
-    assert nudges == [f"{coder.label} exited"]
+    # A clean exit that left nothing open is news, not a wake (P1 WS-2, #279): no nudge.
+    assert nudges == []
 
 
 def test_a_stop_whose_death_a_listing_recorded_asks_again_for_the_release_it_could_not_make(
@@ -15690,7 +15782,9 @@ def test_a_hand_over_whose_row_a_listing_ended_after_its_exit_is_a_stop_that_wor
     [[recorded]] = listed
     assert recorded.agent.id == agent.id and recorded.agent.ended_at is not None
     assert _events(project, "agent_exited") == [f"{agent.label} exited (0)"]  # the listing's
-    assert nudges == [f"{agent.label} exited"]
+    # Nudged only when the exit released a claim (P1 WS-2, #279): a clean exit with
+    # nothing open is news the next wake carries.
+    assert nudges == ([f"{agent.label} exited"] if unguarded == "mark-lost" else [])
 
 
 @pytest.mark.parametrize("intruder", ["restart", "switch"])
@@ -18354,7 +18448,14 @@ def test_a_limit_with_on_limit_switch_moves_the_agent_once_and_wakes_no_manager(
     assert nudges == []
     with store_session() as store:
         events = store.recent_events(project.id, limit=50)
-    assert not any(team_service._wakes_manager(event) for event in events)
+    manager = TeamSession(
+        id="mgr",
+        project_id=project.id,
+        role="manager",
+        started_at=datetime.now(UTC),
+        last_seen_at=datetime.now(UTC),
+    )
+    assert not any(team_service.wake_class(event, manager) == "wake" for event in events)
 
     # The manager's cycle used to switch the replacement again once the hand-over was done.
     with pytest.raises(fleet_service.FleetError, match="usage-limit hand-over; `--force`"):

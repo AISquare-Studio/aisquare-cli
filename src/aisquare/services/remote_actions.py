@@ -1355,7 +1355,9 @@ def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
                 target,
                 label,
                 agent_id,
-                lambda: fleet_service.stop(target, label, force=force, agent_id=agent_id),
+                lambda: fleet_service.stop(
+                    target, label, force=force, agent_id=agent_id, actor="user"
+                ),
             )
     released = [task.id for task in receipt.released]
     result: dict[str, object] = {

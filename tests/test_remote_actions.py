@@ -1056,7 +1056,7 @@ def test_stop_stops_the_pinned_row_and_audits_what_it_did(
         "stop",
         project.id,
         (LABEL,),
-        {"force": False, "agent_id": "agt_one"},
+        {"force": False, "agent_id": "agt_one", "actor": "user"},
     )
     assert response.json() == {
         "agent": receipts.stop.agent.model_dump(mode="json"),
@@ -1592,7 +1592,7 @@ def test_a_force_stop_types_nothing_so_it_skips_the_guard(
     needs.dialog = True
     response = phone.post("agent/stop", **PINNED, force=True)
     assert response.status_code == 200, response.text
-    assert fleet.calls[0][2] == {"force": True, "agent_id": "agt_one"}
+    assert fleet.calls[0][2] == {"force": True, "agent_id": "agt_one", "actor": "user"}
     assert needs.reads == 0 and pane.sent == []
     assert "force=yes dismissed=no" in phone.audit()[0][1]
 

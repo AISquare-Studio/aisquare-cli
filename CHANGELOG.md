@@ -68,6 +68,23 @@ adapter.**
 - A tmux server the fleet starts holds no agent's process identity
   (`CODEX_THREAD_ID`, `CLAUDE_PID`), and the doctor's *fleet server env* row
   names one a server pins.
+- Main's #274 features work on Codex (SCOPE #113 274; a parity-matrix row each):
+  - `metrics tokens` records a Codex session's tokens off its rollout at each
+    `Stop` and its end, priced off OpenAI's dated list. The summary names every
+    list that priced a model in it (`price_lists`), one line each for a mixed team.
+  - The session start leaves out a preference the agent loads itself, read from
+    that agent's own files: a Codex session's `AGENTS.md`, never a `CLAUDE.md`.
+  - The role-less agent is any agent's. The Spawn dialog's *(none) —
+    general-purpose agent* and `fleet spawn agent --agent codex` start a plain
+    Codex session.
+  - *⚙ Settings ▸ App settings* chooses the captain's agent under its box
+    (*captain's agent*, what `team bind captain --agent` writes).
+  - An empty `log`, `metrics show` or `metrics tokens` names
+    `agents connect` for every agent.
+  - Pinned on Codex: the captain's full control at its approval view, a `--task`
+    spawn's read line as its launch argument, Restart all bringing back a killed
+    Codex and a Codex manager told of its dead team, and the solo-session trim
+    through `hook codex`.
 
 **Upgrading:**
 - The store migrates to schema v40 on first open, from main's v35 (0.8.2's v32 through

@@ -245,8 +245,9 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "import": {"engine": "auto", "api_model": "claude-opus-5"},
         },
         "experimental": {"captain": False},
-        # The first message's two (P0-W1a, #122).
-        "fleet": {"first_prompt": "argv", "prompt_ack_seconds": 45.0},
+        # The first message's two (P0-W1a, #122), and whether a pane's program may set the
+        # clipboard (P2-W3, #101).
+        "fleet": {"first_prompt": "argv", "prompt_ack_seconds": 45.0, "pane_clipboard": "off"},
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

@@ -510,7 +510,6 @@ _V1_DEFAULTS: dict[str, Any] = {
             "validator": {"permission_mode": "auto", "worktree": False, "extra_args": []},
             "ui-tester": {"permission_mode": "auto", "worktree": False, "extra_args": []},
         },
-        "pane_clipboard": "off",
     },
     "accounts": {
         "pick": "default",

@@ -107,7 +107,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
 from tests import guard_clock, toast_log
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until_held
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -679,8 +679,7 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
                 "agt_b_coder-01m5d34v",
             )
         }
-        await pilot.resize_terminal(140, 30)
-        await settle(app)
+        await _resized(pilot, 140, 30)
         seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
         return seen
 
@@ -3886,6 +3885,25 @@ async def _through_the_app(pilot: Pilot[None]) -> None:
     await settle_page(pilot.app)
 
 
+async def _resized(pilot: Pilot[None], width: int, height: int) -> None:
+    """``Pilot.resize_terminal``, then wait until the screen is laid out at the new size.
+
+    The app hands a resize on to its screen from a 1/120 s timer, not from a queue, and
+    neither a pause nor ``settle_page`` waits for a timer: on windows-latest the Agent
+    view's header still measured 37 cells after a resize to 140 columns, its click and
+    settle done before the timer fired (CI run 40040410906, attempt 1). The screen lays its
+    widgets out as it takes the resize, so its laid-out size is the fact waited for (its
+    ``size`` is the app's, new at once), then what the widgets do about theirs.
+    """
+    await pilot.resize_terminal(width, height)
+    await settle_until_held(
+        pilot.app,
+        lambda: pilot.app.screen.outer_size == (width, height),
+        what=f"the screen laid out at {width}x{height}",
+    )
+    await settle_page(pilot.app)
+
+
 async def _mouse(
     pilot: Pilot[None], kind: type[events.MouseEvent], x: int, y: int, *, button: int = 1
 ) -> None:
@@ -4056,19 +4074,16 @@ def test_a_terminal_that_shrinks_re_clamps_the_navigator_and_keeps_the_divider_o
         seen: dict[str, object] = {"floor": _floor(app)}
         await _drag(pilot, app.sidebar.outer_size.width, SIZE[0] - 2)
         seen["wide"] = app.sidebar.outer_size.width
-        await pilot.resize_terminal(80, SIZE[1])
-        await _through_the_app(pilot)
+        await _resized(pilot, 80, SIZE[1])
         seen["shrunk"] = (
             app.sidebar.outer_size.width,
             app.content.outer_size.width,
             app.query_one(Divider).region.x,
         )
-        await pilot.resize_terminal(*SIZE)
-        await _through_the_app(pilot)
+        await _resized(pilot, *SIZE)
         seen["back"] = app.sidebar.outer_size.width
         # A key at the small size steps from what is ON SCREEN, not from the wide screen's number.
-        await pilot.resize_terminal(80, SIZE[1])
-        await _through_the_app(pilot)
+        await _resized(pilot, 80, SIZE[1])
         app.sidebar.focus()
         await pilot.press("less_than_sign")
         await settle(app)
@@ -4499,11 +4514,9 @@ def test_a_gesture_on_a_narrow_terminal_keeps_a_wider_remembered_width(
         await _settled(pilot)
         seen["after_drag"] = now()
         # The ask survives: room again, and the 90 is what is shown.
-        await pilot.resize_terminal(140, SIZE[1])
-        await _through_the_app(pilot)
+        await _resized(pilot, 140, SIZE[1])
         seen["after_room"] = now()
-        await pilot.resize_terminal(80, SIZE[1])
-        await _through_the_app(pilot)
+        await _resized(pilot, 80, SIZE[1])
         await pilot.press("less_than_sign")  # a step the screen shows is a real gesture
         await _settled(pilot)
         seen["after_narrower"] = now()
@@ -4709,8 +4722,7 @@ def test_a_min_width_of_zero_is_a_floor_of_zero(tmp_path: Path, script: Script) 
     async def ceiling(pilot: Pilot[None]) -> int | None:
         app = fleet_app(pilot)
         app.sidebar.styles.min_width = 0
-        await pilot.resize_terminal(1 + Panes.MIN_CONTENT, SIZE[1])  # room for the content alone
-        await _through_the_app(pilot)
+        await _resized(pilot, 1 + Panes.MIN_CONTENT, SIZE[1])  # room for the content alone
         return cells(app.sidebar.styles.max_width)
 
     assert drive(ceiling) == 0, "the container's ceiling honours a floor of 0 too"

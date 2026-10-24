@@ -1011,22 +1011,23 @@ once, after all four trains are on `main`.
 | --- | --- | --- | --- | --- |
 | W0 spike | #320 | ≤5 sessions, ~20 min, slots 2 and 3, Claude Code 2.1.309 and 2.1.223, sockets `w0spike`/`w0probe` | — | answers in "W0 results (2026-10-23)" under W0: the 30–50 s Enter-ignore is refuted; an Enter before the input box is dropped (10/10); argv first prompts work on both versions; the inbox socket is pinned for 2.1.309 and absent on 2.1.223; the per-family window is `limits[]` `weekly_scoped` |
 | W1a first messages | #330, #343 | ≤5 sessions, ~15 min, slot 2, 2.1.309, socket `w0spike` | typed after a fixed 2.0 s; no acknowledgement; `--task` typed nothing (field report: 7/7 coders at an empty composer); on 0.8.2 under load, 2 of 8 `fleet restart` resume lines sat typed but unsent while the board read `working`, one needing two Enters | **19/19 first messages acknowledged**: 5 spawns 1.6–1.7 s each, 5 restarts 2.5 s, a `--task` kickoff 1.6 s, 3 typed (`first_prompt = "type"`) 1.8–1.9 s, 5 parallel spawns; no message text left in `run/prompts/` or any `launch_spec` |
-| W1b idle reads waiting | #315 | tests (fake clock) | a just-spawned idle agent read `working` for up to 30 min; an Esc-ended turn likewise | `waiting` from SessionStart; an Esc-ended turn reads `working` for `busy_quiet_seconds` (30 s), then one capture |
-| W1c contracts on claim | #313 | tests | a claim printed the title only | the claim prints the whole contract and the last reopen reason |
+| W1b idle reads waiting | #315, #358 | tests (fake clock) | a just-spawned idle agent read `working` for up to 30 min; an Esc-ended turn likewise | `waiting` from SessionStart; an Esc-ended turn reads `working` for `busy_quiet_seconds` (30 s), then one capture |
+| W1c contracts on claim | #313, #358 | tests | a claim printed the title only | the claim prints the whole contract, the last reopen reason and `aisquare task show <n>`, which survives a shell (#358) |
 | W2 delivery guards | #337 | ≤2 sessions, ~12 min, slot 2, 2.1.309, socket `w0spike` | a manager nudge was appended to a half-written draft and sent ("Your message got cut off"); a `fleet tell` to a busy coder was filed and never delivered (idle 45 s+ after its turn) | the draft stays intact and the nudge is deferred, then sent once the box was cleared; the tell is handed over at turn end, reply 31.9 s after the tell (~17 s of it the coder's own sleep) |
-| W3 account switches | #304, #308 | tests only: forcing a real usage limit is unsafe at reduced scale | one limit with `on_limit = "switch"`: 2 `switched` + 1 manager nudge; an Opus agent picked onto a slot whose `seven_day_opus` was 100 | 1 `switched`, 0 nudges (the manager's switch is refused); the Opus agent goes to slot 3. W3b: a cross-account resume keeps its real transcript (no false collision banner, no fresh restart) |
+| W3 account switches | #304, #308, #350 | tests only: forcing a real usage limit is unsafe at reduced scale | one limit with `on_limit = "switch"`: 2 `switched` + 1 manager nudge; an Opus agent picked onto a slot whose `seven_day_opus` was 100 | 1 `switched`, 0 nudges (the manager's switch is refused); the Opus agent goes to slot 3. W3c: the family week is read from `limits[]` `weekly_scoped`, and a spent one blocks every headroom pick. W3b: a cross-account resume keeps its real transcript (no false collision banner, no fresh restart) |
 | W4 capture off | #305 | test (the #268 repro through the CLI) | `1` prompt logged with capture off | `0` |
 | W5 lock check | #307 | CI | no step read `uv.lock`; it had drifted (the `voice` extra) | the `lock` job fails a dependency change without a relock ([red run](https://github.com/AISquare-Studio/aisquare-cli/actions/runs/40000167349/job/120573893291)) |
 | P1-WS5d xdist (landed via this train) | #309 | CI runners | `Test (pytest)` 42–56 min per Linux leg, serial | 16–22 min with `-n auto` (50–66 % saved) |
-| CI flakes hardened | #344, #347 | CI full matrix | five tests that failed only under load on the full matrix | each hardened without loosening what it guards |
+| CI flakes hardened | #344, #347, #351 | CI full matrix | six tests that failed only under load on the full matrix | each hardened without loosening what it guards |
 | Lean CI for sub-PRs | #322 | CI | 10 jobs per sub-PR run | 2–3 (one Linux check leg, Linux package, the lock job) |
 
 **Not built in this train, and why.** The inbox-socket tier (W1a/W2 "if built"): W0
 pinned its schema for 2.1.309 only, 2.1.223 has no socket, and its migration collided
 with P1's reserved schema 35; follow-up behind `[fleet] inbox_delivery = false`. The
-per-family `weekly_scoped` window W0 found is follow-up P0-W3c, and W1a's round-2 minors
-(the prompt file confined to its agent, a turn's evidence taking a pending first message)
-are #343; both land before the train merges.
+follow-ups all landed in this train: the per-family `weekly_scoped` window W0 found
+(P0-W3c, #350); W1a's round-2 minors, the prompt file confined to its agent and a turn's
+evidence taking a pending first message (#343); and the owed items on W1b, W1c and W4
+(#358).
 
 ## Release checklist
 

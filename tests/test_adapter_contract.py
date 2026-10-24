@@ -1646,3 +1646,60 @@ def test_a_sign_in_runs_the_agents_own_command_or_its_tui_bare(
     if not args:
         assert adapter.exit_command.strip(), f"{adapter.id} signs in from its TUI: how to leave it"
     assert accounts.login_fingerprint(account) is None, "an empty slot holds no login"
+
+
+def test_at_most_one_agent_keeps_the_slots_from_before_agents() -> None:
+    """``AgentAccounts.legacy_slots`` is Claude Code's alone: the store's own table and
+    project key, the listings' first place. A new agent's slots are keyed by its id."""
+    legacy = [a.id for a in adapters() if a.accounts is not None and a.accounts.legacy_slots]
+    assert legacy == ["claude-code"]
+
+
+def test_an_agents_slots_are_arranged_launched_and_refused_by_its_own_answers(
+    adapter: AgentAdapter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Nothing shared branches on Claude Code's id (B8): a slot of every agent is listed,
+    named, arranged (alias, disabled, default, order) in its own registry, launched with its
+    own variables, read through its own slot (identity, sign-in, token, subscription,
+    version) and its plain home refused a removal with its own way to sign out."""
+    slot = _accounts_or_skip(adapter, monkeypatch)
+    account = accounts_core.create_account(adapter.id)
+    _sign_in(adapter, account, "login")
+
+    listed = accounts_service.list_accounts()
+    assert account.slot in {a.slot for a in listed if a.agent == adapter.id}
+    assert accounts_core.label(account) == f"account {account.slot}"
+    plain = accounts_core.default_account(agent=adapter.id)
+    assert (plain.slot, accounts_core.label(plain)) == (slot.plain_slot, slot.plain_label)
+    assert (plain in accounts_core.list_accounts()) is (
+        slot.legacy_slots or plain.config_dir.is_dir()
+    )
+
+    named = accounts_service.set_alias(str(account.slot), f"{adapter.id}-work")
+    assert named.alias == f"{adapter.id}-work"
+    assert accounts_service.set_disabled(str(account.slot), True).disabled
+    accounts_service.set_disabled(str(account.slot), False)
+    chosen = accounts_service.set_default(str(account.slot), agent=adapter.id)
+    assert chosen is not None and chosen.slot == account.slot
+    default = accounts_service.machine_default(adapter.id)
+    assert default is not None and default.slot == account.slot
+    keys = {accounts_service.project_account_key(a.id) for a in adapters() if a.accounts}
+    assert len(keys) == len([a for a in adapters() if a.accounts]), "one project key each"
+
+    env = accounts_core.launch_env(account)
+    assert env[slot.home_env] == str(account.config_dir)
+    assert all(env[name] == str(account.tmp_dir) for name in slot.extra_env)
+    assert accounts_service.carried_vars(adapter.id)[1:] == (slot.home_env, *slot.extra_env)
+    assert slot.launched_account(env, listed) == next(a for a in listed if a.slot == account.slot)
+
+    described = accounts_service.describe(account)
+    assert described.identity == slot.identity(account) and described.signed_in
+    assert described.token_state == slot.token_state(account) == "ok"
+    assert described.subscription == slot.subscription(account)
+    assert adapter.layout_version(str(tmp_path / "nowhere" / adapter.binary)) is None
+
+    with pytest.raises(accounts_service.AccountsError) as refused:
+        accounts_service.remove(plain)
+    assert f"sign out of it {slot.sign_out} instead" in str(refused.value)
+    with pytest.raises(accounts_service.NoSuchAccount, match=f"no {slot.noun} account in slot 99"):
+        accounts_service.resolve("99", agent=adapter.id)

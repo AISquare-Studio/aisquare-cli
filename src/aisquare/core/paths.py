@@ -503,18 +503,9 @@ def credentials_path() -> Path:
     return aisquare_home() / "credentials"
 
 
-def claude_accounts_dir() -> Path:
-    """Where the CLI keeps the Claude Code config directories it owns, one per slot."""
-    return aisquare_home() / "claude-accounts"
-
-
-def claude_accounts_tmp_dir() -> Path:
-    """Where each managed account's ``CLAUDE_CODE_TMPDIR`` lives — disposable, under cache."""
-    return cache_dir() / "claude-accounts"
-
-
 def agent_accounts_dir(name: str) -> Path:
-    """Where the CLI keeps another agent's homes, one per slot (``codex-accounts``)."""
+    """Where the CLI keeps an agent's homes, one per slot: its accounts' ``dir_name``
+    (``claude-accounts``, ``codex-accounts``), as ``core.claude_accounts.accounts_root`` asks."""
     return aisquare_home() / name
 
 

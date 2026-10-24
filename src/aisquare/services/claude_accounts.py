@@ -44,7 +44,6 @@ arrangement lives in ``agent_account`` (store v29).
 from __future__ import annotations
 
 import contextlib
-import json
 import os
 import shutil
 import signal
@@ -62,6 +61,7 @@ from typing import Any, Literal
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
 from aisquare.core import paths
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters.types import FolderTrust, trusted_by
 from aisquare.core.config import AccountsSettings, FleetSettings, load_config
 from aisquare.core.names import name_key
@@ -125,47 +125,13 @@ def _now() -> datetime:
 
 
 def install(agent: str = AGENT) -> ClaudeInstall:
-    """Whether the agent's binary is on PATH, and which version (read from the install layout)."""
-    if agent != AGENT:
-        from aisquare.core.agent_adapters import get_adapter
-
-        found = shutil.which(get_adapter(agent).binary)
-        if found is None:
-            return ClaudeInstall(installed=False)
-        return ClaudeInstall(installed=True, binary=found, version=_layout_version(found))
-    binary = shutil.which("claude")
-    if binary is None:
+    """Whether the agent's binary is on PATH, and which version its install layout names
+    (``AgentAdapter.layout_version``: no process is started)."""
+    adapter = get_adapter(agent)
+    found = shutil.which(adapter.binary)
+    if found is None:
         return ClaudeInstall(installed=False)
-    # Lazy: diagnostics imports this module for its doctor line.
-    from aisquare.services.diagnostics import claude_code_version
-
-    return ClaudeInstall(installed=True, binary=binary, version=claude_code_version(binary))
-
-
-def _layout_version(binary: str) -> str | None:
-    """A version the install's own layout names, without running it.
-
-    Codex's standalone installer links ``…/releases/<version>-<target>/bin/codex``;
-    npm's ``@openai/codex`` has a ``package.json`` above its ``bin``. Neither: ``None``.
-    """
-    import re
-
-    try:
-        resolved = Path(binary).resolve()
-    except (OSError, RuntimeError):
-        return None
-    match = re.search(r"/releases/(\d+\.\d+\.\d+[^/-]*)", resolved.as_posix())
-    if match:
-        return match.group(1)
-    for parent in list(resolved.parents)[:4]:
-        try:
-            data: Any = json.loads((parent / "package.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        version = data.get("version") if isinstance(data, dict) else None
-        if isinstance(version, str) and version:
-            return version
-    return None
+    return ClaudeInstall(installed=True, binary=found, version=adapter.layout_version(found))
 
 
 def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
@@ -179,27 +145,14 @@ def describe(account: ClaudeAccount) -> ClaudeAccountStatus:
     home = core.agent_config_dir(account)
     context = agent_core.inspect_context(account.agent, home, read_documents=False)
     _readiness, detail = agent_core.integration_readiness(account.agent, home)
-    if account.agent != AGENT:
-        kind = core.kind(account.agent)
-        return ClaudeAccountStatus(
-            account=account,
-            label=core.label(account),
-            identity=core.identity(account),
-            signed_in=core.signed_in(account),
-            token_state=kind.token_state(account),
-            subscription=kind.subscription(account),
-            hooks_installed=_hooks_installed(account),
-            detail=" ".join(filter(None, [detail, *context.notes])),
-        )
-    login = core.stored_login(account)
-    creds = login.credentials
+    kind = core.kind(account.agent)
     return ClaudeAccountStatus(
         account=account,
         label=core.label(account),
         identity=core.identity(account),
         signed_in=core.signed_in(account),
-        token_state="unreadable" if login.unreadable is not None else core.token_state(creds),
-        subscription=core.subscription_label(creds),
+        token_state=kind.token_state(account),
+        subscription=kind.subscription(account),
         hooks_installed=_hooks_installed(account),
         detail=" ".join(filter(None, [detail, *context.notes])),
     )
@@ -209,18 +162,22 @@ def _hooks_installed(account: ClaudeAccount) -> bool:
     """Whether aisquare runs in this slot: the one shared answer, which never raises.
 
     So a slot reads as the doctor's row and ``agents status`` read it, and a
-    settings.json that cannot be read is "not installed" rather than a crash.
-    A Codex home's is ``core.agents.hooks_installed``: every hook in its
-    ``hooks.json`` (Codex then asks the operator to trust them once).
+    settings.json that cannot be read is "not installed" rather than a crash: the one
+    "connected?" answer (``core.agents.connected``, the plugin route included). An agent
+    that runs a hook only once it is trusted (``capabilities.requires_hook_trust``) is read
+    by its hooks file alone, every hook in it (``core.agents.hooks_installed``: Codex's
+    ``hooks.json``, which Codex then asks the operator to trust once): its plugin's hooks
+    are trusted apart from them.
     """
-    if account.agent != AGENT:
-        from aisquare.core import agents as agent_core
+    from aisquare.core import agents as agent_core
 
-        try:
-            return agent_core.hooks_installed(account.agent, core.agent_config_dir(account))
-        except Exception:
-            return False
-    return agents_service.claude_code_connected(account.config_dir)
+    home = core.agent_config_dir(account)
+    try:
+        if get_adapter(account.agent).capabilities.requires_hook_trust:
+            return agent_core.hooks_installed(account.agent, home)
+        return agent_core.connected(account.agent, home)
+    except Exception:
+        return False
 
 
 def overview() -> AccountsOverview:
@@ -231,12 +188,9 @@ def overview() -> AccountsOverview:
     and never the listing — see :func:`list_accounts`. ``installs`` has every
     agent with account slots; Claude Code's is ``claude`` too, as it always was.
     """
-    claude = install()
-    installs = {
-        agent: claude if agent == AGENT else install(agent) for agent in core.account_agents()
-    }
+    installs = {agent: install(agent) for agent in core.account_agents()}
     return AccountsOverview(
-        claude=claude,
+        claude=installs.get(AGENT) or install(),
         accounts=[describe(account) for account in list_accounts()],
         installs=installs,
     )
@@ -263,8 +217,9 @@ PROJECT_ACCOUNT_KEY = "claude_account"
 
 
 def project_account_key(agent: str = AGENT) -> str:
-    """The ``project_setting`` key of ``agent``'s project default: one per agent."""
-    return PROJECT_ACCOUNT_KEY if agent == AGENT else f"{agent}_account"
+    """The ``project_setting`` key of ``agent``'s project default: one per agent, Claude
+    Code's the one it always was (``AgentAccounts.legacy_slots``)."""
+    return PROJECT_ACCOUNT_KEY if core.kind(agent).legacy_slots else f"{agent}_account"
 
 
 ChoiceSource = Literal["flag", "role binding", "project default", "headroom", "machine default"]
@@ -316,10 +271,13 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
     then each other agent's in ITS order (``agent_account``, store v29).
     """
     listed = core.list_accounts()
-    arranged = _arranged_claude(store, [a for a in listed if a.agent == AGENT])
+    arranged: list[ClaudeAccount] = []
     for agent in core.account_agents():
-        if agent != AGENT:
-            arranged.extend(_arranged_agent(store, agent, [a for a in listed if a.agent == agent]))
+        mine = [a for a in listed if a.agent == agent]
+        if core.kind(agent).legacy_slots:
+            arranged.extend(_arranged_claude(store, mine))
+        else:
+            arranged.extend(_arranged_agent(store, agent, mine))
     return arranged
 
 
@@ -475,11 +433,15 @@ def _resolve_in(
 
 
 def _whose(agent: str | None, accounts: Sequence[ClaudeAccount]) -> str:
-    """``Claude`` / ``Codex`` in a not-found message: the agent asked for, else Claude's
-    word on a machine that has only Claude accounts, as every message here always said."""
-    if agent == AGENT or (agent is None and all(a.agent == AGENT for a in accounts)):
-        return "Claude"
-    return core.agent_label(agent) if agent is not None else "such"
+    """``Claude`` / ``Codex`` in a not-found message (``AgentAccounts.noun``): the agent
+    asked for, else the word of the one agent a machine has accounts of, as every message
+    here always said of Claude's; ``such`` with several."""
+    if agent is None:
+        agents = {a.agent for a in accounts}
+        if len(agents) > 1:
+            return "such"
+        agent = next(iter(agents), AGENT)
+    return core.kind(agent).noun
 
 
 def _signed_in_as(
@@ -497,7 +459,7 @@ def _signed_in_as(
         identity = core.identity(account)
         return identity is not None and identity.email.lower() == email
 
-    if agent is not None or all(a.agent == AGENT for a in accounts):
+    if agent is not None or len({a.agent for a in accounts}) <= 1:
         ordered = sorted(accounts, key=lambda a: a.agent != agent) if agent else accounts
         return next((account for account in ordered if matches(account)), None)
     first: dict[str, ClaudeAccount] = {}
@@ -588,10 +550,8 @@ def slot_of(config_dir: str | Path) -> int | None:
     if managed is not None:
         return managed
     try:
-        if Path(config_dir).resolve() == core.default_config_dir().resolve():
-            return core.DEFAULT_SLOT
         for agent in core.account_agents():
-            if agent != AGENT and Path(config_dir).resolve() == core.plain_home(agent).resolve():
+            if Path(config_dir).resolve() == core.plain_home(agent).resolve():
                 return core.kind(agent).plain_slot
     except (OSError, RuntimeError):  # RuntimeError: a symlink loop, on 3.11 and 3.12
         return None
@@ -662,9 +622,7 @@ def choose(
     ``[accounts]`` settings are read once per call (finding 12).
     """
     skip = frozenset(exclude)  # once: an iterator would be spent by its first reader
-    accounts, registry_note, project_slot = (
-        _read_registry(project) if agent == AGENT else _read_registry(project, agent=agent)
-    )
+    accounts, registry_note, project_slot = _read_registry(project, agent=agent)
     if explicit is not None:
         return AccountChoice(
             _resolve_in(accounts, explicit, note=registry_note, agent=agent), "flag"
@@ -803,7 +761,7 @@ def set_default(
                     store.set_project_setting(
                         project.id, project_account_key(whose), str(account.slot)
                     )
-            elif whose == AGENT:
+            elif core.kind(whose).legacy_slots:
                 store.set_claude_account_default(account.slot if account else None)
             else:
                 store.set_agent_account_default(whose, account.slot if account else None)
@@ -862,7 +820,7 @@ def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
                     f"the alias {normalised!r} is already taken — see: aisquare accounts"
                 )
             try:
-                if account.agent == AGENT:
+                if core.kind(account.agent).legacy_slots:
                     store.set_claude_account_alias(account.slot, normalised)
                 else:
                     store.set_agent_account_alias(account.agent, account.slot, normalised)
@@ -884,7 +842,7 @@ def set_disabled(ref: str, disabled: bool) -> ClaudeAccount:
         with store_session() as store:
             _arranged(store)
             try:
-                if account.agent == AGENT:
+                if core.kind(account.agent).legacy_slots:
                     store.set_claude_account_disabled(account.slot, disabled)
                 else:
                     store.set_agent_account_disabled(account.agent, account.slot, disabled)
@@ -913,7 +871,7 @@ def _write_order(order: Sequence[ClaudeAccount]) -> list[ClaudeAccount]:
             _arranged(store)
             for agent in dict.fromkeys([AGENT, *(a.agent for a in order)]):
                 slots = [a.slot for a in order if a.agent == agent]
-                if agent == AGENT:
+                if core.kind(agent).legacy_slots:
                     store.order_claude_accounts(slots)
                 elif slots:
                     store.order_agent_accounts(agent, slots)
@@ -957,7 +915,7 @@ def forget_arrangement(slot: int) -> None:
     with contextlib.suppress(sqlite3.Error), store_session() as store:
         store.delete_claude_account(slot)
         for agent in core.account_agents():
-            if agent != AGENT:
+            if not core.kind(agent).legacy_slots:
                 store.delete_agent_accounts(agent, [slot])
             key = project_account_key(agent)
             for project_id, value in store.project_settings(key).items():
@@ -1994,8 +1952,6 @@ CARRIED_VARS = (paths.HOME_ENV_VAR, core.CONFIG_DIR_VAR, core.TMPDIR_VAR)
 
 def carried_vars(agent: str = AGENT) -> tuple[str, ...]:
     """:data:`CARRIED_VARS` for a window of ``agent``: the home, and that agent's variables."""
-    if agent == AGENT:
-        return CARRIED_VARS
     accounts = core.kind(agent)
     return (paths.HOME_ENV_VAR, accounts.home_env, *accounts.extra_env)
 
@@ -2222,14 +2178,9 @@ def remove(account: ClaudeAccount, *, notes: list[str] | None = None) -> Path:
     number (see :func:`_retarget_bindings`), for the caller to show.
     """
     if not account.managed:
-        if account.agent != AGENT:
-            raise AccountsError(
-                f"slot {account.slot} is the {core.label(account)} of this machine, not an "
-                "account the CLI added — sign out of it with `codex logout` instead"
-            )
         raise AccountsError(
-            "slot 1 is the plain claude of this machine, not an account the CLI added — "
-            "sign out of it inside Claude Code (/logout) instead"
+            f"slot {account.slot} is the {core.label(account)} of this machine, not an "
+            f"account the CLI added — sign out of it {core.kind(account.agent).sign_out} instead"
         )
     identity = core.identity(account)  # read before the rename moves the directory
     # The alias too, from the registry itself: a caller holding a plain
@@ -2454,7 +2405,7 @@ def share_for_launch(
                 else sharing.trust_scope(Path.cwd() if folder is None else folder)
             )
             notes += _share_trust_into(target, trust.scope(base), accounts, trust)
-        if knobs.share_settings and whose == AGENT and target.managed:
+        if knobs.share_settings and core.kind(whose).shares_settings and target.managed:
             notes += _share_settings_into(target)
         return notes
     except Exception as exc:  # an observer of the launch: it costs the sharing, never the launch
@@ -2476,22 +2427,10 @@ def _claude_code_accounts() -> list[ClaudeAccount]:
 def _account_of_env(
     env: Mapping[str, str], accounts: Sequence[ClaudeAccount], agent: str = AGENT
 ) -> ClaudeAccount | None:
-    """The account whose home ``agent`` started with ``env`` reads, if ours: for Claude Code,
-    by the ``.claude.json`` it reads (the plain one's is beside its directory)."""
-    if agent != AGENT:
-        home = core.launched_home(agent, env)
-        return next((one for one in accounts if _same_path(one.config_dir, home)), None)
-    config = env.get(core.CONFIG_DIR_VAR, "").strip()
-    wanted = (
-        paths.expand_user(Path(config)) / ".claude.json"
-        if config
-        else core.home_config_dir().with_name(".claude.json")
-    )
-    return next((one for one in accounts if _same_path(core.claude_json_path(one), wanted)), None)
-
-
-def _same_path(a: Path, b: Path) -> bool:
-    return os.path.realpath(a) == os.path.realpath(b)
+    """The account whose home ``agent`` started with ``env`` reads, if ours: its accounts
+    slot's answer (``AgentAccounts.launched_account``; Claude Code's by the ``.claude.json``
+    it reads, the plain one's beside its directory)."""
+    return core.kind(agent).launched_account(env, accounts)
 
 
 def _decided(records: Mapping[str, bool], scope: sharing.TrustScope) -> bool:

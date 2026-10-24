@@ -1,5 +1,6 @@
 """Claude Code's native integration vocabulary."""
 
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
@@ -33,6 +34,7 @@ from aisquare.core.agent_adapters.types import (
     command_entry,
     option_occurrences,
     option_values,
+    package_version,
     payload_cwd,
     payload_text,
 )
@@ -56,6 +58,8 @@ _HEADLESS_HEAD = ("--tools", "", "--max-turns", "1", "--output-format", "json")
 _HEADLESS_TAIL = ("--no-session-persistence", "--settings", "{}", "--strict-mcp-config")
 #: Claude Code's Homebrew cask, offered on macOS after the native installer.
 BREW_COMMAND = "brew install --cask claude-code"
+#: A native install's target, named by its version (``…/share/claude/versions/2.1.250``).
+_VERSION_DIR = re.compile(r"^\d+\.\d+\.\d+\S*$")
 
 
 def _effort_level(payload: Mapping[str, Any]) -> str | None:
@@ -201,6 +205,20 @@ class ClaudeCodeAdapter:
         if value:
             return paths.expand_user(Path(value))
         return home / self.home_name
+
+    def layout_version(self, binary: str) -> str | None:
+        """From the install layout, never ``claude --version``: the native installer links
+        ``claude`` to ``…/share/claude/versions/<version>`` (the target's name IS the
+        version); an npm install links it to ``…/node_modules/@anthropic-ai/claude-code/
+        cli.js`` with a ``package.json`` beside it. Anything else is ``None``: an honest
+        blank in the detail beats a guess."""
+        try:
+            real = Path(binary).resolve()
+        except (OSError, RuntimeError):
+            return None
+        if _VERSION_DIR.match(real.name):
+            return real.name
+        return package_version(str(real), depth=1)
 
     def hooks_switch(
         self, home: Path, settings_path: Path, args: Sequence[str] = ()

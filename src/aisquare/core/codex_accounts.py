@@ -43,7 +43,7 @@ import binascii
 import hashlib
 import json
 import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -603,6 +603,10 @@ class CodexAccounts:
     plain_label = "plain codex"
     install_command = INSTALL_COMMAND
     network_usage = False
+    legacy_slots = False
+    noun = "Codex"
+    sign_out = "with `codex logout`"
+    shares_settings = False
 
     def sign_in_args(self) -> tuple[str, ...]:
         # Codex's own browser (or device-code) sign-in; it writes auth.json and exits.
@@ -615,13 +619,20 @@ class CodexAccounts:
     def config_dir(self, slot_dir: Path) -> Path:
         return slot_dir  # CODEX_HOME names the config dir itself
 
+    def launched_account(
+        self, env: Mapping[str, str], accounts: Sequence[ClaudeAccount]
+    ) -> ClaudeAccount | None:
+        from aisquare.core.claude_accounts import account_in_home
+
+        return account_in_home(AGENT, env, accounts)
+
     def identity(
         self, account: ClaudeAccount, *, env: Mapping[str, str] | None = None
     ) -> ClaudeIdentity | None:
         return identity(account, env=env)
 
-    def signed_in(self, account: ClaudeAccount) -> bool:
-        return signed_in(account)
+    def signed_in(self, account: ClaudeAccount, *, fresh: bool = False) -> bool:
+        return signed_in(account)  # auth.json, read afresh every time
 
     def subscription(self, account: ClaudeAccount) -> str | None:
         return plan(account)

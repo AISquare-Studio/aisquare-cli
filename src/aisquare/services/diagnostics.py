@@ -24,6 +24,7 @@ from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, launch_seal, orchestrator, outbox, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, PluginInstall
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
@@ -1002,37 +1003,18 @@ _STALE_HOOKS = (
 _RECONNECT = "(Re)connect it: aisquare agents connect claude-code"
 
 
-_CLAUDE_VERSION_DIR = re.compile(r"^\d+\.\d+\.\d+\S*$")
-
-
 def claude_code_version(binary: str | None = None) -> str | None:
-    """The installed Claude Code version, read from the install layout on disk.
+    """The installed Claude Code version, read from the install layout on disk
+    (``ClaudeCodeAdapter.layout_version``).
 
     NO PROCESS IS STARTED: ``claude --version`` from a diagnostic would be a new
     spawn seam, and the answer is already on the filesystem for both layouts
-    the installer produces. The native installer links ``claude`` to
-    ``…/share/claude/versions/<version>`` (the target's name IS the version);
-    an npm install links it to ``…/node_modules/@anthropic-ai/claude-code/cli.js``
-    with a ``package.json`` beside it. Anything else is ``None`` — an honest
-    blank in the detail beats a guess, and the check is unchanged without it.
-
-    ``binary`` is the resolved executable for tests; the default is PATH.
+    the installer produces. ``binary`` is the resolved executable for tests; the
+    default is its binary on PATH.
     """
-    found = binary if binary is not None else shutil.which("claude")
-    if found is None:
-        return None
-    try:
-        real = Path(found).resolve()
-        if _CLAUDE_VERSION_DIR.match(real.name):
-            return real.name
-        package = real.parent / "package.json"
-        if package.is_file():
-            version = json.loads(package.read_text(encoding="utf-8")).get("version")
-            if isinstance(version, str) and version:
-                return version
-    except (OSError, ValueError, AttributeError):
-        return None
-    return None
+    adapter = get_adapter(claude_accounts_core.AGENT)
+    found = binary if binary is not None else shutil.which(adapter.binary)
+    return adapter.layout_version(found) if found is not None else None
 
 
 def _site_label(site: agent_core.HookSiteHealth) -> str:

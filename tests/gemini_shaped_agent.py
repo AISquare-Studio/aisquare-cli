@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from aisquare.core import agents, harness
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters.lasting import fetches_aisquare, runs_aisquare
 from aisquare.core.agent_adapters.transcripts import (
     YOU,
@@ -60,6 +61,7 @@ from aisquare.core.agent_adapters.types import (
     WriteScope,
     config_home,
     option_values,
+    package_version,
     payload_cwd,
     payload_text,
 )
@@ -285,6 +287,10 @@ class GeminiShapedAccounts:
     plain_label = "plain gemini"
     install_command = "npm install -g @google/gemini-cli"
     network_usage = False
+    legacy_slots = False
+    noun = "Gemini-shaped"
+    sign_out = "inside Gemini (/auth)"
+    shares_settings = False
     trust = GeminiShapedTrust()
 
     def sign_in_args(self) -> tuple[str, ...]:
@@ -293,6 +299,11 @@ class GeminiShapedAccounts:
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
         value = plain.get(HOME_ENV, "").strip()
         return Path(value).expanduser() if value else home
+
+    def launched_account(
+        self, env: Mapping[str, str], accounts: Sequence[ClaudeAccount]
+    ) -> ClaudeAccount | None:
+        return accounts_core.account_in_home(self.agent, env, accounts)
 
     def config_dir(self, slot_dir: Path) -> Path:
         return slot_dir / CONFIG
@@ -312,7 +323,7 @@ class GeminiShapedAccounts:
             return None
         return ClaudeIdentity(email=active)
 
-    def signed_in(self, account: ClaudeAccount) -> bool:
+    def signed_in(self, account: ClaudeAccount, *, fresh: bool = False) -> bool:
         return bool((self._read(account, "oauth_creds.json") or {}).get("refresh_token"))
 
     def subscription(self, account: ClaudeAccount) -> str | None:
@@ -374,6 +385,9 @@ class GeminiShapedAdapter:
         """An explicit dir, else ``$GEMINI_CLI_HOME/.gemini``, else ``~/.gemini``
         (``config_home``, through its accounts' ``config_dir``)."""
         return config_home(self, home, env, explicit)
+
+    def layout_version(self, binary: str) -> str | None:
+        return package_version(binary)
 
     def hooks_switch(
         self, home: Path, settings_path: Path, args: Sequence[str] = ()

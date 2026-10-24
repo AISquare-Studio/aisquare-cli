@@ -228,7 +228,7 @@ def test_the_plan_finds_every_kind_of_hook_site(
     ambient = _hooked(tmp_path / "elsewhere" / "claude-config", tool.script)
     recorded = _hooked(tmp_path / "recorded" / "claude", tool.script)
     _record(recorded)
-    slot = _hooked(paths.claude_accounts_dir() / "2", tool.script)
+    slot = _hooked(accounts_core.accounts_root() / "2", tool.script)
     (slot / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(ambient))
 
@@ -258,7 +258,7 @@ def test_the_plan_names_the_logins_a_purge_would_delete(
     tool: Tool, world: World, runner: CliRunner, tmp_path: Path
 ) -> None:
     _initialised(runner, tmp_path)
-    slot = paths.claude_accounts_dir() / "2"
+    slot = accounts_core.accounts_root() / "2"
     slot.mkdir(parents=True)
     (slot / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
     (slot / ".claude.json").write_text(
@@ -282,7 +282,7 @@ def test_the_plan_parses_each_slots_claude_json_once(
     of logins parsed it again for the email; such a file can reach tens of MB. The login is
     taken from the scan's parse. The control: the login is still named."""
     _initialised(runner, tmp_path)
-    slot = paths.claude_accounts_dir() / "2"
+    slot = accounts_core.accounts_root() / "2"
     slot.mkdir(parents=True)
     (slot / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
     (slot / ".claude.json").write_text(
@@ -1400,8 +1400,8 @@ def test_purge_deletes_the_home_and_never_follows_a_link_inside_it(
     claude = _hooked(isolated_agent_home / ".claude", tool.script)
     (claude / "projects").mkdir()
     (claude / "projects" / "transcript.jsonl").write_text("precious\n", encoding="utf-8")
-    paths.claude_accounts_dir().mkdir(parents=True, exist_ok=True)
-    (paths.claude_accounts_dir() / "3").symlink_to(claude, target_is_directory=True)
+    accounts_core.accounts_root().mkdir(parents=True, exist_ok=True)
+    (accounts_core.accounts_root() / "3").symlink_to(claude, target_is_directory=True)
 
     result = runner.invoke(app, ["uninstall", "--yes", "--purge"])
 
@@ -1513,7 +1513,7 @@ def test_a_plugin_inside_the_home_a_purge_deletes_does_not_hold_the_purge_up(
     was refused for it all the same (review of #257)."""
     monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: True)  # the route's rule
     _initialised(runner, tmp_path)
-    slot = _plugin_installed(paths.claude_accounts_dir() / "2")
+    slot = _plugin_installed(accounts_core.accounts_root() / "2")
 
     plan = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
     kept = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
@@ -2253,7 +2253,7 @@ def test_purge_says_the_keychain_keeps_the_slots_tokens_on_macos(
     purge does not touch — said, rather than promised away."""
     monkeypatch.setattr(accounts_core, "keychain_platform", lambda: keychain)
     _initialised(runner, tmp_path)
-    slot = paths.claude_accounts_dir() / "2"
+    slot = accounts_core.accounts_root() / "2"
     slot.mkdir(parents=True)
     (slot / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
 
@@ -2498,7 +2498,7 @@ def test_the_question_never_offers_what_an_unreadable_site_rules_out(
 def _retired_slot_with_broken_hooks(program: Path | str) -> Path:
     """A slot `accounts remove` retired with aisquare's hooks still in it: its settings.json
     was not valid JSON, so they could not be taken out first, and that failure is swallowed."""
-    slot = paths.claude_accounts_dir() / "2.removed-20261001T120000Z"
+    slot = accounts_core.accounts_root() / "2.removed-20261001T120000Z"
     slot.mkdir(parents=True)
     (slot / "settings.json").write_text(_hooks_text(program, trailing_comma=True), "utf-8")
     return slot
@@ -2589,7 +2589,7 @@ def test_a_slot_that_links_out_of_the_home_still_holds_the_purge_up(
     broken = tmp_path / "elsewhere" / "claude-old"  # reached through the slot alone
     broken.mkdir(parents=True)
     (broken / "settings.json").write_text(_hooks_text(tool.script, trailing_comma=True), "utf-8")
-    slot = paths.claude_accounts_dir() / "3"
+    slot = accounts_core.accounts_root() / "3"
     slot.parent.mkdir(parents=True, exist_ok=True)
     slot.symlink_to(broken, target_is_directory=True)
 
@@ -2771,7 +2771,7 @@ def test_a_purge_the_guard_refuses_is_planned_as_keeping_the_home(
     monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: True)  # the route's rule
     _initialised(runner, tmp_path)  # in AISQUARE_HOME, which the suite moves
     home = paths.aisquare_home()
-    slot = _plugin_installed(paths.claude_accounts_dir() / "2")
+    slot = _plugin_installed(accounts_core.accounts_root() / "2")
     _hooked(isolated_agent_home / ".claude", tool.script)
 
     machine = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
@@ -2842,7 +2842,7 @@ def test_an_mcp_server_a_purge_deletes_with_the_home_is_not_kept(
     (sweep 2 of #257). One in ~/.claude.json outlives the purge, and without --purge the
     slot's stays too (controls)."""
     _initialised(runner, tmp_path)
-    _mcp_server(paths.claude_accounts_dir() / "2" / ".claude.json", "fleet-memory")
+    _mcp_server(accounts_core.accounts_root() / "2" / ".claude.json", "fleet-memory")
     _mcp_server(isolated_agent_home / ".claude.json", "user-memory")
 
     plain = runner.invoke(app, ["uninstall", "--dry-run"]).stdout
@@ -2879,7 +2879,7 @@ def test_an_mcp_server_reached_through_a_link_in_the_home_is_kept_by_its_own_fil
     if not can_symlink():
         pytest.skip("this machine cannot create symlinks")
     _initialised(runner, tmp_path)
-    slot = paths.claude_accounts_dir() / "2"
+    slot = accounts_core.accounts_root() / "2"
     if link == "slot-file":
         held = _mcp_server(tmp_path / "elsewhere" / ".claude.json", "linked-memory")
         slot.mkdir(parents=True)
@@ -2990,7 +2990,7 @@ def test_each_mcp_server_is_named_with_the_command_that_reaches_it(
     spec = {"command": "aisquare", "args": ["serve"]}
     repo = tmp_path / "my repo"
     sibling = isolated_agent_home / ".claude-c2"
-    slot = paths.claude_accounts_dir() / "2"
+    slot = accounts_core.accounts_root() / "2"
     (isolated_agent_home / ".claude.json").parent.mkdir(parents=True, exist_ok=True)
     (isolated_agent_home / ".claude.json").write_text(
         json.dumps(
@@ -3160,7 +3160,7 @@ def test_a_slot_linked_where_this_user_cannot_enter_costs_no_other_slot(
     _initialised(runner, tmp_path)
     home = paths.aisquare_home()
     outside = _broken_hooks(tmp_path / "elsewhere" / "claude-old", tool.script)
-    accounts = paths.claude_accounts_dir()
+    accounts = accounts_core.accounts_root()
     (accounts / "2").mkdir(parents=True)
     (accounts / "2" / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
     (accounts / "3").symlink_to(outside, target_is_directory=True)
@@ -3479,7 +3479,7 @@ def test_a_purge_does_not_wait_for_a_project_server_only_its_own_slots_left_unan
     (isolated_agent_home / ".claude.json").write_text(
         json.dumps({"projects": {str(repo): answer}}), encoding="utf-8"
     )
-    slot = paths.claude_accounts_dir() / "2"
+    slot = accounts_core.accounts_root() / "2"
     slot.mkdir(parents=True)
     (slot / ".claude.json").write_text(
         json.dumps(

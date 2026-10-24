@@ -36,6 +36,7 @@ from aisquare.core.agent_adapters.types import (
     config_home,
     option_occurrences,
     option_values,
+    package_version,
     payload_cwd,
     payload_text,
     rewrite_option_values,
@@ -600,6 +601,19 @@ class CodexAdapter:
 
     def config_dir(self, home: Path, env: Mapping[str, str], explicit: Path | None = None) -> Path:
         return config_home(self, home, env, explicit)
+
+    def layout_version(self, binary: str) -> str | None:
+        """From the install layout: the standalone installer links ``…/releases/<version>-
+        <target>/bin/codex``; npm's ``@openai/codex`` has a ``package.json`` above its
+        ``bin``. Neither: ``None``."""
+        try:
+            resolved = Path(binary).resolve()
+        except (OSError, RuntimeError):
+            return None
+        match = re.search(r"/releases/(\d+\.\d+\.\d+[^/-]*)", resolved.as_posix())
+        if match:
+            return match.group(1)
+        return package_version(str(resolved))
 
     def hooks_switch(
         self, home: Path, settings_path: Path, args: Sequence[str] = ()

@@ -1545,10 +1545,10 @@ def test_one_launch_reads_the_registry_and_the_settings_once(
     real_read = service._read_registry
 
     def counted_read(
-        project: ProjectInfo | None = None,
+        project: ProjectInfo | None = None, *, agent: str = core.AGENT
     ) -> tuple[list[ClaudeAccount], str | None, int | None]:
         reads.append(1)
-        return real_read(project)
+        return real_read(project, agent=agent)
 
     loads: list[int] = []
     real_settings = service.accounts_settings

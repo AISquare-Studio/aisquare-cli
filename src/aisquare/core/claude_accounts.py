@@ -8,7 +8,7 @@ for as long as parallel installs have existed; this module is the CLI owning
 the same mechanism, so that ``asq`` can add, list, launch and remove accounts
 without anyone writing an alias.
 
-Layout (``paths.claude_accounts_dir`` / ``paths.claude_accounts_tmp_dir``)::
+Layout (:func:`accounts_root` / :func:`tmp_root`, each under the accounts' ``dir_name``)::
 
     ~/.aisquare/claude-accounts/<n>/                    CLAUDE_CONFIG_DIR of slot n (n ≥ 2)
     ~/.aisquare/claude-accounts/<n>/.aisquare-account.json   the marker: slot, created_at
@@ -80,7 +80,7 @@ import shutil
 import sys
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
@@ -108,6 +108,12 @@ MARKER = ".aisquare-account.json"
 
 CONFIG_DIR_VAR = "CLAUDE_CONFIG_DIR"
 TMPDIR_VAR = "CLAUDE_CODE_TMPDIR"
+HOME_DIR = ".claude"
+"""The config dir a plain ``claude`` uses under the user's home, ``CLAUDE_CONFIG_DIR`` unset."""
+CLAUDE_JSON = ".claude.json"
+"""Its account file: the login it records, its folder trust (``core.claude_sharing``)."""
+CREDENTIALS = ".credentials.json"
+"""Where it keeps the login's tokens off macOS's Keychain."""
 
 INSTALL_COMMAND = "curl -fsSL https://claude.ai/install.sh | bash"
 """The native installer — the layout ``services.diagnostics.claude_code_version`` reads first."""
@@ -163,13 +169,15 @@ def agent_label(agent: str) -> str:
 
 
 def accounts_root(agent: str = AGENT) -> Path:
-    if agent == AGENT:
-        return paths.claude_accounts_dir()
+    """Where ``agent``'s slots are: its accounts' ``dir_name`` under the aisquare home
+    (``claude-accounts``, ``codex-accounts``)."""
     return paths.agent_accounts_dir(kind(agent).dir_name)
 
 
-def tmp_root() -> Path:
-    return paths.claude_accounts_tmp_dir()
+def tmp_root(agent: str = AGENT) -> Path:
+    """Where the scratch dirs of ``agent``'s slots are, one per slot, for its accounts'
+    ``extra_env`` (Claude Code's ``CLAUDE_CODE_TMPDIR``): disposable, under the cache."""
+    return paths.cache_dir() / kind(agent).dir_name
 
 
 def default_config_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -187,12 +195,11 @@ def default_config_dir(env: Mapping[str, str] | None = None) -> Path:
 
 def home_config_dir() -> Path:
     """``~/.claude``: the directory a plain ``claude`` uses with ``CLAUDE_CONFIG_DIR`` unset."""
-    return _home() / ".claude"
+    return _home() / HOME_DIR
 
 
 def default_account(env: Mapping[str, str] | None = None, *, agent: str = AGENT) -> ClaudeAccount:
-    if agent == AGENT:
-        return ClaudeAccount(slot=DEFAULT_SLOT, config_dir=default_config_dir(env), managed=False)
+    """``agent``'s plain slot: whatever its binary uses in the shell (:func:`plain_home`)."""
     accounts = kind(agent)
     return ClaudeAccount(
         slot=accounts.plain_slot, config_dir=plain_home(agent, env), managed=False, agent=agent
@@ -206,8 +213,6 @@ def plain_home(agent: str, env: Mapping[str, str] | None = None) -> Path:
     variables (:func:`plain_environment`), so a process under one of our slots
     answers the launching shell's home, not the slot's.
     """
-    if agent == AGENT:
-        return default_config_dir(env)
     return kind(agent).plain_home(_home(), plain_environment(env, agent=agent))
 
 
@@ -219,16 +224,29 @@ def launched_home(agent: str, env: Mapping[str, str]) -> Path:
     return accounts.plain_home(_home(), {accounts.home_env: env.get(accounts.home_env, "")})
 
 
+def account_in_home(
+    agent: str, env: Mapping[str, str], accounts: Sequence[ClaudeAccount]
+) -> ClaudeAccount | None:
+    """The one of ``accounts`` whose home ``agent``'s binary started with ``env`` reads
+    (:func:`launched_home`): ``AgentAccounts.launched_account`` for an agent whose home is
+    all its login and trust are kept in (Codex's)."""
+    home = launched_home(agent, env)
+    return next((one for one in accounts if _same_file(one.config_dir, home)), None)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
 def _managed(slot: int, agent: str = AGENT) -> ClaudeAccount:
-    if agent != AGENT:
-        return ClaudeAccount(
-            slot=slot, config_dir=accounts_root(agent) / str(slot), managed=True, agent=agent
-        )
+    """Slot ``slot`` of ``agent``'s, with a scratch dir where its accounts keep variables of
+    their own beside the home (``extra_env``; Codex keeps its temporary files in its home)."""
     return ClaudeAccount(
         slot=slot,
-        config_dir=accounts_root() / str(slot),
-        tmp_dir=tmp_root() / str(slot),
+        config_dir=accounts_root(agent) / str(slot),
+        tmp_dir=tmp_root(agent) / str(slot) if kind(agent).extra_env else None,
         managed=True,
+        agent=agent,
     )
 
 
@@ -260,18 +278,16 @@ def all_managed_accounts() -> list[ClaudeAccount]:
 
 
 def list_accounts() -> list[ClaudeAccount]:
-    """The default first, then every managed slot in order — then each other agent's.
+    """Each agent's plain slot, then every managed slot of its in order, Claude Code's first.
 
-    Another agent's plain home is listed only once it exists: Codex makes
-    ``~/.codex`` on its first run, and a machine that never ran it has no Codex
-    login to show. Claude Code's plain slot is listed always, as it always was.
+    An agent's plain home is listed only once it exists: Codex makes ``~/.codex`` on its
+    first run, and a machine that never ran it has no Codex login to show. Claude Code's
+    plain slot is listed always, as it always was (``AgentAccounts.legacy_slots``).
     """
-    found = [default_account(), *managed_accounts()]
+    found: list[ClaudeAccount] = []
     for agent in account_agents():
-        if agent == AGENT:
-            continue
         plain = default_account(agent=agent)
-        if os.path.isdir(plain.config_dir):
+        if kind(agent).legacy_slots or os.path.isdir(plain.config_dir):
             found.append(plain)
         found.extend(managed_accounts(agent))
     return found
@@ -321,10 +337,8 @@ def label(account: ClaudeAccount) -> str:
     """
     if account.alias:
         return account.alias
-    if account.agent != AGENT:
-        plain = kind(account.agent)
-        return plain.plain_label if account.slot == plain.plain_slot else f"account {account.slot}"
-    return default_label(account.slot)
+    plain = kind(account.agent)
+    return plain.plain_label if account.slot == plain.plain_slot else f"account {account.slot}"
 
 
 def default_label(slot: int) -> str:
@@ -452,8 +466,8 @@ def create_account(agent: str = AGENT) -> ClaudeAccount:
         "created_at": _now().isoformat(),
         "created_by": f"aisquare-cli {__version__}",
     }
-    if agent != AGENT:
-        marker["agent"] = agent
+    if not kind(agent).legacy_slots:
+        marker["agent"] = agent  # Claude Code's slots' markers have always gone without
     (account.config_dir / MARKER).write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
     return account
 
@@ -509,12 +523,12 @@ def claude_json_path(
         or CONFIG_DIR_VAR in plain_environment(env)
         or account.config_dir != home_config_dir()
     ):
-        return account.config_dir / ".claude.json"
-    return _home() / ".claude.json"
+        return account.config_dir / CLAUDE_JSON
+    return _home() / CLAUDE_JSON
 
 
 def credentials_path(account: ClaudeAccount) -> Path:
-    return account.config_dir / ".credentials.json"
+    return account.config_dir / CREDENTIALS
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -530,10 +544,9 @@ def identity(
     *,
     env: Mapping[str, str] | None = None,
 ) -> ClaudeIdentity | None:
-    """The signed-in account, or ``None`` when the directory has no login recorded."""
-    if account.agent != AGENT:
-        return kind(account.agent).identity(account, env=env)
-    return read_identity(claude_json_path(account, env=env))
+    """The signed-in account, or ``None`` when the directory has no login recorded: its
+    agent's accounts slot's answer (``AgentAccounts.identity``)."""
+    return kind(account.agent).identity(account, env=env)
 
 
 def read_identity(path: Path) -> ClaudeIdentity | None:
@@ -669,7 +682,7 @@ def stored_login(account: ClaudeAccount, *, fresh: bool = False) -> StoredLogin:
     Another agent's account keeps no Claude Code login: none is read for it, from the
     Keychain or a file (its adapter's accounts slot reads its own).
     """
-    if account.agent != AGENT:
+    if not _claude_codes(account):
         return StoredLogin(None)
     if keychain_platform():
         read = read_keychain(keychain_service(account), keychain_account(), fresh=fresh)
@@ -677,6 +690,16 @@ def stored_login(account: ClaudeAccount, *, fresh: bool = False) -> StoredLogin:
             return StoredLogin(read.credentials, read.unreadable)
         return StoredLogin(credentials_in(_read_json(plaintext_credentials_path(account))))
     return StoredLogin(credentials_in(_read_json(credentials_path(account))))
+
+
+def _claude_codes(account: ClaudeAccount) -> bool:
+    """Whether ``account``'s agent keeps its slots as Claude Code does (its accounts slot is
+    :class:`ClaudeCodeAccounts`); ``False`` for any other, one this install does not know
+    included."""
+    try:
+        return isinstance(kind(account.agent), ClaudeCodeAccounts)
+    except ValueError:
+        return False
 
 
 def plaintext_credentials_path(
@@ -696,7 +719,7 @@ def plaintext_credentials_path(
     if directory is None:
         return credentials_path(account)
     base = Path(unicodedata.normalize("NFC", directory)) if directory else home_config_dir()
-    return base / ".credentials.json"
+    return base / CREDENTIALS
 
 
 def keychain_platform() -> bool:
@@ -961,11 +984,15 @@ def signed_in(account: ClaudeAccount, *, fresh: bool = False) -> bool:
     working login that Claude Code itself would refuse. A Keychain that would not say
     (:attr:`StoredLogin.unreadable`: locked, refused) is not a logout, so the recorded
     identity answers then, and the row says why its usage cannot be read rather than
-    offer a log-in that would not help. ``fresh`` is :func:`credentials`'.
+    offer a log-in that would not help. ``fresh`` is :func:`credentials`'. Another agent's
+    is its accounts slot's answer (``AgentAccounts.signed_in``).
     """
-    if account.agent != AGENT:
-        return kind(account.agent).signed_in(account)
-    if identity(account) is None:
+    return kind(account.agent).signed_in(account, fresh=fresh)
+
+
+def _claude_signed_in(account: ClaudeAccount, *, fresh: bool = False) -> bool:
+    """:func:`signed_in` for a Claude Code slot (``ClaudeCodeAccounts.signed_in``)."""
+    if read_identity(claude_json_path(account)) is None:
         return False
     login = stored_login(account, fresh=fresh)
     return login.credentials is not None or login.unreadable is not None
@@ -1224,9 +1251,9 @@ did not have gets no copy.
 
 
 def _launch_vars(agent: str) -> tuple[tuple[str, ...], Mapping[str, str]]:
-    """The variables an account of ``agent`` IS, and where a launch keeps the shell's own."""
-    if agent == AGENT:
-        return LAUNCH_VARS, PLAIN_VARS
+    """The variables an account of ``agent`` IS (its home's, then its accounts'
+    ``extra_env``: Claude Code's :data:`LAUNCH_VARS`), and where a launch keeps the shell's
+    own (``plain_vars``: Claude Code's :data:`PLAIN_VARS`)."""
     accounts = kind(agent)
     return (accounts.home_env, *accounts.extra_env), accounts.plain_vars
 
@@ -1271,12 +1298,12 @@ def launch_env(account: ClaudeAccount) -> dict[str, str]:
     """
     if not account.managed:
         return {}
-    if account.agent != AGENT:
-        # No scratch variable of its own: Codex keeps its temporary files under its home.
-        return {kind(account.agent).home_env: str(account.config_dir)}
-    env = {CONFIG_DIR_VAR: str(account.config_dir)}
+    accounts = kind(account.agent)
+    env = {accounts.home_env: str(account.config_dir)}
     if account.tmp_dir is not None:
-        env[TMPDIR_VAR] = str(account.tmp_dir)
+        # Each of its scratch variables names the slot's scratch dir; Codex has none, and
+        # keeps its temporary files under its home.
+        env.update(dict.fromkeys(accounts.extra_env, str(account.tmp_dir)))
     return env
 
 
@@ -1414,7 +1441,7 @@ class ClaudeFolderTrust:
     """Claude Code's folder trust: ``projects["<folder>"].hasTrustDialogAccepted`` in each
     account's ``.claude.json``, under its own lock (``core.claude_sharing``)."""
 
-    file_name = ".claude.json"
+    file_name = CLAUDE_JSON
 
     def scope(self, base: claude_sharing.TrustScope) -> claude_sharing.TrustScope:
         return base  # core.claude_sharing's rules are Claude Code's
@@ -1439,6 +1466,10 @@ class ClaudeCodeAccounts:
     plain_label = "plain claude"
     install_command = INSTALL_COMMAND
     network_usage = True
+    legacy_slots = True
+    noun = "Claude"
+    sign_out = "inside Claude Code (/logout)"
+    shares_settings = True
 
     def sign_in_args(self) -> tuple[str, ...]:
         # No non-interactive login: a first session in the slot runs Claude Code's own.
@@ -1446,24 +1477,38 @@ class ClaudeCodeAccounts:
 
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
         value = plain.get(CONFIG_DIR_VAR, "").strip()
-        return paths.expand_user(Path(value)) if value else home / ".claude"
+        return paths.expand_user(Path(value)) if value else home / HOME_DIR
 
     def config_dir(self, slot_dir: Path) -> Path:
         return slot_dir  # CLAUDE_CONFIG_DIR names the config dir itself
 
+    def launched_account(
+        self, env: Mapping[str, str], accounts: Sequence[ClaudeAccount]
+    ) -> ClaudeAccount | None:
+        """By the ``.claude.json`` a ``claude`` started with ``env`` reads: inside the dir
+        ``CLAUDE_CONFIG_DIR`` names, else beside ``~/.claude`` (:func:`claude_json_path`)."""
+        config = env.get(CONFIG_DIR_VAR, "").strip()
+        wanted = (
+            paths.expand_user(Path(config)) / CLAUDE_JSON
+            if config
+            else home_config_dir().with_name(CLAUDE_JSON)
+        )
+        return next((one for one in accounts if _same_file(claude_json_path(one), wanted)), None)
+
     def identity(
         self, account: ClaudeAccount, *, env: Mapping[str, str] | None = None
     ) -> ClaudeIdentity | None:
-        return identity(account, env=env)
+        return read_identity(claude_json_path(account, env=env))
 
-    def signed_in(self, account: ClaudeAccount) -> bool:
-        return signed_in(account)
+    def signed_in(self, account: ClaudeAccount, *, fresh: bool = False) -> bool:
+        return _claude_signed_in(account, fresh=fresh)
 
     def subscription(self, account: ClaudeAccount) -> str | None:
         return subscription_label(credentials(account))
 
     def token_state(self, account: ClaudeAccount) -> str:
-        return token_state(credentials(account))
+        login = stored_login(account)
+        return "unreadable" if login.unreadable is not None else token_state(login.credentials)
 
     def usage(
         self, account: ClaudeAccount, *, now: datetime | None, fetch: UsageFetch

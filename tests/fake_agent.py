@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from aisquare.core import agents, harness
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters.lasting import fetches_aisquare, runs_aisquare
 from aisquare.core.agent_adapters.transcripts import (
     YOU,
@@ -56,6 +57,7 @@ from aisquare.core.agent_adapters.types import (
     config_home,
     option_occurrences,
     option_values,
+    package_version,
     payload_text,
     store_dir,
     store_read_only,
@@ -272,6 +274,10 @@ class FakeAccounts:
     plain_label = "plain fakeagent"
     install_command = "pipx install fake-agent"
     network_usage = False
+    legacy_slots = False
+    noun = "Fake Agent"
+    sign_out = "with `fakeagent logout`"
+    shares_settings = False
     trust = FakeTrust()
 
     def sign_in_args(self) -> tuple[str, ...]:
@@ -280,6 +286,11 @@ class FakeAccounts:
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
         value = plain.get(self.home_env, "").strip()
         return Path(value).expanduser() if value else home / ".fakeagent"
+
+    def launched_account(
+        self, env: Mapping[str, str], accounts: Sequence[ClaudeAccount]
+    ) -> ClaudeAccount | None:
+        return accounts_core.account_in_home(self.agent, env, accounts)
 
     def config_dir(self, slot_dir: Path) -> Path:
         return slot_dir  # FAKE_AGENT_HOME names its config dir itself
@@ -298,7 +309,7 @@ class FakeAccounts:
         login = self._login(account)
         return ClaudeIdentity(email=str(login["user"])) if login is not None else None
 
-    def signed_in(self, account: ClaudeAccount) -> bool:
+    def signed_in(self, account: ClaudeAccount, *, fresh: bool = False) -> bool:
         return self._login(account) is not None
 
     def subscription(self, account: ClaudeAccount) -> str | None:
@@ -374,6 +385,9 @@ class FakeAgentAdapter:
 
     def config_dir(self, home: Path, env: Mapping[str, str], explicit: Path | None = None) -> Path:
         return config_home(self, home, env, explicit)
+
+    def layout_version(self, binary: str) -> str | None:
+        return package_version(binary)
 
     def hooks_switch(
         self, home: Path, settings_path: Path, args: Sequence[str] = ()

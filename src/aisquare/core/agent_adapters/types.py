@@ -634,6 +634,27 @@ def version_in(output: str) -> str | None:
     return match.group(0) if match else None
 
 
+def package_version(binary: str, *, depth: int = 4) -> str | None:
+    """The ``version`` of the first ``package.json`` beside or above ``binary``'s real path,
+    up to ``depth`` folders up: an npm install's (``…/node_modules/<package>/bin/<binary>``,
+    linked from npm's ``bin``). ``None`` with none there. Never raises."""
+    import json
+
+    try:
+        resolved = Path(binary).resolve()
+    except (OSError, RuntimeError):
+        return None
+    for parent in list(resolved.parents)[:depth]:
+        try:
+            data: Any = json.loads((parent / "package.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            continue
+        version = data.get("version") if isinstance(data, dict) else None
+        if isinstance(version, str) and version:
+            return version
+    return None
+
+
 @dataclass(frozen=True)
 class HooksSwitch:
     """What switches every one of an agent's hooks off: the setting, as the operator writes
@@ -851,6 +872,13 @@ class AgentAdapter(Protocol):
     def config_dir(self, home: Path, env: Mapping[str, str], explicit: Path | None = None) -> Path:
         """The config dir the agent reads, launched with ``env``: ``explicit``, else
         ``env[home_env]``, else ``home / home_name`` (:func:`config_home`)."""
+        ...
+
+    def layout_version(self, binary: str) -> str | None:
+        """The version the install layout of ``binary`` (the agent's executable as ``PATH``
+        finds it) names, read off the filesystem with NO process started: what ``accounts``
+        and the Accounts page show beside it (:func:`package_version` reads an npm
+        install's). ``None`` for a layout that names none. Never raises."""
         ...
 
     def hooks_switch(
@@ -1305,7 +1333,26 @@ class AgentAccounts(Protocol):
     plain_label: str
     install_command: str
     network_usage: bool
-    """Whether :meth:`usage` leaves the machine (Claude's endpoint) or reads local files."""
+    """Whether :meth:`usage` leaves the machine (Claude's endpoint) or reads local files:
+    a local reading is what the account's own sessions recorded, as fresh as their last
+    turn, so a listing says how old it is, and it is keyed to no token it would send."""
+    legacy_slots: bool
+    """Its slots are those aisquare kept before any other agent had slots (Claude Code's),
+    and read as they did then: their arrangement is the store's own ``claude_account`` table
+    and project key, their plain slot is listed before its home exists, a role's binding to
+    one takes a slot of any agent, and every listing names them as it did (the top level of
+    ``accounts --json``, the Accounts page's first section, the doctor's ``claude-*`` rows).
+    ``False`` for every other agent: its slots are keyed by its id (store v29's
+    ``agent_account``) and listed after. One adapter at most."""
+    noun: str
+    """What prose calls one of its accounts: ``a Claude account``, ``a Codex account``."""
+    sign_out: str
+    """How the human signs its plain home out, as a refusal to remove that slot says it:
+    Claude Code's ``inside Claude Code (/logout)``, Codex's ``with `codex logout```."""
+    shares_settings: bool
+    """``[accounts] share_settings`` links a managed slot's settings to its plain home's
+    (Claude Code's ``settings.json``, ``services.claude_accounts.share_settings``); ``False``
+    for an agent whose settings are each slot's own (Codex's)."""
 
     def sign_in_args(self) -> tuple[str, ...]:
         """Arguments to the agent's binary that start its own sign-in in a slot's env.
@@ -1322,6 +1369,15 @@ class AgentAccounts(Protocol):
         """The plain home, from the shell's own launch variables (``plain``)."""
         ...
 
+    def launched_account(
+        self, env: Mapping[str, str], accounts: Sequence[ClaudeAccount]
+    ) -> ClaudeAccount | None:
+        """The one of ``accounts`` (its own) that the agent's binary started with ``env``
+        runs on, if any: the slot whose home it reads (``core.claude_accounts.
+        account_in_home``), Claude Code's by the ``.claude.json`` it reads, the plain one's
+        being beside its directory. What ``[accounts]`` sharing shares into."""
+        ...
+
     def config_dir(self, slot_dir: Path) -> Path:
         """The config dir the agent reads in a home :attr:`home_env` names (a slot's, the
         plain one): where its hooks file, settings and login are. The home itself for
@@ -1331,10 +1387,16 @@ class AgentAccounts(Protocol):
     def identity(
         self, account: ClaudeAccount, *, env: Mapping[str, str] | None = None
     ) -> ClaudeIdentity | None: ...
-    def signed_in(self, account: ClaudeAccount) -> bool: ...
+    def signed_in(self, account: ClaudeAccount, *, fresh: bool = False) -> bool:
+        """A login is recorded in the slot and usable; ``fresh`` reads the store it is kept in
+        again rather than take a read of the last few seconds (Claude Code's Keychain)."""
+        ...
+
     def subscription(self, account: ClaudeAccount) -> str | None: ...
     def token_state(self, account: ClaudeAccount) -> str:
-        """``ok``, ``expired`` or ``missing`` — read, never refreshed."""
+        """``ok``, ``expired`` or ``missing`` — read, never refreshed; ``unreadable`` when the
+        store the login is kept in would not say (a locked Keychain), which is no login to
+        do again."""
         ...
 
     def usage(

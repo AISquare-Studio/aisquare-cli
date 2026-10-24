@@ -226,7 +226,9 @@ class Tally:
             bucket.weighted += weighted
         if not self.edited:
             self.before_edit_tokens += added.total
-            self.before_edit_weighted += weighted or 0.0
+            # Weighted as the bucket is: a request its table leaves unpriced (a cache write
+            # with no listed price) adds none.
+            self.before_edit_weighted += weighted if cost is not None and weighted else 0.0
             if self.editing:
                 self.edited, self.editing = True, False
 

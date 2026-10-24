@@ -104,6 +104,19 @@ def test_a_cache_write_is_its_30_minute_price_or_unpriced_where_the_page_lists_n
     assert found.models["gpt-5.4"].priced is False
 
 
+def test_an_unpriced_request_before_the_first_edit_adds_no_weighted_tokens(tmp_path: Path) -> None:
+    """The first-edit figures weigh a request as its bucket does: a cache write on a row that
+    lists no write price leaves the request unpriced, so it adds tokens and no weight
+    (r17 nit 5: 222.5 weighted beside a bucket priced 0.0)."""
+    scan = _scan(
+        tmp_path / "r.jsonl",
+        _turn(0, "t1", "gpt-5.4"),
+        _record(1, "t1", "resp_a", input=1000, written=100, output=10),
+    )
+    assert scan.delta.models["gpt-5.4"].priced is False
+    assert (scan.first_edit.tokens, scan.first_edit.weighted) == (1010, 0.0)
+
+
 def test_a_long_prompt_is_priced_at_the_long_context_rates(tmp_path: Path) -> None:
     found = _scan(
         tmp_path / "r.jsonl",

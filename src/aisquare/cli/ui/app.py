@@ -30,6 +30,7 @@ all of them must reach it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import sys
 import threading
@@ -364,6 +365,8 @@ def _read_fleet(
             groups = store.project_groups()
             folded = set() if viewed is None else _folded(projects, groups) - set(viewed)
             listings = fleet_service.read_listings(store, projects, skip=folded)
+            # A manager nudge a draft held back (P0-W2, #276), read in this frame's session.
+            owed = fleet_service.deferred_nudge_targets(store)
     except Exception as exc:  # the store is briefly unavailable — keep what is shown
         return _FleetRead(capturing, error=f"{type(exc).__name__}: {exc}")
     many = fleet_service.list_agents_many(listings)
@@ -380,8 +383,9 @@ def _read_fleet(
         )
         notices[project_id] = f"agents unavailable — {said}"
     # The one write a frame makes: a manager nudge a draft held back goes out once its input
-    # box is clear (P0-W2, #276). One indexed read when nothing is held back; never raises.
-    fleet_service.retry_deferred_nudges()
+    # box is clear (P0-W2, #276); nothing is opened when nothing is owed.
+    with contextlib.suppress(Exception):
+        fleet_service.send_deferred_nudges(owed)
     return _FleetRead(capturing, projects, groups, agents, notices, listings.live)
 
 

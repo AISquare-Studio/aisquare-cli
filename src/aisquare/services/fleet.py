@@ -9798,27 +9798,44 @@ def retry_deferred_nudges() -> int:
     One indexed read when nothing is held back. A nudge whose manager has prompted since it
     was held back is dropped unsent: that prompt's ``UserPromptSubmit`` handed it the delta
     the nudge was for. One whose manager row has ended is dropped too. A draft still there
-    keeps it held back (``nudge_manager`` asks the guard again). Never raises."""
+    keeps it held back (``nudge_manager`` asks the guard again). Never raises.
+
+    Read and sent in two steps (:func:`deferred_nudge_targets`, :func:`send_deferred_nudges`)
+    so ``asq``'s frame reads in its own store session and sends after it: one store session
+    per read (P2-W3, #83)."""
     try:
         with store_session() as store:
-            held = {
-                key.removeprefix(NUDGE_DEFERRED): since
-                for key, since in store.list_meta(NUDGE_DEFERRED).items()
-                if since
-            }
-            targets: list[FleetAgent] = []
-            for session_id, since in held.items():
-                row = store.fleet_agent_for_session(session_id)
-                session = store.get_session(session_id)
-                prompted = session.prompted_at if session is not None else None
-                gone = row is None or row.ended_at is not None or row.label != MANAGER_LABEL
-                if gone or (prompted is not None and prompted >= datetime.fromisoformat(since)):
-                    store.set_meta(f"{NUDGE_DEFERRED}{session_id}", "")
-                    continue
-                assert row is not None
-                targets.append(row)
+            targets = deferred_nudge_targets(store)
     except Exception:
         return 0
+    return send_deferred_nudges(targets)
+
+
+def deferred_nudge_targets(store: ContextStore) -> list[FleetAgent]:
+    """The managers whose held-back nudge is still owed, read in ``store``; one owed no
+    more (its manager prompted since, or its row ended) is dropped there. One indexed read
+    when nothing is held back."""
+    held = {
+        key.removeprefix(NUDGE_DEFERRED): since
+        for key, since in store.list_meta(NUDGE_DEFERRED).items()
+        if since
+    }
+    targets: list[FleetAgent] = []
+    for session_id, since in held.items():
+        row = store.fleet_agent_for_session(session_id)
+        session = store.get_session(session_id)
+        prompted = session.prompted_at if session is not None else None
+        gone = row is None or row.ended_at is not None or row.label != MANAGER_LABEL
+        if gone or (prompted is not None and prompted >= datetime.fromisoformat(since)):
+            store.set_meta(f"{NUDGE_DEFERRED}{session_id}", "")
+            continue
+        assert row is not None
+        targets.append(row)
+    return targets
+
+
+def send_deferred_nudges(targets: Sequence[FleetAgent]) -> int:
+    """Send each of :func:`deferred_nudge_targets`' nudges; how many were sent."""
     return sum(
         nudge_manager(
             row.project_id,

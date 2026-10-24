@@ -29,7 +29,6 @@ from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import credentials as credentials_store
 from aisquare.core import paths
-from aisquare.core import snapshot as snapshot_core
 from aisquare.core.config import (
     AppConfig,
     ExplainabilitySettings,
@@ -104,6 +103,10 @@ def _configured_explainability(settings: ExplainabilitySettings) -> str | None:
     if settings.gateway_url:
         parts.append(f"gateway {settings.gateway_url}")
     return "; ".join(parts) or None
+
+
+#: What ``init`` says about the Repomix pack it no longer makes (doctor words it as a row).
+SNAPSHOT_OPT_IN = "not packed (opt-in: aisquare project onboard packs one)"
 
 
 def initialize(
@@ -193,17 +196,14 @@ def initialize(
 
     onboarded = 0
     if onboard:
-        report = project_service.onboard(path, refresh=False)
+        # No Repomix pack: no agent is pointed at one, and it cost init a minute on a
+        # large repo. `project onboard` packs one on demand.
+        report = project_service.onboard(path, refresh=False, pack=False)
         onboarded = len(report.seeded)
-        if report.snapshot is not None and report.snapshot.status == "ready":
-            notes.append(
-                f"Snapshot: {report.snapshot.file_count} files, "
-                f"{report.snapshot.token_count} tokens packed for fast agent context."
-            )
-        elif report.snapshot is None:
-            # Off (no Node, or no packer: optional, not a fault) or a pack that
-            # failed and why -- the same sentence `project onboard` prints, from one place.
-            notes.append(f"Snapshot: {report.snapshot_note or snapshot_core.skipped_detail()}.")
+        if report.snapshot is None:
+            # The home's own sentence where it has one: it is never packed, so the opt-in
+            # line would name a `project onboard` that packs nothing there (D5, #42).
+            notes.append(f"Snapshot: {report.snapshot_note or SNAPSHOT_OPT_IN}.")
 
     for agent in agents:
         try:

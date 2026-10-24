@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Exact token usage per session** — `aisquare metrics tokens [--session S]
+  [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
+  read only the bytes the session's transcript gained since the last record, plus its
+  subagent files, count each API request once per `message.id`, and store a turn row
+  and a running session row. The summary gives raw tokens (input, cache write, cache
+  read, output), cost-weighted tokens (input + 1.25 x cache write + 0.1 x cache read +
+  output at the model's output/input price ratio) and the list price in USD from a
+  dated price table; a model the table does not have is reported apart, never guessed.
+  Recording can never fail a hook: a failure is one line in `log/metrics.log`. On this
+  Mac the Stop hook's recording takes about 1.3-3.3 ms at p95 (33.7 ms on a Windows CI
+  runner); a Stop reads only the bytes appended since the last.
 - **App settings has two tabs**: *Agent settings* (shown first: roles, the fleet,
   accounts — the same fields, ids and save rules as the single page before, under
   bold section headers, with the pointers to `team harness`/`team bind` as its last
@@ -83,10 +94,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   project with its own card, which never shows the captain's row; it warns once
   that the folder holds aisquare's settings, the fleet database and every Claude
   account's login data, which agents working there can read and change. It is
-  never packed into a codebase snapshot, so agents there get no packed overview
-  (a pack of it left from before is not served, and is deleted). Removing it from
-  the fleet hides it again. Every other role, fleet row and board, and the store
-  (schema v33), are the same either way. Four fleet changes that came with it are
+  never packed into a codebase snapshot, not even by `project onboard`, and `init`
+  there says so rather than that the pack is opt-in (a pack of it left from before
+  is not served, and the next onboard or `init` deletes it). Removing it from the
+  fleet hides it again. Every other role, fleet row and board, and the store
+  (schema v35), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line
   names, and `serve --stdio`'s idle clock (all under Fixed, below).
@@ -313,6 +325,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   briefing's ASSIGNED TO YOU line says, which decides per role and state whether
   to claim it (a tester on a todo task is told it is not its to claim). A spawn
   with neither is typed nothing, and reads `waiting`.
+- **Less per-request context from aisquare.** A solo session (no role, no fleet row,
+  nobody else on the board: no open task, no live fleet agent, no other live session)
+  gets no `<aisquare-team>` block, and the MCP server's instructions are one line where
+  there is no team; `serve` over HTTP keeps the full text. The session is still on the
+  board, and its first prompt after a team forms brings the board, once. A check that
+  fails keeps the board. Session start no longer points agents at the Repomix snapshot
+  (it told them to read the pack FIRST, often ~110k tokens, and on some repos the
+  "skeleton" and "full pack" lines named the same file) and no longer adds the
+  "Past user prompts … aisquare log" line. A `Your preferences` entry whose text a
+  `CLAUDE.md` Claude Code loads this session already holds (`~/.claude/CLAUDE.md`, or
+  the project's chain from the cwd up) is not injected again: `agents connect` imported
+  those sections, so they reached every session twice. Preferences from anywhere else
+  stay. For a solo onboarded repo, SessionStart output plus MCP instructions go from
+  about 2,400 characters to about 130.
+- `init` no longer packs the codebase with Repomix: no agent reads the pack, and it
+  cost a minute on a large repo. `aisquare project onboard` packs one on demand, as it
+  did; doctor's snapshot row reads `none — opt-in: aisquare project onboard packs one`
+  instead of warning.
 - In `asq`, the Spawn dialog shows three fields — Role, Hand off from (with its How row
   once a teammate is picked) and Account — and folds everything else into one
   **Advanced** section: *Pick…* (moved there from beside Role, where it sat next to the
@@ -323,9 +353,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *Spawn* is disabled, so the reason is never folded out of sight. The box sizes to what
   it shows instead of 92% of the terminal, and scrolls between its docked header and
   buttons once Advanced is open on a short one. What a spawn sends is unchanged.
-- The store migrates to schema v34 on first open, from 0.8.2's v32, in two steps: v34
+- The store migrates to schema v35 on first open, from 0.8.2's v32, in three steps: v35
+  adds two tables, `usage_session` and `usage_turn`, for `aisquare metrics tokens`. v34
   adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,
-  `died` otherwise; NULL on a row from before it, read by its exit status, #38). v33
+  `died` otherwise; NULL on a row from before it, read by its exit status, #38). The
+  token-metrics branch (#346) stamped its tables v34 too: its store reads v34 without
+  `ended_by`, and the presence pass adds the column before v35, which finds its tables
+  in place (#42). v33
   adds the two persona columns, `team_session.persona` (the persona a session was
   launched as) and `fleet_agent.persona` (the one an agent was spawned with or given
   since). Both are nullable, and a row from before them reads as no persona. The step

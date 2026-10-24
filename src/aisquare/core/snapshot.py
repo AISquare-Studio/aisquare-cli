@@ -12,15 +12,15 @@ Adaptive, like the server: use the full pack when it fits the token budget
 the compressed pack as the skeleton with its per-file index and mark the
 snapshot ``skeleton_only``, recording the three numbers. The budget mirrors a
 server cap on a pack that is read INTO a model context — nothing in the CLI
-does that (the session-start directive hands the agent paths), so it gates only
-the full pack. A ``too_large`` verdict, nothing stored, is only ever loaded from
-a snapshot.json written before ``skeleton_only`` existed. Repomix
-is a Node CLI — we shell out to ``repomix`` (or ``npx repomix``); if neither is
+does that, so it gates only the full pack. A ``too_large`` verdict, nothing
+stored, is only ever loaded from a snapshot.json written before ``skeleton_only``
+existed. Repomix is a Node CLI — we shell out to ``repomix`` (or ``npx repomix``); if neither is
 available the snapshot is skipped, not fatal. The whole feature is optional: when
 :func:`can_pack` is False every surface reports packing as off (:func:`off_detail`),
-because memory and the hooks never needed it. A pack made before then stays, and
-agents still get it, so the surfaces say that too (:func:`not_refreshed_detail`,
-:func:`unrefreshable_note`).
+because memory and the hooks never needed it. A pack made before then stays, so
+the surfaces say that too (:func:`not_refreshed_detail`, :func:`unrefreshable_note`).
+No agent is pointed at a pack and ``init`` makes none: ``project onboard`` packs on
+demand, for whoever wants one.
 """
 
 from __future__ import annotations
@@ -378,14 +378,10 @@ def not_refreshed_detail(meta: Snapshot, failure: str | None = None) -> str:
     """A ``--refresh`` that packed nothing while the last pack stays, as ``onboard`` says it.
 
     A failed pack rewrites nothing, so snapshot.json, the pack and its index are
-    still the last pack's, and the session-start directive keeps handing them to
-    every agent. "off" said the feature was gone while agents oriented from a pack
-    the tree may have moved on from (review of #257).
+    still the last pack's. "off" said the feature was gone while the last pack, which
+    the tree may have moved on from, was still on disk (review of #257).
     """
-    return (
-        f"not refreshed — {skipped_reason(failure)}. "
-        f"Agents still get the last pack, made {_made(meta)}"
-    )
+    return f"not refreshed — {skipped_reason(failure)}. The last pack stays, made {_made(meta)}"
 
 
 def unrefreshable_note(meta: Snapshot) -> str:
@@ -393,8 +389,8 @@ def unrefreshable_note(meta: Snapshot) -> str:
 
     The doctor's repomix and tiktoken rows read :func:`can_pack` and say packing is
     off, and the snapshot row read only snapshot.json, so one run said "off" and
-    "ready" about the same feature. Both halves are true -- agents still get the
-    last pack, and it cannot be refreshed here -- so the row says both.
+    "ready" about the same feature. Both halves are true -- the last pack is there,
+    and it cannot be refreshed here -- so the row says both.
     """
     if can_pack():
         return ""
@@ -660,12 +656,10 @@ def _write_skeleton_only(meta: Snapshot, skeleton_text: str, *, tokens: int) -> 
     """Over budget even compressed: keep the skeleton and its per-file index, skip the full pack.
 
     The budget mirrors a server cap on a pack that is READ INTO a model context.
-    Nothing in the CLI does that — the session-start directive hands the agent
-    paths and it opens slices through the index — so the cap gates only the
-    full pack, and the repos that most need a skeleton are exactly the ones
-    over it. The old verdict stored nothing for them. A full pack left by an
-    earlier, smaller run is removed so nothing points at contents that no
-    longer match the tree.
+    Nothing in the CLI does that, so the cap gates only the full pack, and the
+    repos that most need a skeleton are exactly the ones over it. The old verdict
+    stored nothing for them. A full pack left by an earlier, smaller run is removed
+    so nothing points at contents that no longer match the tree.
     """
     meta.skeleton_path.write_text(skeleton_text, encoding="utf-8")
     index = _build_index(skeleton_text)

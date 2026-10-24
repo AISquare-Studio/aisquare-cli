@@ -4760,6 +4760,62 @@ def _assignment_block(board: str) -> str:
     return board.split("ASSIGNED TO YOU", 1)[1].split("sessions:", 1)[0]
 
 
+# --- a fleet agent is never solo (#42: #346's solo gate meets #274's briefings) -----------
+#
+# #346 gives a session with nobody to coordinate with no team block and the one-line MCP
+# instructions. A fleet agent is a team member by being one: its window carries
+# AISQUARE_FLEET_AGENT and AISQUARE_ROLE, and its own row is a live fleet agent on the board.
+# The briefing it gets is what D2's first message (#32 m1) tells it to follow. That holds for
+# #303's role-less agent (``agent``, the Spawn dialog's *(none)*) too: it has no cycle, and
+# it is still on its board as a member.
+
+
+@pytest.mark.parametrize("counted", [True, False], ids=["its row counted", "env alone"])
+@pytest.mark.parametrize("task", [True, False], ids=["--task", "no task"])
+@pytest.mark.parametrize("role", ["coder", fleet_service.PLAIN_ROLE])
+def test_a_fleet_agent_alone_on_its_board_is_briefed_as_a_team_member(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    task: bool,
+    counted: bool,
+    role: str,
+) -> None:
+    """Nobody else on the board: no other session, no task but its own. Its start brings
+    the team block, its role's cycle (none for the role-less ``agent``) and, for a
+    ``--task`` spawn, the ASSIGNED TO YOU line the first message D2 types into it names; it
+    is never marked unbriefed, and its MCP server serves the board's protocol. With its own
+    row not counted as a team, its window's variables alone keep it a member."""
+    from aisquare.services import mcp_server
+
+    mine = _task(project, "the only task here") if task else None
+    agent, first = _spawned(project, role, mine.id if mine else None, tmux, monkeypatch)
+    with store_session() as store:
+        assert [s.id for s in store.team_sessions(project.id) if s.id != first] == []
+    if not counted:
+        monkeypatch.setattr(team_service, "_has_team", lambda *args, **kwargs: False)
+        monkeypatch.setattr(team_service, "board_has_team", lambda *args, **kwargs: False)
+
+    started = team_service.hook_session_start(first, project.root, "startup")
+
+    assert "<aisquare-team>" in started, started
+    assert f"You are team session {first[:8]}" in started
+    if role == fleet_service.PLAIN_ROLE:
+        assert "Your standing cycle" not in started, "the role-less agent has no cycle"
+    else:
+        assert "Your standing cycle (coder)" in started
+    with store_session() as store:
+        assert store.get_meta(team_service._unbriefed(first)) is None
+    assert mcp_server.server_instructions() == mcp_server.TEAM_INSTRUCTIONS
+    if mine is not None:
+        assert f"ASSIGNED TO YOU: {mine.id} [todo] the only task here" in started
+        assert "do what the ASSIGNED TO YOU line of" in fleet_service.task_prompt(mine)
+    else:
+        assert "ASSIGNED TO YOU" not in started
+    assert _row(agent.id).session_id == first
+
+
 def test_a_spawned_agent_is_told_its_task_on_its_first_start(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

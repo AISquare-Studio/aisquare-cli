@@ -1009,13 +1009,18 @@ def onboard_on_purpose(store: ContextStore, project: ProjectInfo) -> tuple[Proje
     return added, HOME_WARNING if became else None
 
 
-def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
+def onboard(path: Path | None, *, refresh: bool, pack: bool = True) -> OnboardReport:
     """Pack the codebase into a snapshot and seed facts from ecosystem markers.
 
     Generates the Repomix snapshot (full pack + skeleton + index) on first run,
     or when ``refresh`` is set, and seeds one fact per detected marker. Existing
     facts are never duplicated; the snapshot is reused unless ``refresh``. ``path`` is
     the user's, refused unless it is a folder (:func:`typed_root`).
+
+    ``pack=False`` (``init``) packs nothing and reports the pack already there, if
+    any: no agent is pointed at a pack any more, so it is ``project onboard``'s, on
+    demand, and not a minute of every ``init``. The aisquare home is the same either
+    way: never packed, a pack left from before deleted, and ``snapshot_note`` says why.
     """
     root = typed_root(path)
     project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
@@ -1033,6 +1038,13 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
                 seeded.append(
                     store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
                 )
+    if not pack and not snapshot_core.is_the_homes(project.id):
+        return OnboardReport(
+            seeded=seeded, snapshot=snapshot_core.load(project.id), warning=warning
+        )
+    # The home takes this path asked or not: _ensure_snapshot packs nothing there, deletes
+    # a pack left from before, and says why, where `init`'s opt-in line would point at a
+    # `project onboard` that never packs it (D5, #42).
     snapshot, note = _ensure_snapshot(project, refresh=refresh)
     return OnboardReport(seeded=seeded, snapshot=snapshot, snapshot_note=note, warning=warning)
 
@@ -1052,7 +1064,7 @@ def _ensure_snapshot(project: ProjectInfo, *, refresh: bool) -> tuple[Snapshot |
     sentence :mod:`snapshot_core` words: the optional feature being off (no Node, or
     a Node with no packer) is not a pack that failed, and a pack that failed says
     why in the packer's own words. A failed ``--refresh`` rewrites nothing, so a
-    last pack agents still get is returned, with a sentence that says so.
+    last pack is returned, with a sentence that says so.
     """
     if snapshot_core.is_the_homes(project.id):
         # Never packed, refresh or not, and a pack left from before is deleted: its

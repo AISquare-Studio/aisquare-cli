@@ -33,7 +33,15 @@ from aisquare.core.ids import new_agent_id, new_event_id, new_task_id
 from aisquare.core.state_file import StateUnwritableError, read_state
 from aisquare.core.store import SqliteStore, store_session
 from aisquare.core.workspace import _is_dir, pinned_project_id, project_id_for, worktree_principal
-from aisquare.models import FleetAgent, ProjectInfo, TeamEvent, TeamSession, TeamTask
+from aisquare.models import (
+    FleetAgent,
+    ProjectInfo,
+    SessionUsage,
+    TeamEvent,
+    TeamSession,
+    TeamTask,
+    TurnUsage,
+)
 from tests.fsperms import can_deny_reads
 from tests.test_worktree import _git
 
@@ -535,6 +543,25 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         store.set_meta(f"signal/{alpha}/phase", "{}")
         store.set_meta(f"nudge:{session.id}", now.isoformat())
         store.set_meta(f"distill_seq:{beta}", "7")
+        for project in (alpha, beta):
+            usage = SessionUsage(
+                session_id=f"use-{project}",
+                project_id=project,
+                started_at=now,
+                updated_at=now,
+            )
+            store.record_usage(
+                usage,
+                TurnUsage(
+                    id=f"use_{project}",
+                    session_id=usage.session_id,
+                    project_id=project,
+                    seq=1,
+                    trigger="stop",
+                    recorded_at=now,
+                ),
+                previous_state=None,
+            )
     _record_turn("trc_alpha", alpha)
     _record_turn("trc_beta", beta)
     data_dir = paths.project_data_dir(alpha)
@@ -554,6 +581,8 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
         "team_session": 1,
         "fleet_agent": 1,
         "metric": 1,
+        "usage_turn": 1,
+        "usage_session": 1,
         "project_setting": 0,
         "project_explainability": 0,
         "project_destination": 0,
@@ -575,6 +604,7 @@ def test_forget_purge_deletes_every_row_the_project_owns_and_its_data_dir(
     # The bystander kept everything.
     assert _listed(runner) == {beta}
     assert _raw("SELECT COUNT(*) FROM entry WHERE project_id = ?", (beta,)) == [(1,)]
+    assert _raw("SELECT COUNT(*) FROM usage_session WHERE project_id = ?", (beta,)) == [(1,)]
     assert _raw("SELECT value FROM team_meta WHERE key = ?", (f"distill_seq:{beta}",)) == [("7",)]
     assert _raw("SELECT COUNT(*) FROM metric WHERE project_id = ?", (beta,)) == [(1,)]
 
@@ -609,7 +639,10 @@ def test_purge_copes_with_hundreds_of_recorded_sessions(
 #: Values a CHECK needs that no made-up value meets, per table and column. A table a
 #: migration adds whose CHECK refuses the made-up row fails the test below with the
 #: constraint named; its values go here.
-_CHECKED_VALUES: dict[str, dict[str, object]] = {"entry": {"pool": "project"}}
+_CHECKED_VALUES: dict[str, dict[str, object]] = {
+    "entry": {"pool": "project"},
+    "usage_turn": {"trigger": "stop"},
+}
 
 #: Distinct made-up values, so a UNIQUE column takes every one.
 _MADE_UP = itertools.count(1)

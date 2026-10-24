@@ -100,6 +100,7 @@ aisquare
 ├── config          list [--overrides] · get <key> · set <key> <value> · reset [--yes]
 │                   redaction <off|standard|strict>
 └── metrics         show · list  [-n N] [--session S] [--project P | --all]   (CI test bed; hidden)
+                    tokens [--session S] [--since 2h] [--role R] [--project P | --all]   (tokens per session, from transcripts)
 ```
 
 Everything `aisquare --help` lists is implemented. Roadmap commands are

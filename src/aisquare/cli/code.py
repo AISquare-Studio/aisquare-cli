@@ -38,7 +38,8 @@ def _first_build_note() -> None:
     """Say so on stderr when a query builds the index first (a first one takes a while)."""
     if get_state().json_output or not code_service.settings().enabled:
         return
-    if not code_index.ready(code_service.project_here().id):
+    project_id = code_service.project_here().id
+    if not code_index.ready(project_id) and not code_index.building(project_id):
         stderr_console().print("no code index yet: building it first", markup=False)
 
 
@@ -155,7 +156,8 @@ def index_command(
     if show_status:
         found = code_service.index_status()
         if as_json:
-            typer.echo(json.dumps(found.as_json()))
+            building = code_index.building(code_service.project_here().id)
+            typer.echo(json.dumps({**found.as_json(), "building": building}))
             return
         if not found.exists or found.built_at is None:  # none, or a first build uncommitted
             if code_index.building(code_service.project_here().id):

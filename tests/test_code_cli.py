@@ -69,6 +69,7 @@ def test_a_query_before_an_index_builds_one_unless_code_is_off(
         assert result.exit_code == 1
         error = json.loads(result.output)
         assert error["error"] == "no_index"
+    assert _json(runner, "index", "--status")["building"] is False
     assert _json(runner, "index", "--status")["exists"] is False
 
     config.code.enabled = True
@@ -92,7 +93,11 @@ def test_a_query_while_the_first_build_runs_says_so(runner: CliRunner, checkout:
         result = runner.invoke(app, ["--json", "code", "find", "parse_window"])
         row = diagnostics._check_code_index(checkout)
         status = runner.invoke(app, ["code", "index", "--status"])
+        as_json = _json(runner, "index", "--status")
+        human_query = runner.invoke(app, ["code", "find", "parse_window"])
     assert "building in the background" in status.output
+    assert as_json["building"] is True
+    assert "building it first" not in human_query.output, "it builds nothing: index_busy"
     assert result.exit_code == 1
     assert json.loads(result.output)["error"] == "index_busy"
     assert row.detail.startswith("building in the background")

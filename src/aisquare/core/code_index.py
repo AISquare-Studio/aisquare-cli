@@ -639,10 +639,15 @@ def _build(
             full = True
         report = BuildReport(full=full)
         if full:
-            conn.executescript(
-                "DELETE FROM file; DELETE FROM symbol; DELETE FROM ref; "
-                "INSERT INTO symbol_fts (symbol_fts) VALUES ('delete-all');"
-            )
+            # In the build's one transaction, never executescript (which commits at once):
+            # a reader keeps the last index until the new one is committed (review of #385).
+            for statement in (
+                "DELETE FROM file",
+                "DELETE FROM symbol",
+                "DELETE FROM ref",
+                "INSERT INTO symbol_fts (symbol_fts) VALUES ('delete-all')",
+            ):
+                conn.execute(statement)
         known = {
             row[0]: (row[1], row[2], row[3], row[4])
             for row in conn.execute("SELECT path, sha256, size, mtime_ns, parser FROM file")

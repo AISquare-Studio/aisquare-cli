@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -171,22 +172,38 @@ never sits in argv, which ``ps`` shows (the name travels as ``AISQUARE_PERSONA``
 _SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
 
 
-def _shared_memory(binary: str, args: Sequence[str]) -> list[str]:
-    """``[accounts] share = ["memory"]``: the shared auto-memory directory for this folder,
-    as ``--settings`` (P2-W7, #198). Claude Code only, and not over a ``--settings`` the
-    operator's line already carries, which wins; either is said in one dim line."""
+def _with_shared_memory(
+    binary: str, role_args: Sequence[str], operator_args: Sequence[str]
+) -> list[str]:
+    """``role_args`` with ``[accounts] share = ["memory"]``'s shared auto-memory directory for
+    this folder in their ``--settings`` (P2-W7, #198). Claude Code only.
+
+    ONE ``--settings`` for every key aisquare sets: the role's skill listing (P1 WS-1,
+    ``harness.tool_policy``) and the memory directory merge into one JSON. Two flags are not
+    two settings: Claude Code reads one, and the memory stood down on the role's own flag,
+    so a coder or a tester shared no memory at all (sync #367). An ``--settings`` the
+    operator's line carries (``operator_args``: a binding's ``--arg``, a fleet
+    ``extra_args``, what was typed) still wins, as each feature says; the memory's
+    stand-down is said in one dim line.
+    """
+    out = list(role_args)
     wanted = claude_accounts_service.memory_settings_args(Path.cwd())
     if not wanted:
-        return []
-    if any(arg == "--settings" or arg.startswith("--settings=") for arg in args):
+        return out
+    if any(arg == "--settings" or arg.startswith("--settings=") for arg in operator_args):
         stderr_console().print(
             "accounts: memory is not shared into this launch — its own --settings wins",
             style="dim",
         )
-        return []
+        return out
     if not harness.is_default_agent(binary):
-        return []
-    return wanted
+        return out
+    memory = json.loads(wanted[1])
+    for index, arg in enumerate(out[:-1]):
+        if arg == "--settings":
+            out[index + 1] = json.dumps({**json.loads(out[index + 1]), **memory})
+            return out
+    return [*out, *wanted]
 
 
 def _persona_system_prompt(
@@ -666,16 +683,8 @@ def launch(
         if persona is not None
         else []
     )
-    memory_args = _shared_memory(resolution.binary, [*binding_args, *role_args, *agent_args])
-    argv = [
-        resolution.binary,
-        *binding_args,
-        *role_args,
-        *persona_args,
-        *memory_args,
-        *agent_args,
-        *pinned_id,
-    ]
+    role_args = _with_shared_memory(resolution.binary, role_args, [*binding_args, *agent_args])
+    argv = [resolution.binary, *binding_args, *role_args, *persona_args, *agent_args, *pinned_id]
     # The first message (P0-W1a, #122), last: Claude Code's positional prompt, after `--`.
     # Read from a file and the file deleted, so the window's command, which tmux carries and
     # the row records, never holds the text, and a replay of that command finds no file and

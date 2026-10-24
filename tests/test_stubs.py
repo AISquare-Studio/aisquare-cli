@@ -30,6 +30,11 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("board",),
     ("recall",),
     ("launch",),
+    ("exec",),
+    ("reports", "list"),
+    ("reports", "show"),
+    ("reports", "prune"),
+    ("reports", "stats"),
     ("serve",),
     ("captain", "serve"),
     ("captain",),
@@ -126,6 +131,10 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "drop",
             "release",
         )
+    ),
+    *(
+        ("brief", command)
+        for command in ("create", "list", "show", "update", "link", "evidence", "finding", "check")
     ),
     *(
         (group, command)

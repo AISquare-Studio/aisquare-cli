@@ -27,6 +27,8 @@ TASK_PREFIX = "tsk_"
 EVENT_PREFIX = "evt_"
 AGENT_PREFIX = "agt_"
 TRACE_PREFIX = "trc_"
+BRIEF_PREFIX = "brf_"
+EVIDENCE_PREFIX = "evd_"
 
 
 def _encode(value: int, length: int) -> str:
@@ -63,6 +65,16 @@ def new_task_id() -> str:
 def new_event_id() -> str:
     """Return a fresh, time-sortable team-event id (``evt_…``)."""
     return _new_id(EVENT_PREFIX)
+
+
+def new_brief_id() -> str:
+    """Return a fresh, time-sortable work-brief id (``brf_…``)."""
+    return _new_id(BRIEF_PREFIX)
+
+
+def new_evidence_id() -> str:
+    """Return a fresh, time-sortable brief evidence id (``evd_…``)."""
+    return _new_id(EVIDENCE_PREFIX)
 
 
 def new_agent_id() -> str:

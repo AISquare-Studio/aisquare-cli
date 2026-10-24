@@ -497,6 +497,14 @@ def project_data_dir(project_id: str) -> Path:
     return aisquare_home() / "projects" / project_id
 
 
+def brief_evidence_dir(project_id: str, brief_id: str) -> Path:
+    """Where a work brief keeps copies of its checks' artifacts, beside ``reports/``.
+
+    Per project, so ``project forget --purge`` removes a project's copies whole.
+    """
+    return aisquare_home() / "briefs" / project_id / brief_id
+
+
 def credentials_path() -> Path:
     """Path of the credentials file (API keys, tokens)."""
     return aisquare_home() / "credentials"

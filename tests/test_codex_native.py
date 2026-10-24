@@ -2582,6 +2582,8 @@ def test_real_codex_approval_and_question_are_answered_from_the_remote_page(
     Transcript tab is the conversation under ``* codex``. Before the transcript slot every
     one of these read the rollout as Claude Code's JSONL: no card but "shows a dialog that
     needs you", no answers, an empty page."""
+    from aisquare.services import remote_needs
+
     binary = shutil.which("codex")
     assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
     refused = _sandbox_refused(binary, tmp_path)
@@ -2625,7 +2627,8 @@ def test_real_codex_approval_and_question_are_answered_from_the_remote_page(
         srv = fleet.server(config.fleet)
         runtime = make_runtime()
         runtime.set_allow_write(True)
-        client = make_client(build_app(runtime, dist_dir=tmp_path))
+        app = build_app(runtime, dist_dir=tmp_path)
+        client = make_client(app)
         assert unlock(client, runtime).status_code == 200
         api = f"{base(runtime)}/api"
         try:
@@ -2748,6 +2751,7 @@ def test_real_codex_approval_and_question_are_answered_from_the_remote_page(
             assert "  ? Colour: Which colour should the button be?" in lines
             assert "  ⎿ interrupted" in lines
         finally:
+            remote_needs._needs_watcher(app.kit).stop_watching()
             subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
             server.shutdown()
             thread.join(timeout=2)
@@ -2781,7 +2785,7 @@ def test_real_codex_takes_a_phones_prompt_tell_at_its_empty_prompt_and_none_at_i
     hook reports: its row reads waiting, and Prompt mode pasted into the dialog, its Enter
     picking for the human. Prompt and Interrupt & tell are refused at it now, before any
     key, and the dialog stays the human's. No command runs in Codex's sandbox here."""
-    from aisquare.services import remote_server
+    from aisquare.services import remote_needs, remote_server
     from tests.remote_kit_helpers import PASSWORD, make_runtime
 
     binary = shutil.which("codex")
@@ -2894,6 +2898,7 @@ def test_real_codex_takes_a_phones_prompt_tell_at_its_empty_prompt_and_none_at_i
                 assert "LIMIT probe" not in shown and "LIMIT probe" not in heard
         finally:
             served.stop_serving()
+            remote_needs._needs_watcher(app.kit).stop_watching()
             if srv.has_session(fleet.session_name(fleet.ensure_codename(project).codename or "")):
                 srv.run("kill-server")
             provider.shutdown()

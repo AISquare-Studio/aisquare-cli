@@ -2453,6 +2453,19 @@ def _exit_detail(status: int | None) -> str | None:
     return f"exit {status}" if status is not None else None
 
 
+def exit_code_of(status: FleetAgentStatus) -> int | None:
+    """The exit code of a row that ended: the one recorded, else, for a dead pane not
+    recorded yet, the one its pane holds (``status.detail``, :func:`_exit_detail`'s words).
+    Read from the row alone, Restart all's list showed none for the second (#274 delta
+    review 2, n6)."""
+    if status.agent.exit_status is not None:
+        return status.agent.exit_status
+    if status.state != "exited" or status.detail is None:
+        return None
+    said = status.detail.removeprefix("exit ")
+    return int(said) if said != status.detail and said.lstrip("-").isdigit() else None
+
+
 def _derive(
     agent: FleetAgent,
     session: TeamSession | None,
@@ -8770,12 +8783,17 @@ def bulk_plan(
 
 
 def _label_heads(project: ProjectInfo) -> dict[str, FleetAgent]:
-    """Each label's newest row in ``project``: the one a restart of that label acts on."""
+    """Each label's newest row in ``project``: the one a restart of that label acts on.
+
+    Picked in SQL (:meth:`~aisquare.core.store.ContextStore.fleet_label_heads`, oldest first,
+    so the last of a label is its newest), not from every row the project ever had, read
+    once per plan and again per row (#274 delta review 2, n4)."""
     with store_session() as store:
-        rows = store.fleet_agents(project.id, live_only=False)
+        rows = store.fleet_label_heads()
     heads: dict[str, FleetAgent] = {}
-    for row in sorted(rows, key=lambda row: (row.created_at, row.id)):
-        heads[row.label] = row
+    for row in rows:
+        if row.project_id == project.id:
+            heads[row.label] = row
     return heads
 
 

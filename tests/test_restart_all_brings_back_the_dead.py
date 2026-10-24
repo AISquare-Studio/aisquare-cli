@@ -507,3 +507,30 @@ def test_stopping_a_dead_agent_whose_server_is_gone_keeps_it_down(
     assert coder.id not in {row.agent.id for row in fleet_service.bulk_plan("restart").targets}
     again = runner.invoke(app, ["fleet", "stop", "--project", "alpha", coder.label])
     assert again.exit_code != 0, "stopped already, and nothing left to remove"
+
+
+def test_a_dead_row_no_listing_could_record_still_shows_its_exit_code(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """n6: a dead pane whose death no listing could write (a locked store) holds its exit
+    code only in the pane. Restart all's list and ``restart --all``'s line show it, as for
+    a row that was recorded."""
+    from aisquare.cli.ui.views.fleet_bulk import plan_text
+
+    coder = fleet.agents["alpha/coder-1"]
+    _kill(tmux, coder)
+    monkeypatch.setattr(fleet_service, "_end_dead_rows", lambda *args, **kwargs: [])
+
+    plan = fleet_service.bulk_plan("restart")
+    [row] = [row for row in plan.targets if row.agent.id == coder.id]
+    assert row.dead and row.agent.exit_status is None, "the premise: not recorded"
+
+    assert fleet_service.exit_code_of(row.status) == KILLED
+    assert "coder-1 · coder · " in plan_text(plan).plain
+    assert f"exited ({KILLED}) — " in plan_text(plan).plain
+    result = runner.invoke(app, ["fleet", "restart", "--all"])
+    assert result.exit_code == 0, result.output
+    assert f"was dead (exit {KILLED}), restarted" in ANSI.sub("", result.stdout)

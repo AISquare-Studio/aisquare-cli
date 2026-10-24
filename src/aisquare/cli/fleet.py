@@ -687,7 +687,11 @@ def _bulk_lines(receipt: fleet_service.BulkReceipt) -> list[str]:
         said, mark = f"failed — {receipt.why}", "✗"
     elif isinstance(result, fleet_service.RestartReceipt):
         if receipt.dead:  # apart from the running ones (#38)
-            code = agent.exit_status
+            # The row as the restart ended it: one no listing had recorded yet holds its
+            # exit only there (n6).
+            code = (
+                agent.exit_status if agent.exit_status is not None else result.replaced.exit_status
+            )
             before = f"was dead{f' (exit {code})' if code is not None else ''}, "
         else:
             before = "stopped and " if result.was_running else ""

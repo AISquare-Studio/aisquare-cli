@@ -92,7 +92,8 @@ def plan_text(plan: fleet_service.BulkPlan) -> Text:
             line.stylize("dim")
         elif row.dead:
             # Apart from the running ones (#38): its exit, and that it comes back.
-            exit_code = f" ({agent.exit_status})" if agent.exit_status is not None else ""
+            code = fleet_service.exit_code_of(row.status)
+            exit_code = f" ({code})" if code is not None else ""
             line.append(f"{exit_code} — {WILL_START}")
         text.append_text(line)
         text.append("\n")

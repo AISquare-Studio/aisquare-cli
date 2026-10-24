@@ -156,7 +156,6 @@ def test_there_is_one_captain_per_home(tmux: FakeTmux, claude_on_path: Path) -> 
             label="captain",
             persona="captain",
             cwd=brain.brain_dir(),
-            agent_args=brain.launch_args(home.root),
         )
     assert len(tmux.spawned) == 1, "refused before a second window was ever started"
     with store_session() as store:

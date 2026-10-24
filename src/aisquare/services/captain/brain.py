@@ -30,8 +30,9 @@ the brain folder, where a relative ``AISQUARE_HOME`` would name another folder.
 The window is also started with the experimental switch as its starter has it
 (``fleet.spawn``, ``core.experimental.captain_environment``): its launcher looks the
 bundled ``captain`` persona up again, in the tmux server's environment. It is the
-window's own pair, set at every start, and never one of :func:`launch_args`, which the
-row records and a restart replays (review of #240, finding 13).
+window's own pair, set at every start, beside :func:`launch_args`, which the fleet also
+gives at every start, a restart's included, and never records (review of #240, finding 13;
+SMOKE8 8a).
 """
 
 from __future__ import annotations
@@ -162,10 +163,17 @@ def server() -> Server:
     )
 
 
+#: The variables :func:`launch_args` sets.
+LAUNCH_ENV = ("AISQUARE_HOME", "AISQUARE_TEAM_HUB")
+
+
 def launch_args(home_root: Path) -> list[str]:
-    """The captain's agent arguments: its environment (``launch -e``). Its tools are the
-    fleet's to confine at every launch (:func:`server`)."""
-    return ["-e", f"AISQUARE_HOME={_home()}", "-e", f"AISQUARE_TEAM_HUB={home_root}"]
+    """The captain's environment, as options of its window's ``aisquare launch`` (``-e``),
+    never its agent's arguments: the fleet gives them at every launch, before the ``--``
+    (``fleet.spawn``). Its tools are the fleet's to confine at every launch too
+    (:func:`server`)."""
+    home, hub = LAUNCH_ENV
+    return ["-e", f"{home}={_home()}", "-e", f"{hub}={home_root}"]
 
 
 def find() -> FleetAgent | None:
@@ -247,7 +255,6 @@ def start(
         label=fleet.CAPTAIN_LABEL,
         persona=persona,
         cwd=brain_dir(),
-        agent_args=launch_args(home.root),
         size=size,
         account=account,
         binary=binary,

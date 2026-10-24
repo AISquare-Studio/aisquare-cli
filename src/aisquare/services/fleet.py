@@ -1820,6 +1820,34 @@ def _the_captains_tools(
     return confined
 
 
+def _the_captains_environment(project: ProjectInfo) -> list[str]:
+    """The captain's ``launch -e`` pairs (``services.captain.brain.launch_args``), for the
+    home board ``project``: options of its window's ``aisquare launch``, so before the
+    ``--`` that hands the rest of the command to the agent. After it, Codex died on
+    ``unexpected argument '-e'`` and Claude Code on ``unknown option '-e'`` (SMOKE8 8a).
+    Given at every launch and never recorded, as :func:`_the_captains_tools` are."""
+    from aisquare.services.captain import brain
+
+    return brain.launch_args(project.root)
+
+
+def _without_the_captains_environment(args: Sequence[str]) -> list[str]:
+    """``args`` less the captain's ``-e`` pairs (:func:`_the_captains_environment`), which a
+    captain's row recorded among its agent's arguments before they were ``launch``'s."""
+    from aisquare.services.captain import brain
+
+    keys = {f"{key}=" for key in brain.LAUNCH_ENV}
+    kept: list[str] = []
+    at = 0
+    while at < len(args):
+        if args[at] == "-e" and at + 1 < len(args) and args[at + 1].startswith(tuple(keys)):
+            at += 2
+            continue
+        kept.append(args[at])
+        at += 1
+    return kept
+
+
 def _fixed_label(role: str, wanted: str | None) -> str | None:
     """The one label ``role`` may run under, the manager's or the captain's, else ``None``.
 
@@ -4167,6 +4195,10 @@ def spawn(
         else fleet_extra_args(selected.adapter, role_config.extra_args, role_config.agent_args)
     )
     extra = list(agent_args)
+    if experimental.captain_role(role):
+        # The captain's environment is its window's `launch`'s, given at every launch
+        # (below); a row that recorded it among its agent's arguments replays without it.
+        extra = _without_the_captains_environment(extra)
     if replayed_args:
         # Filtered on the way OUT as well as on the way in: a spec written before
         # session choices were left out of it still holds them, and the board session
@@ -4501,6 +4533,7 @@ def spawn(
         agent_launch.LAUNCH_AGENT_ENV: selected.adapter.id,
     }
     if experimental.captain_role(role):
+        flags += _the_captains_environment(project)
         # The launcher activates a board BEFORE it hands the agent its `-e` pairs,
         # from its cwd — the brain folder, where `.aisquare` above it is a project
         # marker. With the hub only in `-e`, it onboarded the brain folder (or
@@ -4519,8 +4552,7 @@ def spawn(
         # only in the starting shell — the server started without it — the window said
         # "no persona named 'captain'" and exited under "started the captain" (review of
         # #240, finding 13). A window pair, never a `launch -e` one: those reach the
-        # agent after that lookup, and the row would record the value for every restart
-        # to replay. Read at each start instead, a restart's included.
+        # agent after that lookup. Read at each start, a restart's included.
         env.update(experimental.captain_environment())
     if config.disable_native_agent_teams:
         native_args, native_env = selected.adapter.disable_native_teams()

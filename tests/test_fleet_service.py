@@ -18514,3 +18514,29 @@ def test_fleet_ls_reads_a_quiet_idle_agent_waiting_within_busy_quiet_seconds(
     tmux.screens[agent.pane_id] = REAL_WORKING  # mid-turn, a long tool call: still working
     [busy] = fleet_service.list_agents(project)
     assert busy.state == "working"
+
+
+def test_tell_types_into_a_quiet_idle_agent_the_board_calls_working(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#123's other half, through `fleet tell` (P0-FU, #51): a fresh `working` row whose pane
+    has printed nothing for `busy_quiet_seconds` and shows Claude Code idle at its prompt is
+    waiting, so the tell is TYPED, not filed as a note it would never read. The same row on a
+    screen that is mid-turn still gets the note: never typed into a turn."""
+    from tests.captain_screens import REAL_IDLE, REAL_WORKING
+
+    agent = _coder(project)
+    _board_session(agent, "working")
+    tmux.set_command(agent.pane_id, "claude")  # the agent, not the launcher, is up
+    tmux.output_at[agent.pane_id] = datetime.now(tz=UTC) - timedelta(minutes=1)
+    tmux.screens[agent.pane_id] = REAL_WORKING
+
+    busy = fleet_service.tell(project, "coder-1", "first")
+    assert not busy.delivered and "board note" in busy.how
+    assert tmux.typed == []
+
+    tmux.screens[agent.pane_id] = REAL_IDLE
+    idle = fleet_service.tell(project, "coder-1", "second")
+    assert idle.delivered and "typed" in idle.how
+    assert tmux.typed == [(agent.pane_id, "paste", "second"), (agent.pane_id, "key", "Enter")]
+    assert [n for n in _events(project, "note")] == ["first"]

@@ -43,7 +43,6 @@ from aisquare.core.source_revision import (
     git_common_dir,
     source_file_hashes,
     source_root_for,
-    source_unchanged,
 )
 from aisquare.core.store import BriefRow, ContextStore, TaskTransition, store_session
 from aisquare.models import (
@@ -245,6 +244,24 @@ class _Sources:
     def __init__(self, override: Path | None = None) -> None:
         self.override = override
         self._files: dict[str, dict[str, str] | str] = {}
+        self._outputs: dict[str, set[str]] = {}
+
+    def outputs(self, *roots: str | None) -> set[str]:
+        """What checks themselves write in these checkouts: every path the run of ANY
+        saved ``--project`` report there created (its after minus its before), recorded
+        as evidence or not. Such a path never makes a pass stale, nor a run "changed
+        while it ran": one task's two checks each writing a report into the checkout
+        (``--junitxml=a.xml``, ``b.xml``) must not stale each other, and re-running one
+        rewrites its own file (manager's decision on #12, refining M2). An added
+        ``conftest.py`` is created by no run, so it still counts. Reports that cannot be
+        read add nothing: fewer paths ignored is the strict direction."""
+        found: set[str] = set()
+        for root in {r for r in roots if r}:
+            key = str(Path(root).resolve())
+            if key not in self._outputs:
+                self._outputs[key] = _created_in(key)
+            found |= self._outputs[key]
+        return found
 
     def root(self, recorded: str | None) -> str | None:
         return str(self.override) if self.override is not None else recorded
@@ -303,10 +320,11 @@ def _source_stale(evidence: BriefEvidence, sources: _Sources) -> str | None:
         except ValueError as exc:
             return str(exc)
         if saved is not None:
-            paths = changed_paths(saved.before, current, output=_created(saved))
+            made = _created(saved) | sources.outputs(report.source_root, root)
+            paths = changed_paths(saved.before, current, output=made, ignore=made)
             if not paths:
                 return None
-            return f"the source in {root} changed since the check ran: {_listed(paths)}"
+            return _changed(f"the source in {root} changed since the check ran", paths)
         if fingerprint_of(current) == report.source_fingerprint_before:
             return None
         return f"the source in {root} changed since the check ran"
@@ -350,9 +368,12 @@ def _same_task(store: ContextStore, recorded: str, task: TeamTask) -> bool:
 
 
 def _pass_refusals(
-    report: command_reports.CommandReport, saved: command_reports.SourceFiles | None
+    report: command_reports.CommandReport,
+    saved: command_reports.SourceFiles | None,
+    sources: _Sources | None = None,
 ) -> list[str]:
-    """Why a saved command run cannot back a pass: every rule, each said."""
+    """Why a saved command run cannot back a pass: every rule, each said. A path some
+    check wrote (:meth:`_Sources.outputs`) changing is no reason."""
     why: list[str] = []
     if report.launch_error is not None:
         why.append(f"it could not start ({report.launch_error})")
@@ -366,11 +387,14 @@ def _pass_refusals(
         cause = report.source_capture_error or "run it with `asq exec --project`"
         why.append(f"its source identity is unknown ({cause})")
         return why
+    made = (sources or _Sources()).outputs(report.source_root)
+    if saved is not None:
+        made |= _created(saved)
     if saved is not None and saved.after is not None:
-        changed_while = not source_unchanged(saved.before, saved.after)
-    else:
-        changed_while = report.source_fingerprint_before != report.source_fingerprint_after
-    if changed_while:
+        during = changed_paths(saved.before, saved.after, ignore=made)
+        if during:
+            why.append(_changed("the source changed while it ran", during))
+    elif report.source_fingerprint_before != report.source_fingerprint_after:
         why.append("the source changed while it ran")
     try:
         current = source_file_hashes(Path(report.source_root))
@@ -378,15 +402,50 @@ def _pass_refusals(
         why.append(f"the source in {report.source_root} cannot be read now ({exc})")
         return why
     if saved is not None:
-        paths = changed_paths(saved.before, current, output=_created(saved))
+        paths = changed_paths(saved.before, current, output=made, ignore=made)
         if paths:
             why.append(
-                f"the source in {report.source_root} has changed since it ran "
-                f"({_listed(paths)}); run it again"
+                _changed(f"the source in {report.source_root} has changed since it ran", paths)
             )
     elif fingerprint_of(current) != report.source_fingerprint_before:
-        why.append(f"the source in {report.source_root} has changed since it ran; run it again")
+        why.append(
+            f"the source in {report.source_root} has changed since it ran; its files were "
+            "not saved, so which one cannot be said. If a check's own output is in the "
+            "checkout, delete it, gitignore it, or write it outside the checkout"
+        )
     return why
+
+
+def _changed(what: str, paths: Sequence[str]) -> str:
+    """A changed-path reason that says what to do about it. Never only "run it again": a
+    file a check writes into the checkout and that already existed changes on every
+    run, and running again changes it again (the tester's finding on #12)."""
+    return (
+        f"{what}: {_listed(paths)}. If that is a check's own output, delete it, gitignore "
+        "it, or have the check write it outside the checkout; if it is source, record a "
+        "check of the source as it is now"
+    )
+
+
+def _created_in(root: str) -> set[str]:
+    """Every path a saved ``--project`` report's run created in checkout ``root``."""
+    made: set[str] = set()
+    try:
+        saved_reports = command_reports.list_reports()
+    except (OSError, ValueError):
+        return made
+    for report in saved_reports:
+        if not report.source_files_saved or report.source_root is None:
+            continue
+        try:
+            if str(Path(report.source_root).resolve()) != root:
+                continue
+            files = command_reports.load_source_files(report.id)
+        except (OSError, ValueError):
+            continue
+        if files is not None:
+            made |= _created(files)
+    return made
 
 
 def _created(saved: command_reports.SourceFiles) -> set[str]:

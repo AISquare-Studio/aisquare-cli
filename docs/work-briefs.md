@@ -61,13 +61,21 @@ A report backs a **pass** only if the run:
 - saw the same source before it, after it, and now.
 
 The source is compared **file by file**, in the checkout the report ran in, not the one
-you record from: a check run in a worktree is about that worktree. A file the check
-itself created (in the run's after-identity and not its before: `--junitxml
-report.xml`) is its output and never counts. Every other change does: a file that
-existed and changed or went, and a file that is new since the check and that the check
-did not create, such as an added `conftest.py`, which changes what the check means. The
-reason names the first files that changed. A report taken with `--task` backs only
-that task; `--task` takes the task's number or id, as everywhere.
+you record from: a check run in a worktree is about that worktree.
+
+**Check output never counts.** A path is check output when the run of any saved
+`asq exec --project` report in that checkout created it (it is in that run's
+after-identity and not its before), whether or not that report was recorded. So R1's
+`--junitxml=a.xml` and R2's `--junitxml=b.xml` never stale each other, and running a
+check again, which rewrites its own report file, is not a change.
+
+Every other change counts: a file that existed and changed or went, and a new file no
+run created, such as an added `conftest.py`, which changes what the check means. The
+reason names the first files that changed and says what to do. If the file is a
+check's own output (one a run rewrites but did not create, a committed snapshot for
+instance), delete it, gitignore it, or have the check write it outside the checkout.
+If it is source, record a check of the source as it is now. A report taken with
+`--task` backs only that task; `--task` takes the task's number or id, as everywhere.
 
 A run of any exit status can back `--verdict fail`, but it must still be a report taken
 with `--project` for this brief's board, and, if it was taken with `--task`, for that

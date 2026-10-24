@@ -263,19 +263,26 @@ def changed_paths(
     current: Mapping[str, str],
     *,
     output: Collection[str] | None = None,
+    ignore: Collection[str] = (),
 ) -> list[str]:
     """The paths that make ``current`` differ from ``recorded``, sorted: each recorded
     file that changed or vanished, and, given ``output``, each path new since the record
-    that is not in it.
+    that is not in it. A path in ``ignore`` never counts, whatever happened to it: what
+    checks themselves write (a ``--junitxml`` report rewritten by each run).
 
     Without ``output``, a path only in ``current`` never counts: comparing a run's own
     before and after, every new path is the run's output. Later, against the checkout
     now, ``output`` is what the run created (its after minus its before), and any OTHER
     new path is a change: an added ``conftest.py`` changes what a pytest check means
     (validator round on #136, M2)."""
-    changed = [name for name, digest in recorded.items() if current.get(name) != digest]
+    skipped = set(ignore)
+    changed = [
+        name
+        for name, digest in recorded.items()
+        if name not in skipped and current.get(name) != digest
+    ]
     if output is not None:
-        made = set(output)
+        made = set(output) | skipped
         changed += [name for name in current if name not in recorded and name not in made]
     return sorted(changed)
 

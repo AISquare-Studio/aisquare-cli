@@ -135,7 +135,11 @@ untracked nonignored file, kept file by file.
   files, not only the commit it records.
 - **New files are output.** Because identity is kept per file, a file that did not
   exist before the command (`pytest --junitxml=report.xml`) is new output. A
-  pre-existing file that changed or vanished is a change.
+  pre-existing file that changed or vanished is a change. When a report backs brief
+  evidence, a path any saved `--project` run in that checkout created stays output on
+  later runs too, so a check that rewrites its own report file can be recorded again
+  ([work briefs](work-briefs.md)). For anything else a check writes into the
+  checkout, gitignore it, or write it outside the checkout.
 - **A worktree is its own checkout.** A command run in a linked worktree is about that
   worktree's files, under the board's one project.
 - **The home directory is refused.** A directory that is, or contains, your home or

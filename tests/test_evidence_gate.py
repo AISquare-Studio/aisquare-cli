@@ -178,7 +178,7 @@ def test_the_source_changing_during_or_after_the_run_refuses_a_pass(repo: Path) 
     _git(repo, "checkout", "--", "app.py")
     after = _run(_py("print('ok')"), task=task)
     (repo / "app.py").write_text("def answer():\n    return 41\n")
-    with pytest.raises(ValueError, match=r"has changed since it ran \(app.py\); run it again"):
+    with pytest.raises(ValueError, match=r"has changed since it ran: app.py\. If that is"):
         _record(brief, task, after)
 
 
@@ -214,6 +214,49 @@ def test_the_checks_own_output_never_stales_its_pass(repo: Path) -> None:
     assert _check(brief) == {"R1": "pass"}
 
 
+def _pytest_into(report_file: str) -> list[str]:
+    """A real pytest check that writes its junit report into the checkout."""
+    return [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+            f"--junitxml={report_file}", "test_app.py"]  # fmt: skip
+
+
+def test_two_checks_writing_reports_into_the_checkout_can_both_be_done(repo: Path) -> None:
+    """The tester's finding on #12: R1's check writes a.xml and R2's writes b.xml. At
+    dac09e77 recording R2 staled R1 (b.xml is new and R1's run did not create it), and
+    re-running R1 was refused "changed while it ran (a.xml)" forever. A path some saved
+    run created is check output, for every check in that checkout."""
+    brief, task = _linked("R one", "R two")
+    _record(brief, task, _run(_pytest_into("a.xml"), task=task), req="R1")
+    _record(brief, task, _run(_pytest_into("b.xml"), task=task), req="R2")
+    assert (repo / "a.xml").exists() and (repo / "b.xml").exists()
+    assert _check(brief) == {"R1": "pass", "R2": "pass"}
+
+    again = _run(_pytest_into("a.xml"), task=task)  # a.xml is there now, and rewritten
+    _record(brief, task, again, req="R1")
+    assert _check(brief) == {"R1": "pass", "R2": "pass"}
+    assert team.finish_task(task.id).status == "done"
+
+    (repo / "conftest.py").write_text("raise RuntimeError('collection fails now')\n")
+    assert _check(brief) == {"R1": "stale", "R2": "stale"}, "an added conftest.py still counts"
+
+
+def test_a_source_file_the_check_changes_is_named_with_the_three_remedies(repo: Path) -> None:
+    """Where a path that existed still changes during a run, the refusal names it and says
+    what to do: delete it, gitignore it, or write check output outside the checkout."""
+    (repo / "snapshot.txt").write_text("one\n")
+    _git(repo, "add", "snapshot.txt")
+    _git(repo, "commit", "-q", "-m", "a committed file the check rewrites")
+    brief, task = _linked()
+    report = _run(_py("open('snapshot.txt', 'w').write('two\\n')"), task=task)
+    with pytest.raises(ValueError) as refused:
+        _record(brief, task, report)
+    said = str(refused.value)
+    assert "the source changed while it ran: snapshot.txt." in said
+    for remedy in ("delete it", "gitignore it", "write it outside the checkout"):
+        assert remedy in said, said
+    assert "run it again" not in said
+
+
 def test_a_stale_pass_on_an_assembled_checkout_names_what_changed(repo: Path) -> None:
     """Validator round on #136, M5: on an assembled checkout every pass read "stale" and
     named no file. The reason names the first changed paths, up to five."""
@@ -226,9 +269,8 @@ def test_a_stale_pass_on_an_assembled_checkout_names_what_changed(repo: Path) ->
         (worktree / f"extra_{n}.py").write_text("x = 1\n")
     status = briefs.check(brief.id, source_root=worktree).requirements[0]
     assert status.state == "stale"
-    named = status.reason.split("changed since the check ran: ")[1]
-    assert named.startswith("app.py, extra_0.py, extra_1.py, extra_2.py, extra_3.py")
-    assert named.endswith("and 2 more")
+    named = status.reason.split("changed since the check ran: ")[1].split(". If that is")[0]
+    assert named == "app.py, extra_0.py, extra_1.py, extra_2.py, extra_3.py and 2 more"
 
 
 def test_a_report_captured_for_a_task_backs_only_that_task() -> None:

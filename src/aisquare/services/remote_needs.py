@@ -893,6 +893,8 @@ def _needs_trust_item(
     detail = status.detail or ""
     if status.state != "attention" or not detail.startswith(TRUST_PROMPT):
         return None
+    if _needs_dialog_reader(status.agent) is not None:
+        return None  # its screen's own card, with its words (rule 5a)
     agent = status.agent
     return _needs_item(
         "permission",
@@ -913,6 +915,29 @@ push (:func:`_needs_screen_dialog_item`), as the folder-trust question does: one
 start is often answered by the human who spawned the agent from the UI, at its window."""
 
 
+def _needs_dialog_reader(agent: FleetAgent) -> Callable[[Sequence[str]], str | None] | None:
+    """How the agent's adapter reads a dialog of its own off its screen
+    (``capabilities.dialog_on_screen``: Codex's); ``None`` for one that reads none."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent.agent)
+    return None if adapter is None else adapter.capabilities.dialog_on_screen
+
+
+def _needs_on_its_screen(status: FleetAgentStatus) -> bool:
+    """Whether the row reads ``attention`` only for a dialog the listing read off its screen
+    with its adapter (``fleet.TRUST_PROMPT``, ``fleet.AT_A_DIALOG``: Codex's, before its first
+    hook), which no hook reported: its card is rule 5a's, read off the screen here, as it
+    was while the listing read such a row ``waiting``."""
+    from aisquare.services.fleet import AT_A_DIALOG, TRUST_PROMPT
+
+    return (
+        status.state == "attention"
+        and (status.detail or "").startswith((TRUST_PROMPT, AT_A_DIALOG))
+        and _needs_dialog_reader(status.agent) is not None
+    )
+
+
 def _needs_screen_dialog(
     agent: FleetAgent, screen: Callable[[], Sequence[str] | None] | None
 ) -> str | None:
@@ -920,10 +945,7 @@ def _needs_screen_dialog(
     read without the escapes the scan's capture keeps (:data:`_ESCAPES`); ``None`` for an
     agent whose adapter reads no dialog off its screen, which is then not read, and for a
     screen this derivation was not given, could not read, or shows no dialog on."""
-    from aisquare.core.agent_adapters import recorded_adapter
-
-    adapter = recorded_adapter(agent.agent)
-    read = None if adapter is None else adapter.capabilities.dialog_on_screen
+    read = _needs_dialog_reader(agent)
     rows = None if read is None or screen is None else screen()
     if read is None or rows is None:
         return None
@@ -1157,7 +1179,7 @@ def needs_from_agent(
     if trust is not None:
         return [trust]
     pending = _needs_pending(tail, agent)
-    attention = _needs_attention(status)
+    attention = _needs_attention(status) and not _needs_on_its_screen(status)
     reader = _needs_reader(agent)
     asking = next(
         (tool for tool in pending if _needs_asks(reader, tool) in ("question", "plan")), None
@@ -3881,7 +3903,7 @@ def _needs_with_board_sessions(
         if found is None:
             return status
         if status.state == "attention" and (status.detail or "").startswith(
-            fleet_service.TRUST_PROMPT
+            (fleet_service.TRUST_PROMPT, fleet_service.AT_A_DIALOG)
         ):
             return found.model_copy(update={"state": status.state, "detail": status.detail})
         return found

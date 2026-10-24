@@ -1203,11 +1203,19 @@ class CodexAdapter:
         return ["resume", native_session_id]
 
     def fork_args(self, native_session_id: str, transcript_path: Path | None) -> ForkArgs | None:
-        """``codex fork <SESSION_ID>``: measured on 0.162.1, ``codex exec fork <id> "…"`` wrote
-        a new rollout, a new thread id, whose request carried the source's user turns. The
-        new id comes from its first hook. A thread forks only within its own home, as it
-        resumes (``resumes_across_homes`` is False)."""
-        return ForkArgs(("fork", native_session_id), mints_id=False)
+        """``codex fork <SESSION_ID> -C .``: measured on 0.162.1, ``codex exec fork <id> "…"``
+        wrote a new rollout, a new thread id, whose request carried the source's user turns.
+        The new id comes from its first hook. A thread forks only within its own home, as it
+        resumes (``resumes_across_homes`` is False).
+
+        ``-C .`` is the fork's own directory, the one its window starts in (its worktree):
+        started anywhere but the source's last cwd, a bare ``fork`` opens ``Working directory
+        · fork``, whose highlight and Esc both run the fork in the SOURCE's tree, and waits
+        there with no hook (SMOKE8 of #113). Measured on 0.162.1 and 0.164.0: with ``-C`` (a
+        path or ``.``, before ``fork`` or after its id) neither opens it, even under a
+        ``resume_cwd = "session"`` its "Always use session directory" saved, and the fork
+        runs in that directory with the source's turns and its own line."""
+        return ForkArgs(("fork", native_session_id, "-C", "."), mints_id=False)
 
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
         """``codex queue --thread <id> --message=<text>``: measured on 0.162.1 against an

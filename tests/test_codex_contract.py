@@ -654,10 +654,14 @@ def test_a_fork_is_codexs_fork_subcommand_and_its_hook_names_the_new_thread(
     tmp_path: Path,
 ) -> None:
     """Measured on 0.162.1 (M10): ``codex exec fork <id> "…"`` wrote a new rollout with a new
-    thread id, whose request carried the source's user turns. Claude Code's is main's
-    ``--resume <transcript> --fork-session``, beside the ``--session-id`` the fleet mints."""
+    thread id, whose request carried the source's user turns. ``-C .``: in the fork's own
+    directory, never Codex's ``Working directory · fork`` chooser (SMOKE8 of #113). Claude
+    Code's is main's ``--resume <transcript> --fork-session``, beside the ``--session-id`` the
+    fleet mints."""
     transcript = tmp_path / "s.jsonl"
-    assert codex.fork_args("019a-thread", transcript) == ForkArgs(("fork", "019a-thread"), False)
+    assert codex.fork_args("019a-thread", transcript) == ForkArgs(
+        ("fork", "019a-thread", "-C", "."), False
+    )
     assert get_adapter("claude-code").fork_args("abc", transcript) == ForkArgs(
         ("--resume", str(transcript), "--fork-session"), True
     )
@@ -805,6 +809,11 @@ CODEX_PROMPTS = {
     "a question view (request_user_input, --no-alt-screen)": ["dialog", None, None],
     "the update dialog, an npm-installed 0.164.0 at start with a newer release in its "
     "version.json (no -c check_for_update_on_startup=false)": ["dialog", None, None],
+    "Working directory · fork, a bare codex fork run outside the source thread's cwd": [
+        "dialog",
+        None,
+        None,
+    ],
 }
 
 

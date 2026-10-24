@@ -14,6 +14,9 @@ every request): no account, login, provider credential or model spend.
   own screens and sends ``1``, and the command runs; at the next approval ``press no``
   sends Esc, and it does not. Read with Claude Code's shapes, as the captain read every
   pane before, the view showed no prompt and ``press yes`` was refused.
+- A hand-off Fork into its own worktree (SMOKE8 of #113, check 12): Codex comes up in the
+  worktree with the source's turns and the fork's line, never at its ``Working directory ·
+  fork`` chooser, whose default is the source's checkout.
 """
 
 from __future__ import annotations
@@ -250,6 +253,54 @@ def test_a_hand_off_fork_of_a_real_codex_coder_is_a_new_thread_with_its_turns(
             forked, kept = store.get_fleet_agent(fork.id), store.get_fleet_agent(source.id)
         assert forked is not None and forked.session_id not in (None, bound.session_id)
         assert kept is not None and kept.ended_at is None, "the source runs on"
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_a_hand_off_fork_into_its_own_worktree_comes_up_there_with_its_turns_and_its_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE8 of #113, check 12: the Fork the Spawn dialog offers by default runs in a worktree
+    of its own, a directory the source's thread never ran in, and a bare ``codex fork <id>``
+    there opened ``Working directory · fork`` (its default: the SOURCE's checkout) and waited,
+    the fork line never sent. The test above forks with the source's own cwd, so it never met
+    it. Forked with ``-C .``, Codex runs in the worktree: no chooser on screen, its first turn
+    carries the source's conversation and the fork's line, and its cwd is the worktree."""
+    with _codex_fleet(tmp_path, monkeypatch, "forktree") as live:
+        root = live.project.root
+        git = ["git", "-C", str(root), "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+        tree = root / fleet.settings().worktree_dir / "forked"
+        with (live.outside / "c" / "config.toml").open("a", encoding="utf-8") as config:
+            # Its folder trust is not under test here: only the directory it runs in.
+            config.write(f'[projects.{json.dumps(str(tree))}]\ntrust_level = "trusted"\n')
+        source = fleet.spawn(
+            live.project, "coder", agent="codex", worktree=False, prompt="hello source",
+            agent_args=NATIVE,
+        ).agent  # fmt: skip
+        live.until(
+            lambda: fleet.status_of(source).state == "waiting", 60, "its turn", source.pane_id
+        )
+        before = len(live.requests)
+
+        receipt = fleet.hand_off(live.project, source.label, label="forked")
+
+        assert receipt.resumed is True, receipt.notes
+        fork = receipt.started.agent
+        assert fork.cwd == tree and tree.is_dir(), "its own worktree"
+        line = f"You are a fork of {source.label}"
+
+        def forked_turn() -> dict[str, Any] | None:
+            assert "Working directory" not in live.screen(fork.pane_id), "Codex's chooser"
+            requests = live.requests[before:]
+            return next((r for r in requests if any(line in t for t in _user_texts(r))), None)
+
+        turn = live.until(forked_turn, 60, "the fork's first turn", fork.pane_id)
+        assert "hello source" in _user_texts(turn), "the source's conversation"
+        assert f"<cwd>{tree}</cwd>" in json.dumps(turn), "its turn runs in the worktree"
+        live.until(
+            lambda: fleet.status_of(fork).state == "waiting", 60, "the fork's turn", fork.pane_id
+        )
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")

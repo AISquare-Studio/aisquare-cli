@@ -74,7 +74,7 @@ def test_a_fork_of_a_codex_row_is_codexs_own_fork_of_its_thread(
     native = _native(_command(tmux))
     assert _at(native, "fork", THREAD_ONE) and "resume" not in native
     assert not {"--resume", "--fork-session", "--session-id"} & set(native)
-    assert f"forked as Codex forks a session: `fork {THREAD_ONE}`" in receipt.notes
+    assert f"forked as Codex forks a session: `fork {THREAD_ONE} -C .`" in receipt.notes
     assert _events(codex.project, "forked") == [
         f"{fork.label} forked from {codex.agent.label} — resumed its session as a fork"
     ]

@@ -3381,8 +3381,15 @@ says (:func:`_derive`): a server answers at its socket, and it is not the one th
 started on, which may run on where no client reaches it."""
 
 TRUST_PROMPT = "waiting for folder trust"
-"""How an agent at Claude Code's folder-trust question reads (:func:`_with_trust_prompts`):
-``attention``, its detail starting with this. ``remote_needs`` keys its card on it."""
+"""How an agent at its folder-trust question reads (:func:`_with_trust_prompts`): Claude
+Code's, and Codex's as its adapter reads it off its screen. ``attention``, its detail starting
+with this. ``remote_needs`` keys Claude Code's card on it."""
+
+AT_A_DIALOG = "at a dialog of its own"
+"""How an agent reads at any other dialog it opens before its first hook, which its adapter
+reads off its screen (``capabilities.dialog_on_screen``: Codex's hook review, its ``Working
+directory · fork``): ``attention``, its detail this and the dialog's words
+(:func:`_with_trust_prompts`)."""
 
 
 def trust_prompt_detail(folder: Path) -> str:
@@ -3423,21 +3430,47 @@ def _with_trust_prompts(
         session = status.session or by_id.get(status.agent.session_id or "")
         pane = panes.get(status.agent.id)
         if pane is not None and _maybe_at_trust_prompt(status, session):
-            agent = status.agent
-            try:
-                lines = pane.captured()
-            except TmuxError:
-                lines = []
-            if claude_sharing.shows_trust_prompt(lines):
-                detail = trust_prompt_detail(agent.cwd)
+            detail = _start_dialog(status.agent, pane)
+            if detail is not None:
                 status = status.model_copy(update={"state": "attention", "detail": detail})
         shown.append(status)
     return shown
 
 
+def _start_dialog(agent: FleetAgent, pane: PlacedPane) -> str | None:
+    """The detail of ``agent`` at a dialog on ``pane`` before its first hook
+    (:func:`_with_trust_prompts`); ``None`` with none up, or a screen tmux would not show.
+
+    Claude Code's folder-trust question, by its words (``claude_sharing.shows_trust_prompt``).
+    An agent whose adapter reads its own dialogs off its screen (``capabilities.
+    dialog_on_screen``) is read by it: Codex's folder trust (``screen_prompt``'s ``trust``)
+    reads as Claude Code's does, and any other dialog it opens with no hook as
+    :data:`AT_A_DIALOG` with its words. Before, a Codex at its folder trust, its hook review
+    or the ``Working directory · fork`` a bare ``codex fork`` opened read a healthy
+    ``waiting … no hooks`` (SMOKE8 of #113)."""
+    adapter = recorded_adapter(agent.agent) if agent.agent is not None else None
+    read = adapter.capabilities.dialog_on_screen if adapter is not None else None
+    try:
+        lines = pane.screen() if read is not None else pane.captured()
+    except TmuxError:
+        return None
+    if adapter is None or read is None:
+        return trust_prompt_detail(agent.cwd) if claude_sharing.shows_trust_prompt(lines) else None
+    words = read(lines)
+    if words is None:
+        return None
+    prompt = adapter.capabilities.screen_prompt
+    if prompt is not None and (asked := prompt(lines)) is not None and asked.shape == "trust":
+        return trust_prompt_detail(agent.cwd)
+    return f"{AT_A_DIALOG}: {words}"
+
+
 def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None = None) -> bool:
     """A live Claude Code row tmux reports, whose session has said nothing since the row
-    began: ``session``, the row's found by its id, else the listing's.
+    began: ``session``, the row's found by its id, else the listing's. Or such a row of an
+    agent whose adapter reads its own dialogs off its screen (``capabilities.
+    dialog_on_screen``: Codex's), one with no session yet included, as none of those dialogs
+    fires a hook (:func:`_start_dialog`).
 
     Claude Code alone asks the question, so a row is asked about only when it is Claude
     Code: one with a session (only Claude Code's hooks write one), one started on a
@@ -3452,14 +3485,14 @@ def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None
     if agent.ended_at is not None or status.held or status.state not in ("waiting", "working"):
         return False
     adapter = recorded_adapter(agent.agent) if agent.agent is not None else None
-    if adapter is not None and adapter.capabilities.start_dialog_mark is None:
+    reads = adapter is not None and adapter.capabilities.dialog_on_screen is not None
+    if adapter is not None and adapter.capabilities.start_dialog_mark is None and not reads:
         # This is Claude Code's question (`claude_sharing.shows_trust_prompt`), and an agent
-        # with no mark under such a dialog is not captured on every listing for it. Codex
-        # does ask in a git checkout no trust covers (0.162.1), with no hook, and Remote's
-        # scan reads that off its screen (`capabilities.dialog_on_screen`).
+        # with no mark under such a dialog, and none it reads off its screen, is not captured
+        # on every listing for it.
         return False
     if session is None:
-        return agent.session_id is not None or harness.is_default_agent(agent.binary)
+        return reads or agent.session_id is not None or harness.is_default_agent(agent.binary)
     return session.last_seen_at < agent.created_at
 
 

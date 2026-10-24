@@ -256,6 +256,11 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "roles": {role: {"remote_control": False} for role in _V1_DEFAULTS["fleet"]["roles"]},
             "first_prompt": "argv",
             "prompt_ack_seconds": 45.0,
+            # The idle check's quiet window (P0-W1b, #123).
+            "busy_quiet_seconds": 30,
+            # The delivery guards (P0-W2, #276).
+            "draft_quiet_seconds": 10.0,
+            "deliver_notes_at_turn_end": True,
         },
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()

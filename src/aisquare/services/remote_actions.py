@@ -82,7 +82,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, TypeVar
 
-from aisquare.services import remote_needs, remote_server
+from aisquare.services import delivery, remote_needs, remote_server
 from aisquare.services.remote_server import RequestError
 
 if TYPE_CHECKING:
@@ -1122,6 +1122,18 @@ def action_paste(
     server = fleet_service.server_of(agent)
     first = "interrupted it with Escape, then " if interrupted else ""
     sent, escape = ("Escape was sent, but ", " escape=sent") if interrupted else ("", "")
+    # Never over a human's draft (P0-W2, #276): a draft in its input box, or someone typing
+    # in its pane in asq, and nothing is pasted (`delivery.draft_guard`).
+    held = delivery.draft_guard(
+        server, agent.pane_id, quiet=fleet_service.settings().draft_quiet_seconds
+    )
+    if held is not None:
+        raise RequestError(
+            409,
+            "fleet_error",
+            f"{sent}{label}: {held}, which nothing types over — nothing was typed",
+            audit=trail(f"delivered=no{escape} failed=draft"),
+        )
     told = fleet_service.type_then_enter(
         server, agent.pane_id, text, label, press="press Enter on the pad"
     )

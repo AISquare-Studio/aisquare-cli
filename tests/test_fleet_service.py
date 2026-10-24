@@ -6694,7 +6694,7 @@ def test_a_nudge_wakes_a_manager_only_for_a_write_on_the_board_it_reads(hubbed: 
     assert hubbed.tmux.typed == [], "its manager reads the hub's board, where neither is"
     team_service.add_note("which branch?", kind="question", session_ref=hubbed.coder_sid)
     assert hubbed.tmux.typed == [
-        (hubbed.manager.pane_id, "literal", NUDGE_TEXT),
+        (hubbed.manager.pane_id, "paste", NUDGE_TEXT),
         (hubbed.manager.pane_id, "key", "Enter"),
     ], "a write on the board it reads does wake it"
 
@@ -6726,7 +6726,7 @@ def test_under_a_hub_a_waiting_manager_is_woken_by_its_coders_writes_and_its_own
         team_service.finish_task(hubbed.task.id, session_ref=hubbed.coder_sid)
 
     assert hubbed.tmux.typed == [
-        (hubbed.manager.pane_id, "literal", NUDGE_TEXT),
+        (hubbed.manager.pane_id, "paste", NUDGE_TEXT),
         (hubbed.manager.pane_id, "key", "Enter"),
     ]
     delta = team_service.hook_prompt_heartbeat(hubbed.manager_sid, hubbed.fleet.root)
@@ -11235,7 +11235,7 @@ def test_reap_nudges_a_waiting_manager_when_an_agent_exits(
     tmux.die(coder.pane_id, 1)
     fleet_service.reap(project)
     assert tmux.typed == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
 
@@ -12565,7 +12565,7 @@ def test_nudge_types_one_fixed_line_into_a_waiting_manager(
     manager = _waiting_manager(tmux, project)
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     assert tmux.typed == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
     assert not NUDGE_TEXT.startswith(("/", "!")), "Claude Code's command prefixes"
@@ -12623,7 +12623,7 @@ def test_nudge_refuses_a_stale_waiting_row_that_ls_and_tell_call_working(
     assert fleet_service.status_of(manager).state == "waiting"
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     assert tmux.typed == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
 
@@ -13271,7 +13271,8 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
     with store_session() as store:
         revived = store.get_session(agent.session_id or "")
         still = store.get_task(task.id)
-    assert revived is not None and revived.ended_at is None and revived.state == "working"
+    # A resumed session sits at its prompt until the resume line is typed (#123): `waiting`.
+    assert revived is not None and revived.ended_at is None and revived.state == "waiting"
     assert still is not None and still.status == "doing" and still.claimed_by == agent.session_id
 
 
@@ -14242,7 +14243,7 @@ def test_a_listing_records_a_dead_pane_as_ended_and_keeps_the_row_while_its_wind
     assert row is not None and row.ended_at is not None and row.exit_status == 130
     assert _events(project, "agent_exited") == ["coder-1 exited (130)"]
     assert tmux.typed == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
     # Idempotent: the next listing writes nothing and says nothing more.
@@ -16276,7 +16277,7 @@ def test_a_restart_whose_replacement_never_starts_wakes_the_manager_it_held_back
 
     assert len(_events(project, "agent_exited")) == 1
     assert [typed for typed in tmux.typed if typed[0] == manager.pane_id] == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
 
@@ -18568,3 +18569,114 @@ def test_a_hand_over_worker_that_crashes_posts_handover_failed_and_wakes_the_man
     assert "hand-over worker failed (OperationalError: database is locked)" in failed
     assert "fleet switch" in failed
     assert len(nudges) == 1
+
+
+# --- #123: an idle agent reads waiting, not working (P0-W1b) ---------------------------------
+
+
+def _working_row(now: datetime, *, seen: timedelta) -> tuple[FleetAgent, TeamSession]:
+    agent = FleetAgent(
+        id="agt_idle1",
+        project_id="prj_x",
+        label="coder-1",
+        role="coder",
+        pane_id="%9",
+        session_id="sess-idle",
+        cwd=Path("/tmp"),
+        created_at=now - timedelta(hours=1),
+    )
+    session = TeamSession(
+        id="sess-idle",
+        project_id="prj_x",
+        role="coder",
+        started_at=now - timedelta(hours=1),
+        last_seen_at=now - seen,
+        state="working",
+    )
+    return agent, session
+
+
+def test_a_fresh_working_row_over_a_quiet_idle_pane_reads_waiting() -> None:
+    """A turn that ended with Esc fires no Stop, and an agent whose start upsert said
+    `working` before #123 stayed so: the row was trusted for `_STALE_AFTER` (30 min)
+    whatever the pane showed. Past `busy_quiet_seconds` of a quiet pane, its screen
+    decides — once, and only for a row in that state."""
+    now = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
+    agent, session = _working_row(now, seen=timedelta(minutes=5))
+    quiet = fleet_service._PaneView(False, None, "claude", now - timedelta(seconds=45))
+    asked: list[str] = []
+
+    def idle() -> bool:
+        asked.append("idle")
+        return True
+
+    state = fleet_service._derive(agent, session, quiet, observed=True, now=now, idle_box=idle)
+    assert state == ("waiting", "idle (the board said working)")
+
+    # Busy: the pane printed within the quiet window — trusted, and nothing is captured.
+    asked.clear()
+    busy = fleet_service._PaneView(False, None, "claude", now - timedelta(seconds=3))
+    assert fleet_service._derive(agent, session, busy, observed=True, now=now, idle_box=idle) == (
+        "working",
+        None,
+    )
+    assert asked == []
+    # A quiet pane whose box is not idle (a long tool call, a spinner) is still working.
+    assert fleet_service._derive(
+        agent, session, quiet, observed=True, now=now, idle_box=lambda: False
+    ) == ("working", None)
+
+
+def test_fleet_ls_reads_a_quiet_idle_agent_waiting_within_busy_quiet_seconds(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    from tests.captain_screens import REAL_IDLE, REAL_WORKING
+
+    agent = fleet_service.spawn(project, "coder", worktree=False).agent
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id=agent.session_id or "",
+                project_id=project.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now - timedelta(minutes=2),
+                state="working",
+            )
+        )
+    tmux.output_at[agent.pane_id] = now - timedelta(minutes=1)
+    tmux.screens[agent.pane_id] = REAL_IDLE
+
+    [idle] = fleet_service.list_agents(project)
+    assert (idle.state, idle.detail) == ("waiting", "idle (the board said working)")
+
+    tmux.screens[agent.pane_id] = REAL_WORKING  # mid-turn, a long tool call: still working
+    [busy] = fleet_service.list_agents(project)
+    assert busy.state == "working"
+
+
+def test_tell_types_into_a_quiet_idle_agent_the_board_calls_working(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#123's other half, through `fleet tell` (P0-FU, #51): a fresh `working` row whose pane
+    has printed nothing for `busy_quiet_seconds` and shows Claude Code idle at its prompt is
+    waiting, so the tell is TYPED, not filed as a note it would never read. The same row on a
+    screen that is mid-turn still gets the note: never typed into a turn."""
+    from tests.captain_screens import REAL_IDLE, REAL_WORKING
+
+    agent = _coder(project)
+    _board_session(agent, "working")
+    tmux.set_command(agent.pane_id, "claude")  # the agent, not the launcher, is up
+    tmux.output_at[agent.pane_id] = datetime.now(tz=UTC) - timedelta(minutes=1)
+    tmux.screens[agent.pane_id] = REAL_WORKING
+
+    busy = fleet_service.tell(project, "coder-1", "first")
+    assert not busy.delivered and "board note" in busy.how
+    assert tmux.typed == []
+
+    tmux.screens[agent.pane_id] = REAL_IDLE
+    idle = fleet_service.tell(project, "coder-1", "second")
+    assert idle.delivered and "typed" in idle.how
+    assert tmux.typed == [(agent.pane_id, "paste", "second"), (agent.pane_id, "key", "Enter")]
+    assert [n for n in _events(project, "note")] == ["first"]

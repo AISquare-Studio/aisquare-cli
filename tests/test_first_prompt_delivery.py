@@ -316,19 +316,25 @@ def test_the_typed_way_is_kept_for_type_and_it_waits_for_the_box(
     monkeypatch.setattr(fleet_service, "server", lambda config=None: fake)
     monkeypatch.setattr(tmux_core, "desktop_environment", lambda environ=None: {})
     monkeypatch.setattr(fleet_service, "settings", lambda: FleetSettings(first_prompt="type"))
-    looks = 0
-    original = fake.pane_facts
+    looks, captures = 0, 0
+    original, original_capture = fake.pane_facts, fake.capture
 
     def coming_up(pane_id: str) -> Any:
         nonlocal looks
         looks += 1
         if looks == 2:
             fake.set_command(pane_id, "claude")
-        if looks == 4:
-            fake.screens[pane_id] = _box()  # the box comes a beat after the exec
         return original(pane_id)
 
+    def drawn_a_beat_later(pane_id: str, **kwargs: Any) -> Any:
+        nonlocal captures
+        captures += 1
+        if captures == 3 and pane_id not in fake.screens:
+            fake.screens[pane_id] = _box()  # the box comes a beat after the exec
+        return original_capture(pane_id, **kwargs)
+
     monkeypatch.setattr(fake, "pane_facts", coming_up)
+    monkeypatch.setattr(fake, "capture", drawn_a_beat_later)
 
     def hook(pane_id: str) -> None:
         agent_id = str(fake.spawned[-1]["env"]["AISQUARE_FLEET_AGENT"])  # type: ignore[index]

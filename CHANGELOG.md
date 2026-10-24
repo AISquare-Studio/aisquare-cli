@@ -504,6 +504,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now a kickoff that names the task as its ASSIGNED TO YOU block does; a `--prompt`
   beside `--task` follows it. The manager's cycle says `--task` delivers the task.
   (#122)
+- **Nothing the fleet types lands in your draft.** A board write that woke the
+  manager typed its nudge into the manager's input box whatever was there. A human
+  halfway through a message in `asq` had the nudge appended to the draft, and its
+  Enter sent both. Every typed write now reads the input box first and types nothing
+  while it holds a draft, or while you have typed into the pane in `asq` within
+  `[fleet] draft_quiet_seconds` (10). That covers the manager's nudge, `fleet tell`,
+  a typed first message and the Remote's paste. Claude Code's own dim placeholder
+  and suggestion are not a draft. A nudge held back goes out once the box is clear
+  (`asq` retries it as it refreshes); if you send the draft first, your prompt
+  carries the same board update and the nudge is dropped. A tell held back is filed
+  as a note and says why. (#276)
+- **A note reaches a busy agent at the end of its turn.** A note to an agent's label
+  or role, including a `fleet tell` to an agent that was working, waited for the
+  agent's next prompt, which one that had finished might never get. Its `Stop` hook
+  now hands it the notes addressed to it when the turn ends, as the manager is kept
+  going on fresh board decisions, with the same guards: not on a turn already
+  continuing from a stop hook, and at most `[fleet] max_continuations_per_hour` an
+  hour. `[fleet] deliver_notes_at_turn_end = false` turns it off. (#276)
 - **A coder that claims a task sees its contract.** `task claim` and `task next
   --claim` printed the title line alone, and the contract (`--detail`) was a
   separate `task show` that nothing named, so people pasted contracts into coders'
@@ -543,6 +561,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   family week counting for an agent of that family, and every limit an agent hits
   is remembered on its account until the reset it named, so no pick by headroom
   sends an agent back before then. (#277)
+- **An idle agent reads waiting, not working.** A session start wrote `working`,
+  and only the captain was set back to `waiting`, so a just-spawned agent sitting
+  at an empty prompt read busy for up to 30 minutes: `fleet tell` filed a note it
+  never read, and an agent whose first prompt was never submitted looked busy to
+  everyone who could have reached it. Every role now reads `waiting` from its
+  session start until a prompt starts a turn (a compaction keeps what the turn
+  said). And a `working` row whose pane has printed nothing for `[fleet]
+  busy_quiet_seconds` (30) is checked once: if Claude Code sits idle at its prompt —
+  a turn ended with Esc fires no hook — it reads ⏸ waiting, *idle (the board said
+  working)*. (#123)
 
 - **A killed test run no longer leaves its tmux servers running.** Teardown ends every
   server a test starts, but a run that is killed (a timeout, `kill`, an xdist worker that

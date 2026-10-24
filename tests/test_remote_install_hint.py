@@ -1,6 +1,8 @@
-"""A machine without the remote extra is told the one command that adds it there.
+"""A damaged install, missing Remote's dependencies, is told the one command that repairs it.
 
-It was told ``pip install 'aisquare-cli[remote]' (or: pipx inject aisquare-cli
+Remote's dependencies are core since #34 (they were the ``remote`` extra), so only a damaged
+install gets this line, and the command installs aisquare-cli again as it was installed.
+Before, it was told ``pip install 'aisquare-cli[remote]' (or: pipx inject aisquare-cli
 websockets)``, and neither fixed the install the docs give. That is a uv tool
 (``install.sh``, the README): its environment has no pip, so ``pip`` reached
 another interpreter or none, and there is no pipx environment to inject into.
@@ -99,9 +101,9 @@ def test_a_uv_tool_installed_by_install_sh_is_installed_again_with_the_extra_and
     """uv cannot add a package to a tool, and installing one again resolves it from that
     command alone: without ``--with tiktoken`` the tiktoken ``install.sh`` put there goes."""
     hint = _uv_tool(monkeypatch, tmp_path, INSTALL_SH_RECEIPT)
-    assert hint == "uv tool install --python 3.13 --with tiktoken 'aisquare-cli[remote]'"
+    assert hint == "uv tool install --python 3.13 --with tiktoken aisquare-cli"
     assert remote_server._remote_dependency_error() == (
-        f"the remote extra is not installed (starlette, uvicorn, websockets missing) — {hint}"
+        f"{remote_server.DAMAGED_INSTALL} (starlette, uvicorn, websockets) — repair it: {hint}"
     )
 
 
@@ -117,8 +119,7 @@ def test_a_uv_tool_keeps_every_extra_and_package_it_was_installed_with(
         python="3.12",
     )
     assert _uv_tool(monkeypatch, tmp_path, receipt) == (
-        "uv tool install --python 3.12 --with tiktoken --with 'llm>=0.12' "
-        "'aisquare-cli[remote,serve]'"
+        "uv tool install --python 3.12 --with tiktoken --with 'llm>=0.12' 'aisquare-cli[serve]'"
     )
 
 
@@ -128,7 +129,7 @@ def test_a_uv_tool_keeps_every_extra_and_package_it_was_installed_with(
         (
             ['{ name = "aisquare-cli", specifier = "==0.7.0" }'],
             "",
-            "uv tool install --python 3.13 'aisquare-cli[remote]==0.7.0'",
+            "uv tool install --python 3.13 aisquare-cli==0.7.0",
         ),
         (
             [
@@ -136,14 +137,14 @@ def test_a_uv_tool_keeps_every_extra_and_package_it_was_installed_with(
                 '?rev=feat%2Fremote&subdirectory=cli" }'
             ],
             "",
-            "uv tool install --python 3.13 'aisquare-cli[remote] @ git+https://github.com/"
+            "uv tool install --python 3.13 'aisquare-cli @ git+https://github.com/"
             "AISquare-Studio/aisquare-cli@feat/remote#subdirectory=cli'",
         ),
         (
             ['{ name = "aisquare-cli", git = "https://github.com/AISquare-Studio/aisquare-cli" }'],
             "",
             "uv tool install --python 3.13 "
-            "'aisquare-cli[remote] @ git+https://github.com/AISquare-Studio/aisquare-cli'",
+            "'aisquare-cli @ git+https://github.com/AISquare-Studio/aisquare-cli'",
         ),
         (
             [
@@ -152,7 +153,7 @@ def test_a_uv_tool_keeps_every_extra_and_package_it_was_installed_with(
             ],
             "",
             "uv tool install --python 3.13 "
-            "'aisquare-cli[remote] @ https://example.com/cli.zip#subdirectory=cli'",
+            "'aisquare-cli @ https://example.com/cli.zip#subdirectory=cli'",
         ),
         (
             [
@@ -161,12 +162,12 @@ def test_a_uv_tool_keeps_every_extra_and_package_it_was_installed_with(
             ],
             "",
             "uv tool install --python 3.13 --with 'tiktoken ; sys_platform != '\"'\"'win32'\"'\"'' "
-            "'aisquare-cli[remote]'",
+            "aisquare-cli",
         ),
         (
             ['{ name = "aisquare-cli" }', '{ name = "llm" }'],
             'entrypoints = [{ name = "llm", install-path = "/b/llm", from = "llm" }]',
-            "uv tool install --python 3.13 --with-executables-from llm 'aisquare-cli[remote]'",
+            "uv tool install --python 3.13 --with-executables-from llm aisquare-cli",
         ),
     ],
     ids=["a pin", "a git branch", "a git default branch", "a url", "a marker", "executables"],
@@ -186,13 +187,13 @@ def test_a_uv_tool_is_asked_for_again_as_it_was_given(
 def test_a_uv_tool_from_a_local_source_stays_on_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``'aisquare-cli[remote]'`` would have swapped a checkout, editable or not, for the
+    """``aisquare-cli`` would have swapped a checkout, editable or not, for the
     index's release."""
     source = tmp_path / "aisquare cli"
     for key, editable in (("directory", ""), ("editable", "--editable ")):
         receipt = _receipt(f'{{ name = "aisquare-cli", {key} = "{source.as_posix()}" }}')
         assert _uv_tool(monkeypatch, tmp_path / key, receipt) == (
-            f"uv tool install --python 3.13 {editable}'aisquare-cli[remote] @ {source.as_uri()}'"
+            f"uv tool install --python 3.13 {editable}'aisquare-cli @ {source.as_uri()}'"
         )
 
 
@@ -203,7 +204,7 @@ def test_a_uv_tool_whose_receipt_names_no_python_stays_on_the_one_it_runs_on(
     that is another one."""
     receipt = _receipt('{ name = "aisquare-cli", extras = ["serve"] }', python=None)
     assert _uv_tool(monkeypatch, tmp_path, receipt) == (
-        f"uv tool install --python {PYTHON} 'aisquare-cli[remote,serve]'"
+        f"uv tool install --python {PYTHON} 'aisquare-cli[serve]'"
     )
 
 
@@ -217,7 +218,7 @@ def test_a_receipt_that_cannot_be_read_gets_the_command_install_sh_installs_with
 ) -> None:
     """Nothing to say again: the documented install's own command is the best left."""
     assert _uv_tool(monkeypatch, tmp_path, receipt) == (
-        f"uv tool install --python {PYTHON} --with tiktoken 'aisquare-cli[remote]'"
+        f"uv tool install --python {PYTHON} --with tiktoken aisquare-cli"
     )
 
 
@@ -241,7 +242,7 @@ def test_a_receipt_with_what_no_command_carries_is_named_instead(
     receipt = _receipt(*requirements, tail=tail)
     assert _uv_tool(monkeypatch, tmp_path, receipt) == (
         f"install aisquare-cli again with uv tool install, as {tmp_path / 'uv-receipt.toml'} "
-        "records it, adding remote to its extras"
+        "records it"
     )
 
 
@@ -252,7 +253,7 @@ def test_a_receipt_with_what_no_command_carries_is_named_instead(
             ['{ name = "aisquare-cli" }', '{ name = "llm" }'],
             "3.13",
             'entrypoints = [{ name = "llm", install-path = "/b/llm", from = ["llm"] }]',
-            "uv tool install --python 3.13 --with llm 'aisquare-cli[remote]'",
+            "uv tool install --python 3.13 --with llm aisquare-cli",
         ),
         (['{ name = "aisquare-cli", git = "https://[::1/cli" }'], "3.13", "", None),
         (['"aisquare-cli"'], "3.13", "", None),
@@ -276,7 +277,7 @@ def test_a_receipt_uv_would_not_write_is_read_without_an_error(
     hint = _uv_tool(monkeypatch, tmp_path, _receipt(*requirements, python=python, tail=tail))
     sentence = (
         f"install aisquare-cli again with uv tool install, as {tmp_path / 'uv-receipt.toml'} "
-        "records it, adding remote to its extras"
+        "records it"
     )
     assert hint == (sentence if said is None else said)
 
@@ -303,8 +304,8 @@ def test_a_pipx_install_is_told_to_inject_what_it_misses_and_nothing_less(
 @pytest.mark.parametrize(
     ("made_by", "command"),
     [
-        ("uv = 0.12.19\n", "uv pip install --python '{python}' 'aisquare-cli[remote]'"),
-        ("", "'{python}' -m pip install 'aisquare-cli[remote]'"),
+        ("uv = 0.12.19\n", "uv pip install --python '{python}' aisquare-cli"),
+        ("", "'{python}' -m pip install aisquare-cli"),
     ],
     ids=["made by uv, which gives it no pip", "made by venv"],
 )
@@ -326,18 +327,18 @@ def test_a_virtualenv_gets_the_extra_from_its_own_interpreter(
         (
             "",
             r"C:\Users\me\.venv\Scripts\python.exe",
-            r'C:\Users\me\.venv\Scripts\python.exe -m pip install "aisquare-cli[remote]"',
+            r"C:\Users\me\.venv\Scripts\python.exe -m pip install aisquare-cli",
         ),
         (
             "",
             r"C:\Users\Jo Doe\.venv\Scripts\python.exe",
-            r'& "C:\Users\Jo Doe\.venv\Scripts\python.exe" -m pip install "aisquare-cli[remote]"'
+            r'& "C:\Users\Jo Doe\.venv\Scripts\python.exe" -m pip install aisquare-cli'
             " (in cmd.exe, without the &)",
         ),
         (
             "uv = 0.12.19\n",
             r"C:\Users\me\.venv\Scripts\python.exe",
-            r'uv pip install --python C:\Users\me\.venv\Scripts\python.exe "aisquare-cli[remote]"',
+            r"uv pip install --python C:\Users\me\.venv\Scripts\python.exe aisquare-cli",
         ),
     ],
     ids=["a virtualenv", "one under a name with a space", "one uv made"],
@@ -366,8 +367,7 @@ def test_on_windows_a_uv_tool_is_told_a_command_its_shells_can_run(
         '{ name = "llm", specifier = ">=0.12" }',
     )
     assert _uv_tool(monkeypatch, tmp_path, receipt, platform="win32") == (
-        'uv tool install --python 3.13 --with tiktoken --with "llm>=0.12" '
-        '"aisquare-cli[remote,serve]"'
+        'uv tool install --python 3.13 --with tiktoken --with "llm>=0.12" "aisquare-cli[serve]"'
     )
 
 
@@ -381,8 +381,7 @@ def test_serve_on_a_uv_tool_without_the_extra_names_the_uv_command_and_no_other(
     result = CliRunner().invoke(cli, ["remote", "serve"])
     assert result.exit_code == 1
     said = " ".join(result.output.split())
-    extra = '"aisquare-cli[remote]"' if sys.platform == "win32" else "'aisquare-cli[remote]'"
-    assert f"uv tool install --python 3.13 --with tiktoken {extra}" in said
+    assert "uv tool install --python 3.13 --with tiktoken aisquare-cli" in said
     assert "pip install" not in said and "pipx" not in said
 
 
@@ -390,7 +389,10 @@ def test_web_push_names_the_same_command_as_the_server_does() -> None:
     """``pip install`` reaches neither a uv tool's environment nor a pipx one, for
     cryptography any more than for the server's three."""
     hint, said = remote_server.remote_install_hint(), remote_push.PUSH_INSTALL_HINT
-    assert said == f"Web Push needs the cryptography package — {hint}"
+    assert said == (
+        "Web Push needs the cryptography package, which this damaged install is missing — "
+        f"repair it: {hint}"
+    )
 
 
 def _wheel(into: Path, name: str, *, requires: tuple[str, ...] = (), script: str = "") -> None:
@@ -427,10 +429,12 @@ def test_a_real_uv_keeps_a_tool_installed_with_serve_whole_when_the_hint_is_foll
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The hint run as printed, by uv itself, on a tool installed as the README's MCP section
-    and ``install.sh`` leave it plus one more package: offline, from wheels made here."""
+    and ``install.sh`` leave it plus one more package, and then damaged (a core dependency of
+    Remote's taken out of it): offline, from wheels made here. It puts back what is missing
+    and keeps every other."""
     wheels = tmp_path / "wheels"
     wheels.mkdir()
-    requires = ('starlette; extra == "remote"', 'mcp; extra == "serve"')
+    requires = ("starlette", 'mcp; extra == "serve"')
     _wheel(wheels, "aisquare-cli", requires=requires, script="asq")
     for name in ("starlette", "mcp", "tiktoken", "llm"):
         _wheel(wheels, name)
@@ -453,6 +457,13 @@ def test_a_real_uv_keeps_a_tool_installed_with_serve_whole_when_the_hint_is_foll
         capture_output=True,
     )
     tool = tmp_path / "tools" / "aisquare-cli"
+    (python,) = [*tool.glob("bin/python"), *tool.glob("Scripts/python.exe")]
+    subprocess.run(
+        ["uv", "pip", "uninstall", "--python", str(python), "starlette"],
+        env=env,
+        check=True,
+        capture_output=True,
+    )
     _installed(monkeypatch, tool)
     hint = remote_server.remote_install_hint()
     subprocess.run(shlex.split(hint), env=env, check=True, capture_output=True)
@@ -464,9 +475,9 @@ def test_a_real_uv_keeps_a_tool_installed_with_serve_whole_when_the_hint_is_foll
 @pytest.mark.parametrize(
     ("route", "command"),
     [
-        ("uv tool", "uv tool install --python 3.13 --with tiktoken 'aisquare-cli[remote]'"),
+        ("uv tool", "uv tool install --python 3.13 --with tiktoken aisquare-cli"),
         ("pipx", "pipx inject aisquare-cli segno"),
-        ("venv made by uv", "uv pip install --python '{python}' 'aisquare-cli[remote]'"),
+        ("venv made by uv", "uv pip install --python '{python}' aisquare-cli"),
     ],
 )
 def test_a_qr_without_segno_names_the_command_that_puts_it_back_in_the_install_that_runs(

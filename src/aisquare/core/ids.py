@@ -27,6 +27,7 @@ TASK_PREFIX = "tsk_"
 EVENT_PREFIX = "evt_"
 AGENT_PREFIX = "agt_"
 TRACE_PREFIX = "trc_"
+USAGE_PREFIX = "use_"
 BRIEF_PREFIX = "brf_"
 EVIDENCE_PREFIX = "evd_"
 
@@ -94,3 +95,8 @@ def new_trace_id() -> str:
     client that generated its own would fork the run space silently.
     """
     return _new_id(TRACE_PREFIX)
+
+
+def new_usage_id() -> str:
+    """Return a fresh, time-sortable id for one turn's token usage (``use_…``)."""
+    return _new_id(USAGE_PREFIX)

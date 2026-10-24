@@ -107,6 +107,13 @@ class FakeClipboard:
         return texts[-1] if texts else None
 
 
+LOADED_WRITE_TIMEOUT = 15.0
+"""The native write's bound under :func:`install`: one a loaded box cannot miss."""
+
+TOAST_WAIT = LOADED_WRITE_TIMEOUT + 5
+"""How long a test waits for what follows a native write (its toast, the fake's log)."""
+
+
 def install(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -172,5 +179,9 @@ def install(
         monkeypatch.setattr(clipboard, "native_writer", REAL_NATIVE_WRITER)
     monkeypatch.setattr(clipboard, "osc52_terminal", REAL_OSC52_TERMINAL)
     monkeypatch.setattr(clipboard, "cached_writer", REAL_CACHED_WRITER)
+    # The fake tool is a fresh interpreter, and on a loaded box it outlived the shipped 2 s:
+    # the write was killed, OSC 52 alone still made the toast, and the fake read [] (seq
+    # 1294; test_watch's copy, #44). A test that pins the bound sets its own after this.
+    monkeypatch.setattr(clipboard, "WRITE_TIMEOUT", LOADED_WRITE_TIMEOUT)
     clipboard.forget_writer()
     return fake

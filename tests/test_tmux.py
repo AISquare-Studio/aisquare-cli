@@ -2093,8 +2093,10 @@ def test_live_a_new_server_reuses_pane_ids_and_says_when_it_started(live: TmuxSe
 def test_live_socket_path_is_where_tmux_put_it_and_outlives_the_server(live: TmuxServer) -> None:
     assert live.server_socket_path() is None, "no server, so nothing says where it listens"
     _spawn(live, "asq-test-fox", "w0", CAT)
-    assert live.run("display-message", "-p", "#{socket_path}").strip() == str(live.socket_path())
-    assert live.server_socket_path() == live.socket_path(), "what a spawn records"
+    # tmux says the resolved path: macOS's /tmp is /private/tmp, so compare realpaths.
+    said = live.run("display-message", "-p", "#{socket_path}").strip()
+    assert said == str(live.socket_path().resolve())
+    assert live.server_socket_path() == Path(said), "what a spawn records"
     assert live.socket_path().is_socket()
     live.kill_server()
     assert live.list_sessions() == []

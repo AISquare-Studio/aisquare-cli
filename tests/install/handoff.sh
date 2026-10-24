@@ -215,26 +215,29 @@ done
 
 # wget, where there is no curl: `-t 1 -T 30` (GNU wget would otherwise try 20
 # times), and its own words for a 404. GNU wget is on GitHub's Ubuntu runners;
-# BusyBox's is Alpine's only downloader.
+# BusyBox's is Alpine's only downloader. Their PATH is the wrapper and the tools
+# above and nothing else, so every command named from outside it (the shell,
+# busybox) is given by its full path.
+DASH=$(command -v dash) || fail "this needs dash"
 WGETS=""
 command -v wget >/dev/null 2>&1 && WGETS="gnu"
 busybox --list 2>/dev/null | grep -qx wget && WGETS="$WGETS busybox"
 [ -n "$WGETS" ] || head1 "no wget here: curl only"
 for kind in $WGETS; do
     real=$(command -v wget || true)
-    [ "$kind" = busybox ] && real="busybox wget"
+    [ "$kind" = busybox ] && real="$(command -v busybox) wget"
     make_wrapper "$WORK/wget-$kind" wget "$real"
     WGET_PATH="$WORK/wget-$kind:$WORK/tools"
 
     head1 "$kind wget: main's script hands off"
     # shellcheck disable=SC2086
-    installer "$WGET_PATH" dash $DRY
+    installer "$WGET_PATH" "$DASH" $DRY
     [ "$RC" = 0 ] || fail "the $kind wget hand-off exited $RC"
     expect "using the v$VERSION installer" "$kind wget did not hand off"
     fetched "-t 1 -T 30" "$kind wget was not limited to one try"
 
     head1 "$kind wget: a real 404 falls back to this script"
-    falls_back_on_404 "$WGET_PATH" dash
+    falls_back_on_404 "$WGET_PATH" "$DASH"
 done
 
 head1 "the hand-off works end to end"

@@ -512,6 +512,8 @@ hand_off() {
         # From here a signal is the release's script's to handle, and the run
         # ends with its status, whether it died of the signal or survived it.
         # A no-op trap, not an ignore: an ignored signal would be inherited.
+        # So a TERM sent to this shell ALONE (not its group) is swallowed and
+        # the release's script runs on; forwarding it is not worth the code.
         trap : HUP INT TERM
         _ho_rc=0
         sh "$HANDOFF_FILE" "$@" || _ho_rc=$?

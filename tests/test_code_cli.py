@@ -210,7 +210,10 @@ def test_onboard_returns_while_a_slow_index_build_runs(
         hooks_service, "_detach", lambda argv, *, cwd=None: started.append((argv, cwd))
     )
 
+    built: list[bool] = []
+
     def slow_build(*_args: object, **_kwargs: object) -> code_index.BuildReport:
+        built.append(True)
         time.sleep(SLOW_BUILD_S)
         raise AssertionError("onboard built the index inline")
 
@@ -221,7 +224,10 @@ def test_onboard_returns_while_a_slow_index_build_runs(
     took = time.monotonic() - began
 
     assert result.exit_code == 0, result.output
-    assert took < SLOW_BUILD_S / 2, f"onboard took {took:.1f}s with a {SLOW_BUILD_S}s build"
+    # The build was never called inline, which no runner's speed changes. No wall-clock
+    # bound: the rest of an onboard took 3.1 s on a loaded linux runner and 6.6 s on
+    # windows (rc/p2 push run 40087282716), so any bound measured the runner.
+    assert built == [], f"onboard built the index inline ({took:.1f}s)"
     assert json.loads(result.output)["code_index"].startswith("building in the background")
     [(argv, cwd)] = started
     assert argv[-3:] == ["--quiet", "code", "index"] and cwd == checkout.resolve()

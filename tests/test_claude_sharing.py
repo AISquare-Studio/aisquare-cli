@@ -870,7 +870,11 @@ def test_a_refusal_names_the_link_as_written_without_windows_prefix(
     theirs.mkdir()
     (second.config_dir / "agents").symlink_to(theirs, target_is_directory=True)
     real_readlink = os.readlink
-    monkeypatch.setattr(os, "readlink", lambda path: "\\\\?\\" + real_readlink(path))
+    prefix = "\\\\?\\"
+    # Windows' own readlink already has it (rc/p2 push run 40087282716): once, as there.
+    monkeypatch.setattr(
+        os, "readlink", lambda path: prefix + real_readlink(path).removeprefix(prefix)
+    )
 
     [refused] = [c for c in service.enable_share(["agents"], now=NOW) if c.account.slot == 2]
 

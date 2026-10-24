@@ -18,7 +18,8 @@ import pytest
 
 from aisquare.core import tmux as tmux_core
 from aisquare.core.tmux import TmuxServer
-from tests.conftest import _OWNER_TMUX_DIRS, RealFleetGuard, _kill_private_servers
+from tests.conftest import _OWNER_TMUX_DIRS, RealFleetGuard
+from tests.private_fleets import end_private_servers
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="tmux and /bin/sh are POSIX")
 
@@ -75,7 +76,7 @@ def test_a_server_a_test_starts_is_its_own_and_teardown_ends_it(
     assert result.returncode == 0, result.stderr
     assert server.socket_path().exists()
     assert no_real_fleet.private in server.socket_path().parents
-    _kill_private_servers(no_real_fleet.private, no_real_fleet.uid, no_real_fleet.tmux)
+    end_private_servers(no_real_fleet.private, no_real_fleet.uid, no_real_fleet.tmux)
     alive = tmux_core._tmux([server.binary(), "-L", "asq", "has-session", "-t", "t"], None)
     assert alive.returncode != 0, "the private server is gone, and every pane with it"
     assert no_real_fleet.verdict() is None

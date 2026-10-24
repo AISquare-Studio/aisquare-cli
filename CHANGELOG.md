@@ -8,6 +8,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`[accounts] prefer = "reset-soonest"`** (*under the line, prefer* in App
+  settings): of the accounts under `switch_at`, a spawn and a hand-over take the
+  one whose week resets first, priority breaking ties, so a week's allowance is
+  spent before it lapses. `priority`, the default, picks as before. `accounts
+  usage` shows each per-family week and its reset beside the week. **`fleet
+  switch --force`** moves an agent the usage-limit hand-over moved minutes ago,
+  which is otherwise refused. New event **`handover_failed`**: the automatic
+  hand-over could not move a limited agent, with the reason and the `fleet
+  switch` that would; it wakes the manager. (#277)
+
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in
@@ -260,11 +270,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pump's own flag and silently leaves every button of the screen dead; the
   dialog's flag is `_spawning`.
 
+- **`aisquare metrics tokens`: what each agent session spent in tokens.** It reads
+  each session's Claude Code transcript and prints one row per session and a total:
+  requests, input (fresh, cache write and cache read), output, the baseline (the
+  first request), peak and mean context, wakes and the ones that took no action,
+  the team-delta blocks with their characters and carried cost, compactions, and
+  tool calls by name. `--json` gives every field; `--role`, `--session` and
+  `--since` narrow it. It prints counts, never text, and streams a transcript of
+  any size a line at a time. This is the ruler the P1 workstreams report their
+  before/after numbers with (`docs/plans/handoff-p1-token-diet.md` §1.7).
+
 ### Changed
 - **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and
   the suite on one Linux leg (py3.12), the Linux package job and the other jobs
   bar the ambient legs and the demo. Pushes to `rc/**` and `main`, PRs into
   `main`, the nightly and a run by hand keep the full matrix (CONTRIBUTING).
+- **`make test` runs the suite on every core** (#129 d). pytest-xdist is in the `dev`
+  extra and `uv.lock`, and `make test` runs `pytest -n auto`; so does CI's `check` job on
+  3.11–3.13 (the `ambient` job stays serial: it exists to catch reads of machine state,
+  not to be fast). No test needed a group: each one already has a home, a tmux folder and
+  a `claude` stand-in of its own. What a test left running wrote outside every home is
+  still reported under workers: each worker hands its notes to the controller, which
+  prints the summary. Run serially with `pytest -p no:xdist`.
+- **CI checks that `uv.lock` matches `pyproject.toml` (#278).** A new `lock` job
+  runs `uv lock --check` on a pinned uv, and `make check` runs it too where `uv` is
+  on PATH (`make lockcheck`). The lock had drifted unseen: CI installs with pip, so
+  nothing read it, and `uv run --frozen` failed on every persona path for want of
+  `pyyaml`. The `voice` extra had drifted the same way since (the xdist change
+  relocked it). A dependency change without its relock now fails CI.
 - The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
   adds the two persona columns, `team_session.persona` (the persona a session was
   launched as) and `fleet_agent.persona` (the one an agent was spawned with or given
@@ -322,9 +355,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   loses them, since the deny is the role's own now. Moving back with `aisquare
   upgrade --version` to 0.8.2 or earlier names each role that release would launch
   with tools denied here, with the `config set` that keeps them denied there.
+- The P0 reliability plan (`docs/plans/handoff-p0-reliability.md`, "W0 results") now
+  records what was measured on a live box before its prompt-delivery work starts. On
+  Claude Code 2.1.309 and 2.1.223, a typed prompt's first Enter is taken as soon as the
+  input box is drawn, and the reported 30–50 s delay did not reproduce. An Enter sent
+  before the box is drawn is dropped, and the prompt stays unsent in the input box.
+  A prompt passed on the command line runs as the first turn, alone, with `--resume`
+  or after `--`. The results also record the inbox socket's message line and when a
+  message is delivered or held, and that the usage endpoint reports a per-model window
+  in `limits[]`. `tests/test_claude_accounts.py` gains a fixture shaped like the
+  endpoint's answer of 2026-10-23, with invented values.
 
 ### Fixed
 
+- **Every first message reaches its agent and starts a turn, or `fleet ls` says it
+  did not.** A spawn's `--prompt`, the line `fleet restart` and `fleet switch` start
+  a replacement with, a fresh hand-off and the usage-limit hand-over's were typed
+  with one Enter about two seconds after the agent started. An Enter that reaches
+  Claude Code before it draws its input box is dropped while the text stays in the
+  box, so the agent sat idle with its message unsent, and the board read it
+  `working`. A Claude Code agent now gets its first message on its command line
+  (`claude -- "<message>"`), in a file only you can read that its launch deletes,
+  so the row's recorded launch never holds it and a restart replays no old message.
+  Any other binary, and every agent under `[fleet] first_prompt = "type"`, has it
+  typed once Claude Code's input box is drawn, checked in the box, and sent again
+  only while the text is provably still waiting there. The row reads `pending` until
+  the agent's `UserPromptSubmit` takes it. `fleet spawn`, `restart` and `switch` wait
+  `[fleet] prompt_ack_seconds` (45) for that and say so, and their `--json` adds
+  `prompt_delivery` and `prompt_acked`. A message still pending past that wait at an
+  idle input box reads `attention` ("first prompt not taken", with the `fleet tell`
+  and `fleet restart` that take it on), and the board gets one `prompt_unsent`, which
+  wakes the manager. `aisquare doctor` gains a `fleet-delivery` row: the last week's first
+  messages acknowledged, N of M, and how long agents took to start their first turn.
+  The store migrates to schema v34, which adds three nullable columns:
+  `team_session.prompted_at`, `fleet_agent.first_prompt` and
+  `fleet_agent.first_prompt_at`. A row from before them reads as "not tracked".
+  (#122)
+- **`fleet spawn coder --task <id>` gives the coder its task.** With no `--prompt`
+  it typed nothing, and the coder waited at an empty prompt. Its first message is
+  now a kickoff that names the task as its ASSIGNED TO YOU block does; a `--prompt`
+  beside `--task` follows it. The manager's cycle says `--task` delivers the task.
+  (#122)
 - **A coder that claims a task sees its contract.** `task claim` and `task next
   --claim` printed the title line alone, and the contract (`--detail`) was a
   separate `task show` that nothing named, so people pasted contracts into coders'
@@ -334,6 +405,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   coder's cycle names `task show`, the manager's says the contract belongs in
   `--detail`, and `--detail`'s help says it is the contract. `--json` is unchanged.
   (#74)
+- **A session resumed under another account keeps its transcript.** `claude
+  --resume <path>` under another `CLAUDE_CONFIG_DIR` (every resumed `fleet
+  switch` and usage-limit hand-over) reports a transcript under the new account
+  that Claude Code never creates, and keeps writing the original. The board
+  recorded the missing one, so every prompt after it raised a false *TWO live
+  agents* collision banner, and the agent's next restart or switch found nothing
+  to resume and started fresh. A session start no longer replaces a transcript
+  on disk with one that is not, and a row an earlier build wrote heals at the next
+  prompt. Found by the P0-W0 spike on Claude Code 2.1.309 and 2.1.223.
+- **`capture.enabled = false` stops prompt capture (#268).** The key was read by
+  nothing: with it off, `UserPromptSubmit` stored every prompt, `aisquare log`
+  listed it, and Explainability spooled it. Off, no prompt is stored or spooled;
+  the turn's metrics row (no text) and the teammate delta still arrive, and the
+  CI experiment, its own opt-in, still consults its endpoint. A config that cannot
+  be read records no prompt and says so on stderr: privacy fails closed.
+  `config set capture.enabled false` says in one line what stops and what does not.
+- **One usage limit moves an agent once, to an account that can take it.**
+  With `on_limit = "switch"` the `limited` line woke the manager with a `fleet
+  switch` while the hand-over was already moving the agent, and once that had
+  finished the manager's switch moved the replacement again: two `switched` for
+  one limit. The line is now a `limited_handing_over` event, *moving it to another
+  account automatically*, that wakes nobody, the manager's cycle acts on `handover_failed` instead, a
+  replacement minutes old is refused without `--force`, and `switched` is news on
+  the next delta, not a wake-up. And a pick read only the five-hour and seven-day
+  windows: the per-family weeks (`seven_day_opus`, `seven_day_sonnet`), `limits[]`
+  and a window's `locked_reason` were dropped, so an Opus agent was moved onto an
+  account whose Opus week was spent and refused at once. They are read now, a
+  family week counting for an agent of that family, and every limit an agent hits
+  is remembered on its account until the reset it named, so no pick by headroom
+  sends an agent back before then. (#277)
+
+- **A killed test run no longer leaves its tmux servers running.** Teardown ends every
+  server a test starts, but a run that is killed (a timeout, `kill`, an xdist worker that
+  dies) runs no teardown, and its servers lived on with a pane each: 55 were found on one
+  box, some days old. The suite's private folders under `/tmp` are now named for the
+  process that made them (`asqtx<pid>-…`), and each run starts by ending the servers in,
+  and removing, every folder whose process is gone; a folder of a run still going is
+  never touched. `test_live_a_server_under_another_tmux_tmpdir_is_reached_at_the_path_it_said`
+  also ends its server when it fails before its old `try`: its folder is one that neither
+  the `live` fixture nor `no_real_fleet` looks in.
 
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for

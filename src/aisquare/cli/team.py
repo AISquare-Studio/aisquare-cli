@@ -8,18 +8,16 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import shutil
 import sqlite3
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
 
-from aisquare.cli.common import expected_config_write_errors, fail, local_time
+from aisquare.cli.common import expected_config_write_errors, fail, local_time, parse_since
 from aisquare.core import harness, orchestrator
 from aisquare.core.config import (
     ExplainabilitySettings,
@@ -266,22 +264,6 @@ def role(
         typer.echo(session.model_dump_json())
     else:
         stdout_console().print(f"✓ {team_service.short_id(session.id)} is now {session.role}")
-
-
-def _parse_since(value: str) -> datetime:
-    """``--since`` accepts a relative span (15m, 2h, 3d) or an ISO timestamp."""
-    span = re.fullmatch(r"(\d+)([smhd])", value.strip())
-    if span:
-        unit = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}[span.group(2)]
-        return datetime.now(tz=UTC) - timedelta(**{unit: int(span.group(1))})
-    try:
-        moment = datetime.fromisoformat(value)
-    except ValueError:
-        raise typer.BadParameter(
-            f"{value!r} is neither a span (15m, 2h) nor an ISO timestamp"
-        ) from None
-    # A naive timestamp means the user's local clock.
-    return moment if moment.tzinfo is not None else moment.astimezone()
 
 
 def _bin_env_hint(role: str) -> str:
@@ -1095,7 +1077,7 @@ def log(
         if as_session is None:
             fail("--mine needs --as <session> (your id is on the board)", error="missing_session")
         by = as_session
-    moment = _parse_since(since) if since is not None else None
+    moment = parse_since(since) if since is not None else None
     try:
         events = team_service.log_events(
             limit=limit,

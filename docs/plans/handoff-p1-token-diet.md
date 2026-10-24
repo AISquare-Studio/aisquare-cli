@@ -89,7 +89,28 @@ WS-0 is the prerequisite and is not scored.
 | 5 | WS-5 #129 remainder | wall time and model price, not tokens | — | #129's estimates: 18–35 min per run from per-task verification, 5–8 min from xdist | latency | M | not scored |
 
 WS-0's baseline run (§1.7) turns the Impact column into token counts per manager-hour and
-per agent-hour. Re-rank in the release PR if the counts change the order. The waves below
+per agent-hour. Re-rank in the release PR if the counts change the order.
+
+**Re-scored from the reduced baseline run (WS-0, 2026-10-23; shape and caveats in §1.7).**
+The counts keep the order. Measured on 106 requests and 5,666,363 input tokens
+(97% cache reads), over 10.5 minutes:
+
+- **WS-1:** each request's prefix, the baseline, was 38,220–40,026 tokens per session.
+  WS-1's measured cut on the same Claude Code release (#311) is about 17k per request
+  in an interactive `/context` (26.9k → 9.9k for a coder), and 7.1k on a first request
+  under `-p`. Over these 106 requests that is about 0.75M–1.8M tokens, 13–32% of the
+  run's input. It is still the largest per-request saving: High.
+- **WS-2:** the manager took 4 wakes. They cost 346,949 input tokens, 17% of the
+  manager's 2.01M, and 2 of the 4 took no action. Two made no tool call at all; the
+  other two each ran `fleet tell`, a write. That holds under the board-read rule as
+  fixed in review (`team log`, `task next` without `--claim`, a read behind `cd`). 20 delta blocks (21,723 characters)
+  were carried for 311,384 characters across later requests. High.
+- **WS-3:** this fixture's skeleton is 715 tokens, below the read-first limit, so it
+  cost nothing here, by design. It stays Medium: none on small repos, severe on large
+  ones (WS-3's own runs).
+- **WS-4:** there was no compaction in 10 minutes. The manager's context was 54,441 on
+  average and 65,785 at peak, so this scale cannot measure WS-4. It stays High by
+  mechanism. The waves below
 follow dependencies, so WS-1 and WS-3 ship together in wave 1 whichever ranks first.
 
 ### 1.3 Recommended order
@@ -182,6 +203,29 @@ lands, a PR may use a throwaway script that applies the same definitions.
   baseline; each workstream re-runs the same script on its branch. WS-3 adds two fixture
   repos: one whose skeleton is between 25k tokens and `max_tokens`, and one over
   `max_tokens`.
+- **Baseline as run (2026-10-23, reduced scale by owner decision).** Base `f6110b62` (main
+  `09f48563` plus this handoff; no code change), Claude Code **2.1.309**, the default
+  logged-in account (Claude Team), Opus 5.5 for every role.
+  - Fleet: 1 manager, 2 coders and 1 reviewer, 4 agents, on a scratch `AISQUARE_HOME`
+    and a scratch tmux socket (`asqbl`). Claude Code ran with `--setting-sources
+    project,local` and a scratch `--settings` holding only the base's six hooks, so no
+    user hook and no `~/.aisquare` was touched.
+  - Work: a 5-file fixture repo (`textkit`, no remote) and 3 tasks. One task failed
+    review once.
+  - Time: 10.5 minutes of wall time, 18:02–18:13Z. That falls short of the two hours
+    and the gap past the cache TTL asked above; the full run happens once all four
+    trains are on main.
+  - Kickoff: the manager's goal was typed into its pane by hand. `fleet tell` filed it as
+    a note, because the board read the idle manager as `working` (#123, P0).
+  - Ledger: `aisquare --json metrics tokens --all` over that home, counts only, is
+    attached to the WS-0 PR. The store's `continuations:` key agrees with its 4 wakes.
+  - **Known gaps; do not compare against this run for them:**
+    - No request came after a gap longer than the cache TTL, so it shows no
+      cache-expiry wake.
+    - It has no compaction, so it is not a baseline for WS-4's quiet-point compaction
+      or its context sawtooth.
+    - WS-4 measures against the full run, or a manager run of its own long enough to
+      compact.
 
 ---
 

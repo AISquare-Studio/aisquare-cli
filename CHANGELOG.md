@@ -44,29 +44,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which is otherwise refused. New event **`handover_failed`**: the automatic
   hand-over could not move a limited agent, with the reason and the `fleet
   switch` that would; it wakes the manager. (#277)
-- **`aisquare task next --task <ref>`** returns that task when it is in `--status` and
-  ready, and nothing else. A tester or ui-tester spawned for a task (`fleet spawn tester
-  --task <id>`) verifies that one task and stops after its verdict; the manager spawns one
-  per task at its review, and the validator stays the single final gate (#129).
-- **`fleet spawn` runs the role's model ladder**, as `team spawn` does: `--model` and
-  `--effort` from the cached probe (never a probe at spawn), recorded so a restart or
-  switch starts the same model, and shown in `fleet ls --json`'s `launch_spec`. Arguments
-  that already name a model or an effort are yours, and another binary gets neither
-  (#129).
-
-- **`aisquare team show <seq>`** prints one board event in full: who wrote it and who
-  caused it, the task, the addressee, its details and the whole text. Every update an
-  agent reads is now one line that ends in this command when there is more (#279).
-- **`fleet stop --as SESSION`**, and every `agent_exited` names who stopped the agent
-  (`coder-auth exited (0) — stopped by manager`, `(--force)`), with its status, the
-  claims its end released and `--force` in its details. A stop with no `--as` acts for
-  the fleet window it runs in, else for `user` (#214, #279).
-- **Per-agent board context.** `[fleet.roles.<role>] board_context = "all" | "relevant" |
-  "none"` and `fleet spawn --board-context`, kept by `restart` and `switch`. `relevant`
-  keeps an agent's own tasks, what is addressed to its role or label, and decisions;
-  `none` gives no recent updates at start and no deltas. The reviewer's default is
-  `none`, so it judges a change cold; a manager reads `all`, and doctor says when its
-  key says otherwise (#279).
 
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
@@ -329,6 +306,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--since` narrow it. It prints counts, never text, and streams a transcript of
   any size a line at a time. This is the ruler the P1 workstreams report their
   before/after numbers with (`docs/plans/handoff-p1-token-diet.md` §1.7).
+- **One tester per task, and `fleet spawn` runs the model ladder** (#129 a, b).
+  `aisquare task next --task <ref>` returns that task when it is in `--status` and
+  ready, and nothing else. A tester or ui-tester spawned for a task (`fleet spawn tester
+  --task <id>`) verifies that one task and stops after its verdict; the manager spawns one
+  per task at its review, and the validator stays the single final gate. `fleet spawn`
+  runs the role's model ladder, as `team spawn` does: `--model` and `--effort` from the
+  cached probe (never a probe at spawn), recorded so a restart or switch starts the same
+  model, and shown in `fleet ls --json`'s `launch_spec`. Arguments that already name a
+  model or an effort are yours, and another binary gets neither.
+- **A manager starts from its start pack, cites briefs by path, and can be compacted at
+  a quiet point** (#281). At every session start, compactions and restarts included, a
+  manager is given its state file (`~/.aisquare/projects/<id>/manager/state.md`), every
+  open task, unanswered questions, live agents, the wake events waiting for it, and the
+  project's `.aisquare/rules/*.md` by path, in at most 20,000 characters, instead of the
+  plain board and the re-reading that followed; its cycle asks it to keep that file
+  current and to cite scripts and rules by path rather than paste them. `aisquare task
+  add --detail-file <path>` and `--rules testing,git` read a contract from a file and
+  cite rules files by path (a rules file that does not exist refuses the add), and
+  `[team] brief_blocks` (`objective`, `acceptance`, `boundaries`) warns about a contract
+  missing one, or refuses it under `[team] brief_strict = true`. Quiet-point compaction
+  ships off: with `[fleet] quiet_compact_at` set (400000 is a good start), a manager whose
+  turn ends with nothing pending, no question and a fresh state file is sent `/compact`
+  after `quiet_compact_delay` seconds, only into an idle prompt with an empty input box
+  and never while someone types in its pane, at most once per `quiet_compact_cooldown`
+  minutes, and its row reads `waiting` afterwards. Claude Code's own auto and idle
+  compaction are left as they are.
 
 ### Changed
 
@@ -356,7 +359,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not to be fast). No test needed a group: each one already has a home, a tmux folder and
   a `claude` stand-in of its own. What a test left running wrote outside every home is
   still reported under workers: each worker hands its notes to the controller, which
-  prints the summary. Run serially with `pytest -p no:xdist`.
+  prints the summary. Run serially with `pytest -p no:xdist`. A killed run (a timeout,
+  `kill`, a worker that dies) runs no teardown, and its tmux servers lived on with a pane
+  each, 55 on one box, some days old. The suite's private folders under `/tmp` are now
+  named for the process that made them (`asqtx<pid>-…`), and each run starts by ending
+  the servers in, and removing, every folder whose process is gone; a folder of a run
+  still going is never touched.
 - **CI checks that `uv.lock` matches `pyproject.toml` (#278).** A new `lock` job
   runs `uv lock --check` on a pinned uv, and `make check` runs it too where `uv` is
   on PATH (`make lockcheck`). The lock had drifted unseen: CI installs with pip, so
@@ -364,16 +372,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pyyaml`. The `voice` extra had drifted the same way since (the xdist change
   relocked it). A dependency change without its relock now fails CI.
 
-- **A manager wakes for decisions, not news** (#279). A clean exit, a switch, a restart
-  and the manager's own `fleet stop` no longer cost it a turn: they wait past its
+- **A manager wakes for decisions, not news** (#279, #214). A clean exit, a switch, a
+  restart and the manager's own `fleet stop` no longer cost it a turn: they wait past its
   cursor and ride along with the next wake. An exit still wakes it when it failed, was
   killed or lost, released a claim, or was a hand-over that did not start, and asq's
-  Stop on an agent that exits cleanly types no nudge into a waiting manager. Every
-  board update an agent reads is one line, `#<seq> <who> <kind>[ #<task>]: <first line>`,
-  with the board named once in the block's header; the human board (`aisquare board`)
-  keeps full text. The store moves to the next schema step (reserved 35, after P0's 34)
-  for the events' `actor` and `meta` columns, nullable, so an older row reads as no
-  actor and no details.
+  Stop on an agent that exits cleanly types no nudge into a waiting manager. Every board
+  update an agent reads is one line, `#<seq> <who> <kind>[ #<task>]: <first line>`, with
+  the board named once in the block's header; `aisquare team show <seq>` prints one in
+  full (who wrote it and who caused it, the task, the addressee, its details and the
+  whole text), and the human board (`aisquare board`) keeps full text. `fleet stop --as
+  SESSION` records who stopped an agent, and every `agent_exited` names it (`coder-auth
+  exited (0) — stopped by manager`, `(--force)`) with its status, the claims its end
+  released and `--force` in its details; a stop with no `--as` acts for the fleet window
+  it runs in, else for `user`. `[fleet.roles.<role>] board_context = "all" | "relevant" |
+  "none"` and `fleet spawn --board-context`, kept by `restart` and `switch`, set what of
+  the board an agent reads: `relevant` keeps its own tasks, what is addressed to its role
+  or label, and decisions; `none` gives no recent updates at start and no deltas, and at
+  its turn's end only the notes addressed to it. The reviewer's default is `none`, so it
+  judges a change cold; a manager reads `all`, and doctor says when its key says
+  otherwise. The store moves to schema 35 for the events' `actor` and `meta` columns,
+  added by presence and nullable, so an older row reads as no actor and no details.
+- **Fleet roles launch without eight tools no role uses** (#280). Every tool
+  schema and the skill listing ride every request of every agent, so each role now
+  launches with only what it uses, wherever it starts: `fleet spawn`, `team spawn`
+  and `aisquare launch <role>`. `[fleet] deny_tools` denies Artifact,
+  ArtifactComments, Workflow, ReportFindings, ShareOnboardingGuide,
+  PushNotification, ScheduleWakeup and SendFeedback by default. Each
+  `[fleet.roles.<role>]` table takes `deny_tools`, `allow_tools` (the one way to
+  hand a tool back) and `skill_listing`: `full` for the manager, and `names` for
+  every other role, which keeps every skill name with its description cut. Every
+  `--disallowedTools` on the line is merged into one sorted token. On Claude Code
+  2.1.309, `/context` in a fresh coder read 9.9k tokens where it read 26.9k (tools
+  21.6k → 7.4k, skills 2.5k → 100), and every request of the session carries that.
+  A launch at `ultracode` effort keeps Workflow, which ultracode orchestrates with.
+  `aisquare doctor` has a `<role> tools` row for each role. The config file moves
+  to version 3, once: a reviewer whose `extra_args` are exactly 0.8.2's default
+  loses them, since the deny is the role's own now. Moving back with `aisquare
+  upgrade --version` to 0.8.2 or earlier names each role that release would launch
+  with tools denied here, with the `config set` that keeps them denied there.
+  A reviewer's own `extra_args` no longer drops its Edit/Write deny list either: the
+  deny was the reviewer's default `extra_args`, and a list replaces whole, so setting
+  them launched the reviewer with Edit, Write and NotebookEdit, and `aisquare launch
+  reviewer` and `team spawn reviewer` denied it nothing at all.
 - The store migrates to schema v33 on first open, from 0.8.2's v32, in one step: v33
   adds the two persona columns, `team_session.persona` (the persona a session was
   launched as) and `fleet_agent.persona` (the one an agent was spawned with or given
@@ -413,24 +453,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tmux as before. Polling is quicker too: typing no longer holds frames back
   until you stop, and an echo that takes longer than 50 ms no longer waits half a
   second to show.
-- **Fleet roles launch without eight tools no role uses** (#280). Every tool
-  schema and the skill listing ride every request of every agent, so each role now
-  launches with only what it uses, wherever it starts: `fleet spawn`, `team spawn`
-  and `aisquare launch <role>`. `[fleet] deny_tools` denies Artifact,
-  ArtifactComments, Workflow, ReportFindings, ShareOnboardingGuide,
-  PushNotification, ScheduleWakeup and SendFeedback by default. Each
-  `[fleet.roles.<role>]` table takes `deny_tools`, `allow_tools` (the one way to
-  hand a tool back) and `skill_listing`: `full` for the manager, and `names` for
-  every other role, which keeps every skill name with its description cut. Every
-  `--disallowedTools` on the line is merged into one sorted token. On Claude Code
-  2.1.309, `/context` in a fresh coder read 9.9k tokens where it read 26.9k (tools
-  21.6k → 7.4k, skills 2.5k → 100), and every request of the session carries that.
-  A launch at `ultracode` effort keeps Workflow, which ultracode orchestrates with.
-  `aisquare doctor` has a `<role> tools` row for each role. The config file moves
-  to version 3, once: a reviewer whose `extra_args` are exactly 0.8.2's default
-  loses them, since the deny is the role's own now. Moving back with `aisquare
-  upgrade --version` to 0.8.2 or earlier names each role that release would launch
-  with tools denied here, with the `config set` that keeps them denied there.
 - The P0 reliability plan (`docs/plans/handoff-p0-reliability.md`, "W0 results") now
   records what was measured on a live box before its prompt-delivery work starts. On
   Claude Code 2.1.309 and 2.1.223, a typed prompt's first Enter is taken as soon as the
@@ -489,11 +511,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   box, so the agent sat idle with its message unsent, and the board read it
   `working`. A Claude Code agent now gets its first message on its command line
   (`claude -- "<message>"`), in a file only you can read that its launch deletes,
-  so the row's recorded launch never holds it and a restart replays no old message.
+  so the row's recorded launch never holds it and a restart replays no old message;
+  the launch takes only a file the fleet wrote, in its own folder, and reads nothing
+  else.
   Any other binary, and every agent under `[fleet] first_prompt = "type"`, has it
   typed once Claude Code's input box is drawn, checked in the box, and sent again
   only while the text is provably still waiting there. The row reads `pending` until
-  the agent's `UserPromptSubmit` takes it. `fleet spawn`, `restart` and `switch` wait
+  the agent's turn takes it: its `UserPromptSubmit`, or its `Stop` if that hook
+  could not record the prompt. `fleet spawn`, `restart` and `switch` wait
   `[fleet] prompt_ack_seconds` (45) for that and say so, and their `--json` adds
   `prompt_delivery` and `prompt_acked`. A message still pending past that wait at an
   idle input box reads `attention` ("first prompt not taken", with the `fleet tell`
@@ -503,18 +528,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The store migrates to schema v34, which adds three nullable columns:
   `team_session.prompted_at`, `fleet_agent.first_prompt` and
   `fleet_agent.first_prompt_at`. A row from before them reads as "not tracked".
+  And `fleet spawn coder --task <id>` with no `--prompt` typed nothing, so the coder
+  waited at an empty prompt: its first message is now a kickoff that names the task
+  as its ASSIGNED TO YOU block does, a `--prompt` beside `--task` following it.
   (#122)
-- **`fleet spawn coder --task <id>` gives the coder its task.** With no `--prompt`
-  it typed nothing, and the coder waited at an empty prompt. Its first message is
-  now a kickoff that names the task as its ASSIGNED TO YOU block does; a `--prompt`
-  beside `--task` follows it. The manager's cycle says `--task` delivers the task.
-  (#122)
+- **Nothing the fleet types lands in your draft.** A board write that woke the
+  manager typed its nudge into the manager's input box whatever was there. A human
+  halfway through a message in `asq` had the nudge appended to the draft, and its
+  Enter sent both. Every typed write now reads the input box first and types nothing
+  while it holds a draft, or while you have typed into the pane in `asq` within
+  `[fleet] draft_quiet_seconds` (10). That covers the manager's nudge, `fleet tell`,
+  a typed first message and the Remote's paste. Claude Code's own dim placeholder
+  and suggestion are not a draft. A nudge held back goes out once the box is clear
+  (`asq` retries it as it refreshes); if you send the draft first, your prompt
+  carries the same board update and the nudge is dropped. A tell held back is filed
+  as a note and says why. A draft that appears while the text is being pasted
+  stops it before its Enter, and the tell or the first message's note says so: "a
+  draft appeared in its input box while the text was being typed; ours is in the
+  box with it, unsent, and nothing was sent". And a note reaches a busy agent at the end of its turn: a
+  note to an agent's label or role, including a `fleet tell` to an agent that was
+  working, waited for the agent's next prompt, which one that had finished might
+  never get. Its `Stop` hook now hands it the notes addressed to it when the turn
+  ends, as the manager is kept going on fresh board decisions, with the same
+  guards: not on a turn already continuing from a stop hook, and at most `[fleet]
+  max_continuations_per_hour` an hour. `[fleet] deliver_notes_at_turn_end = false`
+  turns it off. (#276)
 - **A coder that claims a task sees its contract.** `task claim` and `task next
   --claim` printed the title line alone, and the contract (`--detail`) was a
   separate `task show` that nothing named, so people pasted contracts into coders'
   panes. A claim now prints the contract, the reason the task was last reopened
-  (which was lost the moment a reopened task was claimed again) and `aisquare task
-  show <ref>`. `task next` without `--claim` says when a task has a contract. The
+  (which was lost the moment a reopened task was claimed again) and the command
+  that shows it again, `aisquare task show 2`: the bare number, which a shell keeps
+  (`#2` starts a comment). `task next` without `--claim` says when a task has a contract. The
   coder's cycle names `task show`, the manager's says the contract belongs in
   `--detail`, and `--detail`'s help says it is the contract. `--json` is unchanged.
   (#74)
@@ -539,15 +584,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   switch` while the hand-over was already moving the agent, and once that had
   finished the manager's switch moved the replacement again: two `switched` for
   one limit. The line is now a `limited_handing_over` event, *moving it to another
-  account automatically*, that wakes nobody, the manager's cycle acts on `handover_failed` instead, a
-  replacement minutes old is refused without `--force`, and `switched` is news on
-  the next delta, not a wake-up. And a pick read only the five-hour and seven-day
-  windows: the per-family weeks (`seven_day_opus`, `seven_day_sonnet`), `limits[]`
-  and a window's `locked_reason` were dropped, so an Opus agent was moved onto an
-  account whose Opus week was spent and refused at once. They are read now, a
-  family week counting for an agent of that family, and every limit an agent hits
-  is remembered on its account until the reset it named, so no pick by headroom
-  sends an agent back before then. (#277)
+  account automatically*, that wakes nobody; the manager's cycle acts on
+  `handover_failed` instead; a replacement minutes old is refused without
+  `--force`; and `switched` is news on the next delta, not a wake-up. And a pick
+  read only the five-hour and seven-day windows. The per-family week (Opus, Sonnet,
+  Fable), which the usage endpoint sends as a `limits[]` entry of kind
+  `weekly_scoped` (the `seven_day_opus` and `seven_day_sonnet` keys come null), and
+  a window's `locked_reason` were dropped, so an Opus agent was moved onto an
+  account whose Opus week was spent and refused at once. They are read now
+  (`weekly_all` counts as the shared week), and an account whose family week is
+  spent is skipped for that family by every headroom pick, a switch by hand
+  included. Every limit an agent hits is remembered on its account until the reset
+  it named, so no pick by headroom sends an agent back before then. (#277)
 - **An idle agent reads waiting, not working.** A session start wrote `working`,
   and only the captain was set back to `waiting`, so a just-spawned agent sitting
   at an empty prompt read busy for up to 30 minutes: `fleet tell` filed a note it
@@ -557,17 +605,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   said). And a `working` row whose pane has printed nothing for `[fleet]
   busy_quiet_seconds` (30) is checked once: if Claude Code sits idle at its prompt —
   a turn ended with Esc fires no hook — it reads ⏸ waiting, *idle (the board said
-  working)*. (#123)
-
-- **A killed test run no longer leaves its tmux servers running.** Teardown ends every
-  server a test starts, but a run that is killed (a timeout, `kill`, an xdist worker that
-  dies) runs no teardown, and its servers lived on with a pane each: 55 were found on one
-  box, some days old. The suite's private folders under `/tmp` are now named for the
-  process that made them (`asqtx<pid>-…`), and each run starts by ending the servers in,
-  and removing, every folder whose process is gone; a folder of a run still going is
-  never touched. `test_live_a_server_under_another_tmux_tmpdir_is_reached_at_the_path_it_said`
-  also ends its server when it fails before its old `try`: its folder is one that neither
-  the `live` fixture nor `no_real_fleet` looks in.
+  working)*, and a `fleet tell` is typed into it instead of filed. (#123)
 
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for
@@ -632,13 +670,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-file index for the slices it needs. A skeleton left on disk by an earlier,
   smaller pack is no longer named, and a pack is no longer called the skeleton
   or "every file's contents" when it is not.
-- **A reviewer's own `extra_args` no longer drops its Edit/Write deny list** (#280,
-  #129). The deny was the reviewer's default `extra_args`, and a list replaces
-  whole, so setting `[fleet.roles.reviewer] extra_args` to trim a tool launched the
-  reviewer with Edit, Write and NotebookEdit. `aisquare launch reviewer` and
-  `aisquare team spawn reviewer` denied it nothing at all. The deny is the role's
-  own now, and every launch of a reviewer has it, merged with whatever else is
-  denied.
 
 ## [0.8.2] - 2026-10-19
 

@@ -258,8 +258,10 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
         "experimental": {"captain": False},
         # The fleet's admission (#283), the role tool policy (#280: the reviewer's deny is its
         # own, not its extra_args), the first message's two (P0-W1a, #122), the idle check's
-        # quiet window (P0-W1b, #123), whether a pane's program may set the clipboard (P2-W3,
-        # #101), and what of the board each role reads (P1 WS-2, #279): the reviewer judges cold.
+        # quiet window (P0-W1b, #123), the delivery guards (P0-W2, #276), whether a pane's
+        # program may set the clipboard (P2-W3, #101), what of the board each role reads (P1
+        # WS-2, #279): the reviewer judges cold; the manager's quiet-point compaction, off, and
+        # the task contract's blocks (P1 WS-4, #281).
         "fleet": {
             "max_agents_total": 0,
             "min_free_mb": 2048,
@@ -274,6 +276,13 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "prompt_ack_seconds": 45.0,
             "busy_quiet_seconds": 30,
             "pane_clipboard": "off",
+            "draft_quiet_seconds": 10.0,
+            "deliver_notes_at_turn_end": True,
+            "quiet_compact_at": 0,
+            "quiet_compact_delay": 45.0,
+            "quiet_compact_cooldown": 30.0,
+            "quiet_compact_state_max_age": 20.0,
+            "quiet_compact_resume": False,
             "roles": {
                 role: {
                     "deny_tools": [],
@@ -285,6 +294,7 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
                 for role in _V1_DEFAULTS["fleet"]["roles"]
             },
         },
+        "team": {"brief_blocks": ["objective", "acceptance", "boundaries"], "brief_strict": False},
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

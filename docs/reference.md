@@ -10,7 +10,7 @@ removes exactly them):
 | --- | --- |
 | `SessionStart` | inject orientation: snapshot pointers, context, team briefing; mark the session `waiting` (it sits at its prompt until one is typed), except after a compaction, which keeps what the turn said |
 | `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on), unless `capture.enabled` is off; deliver the teammate delta; heartbeat, which stamps the session's last prompt and marks its fleet agent's first message taken ([fleet](fleet.md#the-first-message)) |
-| `Stop` | mark the session waiting; renew its task leases; for a fleet worker that may have finished, start the hidden `aisquare hook auto-stop` check ([fleet](fleet.md#capacity)) |
+| `Stop` | mark the session waiting; renew its task leases; keep a manager going on fresh board decisions, and any other agent on the notes addressed to it ([fleet](fleet.md#fleet-tell)); for a fleet manager with `fleet.quiet_compact_at` set, start the hidden `aisquare hook compact-check` worker ([fleet](fleet.md#long-lived-managers-state-file-start-pack-and-quiet-compaction)); for a fleet worker that may have finished, start the hidden `aisquare hook auto-stop` check ([fleet](fleet.md#capacity)) |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |
 | `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and remembers the limit on the account until that reset, so no pick by headroom sends an agent back to it before then; with `[accounts] on_limit = "switch"` a fleet agent is handed to another account, the line is a `limited_handing_over` event that wakes nobody, and a hand-over that cannot go ahead posts `handover_failed`, which wakes the manager; without a hand-over coming, `limited` wakes it ([accounts](orchestration.md#several-accounts-one-team)); any other error marks it `waiting`, with a feed line naming the error |
@@ -159,8 +159,17 @@ list` prints every key. The ones that need more than their name:
 | `fleet.auto_stop_roles` | `["tester", "reviewer", "validator", "ui-tester"]` | the roles auto-stop may stop; add `"coder"` to opt in. Never a manager or the captain. |
 | `fleet.first_prompt` | `argv` | how an agent's first message reaches it: `argv` gives a Claude Code agent its message on its command line and types it for any other binary; `type` types it for every agent ([fleet](fleet.md#the-first-message)). |
 | `fleet.prompt_ack_seconds` | `45` | how long `fleet spawn`, `restart` and `switch` wait for the agent's first turn to start, and how long a listing gives it before the agent reads `attention`: "first prompt not taken". |
+| `fleet.draft_quiet_seconds` | `10` | how long a key typed into an agent's pane in `asq` keeps every fleet write — a nudge, a tell, a typed first message, the Remote's paste — out of that pane. A draft in its input box holds them off for as long as it stays. |
+| `fleet.deliver_notes_at_turn_end` | `true` | an agent other than the manager is handed the notes addressed to its label or role when its turn ends, instead of at its next prompt ([fleet](fleet.md#fleet-tell)). |
+| `fleet.quiet_compact_at` | `0` | a manager's context size, in tokens, at which it is compacted at a quiet point; `0` is off ([fleet](fleet.md#long-lived-managers-state-file-start-pack-and-quiet-compaction)). |
+| `fleet.quiet_compact_delay` | `45` | seconds after a manager's quiet Stop before its compaction is checked again and typed. |
+| `fleet.quiet_compact_cooldown` | `30` | minutes after a quiet compaction (or one that did not start) before another. |
+| `fleet.quiet_compact_state_max_age` | `20` | minutes: a manager whose state file is older is not compacted. |
+| `fleet.quiet_compact_resume` | `false` | `true`: after a quiet compaction, type a one-line resume prompt into the manager. |
 | `projects.capture` | `false` | `true`: every directory a hooked session runs in gets a row, as 0.8.0 did; off, only a project you added records anything ([fleet](fleet.md#naming)). |
 | `redaction.level` | `standard` | how much is scrubbed from what leaves the machine: `off`, `standard` or `strict` ([Explainability](connecting-your-agents-to-explainability.md)). |
+| `team.brief_blocks` | `["objective", "acceptance", "boundaries"]` | the blocks a task contract must carry as `<label>:`; `task add` warns about a missing one ([orchestration](orchestration.md#tasks-idempotent-atomic-dependency-aware)). |
+| `team.brief_strict` | `false` | `true`: `task add` refuses a contract that is missing a block (exit 2). |
 
 ## Architecture
 

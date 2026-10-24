@@ -27,6 +27,7 @@ from textual.widgets import Button, Input, OptionList, Select
 
 from aisquare.cli.ui.attach import AttachTargetScreen, NewBindScreen, Target
 from aisquare.core import claude_accounts as accounts_core
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.orchestrator import team_project
 from aisquare.models import (
     AccountsOverview,
@@ -38,6 +39,7 @@ from aisquare.models import (
 )
 from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
+from tests.test_captain_sidebar import until
 from tests.ui_workers import settle_page
 
 T = TypeVar("T")
@@ -199,13 +201,22 @@ def test_new_binds_binary_follows_the_agent_until_one_is_typed(project: ProjectI
         agent = form.query_one("#bind-agent", Select)
         binary = form.query_one("#bind-binary", Input)
         seen: list[str] = []
-        for value in ("codex", "claude-code"):
+        # The binary follows on the Select's Changed, a later turn of the loop: on Windows CI
+        # one pause returned before it (run 40134430454 read 'claude' after picking Codex),
+        # so each step waits for its effect (``test_captain_sidebar.until``'s rule).
+
+        async def follows(value: str) -> str:
             agent.value = value
-            await pilot.pause()
-            seen.append(binary.value)
+            wanted = get_adapter(value).binary
+            await until(pilot, lambda: binary.value == wanted, what=f"{value}'s binary")
+            return str(binary.value)
+
+        seen += [await follows("codex"), await follows("claude-code")]
         binary.value = "my-codex"
         agent.value = "codex"
-        await pilot.pause()
+        # Typed, it stays: wait until Codex is the bind's agent, then let the handler run.
+        await until(pilot, lambda: form.bind_agent() == "codex", what="codex picked")
+        await settle_page(pilot.app)
         seen.append(binary.value)
         return seen
 

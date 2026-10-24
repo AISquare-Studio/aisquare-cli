@@ -480,6 +480,9 @@ def test_an_unacknowledged_first_prompt_reads_attention_once(
     later = datetime.now(tz=UTC) + timedelta(seconds=46)
     monkeypatch.setattr(fleet_service, "_now", lambda: later)
 
+    with store_session() as store:
+        named = store.get_project(project.id) or project  # the codename the spawn gave it
+
     def unsent_events() -> list[str]:
         with store_session() as store:
             events = store.events_since(project.id, 0, limit=500)
@@ -488,7 +491,7 @@ def test_an_unacknowledged_first_prompt_reads_attention_once(
     for _ in range(2):
         [status] = fleet_service.list_agents(project)
         assert status.state == "attention"
-        assert status.detail == fleet_service.unsent_detail(project, agent.label)
+        assert status.detail == fleet_service.unsent_detail(named, agent.label)
         assert status.detail.startswith("first prompt not taken — `aisquare fleet tell --project")
     assert len(unsent_events()) == 1 and _row(agent.id).first_prompt == "unsent"
     assert "prompt_unsent" in team_service.MANAGER_WAKE_KINDS

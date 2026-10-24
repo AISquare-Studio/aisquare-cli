@@ -4862,7 +4862,7 @@ def _statuses(
         for agent in agents
     ]
     return _with_first_prompts(
-        _with_trust_prompts(statuses, config, by_id, addresses), project, config, addresses
+        _with_trust_prompts(statuses, config, by_id, addresses), current, config, addresses
     )
 
 

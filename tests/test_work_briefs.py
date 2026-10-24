@@ -731,7 +731,7 @@ def test_a_store_a_136_build_stamped_opens_and_works(work: Path) -> None:
 
 
 def test_a_store_that_skipped_the_brief_step_gets_it_back() -> None:
-    """Stamped current without the table, as a store another line carried past v34
+    """Stamped current without the table, as a store another line carried past v36
     would be: the presence pass makes it."""
     from aisquare.core.store import SCHEMA_VERSION
 

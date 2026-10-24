@@ -193,7 +193,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "settings",
         )
     ),
-    *(("metrics", command) for command in ("show", "list")),
+    *(("metrics", command) for command in ("show", "list", "tokens")),
     *(
         ("persona", command)
         for command in (

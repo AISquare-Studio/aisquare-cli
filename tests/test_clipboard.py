@@ -42,7 +42,7 @@ from aisquare.cli.ui.clipboard import (
 )
 from aisquare.core import clipboard
 from aisquare.core.clipboard import Writer, osc52_terminal, pick_writer
-from tests.fake_clipboard import NEEDS_POSIX, TEXT, install
+from tests.fake_clipboard import NEEDS_POSIX, TEXT, TOAST_WAIT, install
 from tests.pane_harness import FakePane, FakeTmux, drag
 from tests.test_terminal_pane import Host, run, synced, wait_until
 
@@ -998,7 +998,7 @@ def test_a_drag_release_puts_the_exact_text_on_pbcopy_and_still_sends_osc52(
             assert host._driver is not None
             monkeypatch.setattr(host._driver, "write", writes.append)
             await drag(pilot, pane, (0, 0), (11, 0))
-            await wait_until(pilot, lambda: bool(host.notices))
+            await wait_until(pilot, lambda: bool(host.notices), timeout=TOAST_WAIT)
             return pane.selected_text(), list(host.notices), writes
 
     selected, notices, writes = run(drive())
@@ -1030,7 +1030,7 @@ def test_ctrl_c_on_a_standing_highlight_puts_the_exact_text_on_pbcopy(
             pane.focus()
             await pilot.pause()
             await pilot.press("ctrl+c")
-            await wait_until(pilot, lambda: bool(host.notices))
+            await wait_until(pilot, lambda: bool(host.notices), timeout=TOAST_WAIT)
             return list(host.notices), writes
 
     notices, writes = run(drive())
@@ -1060,7 +1060,7 @@ def test_the_agent_s_own_selection_is_mirrored_onto_pbcopy(
             await pilot.mouse_down(widget, offset=(0, 0))
             fake.buffer = TEXT  # the program's release handler ran
             await pilot.mouse_up(widget, offset=(9, 0))
-            await wait_until(pilot, lambda: bool(host.notices))
+            await wait_until(pilot, lambda: bool(host.notices), timeout=TOAST_WAIT)
             return list(host.notices), writes
 
     notices, writes = run(drive())
@@ -1089,7 +1089,7 @@ def test_a_textual_input_copy_puts_the_exact_text_on_pbcopy(
             field.select_all()
             await pilot.pause()
             await pilot.press("ctrl+c")
-            await wait_until(pilot, lambda: bool(board.calls()))
+            await wait_until(pilot, lambda: bool(board.calls()), timeout=TOAST_WAIT)
             await pilot.pause(0.1)
             return list(host.notices), writes, host.clipboard
 
@@ -1136,9 +1136,9 @@ def test_no_path_scan_and_no_process_ever_runs_on_the_event_loop(
             loop = threading.get_ident()
             await wait_until(pilot, lambda: synced(host.pane))
             await drag(pilot, host.pane, (0, 0), (11, 0))
-            await wait_until(pilot, lambda: len(host.notices) == 1)
+            await wait_until(pilot, lambda: len(host.notices) == 1, timeout=TOAST_WAIT)
             await drag(pilot, host.pane, (0, 1), (5, 1))  # the second: the writer is known
-            await wait_until(pilot, lambda: len(host.notices) == 2)
+            await wait_until(pilot, lambda: len(host.notices) == 2, timeout=TOAST_WAIT)
             return loop
 
     loop = run(drive())
@@ -1187,7 +1187,7 @@ def test_two_quick_copies_leave_the_second_on_the_clipboard_with_a_toast_each(
             await wait_until(pilot, lambda: synced(host.pane))
             host.copy_to_clipboard("first", toast="one")
             host.copy_to_clipboard("second", toast="two")
-            await wait_until(pilot, lambda: len(host.notices) == 2, timeout=10)
+            await wait_until(pilot, lambda: len(host.notices) == 2, timeout=TOAST_WAIT)
             return list(host.notices)
 
     assert run(drive()) == ["one", "two"]
@@ -1243,7 +1243,7 @@ def test_over_ssh_only_osc52_is_sent_and_a_named_terminal_s_toast_says_if_it_lan
         writes: list[str] = []
         async with host.run_test(size=(40, 6)) as pilot:
             await _drag_and_wait(host, pilot, writes, monkeypatch)
-            await wait_until(pilot, lambda: bool(host.notices))
+            await wait_until(pilot, lambda: bool(host.notices), timeout=TOAST_WAIT)
             await pilot.pause(0.2)
             return list(host.notices), list(host.severities), writes
 
@@ -1277,7 +1277,7 @@ def test_over_ssh_to_an_unknown_terminal_the_toast_says_sent_not_copied(
         writes: list[str] = []
         async with host.run_test(size=(40, 6)) as pilot:
             await _drag_and_wait(host, pilot, writes, monkeypatch)
-            await wait_until(pilot, lambda: bool(host.notices))
+            await wait_until(pilot, lambda: bool(host.notices), timeout=TOAST_WAIT)
             await pilot.pause(0.2)
             return list(host.notices), list(host.severities), writes
 
@@ -1305,9 +1305,9 @@ def test_the_hedge_names_what_was_sent_the_agent_s_selection_or_the_link(
             await pilot.mouse_down(widget, offset=(0, 0))
             fake.buffer = TEXT  # the program's release handler ran
             await pilot.mouse_up(widget, offset=(9, 0))
-            await wait_until(pilot, lambda: bool(host.notices))
+            await wait_until(pilot, lambda: bool(host.notices), timeout=TOAST_WAIT)
             host.copy_to_clipboard("https://x.example/r/t/", toast="Link copied", sent="the link")
-            await wait_until(pilot, lambda: len(host.notices) == 2)
+            await wait_until(pilot, lambda: len(host.notices) == 2, timeout=TOAST_WAIT)
             return list(host.notices)
 
     assert run(drive()) == [
@@ -1378,7 +1378,7 @@ def test_a_copy_pbcopy_took_says_copied_even_on_terminal_app(
         writes: list[str] = []
         async with host.run_test(size=(40, 6)) as pilot:
             await _drag_and_wait(host, pilot, writes, monkeypatch)
-            await wait_until(pilot, lambda: bool(host.notices))
+            await wait_until(pilot, lambda: bool(host.notices), timeout=TOAST_WAIT)
             await pilot.pause(0.2)
             return list(host.notices)
 

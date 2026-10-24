@@ -69,6 +69,7 @@ from aisquare.models import (
     CheckStatus,
     FleetAgent,
     FleetAgentStatus,
+    LaunchSpec,
     ProjectInfo,
     TeamEvent,
     TeamSession,
@@ -1370,7 +1371,11 @@ def test_the_built_in_reviewer_is_launched_with_a_shell(
     fleet_service.spawn(project, "reviewer", worktree=False)
     command = _command(tmux)
     assert "--restricted" not in command
-    assert "--disallowedTools=Edit Write NotebookEdit" in command, "and no editing tools"
+    # No editing tools either: the deny is the role's own, which the window's `launch`
+    # adds (`harness.tool_policy`), so the command it is handed need not carry it.
+    tail = command[command.index("reviewer") + 1 :]
+    policy = harness.tool_policy("reviewer", binary="claude", args=tail, fleet=FleetSettings())
+    assert {"Edit", "Write", "NotebookEdit"} <= set(policy.denied), "and no editing tools"
 
 
 def test_spawn_respects_a_caller_supplied_session_id(
@@ -13080,8 +13085,10 @@ def test_spawn_and_stop_on_a_real_tmux_server(
         assert "fake claude:" in screen, screen
         # The control behind the "gone" hunts: this server must keep dead panes.
         assert real.run("show-options", "-gv", "remain-on-exit").strip() == "on"
-        assert f"--session-id {receipt.agent.session_id}" in screen, screen
-        assert "--name coder-1" in screen and "--permission-mode auto" in screen, screen
+        # The argv wraps at the pane's width: read it with the wrapped rows joined.
+        said = "".join(real.capture(pane).lines)
+        assert f"--session-id {receipt.agent.session_id}" in said, screen
+        assert "--name coder-1" in said and "--permission-mode auto" in said, screen
         # ``#{window_activity}`` must be the time of the last OUTPUT, not the
         # window's creation time: it is the whole working/waiting distinction for
         # an agent with no hooks (ACTIVITY_WINDOW), and a creation-only stamp —
@@ -16823,6 +16830,33 @@ def test_a_reviewer_restarted_from_a_spec_0_7_0_recorded_gets_its_shell_back(
     fleet_service.restart(project, chosen.label)
 
     assert "--restricted" in _command(tmux)
+
+
+@pytest.mark.parametrize(
+    ("recorded_by", "replayed"),
+    [
+        ("0.8.2", ["--model", "opus"]),
+        ("0.8.0", ["--model", "opus"]),
+        ("0.8.3", [*REVIEWER_ARGS, "--model", "opus"]),
+    ],
+    ids=["0.8.2", "0.8.0", "since"],
+)
+def test_a_reviewer_spec_0_8_recorded_replays_without_its_default_deny(
+    recorded_by: str, replayed: list[str]
+) -> None:
+    """Review of #311: 0.8.0 to 0.8.2 recorded the reviewer's default deny first in its
+    spec. Replayed as typed, `allow_tools = ["Edit"]` could never hand Edit back; the deny
+    is the role's own now, so `launch` still denies the editing tools without it."""
+    spec = LaunchSpec(
+        binary="claude", extra_args=[*REVIEWER_ARGS, "--model", "opus"], recorded_by=recorded_by
+    )
+    assert fleet_service._replayed_args("reviewer", spec, FleetSettings()) == replayed
+    assert fleet_service._replayed_args("coder", spec, FleetSettings()) == spec.extra_args
+    fleet = FleetSettings()
+    fleet.roles["reviewer"] = fleet.roles["reviewer"].model_copy(update={"allow_tools": ["Edit"]})
+    policy = harness.tool_policy("reviewer", binary="claude", args=replayed, fleet=fleet)
+    assert ("Edit" in policy.denied) is (recorded_by == "0.8.3")
+    assert {"Write", "NotebookEdit"} <= set(policy.denied)
 
 
 @pytest.mark.parametrize(

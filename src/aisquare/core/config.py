@@ -302,10 +302,21 @@ class FleetRoleSettings(BaseModel):
     permission_mode: str = "auto"
     worktree: bool = False
     extra_args: list[str] = Field(default_factory=list)
+    """Fleet windows only: ``launch`` and ``team spawn`` never read them (#129 f). The
+    tool and skill keys below apply wherever the role starts."""
     persona: str | None = None
     """The persona every spawn of this role gets unless ``--persona`` names another
     (docs/plans/spawn-personas.md §3.8). Checked at spawn, not at load: a name the
     project does not have refuses the spawn with this key in the message."""
+    deny_tools: list[str] = Field(default_factory=list)
+    """Tools this role launches without, on top of ``[fleet] deny_tools`` and the role's
+    own safety list (``harness.RoleProfile.denied_tools``)."""
+    allow_tools: list[str] = Field(default_factory=list)
+    """Tools taken back out of that set: the only way to give a role a tool its safety list
+    denies (the reviewer's ``Edit``). Never a ``--disallowedTools`` on the command line."""
+    skill_listing: Literal["full", "names", "off"] = "names"
+    """How much of Claude Code's skill listing rides every request: ``full``, ``names``
+    (descriptions cut to nothing, every name kept) or ``off`` (the ``Skill`` tool denied)."""
     board_context: Literal["all", "relevant", "none"] = "all"
     """What of the board an agent of this role reads (P1 WS-2, #279): ``all``; ``relevant``
     (its own tasks, what is addressed to it, decisions); ``none`` (no recent updates at
@@ -313,21 +324,39 @@ class FleetRoleSettings(BaseModel):
     ``fleet spawn --board-context`` overrides it per spawn. A manager reads ``all``."""
 
 
+#: Tools no fleet role's cycle and no aisquare command uses, each schema paid on every
+#: request of every agent (#280): ``[fleet] deny_tools`` by default, for every role.
+FLEET_DENY_TOOLS = (
+    "Artifact",
+    "ArtifactComments",
+    "Workflow",
+    "ReportFindings",
+    "ShareOnboardingGuide",
+    "PushNotification",
+    "ScheduleWakeup",
+    "SendFeedback",
+)
+
+
 def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
     """The six fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6).
 
     ``ui-tester`` carries no ``extra_args`` here: its ``--chrome`` is the role's own
     default (``harness.ROLE_PROFILES[...].default_args``) and is added by ``launch``
-    inside the window, so it applies to a hand-started ui-tester too.
+    inside the window, so it applies to a hand-started ui-tester too. The manager keeps
+    the full skill listing; every other role gets names only.
 
-    ``reviewer`` carries :data:`REVIEWER_ARGS`. It was launched ``--restricted`` as
-    "read-only by construction", and Claude Code's ``--restricted`` removes Bash
-    (2.1.296: unless ``--tools`` names it, and then only the named tools remain), so
-    the reviewer could run none of ``aisquare task next``, ``gh pr diff`` or ``gh pr
-    review`` — every step of its cycle — and no subagent it spawned could either,
-    because a subagent's tools come from its session's. It kept ``Edit`` and
-    ``Write``, so it was not read-only either. It now keeps the shell and is denied
-    the tools that edit files. The shell is NOT read-only: a PR that injects
+    ``reviewer`` carries no ``extra_args`` either: its deny of the tools that edit files
+    is the role's own (``harness.RoleProfile.denied_tools``), so ``launch reviewer`` and
+    ``team spawn reviewer`` have it too, and an ``extra_args`` the operator sets no longer
+    replaces it (#280); it was :data:`REVIEWER_ARGS` from 0.8.0 to 0.8.2. Before that
+    it was launched ``--restricted`` as "read-only by construction", and Claude Code's
+    ``--restricted`` removes Bash (2.1.296: unless ``--tools`` names it, and then only
+    the named tools remain), so the reviewer could run none of ``aisquare task next``,
+    ``gh pr diff`` or ``gh pr review`` — every step of its cycle — and no subagent it
+    spawned could either, because a subagent's tools come from its session's. It kept
+    ``Edit`` and ``Write``, so it was not read-only either. It now keeps the shell and
+    is denied the tools that edit files. The shell is NOT read-only: a PR that injects
     ``sed -i``, ``git push`` or ``gh pr merge`` meets only its briefing and the
     ``auto`` mode's per-action classifier (round 25 of #257). No allowlist of commands
     holds it: its inline comments are ``gh api`` POSTs, a prefix a merge shares, and
@@ -336,23 +365,28 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
     cannot push or merge, and branch protection.
     """
     return {
-        "manager": FleetRoleSettings(),
+        "manager": FleetRoleSettings(skill_listing="full"),
         "coder": FleetRoleSettings(worktree=True),
         "tester": FleetRoleSettings(),
-        "reviewer": FleetRoleSettings(
-            worktree=True, extra_args=list(REVIEWER_ARGS), board_context="none"
-        ),
+        "reviewer": FleetRoleSettings(worktree=True, board_context="none"),
         "validator": FleetRoleSettings(),
         "ui-tester": FleetRoleSettings(),
     }
 
 
-#: The reviewer's built-in ``extra_args``: Claude Code without the tools that edit files.
-#: One token, because the flag takes a variadic list and separate words would go on
-#: swallowing whatever plain word came after them on the command line; the names apart
-#: by spaces, which Claude Code splits on as it does on commas, because ``config set``
-#: splits a list on commas and ``config get`` joins one with them.
+#: The reviewer's built-in ``extra_args`` from 0.8.0 to 0.8.2: Claude Code without the
+#: tools that edit files, now the role's own (``harness.RoleProfile.denied_tools``). Still
+#: what a 0.6.0/0.7.0 ``--restricted`` is replaced with, and what a launch spec recorded
+#: then holds. One token, because the flag takes a variadic list and separate words would
+#: go on swallowing whatever plain word came after them on the command line; the names
+#: apart by spaces, which Claude Code splits on as it does on commas, because ``config
+#: set`` splits a list on commas and ``config get`` joins one with them.
 REVIEWER_ARGS = ("--disallowedTools=Edit Write NotebookEdit",)
+
+#: The last release that denies a role only what its ``extra_args`` say, :data:`REVIEWER_ARGS`
+#: being the reviewer's default there: what such a release recorded, or reads, lacks the
+#: role's own deny (``services.fleet._replayed_args``, ``services.lifecycle``).
+LAST_ARGS_ONLY_DENY = "0.8.2"
 
 
 #: The reviewer's built-in ``extra_args`` in 0.6.0 and 0.7.0, which left it no shell
@@ -366,9 +400,12 @@ _FORMER_REVIEWER_ARGS = ["--restricted"]
 #: step of :data:`_MIGRATIONS` brings a file from one version to the next as it loads, and
 #: the next save records the version reached, so a step runs once per file: what the file
 #: holds after that was written by a build that knew the step, and is kept. Not a setting,
-#: and not a field. Version 2 is the first that writes only what the user changed.
-CONFIG_VERSION = 2
+#: and not a field. Version 2 is the first that writes only what the user changed; version
+#: 3 the first whose reviewer denies its editing tools as a role, not in ``extra_args``.
+CONFIG_VERSION = 3
 _VERSION_KEY = "config_version"
+#: The first version that writes only what the user changed (:func:`_migrate`).
+_FIRST_SPARSE_VERSION = 2
 
 
 def replacing_the_former_reviewer_default(args: Sequence[str]) -> list[str]:
@@ -428,22 +465,37 @@ _DISALLOWED_TOOLS = ("--disallowedTools", "--disallowed-tools")
 
 
 def _denied_tools(args: Sequence[str]) -> set[str]:
-    """The tools ``args`` deny Claude Code: each value of ``--disallowedTools``, given with
-    ``=`` or as the words after the flag up to the next option, split on spaces and commas
-    as Claude Code splits it."""
+    """The tools ``args`` deny Claude Code (:func:`split_denied_tools`)."""
+    return split_denied_tools(args)[0]
+
+
+def split_denied_tools(args: Sequence[str]) -> tuple[set[str], list[str]]:
+    """The tools ``args`` deny Claude Code, and ``args`` without saying so.
+
+    Each value of ``--disallowedTools`` (either spelling), given with ``=`` or as the
+    words after the flag up to the next option, split on spaces and commas as Claude
+    Code splits it. Nothing after a bare ``--`` is an option, so it is kept as it is.
+    """
     denied: set[str] = set()
+    kept: list[str] = []
     taking = False
-    for arg in args:
+    for index, arg in enumerate(args):
+        if arg == "--":
+            kept.extend(args[index:])
+            break
         flag, equals, value = arg.partition("=")
         if flag in _DISALLOWED_TOOLS:
             taking = not equals
             denied.update(re.split(r"[\s,]+", value))
-        elif arg.startswith("-"):
+            continue
+        if arg.startswith("-"):
             taking = False
         elif taking:
             denied.update(re.split(r"[\s,]+", arg))
+            continue
+        kept.append(arg)
     denied.discard("")
-    return denied
+    return denied, kept
 
 
 def _replace_the_former_reviewer_default(data: dict[str, Any]) -> None:
@@ -547,11 +599,30 @@ def _keep_only_what_v1_did_not_write_by_default(data: dict[str, Any]) -> None:
     data.update(kept)
 
 
+def _drop_the_reviewer_default_args(data: dict[str, Any]) -> None:
+    """A reviewer whose ``extra_args`` are exactly :data:`REVIEWER_ARGS` loads with today's
+    default, none: the deny is the role's own now (``harness.RoleProfile.denied_tools``).
+
+    Version 2 writes every role table whole (:func:`_with_whole_role_tables`), so every
+    file it saved holds that list whether anyone chose it or not. Kept, it stayed on the
+    command line, where ``allow_tools`` cannot reach: a reviewer given ``Edit`` back would
+    still be denied it. Any other list was chosen, and stays as written.
+    """
+    fleet = data.get("fleet")
+    if not isinstance(fleet, dict):
+        return
+    roles = fleet.get("roles")
+    reviewer = roles.get("reviewer") if isinstance(roles, dict) else None
+    if isinstance(reviewer, dict) and reviewer.get("extra_args") == list(REVIEWER_ARGS):
+        del reviewer["extra_args"]
+
+
 #: The steps that bring a config file to :data:`CONFIG_VERSION`, in order: the one at
 #: index ``n`` takes a parsed file from version ``n`` to ``n + 1``, in place.
 _MIGRATIONS: tuple[Callable[[dict[str, Any]], None], ...] = (
     _replace_the_former_reviewer_default,
     _keep_only_what_v1_did_not_write_by_default,
+    _drop_the_reviewer_default_args,
 )
 
 
@@ -605,7 +676,9 @@ def _migrate(data: dict[str, Any]) -> None:
         version = 0
     for step in _MIGRATIONS[version:]:
         step(data)
-    if version >= len(_MIGRATIONS) and _written_whole(data):
+    # From the first sparse version on, not from today's: 0.8.1 and 0.8.2 keep the 2 they
+    # wrote, and a file one of them saved whole again still says 2 once there is a 3.
+    if version >= _FIRST_SPARSE_VERSION and _written_whole(data):
         _keep_only_what_v1_did_not_write_by_default(data)
 
 
@@ -629,7 +702,9 @@ class FleetSettings(BaseModel):
     ``.git/info/exclude``; ``disable_native_agent_teams`` exports
     ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0`` into fleet launches so a manager
     cannot spawn help the sidebar cannot see; ``max_continuations_per_hour`` caps
-    how often the manager's Stop hook may keep it going on new board events.
+    how often the manager's Stop hook may keep it going on new board events;
+    ``deny_tools`` are the Claude Code tools every role launches without
+    (:data:`FLEET_DENY_TOOLS` by default), wherever it starts.
 
     ``first_prompt`` is how an agent's first message reaches it (P0-W1a, #122):
     ``argv``, Claude Code's own command line (``claude -- "<prompt>"``), for a Claude
@@ -646,6 +721,7 @@ class FleetSettings(BaseModel):
     worktree_dir: str = ".aisquare-worktrees"
     disable_native_agent_teams: bool = True
     max_continuations_per_hour: int = 30
+    deny_tools: list[str] = Field(default_factory=lambda: list(FLEET_DENY_TOOLS))
     first_prompt: Literal["argv", "type"] = "argv"
     prompt_ack_seconds: float = Field(default=45.0, ge=0)
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
@@ -891,7 +967,12 @@ def defaults_a_whole_file_reader_lacks(config: AppConfig) -> list[tuple[str, Any
     return [
         (key, value, then[key])
         for key, value in today.items()
-        if key in then and then[key] != value and ours.get(key) == value
+        if key in then
+        and then[key] != value
+        and ours.get(key) == value
+        # Written whole (`_with_whole_role_tables`): that release reads the file's value.
+        # What the reviewer's empty `extra_args` means there is `lifecycle`'s tools warning.
+        and not key.startswith("fleet.roles.")
     ]
 
 

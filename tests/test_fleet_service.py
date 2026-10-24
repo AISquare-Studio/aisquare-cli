@@ -12538,22 +12538,26 @@ def test_a_spawn_waits_through_a_queue_of_holders_of_the_branch_lock(
     its turn, and the wait was one 120 s for the lock, so the third of three spawns in a
     repo whose checkout is slow was refused behind two ``git worktree add``, though nothing
     was stuck. The wait is per holder now: each says who it is, and another holder than the
-    last one seen starts the wait again."""
-    monkeypatch.setattr(fleet_service, "_BRANCHES_LOCK_WAIT", 0.2)
+    last one seen starts the wait again.
+
+    Each holder keeps it 0.6 s less than the wait and the queue 0.6 s more, so a loaded
+    runner's late wake-up is not read as a stuck holder (a 0.15 s hold against a 0.2 s
+    wait was, on CI), and one wait for the whole queue is still refused."""
+    monkeypatch.setattr(fleet_service, "_BRANCHES_LOCK_WAIT", 1.0)
     monkeypatch.setattr(fleet_service, "_HOLDER_LOOK", 0.05)
     common = fleet_service._git_common_dir(repo)
     first_in = threading.Event()
     released = threading.Event()
 
     def a_queue() -> None:
-        """Three holders, each for less than the wait and all of them for more: what a
-        waiter that loses each hand-over sees of three spawns' `git worktree add`. One
-        hold, and a new holder announced every 0.15 s, so no hand-over is the waiter's."""
+        """Four holders, each for less than the wait and all of them for more: what a
+        waiter that loses each hand-over sees of four spawns' `git worktree add`. One
+        hold, and a new holder announced every 0.4 s, so no hand-over is the waiter's."""
         with locking.holding(common / "aisquare-fleet-branches.lock", wait_s=5):
-            for _turn in range(3):
+            for _turn in range(4):
                 fleet_service._announce_holder(common)
                 first_in.set()
-                time.sleep(0.15)
+                time.sleep(0.4)
         released.set()
 
     queue = threading.Thread(target=a_queue)
@@ -12561,7 +12565,7 @@ def test_a_spawn_waits_through_a_queue_of_holders_of_the_branch_lock(
     try:
         first_in.wait(5)
         with fleet_service._branches_locked(common, wait=fleet_service._BRANCHES_LOCK_WAIT):
-            assert released.is_set(), "taken once the queue let go, 0.45 s on"
+            assert released.is_set(), "taken once the queue let go, 1.6 s on"
     finally:
         queue.join()
 

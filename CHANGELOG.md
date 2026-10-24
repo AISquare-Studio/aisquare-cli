@@ -68,14 +68,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   goes in a gitignored directory (`--junitxml=reports/a.xml` with `reports/` in
   `.gitignore`) or outside the checkout. The ignore rules themselves count (every
   `.gitignore` git reads, a self-ignored one too, `.git/info/exclude` and
-  `core.excludesFile`), and a symlink counts as its in-checkout target. A run during
-  which a source file is created, changed or removed is refused, even when it was
-  put back before the run ended (each file's change time is kept before and after),
+  `core.excludesFile`), and a symlink counts as its in-checkout target, walked as a
+  checkout is. A run during which a source file is created, changed or removed is
+  refused, and so is one during which a file that existed was changed and put back
+  (each file's change time is kept before and after, nested repositories included),
   and a pass goes stale when one is new, changed or gone since, such as an added
   `conftest.py`. The reason names the first changed files and says to gitignore
   (in git), delete or write elsewhere a check's own output. `brief show` and `brief
-  check` print the command that backed each report pass. Known limit: a case-only
-  rename on a case-insensitive file system is not seen, by git either. `asq exec
+  check` print the command that backed each report pass. Known limits: a file
+  created and deleted within one run is not seen, nor is a case-only rename on a
+  case-insensitive file system (by git either). `asq exec
   --task` takes the task's number or id, like every other
   `--task`, and a report taken with it backs only that task. Manual `--artifact`
   passes keep their checkout's whole-tree fingerprint.

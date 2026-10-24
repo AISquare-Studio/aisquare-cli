@@ -77,14 +77,22 @@ the check itself, another `asq exec` run, or you while the check ran.
   never reads it, so it cannot hide anything, and rebuilding `.venv` or
   `node_modules` leaves a pass alone.
 - **A symlink counts as what it points at** inside the checkout, a file or a whole
-  directory, even an ignored one. A link out of the checkout counts by its text.
+  directory, even an ignored one, and so do links inside that directory. A linked
+  directory is walked as a checkout without git is, so `.git` and generated
+  directories such as `__pycache__` are skipped, and a FIFO or socket counts only as
+  being there. A link out of the checkout, or to the checkout itself or a directory
+  holding the link (`loop -> .`), counts by its text: those files already count at
+  their own paths.
 - **A change put back is still a change.** Each file's change time is kept before and
-  after the run (its modification time on Windows), so a file edited and restored
+  after the run (its modification time on Windows), inside nested repositories and
+  submodules too, so a file that existed before the run and was edited and restored
   while the check ran, or a `git stash` and `git stash pop` in another shell, refuses
   the run though the bytes are the same.
-- **Known limit:** a rename that changes only letter case (`calc.py` to `Calc.py`) on a
-  case-insensitive file system, as macOS and Windows have by default, is not seen. Git
-  does not see it either.
+- **Known limits:** a file that is created and deleted again while the run is going
+  is not seen, since only files there before the run have a change time to compare.
+  A rename that changes only letter case (`calc.py` to `Calc.py`) on a
+  case-insensitive file system, as macOS and Windows have by default, is not seen
+  either; git does not see it.
 
 **So check output goes in a gitignored directory, or outside the checkout.** Commit a
 `.gitignore` line such as `reports/` and point the check there:

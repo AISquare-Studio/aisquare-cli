@@ -21,7 +21,7 @@ import os
 import stat
 import subprocess
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 from aisquare.core.paths import aisquare_home
@@ -192,20 +192,26 @@ def _names(root: Path) -> list[str]:
         ]
         kept = {name for name in [*untracked, *rules] if not _generated(name)}
         return sorted(set(tracked) | kept)
-    names: list[str] = []
+    return sorted(str(path.relative_to(root)) for path in _walk(root))
+
+
+def _walk(top: Path) -> Iterator[Path]:
+    """Every file and link under ``top``, sorted: the one walk of a directory, used for a
+    checkout without git and for a directory a symlink points at, so the two cannot
+    disagree about what counts (manager's ruling on the tester's Y3-Y6, #14). It never
+    descends into ``.git``, the :data:`GENERATED_DIRECTORIES` or through a link."""
 
     def unreadable(error: OSError) -> None:
         raise ValueError(f"cannot list source directory: {error}") from None
 
-    for directory, dirs, files in os.walk(root, followlinks=False, onerror=unreadable):
+    for directory, dirs, files in os.walk(top, followlinks=False, onerror=unreadable):
         dirs[:] = sorted(d for d in dirs if d not in GENERATED_DIRECTORIES)
         for dirname in dirs:
             link = Path(directory) / dirname
             if link.is_symlink():
-                names.append(str(link.relative_to(root)))
-        for filename in files:
-            names.append(str((Path(directory) / filename).relative_to(root)))
-    return sorted(names)
+                yield link
+        for filename in sorted(files):
+            yield Path(directory) / filename
 
 
 def _rule_files(root: Path) -> list[tuple[str, Path]]:
@@ -257,41 +263,64 @@ def _hash_file(path: Path, entry: hashlib._Hash) -> str:
     return _change_stamp(after)
 
 
-def _hash_link(root: Path, path: Path, entry: hashlib._Hash) -> str:
+def _hash_entry(root: Path, path: Path, entry: hashlib._Hash, seen: set[Path]) -> list[str]:
+    """Add one walked path (not a directory) to ``entry``; its stamps. A link is its text
+    and target (:func:`_hash_link`), a regular file its bytes, and anything else, a FIFO
+    or a socket, only a marker: it has no content to read, and reading one would hang
+    or fail every report (tester's Y6 on #14)."""
+    if path.is_symlink():
+        return _hash_link(root, path, entry, seen)
+    if not path.exists():
+        entry.update(b"deleted\0")
+        return []
+    if not stat.S_ISREG(path.stat().st_mode):
+        entry.update(b"special\0")
+        return []
+    return [_hash_file(path, entry)]
+
+
+def _hash_link(root: Path, path: Path, entry: hashlib._Hash, seen: set[Path]) -> list[str]:
     """Add a symlink's text and, when it points inside the checkout, what it points at:
     an untracked ``conftest.py`` linked to a file in an ignored directory is that file's
-    content, not the link's (tester's X3 on #14). A target outside the checkout counts
-    by its link text only. The stamp covers the link and every file hashed through it."""
+    content, not the link's (tester's X3 on #14). A linked directory is taken through
+    :func:`_walk`, and links inside it the same way (Y5).
+
+    By its text only: a target outside the checkout, one under ``.git`` or a generated
+    directory, one already taken through this link (``seen``), and the checkout root or
+    any directory holding the link, whose files already count at their own paths: an
+    empty commit must not stale a pass through ``loop -> .`` (Y4)."""
     stamps = [_change_stamp(path.lstat())]
     entry.update(b"link\0" + os.fsencode(os.readlink(path)))
     target = path.resolve()
-    if not target.is_relative_to(root) or not target.exists():
-        return ":".join(stamps)
-    if target.is_file():
+    if (
+        not target.is_relative_to(root)
+        or not target.exists()
+        or path.parent.resolve().is_relative_to(target)
+        or _generated(str(target.relative_to(root)))
+        or target in seen
+    ):
+        return stamps
+    seen.add(target)
+    if not target.is_dir():
         entry.update(b"\0target\0")
-        stamps.append(_hash_file(target, entry))
-    elif target.is_dir():
-        for directory, dirs, files in os.walk(target, followlinks=False):
-            dirs.sort()
-            for filename in sorted(files):
-                inner = Path(directory) / filename
-                if inner.is_symlink():
-                    continue  # one level: a link inside counts as the directory's listing
-                entry.update(b"\0" + os.fsencode(str(inner.relative_to(target))) + b"\0")
-                stamps.append(_hash_file(inner, entry))
-    return hashlib.sha256(":".join(stamps).encode()).hexdigest()
+        return stamps + _hash_entry(root, target, entry, seen)
+    for inner in _walk(target):
+        entry.update(b"\0" + os.fsencode(str(inner.relative_to(target))) + b"\0")
+        stamps += _hash_entry(root, inner, entry, seen)
+    return stamps
 
 
-def _iter_source_entries(root: Path) -> Iterator[tuple[str, str, str | None]]:
-    """Yield ``(relative path, content hash, stamp)`` for every source file under
+def _iter_source_entries(root: Path) -> Iterator[tuple[str, str, dict[str, str]]]:
+    """Yield ``(relative path, content hash, stamps)`` for every source file under
     ``root``, then for each ignore-rules file outside it (:func:`_rule_files`).
 
     The one place the working set is enumerated and hashed, so the per-file map and the
     combined fingerprint cannot disagree about what counts. A symlink is hashed with
     what it points at inside the checkout, never followed out of it. A submodule or
     nested repository adds its recorded commit AND its own content, so an edit, a new
-    file or a local commit inside it changes the identity. The stamp (:func:`_change_stamp`)
-    is None for a path with no file to time: deleted, or a directory entry.
+    file or a local commit inside it changes the identity. ``stamps``
+    (:func:`_change_stamp`) maps each timed file to its stamp: the path's own, a nested
+    repository's files under theirs (tester's Y7 on #14), nothing for a deleted path.
     """
     root = root.resolve()
     if not root.is_dir():
@@ -306,40 +335,45 @@ def _iter_source_entries(root: Path) -> Iterator[tuple[str, str, str | None]]:
             raise ValueError(f"source path escapes through a directory link: {path}")
         entry = hashlib.sha256()
         entry.update(os.fsencode(name) + b"\0")
-        stamp: str | None = None
-        if path.is_symlink():
-            try:
-                stamp = _hash_link(root, path, entry)
-            except OSError as exc:
-                raise ValueError(f"cannot read source link {path}: {exc}") from None
-        elif not path.exists():
-            entry.update(b"deleted\0")
-        elif path.is_dir():
+        stamps: dict[str, str] = {}
+        if path.is_dir() and not path.is_symlink():
             # A gitlink (submodule) or an untracked nested repository: one entry in the
             # parent's listing, whose files the parent never lists. An uninitialised
             # submodule is an empty directory and contributes only its recorded commit.
             entry.update(b"gitlink\0" + (_gitlink(root, name) or "unrecorded").encode())
             if (path / ".git").exists():
-                entry.update(b"nested\0" + source_fingerprint(path).encode())
+                nested, inner = source_state(path)
+                entry.update(b"nested\0" + fingerprint_of(nested).encode())
+                prefix = name.rstrip("/")  # git lists an untracked nested repository as "lib/"
+                stamps = {f"{prefix}/{key}": value for key, value in inner.items()}
         else:
-            stamp = _hash_file(path, entry)
-        yield name, entry.hexdigest(), stamp
+            try:
+                timed = _hash_entry(root, path, entry, set())
+            except OSError as exc:
+                raise ValueError(f"cannot read source {path}: {exc}") from None
+            if timed:
+                stamps[name] = timed[0] if len(timed) == 1 else _combined(timed)
+        yield name, entry.hexdigest(), stamps
     for label, path in _rule_files(root):
         entry = hashlib.sha256(os.fsencode(label) + b"\0")
         stamp = _hash_file(path, entry)
-        yield label, entry.hexdigest(), stamp
+        yield label, entry.hexdigest(), {label: stamp}
+
+
+def _combined(stamps: Sequence[str]) -> str:
+    """One stamp for a link and every file hashed through it."""
+    return hashlib.sha256(":".join(stamps).encode()).hexdigest()
 
 
 def source_state(root: Path) -> tuple[dict[str, str], dict[str, str]]:
-    """``root``'s per-file content hashes, and the stamp of each path that has one: what
-    a report keeps before and after its command, so a change put back before the
-    command ended still shows (tester's X5 on #14)."""
+    """``root``'s per-file content hashes, and the stamp of each timed file: what a
+    report keeps before and after its command, so a change put back before the command
+    ended still shows (tester's X5 on #14)."""
     files: dict[str, str] = {}
     stamps: dict[str, str] = {}
-    for name, digest, stamp in _iter_source_entries(root):
+    for name, digest, timed in _iter_source_entries(root):
         files[name] = digest
-        if stamp is not None:
-            stamps[name] = stamp
+        stamps.update(timed)
     return files, stamps
 
 

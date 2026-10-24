@@ -12,6 +12,7 @@ with the whole session start tested against the 10,000-character hook cap.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -390,6 +391,96 @@ def test_a_link_into_an_ignored_directory_is_hashed_by_its_target(repo: Path) ->
 
     status = _passed_then(break_target)
     assert status.state == "stale" and "conftest.py" in status.reason, status.reason
+
+
+def test_a_link_to_a_directory_skips_what_the_check_writes_under_it(repo: Path) -> None:
+    """Tester's Y3 on #14: an untracked tests_link -> pkg made a first pytest run
+    refused, "changed while it ran: tests_link": the link walk hashed the __pycache__
+    the run wrote through it. It now walks as the checkout does."""
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "mod.py").write_text("X = 1\n")
+    _git(repo, "add", "pkg")
+    _git(repo, "commit", "-q", "-m", "pkg")
+    _symlink_or_skip(repo / "pkg_link", "pkg")
+    brief, task = _linked()
+    write_cache = (
+        "import os; os.makedirs('pkg/__pycache__', exist_ok=True); "
+        "open('pkg/__pycache__/mod.cpython-313.pyc', 'wb').write(b'x')"
+    )
+    _record(brief, task, _run(_py(write_cache), task=task))
+    assert _check(brief) == {"R1": "pass"}
+
+
+def test_a_link_to_the_checkout_itself_counts_by_its_text(repo: Path) -> None:
+    """Tester's Y4 on #14: `loop -> .` walked .git and every ignored file, so a check
+    writing to gitignored reports/ was refused and an empty commit staled the pass."""
+    _ignore_reports(repo)
+    _symlink_or_skip(repo / "loop", ".")
+    (repo / "tests").mkdir()
+    _symlink_or_skip(repo / "tests" / "up", "..")
+    brief, task = _linked()
+    report = _run(_pytest_into("reports/y4.xml"), task=task)
+    _record(brief, task, report)
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "nothing")
+    assert _check(brief) == {"R1": "pass"}, "content, not history"
+    (repo / "loop").unlink()
+    _symlink_or_skip(repo / "loop", "tests")
+    assert _check(brief) == {"R1": "stale"}, "its text still counts"
+
+
+def test_a_fifo_under_a_linked_directory_is_no_unknown_source(repo: Path) -> None:
+    """Tester's Y6 on #14: a FIFO under a linked directory made every report's source
+    unknown ("source is not a regular file"), so no pass was possible."""
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no FIFOs here")
+    _ignore_reports(repo)
+    (repo / "reports" / "run").mkdir(parents=True)
+    os.mkfifo(repo / "reports" / "run" / "pipe")
+    _symlink_or_skip(repo / "run_link", "reports/run")
+    brief, task = _linked()
+    report = _run(_py("print('ok')"), task=task)
+    assert report.source_known, report.source_capture_error
+    _record(brief, task, report)
+    assert _check(brief) == {"R1": "pass"}
+
+
+def test_a_link_inside_a_linked_directory_is_hashed_by_its_target(repo: Path) -> None:
+    """Tester's Y5 on #14: tests/ext -> ../reports/ext (ignored), whose helper.py links
+    to ../helper_impl.py. Editing helper_impl.py left the pass PROVEN."""
+    _ignore_reports(repo)
+    (repo / "reports" / "ext").mkdir(parents=True)
+    (repo / "reports" / "helper_impl.py").write_text("VALUE = 1\n")
+    _symlink_or_skip(repo / "reports" / "ext" / "helper.py", "../helper_impl.py")
+    (repo / "tests").mkdir()
+    _symlink_or_skip(repo / "tests" / "ext", "../reports/ext")
+
+    def break_target() -> None:
+        (repo / "reports" / "helper_impl.py").write_text("raise RuntimeError('broken')\n")
+
+    status = _passed_then(break_target)
+    assert status.state == "stale" and "tests/ext" in status.reason, status.reason
+
+
+def test_a_change_put_back_inside_a_nested_repository_refuses_the_run(repo: Path) -> None:
+    """Tester's Y7 on #14: a nested repository is one directory entry with no stamp, so
+    a change to vendor/lib/lib.py put back before the run ended was accepted. Its
+    files' stamps are carried up, and the refusal names the file."""
+    nested = repo / "vendor" / "lib"
+    nested.mkdir(parents=True)
+    _git(nested, "init", "-q")
+    (nested / "lib.py").write_text("VALUE = 1\n")
+    _git(nested, "add", ".")
+    _git(nested, "commit", "-q", "-m", "lib")
+    brief, task = _linked()
+    swap = (
+        "import os\np = 'vendor/lib/lib.py'\n"
+        "st = os.stat(p); good = open(p).read()\n"
+        "open(p, 'w').write('VALUE = 2\\n'); open(p, 'w').write(good)\n"
+        "os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))\n"
+    )
+    report = _run(_py(swap), task=task)
+    with pytest.raises(ValueError, match=r"changed while it ran: vendor/lib/lib\.py"):
+        _record(brief, task, report)
 
 
 def test_in_a_checkout_without_git_the_remedy_does_not_say_gitignore(

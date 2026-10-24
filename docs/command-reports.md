@@ -133,10 +133,13 @@ untracked nonignored file, kept file by file.
   `.venv`, `venv`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox` and the like
   do not count. Tracked files count whatever directory they are in.
 - **Symlinks count as their targets.** A link to a file or directory inside the
-  checkout is hashed with what it points at; one pointing out of it, by its text.
+  checkout is hashed with what it points at, links inside it the same way, and
+  generated directories skipped. A link pointing out of the checkout, or to the
+  checkout itself or a directory holding the link, counts by its text.
 - **Change times are kept too.** Each file's change time (modification time on
-  Windows) is saved before and after, so a file changed and put back while the
-  command ran still shows. They are not part of the identity: a branch switch that
+  Windows) is saved before and after, nested repositories included, so a file
+  changed and put back while the command ran still shows. A file created and deleted
+  while it ran does not. They are not part of the identity: a branch switch that
   rewrites a file with the same bytes keeps it.
 - **Nested repositories count.** A submodule or nested repository adds its own
   files, not only the commit it records.

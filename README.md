@@ -127,7 +127,9 @@ short alias.
 | [Memory](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/memory.md) | Your agent remembers preferences and project conventions, and starts every session oriented. For everyone; nothing to run after setup |
 | [The fleet](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/fleet.md) | The UI, the roles, `aisquare fleet …`, Claude accounts, and every default you can change |
 | [Orchestration](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/orchestration.md) | Several agent sessions work one problem as a team, with a shared task board. Opt-in, per repo |
+| [Work briefs](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/work-briefs.md) | A request as numbered requirements linked to board tasks, with the checks, findings and corrections recorded against them |
 | [Phone control](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/remote.md) | Optional: the fleet on your phone through your own ngrok tunnel. What needs you across every project, each agent's screen, the board, and once you allow writes, the keys to answer |
+| [Command reports](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/command-reports.md) | `asq exec` runs a command once and saves how it ended and on which source, so a later step can cite it without running it again |
 | [Reference](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/reference.md) | The hooks, the `~/.aisquare` layout, the main command tree and the global flags |
 | [The AISquare platform](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/platform.md) | Optional: signing in, Explainability, the Collective Intelligence test bed |
 | [The captain](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/captain.md) | Experimental, off by default: one agent above every project that you talk to, typed or spoken. Turning it on, its tools, the voice page and the queue of what needs you |

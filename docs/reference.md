@@ -73,12 +73,24 @@ aisquare
 │                   claim · review [--note] · reopen --reason · done [--note]
 │                   block --reason · drop · release        (all with [--as SESSION])
 │                   a task is its id, or 12 / #12 — its number on the caller's board
+├── brief           create <title> -r TEXT… [--check R1=…]… [--assumption A]… [--boundary B]…
+│                   list · show <brief> · link <brief> <task> -r R1…
+│                   update <brief> [-r R1=…] [--check R1=…] [--add TEXT] [--title T]
+│                                  [--assumption A]… [--boundary B]…
+│                                  [--clear-assumptions] [--clear-boundaries]
+│                   evidence <brief> R1 --task T --verdict pass|fail --summary S --artifact F
+│                   finding <brief> R1 --task T --summary S [--artifact F]
+│                   (all with [--as SESSION]; a brief is its id, or B1 / 1 — docs/work-briefs.md)
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>
 ├── launch <role> [--command CMD] [--env KEY=VALUE]… [--account SLOT] [… agent args]
 │                   role = planner|coder|runner|validator, a fleet role (manager,
 │                   tester, reviewer, ui-tester), a numbered seat (coder1), or any role you
 │                   have bound; env merges over `team bind`
+├── exec [--project P] [--task T] [--session S] [--raw] [--max-output-bytes N] -- CMD …
+│                   run CMD once and save a report of how it ended (docs/command-reports.md)
+├── reports         list · show <id> [--raw] [--stream stdout|stderr|both] · stats
+│                   prune [--keep N] [--days N]   — read saved reports; never reruns
 ├── serve [--stdio | --port N --bind H] [--show-token]
 ├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
 ├── remote          serve · needs · status · allow-write on|off · revoke · regenerate-password

@@ -137,6 +137,15 @@ Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
     text on stdin or as one argument; no model process, and stripped anyway:
     a synthesiser has no use for an identity, and ``powershell.exe`` is a shell.
 
+Excluded, command reports (docs/command-reports.md):
+  * ``services/command_reports.py::run_command`` — ``asq exec``'s command, the
+    operator's or agent's own, with its environment unchanged: running it through
+    the wrapper must not change what it does. Not stripped; it is the caller's
+    action, under the caller's identity, exactly as if run directly.
+  * ``core/source_revision.py::_git`` — ``git rev-parse`` and ``git ls-files``
+    for the per-file source identity a ``--project`` report records; no model,
+    stripped, as every git seam is (:func:`git_env`).
+
 Checked and NOT a seam, recorded so the next reader does not re-derive it:
   * ``services/project.py`` — catches ``subprocess.SubprocessError`` but starts
     nothing itself; it is a caller of ``core/snapshot.py``'s seams.
@@ -407,6 +416,17 @@ SEAMS: dict[str, Seam] = {
         "`spd-say`) with the text on stdin or as one argument (T3). No model process; "
         "stripped anyway — a synthesiser has no use for an identity, and powershell "
         "is a shell",
+        strips_identity=True,
+    ),
+    "aisquare/services/command_reports.py::run_command": Seam(
+        EXCLUDED,
+        "`asq exec`'s command, the caller's own, with its environment and semantics "
+        "unchanged; not stripped — it runs under the caller's identity, as if run directly",
+    ),
+    "aisquare/core/source_revision.py::_git": Seam(
+        EXCLUDED,
+        "`git rev-parse` / `git ls-files` for a command report's per-file source identity; "
+        "no model, stripped, as every git seam is (`git_env()`)",
         strips_identity=True,
     ),
 }

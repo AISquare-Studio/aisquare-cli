@@ -9897,6 +9897,25 @@ def _same_home(record: launch_seal.LaunchRecord, target: ClaudeAccount) -> bool:
     return agent_core.dir_identity(Path(home)) == agent_core.dir_identity(target.config_dir)
 
 
+def _moves_home(
+    record: launch_seal.LaunchRecord, target: ClaudeAccount | None, adapter: AgentAdapter
+) -> bool:
+    """Whether a replacement of ``adapter``'s on ``target`` runs under another home than the
+    recorded agent did. None chosen runs under the plain home as the launch environment names
+    it, which a row on the plain slot (Codex's 0, ``~/.codex``) ran under too: asked whether
+    the row had a slot, its take-over started fresh there (review r18 of #113, finding 7).
+    Compared as the config dirs the agent reads in each (``AgentAccounts.config_dir``); a
+    record with no home of its own ran under the plain one."""
+    if adapter.accounts is None:
+        return False
+    plain = claude_accounts_core.plain_home(adapter.id)
+    home = (record.session.home if record.session is not None else None) or record.account_home
+    ran = Path(home) if home else plain
+    goes = target.config_dir if target is not None else plain
+    config_dir = adapter.accounts.config_dir
+    return agent_core.dir_identity(config_dir(ran)) != agent_core.dir_identity(config_dir(goes))
+
+
 def _resumable(
     record: launch_seal.LaunchRecord, adapter: AgentAdapter | None
 ) -> tuple[ResumeSpec | None, str | None]:
@@ -10502,13 +10521,9 @@ def restart(
         replays is not None
         and not replays.capabilities.resumes_across_homes
         and not fresh
-        and (
-            not _same_home(record, choice.account)
-            if choice.account is not None
-            # None chosen runs under the plain home, which a record on a slot did not run
-            # under: `_forkable`'s rule (review r17 of #113, finding 2).
-            else record.account_slot is not None
-        )
+        # None chosen runs under the plain home, which a record on a managed slot did not
+        # run under (review r17 of #113, finding 2) and one on the plain slot did.
+        and _moves_home(record, choice.account, replays)
     ):
         # A take-over onto another account (the Spawn dialog's): its thread lives under the
         # old home (a Codex rollout under its CODEX_HOME), as `switch` says of it.
@@ -10917,12 +10932,8 @@ def _forkable(
             raise FleetError(str(exc)) from exc
         if choice.account is not None:
             wanted = str(choice.account.slot)
-            moved = not _same_home(record, choice.account)
-        else:
-            # The launch environment as it is: the plain home, which a record on an account
-            # slot did not run under.
-            moved = record.account_slot is not None
-        if moved:
+        # None chosen: the launch environment as it is, the plain home.
+        if _moves_home(record, choice.account, forks):
             notes.append(
                 f"{named} cannot fork a thread under another account's home — the new agent "
                 "starts fresh with a hand-off prompt"

@@ -15,6 +15,7 @@ On the fleet's fake tmux, with Codex's hooks as 0.162.1 sends them
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from typer.testing import CliRunner
@@ -182,3 +183,34 @@ def test_a_take_over_of_a_slot_run_codex_row_onto_this_shells_home_starts_fresh(
         "cannot resume a thread under another account's home" in note for note in receipt.notes
     ), receipt.notes
     assert "resume" not in _native(_command(tmux))
+
+
+@pytest.mark.parametrize("mode", ["take_over", "fork"])
+def test_a_hand_off_of_a_plain_codex_row_onto_this_shells_home_keeps_its_thread(
+    mode: Literal["fork", "take_over"],
+    tmux: FakeTmux,
+    codex_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row spawned on the plain codex (slot 0, ``~/.codex``) handed off onto *(this
+    shell's)* runs under that same home, so its thread is there: a take-over resumes it and
+    a fork forks it. Whether the home moves is asked of the homes, as their config dirs,
+    never of whether the row had a slot (review r18 of #113, finding 7)."""
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    plain = accounts_core.default_account(agent="codex")
+    assert plain.slot == 0
+    plain.config_dir.mkdir(parents=True, exist_ok=True)
+    agent = fleet_service.spawn(project, "coder", agent="codex", worktree=False, account="0").agent
+    assert agent.account_slot == 0
+    codex = Codex(agent, project, plain.config_dir, tmux, monkeypatch)
+    _started(codex)
+
+    receipt = fleet_service.hand_off(
+        project, agent.label, mode=mode, account=fleet_service.THIS_SHELL_ACCOUNT
+    )
+
+    assert receipt.resumed is True, receipt.notes
+    assert not any("another account's home" in note for note in receipt.notes), receipt.notes
+    native = _native(_command(tmux))
+    assert _at(native, "resume" if mode == "take_over" else "fork", THREAD_ONE), native

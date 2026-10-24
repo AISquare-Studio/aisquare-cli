@@ -13,6 +13,7 @@ timing line prints under ``pytest -s``, as #272's ``tests/test_terminal_control.
 
 from __future__ import annotations
 
+import sys
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -36,6 +37,12 @@ AGENTS_EACH = 3
 STARTED = datetime(2026, 10, 23, 9, 0, tzinfo=UTC)
 
 _SEP = tmux_core._SEP
+
+#: The fleet's read asks tmux by its socket, and tmux sockets are POSIX: on Windows
+#: ``socket_path()`` refuses, so the read never reaches the fake server (run 40073711742).
+TMUX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32", reason="tmux sockets are POSIX: socket_path() refuses on Windows"
+)
 
 
 class Panes:
@@ -136,6 +143,7 @@ def counted(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
     yield opened
 
 
+@TMUX_ONLY
 def test_one_read_of_50_projects_is_one_store_session_and_one_tmux_process(
     fleet: tuple[list[ProjectInfo], Panes], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -171,6 +179,7 @@ def test_a_project_without_rows_costs_no_tmux_call(
     assert panes.calls == []
 
 
+@TMUX_ONLY
 def test_list_agents_many_answers_what_list_agents_answers(
     fleet: tuple[list[ProjectInfo], Panes], monkeypatch: pytest.MonkeyPatch
 ) -> None:

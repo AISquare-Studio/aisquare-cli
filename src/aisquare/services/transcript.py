@@ -153,11 +153,11 @@ def read_page(
     oldest = end
     reached_start = False
     try:
-        for offset, raw in lines_backwards(file, end, budget=SCAN_BUDGET):
+        walked = lines_backwards(file, end, budget=SCAN_BUDGET)
+        for offset, record in reader.records(walked):  # the agent's own records, folded
             oldest = offset
             if offset == 0:
                 reached_start = True
-            record = parse_line(raw)
             rendered = [] if record is None else reader.page_lines(record, width)
             if record is not None and rendered:
                 collected.append((rendered, _page_stamp(record)))

@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,7 @@ from aisquare.core.agent_adapters.transcripts import (
     dim_note,
     kept_input,
     lines_backwards,
+    one_per_line,
     parse_line,
     question_lines,
     record_time,
@@ -91,6 +92,11 @@ class FakeTranscript:
     ``y``/``n``, and a choice is picked by moving down to it and confirming."""
 
     speaker = "fake"
+
+    def records(
+        self, lines: Iterable[tuple[int, bytes]]
+    ) -> Iterator[tuple[int, dict[str, Any] | None]]:
+        return one_per_line(lines)  # one whole record a line
 
     def tail_facts(self, file: Path, size: int, budget: int, written: datetime) -> TranscriptTail:
         answered: set[str] = set()

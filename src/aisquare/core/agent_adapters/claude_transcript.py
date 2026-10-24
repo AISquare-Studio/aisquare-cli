@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -40,6 +40,7 @@ from aisquare.core.agent_adapters.transcripts import (
     first_question,
     kept_input,
     lines_backwards,
+    one_per_line,
     parse_line,
     question_lines,
     record_time,
@@ -111,6 +112,11 @@ class ClaudeTranscript:
     """Claude Code's answers to the transcript slot (``types.AgentTranscript``)."""
 
     speaker = SPEAKER
+
+    def records(
+        self, lines: Iterable[tuple[int, bytes]]
+    ) -> Iterator[tuple[int, dict[str, Any] | None]]:
+        return one_per_line(lines)  # one whole record a line
 
     def tail_facts(self, file: Path, size: int, budget: int, written: datetime) -> TranscriptTail:
         return _tail_walk(file, size, budget, written)

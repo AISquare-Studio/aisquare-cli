@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -125,23 +125,41 @@ def _when(value: object) -> datetime | None:
 class GeminiShapedTranscript:
     """Its session log, one record a line: ``{"type": "user"|"gemini"|"info"|"error",
     "content", "toolCalls": [{"id", "name", "args"}], "timestamp"}``, and a call's result in a
-    later ``{"$patch": {"toolCalls": [{"id", "status"}]}}`` line. Its permission dialog takes
-    ``1`` for Allow once and Esc for No; a question's options are picked by their numbers."""
+    later ``{"$patch": {"toolCalls": [{"id", "status", "result"}]}}`` line (:meth:`records`
+    folds it into the call). Its permission dialog takes ``1`` for Allow once and Esc for
+    No; a question's options are picked by their numbers."""
 
     speaker = "gemini"
 
+    def records(
+        self, lines: Iterable[tuple[int, bytes]]
+    ) -> Iterator[tuple[int, dict[str, Any] | None]]:
+        """Newest first, as read: a ``$patch`` line, newer than the record whose calls it
+        answers, is held until that record is reached and folded into its calls by id."""
+        patches: dict[str, dict[str, Any]] = {}
+        for offset, raw in lines:
+            record = parse_line(raw)
+            patch = record.get("$patch") if record is not None else None
+            if isinstance(patch, dict):
+                for call in _calls(patch):
+                    patches.setdefault(str(call.get("id")), {}).update(call)
+                yield offset, None
+                continue
+            if record is not None and _calls(record):
+                record = {
+                    **record,
+                    "toolCalls": [
+                        {**call, **patches.pop(str(call.get("id")), {})} for call in _calls(record)
+                    ],
+                }
+            yield offset, record
+
     def tail_facts(self, file: Path, size: int, budget: int, written: datetime) -> TranscriptTail:
-        answered: set[str] = set()
         pending: list[PendingTool] = []
         newest, newest_at, key = "none", None, None
         text: str | None = None
-        for offset, raw in lines_backwards(file, size, budget=budget):
-            record = parse_line(raw)
+        for offset, record in self.records(lines_backwards(file, size, budget=budget)):
             if record is None:
-                continue
-            patch = record.get("$patch")
-            if isinstance(patch, dict):
-                answered |= {str(call.get("id")) for call in _calls(patch)}
                 continue
             kind, at = record.get("type"), record_time(record)
             if kind == "info" and newest == "none":
@@ -157,7 +175,7 @@ class GeminiShapedTranscript:
                 newest, newest_at, key = said, at, str(offset)
             if kind == "gemini" and record.get("content") and text is None:
                 text = str(record["content"])
-            pending += [_pending(call, at) for call in calls if str(call.get("id")) not in answered]
+            pending += [_pending(call, at) for call in calls if not _answered(call)]
             if kind == "user":
                 break
         return TranscriptTail(
@@ -174,7 +192,7 @@ class GeminiShapedTranscript:
         if kind == "user":
             return [YOU, *wrap(str(record.get("content", "")), width), ""]
         if kind != "gemini":
-            return []  # a patch, an info line, an error: no conversation
+            return []  # an info line, an error: no conversation
         lines = [speaker_line(self.speaker)]
         if record.get("content"):
             lines += wrap(str(record["content"]), width)
@@ -183,7 +201,9 @@ class GeminiShapedTranscript:
             if asked.name == "ask_user":
                 lines += question_lines(asked.input.get("questions"), width)
             else:
-                lines.append(dim_note(asked.name, width))
+                status = call.get("status")  # its result, folded in from a later line
+                shown = f"{asked.name} · {status}" if isinstance(status, str) else asked.name
+                lines.append(dim_note(shown, width))
         return [*lines, ""]
 
     def call_asks(self, tool: PendingTool) -> CallAsk:
@@ -221,6 +241,11 @@ class GeminiShapedTranscript:
                 if record.get("content"):
                     said.insert(0, str(record["content"]))
         return None
+
+
+def _answered(call: Mapping[str, Any]) -> bool:
+    """A call its result has reached (a ``$patch`` folded in): it waits on no one."""
+    return call.get("status") in ("success", "error", "cancelled") or "result" in call
 
 
 def _calls(record: Mapping[str, Any]) -> list[dict[str, Any]]:

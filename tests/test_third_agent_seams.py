@@ -395,3 +395,49 @@ def test_a_fleet_spawn_launches_it_by_its_variables_and_one_settings_layer(
         assert server["env"]["AISQUARE_HOME"] == "$AISQUARE_HOME"
     finally:
         unregister(adapter.id)
+
+
+# --- transcript: a call's result in a later line ------------------------------------------
+
+
+def test_a_calls_result_in_a_later_patch_line_reaches_its_tail_and_its_page(
+    tmp_path: Path,
+) -> None:
+    """S5: the Gemini-shaped session log brings a call its result in a later ``$patch`` line.
+    Read backwards, as the shared tail and pager read every transcript, its reader's
+    ``records`` folds that line into the call: the call waits until it is there and not
+    after, and the Transcript tab's page says how it ended."""
+    from aisquare.services import transcript
+
+    adapter = GeminiShapedAdapter()
+    register(adapter)
+    try:
+        log = tmp_path / "session.jsonl"
+        call = {"id": "c1", "name": "run_shell_command", "args": {"command": "make test"}}
+        asked = [
+            {"type": "user", "content": "test it", "timestamp": "2026-10-24T10:00:00Z"},
+            {
+                "type": "gemini",
+                "content": "",
+                "toolCalls": [call],
+                "timestamp": "2026-10-24T10:00:05Z",
+            },
+        ]
+        log.write_text("".join(json.dumps(r) + "\n" for r in asked), encoding="utf-8")
+
+        waiting = transcript.read_transcript_tail(log, agent=adapter.id)
+        assert waiting is not None and [p.tool_use_id for p in waiting.pending] == ["c1"]
+
+        result = {"$patch": {"toolCalls": [{"id": "c1", "status": "success", "result": "ok"}]}}
+        with log.open("a", encoding="utf-8") as out:
+            out.write(json.dumps(result) + "\n")
+            out.write(json.dumps({"type": "gemini", "content": "All green."}) + "\n")
+
+        answered = transcript.read_transcript_tail(log, agent=adapter.id)
+        assert answered is not None and answered.pending == ()
+        page = transcript.read_page(log, agent=adapter.id, width=60)
+        shown = "\n".join(page.lines)
+        assert "run_shell_command · success" in shown and "All green." in shown
+        assert "$patch" not in shown
+    finally:
+        unregister(adapter.id)

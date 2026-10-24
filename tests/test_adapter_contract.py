@@ -1870,3 +1870,22 @@ def test_every_launch_slot_answers_a_launch_part_and_its_settings_reach_the_agen
         )
     else:
         assert not file.exists(), "a layer that names no file writes none"
+
+
+def test_a_transcripts_records_are_its_lines_newest_first_each_at_its_offset(
+    adapter: AgentAdapter,
+) -> None:
+    """S5: ``AgentTranscript.records`` turns the lines a walk read (newest first, each at its
+    offset) into the agent's records, at those offsets: one a line by default
+    (``transcripts.one_per_line``), ``None`` for a line that is no record of its own."""
+    reader = adapter.transcript_reader
+    if reader is None:
+        return
+    lines = [(30, b'{"type": "x", "n": 2}'), (12, b"not json"), (0, b'{"type": "x", "n": 1}')]
+    read = list(reader.records(iter(lines)))
+    assert [offset for offset, _ in read] == [30, 12, 0]
+    assert read[1][1] is None
+    assert [record for _, record in read if record is not None] == [
+        {"type": "x", "n": 2},
+        {"type": "x", "n": 1},
+    ]

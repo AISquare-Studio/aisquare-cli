@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -793,9 +793,10 @@ class AgentTranscript(Protocol):
     (``services.remote_needs``) and the Transcript tab's pages (``services.transcript``).
 
     ``services.transcript`` opens the file (a regular one only, never a pipe), bounds what
-    is read of it and pages it; the reader decodes the agent's own records. A record is one
-    JSON object a line, its ``timestamp`` ISO 8601 (:func:`~aisquare.core.agent_adapters.
-    transcripts.record_time`). The shared shapes are in ``core.agent_adapters.transcripts``.
+    is read of it and pages it; the reader decodes the agent's own records, from its lines
+    (:meth:`records`: one JSON object a line by default, or one a later line patches), each
+    record's ``timestamp`` ISO 8601 (:func:`~aisquare.core.agent_adapters.transcripts.
+    record_time`). The shared shapes are in ``core.agent_adapters.transcripts``.
     """
 
     speaker: str
@@ -811,6 +812,18 @@ class AgentTranscript(Protocol):
         words, an interruption) waits on nothing however much is unread. Reads only the
         tail (``transcripts.lines_backwards``), a line past ``transcripts.MAX_LINE`` off its
         bytes alone; may raise ``OSError``."""
+        ...
+
+    def records(
+        self, lines: Iterable[tuple[int, bytes]]
+    ) -> Iterator[tuple[int, dict[str, Any] | None]]:
+        """The transcript's records from its ``lines``, newest first as they are given
+        (``transcripts.lines_backwards``: ``(offset, line)``), each at its line's offset, and
+        ``None`` for a line that is no record of its own: one that does not parse, or a later
+        line of another record's (Gemini CLI's ``{"$patch": …}`` that brings a tool call its
+        result), which it folds into that record before handing it on. What the Transcript
+        tab's pager reads (``services.transcript.read_page``) and a reader's own tail walk may.
+        ``transcripts.one_per_line`` for one whole record a line (Claude Code's, Codex's)."""
         ...
 
     def page_lines(self, record: dict[str, Any], width: int) -> list[str]:

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -182,6 +182,13 @@ def parse_line(raw: bytes) -> dict[str, Any] | None:
     except (ValueError, UnicodeDecodeError, RecursionError):
         return None
     return record if isinstance(record, dict) else None
+
+
+def one_per_line(lines: Iterable[tuple[int, bytes]]) -> Iterator[tuple[int, dict[str, Any] | None]]:
+    """``AgentTranscript.records`` for a transcript of one whole record a line (Claude Code's
+    session JSONL, Codex's rollout): each line's :func:`parse_line`, at its offset."""
+    for offset, raw in lines:
+        yield offset, parse_line(raw)
 
 
 def record_time(record: Mapping[str, Any]) -> datetime | None:
@@ -406,6 +413,7 @@ __all__ = [
     "first_question",
     "kept_input",
     "lines_backwards",
+    "one_per_line",
     "parse_line",
     "question_lines",
     "record_time",

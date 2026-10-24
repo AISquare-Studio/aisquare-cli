@@ -384,7 +384,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and suggestion are not a draft. A nudge held back goes out once the box is clear
   (`asq` retries it as it refreshes); if you send the draft first, your prompt
   carries the same board update and the nudge is dropped. A tell held back is filed
-  as a note and says why. And a note reaches a busy agent at the end of its turn: a
+  as a note and says why. A draft that appears while the text is being pasted
+  stops it before its Enter, and the tell or the first message's note says so: "a
+  draft appeared in its input box while the text was being typed; ours is in the
+  box with it, unsent, and nothing was sent". And a note reaches a busy agent at the end of its turn: a
   note to an agent's label or role, including a `fleet tell` to an agent that was
   working, waited for the agent's next prompt, which one that had finished might
   never get. Its `Stop` hook now hands it the notes addressed to it when the turn

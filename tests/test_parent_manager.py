@@ -309,7 +309,9 @@ def test_a_paused_project_in_no_group_behaves_as_before(
     """The refusal is the subtree's: a project with no parent above or below it spawns for
     an agent while paused, as the cycle's own rule has always asked it not to."""
     fleet_service.pause(project)
-    fleet_service.spawn(project, "coder", worktree=False, spawned_by=HQ_MANAGER)
+    assert fleet_service.is_paused(project)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, spawned_by=HQ_MANAGER)
+    assert receipt.agent.spawned_by == HQ_MANAGER and receipt.agent.ended_at is None
 
 
 def test_a_group_cap_refuses_the_next_spawn(

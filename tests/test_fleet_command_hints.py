@@ -154,6 +154,7 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "_replaced"): _FLEET_OP,
     ("services/fleet.py", "_in_hand_over"): _FLEET_OP,
     ("services/fleet.py", "spawn"): _FLEET_OP,
+    ("services/fleet.py", "_refuse_by_group"): _FLEET_OP,
     ("services/fleet.py", "_in_place_of_recorded"): _FLEET_OP,
     ("services/fleet.py", "_exited_note"): "each exited row's own ``project_id``",
     ("services/fleet.py", "_tell"): _FLEET_OP,

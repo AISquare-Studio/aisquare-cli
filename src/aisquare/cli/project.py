@@ -10,6 +10,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import (
+    USAGE_ERROR,
     emit_onboard,
     emit_project_action,
     emit_project_detail,
@@ -562,6 +563,7 @@ def _group_id(store: ContextStore, group: str) -> str:
 
 @group_app.command("parent")
 def group_parent(
+    ctx: typer.Context,
     group: Annotated[str, typer.Argument(help="Group name or id.")],
     project: Annotated[
         str | None,
@@ -571,8 +573,12 @@ def group_parent(
 ) -> None:
     """Name a group's parent: its manager hears the members' questions, blocks, results and
     linked tasks (`project group route` chooses) as `routed` lines on its board, nudged."""
-    if (project is None) == (not clear):
-        fail("give a project, or --clear", error="usage", exit_code=2)
+    if project is not None and clear:
+        fail("give a project or --clear, not both", error="usage", exit_code=2)
+    if project is None and not clear:
+        # The words typer says for a missing required argument, through its own usage error
+        # (as `fleet stop` does for its label): exit 2, and JSON under --json.
+        raise USAGE_ERROR("Missing argument 'project'.", ctx)
     parent = _project_ref(project) if project is not None else None
     with store_session() as store:
         gid = _group_id(store, group)

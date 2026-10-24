@@ -451,7 +451,14 @@ def test_locked_board_does_not_duplicate_spooled_or_already_shipped_events(shipp
     assert outbox.counts().sent == 5 and not outbox.pending()
 
 
-def test_concurrent_receivers_publish_one_copy(shipping: None) -> None:
+def test_concurrent_receivers_publish_one_copy(
+    shipping: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Both receivers write the board's dedup keys, one after the other: the second waits
+    # out the first's commit on busy_timeout. The module's 50 ms knob is for the stores it
+    # wedges on purpose; under a loaded make check the first commit outlasts it ("database
+    # is locked", 2 in 50 under load), so these two wait as a receiver does.
+    monkeypatch.delenv("AISQUARE_DB_BUSY_MS")
     barrier = threading.Barrier(2)
 
     def capture() -> int:

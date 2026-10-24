@@ -173,6 +173,24 @@ minutes), and renewed by the session's own lifecycle hooks — so a dead
 session's claims release themselves and the work gets picked up again.
 `task next` only hands out tasks whose dependencies are done.
 
+**Contracts and rules files.** A contract is what the claim prints to whoever
+takes the task, so it carries the whole brief: `objective:`, `acceptance:` and
+`boundaries:`, the blocks `[team] brief_blocks` lists. `task add` warns on
+stderr about a missing block and lists them under `"missing_blocks"` with
+`--json`. With `[team] brief_strict = true` it refuses the add (exit 2).
+Write a long contract to a file and pass `--detail-file brief.md`. Keep rules
+you reuse in `.aisquare/rules/<name>.md` in the project and cite them with
+`--rules testing,git`. The contract then ends with `Rules:
+.aisquare/rules/testing.md, .aisquare/rules/git.md`, and a name with no file
+refuses the add. Text cited by path is read when it is needed. Text pasted
+into `--detail` rides every later request of the manager that wrote it. A
+manager's start pack lists the rules files by path and first line
+([fleet](fleet.md#long-lived-managers-state-file-start-pack-and-quiet-compaction)).
+
+```sh
+aisquare task add "wire auth" --role coder --detail-file briefs/auth.md --rules testing,git
+```
+
 ### Self-check: receipts you can re-prove
 
 Every successful write prints a receipt (`✓ … · seq N on <board>`; under

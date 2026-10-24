@@ -257,7 +257,8 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
         "experimental": {"captain": False},
         # The role tool policy (#280): the reviewer's deny is its own, not its extra_args.
         # The first message's two (P0-W1a, #122), and what of the board each role reads
-        # (P1 WS-2, #279): the reviewer judges cold.
+        # (P1 WS-2, #279): the reviewer judges cold. The manager's quiet-point compaction,
+        # off, and the task contract's blocks (P1 WS-4, #281).
         "fleet": {
             "deny_tools": list(FLEET_DENY_TOOLS),
             "first_prompt": "argv",
@@ -267,6 +268,11 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             # The delivery guards (P0-W2, #276).
             "draft_quiet_seconds": 10.0,
             "deliver_notes_at_turn_end": True,
+            "quiet_compact_at": 0,
+            "quiet_compact_delay": 45.0,
+            "quiet_compact_cooldown": 30.0,
+            "quiet_compact_state_max_age": 20.0,
+            "quiet_compact_resume": False,
             "roles": {
                 role: {
                     "deny_tools": [],
@@ -278,6 +284,7 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
                 for role in _V1_DEFAULTS["fleet"]["roles"]
             },
         },
+        "team": {"brief_blocks": ["objective", "acceptance", "boundaries"], "brief_strict": False},
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

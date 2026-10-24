@@ -9522,6 +9522,59 @@ def retry_deferred_nudges() -> int:
     )
 
 
+def quiet_prompt_refusal(agent: FleetAgent) -> str | None:
+    """Why typing into ``agent``'s pane now could land somewhere but an empty, idle input
+    box, or ``None`` (P1 WS-4's quiet compaction, #281).
+
+    Its own agent in the foreground (:func:`_its_agent`, what every write into a row's
+    pane asks), no dialog, Claude Code's input box drawn and idle (no spinner), and nothing
+    in it: a human's half-typed draft is the one thing a ``/compact`` must never be typed
+    into. Then P0-W2's own guard (:func:`delivery.draft_guard`), which adds someone typing
+    into the pane in ``asq`` within ``[fleet] draft_quiet_seconds``. Never raises: tmux that
+    cannot answer is a refusal too.
+    """
+    try:
+        srv = server_of(agent)
+        facts = srv.pane_facts(agent.pane_id)
+        if not _its_agent(agent, facts):
+            return "its pane does not run it"
+        lines = srv.capture(agent.pane_id).lines
+    except (TmuxError, OSError) as exc:
+        return f"tmux would not show its pane ({exc})"
+    dialog = screen_reader.modal_showing(lines)
+    if dialog is not None:
+        return f"{dialog} is showing"
+    if not screen_reader.box_idle(lines):
+        return "it is not idle at its prompt"
+    if screen_reader.composer_text(lines):
+        return "a draft is in its input box"
+    try:
+        return delivery.draft_guard(srv, agent.pane_id, quiet=settings().draft_quiet_seconds)
+    except (TmuxError, OSError) as exc:
+        return f"tmux would not show its pane ({exc})"
+
+
+def type_line(agent: FleetAgent, text: str, *, acked: Callable[[], bool]) -> delivery.Delivered:
+    """Type one line into ``agent``'s pane and press Enter, through the first message's own
+    verified delivery (:func:`delivery.deliver_typed`): pasted, seen in the box, Enter pressed
+    again only while the box provably still holds it. The caller asked
+    :func:`quiet_prompt_refusal` first, and P0-W2's guard (``guard=``) asks again right before
+    the paste, and refuses the Enter when a human's text appeared beside it."""
+    return delivery.deliver_typed(
+        server_of(agent),
+        agent.pane_id,
+        text,
+        agent.label,
+        press="press Enter in its pane",
+        acked=acked,
+        reads_box=True,
+        sleep=_sleep,
+        monotonic=_monotonic,
+        what="the line",
+        guard=settings().draft_quiet_seconds,
+    )
+
+
 def attach_argv(project: ProjectInfo) -> list[str]:
     """The ``tmux attach`` command for the project's fleet session (the escape hatch).
 

@@ -5075,10 +5075,13 @@ def test_a_cycle_with_no_fleet_row_names_its_project_by_its_codename(
     _stranger(monkeypatch, "coder")
     joined = team_service.hook_prompt_heartbeat("sess-late-6", project.root)
 
+    # The manager's state file is under the project's data directory, which its id names
+    # (P1 WS-4): a path, not a command.
+    state = str(paths.manager_state_file(project.id))
     for board in (started, joined):
         commands = re.findall(r"aisquare fleet [a-z]+(?: --project [\w.-]+)?", board)
         assert commands and all(c.endswith("--project calm-otter") for c in commands), board
-        assert project.id not in board
+        assert project.id not in board.replace(state, "")
 
 
 def test_a_hook_reads_the_row_its_window_names_once_for_the_assignment_and_the_cycle(

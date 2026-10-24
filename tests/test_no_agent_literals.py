@@ -22,7 +22,7 @@ What an agent's words are is read off its adapter (:data:`AGENTS`: every registe
 the synthetic ones the suites register), never listed here: its ``id``, its ``binary`` and
 its Windows shims, its variables (its home's, whose first word is a prefix of its own, its
 accounts', its capabilities', those its launch slots set), its files (``home_name``,
-``settings_name``, ``launch_inputs``, ``context_files``, its accounts' ``dir_name``) and the
+``settings_name``, ``launch_inputs``, ``instruction_files``, its accounts' ``dir_name``) and the
 rest it declares in ``capabilities.vocabulary`` (its model provider's variables, its
 credential files, its flags). So a new agent's words in a shared module fail with their file
 and line, and this guard is not edited for it (review r18 of #113, finding 6).
@@ -82,7 +82,7 @@ def _slot_variables(adapter: AgentAdapter) -> set[str]:
 def _files(adapter: AgentAdapter) -> set[str]:
     accounts, capabilities = adapter.accounts, adapter.capabilities
     named = {adapter.home_name, adapter.settings_name, *capabilities.launch_inputs}
-    named |= {path.name for path in adapter.context_files(Path())}
+    named |= {path.name for path in adapter.instruction_files(Path(), None)}
     named |= set(capabilities.vocabulary.files)
     if accounts is not None:
         named.add(accounts.dir_name)

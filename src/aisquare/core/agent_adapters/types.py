@@ -213,7 +213,7 @@ class Vocabulary:
     ``core/agent_adapters`` must not spell any more than those: tests/test_no_agent_literals.py
     reads them with its ``id``, ``binary``, its variables (``home_env``, its accounts' and its
     capabilities', and those its launch slots set), its files (``home_name``,
-    ``settings_name``, ``launch_inputs``, ``context_files``, its accounts' ``dir_name``), so a
+    ``settings_name``, ``launch_inputs``, ``instruction_files``, its accounts' ``dir_name``), so a
     new agent's words in a shared module fail with their file and line and nothing of that
     guard is edited for it."""
 
@@ -341,15 +341,24 @@ class AgentCapabilities:
     (Claude Code's ``message.usage``): its turn-end and session-end hooks record what the
     session spent (``services.metrics.record_usage``, ``aisquare metrics tokens``; #346).
     Without it nothing is recorded: another agent's transcript is never read with Claude
-    Code's shapes."""
+    Code's shapes. The shared code's gate until it records through the agent's own reader
+    (:meth:`AgentTranscript.usage`, which every adapter with this flag answers: Codex's reads
+    its rollout already), when the flag goes."""
     memory_files: Callable[[Path | None], list[Path]] | None = None
     """The files the agent loads into a session started in a directory itself (Claude
     Code's ``CLAUDE.md`` chain, ``core.injection.claude_md_files``): the user-pool entries
     they hold already are left out of the session-start block (#346), which carried them
-    twice. ``None``: every entry is injected, as before."""
+    twice. ``None``: every entry is injected, as before. The session start's gate until it
+    asks :meth:`AgentAdapter.instruction_files` (the session's config dir and ``cwd``, which
+    Codex answers with its ``AGENTS.md`` chain), when this goes: Claude Code's two agree for
+    the hook's own config dir."""
     positional_prompt: bool = False
     """The first prompt is a positional argument (Codex); otherwise the fleet types it."""
     first_context_file_only: bool = False
+    """Of its config dir's instruction files (:meth:`AgentAdapter.instruction_files` with no
+    ``cwd``, in its precedence) the agent reads the first that is not blank alone (Codex's
+    ``AGENTS.override.md`` over its ``AGENTS.md``), which ``agents connect`` imports
+    (``core.agents.read_context``); otherwise every one that is there."""
     approves_for_me: bool = False
     """The agent has a reviewer of its own that decides what it may do without asking
     (Claude Code's ``auto`` mode, Codex's ``--approve-for-me``), which ``auto`` approvals
@@ -1108,7 +1117,7 @@ class AgentAdapter(Protocol):
     :meth:`store_access`, :meth:`sandbox_writes`, :meth:`broker_access`, :meth:`fleet_args`,
     :meth:`label_args`, :meth:`resume_args`, :meth:`fork_args`,
     ``exit_command``, ``dismiss_key``, :meth:`queue_args`,
-    :meth:`mcp_args`, :meth:`tools_only_args`, :meth:`context_files`,
+    :meth:`mcp_args`, :meth:`tools_only_args`, :meth:`instruction_files`,
     :meth:`disable_native_teams`, :meth:`fleet_settings`, :meth:`settings_layer`,
     :meth:`unattended_env`,
     :meth:`telemetry_args` with ``telemetry_reader``. Personas: :meth:`system_prompt_args`,
@@ -1264,8 +1273,17 @@ class AgentAdapter(Protocol):
         ...
 
     def effort_alias(self, effort: str) -> str: ...
-    def context_files(self, home: Path) -> tuple[Path, ...]:
-        """The instruction files the agent reads from its config dir, in its precedence."""
+    def instruction_files(self, home: Path, cwd: Path | None) -> tuple[Path, ...]:
+        """The instruction files a session of config dir ``home`` started in ``cwd`` loads, in
+        the order it loads them: its config dir's, then its project's along ``cwd``'s chain,
+        each chosen as the agent chooses among a folder's files by what is on disk (Codex's
+        ``AGENTS.override.md`` over its ``AGENTS.md``), a file not there listed where the agent
+        would read one there (it loads nothing): what a session's start leaves out of the
+        context it injects, a preference such a file holds already. ``cwd`` ``None``: the
+        config dir's alone, every one it may read there in its precedence, read or not
+        (``capabilities.first_context_file_only``), which ``agents connect`` imports and the
+        doctor shows (``core.agents.context_files``). Absolute where ``home`` and ``cwd`` are;
+        read-only, never raises."""
         ...
 
     def browser_tools(self, home: Path) -> list[str] | None:

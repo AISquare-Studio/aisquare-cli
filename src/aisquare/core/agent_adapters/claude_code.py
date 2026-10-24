@@ -65,6 +65,9 @@ _HEADLESS_HEAD = ("--tools", "", "--max-turns", "1", "--output-format", "json")
 _HEADLESS_TAIL = ("--no-session-persistence", "--settings", "{}", "--strict-mcp-config")
 #: Claude Code's Homebrew cask, offered on macOS after the native installer.
 BREW_COMMAND = "brew install --cask claude-code"
+#: The memory files Claude Code reads in each folder from a session's cwd up to the root,
+#: beside its config dir's own ``CLAUDE.md`` (main's ``core.injection``).
+_PROJECT_MEMORY_FILES = ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md")
 #: A native install's target, named by its version (``…/share/claude/versions/2.1.250``).
 _VERSION_DIR = re.compile(r"^\d+\.\d+\.\d+\S*$")
 
@@ -460,8 +463,20 @@ class ClaudeCodeAdapter:
             f"mcp__{server}__*",
         ]
 
-    def context_files(self, home: Path) -> tuple[Path, ...]:
-        return (home / "CLAUDE.md",)
+    def instruction_files(self, home: Path, cwd: Path | None) -> tuple[Path, ...]:
+        """Its config dir's ``CLAUDE.md``, then in each folder from ``cwd`` (resolved) up to
+        the filesystem's root its ``CLAUDE.md``, ``CLAUDE.local.md`` and ``.claude/CLAUDE.md``:
+        main's ``core.injection.claude_md_files``, every one of them loaded that is there,
+        for the config dir the session runs on rather than the hook's own."""
+        files = [home / "CLAUDE.md"]
+        if cwd is not None:
+            try:
+                start = cwd.resolve()
+            except (OSError, RuntimeError):
+                start = cwd.absolute()
+            for folder in (start, *start.parents):
+                files += [folder / name for name in _PROJECT_MEMORY_FILES]
+        return tuple(files)
 
     def browser_tools(self, home: Path) -> list[str] | None:
         return None  # MCP servers and plugins across its config dirs: the doctor's own scan

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -743,8 +744,18 @@ class GeminiShapedAdapter:
     def effort_alias(self, effort: str) -> str:
         return effort.strip().lower()
 
-    def context_files(self, home: Path) -> tuple[Path, ...]:
-        return (home / "GEMINI.md",)
+    def instruction_files(self, home: Path, cwd: Path | None) -> tuple[Path, ...]:
+        """``GEMINI.md`` in its config dir, then in each folder from the ``.git`` ceiling down
+        to ``cwd``, or ``cwd`` alone outside one (docs/cli/gemini-md.md; memoryDiscovery.ts
+        sets the ceiling). The files below ``cwd`` load as it reaches them, not at the start,
+        and a project's only in a folder it trusts."""
+        if cwd is None:
+            return (home / "GEMINI.md",)
+        start = cwd.resolve()
+        ancestors = [start, *start.parents]
+        root = next((f for f in ancestors if os.path.exists(f / ".git")), None)
+        folders = reversed(ancestors[: ancestors.index(root) + 1]) if root is not None else [start]
+        return (home / "GEMINI.md", *(folder / "GEMINI.md" for folder in folders))
 
     def browser_tools(self, home: Path) -> list[str] | None:
         return []

@@ -595,8 +595,9 @@ class FakeAgentAdapter:
     def effort_alias(self, effort: str) -> str:
         return effort.strip().lower()
 
-    def context_files(self, home: Path) -> tuple[Path, ...]:
-        return (home / "FAKE.md",)
+    def instruction_files(self, home: Path, cwd: Path | None) -> tuple[Path, ...]:
+        # Its home's FAKE.md, and the one of the folder it starts in, none above: unlike both.
+        return (home / "FAKE.md", *((cwd.resolve() / "FAKE.md",) if cwd is not None else ()))
 
     def browser_tools(self, home: Path) -> list[str] | None:
         return []

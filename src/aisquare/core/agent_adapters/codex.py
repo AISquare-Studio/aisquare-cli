@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import tomllib
 from collections.abc import Mapping, Sequence
@@ -992,8 +993,23 @@ class CodexAdapter:
             f"mcp_servers.{TUI_TOOLS_SERVER}.enabled=false",
         ]
 
-    def context_files(self, home: Path) -> tuple[Path, ...]:
-        return (home / "AGENTS.override.md", home / "AGENTS.md")
+    def instruction_files(self, home: Path, cwd: Path | None) -> tuple[Path, ...]:
+        """Measured on 0.164.0 (SCOPE #113 main-274, N4, and again for the blank and empty
+        files and a folder outside git): in ``$CODEX_HOME``, the first of
+        ``AGENTS.override.md`` and ``AGENTS.md`` that reads and is not blank; then, from the
+        git root (the nearest folder up from ``cwd`` holding ``.git``, the filesystem's root
+        aside) down to ``cwd``, or in ``cwd`` alone outside a repository, each folder's
+        ``AGENTS.override.md`` where it is there, an empty one included, which leaves that
+        folder's ``AGENTS.md`` unread, else its ``AGENTS.md``. Nothing above the git root, and
+        never a ``CLAUDE.md``. Codex's defaults: no ``project_root_markers`` or
+        ``project_doc_fallback_filenames`` of the operator's, and at most
+        ``project_doc_max_bytes`` (32 KiB) of the project's files. ``cwd`` ``None``: both
+        of the config dir's, the override first."""
+        own = tuple(home / name for name in _INSTRUCTIONS)
+        if cwd is None:
+            return own
+        loaded = next((path for path in own if _not_blank(path)), None)
+        return (*((loaded,) if loaded is not None else ()), *_project_instructions(cwd))
 
     def browser_tools(self, home: Path) -> list[str] | None:
         """Codex's own browser, as ``config.toml`` in ``home`` has it: the ``browser_use``
@@ -1533,6 +1549,46 @@ class CodexAdapter:
                 *(excluded if keep_out else ()),
             )
         )
+
+
+#: The instruction files of one folder, in Codex's precedence: the override replaces the other.
+_INSTRUCTIONS = ("AGENTS.override.md", "AGENTS.md")
+
+
+def _not_blank(path: Path) -> bool:
+    """Whether ``path`` reads as text that is not blank, as Codex reads its home's files."""
+    try:
+        return bool(path.read_text(encoding="utf-8").strip())
+    except (OSError, UnicodeError):
+        return False
+
+
+def _there(path: Path) -> bool:
+    """Whether ``path`` is a file or a link, as Codex looks for a folder's instruction file
+    (``symlink_metadata``): a folder of that name is passed over."""
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return False
+    return stat.S_ISREG(mode) or stat.S_ISLNK(mode)
+
+
+def _project_instructions(cwd: Path) -> list[Path]:
+    """The project's instruction files a session in ``cwd`` loads
+    (:meth:`CodexAdapter.instruction_files`): one per folder from the git root down."""
+    try:
+        start = cwd.resolve()
+    except (OSError, RuntimeError):
+        start = cwd.absolute()
+    ancestors = [start, *start.parents]
+    # `.git` by `metadata`, a link followed; the filesystem's root, which has no parent, never.
+    root = next((f for f in ancestors if f != f.parent and os.path.exists(f / ".git")), None)
+    folders = reversed(ancestors[: ancestors.index(root) + 1]) if root is not None else [start]
+    return [
+        found
+        for folder in folders
+        if (found := next((folder / n for n in _INSTRUCTIONS if _there(folder / n)), None))
+    ]
 
 
 def _leaves(settings: Mapping[str, Any], prefix: str = "") -> list[tuple[str, Any]]:

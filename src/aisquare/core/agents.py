@@ -185,7 +185,7 @@ def _specs(config_dir: Path | None = None) -> list[AgentSpec]:
                 adapter.id,
                 adapter.label,
                 directory,
-                adapter.context_files(directory),
+                adapter.instruction_files(directory, None),
                 directory / adapter.settings_name,
                 adapter.capabilities.hooks,
                 adapter.capabilities.first_context_file_only,

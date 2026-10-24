@@ -153,7 +153,7 @@ def test_codex_instructions_cannot_break_claude_detection(
 
 def test_codex_context_precedence_agrees_in_detection_and_ingestion(tmp_path: Path) -> None:
     adapter = get_adapter("codex")
-    override, normal = adapter.context_files(tmp_path)
+    override, normal = adapter.instruction_files(tmp_path, None)
     normal.write_text("normal instructions")
     override.write_text(" \n")
     assert agents.context_files("codex", tmp_path) == [normal]
@@ -485,3 +485,63 @@ def test_exporters_are_scoped_to_the_effective_home_and_selected_profile(
     assert not codex_config.operator_configured(home, ["--profile", "clean"])
     (home / "config.toml").write_text('[otel]\nexporter="none"\n')
     assert codex_config.operator_configured(home, [])
+
+
+def test_codex_loads_its_homes_first_text_then_one_file_a_folder_from_the_git_root(
+    tmp_path: Path,
+) -> None:
+    """Measured on 0.164.0 (one ``codex exec`` request each, markers in every file): the home's
+    blank override gives way to its AGENTS.md; nothing above the git root; the root's override
+    replaces its AGENTS.md; a folder's EMPTY override still leaves its AGENTS.md unread; a
+    folder of the override's name is passed over; outside a repository, cwd's alone."""
+    home = tmp_path / "home"
+    repo = tmp_path / "proj" / "repo"
+
+    def write(path: Path, text: str = "marker\n") -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    write(home / "AGENTS.override.md", "  \n")
+    write(home / "AGENTS.md")
+    write(tmp_path / "proj" / "AGENTS.md")
+    write(repo / "AGENTS.md")
+    write(repo / "AGENTS.override.md")
+    write(repo / "mid" / "AGENTS.md")
+    write(repo / "mid" / "sub" / "AGENTS.override.md", "")
+    write(repo / "mid" / "sub" / "AGENTS.md")
+    (repo / "mid" / "sub" / "deep" / "AGENTS.override.md").mkdir(parents=True)
+    write(repo / "mid" / "sub" / "deep" / "AGENTS.md")
+    (repo / ".git").mkdir()
+    write(tmp_path / "plain" / "AGENTS.md")
+    write(tmp_path / "plain" / "a" / "AGENTS.md")
+    codex = get_adapter("codex")
+
+    assert codex.instruction_files(home, repo / "mid" / "sub" / "deep") == (
+        home / "AGENTS.md",
+        repo / "AGENTS.override.md",
+        repo / "mid" / "AGENTS.md",
+        repo / "mid" / "sub" / "AGENTS.override.md",
+        repo / "mid" / "sub" / "deep" / "AGENTS.md",
+    )
+    assert codex.instruction_files(home, tmp_path / "plain" / "a") == (
+        home / "AGENTS.md",
+        tmp_path / "plain" / "a" / "AGENTS.md",
+    )
+    assert codex.instruction_files(home, None) == (home / "AGENTS.override.md", home / "AGENTS.md")
+    (home / "AGENTS.md").unlink()
+    assert codex.instruction_files(home, tmp_path / "plain" / "a") == (
+        tmp_path / "plain" / "a" / "AGENTS.md",
+    )
+
+
+def test_claude_code_loads_its_config_dirs_claude_md_then_main_s_chain_up_to_the_root(
+    tmp_path: Path,
+) -> None:
+    """main's ``core.injection.claude_md_files``, for the config dir the session runs on."""
+    home, cwd = tmp_path / "cfg", tmp_path / "a" / "b"
+    cwd.mkdir(parents=True)
+    names = ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md")
+    chain = [cwd, *cwd.parents]
+    files = get_adapter("claude-code").instruction_files(home, cwd)
+    assert files == (home / "CLAUDE.md", *(folder / name for folder in chain for name in names))
+    assert get_adapter("claude-code").instruction_files(home, None) == (home / "CLAUDE.md",)

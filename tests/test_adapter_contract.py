@@ -700,7 +700,7 @@ def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_
     assert key not in {"Enter", "C-m", "KPEnter", "Space"}, key
     mcp = adapter.mcp_args("/opt/aisquare", ["serve", "--stdio"], ["AISQUARE_HOME"])
     assert "/opt/aisquare" in json.dumps([mcp.args, dict(mcp.env), mcp.settings])
-    files = adapter.context_files(tmp_path)
+    files = adapter.instruction_files(tmp_path, None)
     assert files and all(path.parent == tmp_path for path in files)
     assert adapter.disable_native_teams(), "the fleet keeps the agent's own sub-agent teams off"
     telemetry = adapter.telemetry_args("http://127.0.0.1:9/v1/logs")
@@ -1539,6 +1539,64 @@ def test_a_session_read_in_two_scans_adds_up_to_one_read_whole(
         assert reader.usage(tmp_path / "missing.jsonl", None).delta.is_empty()
         restarted = reader.usage(whole, "not a state").delta.to_dict()
         assert _rounded(restarted) == _rounded(expected.delta.to_dict()), what
+
+
+# --- the instruction files a session loads -----------------------------------------------
+
+
+def test_the_instruction_files_are_the_config_dirs_then_the_projects_up_the_chain(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``instruction_files`` (C3 of SCOPE #113 main-274): with no ``cwd``, the config dir's own
+    alone (what ``agents connect`` imports); in a session started in a repository's subfolder,
+    with every file it names there in every folder, the config dir's first, then the
+    project's, each in ``cwd`` or a folder above it, absolute, and none read past the home
+    and that chain."""
+    home, repo = tmp_path / "home", tmp_path / "work" / "repo"
+    cwd = repo / "pkg" / "sub"
+    cwd.mkdir(parents=True)
+    home.mkdir()
+    (repo / ".git").mkdir()
+    own = adapter.instruction_files(home, None)
+    assert own and all(path.parent == home for path in own), own
+    chain = [cwd.resolve(), *cwd.resolve().parents]
+    named = {path.relative_to(home) for path in own}
+    for path in adapter.instruction_files(home, cwd):
+        folder = next((f for f in chain if path.is_relative_to(f)), None)
+        if folder is not None and not path.is_relative_to(home):
+            named.add(path.relative_to(folder))
+    for folder in (home.resolve(), *chain[: chain.index(tmp_path.resolve())]):
+        for name in named:
+            (folder / name).parent.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_text(f"{folder.name}: instructions\n", encoding="utf-8")
+    files = adapter.instruction_files(home, cwd)
+    assert all(path.is_absolute() for path in files), files
+    at_home = [path for path in files if path.is_relative_to(home)]
+    assert at_home and files[: len(at_home)] == tuple(at_home), "the config dir's come first"
+    project = files[len(at_home) :]
+    assert project, f"{adapter.id} loads nothing of the project it starts in"
+    assert all(any(path.is_relative_to(folder) for folder in chain) for path in project), project
+    assert any(path.parent == cwd.resolve() for path in project), "cwd's own is loaded"
+
+
+def test_the_merges_claude_only_gates_agree_with_the_slots_that_replace_them(
+    adapter: AgentAdapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``capabilities.transcript_usage`` and ``memory_files`` (the #274 merge's gates) beside the
+    slots that replace them: an agent whose usage the shared code records answers
+    ``transcript_reader.usage``, and one whose ``memory_files`` the session start trims by
+    names the same files, for the hook's own config dir, as its ``instruction_files``."""
+    capabilities = adapter.capabilities
+    if capabilities.transcript_usage:
+        assert _reader(adapter).usage(tmp_path / "none.jsonl", None) is not None
+    if capabilities.memory_files is not None:
+        home = tmp_path / "config"
+        monkeypatch.setenv(adapter.home_env, str(home))
+        cwd = tmp_path / "repo" / "sub"
+        cwd.mkdir(parents=True)
+        loaded = tuple(capabilities.memory_files(cwd))
+        assert loaded == adapter.instruction_files(home, cwd)
+        assert tuple(capabilities.memory_files(None)) == adapter.instruction_files(home, None)
 
 
 # --- a dialog of the agent's own that only its screen shows, for Remote's needs-you cards ---

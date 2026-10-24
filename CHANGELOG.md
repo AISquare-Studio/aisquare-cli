@@ -332,6 +332,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The snapshot's per-file index is one file per line**, and a skeleton never
+  outlives its pack. `index.json` was one JSON line, so an agent's Read returned
+  it whole and a Grep for one path matched every file: on #282's over-budget
+  fixture (402 files) every agent read the whole 34k-character index. It is still
+  one JSON array, so every reader parses it as before. A pack that makes no
+  skeleton (the compressed pack, or a full pack whose skeleton failed) now removes
+  the one an earlier run left, which no longer matched the tree.
+
 - **A stale `ANTHROPIC_BASE_URL` is found wherever it hides, and one command removes
   it** (#51). Tracing's proxy can outlive Disable in a Claude `settings.json` `env`
   block (the plain claude's, a managed slot's, a project's shared or local file), a

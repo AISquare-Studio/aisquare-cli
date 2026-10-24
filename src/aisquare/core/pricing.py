@@ -53,6 +53,10 @@ class Price:
     output: float
     cache_read: float = 0.1
     """A multiple of the input price, as the pricing page states it."""
+    cache_write: float | None = CACHE_WRITE_5M
+    """A cache write of the shorter TTL, a multiple of the input price (Anthropic's 5-minute
+    1.25x, its 1-hour write being :data:`CACHE_WRITE_1H`); ``None`` where the source lists
+    no cache-write price, which leaves a request that wrote to the cache unpriced."""
     long_prompt_over: int | None = None
     """Prompt size (input + cache reads + cache writes) above which ``long_*`` apply."""
     long_input: float | None = None
@@ -141,18 +145,7 @@ def cost_usd(model: str, tokens: RequestTokens, *, prompt: int | None = None) ->
 
     ``prompt`` is the request's whole prompt where ``tokens`` are only part of it (an
     increase a later line of the same request added): the tier is the request's."""
-    price = price_for(model)
-    if price is None:
-        return None
-    input_rate, output_rate = price.rates(tokens.prompt if prompt is None else prompt)
-    per_mtok = (
-        tokens.input * input_rate
-        + tokens.cache_write_5m * input_rate * CACHE_WRITE_5M
-        + tokens.cache_write_1h * input_rate * CACHE_WRITE_1H
-        + tokens.cache_read * input_rate * price.cache_read
-        + tokens.output * output_rate
-    )
-    return per_mtok / 1_000_000
+    return cost_at(price_for(model), tokens, prompt=prompt)
 
 
 def weighted_tokens(
@@ -161,7 +154,33 @@ def weighted_tokens(
     """Cost-weighted tokens of one request (see the module docstring), or ``None``
     for an unpriced model — the output weight IS a price ratio. ``prompt`` as for
     :func:`cost_usd`."""
-    price = price_for(model)
+    return weighted_at(price_for(model), tokens, prompt=prompt)
+
+
+def cost_at(
+    price: Price | None, tokens: RequestTokens, *, prompt: int | None = None
+) -> float | None:
+    """:func:`cost_usd` at ``price`` (an agent's own table's, ``AgentAdapter.price_table``):
+    ``None`` with no price, and for a request that wrote to the cache at a price that
+    lists no cache write."""
+    if price is None or (tokens.cache_write and price.cache_write is None):
+        return None
+    input_rate, output_rate = price.rates(tokens.prompt if prompt is None else prompt)
+    per_mtok = (
+        tokens.input * input_rate
+        + tokens.cache_write_5m * input_rate * (price.cache_write or 0.0)
+        + tokens.cache_write_1h * input_rate * CACHE_WRITE_1H
+        + tokens.cache_read * input_rate * price.cache_read
+        + tokens.output * output_rate
+    )
+    return per_mtok / 1_000_000
+
+
+def weighted_at(
+    price: Price | None, tokens: RequestTokens, *, prompt: int | None = None
+) -> float | None:
+    """:func:`weighted_tokens` at ``price``; ``None`` with no price. The weights are fixed,
+    whatever the price lists of cache writes."""
     if price is None:
         return None
     input_rate, output_rate = price.rates(tokens.prompt if prompt is None else prompt)

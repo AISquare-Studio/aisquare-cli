@@ -31,6 +31,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionArgs,
     PermissionIntent,
     PluginInstall,
+    PriceTable,
     SandboxWrites,
     ScreenPrompt,
     SkillDirs,
@@ -52,6 +53,7 @@ from aisquare.core.agent_adapters.types import (
 )
 from aisquare.core.codex_accounts import CodexAccounts, _records_from_end, approvals_reviewer
 from aisquare.core.paths import expand_user
+from aisquare.core.pricing import Price
 
 #: ``model_reasoning_effort`` levels Codex names (0.162.1). Which of them a model
 #: takes is Codex's to say, so another level is passed through with a note.
@@ -234,6 +236,66 @@ def _filesystem_table(value: object) -> dict[str, str]:
 #: recorded as this one).
 REVIEWERS = {"ask": "user", "auto": "auto_review"}
 #: The hook events AISquare installs (``capabilities.hooks``) and decodes.
+#: OpenAI's Standard-tier list prices for the models Codex runs, read 2026-10-24 off
+#: https://developers.openai.com/api/docs/pricing (:func:`_openai`).
+PRICES_AS_OF = "2026-10-24"
+PRICES_SOURCE = (
+    "OpenAI API list prices, Standard tier: https://developers.openai.com/api/docs/pricing "
+    "(read 2026-10-24)"
+)
+#: The page's short context: ≤272K input tokens.
+_SHORT_CONTEXT = 272_000
+
+
+def _openai(
+    input: float,
+    output: float,
+    cached: float,
+    long: tuple[float, float] | None = None,
+    *,
+    writes: bool = True,
+) -> Price:
+    """A row as the page states it, USD per million tokens: input, output and cached input,
+    and the long context's input and output (over :data:`_SHORT_CONTEXT`; its cached input
+    is the same multiple). A cache write is the 30-minute one, 1.25x input (the 12-hour one
+    is 2.5x, a TTL Codex's records do not tell apart); ``writes=False`` where the page lists
+    none (``-``, or no such column), and a request that wrote to the cache is unpriced."""
+    long_input, long_output = long if long is not None else (None, None)
+    return Price(
+        input,
+        output,
+        cache_read=cached / input,
+        cache_write=1.25 if writes else None,
+        long_prompt_over=_SHORT_CONTEXT if long is not None else None,
+        long_input=long_input,
+        long_output=long_output,
+    )
+
+
+PRICES: Mapping[str, Price] = MappingProxyType(
+    {
+        "gpt-6.1-sol": _openai(2.00, 10.00, 0.10, (4.00, 15.00)),
+        "gpt-6-luna": _openai(0.10, 0.50, 0.01, (0.20, 0.75)),
+        "gpt-6-sol": _openai(2.00, 10.00, 0.20, (4.00, 15.00)),
+        "gpt-6-astra": _openai(10.00, 50.00, 1.00, (20.00, 75.00)),
+        "gpt-5.6-sol": _openai(4.00, 20.00, 0.40, (8.00, 30.00)),
+        "gpt-5.6-terra": _openai(2.00, 12.00, 0.20, (4.00, 18.00)),
+        "gpt-5.6-luna": _openai(0.20, 1.20, 0.02, (0.40, 1.80)),
+        "gpt-5.5": _openai(5.00, 30.00, 0.50, (10.00, 45.00), writes=False),
+        "gpt-5.4": _openai(2.50, 15.00, 0.25, (5.00, 22.50), writes=False),
+        "gpt-5.3-codex": _openai(1.75, 14.00, 0.175, writes=False),
+    }
+)
+#: A dated snapshot's suffix (``gpt-5.4-2026-03-05``), priced as its model.
+_SNAPSHOT = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+
+def canonical_model(model: str) -> str:
+    """``model`` as :data:`PRICES` keys it: lower case, no provider prefix (``openai/``), no
+    snapshot date."""
+    return _SNAPSHOT.sub("", model.strip().lower().rpartition("/")[2])
+
+
 _EVENTS = {
     "SessionStart": "session_start",
     "UserPromptSubmit": "prompt",
@@ -614,6 +676,10 @@ class CodexAdapter:
         from aisquare.core.agent_adapters.codex_config import CodexTelemetry
 
         return CodexTelemetry()
+
+    price_table: PriceTable | None = PriceTable(
+        PRICES_AS_OF, PRICES_SOURCE, PRICES, canonical_model
+    )
 
     @property
     def transcript_reader(self) -> AgentTranscript:

@@ -54,6 +54,7 @@ from aisquare.core.agent_adapters.types import (
     NativeChoice,
     PermissionArgs,
     PermissionIntent,
+    PriceTable,
     SandboxWrites,
     ScreenPrompt,
     SkillDirs,
@@ -69,6 +70,7 @@ from aisquare.core.agent_adapters.types import (
 )
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
+from aisquare.core.pricing import Price
 from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
 
 #: Its native event names, each the kind it decodes to.
@@ -83,6 +85,33 @@ EVENTS: dict[str, EventKind] = {
     "turn.error": "turn_failed",
     "notice": "notification",
 }
+
+
+def _fake_model(model: str) -> str:
+    """A model as its price list keys it: its ids are written ``fake:<name>``, by any case."""
+    return model.strip().lower().removeprefix("fake:")
+
+
+#: Its own rates, unlike both real agents' (no cached-input discount past half, no cache
+#: write it bills, a long prompt from 50K): a service that prices it from another agent's
+#: table, or by a model id's prefix, prices it wrong.
+PRICES = PriceTable(
+    "2026-10-24",
+    "the fake agent's own rate card (tests/fake_agent.py)",
+    {
+        "swift": Price(1.0, 4.0, cache_read=0.5, cache_write=None),
+        "deep": Price(
+            6.0,
+            30.0,
+            cache_read=0.5,
+            cache_write=None,
+            long_prompt_over=50_000,
+            long_input=9.0,
+            long_output=45.0,
+        ),
+    },
+    _fake_model,
+)
 
 
 class FakeTranscript:
@@ -366,6 +395,7 @@ class FakeAgentAdapter:
     plugin = None
     telemetry_reader: TelemetryReader | None = None
     transcript_reader: AgentTranscript | None = FakeTranscript()
+    price_table: PriceTable | None = PRICES
     screen: AgentScreen | None = AgentScreen(
         dialog_on_screen=dialog_on_screen,
         screen_prompt=screen_prompt,

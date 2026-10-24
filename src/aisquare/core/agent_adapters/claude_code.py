@@ -6,7 +6,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from aisquare.core import harness, paths
+from aisquare.core import harness, paths, pricing
 from aisquare.core.agent_adapters.claude_screen import (
     box_drawn,
     box_idle,
@@ -30,6 +30,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionArgs,
     PermissionIntent,
     PluginInstall,
+    PriceTable,
     SandboxWrites,
     SessionFlags,
     SkillDirs,
@@ -240,6 +241,14 @@ class ClaudeCodeAdapter:
     )
 
     telemetry_reader = None  # no native telemetry: its traffic goes through the proxy
+    #: Anthropic's list prices, the table ``core.pricing`` keeps (``PRICES_SOURCE``), by
+    #: reference until the shared code prices through this slot alone.
+    price_table: PriceTable | None = PriceTable(
+        pricing.PRICES_AS_OF,
+        pricing.PRICES_SOURCE,
+        MappingProxyType(pricing.PRICES),
+        pricing.canonical_model,
+    )
 
     @property
     def transcript_reader(self) -> AgentTranscript:

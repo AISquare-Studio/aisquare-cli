@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from aisquare.core.agent_adapters.transcripts import PendingTool, TranscriptTail
     from aisquare.core.claude_accounts import FailedTurn, LimitNotice
     from aisquare.core.claude_sharing import TrustScope
+    from aisquare.core.pricing import Price, RequestTokens
     from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
 
 
@@ -969,6 +970,47 @@ class AgentTranscript(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class PriceTable:
+    """One agent's model prices (:attr:`AgentAdapter.price_table`): each model its sessions
+    run, at its list price in USD per million tokens (``core.pricing.Price``), keyed by
+    :attr:`canonical`'s spelling of a model id, read off :attr:`source` on :attr:`as_of`.
+    A model it does not list is unpriced, never priced like its neighbour: its tokens are
+    counted and reported apart (``core.pricing``). An agent's figure is its API's list
+    price whatever its login pays with (a plan's credits), as Claude Code's is."""
+
+    as_of: str
+    """The day the prices were read (``YYYY-MM-DD``)."""
+    source: str
+    """Where they were read: a page, a file of the agent's own, and how."""
+    prices: Mapping[str, Price]
+    canonical: Callable[[str], str]
+    """A model id as :attr:`prices` keys it (no date, no provider prefix, no context-window
+    suffix): every key of :attr:`prices` is its own canonical spelling."""
+
+    def price_for(self, model: str) -> Price | None:
+        """The list price of ``model``, or ``None`` where the table does not have it."""
+        return self.prices.get(self.canonical(model))
+
+    def cost_usd(
+        self, model: str, tokens: RequestTokens, *, prompt: int | None = None
+    ) -> float | None:
+        """The list price of one request of ``model`` in USD (``core.pricing.cost_at``), or
+        ``None``: an unpriced model, or a cache write at a price that lists none."""
+        from aisquare.core import pricing
+
+        return pricing.cost_at(self.price_for(model), tokens, prompt=prompt)
+
+    def weighted_tokens(
+        self, model: str, tokens: RequestTokens, *, prompt: int | None = None
+    ) -> float | None:
+        """Cost-weighted tokens of one request of ``model`` (``core.pricing.weighted_at``),
+        or ``None`` for an unpriced model."""
+        from aisquare.core import pricing
+
+        return pricing.weighted_at(self.price_for(model), tokens, prompt=prompt)
+
+
 class TelemetryReader(Protocol):
     """One agent's native OpenTelemetry, as AISquare's per-launch receiver reads it
     (``services.native_telemetry``; :attr:`AgentAdapter.telemetry_reader`, with
@@ -1022,7 +1064,7 @@ class AgentAdapter(Protocol):
     :meth:`telemetry_args` with ``telemetry_reader``. Personas: :meth:`system_prompt_args`,
     :meth:`skill_dirs`, :meth:`headless_call` with :meth:`headless_answer`. Accounts:
     ``accounts``.
-    Remote: ``transcript_reader``. ``capabilities`` says the rest.
+    Remote: ``transcript_reader``. Usage: ``price_table``. ``capabilities`` says the rest.
     """
 
     id: str
@@ -1082,6 +1124,14 @@ class AgentAdapter(Protocol):
         """The reader of the agent's session transcript, for Remote's needs-you cards and
         Transcript tab; ``None`` for an agent whose transcript AISquare cannot read (its
         rows then have no card a transcript decides, and an empty page)."""
+        ...
+
+    @property
+    def price_table(self) -> PriceTable | None:
+        """The list prices of the models its sessions run (:class:`PriceTable`), which its
+        token usage is priced at: Claude Code's Anthropic table, Codex's OpenAI one.
+        ``None`` for an agent whose prices AISquare has not read: every model of it is
+        unpriced, and reported apart."""
         ...
 
     def config_dir(self, home: Path, env: Mapping[str, str], explicit: Path | None = None) -> Path:

@@ -69,6 +69,7 @@ from aisquare.core.agent_adapters.types import (
 )
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
 from aisquare.core.orchestrator import team_project
+from aisquare.core.pricing import RequestTokens
 from aisquare.core.store import store_session
 from aisquare.models import ClaudeAccount
 from aisquare.services import agent_events, first_run, store_broker
@@ -169,6 +170,34 @@ RECORDED_HEADLESS: dict[str, dict[str, str | None]] = {
 }
 
 
+#: One request each adapter prices off its own table (``price_table``), spelled as its sessions
+#: name the model, with the list price and cost-weighted tokens it comes to: Codex's is N1's
+#: first response of SCOPE #113 main-274 on the default gpt-6.1-sol (400 uncached of 1000
+#: input, 600 cached, 51 out): 400 x 2.00 + 600 x 0.10 + 51 x 10.00 per MTok, and
+#: 400 + 0.1 x 600 + 5 x 51.
+EXPECTED_PRICES: dict[str, tuple[str, RequestTokens, float, float]] = {
+    "claude-code": (
+        "claude-opus-5-5[1m]",
+        RequestTokens(input=400, cache_write_5m=100, cache_read=600, output=51),
+        0.003240,
+        840.0,
+    ),
+    "codex": ("gpt-6.1-sol", RequestTokens(input=400, cache_read=600, output=51), 0.001370, 715.0),
+    "fake-agent": (
+        "FAKE:swift",
+        RequestTokens(input=400, cache_read=600, output=51),
+        0.000904,
+        664.0,
+    ),
+    "gemini-shaped": (
+        "models/gemini-2.5-pro",
+        RequestTokens(input=400, cache_read=600, output=51),
+        0.001085,
+        868.0,
+    ),
+}
+
+
 def _expected(adapter: AgentAdapter, intent: PermissionIntent, flags: list[str]) -> list[str]:
     store = adapter.store_access(intent.write, store_dir())
     return [arg for flag in flags for arg in (store if flag == STORE else [flag])]
@@ -236,6 +265,8 @@ def test_every_registered_adapter_brings_its_fixtures() -> None:
     for name in REGISTERED:
         assert (FIXTURES / f"{name}.json").is_file(), f"tests/fixtures/agent_events/{name}.json"
         assert name in EXPECTED_PERMISSIONS, f"add {name} to EXPECTED_PERMISSIONS"
+        if get_adapter(name).price_table is not None:
+            assert name in EXPECTED_PRICES, f"add {name} to EXPECTED_PRICES"
 
 
 def test_identity_and_config_home(adapter: AgentAdapter, tmp_path: Path) -> None:
@@ -1357,6 +1388,52 @@ def test_send_keys_asks_before_the_keys_that_end_the_agent_on_one_press(
         assert adapter.label in str(refused.extra["reason"]), "the page asks in its name"
 
 
+# --- token usage and its prices -------------------------------------------------------
+
+
+def test_a_price_table_is_dated_sourced_and_lists_each_model_under_its_own_name(
+    adapter: AgentAdapter,
+) -> None:
+    """``price_table`` (C2 of SCOPE #113 main-274): a dated, sourced table whose every row is
+    positive and keyed by its own canonical spelling, whose long-context rates come whole,
+    and which prices nothing it does not list."""
+    from datetime import date
+
+    table = adapter.price_table
+    if table is None:
+        return
+    assert date.fromisoformat(table.as_of) and table.source
+    assert table.prices, f"{adapter.id}'s table lists no model"
+    for model, price in table.prices.items():
+        assert table.canonical(model) == model, model
+        assert table.price_for(model) is price
+        assert min(price.input, price.output, price.cache_read) > 0, model
+        assert price.cache_write is None or price.cache_write > 0, model
+        long = (price.long_prompt_over, price.long_input, price.long_output)
+        assert all(value is None for value in long) or all(v and v > 0 for v in long), model
+    assert table.price_for("no-such-model-7") is None
+    assert table.cost_usd("no-such-model-7", RequestTokens(input=1)) is None
+
+
+def test_a_request_is_priced_at_its_agents_own_list_price(adapter: AgentAdapter) -> None:
+    """The adapter's table prices a request of its model as its sessions spell it (a
+    context-window suffix, a provider prefix, another case), and a cache write at a row that
+    lists none leaves the request unpriced, its cost-weighted tokens still counted."""
+    table = adapter.price_table
+    if table is None:
+        return
+    model, tokens, cost, weighted = EXPECTED_PRICES[adapter.id]
+    assert table.cost_usd(model, tokens) == pytest.approx(cost)
+    assert table.weighted_tokens(model, tokens) == pytest.approx(weighted)
+    for name, price in table.prices.items():
+        wrote = RequestTokens(input=10, cache_write_5m=10, output=1)
+        if price.cache_write is None:
+            assert table.cost_usd(name, wrote) is None, name
+            assert table.weighted_tokens(name, wrote) is not None, name
+        else:
+            assert table.cost_usd(name, wrote) is not None, name
+
+
 # --- a dialog of the agent's own that only its screen shows, for Remote's needs-you cards ---
 
 
@@ -1968,6 +2045,7 @@ def test_the_guide_names_every_member_of_the_protocol() -> None:
         "PermissionArgs",
         "SessionFlags",
         "Vocabulary",
+        "PriceTable",
     }
     missing = []
     for node in tree.body:

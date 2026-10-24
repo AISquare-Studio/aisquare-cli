@@ -67,6 +67,7 @@ from aisquare.core.agent_adapters.types import (
     NativeChoice,
     PermissionArgs,
     PermissionIntent,
+    PriceTable,
     SandboxWrites,
     SkillDirs,
     TelemetryReader,
@@ -81,6 +82,7 @@ from aisquare.core.agent_adapters.types import (
 )
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
+from aisquare.core.pricing import Price
 from aisquare.core.shell_line import command_line
 from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage, UsageWindow
 
@@ -122,6 +124,38 @@ VALUE_OPTIONS = frozenset(
         "-p",
         "--prompt",
     }
+)
+
+
+#: Its list prices, USD per million tokens, from ai.google.dev/gemini-api/docs/pricing ("Last
+#: updated 2026-10-22 UTC", as SCOPE #113 main-274 read it): input, output, cached input, and
+#: the dearer rates of a prompt over 200K tokens. Its context caching bills storage by the
+#: hour, no per-token write: none is listed, and a request that wrote one is unpriced.
+PRICES = PriceTable(
+    "2026-10-22",
+    "Gemini API list prices: ai.google.dev/gemini-api/docs/pricing (last updated 2026-10-22)",
+    {
+        "gemini-3.1-pro-preview": Price(
+            2.00,
+            12.00,
+            cache_read=0.1,
+            cache_write=None,
+            long_prompt_over=200_000,
+            long_input=4.00,
+            long_output=18.00,
+        ),
+        "gemini-2.5-pro": Price(
+            1.25,
+            10.00,
+            cache_read=0.1,
+            cache_write=None,
+            long_prompt_over=200_000,
+            long_input=2.50,
+            long_output=15.00,
+        ),
+        "gemini-3-flash-preview": Price(0.50, 3.00, cache_read=0.1, cache_write=None),
+    },
+    lambda model: model.strip().lower().removeprefix("models/"),
 )
 
 
@@ -503,6 +537,7 @@ class GeminiShapedAdapter:
     plugin = None
     telemetry_reader: TelemetryReader | None = GeminiShapedTelemetry()
     transcript_reader: AgentTranscript | None = GeminiShapedTranscript()
+    price_table: PriceTable | None = PRICES
     screen: AgentScreen | None = None  # its screens are unmeasured: none is read
     capabilities = AgentCapabilities(
         launch_inputs=(CONFIG, ".agents"),

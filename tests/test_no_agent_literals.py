@@ -152,10 +152,6 @@ BASELINE: dict[str, dict[Shape, int]] = {
     "core/codex_accounts.py": {"binary": 1, "env": 1, "dir": 3},
     "core/config.py": {"flag": 3},
     "core/harness.py": {"env": 30, "dir": 1, "flag": 5},
-    # Main #274's solo-session context trim (#346): the CLAUDE.md files Claude Code loads
-    # itself (`injection.claude_md_files`, the Claude adapter's `capabilities.memory_files`;
-    # merge of #274 into #113). Parity phase: SCOPE #113 main-274, the context trim.
-    "core/injection.py": {"dir": 2},
     "core/spawn.py": {"env": 1},
     "services/diagnostics.py": {"env": 1, "dir": 4},
     "services/explainability.py": {"env": 4},

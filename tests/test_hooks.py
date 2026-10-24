@@ -169,6 +169,46 @@ def test_session_start_leaves_out_a_preference_a_claude_md_already_loads(
     assert "use make check" not in result.stdout
 
 
+def test_a_codex_session_start_leaves_out_what_its_agents_md_loads_and_keeps_a_claude_md(
+    runner: CliRunner, work_dir: Path, tmp_path: Path
+) -> None:
+    """SCOPE #113 274, L3: the session start asks the session's own agent which files it
+    loads (``instruction_files``, for the home its hook names). A Codex session loads its
+    home's ``AGENTS.md`` and the repo's, never a ``CLAUDE.md``: what an ``AGENTS.md`` holds is
+    left out, and a preference only a ``CLAUDE.md`` holds is Codex's to read here, so it
+    stays. It read Claude Code's files for every agent."""
+    (work_dir / ".git").mkdir()
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "AGENTS.md").write_text("# graphify\n- run graphify on /graphify\n")
+    (work_dir / "AGENTS.md").write_text("use make check\n")
+    (work_dir / "CLAUDE.md").write_text("use the claude-only tox\n")
+    for text in (
+        "# graphify\n- run graphify on /graphify",
+        "use make check",
+        "use the claude-only tox",
+        "prefer tabs",
+    ):
+        runner.invoke(app, ["context", "add", text, "--user"])
+    payload = {
+        "hook_event_name": "SessionStart",
+        "session_id": "019a2b3c-4d5e-7f60-8a1b-0000000000aa",
+        "cwd": str(work_dir),
+        "source": "startup",
+        "model": "gpt-test",
+    }
+
+    result = runner.invoke(
+        app, ["hook", "codex", "--config-dir", str(home)], input=json.dumps(payload)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "prefer tabs" in result.stdout
+    assert "use the claude-only tox" in result.stdout
+    assert "graphify" not in result.stdout
+    assert "use make check" not in result.stdout
+
+
 def test_the_claude_md_chain_is_the_hook_inputs_cwd_not_the_hook_process_cwd(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -174,6 +174,7 @@ def _dispatch(
             agent=adapter.id,
             native_session_id=event.session_id,
             account=account,
+            config_dir=config_dir,
         )
     if event.kind == "prompt":
         source = adapter.id

@@ -344,14 +344,6 @@ class AgentCapabilities:
     Code's shapes. The shared code's gate until it records through the agent's own reader
     (:meth:`AgentTranscript.usage`, which every adapter with this flag answers: Codex's reads
     its rollout already), when the flag goes."""
-    memory_files: Callable[[Path | None], list[Path]] | None = None
-    """The files the agent loads into a session started in a directory itself (Claude
-    Code's ``CLAUDE.md`` chain, ``core.injection.claude_md_files``): the user-pool entries
-    they hold already are left out of the session-start block (#346), which carried them
-    twice. ``None``: every entry is injected, as before. The session start's gate until it
-    asks :meth:`AgentAdapter.instruction_files` (the session's config dir and ``cwd``, which
-    Codex answers with its ``AGENTS.md`` chain), when this goes: Claude Code's two agree for
-    the hook's own config dir."""
     positional_prompt: bool = False
     """The first prompt is a positional argument (Codex); otherwise the fleet types it."""
     first_context_file_only: bool = False

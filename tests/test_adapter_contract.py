@@ -1579,24 +1579,42 @@ def test_the_instruction_files_are_the_config_dirs_then_the_projects_up_the_chai
     assert any(path.parent == cwd.resolve() for path in project), "cwd's own is loaded"
 
 
-def test_the_merges_claude_only_gates_agree_with_the_slots_that_replace_them(
+def test_the_merges_claude_only_gate_agrees_with_the_slot_that_replaces_it(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``capabilities.transcript_usage`` (the #274 merge's gate, until lane 274-L2) beside the
+    slot that replaces it: an agent whose usage the shared code records answers
+    ``transcript_reader.usage``."""
+    if adapter.capabilities.transcript_usage:
+        assert _reader(adapter).usage(tmp_path / "none.jsonl", None) is not None
+
+
+def test_the_session_start_leaves_out_what_the_agents_own_instruction_files_hold(
     adapter: AgentAdapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``capabilities.transcript_usage`` and ``memory_files`` (the #274 merge's gates) beside the
-    slots that replace them: an agent whose usage the shared code records answers
-    ``transcript_reader.usage``, and one whose ``memory_files`` the session start trims by
-    names the same files, for the hook's own config dir, as its ``instruction_files``."""
-    capabilities = adapter.capabilities
-    if capabilities.transcript_usage:
-        assert _reader(adapter).usage(tmp_path / "none.jsonl", None) is not None
-    if capabilities.memory_files is not None:
-        home = tmp_path / "config"
-        monkeypatch.setenv(adapter.home_env, str(home))
-        cwd = tmp_path / "repo" / "sub"
-        cwd.mkdir(parents=True)
-        loaded = tuple(capabilities.memory_files(cwd))
-        assert loaded == adapter.instruction_files(home, cwd)
-        assert tuple(capabilities.memory_files(None)) == adapter.instruction_files(home, None)
+    """SCOPE #113 274, L3: a user preference the agent loads itself, from the first of its
+    config dir's ``instruction_files``, is left out of the session
+    start's block; one no file of its holds stays. Every agent, by its own files."""
+    from aisquare.services import hooks
+
+    home = tmp_path / "config"
+    home.mkdir()
+    cwd = tmp_path / "repo"
+    (cwd / ".git").mkdir(parents=True)
+    monkeypatch.chdir(cwd)
+    # The config dir's first (no ``cwd``: every one it may read there, in its precedence),
+    # which a Codex session reads by what is on disk.
+    [first, *_] = adapter.instruction_files(home, None)
+    first.parent.mkdir(parents=True, exist_ok=True)
+    first.write_text("# loaded\n- the agent reads this itself\n", encoding="utf-8")
+    for text in ("# loaded\n- the agent reads this itself", "prefer tabs"):
+        added = CliRunner().invoke(app, ["context", "add", text, "--user"])
+        assert added.exit_code == 0, added.output
+
+    block = hooks.session_start_context(cwd, agent=adapter.id, config_dir=home)
+
+    assert "prefer tabs" in block
+    assert "the agent reads this itself" not in block, (adapter.id, first)
 
 
 # --- a dialog of the agent's own that only its screen shows, for Remote's needs-you cards ---

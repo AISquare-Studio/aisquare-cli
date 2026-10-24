@@ -25,6 +25,7 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from aisquare.core import agents as agents_core
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import insights, launch_seal, selfcli
 from aisquare.core import spawn as spawn_core
@@ -83,8 +84,12 @@ def session_start_context(
     agent: str = "claude-code",
     native_session_id: str | None = None,
     account: str | None = None,
+    config_dir: Path | None = None,
 ) -> str:
-    """Context to inject at Claude Code ``SessionStart`` (empty if nothing useful)."""
+    """Context to inject at an agent's ``SessionStart`` (empty if nothing useful).
+
+    ``config_dir`` is the home the session runs on (the hook's ``--config-dir``), whose
+    instruction files the agent loads itself; else the agent's own as this shell names it."""
     from aisquare.core.agent_adapters import recorded_adapter
 
     began = datetime.now(tz=UTC)  # the row's started_at: when the hook was entered
@@ -110,11 +115,10 @@ def session_start_context(
         recorded = project_service.tracked(store, project)
         stored = store.get_project(project.id) is not None
     # Not what the agent loads itself: a CLAUDE.md section `agents connect` imported rode
-    # every request of Claude Code's twice. Only for an agent that says which files those
-    # are (`capabilities.memory_files`).
-    memory = adapter.capabilities.memory_files if adapter is not None else None
-    if memory is not None:
-        entries = without_loaded_preferences(entries, memory(cwd))
+    # every request of Claude Code's twice, an AGENTS.md one Codex's (SCOPE #113 274, L3).
+    if adapter is not None:
+        home = config_dir or adapter.config_dir(agents_core.home(), os.environ)
+        entries = without_loaded_preferences(entries, adapter.instruction_files(home, cwd))
     block = build_block(entries, project) if entries else ""
     team_block = (
         team_service.hook_session_start(

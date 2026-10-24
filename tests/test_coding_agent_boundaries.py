@@ -537,7 +537,8 @@ def test_codex_loads_its_homes_first_text_then_one_file_a_folder_from_the_git_ro
 def test_claude_code_loads_its_config_dirs_claude_md_then_main_s_chain_up_to_the_root(
     tmp_path: Path,
 ) -> None:
-    """main's ``core.injection.claude_md_files``, for the config dir the session runs on."""
+    """main's CLAUDE.md chain (its ``core.injection.claude_md_files``), for the config dir the
+    session runs on."""
     home, cwd = tmp_path / "cfg", tmp_path / "a" / "b"
     cwd.mkdir(parents=True)
     names = ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md")

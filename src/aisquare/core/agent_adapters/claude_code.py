@@ -49,7 +49,6 @@ from aisquare.core.claude_accounts import (
     INSTALL_COMMAND,
     ClaudeCodeAccounts,
 )
-from aisquare.core.injection import claude_md_files
 
 #: ``--permission-mode`` for each approvals intent (``core.config.CLAUDE_PERMISSION_MODES``);
 #: ``never`` is ``bypassPermissions`` with a ``full`` write scope, else ``dontAsk``.
@@ -209,7 +208,6 @@ class ClaudeCodeAdapter:
         model_proxy=True,
         model_ladders=True,
         transcript_usage=True,
-        memory_files=claude_md_files,
         legacy_fleet_args=True,
         value_options=frozenset(
             {
@@ -466,8 +464,7 @@ class ClaudeCodeAdapter:
     def instruction_files(self, home: Path, cwd: Path | None) -> tuple[Path, ...]:
         """Its config dir's ``CLAUDE.md``, then in each folder from ``cwd`` (resolved) up to
         the filesystem's root its ``CLAUDE.md``, ``CLAUDE.local.md`` and ``.claude/CLAUDE.md``:
-        main's ``core.injection.claude_md_files``, every one of them loaded that is there,
-        for the config dir the session runs on rather than the hook's own."""
+        every one of them loaded that is there, for the config dir the session runs on."""
         files = [home / "CLAUDE.md"]
         if cwd is not None:
             try:

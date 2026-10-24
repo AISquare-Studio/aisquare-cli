@@ -424,13 +424,13 @@ def test_a_line_under_an_aisquare_path_is_not_parsed_for_its_cwd(
     }
     _write(transcript, title, marked)
     parsed: list[str] = []
-    real = usage.json.loads
+    real = json.loads
 
     def loads(raw: Any, *args: Any, **kwargs: Any) -> Any:
         parsed.append(raw if isinstance(raw, str) else raw.decode())
         return real(raw, *args, **kwargs)
 
-    monkeypatch.setattr(usage.json, "loads", loads)
+    monkeypatch.setattr(json, "loads", loads)  # the module usage parses with
     found, _ = usage.scan(transcript)
     monkeypatch.undo()
     assert [json.loads(line)["type"] for line in parsed] == ["user"]

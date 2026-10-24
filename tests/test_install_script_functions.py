@@ -477,6 +477,7 @@ def test_the_chrome_devtools_extra_is_current_from_its_node_floor(
     exactly 22.11. Under --no-agent, so the Node half is all there is to the extra.
     """
     stubs = stub_dir(tmp_path, "bin", "node", body=f'printf "{node_version}\\n"')
+    stub_dir(tmp_path, "bin", "npx")
     result = sh(
         "WANT_AGENT=0; survey >/dev/null 2>&1; "
         "if extra_call current chrome-devtools; then echo current; else echo install; fi",
@@ -1188,16 +1189,21 @@ def test_an_empty_answer_takes_the_default_and_opens_the_ui(
 # ---------------------------------------------------------------------------
 
 
-def test_no_project_adds_nothing_to_the_expected_amber(tmp_path: Path) -> None:
-    """`--no-project`, and a run from a directory that is no git repo (§4), register no
-    project, and no doctor row is amber for that any more: the `snapshot` row that was
-    went with the codebase snapshot. Expecting it still would hide a real `snapshot`
-    row from an older doctor; there is none to hide, so the set is `brain` either way."""
+def test_the_expected_amber_is_brain_and_the_releases_snapshot_rows(tmp_path: Path) -> None:
+    """`brain`, and the installed release's rows for the codebase snapshot this tree
+    removed (`repomix`, `snapshot`, `tiktoken`), with a project or without one: the
+    script installs the latest release, whose doctor still has them (review of #399,
+    MAJOR 1). This tree's own doctor has none, and an expected row that is not amber is
+    good news, so a cell grading this tree is unaffected."""
     for setup in ("WANT_PROJECT=0", 'WANT_PROJECT=1; PROJECT_DIR=""', "PROJECT_DIR=/p"):
         result = sh(f"{setup}; expected_amber; echo", path=base_path(tmp_path))
-        assert result.stdout.strip() == "brain", (
+        assert result.stdout.strip() == "brain repomix snapshot tiktoken", (
             f"with `{setup}` expected_amber said {result.stdout.strip()!r}\n{result.stderr}"
         )
+    flags = sh("WANT_AGENT=0; WANT_SYSTEM_DEPS=0; expected_amber; echo", path=base_path(tmp_path))
+    assert flags.stdout.strip() == "brain claude-code gh repomix snapshot tiktoken tmux", (
+        "alphabetical, as doctor_amber sorts"
+    )
 
 
 def test_doctor_amber_is_sorted_so_the_comparison_is_about_the_set(tmp_path: Path) -> None:
@@ -1247,7 +1253,7 @@ def test_the_short_circuit_fires_for_a_current_no_project_machine(
         ("tmux", "tmux 3.7c"),
         ("gh", "gh version 2.97.0 (2026-07-31)"),
         ("git", "git version 2.55.0"),
-        *([("node", "v26.7.0")] if node else []),
+        *([("node", "v26.7.0"), ("npx", "10.9.2")] if node else []),
         ("curl", ""),
     ):
         script = versions / name
@@ -1489,14 +1495,22 @@ def test_no_system_deps_expects_the_checks_it_skipped(tmp_path: Path) -> None:
 
 
 def _summary_then_handoff(
-    tmp_path: Path, assignments: str, *, env: dict[str, str] | None = None
+    tmp_path: Path,
+    assignments: str,
+    *,
+    env: dict[str, str] | None = None,
+    npx: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    """`summary` then `handoff` after a run with a project; ``assignments`` say the rest."""
+    """`summary` then `handoff` after a run with a project; ``assignments`` say the rest.
+    An `npx` is on PATH unless ``npx=False``: the Chrome DevTools extra needs one."""
+    path = base_path(tmp_path)
+    if npx:
+        path = f"{stub_dir(tmp_path, 'npxbin', 'npx')}:{path}"
     return sh(
         f"DRY_RUN=0; WANT_PROJECT=1; PROJECT_DIR=/p; UNEXPECTED=0; {assignments}; "
         'summary; echo "UNEXPECTED=$UNEXPECTED"; handoff',
         env=env,
-        path=base_path(tmp_path),
+        path=path,
         no_terminal=True,
     )
 
@@ -1527,23 +1541,26 @@ def test_an_extra_this_run_chose_and_could_not_install_is_unexpected(tmp_path: P
 
 
 @pytest.mark.parametrize(
-    ("assignments", "unexpected"),
+    ("assignments", "npx", "unexpected"),
     [
-        ("CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=22.12.0; DOCTOR_AMBER=brain", 0),
+        ("CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=22.12.0; DOCTOR_AMBER=brain", True, 0),
         # Not chosen: a machine with no Node is what the opt-in leaves.
-        ("CHOSEN_EXTRAS=; NODE_VERSION=; DOCTOR_AMBER=brain", 0),
-        ("WANT_SYSTEM_DEPS=0; CHOSEN_EXTRAS=; NODE_VERSION=; DOCTOR_AMBER=brain", 0),
+        ("CHOSEN_EXTRAS=; NODE_VERSION=; DOCTOR_AMBER=brain", False, 0),
+        ("WANT_SYSTEM_DEPS=0; CHOSEN_EXTRAS=; NODE_VERSION=; DOCTOR_AMBER=brain", False, 0),
         # --dry-run installs nothing, so nothing failed to install.
-        ("CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=; DOCTOR_AMBER=brain; DRY_RUN=1", 0),
+        ("CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=; DOCTOR_AMBER=brain; DRY_RUN=1", False, 0),
         # Chosen, and what the run left is below the floor: it did not install.
-        ("CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=22.11.0; DOCTOR_AMBER=brain", 1),
+        ("CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=22.11.0; DOCTOR_AMBER=brain", True, 1),
+        # Chosen, Node at the floor, and no npx to start the MCP with (review of #399,
+        # m5): npm did not install, and that is the extra not installing.
+        ("CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=22.12.0; DOCTOR_AMBER=brain", False, 1),
     ],
-    ids=["installed", "not-chosen", "no-system-deps", "dry-run", "too-old"],
+    ids=["installed", "not-chosen", "no-system-deps", "dry-run", "too-old", "no-npx"],
 )
 def test_only_a_chosen_extra_that_is_missing_is_named(
-    tmp_path: Path, assignments: str, unexpected: int
+    tmp_path: Path, assignments: str, npx: bool, unexpected: int
 ) -> None:
-    result = _summary_then_handoff(tmp_path, assignments)
+    result = _summary_then_handoff(tmp_path, assignments, npx=npx)
 
     assert f"UNEXPECTED={unexpected}" in result.stdout, result.stdout
     assert result.returncode == (2 if unexpected else 0)
@@ -1613,12 +1630,13 @@ def test_an_extra_is_installed_only_when_chosen(
         assert "optional; --with chrome-devtools adds it" in result.stdout + result.stderr
 
 
-def test_a_current_extra_is_reported_and_its_npm_left_alone_unless_chosen(
+def test_npm_is_installed_only_for_a_run_that_chose_the_extra_and_a_failure_is_said(
     tmp_path: Path,
 ) -> None:
-    """A machine that has the Node is told so whether or not it chose the extra; the npm
-    beside it is installed only for a run that chose it, since an extra nobody asked for
-    installs nothing."""
+    """A Node at the floor with no npx (npm is its own package on Arch, Alpine and
+    Debian's nodejs): a run that did not choose the extra installs nothing, and one that
+    did installs npm beside it. When npm then brings no npx, that is said, where it
+    happened (review of #399, m5): the summary's "see the warning above" points at it."""
     log = tmp_path / "calls.log"
     pkg = stub_dir(tmp_path, "pkg", "apt-get", body=f'printf "%s\\n" "$*" >>"{log}"\nexit 0')
 
@@ -1630,10 +1648,16 @@ def test_a_current_extra_is_reported_and_its_npm_left_alone_unless_chosen(
         )
         return result.stdout + result.stderr
 
-    assert "Node 22.12.0 — current" in run("")
-    assert not log.exists(), "npm was installed for a run that did not choose Node"
-    assert "Node 22.12.0 — current" in run("chrome-devtools")
-    assert "npm" in log.read_text(encoding="utf-8"), "a run that chose Node gets its npx"
+    unchosen = run("")
+    assert "not installing the Chrome DevTools MCP" in unchosen, unchosen
+    assert not log.exists(), "npm was installed for a run that did not choose the extra"
+    chosen = " ".join(run("chrome-devtools").split())
+    assert "Node 22.12.0 — current" in chosen
+    assert "install -y npm" in log.read_text(encoding="utf-8"), "the chosen run gets its npx"
+    assert (
+        "Node 22.12.0 is here but npx is not, and npm did not install: the Chrome DevTools"
+        " MCP is started with npx. Install it with: sudo apt install npm"
+    ) in chosen
 
 
 @pytest.mark.parametrize("flag", [["--with", "chrome-devtools"], ["--with=chrome-devtools"]])
@@ -1649,18 +1673,138 @@ def test_with_chooses_an_extra_and_refuses_one_there_is_not(
     assert "--with nope: not an optional extra (there is: chrome-devtools)" in refused.stderr
 
 
+def test_an_extra_named_twice_is_chosen_once(tmp_path: Path) -> None:
+    """`--with X --with=X`, and X does not install: one unexpected, named once (review of
+    #399, n3)."""
+    result = _summary_then_handoff(
+        tmp_path,
+        "parse_args --with chrome-devtools --with=chrome-devtools; NODE_VERSION=; "
+        "DOCTOR_AMBER=brain",
+    )
+
+    assert "UNEXPECTED=1" in result.stdout, result.stdout
+    assert result.stdout.count(_NODE_FAILED) == 1, result.stdout
+
+
+def test_the_extras_prompt_defaults_to_no(tmp_path: Path) -> None:
+    """Enter at the prompt installs nothing: `confirm`'s default is what Enter, `--yes`
+    and a run with no terminal all answer (review of #399, m6)."""
+    result = sh(
+        "NODE_VERSION=; extras_are_asked() { return 0; }; "
+        'confirm() { printf "ASKED [%s] default=%s\\n" "$1" "$2"; [ "$2" = y ]; }; '
+        "install_node() { echo NODE-INSTALLED; }; install_extras",
+        path=base_path(tmp_path),
+        no_terminal=True,
+    )
+
+    assert (
+        "ASKED [Install the Chrome DevTools MCP for browser tools: Node 22.12+, registered with"
+        " Claude Code?] default=n"
+    ) in result.stdout, result.stdout + result.stderr
+    assert "NODE-INSTALLED" not in result.stdout
+
+
+def _short_circuits(tmp_path: Path, assignments: str, amber: str, *, npx: bool) -> str:
+    """`short_circuit` alone, on a machine whose CLI, uv and system packages are current
+    and whose doctor answers ``amber``: SHORT when it says "Nothing to do", else WORK."""
+    path = f"{stub_dir(tmp_path, 'sccli', 'aisquare')}:{base_path(tmp_path)}"
+    if npx:
+        path = f"{stub_dir(tmp_path, 'scnpx', 'npx')}:{path}"
+    result = sh(
+        "INSTALL_TARGET=$PYPI_PACKAGE; CLI_ACTION=current; CLI_VERSION=0.9.0; PIN_VERSION=; "
+        "FORCE=0; UPGRADE_ALL=0; UV_VERSION=0.12.3; TMUX_ACTION=current; GH_ACTION=current; "
+        "GIT_ACTION=current; WANT_AGENT=0; WANT_PROJECT=0; NODE_VERSION=; CHOSEN_EXTRAS=; "
+        f"doctor_amber() {{ printf '%s' '{amber}'; }}; {assignments or ':'}; "
+        "if short_circuit; then echo SHORT; else echo WORK; fi",
+        path=path,
+        no_terminal=True,
+    )
+    return result.stdout
+
+
+@pytest.mark.parametrize(
+    ("assignments", "npx", "expected"),
+    [
+        ("", False, "SHORT"),
+        # Chosen, and not there: work to do, however current the rest (m6).
+        ("CHOSEN_EXTRAS=chrome-devtools", False, "WORK"),
+        ("CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=22.12.0", True, "SHORT"),
+        # Node at the floor and no npx: the short-circuit used to fire here, past
+        # _ensure_npx, and a missing npm was never installed or reported (m5).
+        ("CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=22.12.0", False, "WORK"),
+    ],
+    ids=["not-chosen", "chosen-no-node", "chosen-and-there", "chosen-no-npx"],
+)
+def test_a_chosen_extra_that_is_not_there_is_work_for_the_short_circuit(
+    tmp_path: Path, assignments: str, npx: bool, expected: str
+) -> None:
+    said = _short_circuits(tmp_path, assignments, "brain", npx=npx)
+
+    assert said.strip().splitlines()[-1] == expected, said
+
+
+#: The installed release's rows for the codebase snapshot (`RELEASE_ERA_AMBER`).
+_RELEASE_ROWS = ("brain repomix", "brain snapshot", "brain tiktoken", "brain repomix snapshot")
+
+
+@pytest.mark.parametrize("amber", _RELEASE_ROWS)
+@pytest.mark.parametrize(
+    "flags",
+    [
+        "",
+        "WANT_SYSTEM_DEPS=0",
+        "WANT_PROJECT=0; PROJECT_DIR=",
+        "WANT_SYSTEM_DEPS=0; WANT_PROJECT=0",
+    ],
+    ids=["default", "no-system-deps", "no-project", "no-system-deps-no-project"],
+)
+def test_the_installed_releases_snapshot_rows_are_expected(
+    tmp_path: Path, amber: str, flags: str
+) -> None:
+    """install.sh installs the latest RELEASE, and up to 0.9.0 its doctor has `repomix`
+    (amber with a Node below 22, which this script no longer upgrades unasked, or no
+    npm), `snapshot` (0.8.2, with no project or no Node to pack with) and `tiktoken`.
+    Review of #399, MAJOR 1: `--yes` on Debian 12's own Node 18 exited 2 on `repomix`.
+    They are expected, under every flag, and the summary says why in one line."""
+    result = _summary_then_handoff(tmp_path, f"{flags or ':'}; DOCTOR_AMBER='{amber}'")
+
+    assert "UNEXPECTED=0" in result.stdout, result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"expected: {amber}" in result.stdout, result.stdout
+    era = "/".join(amber.split()[1:])
+    assert f"  {era} — this release's rows for the codebase snapshot," in result.stdout
+    assert "Not expected" not in result.stdout
+
+
+@pytest.mark.parametrize("flags", ["", "WANT_SYSTEM_DEPS=0"], ids=["default", "no-system-deps"])
+def test_the_installed_releases_snapshot_rows_do_not_stop_the_short_circuit(
+    tmp_path: Path, flags: str
+) -> None:
+    """A current machine whose release doctor shows them still has nothing to do, and
+    the one line says why."""
+    said = _short_circuits(tmp_path, flags, "brain repomix snapshot", npx=False)
+
+    assert said.strip().splitlines()[-1] == "SHORT", said
+    assert (
+        "except brain repomix snapshot (gbrain is out of scope; this release's"
+        " codebase-snapshot rows, gone in the next)"
+    ) in said
+
+
 def test_the_plan_names_an_extra_only_as_it_will_happen(tmp_path: Path) -> None:
     """Chosen: the plan says it installs, and what it registers with Claude Code is listed
     with what the run writes. Not chosen, with nothing to ask on: nothing is promised.
     Already there: not named at all. Under --no-agent the plan says the MCP is not
     registered."""
 
+    npx = stub_dir(tmp_path, "npxbin", "npx")
+
     def plan(assignments: str) -> str:
         return sh(
             f"CLI_ACTION=current; CLI_VERSION=0.9.0; UV_VERSION=0.12.3; WANT_AGENT=1; "
             f"WANT_SYSTEM_DEPS=0; DEVTOOLS_MCP=absent; {assignments}; banner",
             env={"HOME": str(tmp_path), "CLAUDE_CONFIG_DIR": ""},
-            path=base_path(tmp_path),
+            path=f"{npx}:{base_path(tmp_path)}",
             no_terminal=True,
         ).stdout
 
@@ -1958,20 +2102,29 @@ def test_claude_is_asked_to_register_only_for_a_run_that_chose_it_and_can(
         assert says in result.stdout, result.stdout
 
 
-def test_node_without_npx_is_not_registered_and_says_what_to_install(tmp_path: Path) -> None:
-    """A Node with no npx cannot start the MCP (npm is its own package on several
-    distributions), so registering it would leave Claude Code a server that fails."""
+def test_a_node_without_npx_is_not_registered_and_the_extra_did_not_install(
+    tmp_path: Path,
+) -> None:
+    """A Node with no npx cannot start the MCP, so registering it would leave Claude Code
+    a server that fails. npm not installing is the extra not installing: said once,
+    where it happened, and the run exits 2 naming the extra."""
     stubs, log = _fake_claude(tmp_path)
     (stubs / "npx").unlink()
+    pkg = stub_dir(tmp_path, "pkg", "apt-get")
 
-    result = _register(tmp_path, "PKG=apt", path=f"{stubs}:{base_path(tmp_path)}")
+    result = _register(
+        tmp_path,
+        "PKG=apt; PKG_SUDO=; install_extras",
+        path=f"{stubs}:{pkg}:{base_path(tmp_path)}",
+    )
 
     warning = " ".join(result.stderr.split())
     assert _mcp_adds(log) == []
-    assert "Node is here but npx is not" in warning
-    assert "Install npm (sudo apt install npm)" in warning
-    assert "WARNINGS=1 UNEXPECTED=0" in result.stdout
-    assert result.returncode == 0
+    assert "is here but npx is not, and npm did not install" in warning
+    assert "Chrome DevTools MCP not registered: there is no npx to start it" in result.stdout
+    assert _NODE_FAILED in result.stdout
+    assert "WARNINGS=1 UNEXPECTED=1" in result.stdout
+    assert result.returncode == 2
 
 
 def test_the_mcp_is_registered_after_claude_code_is_installed(source_text: str) -> None:

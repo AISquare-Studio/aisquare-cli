@@ -76,7 +76,8 @@ MIN_NODE_MAJOR=22
 MIN_NODE_MINOR=12
 # The Chrome DevTools extra's Node floor. chrome-devtools-mcp@1.12.0 declares
 # "engines": {"node": "^20.19.0 || ^22.12.0 || >=23"}, and 22 is the line
-# NodeSource and fnm are asked for, so 22.12. Debian 12 ships Node 18 and Ubuntu
+# NodeSource and fnm are asked for, so 22.12. Not the ^20.19 it also accepts:
+# Node 20 reached end of life on 2026-04-30. Debian 12 ships Node 18 and Ubuntu
 # 22.04 ships 12, which is why this is a real floor and not a formality (§1.4).
 # The MCP is registered as @latest, so a release that raises its engines needs
 # this raised with it.
@@ -99,8 +100,19 @@ DEVTOOLS_MCP_PACKAGE="chrome-devtools-mcp@latest"
 OPTIONAL_EXTRAS="chrome-devtools"
 
 # `brain` is always expected to be amber when this finishes — gbrain is out of
-# scope (§0.4). `expected_amber` adds to it when the run asked for no project.
+# scope (§0.4). `expected_amber` adds to it what the flags asked for.
 EXPECTED_AMBER="brain"
+
+# The installed RELEASE's rows for the codebase snapshot this tree removed
+# (#399): `repomix`, `snapshot` and `tiktoken`. This script installs the latest
+# release, and every release up to 0.9.0 has them. `repomix` goes amber with a
+# Node below 22 or no npm, which this script no longer upgrades unless the
+# Chrome DevTools extra is chosen; `snapshot` in 0.8.2 with no project or no Node
+# to pack with. Neither is a state this run caused or could fix. Measured by the
+# review of #399: `--yes` on Debian 12's own Node 18 exited 2 on `repomix`. The
+# same reasoning keeps `--with tiktoken` above install_cli; drop both once a
+# release without these rows is the latest on PyPI.
+RELEASE_ERA_AMBER="repomix snapshot tiktoken"
 
 # --- options (§3.5) ---------------------------------------------------------
 
@@ -879,6 +891,12 @@ short_circuit() {
             _why="${_why}system deps skipped"
             ;;
     esac
+    case " $_amber " in
+        *" repomix "* | *" snapshot "* | *" tiktoken "*)
+            [ -n "$_why" ] && _why="$_why; "
+            _why="${_why}this release's codebase-snapshot rows, gone in the next"
+            ;;
+    esac
     [ -n "$_why" ] || _why="all expected"
     if [ -n "$_amber" ]; then
         note "doctor: everything ok except $_amber ($_why)"
@@ -1060,8 +1078,9 @@ Open a new shell and rerun, or add it by hand:
 # that goes amber without it on a machine with Node, which the Chrome DevTools
 # extra makes.
 # Measured in the container matrix: run 4 upgraded to the release, its doctor
-# called tiktoken unexpected, and the run exited 2. Drop `--with tiktoken` here
-# once a release without that row is the latest on PyPI.
+# called tiktoken unexpected, and the run exited 2. Drop `--with tiktoken` here,
+# with RELEASE_ERA_AMBER and docs/install.md's by-hand line, once a release
+# without that row is the latest on PyPI.
 
 install_cli() {
     _target=$INSTALL_TARGET
@@ -1484,9 +1503,10 @@ extra_chosen() {
 }
 
 # `--with $1`: choose that extra, refusing a name OPTIONAL_EXTRAS does not have.
+# Named twice, it is chosen once, so a failure is not counted or named twice.
 choose_extra() {
     case " $OPTIONAL_EXTRAS " in
-        *" $1 "*) CHOSEN_EXTRAS="$CHOSEN_EXTRAS $1" ;;
+        *" $1 "*) extra_chosen "$1" || CHOSEN_EXTRAS="$CHOSEN_EXTRAS $1" ;;
         *) die "--with $1: not an optional extra (there is: $OPTIONAL_EXTRAS)" ;;
     esac
 }
@@ -1514,11 +1534,15 @@ extra_chrome_devtools_line() {
     fi
 }
 
-# Nothing to do: Node at the floor, and the MCP registered, not this run's to
-# register (--no-agent), or already answered for by register_devtools_mcp, whose
-# failure only warns.
+# Nothing to do: Node at the floor with the npx that starts the MCP, and the MCP
+# registered, not this run's to register (--no-agent), or already answered for by
+# register_devtools_mcp, whose failure only warns. npx is part of it because on
+# Arch, Alpine and Debian's own nodejs npm is a package of its own: a Node 22
+# with no npx was otherwise "current", short-circuited past _ensure_npx, and a
+# failed npm install was never reported (review of #399).
 extra_chrome_devtools_current() {
     _node_ok || return 1
+    have npx || return 1
     [ "$WANT_AGENT" = 0 ] || [ "$DEVTOOLS_MCP" != absent ]
 }
 
@@ -1649,13 +1673,22 @@ _reread_node() {
 # Node 22 with no npx cannot start it, for a reason that reads like a Node
 # problem and is not one — so npx is checked, and npm installed beside node when
 # it is missing.
+#
+# Called only for a run that chose the extra, so a failure is the extra's: it
+# warns here, and `summary` names the extra as not installed (exit 2).
 _ensure_npx() {
     have npx && return 0
-    [ -n "$PKG" ] || return 1
-    debug "node is present but npx is not — installing npm"
-    pkg_install npm || return 1
-    hash -r 2>/dev/null || true
-    have npx
+    if [ -n "$PKG" ]; then
+        debug "node is present but npx is not — installing npm"
+        if pkg_install npm; then
+            [ "$DRY_RUN" = 1 ] && return 0
+            hash -r 2>/dev/null || true
+            have npx && return 0
+        fi
+    fi
+    warn "Node $NODE_VERSION is here but npx is not, and npm did not install: the Chrome
+         DevTools MCP is started with npx. Install it with: $(pkg_hint npm)"
+    return 1
 }
 
 # Fetch and run NodeSource's own setup script. From a FILE rather than a pipe,
@@ -1813,8 +1846,8 @@ register_devtools_mcp() {
         return 0
     fi
     if ! have npx; then
-        warn "Chrome DevTools MCP not registered: Node is here but npx is not, so it could not start.
-         Install npm ($(pkg_hint npm)), then: $(devtools_mcp_add_shown)"
+        # _ensure_npx has warned, and the summary names the extra.
+        note "Chrome DevTools MCP not registered: there is no npx to start it"
         return 0
     fi
     if ! have claude; then
@@ -1891,11 +1924,10 @@ DOCTOR_AMBER=""
 
 # The checks that SHOULD be amber when this run finishes, sorted.
 #
-# `brain` always. The others only for what the flags asked for. Before #346 a
-# `snapshot` row was amber whenever no project was registered, and with the set
-# hardcoded to `brain`, a `--no-project` machine could NEVER reach §3.9.4's
-# "nothing to do" however current it was; that row went with the codebase
-# snapshot (#399).
+# `brain` always, and the release's codebase-snapshot rows (RELEASE_ERA_AMBER)
+# while a release that has them is what this installs. The others only for what
+# the flags asked for. A row expected and not amber is good news: the caller asks
+# "nothing amber that we did not expect", never for an equal set.
 expected_amber() {
     # Alphabetical, to read the same way as doctor_amber's sorted output.
     _exp="$EXPECTED_AMBER"
@@ -1917,6 +1949,7 @@ expected_amber() {
         # provisioning run with that flag failed its caller, always.
         _exp="$_exp gh"
     fi
+    _exp="$_exp $RELEASE_ERA_AMBER"
     if [ "$WANT_SYSTEM_DEPS" = 0 ]; then
         _exp="$_exp tmux"
     fi
@@ -2316,6 +2349,18 @@ summary() {
                 note "             the fleet UI needs tmux, and PRs need gh."
                 ;;
         esac
+        # The release's rows for what the next one removes (RELEASE_ERA_AMBER),
+        # named as one, and only those actually amber.
+        _sm_era=""
+        for _check in $_expected; do
+            case " $RELEASE_ERA_AMBER " in
+                *" $_check "*) _sm_era="${_sm_era:+$_sm_era/}$_check" ;;
+            esac
+        done
+        if [ -n "$_sm_era" ]; then
+            note "  $_sm_era — this release's rows for the codebase snapshot,"
+            note "             which the next release removes. Nothing to do."
+        fi
     fi
 
     if [ -n "$_actionable" ]; then

@@ -35,6 +35,7 @@ REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "install.sh"
 CELL = REPO / "tests/install/cell.sh"
 CELL_NONROOT = REPO / "tests/install/cell-nonroot.sh"
+RELEASE_CELL = REPO / "tests/install/release-cell.sh"
 MATRIX = REPO / "tests/install/matrix.sh"
 #: The Claude Code plugin's hook launcher: Claude Code runs it with `sh`, which is
 #: dash on Debian and Ubuntu, so it is held to the same rules.
@@ -48,7 +49,7 @@ PLUGIN_HOOK = REPO / "plugins/claude-code/scripts/aisquare-hook"
 #: the tree was checked by nothing at all. Anything added to tests/install/ must
 #: be added here; the test below asserts that, so the next omission fails
 #: instead of going unnoticed.
-POSIX_SCRIPTS = (SCRIPT, CELL, CELL_NONROOT, MATRIX, PLUGIN_HOOK)
+POSIX_SCRIPTS = (SCRIPT, CELL, CELL_NONROOT, RELEASE_CELL, MATRIX, PLUGIN_HOOK)
 
 
 @pytest.fixture(scope="module")

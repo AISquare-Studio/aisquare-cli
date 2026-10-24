@@ -242,7 +242,7 @@ def test_the_manager_stops_and_reaps_finished_agents_and_everyone_else_cleans_up
     manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
     assert (
         "An agent whose task is done, with no queued task that fits it: "
-        "`aisquare fleet stop <label>`, then `aisquare fleet reap`"
+        "`aisquare fleet stop <label> --as abcd1234`, then `aisquare fleet reap`"
     ) in manager
     assert "removes the agent's worktree once its work is pushed" in manager
     assert manager.index("`aisquare fleet reap` again") < manager.index('"READY:')
@@ -281,13 +281,16 @@ def test_the_boards_cycles_name_their_project_in_every_fleet_command() -> None:
 
     manager = cycle("manager")
     assert (
-        "`aisquare fleet stop --project calm-otter <label>`, then "
+        "`aisquare fleet stop --project calm-otter <label> --as abcd1234`, then "
         "`aisquare fleet reap --project calm-otter`"
     ) in manager
     verbs = re.findall(r"aisquare fleet (\S+)( --project calm-otter)?", manager)
-    assert {verb for verb, _named in verbs} == {"spawn", "tell", "switch", "stop", "reap"}
-    assert all(named for _verb, named in verbs), verbs
-    assert "`aisquare fleet spawn --project calm-otter tester`" in manager
+    # `fleet adopt` (#290) takes no --project: the conversation's own directory names it.
+    scoped = [(verb, named) for verb, named in verbs if verb != "adopt"]
+    assert {verb for verb, _named in scoped} == {"spawn", "tell", "switch", "stop", "reap"}
+    assert all(named for _verb, named in scoped), verbs
+    assert "`aisquare fleet adopt --list`" in manager
+    assert "`aisquare fleet spawn --project calm-otter tester --task <id> --as abcd1234`" in manager
     assert "`fleet spawn " not in manager, "the short forms name it too"
     coder = cycle("coder")
     assert "`aisquare fleet reap --project calm-otter` removes that." in coder
@@ -309,6 +312,15 @@ def test_the_lane_rules_substitute_commands_run_as_written() -> None:
     assert '--detail "<contract>" --as abcd1234' in planner
     manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
     assert "aisquare fleet spawn coder --task <id> --as abcd1234" in manager
+
+
+def test_the_manager_cycle_names_the_label_limit() -> None:
+    """#291: the manager adds a task, then spawns for it, so a label it learns is too long
+    only from the spawn's refusal leaves that task without an agent. The cycle says so first."""
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
+    assert (
+        "Labels are unique, descriptive and at most 24 characters (coder-auth, not coder-2)."
+    ) in manager
 
 
 def test_no_role_reads_never_merge_twice() -> None:
@@ -1624,3 +1636,41 @@ def test_spawn_printed_command_joins_each_paste_to_its_own_run(
     assert len(started) == 2, proc.stdout
     assert started == keyed, "the agent must start on the id its Run is keyed by"
     assert started[0] != started[1], "a second paste must not reuse the first session's id"
+
+
+@pytest.mark.parametrize("role", ["tester", "runner", "validator"])
+def test_the_checking_roles_name_the_memory_gate_only_when_it_is_set(role: str) -> None:
+    """#283: `fleet gate` is in the tester's and validator's cycle once `[fleet]
+    test_gate_mb` is set, and not before: a line naming a gate nobody configured is noise."""
+    from aisquare.core.config import load_config, save_config
+
+    assert "fleet gate" not in " ".join(harness.role_cycle(role, "abcd1234", fleet=unscoped))
+    config = load_config()
+    config.fleet.test_gate_mb = 4096
+    save_config(config)
+    assert "aisquare fleet gate -- <command>" in " ".join(
+        harness.role_cycle(role, "abcd1234", fleet=unscoped)
+    )
+    assert "fleet gate" not in " ".join(harness.role_cycle("coder", "abcd1234", fleet=unscoped))
+
+
+def test_the_coder_cycle_names_task_show_and_the_manager_puts_the_contract_in_detail() -> None:
+    """#74: the coder was told to read a contract no command it ran had printed, and nothing
+    named `task show`; the manager pasted contracts into spawn prompts instead."""
+    coder = " ".join(harness.role_cycle("coder", "abcd1234", fleet=unscoped))
+    assert "the claim prints both; `aisquare task show <id>` is the whole task" in coder
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
+    assert "the coder's claim prints the contract, so put it in `--detail`, not the prompt" in (
+        manager
+    )
+
+
+def test_the_manager_acts_on_a_failed_hand_over_not_on_a_limit() -> None:
+    """P0-W3 (#277): the cycle told the manager to `fleet switch` every `limited` agent while
+    `on_limit = "switch"` moved it already, so one limit moved an agent twice."""
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
+    assert (
+        'With `on_limit = "switch"` (the default) the fleet moves a limited agent itself; '
+        "act on `handover_failed`, not on `limited`:"
+    ) in manager
+    assert "`aisquare fleet switch <label> --as abcd1234`" in manager

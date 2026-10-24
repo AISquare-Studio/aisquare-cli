@@ -11,7 +11,7 @@ import shutil
 import string
 import sys
 from collections.abc import Callable, Collection, Container, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib import metadata
 from pathlib import Path, PurePath
 from urllib.parse import urlsplit
@@ -19,13 +19,13 @@ from urllib.parse import urlsplit
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import experimental, harness, orchestrator, paths
+from aisquare.core import claude_sharing, code_index, experimental, harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
 from aisquare.core.injection import load_last
 from aisquare.core.keys import EXTENDED_MINIMUM
-from aisquare.core.spawn import TEAM_ENV_VARS
+from aisquare.core.spawn import TEAM_ENV_VARS, tmux_client_env
 from aisquare.core.store import damaged_store_recovery, store_session
 from aisquare.core.stubs import stub
 from aisquare.core.terminal import outer_terminal
@@ -33,6 +33,7 @@ from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project, git_common_root
 from aisquare.models import (
     CheckStatus,
+    ClaudeAccount,
     DoctorCheck,
     FleetAgent,
     InjectionRecord,
@@ -149,15 +150,19 @@ def doctor(
         _check_claude_code(cwd),
         *_planned_agent_checks(),
         *_claude_accounts_checks(),
+        *_check_role_bindings(),
         _check_tmux(),
         _check_gh(),
         _check_snapshot(cwd),
+        # Never warns, so it moves no actionable row out of the sidebar's first three.
+        _check_code_index(cwd),
         _check_brain(cwd),
         _check_harness(cwd),
         _check_self_invocation(cwd),
         _check_fleet(),
         *_check_dead_managers(),
         *_check_resumable_agents(),
+        *_check_fleet_delivery(),
         *_check_captured_projects(),
         # After the actionable machine checks on purpose. The fleet UI's sidebar
         # showed the first three not-ok rows (a stable sort within the warn
@@ -167,15 +172,26 @@ def doctor(
         # fleet terminal row (#147) can warn too, about a running server's kept
         # prefix, so it waits here with them rather than beside tmux.
         _check_browser_tools(cwd),
+        *_check_role_tools(),
         _check_fleet_terminal(),
         # Beside the fleet terminal row, which reads the same running server (fix 4 of the
         # fleet-board card): it can warn, so it waits with the other late rows.
         _check_fleet_server_env(cwd=cwd),
+        # Only while a role asks for Claude Code's Remote Control (#289): which roles, and
+        # what in their launch would make Claude Code refuse it.
+        *_optional(_check_remote_control()),
+        *_check_manager_board_context(),
+        # Can warn (memory below the floor, pressure at warn), so it waits with the late rows.
+        _check_fleet_capacity(),
+        _check_watcher(),
         *_experiment_checks(),
         # Only while the experimental captain is off: one ok row saying how to turn it
         # on. On, doctor is as it was before the switch.
         *_optional(_captain_check()),
         *explainability_ops.checks(live=live, target_name=target, project_id=project_id),
+        # Beside the section whose leftovers it finds, and independent of it: a stale
+        # ANTHROPIC_BASE_URL kills a launch whether or not tracing or the team is on (#51).
+        _check_anthropic_routing(),
         # Only while a key the CLI minted is owed a revocation (#142); --live
         # tries each again first — one request per key, on the API that minted it.
         *_optional(_minted_keys_check(live)),
@@ -1368,9 +1384,67 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         ]
     return [
         _ok("claude-accounts", detail),
+        *_optional(_claude_accounts_sharing_check(managed)),
         *_claude_account_default_checks(),
         *_claude_account_limit_checks(),
     ]
+
+
+def _claude_accounts_sharing_check(managed: Sequence[ClaudeAccount]) -> DoctorCheck | None:
+    """``claude-accounts sharing`` (P2-W7, #198): what ``[accounts] share`` gives each slot.
+
+    Warns on a part that is on but a slot does not share (linked elsewhere, a broken
+    link, or its own entry still there), and on a slot whose ``projects/`` is a symlink:
+    since Claude Code 2.1.280 every auto-memory write there asks for approval that no
+    allow rule, hook or auto mode can give (anthropics/claude-code#98044), and a shared
+    ``projects/`` is swept by the shortest ``cleanupPeriodDays``. ``None`` when nothing
+    is shared and no ``projects/`` is linked. Read-only.
+    """
+    name = "claude-accounts sharing"
+    try:
+        knobs = claude_accounts_service.accounts_settings()
+        source = claude_accounts_core.default_account().config_dir
+        linked_dirs = [
+            account for account in managed if os.path.islink(account.config_dir / "projects")
+        ]
+        if not knobs.share and not linked_dirs:
+            return None
+        problems: list[str] = []
+        for account in linked_dirs:
+            problems.append(
+                f"slot {account.slot}'s projects/ is a symlink: every auto-memory write asks "
+                "for approval (Claude Code 2.1.280+)"
+            )
+        for part in knobs.share:
+            if part not in claude_sharing.LINKED_PARTS:
+                continue
+            for account in managed:
+                state = claude_sharing.part_state(account.config_dir, part, source)
+                entry = claude_sharing.part_entry(account.config_dir, part)
+                if state == "shared" and not entry.exists():
+                    problems.append(f"slot {account.slot}'s {entry.name} is a broken link")
+                elif state == "elsewhere":
+                    problems.append(f"slot {account.slot}'s {entry.name} links elsewhere")
+                elif state == "own":
+                    problems.append(f"slot {account.slot}'s {entry.name} is its own")
+                elif state == "none":
+                    problems.append(f"slot {account.slot} has no {entry.name} linked yet")
+        memory = (
+            f"; memory in {claude_accounts_service.shared_memory_root()}"
+            if "memory" in knobs.share
+            else ""
+        )
+        detail = f"sharing {', '.join(knobs.share) or 'nothing'}{memory}"
+        if problems:
+            return _warn(
+                name,
+                f"{detail} — " + "; ".join(problems),
+                "aisquare accounts share --enable <parts> links what is missing; a link "
+                "elsewhere or a symlinked projects/ is yours to undo (keep transcripts apart)",
+            )
+        return _ok(name, detail)
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
 
 
 def _arranges_an_account() -> bool:
@@ -1444,6 +1518,63 @@ def _check_resumable_agents() -> list[DoctorCheck]:
             f"Restart continues the session instead of starting over: {shown}",
         )
     ]
+
+
+#: How far back ``fleet-delivery`` counts first messages.
+DELIVERY_WINDOW = timedelta(days=7)
+
+
+def _check_fleet_delivery(now: datetime | None = None) -> list[DoctorCheck]:
+    """How the fleet's first messages went over the last week (P0-W1a, #122): acknowledged N
+    of M, and how long the agents took to start their first turn, median and 95th percentile
+    (``first_prompt_at - created_at`` of each acknowledged row). A warning when any was
+    never taken (``unsent``), naming where to look. Machine-wide; silent when no row in the
+    window was given one, and gated on the store existing, as ``fleet-resume`` is."""
+    if _uncreated_home("fleet-delivery") is not None:
+        return []
+    now = now or datetime.now(tz=UTC)
+    try:
+        with store_session() as store:
+            rows = store.first_prompt_rows(now - DELIVERY_WINDOW)
+    except Exception:  # the database line reports a broken store
+        return []
+    if not rows:
+        return []
+    acked = [row for row in rows if row.first_prompt == "acked"]
+    unsent = [row for row in rows if row.first_prompt == "unsent"]
+    waits = sorted(
+        (row.first_prompt_at - row.created_at).total_seconds()
+        for row in acked
+        if row.first_prompt_at is not None
+    )
+    timing = (
+        f"; first turn after {_seconds(_percentile(waits, 50))} (median), "
+        f"{_seconds(_percentile(waits, 95))} (p95)"
+        if waits
+        else ""
+    )
+    detail = f"last 7 days: acknowledged {len(acked)} of {len(rows)} first messages{timing}"
+    if not unsent:
+        return [_ok("fleet-delivery", detail)]
+    labels = ", ".join(sorted({row.label for row in unsent})[:6])
+    return [
+        _warn(
+            "fleet-delivery",
+            f"{detail}; {len(unsent)} never taken ({labels})",
+            "each one still live reads attention in its project's fleet listing, which names "
+            "the tell that sends the message again and the restart that starts it over",
+        )
+    ]
+
+
+def _percentile(values: Sequence[float], percent: int) -> float:
+    """The ``percent``-th percentile of sorted ``values`` (nearest rank)."""
+    rank = max(1, min(len(values), -(-percent * len(values) // 100)))
+    return values[rank - 1]
+
+
+def _seconds(value: float) -> str:
+    return f"{value:.1f} s" if value < 60 else f"{value / 60:.1f} min"
 
 
 def _check_captured_projects() -> list[DoctorCheck]:
@@ -1991,6 +2122,68 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
     return checks
 
 
+#: A binding's variables that point Claude Code at a directory: its config directory,
+#: whose ``settings.json`` must carry aisquare's hooks, and its temp directory.
+_BOUND_CONFIG_DIR, _BOUND_TMPDIR = "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_TMPDIR"
+
+
+def _check_role_bindings() -> list[DoctorCheck]:
+    """``role bindings``: each role a binding points at another Claude Code directory runs
+    one that works (#98).
+
+    Only bindings that name an account were checked (:func:`_claude_account_default_checks`).
+    One whose ``env`` sets ``CLAUDE_CONFIG_DIR`` to a directory without aisquare's hooks
+    runs sessions the board never hears of, and one whose ``CLAUDE_CODE_TMPDIR`` cannot be
+    written starts a Claude Code that cannot keep its temp files. Each value is expanded as
+    a launch expands it (``harness.expand_value``), and "has the hooks" is the one shared
+    answer (``agents.claude_code_connected``), so this row and Welcome never disagree. A
+    variable bound to a file (``env_files``) holds a secret, not a path, and is not read.
+    No row at all when no binding sets either variable: a machine that never bound one
+    keeps the doctor output it had.
+    """
+    try:
+        bindings = settings_service.role_bindings()
+    except Exception:  # `_check_config` says why the file cannot be read
+        return []
+    fine: list[str] = []
+    problems: list[str] = []
+    fixes: list[str] = []
+    line = install_route.command_line  # a fix is pasted: quoted for this shell, Windows too
+    for role, profile in sorted(bindings.items()):
+
+        def unset(key: str, role: str = role) -> str:
+            return line(["aisquare", "team", "bind", role, "--unset", key])
+
+        raw = profile.env.get(_BOUND_CONFIG_DIR)
+        if raw is not None:
+            path = Path(harness.expand_value(raw))
+            if not path.is_dir():
+                problems.append(f"{role}: {_BOUND_CONFIG_DIR} {path} is not a directory")
+                fixes.append(unset(_BOUND_CONFIG_DIR))
+            elif not agents_service.claude_code_connected(path):
+                problems.append(
+                    f"{role}: {_BOUND_CONFIG_DIR} {path} has no aisquare hooks, so its "
+                    "sessions never reach the board"
+                )
+                connect = ["aisquare", "agents", "connect", "claude-code", "--config-dir"]
+                fixes.append(f"{line([*connect, str(path)])} (or {unset(_BOUND_CONFIG_DIR)})")
+            else:
+                fine.append(f"{role} → {path}")
+        raw = profile.env.get(_BOUND_TMPDIR)
+        if raw is not None:
+            path = Path(harness.expand_value(raw))
+            if path.is_dir() and os.access(path, os.W_OK | os.X_OK):
+                fine.append(f"{role} temp → {path}")
+            else:
+                problems.append(f"{role}: {_BOUND_TMPDIR} {path} is not writable")
+                fixes.append(f"{line(['mkdir', '-p', str(path)])} (or {unset(_BOUND_TMPDIR)})")
+    if problems:
+        return [_warn("role bindings", "; ".join(problems), "; ".join(dict.fromkeys(fixes)))]
+    if fine:
+        return [_ok("role bindings", "; ".join(fine) + " — hooks connected, temp dirs writable")]
+    return []
+
+
 # --- system tools the fleet needs (docs/plans/fleet-tui.md §5 "Doctor", §8.2) ---------
 
 _OS_RELEASE = Path("/etc/os-release")
@@ -2082,6 +2275,28 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
         # Failing open costs this line its verdict, not the operator anything
         # else: the fleet re-checks tmux on its first spawn and says so then.
         return _ok(name, f"not evaluated ({exc}) — the fleet checks again on its first spawn")
+
+
+def _check_manager_board_context() -> list[DoctorCheck]:
+    """A warn row when ``[fleet.roles.manager] board_context`` is not ``all``, else none.
+
+    The board is the manager's job: a spawn gives it ``all`` whatever the key says, and
+    says so in its notes (P1 WS-2, #279). This is where the key's own reader hears it.
+    """
+    try:
+        manager = load_config().fleet.roles.get("manager")
+    except Exception:  # an unreadable config has its own row
+        return []
+    if manager is None or manager.board_context == "all":
+        return []
+    return [
+        _warn(
+            "manager board context",
+            f"fleet.roles.manager.board_context = {manager.board_context!r} is ignored: "
+            "a manager reads the whole board",
+            "aisquare config set fleet.roles.manager.board_context all",
+        )
+    ]
 
 
 def _check_fleet_terminal(
@@ -2204,6 +2419,110 @@ def _stale_server_environment(srv: tmux_core.TmuxServer, env: Mapping[str, str])
     held = _server_environment(srv)
     current = tmux_core.desktop_environment(env)
     return [var for var, value in current.items() if held.get(var) != value]
+
+
+def _check_fleet_capacity() -> DoctorCheck:
+    """``fleet capacity``: memory headroom and live agents against admission's limits (#283).
+
+    What the next ``fleet spawn`` would meet, read as ``aisquare fleet capacity`` reads it:
+    ok with the numbers; warn when a spawn would be refused (below ``min_free_mb``,
+    critical pressure, the fleet at ``max_agents_total``) or memory pressure is at warn.
+    Read-only, and it does not bring a home into being.
+    """
+    name = "fleet capacity"
+    try:
+        if (uncreated := _uncreated_home(name)) is not None:
+            return uncreated
+        report = fleet_service.capacity()
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    head = report.headroom
+    memory = (
+        f"{head.available_mb} MB available" if head.available_mb is not None else "memory unread"
+    )
+    budget = f" of {report.max_agents_total}" if report.max_agents_total else ""
+    detail = (
+        f"{memory}, pressure {head.pressure}, floor {report.min_free_mb or 'off'}; "
+        f"{report.live_total}{budget} agents live — {report.reason}"
+    )
+    if not report.admits or head.pressure == "warn":
+        return _warn(
+            name,
+            detail,
+            "aisquare fleet capacity lists the live agents — stop one, free memory, or "
+            "change max_agents_total / min_free_mb in [fleet]",
+        )
+    return _ok(name, detail)
+
+
+def _check_watcher() -> DoctorCheck:
+    """``fleet watcher``: whether ``aisquare watch`` runs for this home, and how old its
+    last look is (P2-W2, #284). Warn when it runs but has not looked for three intervals: a
+    manager told to wait for ``watch:`` lines would wait for nothing. Read-only."""
+    name = "fleet watcher"
+    try:
+        if (uncreated := _uncreated_home(name)) is not None:
+            return uncreated
+        from aisquare.core.config import load_config
+        from aisquare.services import watch as watch_service
+
+        found = watch_service.watch_status()
+        every = load_config().watch.interval_seconds
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    age = found.age()
+    looked = f"last look {int(age.total_seconds())} s ago" if age is not None else "no look yet"
+    if found.pid is None:
+        return _ok(name, f"not running ({looked}); `aisquare watch --detach` starts it")
+    if age is None or age.total_seconds() > 3 * every:
+        return _warn(
+            name,
+            f"running (pid {found.pid}), {looked}",
+            "aisquare watch --stop, then aisquare watch --detach",
+        )
+    return _ok(name, f"running (pid {found.pid}), {looked}")
+
+
+def _check_anthropic_routing(server: explainability_ops.FleetServer | None = None) -> DoctorCheck:
+    """``anthropic routing``: a stale ``ANTHROPIC_BASE_URL`` wherever it hides (#51).
+
+    The scan (``explainability_ops.routing_sources``) reads this process, every Claude
+    settings file an agent here loads, the role bindings and their env files, and the
+    fleet tmux server. A leftover of ours (a proxy this machine configured, or our
+    identity headers, with tracing off or on another target) and a URL the agent cannot
+    parse warn, each named with its fix; the operator's own gateway is info. No header
+    value is ever shown. ``_check_harness`` saw the variable only in this process and
+    only with the team active for the cwd; this row asks neither.
+    """
+    name = "anthropic routing"
+    try:
+        sources = explainability_ops.routing_sources(server=server)
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    stale = [source for source in sources if source.stale]
+    foreign = [source for source in sources if source.verdict == "foreign"]
+    if not stale:
+        if not foreign:
+            live = [source for source in sources if source.verdict == "ours-live"]
+            if live:
+                return _ok(name, f"the tracing proxy, set in {len(live)} place(s) while on")
+            return _ok(name, "no ANTHROPIC_BASE_URL set anywhere an agent here reads")
+        said = "; ".join(f"{s.base_url or 'headers only'} in {s.where}" for s in foreign)
+        return _ok(name, f"your own gateway, left as it is: {said}")
+    why = {"unparsable": "not a usable URL", "ours-stale": "a proxy of ours tracing is not using"}
+    said = "; ".join(
+        f"{s.where}: {s.base_url or 'our identity headers'} ({why[s.verdict]})" for s in stale
+    )
+    fixes = [explainability_ops.RESET_COMMAND] + [
+        s.fix for s in stale if s.kind == "process" or s.verdict == "unparsable"
+    ]
+    if all(s.verdict == "unparsable" for s in stale):
+        fixes.pop(0)  # reset removes only what is ours
+    return _warn(
+        name,
+        f"{said} — agents launched with it fail at their first model call once that proxy is gone",
+        "; ".join(dict.fromkeys(fixes)),
+    )
 
 
 def _check_fleet_server_env(
@@ -2646,6 +2965,34 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
     )
 
 
+def _check_role_tools() -> list[DoctorCheck]:
+    """``<role> tools``: one row per fleet role, the tools it launches without and its skill
+    listing, as ``harness.tool_policy`` gives them to a launch that asks nothing itself (#280).
+
+    Ok, always: the rows say what each role's prefix carries, and nothing in them is a
+    defect. Not a warning for a name Claude Code does not have either, because Claude Code
+    does not say: 2.1.309 starts with ``--disallowedTools=NoSuchTool`` silently, so a
+    typo in ``deny_tools`` denies nothing, which is what the row shows. A role bound to
+    another agent gets no deny token, and its row says why.
+    """
+    try:
+        fleet = load_config().fleet
+    except Exception:  # `_check_config` reports the config; this row is about roles
+        return []
+    rows: list[DoctorCheck] = []
+    for role in fleet.roles:
+        binary = harness.resolve_binary(role).binary
+        policy = harness.tool_policy(role, binary=binary, args=[], fleet=fleet)
+        listing = f"skill listing {policy.skill_listing}"
+        if not policy.applied:
+            reason = f"{os.path.basename(binary)!r} is not {harness.DEFAULT_AGENT_BINARY}"
+            rows.append(_ok(f"{role} tools", f"no deny token: {reason}; {listing}"))
+            continue
+        denied = ", ".join(policy.denied) if policy.denied else "nothing"
+        rows.append(_ok(f"{role} tools", f"denies {denied}; {listing}"))
+    return rows
+
+
 def _short_path(path: PurePath, home: PurePath | None = None) -> str:
     """``path`` with the user's home as ``~`` — a detail line is read, not parsed.
 
@@ -2732,6 +3079,41 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         "no codebase snapshot for the active project",
         "Pack one: aisquare project onboard",
     )
+
+
+def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
+    """``code index``: the active project's symbol index (#285) — symbols, files, age, parsers.
+
+    Ok whatever it finds, deliberately: an index is optional (agents grep without one),
+    and one a commit behind still answers for most of the tree. The line says how to
+    build or refresh it, and which languages no installed parser reads.
+    """
+    name = "code index"
+    absent = _uncreated_home(name)
+    if absent is not None:
+        return absent
+    try:
+        with store_session() as store:
+            project = active_project(store, cwd)
+        found = code_index.status(project.id, current_head=snapshot_core.head_sha(project.root))
+        building = code_index.building(project.id)
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    unfinished = not found.exists or found.built_at is None  # a first build not yet committed
+    if unfinished and building:
+        return _ok(name, "building in the background (agents grep until it is ready)")
+    if unfinished:
+        return _ok(name, "none yet — `aisquare code index` builds one (agents grep without it)")
+    parsers = ", ".join(f"{parser} {count}" for parser, count in sorted(found.parsers.items()))
+    detail = f"{found.symbols} symbols in {found.files} files ({parsers}), built {found.built_at}"
+    if found.stale:
+        detail += " — a commit behind the checkout; `aisquare code index` refreshes it"
+    if found.not_indexed:
+        missing = ", ".join(f"{lang} {n}" for lang, n in sorted(found.not_indexed.items()))
+        detail += f"; not indexed: {missing}"
+    if building:
+        detail += "; a refresh is running"
+    return _ok(name, detail)
 
 
 def _check_brain(cwd: Path | None = None) -> DoctorCheck:
@@ -3171,6 +3553,94 @@ def _fleet_labels(agents: list[FleetAgent], names: dict[str, str], *, limit: int
     if len(agents) > limit:
         shown.append(f"+{len(agents) - limit} more")
     return ", ".join(shown)
+
+
+REMOTE_CONTROL_HOST = "api.anthropic.com"
+
+
+def _window_environment(
+    environ: Mapping[str, str] | None, server: tmux_core.TmuxServer | None
+) -> tuple[Mapping[str, str], str]:
+    """The environment a fleet window inherits, and where it comes from.
+
+    A tmux server copies the environment of the client that started it, and every window
+    opened on it inherits that, before its own ``-e`` pairs (the role's binding). So it is
+    the running fleet server's global environment; with none running, what the fleet would
+    start one with: this shell's, less what ``core.spawn.tmux_client_env`` strips (a
+    tracing base URL among it). A server that will not answer is read as none.
+    """
+    try:
+        srv = server or _fleet_server(fleet_service.settings().tmux_socket)
+        if srv.available() and not srv.server_absent():
+            return _server_environment(srv), "on the fleet server"
+    except Exception:  # diagnostics must never crash
+        pass
+    return tmux_client_env(os.environ if environ is None else environ), "in this shell"
+
+
+def _check_remote_control(
+    environ: Mapping[str, str] | None = None, server: tmux_core.TmuxServer | None = None
+) -> DoctorCheck | None:
+    """``remote control``: the roles started with Claude Code's own Remote Control (#289),
+    and what in their launch would make Claude Code refuse it; ``None`` while no role asks.
+
+    A blocker is what ``launch`` steps aside for: a role bound to a binary that is not
+    Claude Code; an ``ANTHROPIC_BASE_URL`` naming another host than the Anthropic API, in
+    the role's binding or in what its window inherits (:func:`_window_environment`, not
+    this shell's: the agents never see it); explainability tracing, whose proxy is such a
+    base URL at every traced launch; a ``CLAUDE_CODE_OAUTH_TOKEN``, which can make model
+    requests only. ``launch`` says the same on each launch; this row says it before one.
+    """
+    name = "remote control"
+    try:
+        config = load_config()
+    except Exception:  # the config row has the verdict on a config that will not load
+        return None
+    roles = sorted(role for role, settings in config.fleet.roles.items() if settings.remote_control)
+    if not roles:
+        return None
+    inherited, source = _window_environment(environ, server)
+    blockers: list[str] = []
+    for role in roles:
+        profile = harness.resolve_profile(role)
+        binary = harness.resolve_binary(role).binary
+        if not harness.is_default_agent(binary):
+            blockers.append(f"{role} runs {os.path.basename(binary)!r}, not Claude Code")
+        env = {**inherited, **profile.env}
+        base_url = (env.get("ANTHROPIC_BASE_URL") or "").strip()
+        if base_url and urlsplit(base_url).hostname != REMOTE_CONTROL_HOST:
+            where = "in its binding" if "ANTHROPIC_BASE_URL" in profile.env else source
+            host = urlsplit(base_url).hostname or "another host"
+            blockers.append(f"{role}: ANTHROPIC_BASE_URL {where} points at {host}")
+        if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            where = "in its binding" if "CLAUDE_CODE_OAUTH_TOKEN" in profile.env else source
+            blockers.append(f"{role}: CLAUDE_CODE_OAUTH_TOKEN is set {where}")
+    if config.explainability.enabled:
+        blockers.append("explainability tracing sends every traced launch through its proxy")
+    on = ", ".join(roles)
+    if not blockers:
+        return _ok(
+            name,
+            f"on for {on} — each session can be continued from claude.ai/code and the Claude "
+            "app, titled '<project> · <label>'",
+        )
+    fix = (
+        "Remote Control needs Claude Code on a Claude.ai login (Pro, Max, Team or "
+        "Enterprise) talking to the Anthropic API: unbind the base URL or the token from "
+        "these roles, or turn tracing off, which `aisquare explainability disable` does for "
+        "every launch on this machine, not for these roles alone"
+    )
+    if source == "on the fleet server" and any(source in blocker for blocker in blockers):
+        fix += (
+            "; a variable the fleet server holds reaches every agent it starts until the "
+            "server is restarted from a shell without it (with no agent running: tmux -L "
+            f"{fleet_service.settings().tmux_socket} kill-server)"
+        )
+    return _warn(
+        name,
+        f"on for {on}, but Claude Code will refuse it: {'; '.join(blockers)}",
+        f"{fix}; `aisquare launch` skips the flag and says why until then",
+    )
 
 
 def _check_fleet(

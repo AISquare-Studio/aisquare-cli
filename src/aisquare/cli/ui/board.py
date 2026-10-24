@@ -17,6 +17,14 @@ theme picker. The pure renderers — ``feed_line``, ``_session_lines``, the
 detail texts, the transcript helpers — stay in ``cli.watch``: the Rich fallback
 there needs them without Textual, and other modules import them from there.
 
+**What needs you** (#286) is one line over the board: the waiting panes, the owner's
+questions, the cards waiting on a gate and the blocked ones, counted by the captain's
+attention queue's own classifier (``services.captain.queue.observe``) over what the
+tick already read — no second definition of "needs the owner", no tmux call, no extra
+store read, and nothing written to ``captain/queue.json``. Each count is a button that
+goes to the first thing it counts. With no open tasks the table says where they come
+from.
+
 All data comes from ``services.team``; nothing here writes. The panel resolves
 its project ONCE (or takes it from the caller) and passes it to every board
 read, so a tick never costs a ``git rev-parse`` and never touches ``os.environ``.
@@ -34,9 +42,11 @@ long as the session lives.
 from __future__ import annotations
 
 import contextlib
+import textwrap
 import time
-from collections.abc import Mapping
-from datetime import datetime
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -49,7 +59,7 @@ from textual.coordinate import Coordinate
 from textual.geometry import Size
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, OptionList, Static
+from textual.widgets import Button, DataTable, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker, WorkerState
 
@@ -60,7 +70,14 @@ from aisquare.cli.ui.divider import Divider, floor_of
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core.store import unmet_needs
 from aisquare.core.terminal import mac_keyboard
-from aisquare.models import CLOSED_STATUSES, ProjectInfo, TeamEvent, TeamSession, TeamTask
+from aisquare.models import (
+    CLOSED_STATUSES,
+    FleetAgentStatus,
+    ProjectInfo,
+    TeamEvent,
+    TeamSession,
+    TeamTask,
+)
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import team as team_service
 
@@ -130,10 +147,240 @@ def status_icon(status: str, *, waiting: bool = False) -> Text:
     return Text(glyph + " " * max(0, ICON_CELLS - cell_len(glyph)), style=style)
 
 
+EMPTY_TASKS = "No open tasks. The manager writes them when you give it a goal on the Manager tab."
+"""The task table's body with no open task: where tasks come from (NN/g's empty state)."""
+EMPTY_ROW = "__no-open-tasks__"
+"""The row key of :data:`EMPTY_TASKS`: no task's id, so a pick on it shows nothing."""
+NEEDS_YOU: tuple[tuple[str, str, str, str], ...] = (
+    ("waiting", "🔔", "waiting", "waiting"),
+    ("question", "❓", "question", "questions"),
+    ("review", "👀", "in review", "in review"),
+    ("blocked", "⛔", "blocked", "blocked"),
+)
+"""The strip's counts in order: (kind, glyph, one, many). ``stale`` is left to the captain."""
+NOTHING_NEEDS_YOU = "nothing needs you — the manager is working; talk to it on the Manager tab"
+WHAT_TO_DO_HERE: tuple[tuple[str, str], ...] = (
+    ("🔔  ❓", "need you: click the agent and answer in its pane"),
+    ("👀", "waits for a reviewer agent, or for you on the PR"),
+    ("typing", "nothing here is typed into — you talk to the manager"),
+)
+"""What a human does on the board (#286), as the help screens list it."""
+
+
+@dataclass(frozen=True)
+class NeedsYou:
+    """What the strip shows: per kind, what it counts — task ids or agent labels."""
+
+    tasks: dict[str, list[str]] = field(default_factory=dict)
+    """``blocked`` and ``review``: the cards, in the table's order."""
+    agents: dict[str, list[str]] = field(default_factory=dict)
+    """``waiting`` and ``question``: the agents' labels."""
+
+    def count(self, kind: str) -> int:
+        return len(self.tasks.get(kind, ())) + len(self.agents.get(kind, ()))
+
+    def line(self) -> str:
+        """The strip as one line of text: what a test, and a screen reader, reads."""
+        parts = [
+            f"{glyph} {self.count(kind)} {one if self.count(kind) == 1 else many}"
+            for kind, glyph, one, many in NEEDS_YOU
+            if self.count(kind)
+        ]
+        if not parts:
+            return NOTHING_NEEDS_YOU
+        return "needs you: " + " · ".join(parts) + " — click one to go to it"
+
+
+@dataclass(frozen=True)
+class _TickSources:
+    """The attention queue's sources over what one board tick read: one project, its
+    sessions, tasks and the feed's events. No pane is read (the fleet's agents are tmux's)
+    and no pull request asked for, so nothing here leaves the tick."""
+
+    project: ProjectInfo
+    read_sessions: list[TeamSession]
+    read_tasks: list[TeamTask]
+    read_events: list[TeamEvent]
+    seq: int
+
+    def projects(self) -> list[ProjectInfo]:
+        return [self.project]
+
+    def agents(self, project: ProjectInfo) -> list[FleetAgentStatus]:
+        return []
+
+    def tasks(self, project_id: str) -> list[TeamTask]:
+        return self.read_tasks
+
+    def events(self, project_id: str, *, since_seq: int) -> list[TeamEvent]:
+        return [event for event in self.read_events if event.seq > since_seq]
+
+    def recent_events(self, project_id: str, *, limit: int) -> list[TeamEvent]:
+        return self.read_events[-limit:]
+
+    def events_about(self, project_id: str, task_id: str, *, since: datetime) -> list[TeamEvent]:
+        return [e for e in self.read_events if e.task_id == task_id and e.created_at >= since]
+
+    def latest_seq(self, project_id: str) -> int:
+        return self.seq
+
+    def sessions(self, project_id: str) -> list[TeamSession]:
+        return self.read_sessions
+
+    def pane_tail(self, status: FleetAgentStatus) -> None:
+        return None
+
+    def pull_requests(self, project: ProjectInfo) -> list[Any]:
+        return []
+
+
+def needs_you(
+    project: ProjectInfo,
+    sessions: Sequence[TeamSession],
+    tasks: Sequence[TeamTask],
+    events: Sequence[TeamEvent],
+    *,
+    seq: int,
+    now: datetime | None = None,
+) -> NeedsYou:
+    """What needs the owner on one board, from what its tick read (#286).
+
+    Questions, blocked cards and cards waiting on a gate are the attention queue's
+    observations (``queue.observe``). A question counts while it is still its asker's last
+    word on the board and the asker is live: the queue's own rows are resolved by the
+    owner, which a board cannot see. A waiting pane is a live session in the fleet's
+    ``attention`` state — the state the queue reads as "waits on you".
+    """
+    from aisquare.services.captain import queue  # lazy: the captain's module, read on a tick
+
+    sources = _TickSources(project, list(sessions), list(tasks), list(events), seq)
+    seen = queue.observe(sources, cursors={}, now=now or datetime.now(UTC))
+    live = {session.id: session for session in sessions if session.ended_at is None}
+    last_said: dict[str, int] = {}
+    by_id = {event.id: event for event in events}
+    for event in events:
+        if event.session_id:
+            last_said[event.session_id] = max(last_said.get(event.session_id, 0), event.seq)
+    found = NeedsYou()
+    for observation in seen.observations:
+        if observation.kind in ("blocked", "review") and observation.source_ref:
+            found.tasks.setdefault(observation.kind, []).append(observation.source_ref)
+        elif observation.kind == "question":
+            asked = by_id.get(observation.source_ref or "")
+            asker = asked.session_id if asked is not None else None
+            if asked is None or asker not in live or last_said.get(asker or "") != asked.seq:
+                continue  # answered since (the asker spoke again), or nobody left to answer
+            label = observation.agent or ""
+            if label not in found.agents.get("question", []):
+                found.agents.setdefault("question", []).append(label)
+    for session in live.values():
+        if session.state == "attention":
+            found.agents.setdefault("waiting", []).append(session.label or session.role)
+    return found
+
+
+NOTHING_SHORT = "nothing needs you"
+""":data:`NOTHING_NEEDS_YOU` where the whole sentence does not fit."""
+STRIP_TAIL = "— click one to go to it"
+BUTTON_CELLS = 3
+"""What a compact button adds to its label in cells: its padding and the margin after it."""
+BUTTON_PAD = 2
+"""A compact button's padding, one cell each side of its label."""
+
+
+class NeedsYouStrip(Horizontal):
+    """The line over the board: what needs you, each count a button to it (#286).
+
+    It fits the width it has rather than run off it: the whole line, else without its
+    tail, else each count as its glyph and number alone (``🔔 1``). Inside `asq` at 80
+    columns the board is about 50 wide, which the whole line overran."""
+
+    DEFAULT_CSS = """
+    NeedsYouStrip { height: 1; }
+    NeedsYouStrip Static { width: auto; height: 1; }
+    NeedsYouStrip Button { margin: 0 1 0 0; min-width: 0; }
+    """
+
+    class Picked(Message):
+        """A count was pressed: go to the first thing it counts."""
+
+        def __init__(self, kind: str) -> None:
+            self.kind = kind
+            super().__init__()
+
+    def __init__(self, *, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self.needs = NeedsYou()
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="needs-you-lead")
+        for kind, *_rest in NEEDS_YOU:
+            yield Button("", id=f"needs-you-{kind}", compact=True)
+        yield Static("", id="needs-you-tail")
+
+    def show(self, needs: NeedsYou) -> None:
+        self.needs = needs
+        self._fit(self.size.width)
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._fit(event.size.width)
+
+    def _fit(self, width: int) -> None:
+        """The longest form of the line that fits ``width`` (all of them before a size)."""
+        lead = self.query_one("#needs-you-lead", Static)
+        tail = self.query_one("#needs-you-tail", Static)
+        counts = [
+            (kind, glyph, one, many, self.needs.count(kind)) for kind, glyph, one, many in NEEDS_YOU
+        ]
+        shown = [entry for entry in counts if entry[4]]
+        for kind, *_rest, count in counts:
+            self.query_one(f"#needs-you-{kind}", Button).display = bool(count)
+        if not shown:
+            fits = width <= 0 or cell_len(NOTHING_NEEDS_YOU) <= width
+            lead.update(Text(NOTHING_NEEDS_YOU if fits else NOTHING_SHORT, style="dim"))
+            tail.update("")
+            return
+        lead_text = "needs you: "
+        for compact, with_tail in ((False, True), (False, False), (True, False)):
+            labels = {
+                kind: f"{glyph} {count}"
+                if compact
+                else f"{glyph} {count} {one if count == 1 else many}"
+                for kind, glyph, one, many, count in shown
+            }
+            used = cell_len(lead_text) + sum(
+                cell_len(label) + BUTTON_CELLS for label in labels.values()
+            )
+            if with_tail:
+                used += cell_len(STRIP_TAIL)
+            if width <= 0 or used <= width or compact:
+                break
+        for kind, label in labels.items():
+            button = self.query_one(f"#needs-you-{kind}", Button)
+            button.label = label
+            # Sized from the label, not left to ``width: auto``: a Button keeps the width
+            # it measured for its LAST label, so a terminal shrunk from 160 columns to 80
+            # kept "🔔 1 waiting"'s 14 cells for "🔔 1", and the last counts ran off the
+            # strip (review of #324, round 2, from the tmux walk).
+            button.styles.width = cell_len(label) + BUTTON_PAD
+        lead.update(Text(lead_text, style="bold"))
+        tail.update(Text(STRIP_TAIL, style="dim") if with_tail else "")
+
+    @on(Button.Pressed)
+    def _pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        kind = (event.button.id or "").removeprefix("needs-you-")
+        self.post_message(self.Picked(kind))
+
+
 def board_help() -> Text:
-    """The board's keys and the icon legend, for a help screen."""
+    """The board's keys, what a human does here, and the icon legend, for a help screen."""
     text = Text()
     for key, what in board_keys():
+        text.append(f"  {key:<11}", style="bold cyan")
+        text.append(f" {what}\n")
+    text.append("\n  what to do here\n", style="bold")
+    for key, what in WHAT_TO_DO_HERE:
         text.append(f"  {key:<11}", style="bold cyan")
         text.append(f" {what}\n")
     text.append("\n  task icons\n", style="bold")
@@ -337,6 +584,15 @@ class BoardPanel(Vertical):
             self.project = project
             super().__init__()
 
+    class AgentWanted(Message):
+        """A 🔔 or ❓ count was pressed: the agent it names, by its label on ``project_id``'s
+        board. The fleet UI selects that agent's row, where its pane is answered."""
+
+        def __init__(self, project_id: str, label: str) -> None:
+            self.project_id = project_id
+            self.label = label
+            super().__init__()
+
     def __init__(
         self, project: ProjectInfo | None, *, interval: float = 2.0, id: str | None = None
     ) -> None:
@@ -360,6 +616,10 @@ class BoardPanel(Vertical):
         self._labels: Mapping[int, str] = {}
         self._labels_asked_at: float | None = None
         self._all_tasks: list[TeamTask] = []
+        self._read_project: ProjectInfo | None = project
+        """The board the last refresh read: ``project``, or the one it resolved to."""
+        self.needs = NeedsYou()
+        """What the strip shows, from the last refresh (:func:`needs_you`)."""
         self.autoscroll = True
         self.detail_text = ""
         """The plain text of the detail pane (what a test reads)."""
@@ -367,6 +627,7 @@ class BoardPanel(Vertical):
         """(author session id, timestamp) of the selected item, for the transcript jump."""
 
     def compose(self) -> ComposeResult:
+        yield NeedsYouStrip(id="needs-you")
         with Horizontal(id="board-main"):
             with BoardColumn(id="board-side"):
                 yield TeamBlock(id="sessions")
@@ -465,12 +726,16 @@ class BoardPanel(Vertical):
         # cache BEFORE the archive rebuilds, so the closer is never one frame stale.
         self._append_events(events)
         self._refresh_tasks(tasks)
+        self._read_project = project
+        read = [self._events_by_id[event_id] for event_id in self._feed_order]
+        self.needs = needs_you(project, sessions, tasks, read, seq=self._last_seq)
+        self.query_one(NeedsYouStrip).show(self.needs)
         self.post_message(self.Refreshed(project))
 
     def _refresh_labels(self, sessions: list[TeamSession]) -> None:
         """Ask the registry for the slot labels OFF the UI thread, at most every LABELS_TTL s.
 
-        ``watch._session_lines`` used to read them itself — a ``context.db``
+        ``cli.watch._session_lines`` used to read them itself — a ``context.db``
         open with a busy timeout of seconds, a scan of the account directories
         and, on a registry not yet reconciled, its writes — on the event loop,
         at every tick of every open board (review of #205, fourth round). The
@@ -564,6 +829,13 @@ class BoardPanel(Vertical):
             for task in (t for t in tasks if t.status in OPEN_STATUSES):
                 waiting = task.status == "todo" and bool(unmet_needs(task, self._statuses))
                 rows.append((task, _number_cell(task), status_icon(task.status, waiting=waiting)))
+            if not rows:
+                # The empty state: where tasks come from, wrapped to the room the table has.
+                width = self._title_room(table, rows) or len(EMPTY_TASKS)
+                lines = textwrap.wrap(EMPTY_TASKS, max(width, 16))
+                body = Text("\n".join(lines), style="dim")
+                table.add_row(Text(""), Text(""), body, key=EMPTY_ROW, height=len(lines))
+                return
         room = self._title_room(table, rows)
         for task, number, icon in rows:
             self._tasks_by_id[task.id] = task
@@ -588,6 +860,25 @@ class BoardPanel(Vertical):
 
     def on_pickable_table_resized(self, event: PickableTable.Resized) -> None:
         self._refresh_tasks(self._all_tasks)
+
+    def on_needs_you_strip_picked(self, event: NeedsYouStrip.Picked) -> None:
+        """A count was pressed: its first card selected in the table, or its first agent
+        asked for (:class:`AgentWanted`)."""
+        tasks = self.needs.tasks.get(event.kind)
+        if tasks:
+            if self._show_done:
+                self._show_done = False
+                self._refresh_tasks(self._all_tasks)
+            table = self.query_one("#tasks", DataTable)
+            with contextlib.suppress(Exception):  # the row went in a rebuild since
+                table.move_cursor(row=table.get_row_index(tasks[0]))
+            table.focus()
+            self._show_task_detail(tasks[0])
+            return
+        agents = self.needs.agents.get(event.kind)
+        project = self._read_project
+        if agents and project is not None:
+            self.post_message(self.AgentWanted(project.id, agents[0]))
 
     def _cursor_task_id(self, table: DataTable[Any]) -> str | None:
         try:
@@ -824,7 +1115,11 @@ class BoardPanel(Vertical):
             floor_of(side), width - 1 - floor_of(self.query_one("#feedpane"))
         )
         detail = self.query_one("#detailwrap")
+        strip = self.query_one(NeedsYouStrip)
         detail.styles.max_height = max(
             floor_of(detail, "height"),
-            height - 1 - floor_of(self.query_one("#board-main"), "height"),
+            height
+            - 1
+            - floor_of(strip, "height")
+            - floor_of(self.query_one("#board-main"), "height"),
         )

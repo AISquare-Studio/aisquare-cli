@@ -11,6 +11,8 @@
 - ``aisquare captain attention | next | resolve | snooze | since | log | uav | wololo
   | bt | actions`` (``cli/captain_verbs.py``, T5): the owner's own hands on the
   captain's tools, each audited with the words as typed.
+- ``aisquare captain gate enroll | unlock | lock | status`` (``cli/captain_gate.py``,
+  #216): the owner gate.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from typing import Annotated, Any
 import typer
 from typer.core import TyperGroup
 
-from aisquare.cli import captain_verbs, captain_voice
+from aisquare.cli import captain_gate, captain_verbs, captain_voice
 from aisquare.cli.common import fail
 from aisquare.cli.serve import dependency_error
 from aisquare.core import experimental
@@ -122,6 +124,7 @@ app = typer.Typer(
     no_args_is_help=False,
 )
 captain_voice.register(app)  # `voice`: the page, in its own module (T3)
+captain_gate.register(app)  # `gate enroll | unlock | lock | status` (#216)
 captain_verbs.register(
     app
 )  # attention, next, resolve, snooze, since, log, uav, wololo, bt, actions (T5)

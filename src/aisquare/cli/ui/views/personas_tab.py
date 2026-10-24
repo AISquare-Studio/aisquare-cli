@@ -49,6 +49,7 @@ from aisquare.cli.ui.attach import (
     AttachTargetScreen,
     ConfirmAttachScreen,
     NewAccountRequested,
+    ReturnTo,
     Target,
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
@@ -180,8 +181,9 @@ class PersonasTab(Vertical):
     PersonasTab { height: 1fr; padding: 0 1; }
     PersonasTab #personas-top { height: auto; }
     PersonasTab #persona-search { width: 1fr; }
-    PersonasTab #personas-top Checkbox { width: auto; }
     PersonasTab #personas-top Button { margin-left: 1; }
+    PersonasTab #personas-layers { height: auto; }
+    PersonasTab #personas-layers Checkbox { width: auto; }
     PersonasTab #personas-body { height: 1fr; }
     PersonasTab #persona-table { width: 3fr; height: 1fr; }
     PersonasTab #persona-preview { width: 2fr; height: 1fr; border-left: tall $panel;
@@ -211,12 +213,15 @@ class PersonasTab(Vertical):
         self.unavailable: str | None = None
 
     def compose(self) -> ComposeResult:
+        # Two rows: one would need ~86 columns, and beside the sidebar an 80-column
+        # terminal gives this tab 49, which left + Import… and + New off its edge.
         with Horizontal(id="personas-top"):
             yield Input(placeholder="search name, description or tag", id="persona-search")
-            for layer in LAYERS:
-                yield Checkbox(layer, True, id=f"layer-{layer}")
             yield Button("+ Import…", id="persona-import")
             yield Button("+ New", id="persona-new")
+        with Horizontal(id="personas-layers"):
+            for layer in LAYERS:
+                yield Checkbox(layer, True, id=f"layer-{layer}")
         with Horizontal(id="personas-body"):
             yield DataTable(id="persona-table", cursor_type="row", zebra_stripes=True)
             with VerticalScroll(id="persona-preview"):
@@ -364,18 +369,32 @@ class PersonasTab(Vertical):
 
     def on_attach_requested(self, event: AttachRequested) -> None:
         """The second step — who runs it: the target picker, ordered by the intent."""
-        persona = event.persona
+        self.open_picker(event.persona, event.intent)
+
+    def open_picker(
+        self,
+        persona: str,
+        intent: AttachIntent,
+        *,
+        select: str | None = None,
+        filter_text: str = "",
+    ) -> None:
+        """The target picker for ``persona``. The shell opens it again, through here, once a
+        sign-in its *+ New account* started has landed, with that account highlighted
+        (``select``) and the filter as it was (#215): what it is chosen for stays this tab's."""
         self.app.push_screen(
             AttachTargetScreen(
                 self.project,
                 persona=persona,
-                intent=event.intent,
+                intent=intent,
                 accounts=accounts_service.overview,
+                select=select,
+                filter_text=filter_text,
             ),
-            callback=lambda target: self._target_chosen(persona, target),
+            callback=lambda target: self._target_chosen(persona, intent, target),
         )
 
-    def _target_chosen(self, persona: str, target: Target | None) -> None:
+    def _target_chosen(self, persona: str, intent: AttachIntent, target: Target | None) -> None:
         if target is None:
             return
         if target.kind == "agent":
@@ -385,7 +404,8 @@ class PersonasTab(Vertical):
                 callback=lambda yes: self._attach_persona(persona, label) if yes else None,
             )
         elif target.kind == "new-account":
-            self.post_message(NewAccountRequested())
+            form = {"persona": persona, "intent": intent, "filter": target.key}
+            self.post_message(NewAccountRequested(ReturnTo("picker", self.project.id, form)))
         else:
             self.app.push_screen(
                 SpawnDialog(
@@ -478,11 +498,32 @@ class PersonasTab(Vertical):
             self._open(entry)
 
     def _open(self, entry: Entry) -> None:
-        """The SKILL.md in the editor — read-only with *Save as…* for a bundled persona."""
+        """The SKILL.md in ``$EDITOR``, in a pane (#212). The text box editor for a bundled
+        persona (read-only, with *Save as…*) and wherever no pane can open."""
+        if entry.layer != "bundled" and dialogs.editor_unavailable() is None:
+            self.app.push_screen(
+                dialogs.EditorPaneScreen(entry.name, entry.layer, entry.path, self.root),
+                callback=lambda result: self._edited(entry, result),
+            )
+            return
+        self._open_text(entry)
+
+    def _open_text(self, entry: Entry) -> None:
         self.app.push_screen(
             dialogs.EditPersonaScreen(entry.name, entry.layer, entry.path, self.root),
             callback=lambda saved: self.reload(select=entry.name if saved else entry.key),
         )
+
+    def _edited(self, entry: Entry, result: bool | str | None) -> None:
+        """The editor pane closed: re-read the catalogue. A pane that could not open hands
+        over to the text box editor, saying why."""
+        if isinstance(result, str):
+            self.notify(
+                f"{result} — editing in the text box instead", severity="warning", markup=False
+            )
+            self._open_text(entry)
+            return
+        self.reload(select=entry.name if result else entry.key)
 
     @on(Button.Pressed, "#persona-export")
     def action_export(self) -> None:

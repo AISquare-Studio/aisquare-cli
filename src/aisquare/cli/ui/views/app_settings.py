@@ -15,9 +15,16 @@ Reset all settings to default asks first, then moves the file aside
 (``services.settings.reset_settings``) and names the backup it kept; moving it
 back undoes the reset.
 
-Model, effort and binary per role are NOT here on purpose: they live in
-``team harness`` / ``team bind`` / ``AISQUARE_MODEL_<ROLE>`` — one home per
-concept, which is the rule that deleted ``bins`` in #56. The one ``[team]``
+Model and effort per role are NOT here on purpose: they live in ``team harness`` and
+``AISQUARE_MODEL_<ROLE>`` / ``AISQUARE_EFFORT_<ROLE>``, one home per concept, the rule
+that deleted ``bins`` in #56. #98 asked to reverse that; the proposed default, kept until
+the owner decides, is that they stay out. The binary is a binding's, and bindings ARE here
+(#98): the *role bindings* section lists each role ``team bind`` bound, with its binary,
+its environment (``CLAUDE_CONFIG_DIR`` and ``CLAUDE_CODE_TMPDIR`` called out with their
+values, any other variable by name only, since a value may be a token) and its args.
+*Edit* opens the bind form on it, *Unset key…* and *Clear* are ``team bind --unset`` and
+``--clear``; each writes at once through ``services.settings``, the writers ``team bind``
+uses, apart from the form's Save. The one ``[team]``
 value here is the ACCOUNT per role (#145): the select beside each role writes
 ``team.profiles.<role>.account`` — exactly what ``aisquare team bind <role>
 --account`` writes — the middle rung of the account ladder a launch walks
@@ -41,6 +48,7 @@ Reached from *⚙ Settings ▸ App settings*: the Settings hub opens
 from __future__ import annotations
 
 import re
+import shlex
 from collections.abc import Iterable
 from typing import ClassVar, NamedTuple
 
@@ -53,6 +61,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.attach import NewBindScreen
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import paths, personas
 from aisquare.core.config import (
@@ -88,6 +97,11 @@ ON_LIMIT_MODES: tuple[tuple[str, str], ...] = (
     ("switch to the account with headroom", "switch"),
 )
 """``[accounts] on_limit``: what the fleet does when an agent's turn ends on a usage limit."""
+PREFER_MODES: tuple[tuple[str, str], ...] = (
+    ("the first in priority order", "priority"),
+    ("the week that resets soonest", "reset-soonest"),
+)
+"""``[accounts] prefer`` (#277): which account under ``switch_at`` a pick takes."""
 _ID_KEPT = re.compile(r"[A-Za-z0-9-]")
 """The characters of a role name its widget ids keep as they are (:func:`widget_suffix`)."""
 ACCOUNTS_WORKER = "app-settings-accounts"
@@ -99,7 +113,7 @@ _INPUTS = (
     "accounts-switch-at",
     "accounts-wait-minutes",
 )
-_SELECTS = ("accounts-pick", "accounts-on-limit")
+_SELECTS = ("accounts-pick", "accounts-on-limit", "accounts-prefer")
 """The form's fields beside the per-role rows, by id: what :meth:`AppSettingsView._changed`
 compares with what they showed when the form was read."""
 _ACCOUNT_SWITCHES = {
@@ -108,6 +122,122 @@ _ACCOUNT_SWITCHES = {
 }
 """``[accounts]``'s two switches, by id → field: what the accounts share
 (``core.claude_sharing``)."""
+
+
+BINDING_ID_PREFIX = "binding-"
+"""What every widget id of a role binding's row starts with: never ``role-`` (the per-role
+fields', :data:`ROLE_ID_PREFIX`) and never a fixed id (those are ``bindings-…``)."""
+CALLED_OUT = ("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_TMPDIR")
+"""The binding variables the section shows with their values: which Claude Code directory
+the role runs, and where it keeps its temp files (the doctor's ``role bindings`` row)."""
+
+
+def binding_widget_id(kind: str, role: str) -> str:
+    """The id of ``role``'s binding ``kind`` widget (``row``, ``edit``, ``unset``,
+    ``clear``): ``binding-<kind>-<suffix>``, one to one as :func:`role_widget_id` is."""
+    return f"{BINDING_ID_PREFIX}{kind}-{widget_suffix(role)}"
+
+
+def binding_text(role: str, profile: RoleLaunchProfile) -> Text:
+    """One binding as the section shows it. Built by appending, never markup: a role name
+    and a value are data."""
+    text = Text(role, style="bold")
+    text.append(f"  {profile.bin}" if profile.bin else "  (the role's own binary)")
+    for key in CALLED_OUT:
+        if key in profile.env:
+            text.append(f"\n  {key} = ")
+            text.append(profile.env[key])
+    named = [key for key in profile.env if key not in CALLED_OUT]
+    if named:
+        text.append(f"\n  env {', '.join(named)}", style="dim")
+    if profile.env_files:
+        text.append(f"\n  bound to a file: {', '.join(sorted(profile.env_files))}", style="dim")
+    if profile.args:
+        text.append(f"\n  args {shlex.join(profile.args)}")
+    if profile.account:
+        text.append(f"\n  account {profile.account}", style="dim")
+    return text
+
+
+class UnsetKeyScreen(ModalScreen[str | None]):
+    """``team bind <role> --unset KEY`` as a question: which variable; dismisses with it."""
+
+    DEFAULT_CSS = """
+    UnsetKeyScreen { align: center middle; }
+    UnsetKeyScreen > Vertical { width: 64; height: auto; border: round $accent; padding: 1 2; }
+    UnsetKeyScreen Horizontal { height: auto; margin-top: 1; }
+    UnsetKeyScreen Button { margin-right: 1; }
+    """
+    BINDINGS: ClassVar = [("escape", "cancel", "cancel")]
+
+    def __init__(self, role: str, keys: list[str]) -> None:
+        super().__init__()
+        self.role = role
+        self.keys = keys
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            question = Text("Unset a variable of ", style="bold")
+            question.append(self.role, style="bold")
+            yield Static(question)
+            yield Select(
+                [(key, key) for key in self.keys],
+                value=self.keys[0],
+                allow_blank=False,
+                id="unset-key",
+            )
+            with Horizontal():
+                yield Button("Unset", id="unset-confirm", variant="warning")
+                yield Button("Cancel", id="unset-cancel")
+
+    @on(Button.Pressed, "#unset-confirm")
+    def _confirm(self) -> None:
+        self.dismiss(str(self.query_one("#unset-key", Select).value))
+
+    @on(Button.Pressed, "#unset-cancel")
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ConfirmClearBinding(ModalScreen[bool]):
+    """``team bind <role> --clear`` asks first: the whole binding goes."""
+
+    DEFAULT_CSS = """
+    ConfirmClearBinding { align: center middle; }
+    ConfirmClearBinding > Vertical { width: 64; height: auto; border: round $error; padding: 1 2; }
+    ConfirmClearBinding Horizontal { height: auto; margin-top: 1; }
+    ConfirmClearBinding Button { margin-right: 1; }
+    """
+    BINDINGS: ClassVar = [("escape", "cancel", "cancel")]
+
+    def __init__(self, role: str) -> None:
+        super().__init__()
+        self.role = role
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            question = Text("Clear the binding of ", style="bold")
+            question.append(self.role, style="bold")
+            question.append("?", style="bold")
+            yield Static(question)
+            yield Static(
+                Text(
+                    "Its binary, environment, args and account go, as `aisquare team bind "
+                    "<role> --clear` takes them; the role then launches as an unbound one."
+                ),
+                id="clear-explained",
+            )
+            with Horizontal():
+                yield Button("Clear", id="clear-confirm", variant="error")
+                yield Button("Cancel", id="clear-cancel")
+
+    @on(Button.Pressed, "#clear-confirm")
+    def _confirm(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#clear-cancel")
+    def action_cancel(self) -> None:
+        self.dismiss(False)
 
 
 def role_order(fleet: FleetSettings) -> list[str]:
@@ -266,10 +396,20 @@ class AppSettingsView(VerticalScroll):
     AppSettingsView .section { text-style: bold; margin-top: 1; }
     AppSettingsView #settings-buttons Button { margin-right: 1; }
     AppSettingsView #settings-note { color: $text-muted; margin-top: 1; height: auto; }
+    AppSettingsView #role-bindings { height: auto; }
+    AppSettingsView .binding { height: auto; margin-bottom: 1; }
+    AppSettingsView .binding Static { height: auto; }
+    AppSettingsView .binding Horizontal { height: auto; }
+    AppSettingsView .binding Button { margin-right: 1; min-width: 8; }
+    AppSettingsView #bindings-empty { color: $text-muted; height: auto; }
     """
     ROLE_SECTION: ClassVar[str] = "roles — permission mode, worktree, persona and account per role"
     ACCOUNTS_SECTION: ClassVar[str] = (
         "accounts — how launches pick one; what a usage limit does; what they share"
+    )
+    BINDINGS_SECTION: ClassVar[str] = (
+        "role bindings — binary, environment and args per role (aisquare team bind); "
+        "each change is written at once"
     )
 
     def __init__(self, *, id: str | None = None) -> None:
@@ -279,6 +419,8 @@ class AppSettingsView(VerticalScroll):
         self.accounts = config.accounts
         self._roles: list[str] = role_order(self.fleet)
         self._account_bindings: dict[str, str] = settings_service.role_account_bindings(config)
+        self._role_bindings: dict[str, RoleLaunchProfile] = dict(config.team.profiles)
+        """Every role's binding as the section shows it (``team.profiles``)."""
         self._accounts: list[ClaudeAccount] = []
         """The slots the account selects offer — filled by :meth:`_load_accounts`'s worker."""
         self._shown: dict[str, object] = {}
@@ -455,6 +597,11 @@ class AppSettingsView(VerticalScroll):
             yield Label("switch at (% used)")
             yield Input(value=str(self.accounts.switch_at), type="integer", id="accounts-switch-at")
         with Horizontal(classes="row"):
+            yield Label("under the line, prefer")
+            yield Select(
+                PREFER_MODES, value=self.accounts.prefer, allow_blank=False, id="accounts-prefer"
+            )
+        with Horizontal(classes="row"):
             yield Label("on a usage limit")
             yield Select(
                 ON_LIMIT_MODES,
@@ -483,13 +630,70 @@ class AppSettingsView(VerticalScroll):
             Text(
                 f"saved to {paths.config_path()} (only what differs from the defaults) — a "
                 "per-spawn flag still wins over these (no [fleet] value is read from the "
-                "environment). Model, effort "
-                "and binary per role live in `aisquare team harness` and "
-                "`aisquare team bind`. The account per role is `team bind <role> "
+                "environment). Model and effort "
+                "per role live in `aisquare team harness`; each role's binding (binary, "
+                "environment, args) is under role bindings below. The account per role "
+                "is `team bind <role> "
                 "--account`; the machine and project defaults are on the Accounts page "
                 "and `aisquare accounts default`.",
             ),
             id="settings-note",
+        )
+        yield Static(self.BINDINGS_SECTION, classes="section")
+        with Vertical(id="role-bindings"):
+            yield from self._binding_rows()
+        with Horizontal(classes="row"):
+            yield Button("+ New bind", id="bindings-new")
+
+    def _binding_rows(self) -> Iterable[Vertical | Static]:
+        """One block per bound role — its binding, then Edit, Unset key… and Clear."""
+        if not self._role_bindings:
+            yield Static(
+                Text(
+                    "no role bindings — `aisquare team bind <role> --bin … --env KEY=VALUE` "
+                    "makes one, or + New bind"
+                ),
+                id="bindings-empty",
+            )
+            return
+        for role, profile in sorted(self._role_bindings.items()):
+            yield Vertical(
+                Static(binding_text(role, profile)),
+                Horizontal(
+                    Button("Edit", id=binding_widget_id("edit", role)),
+                    Button(
+                        "Unset key…",
+                        id=binding_widget_id("unset", role),
+                        disabled=not (profile.env or profile.env_files),
+                    ),
+                    Button("Clear", id=binding_widget_id("clear", role), variant="error"),
+                ),
+                id=binding_widget_id("row", role),
+                classes="binding",
+            )
+
+    async def reload_bindings(self) -> None:
+        """Show the bindings the file holds now: after this page's own write, on Reload,
+        and each time the page is shown, so one a shell wrote meanwhile shows (review of
+        #334: the page is built once and kept).
+
+        On this view's own message queue (``call_later``, ``on_show``), never a worker: one
+        rebuild ends before the next begins, which two at once would not (a row's id
+        mounted twice), and the read is the one file the form reads on this thread too.
+        """
+        self._role_bindings = dict(self._read_config().team.profiles)
+        rows = self.query_one("#role-bindings", Vertical)
+        await rows.remove_children()
+        await rows.mount_all(list(self._binding_rows()))
+
+    async def on_show(self) -> None:
+        await self.reload_bindings()
+
+    def _binding_role(self, button_id: str | None, kind: str) -> str | None:
+        """The bound role a binding button belongs to, by its id."""
+        return next(
+            (role for role in self._role_bindings if binding_widget_id(kind, role) == button_id),
+            None,
         )
 
     def on_mount(self) -> None:
@@ -547,6 +751,7 @@ class AppSettingsView(VerticalScroll):
         self.query_one("#accounts-pick", Select).value = self.accounts.pick
         self.query_one("#accounts-switch-at", Input).value = str(self.accounts.switch_at)
         self.query_one("#accounts-on-limit", Select).value = self.accounts.on_limit
+        self.query_one("#accounts-prefer", Select).value = self.accounts.prefer
         self.query_one("#accounts-wait-minutes", Input).value = str(
             self.accounts.wait_if_reset_within_minutes
         )
@@ -567,6 +772,7 @@ class AppSettingsView(VerticalScroll):
             row.account.value = bound or NO_ACCOUNT
         self._shown = self._field_values()
         self._load_accounts()  # the slots as they are now, off the UI thread
+        self.call_later(self.reload_bindings)
 
     # --- writing -----------------------------------------------------------------------
 
@@ -631,7 +837,11 @@ class AppSettingsView(VerticalScroll):
             "switch_at": switch_at,
             "wait_if_reset_within_minutes": wait_minutes,
         }
-        for wid, key in (("accounts-pick", "pick"), ("accounts-on-limit", "on_limit")):
+        for wid, key in (
+            ("accounts-pick", "pick"),
+            ("accounts-on-limit", "on_limit"),
+            ("accounts-prefer", "prefer"),
+        ):
             value = self.query_one(f"#{wid}", Select).value
             if wid in changed and isinstance(value, str):
                 update[key] = value
@@ -715,6 +925,66 @@ class AppSettingsView(VerticalScroll):
             return
         self.reload_form()
         self.notify(f"✓ settings saved to {written}", timeout=5, markup=False)
+
+    # --- role bindings (#98) -----------------------------------------------------------
+
+    @on(Button.Pressed, "#bindings-new")
+    def _new_binding(self) -> None:
+        self.app.push_screen(NewBindScreen([]), self._binding_saved)
+
+    @on(Button.Pressed)
+    def _binding_button(self, event: Button.Pressed) -> None:
+        button = event.button.id
+        if not button or not button.startswith(BINDING_ID_PREFIX):
+            return
+        event.stop()
+        if (role := self._binding_role(button, "edit")) is not None:
+            # The binding as the file holds it now: Save writes it whole, so one opened on
+            # what the section last read would write a shell's later `team bind` away.
+            current = self._read_config().team.profiles.get(role)
+            if current != self._role_bindings.get(role):
+                self.call_later(self.reload_bindings)
+            if current is None:
+                self.notify(f"{role} is no longer bound (changed outside this page)", markup=False)
+                return
+            self.app.push_screen(NewBindScreen([], editing=(role, current)), self._binding_saved)
+        elif (role := self._binding_role(button, "unset")) is not None:
+            profile = self._role_bindings[role]
+            keys = [*profile.env, *sorted(profile.env_files)]
+            self.app.push_screen(
+                UnsetKeyScreen(role, keys), lambda key, role=role: self._unset(role, key)
+            )
+        elif (role := self._binding_role(button, "clear")) is not None:
+            self.app.push_screen(
+                ConfirmClearBinding(role), lambda yes, role=role: self._clear(role, yes)
+            )
+
+    def _binding_saved(self, seat: str | None) -> None:
+        if seat is not None:
+            self.notify(f"bound {seat} — saved to {paths.config_path()}", markup=False)
+            self.call_later(self.reload_bindings)
+
+    def _unset(self, role: str, key: str | None) -> None:
+        if key is None:
+            return
+        try:
+            settings_service.bind_role(role, unset=[key])
+        except Exception as exc:  # the file could not be written: say so, change nothing shown
+            self.notify(f"{key} not unset: {exc}", severity="error", markup=False)
+            return
+        self.notify(f"{role}: {key} unset (aisquare team bind {role} --unset {key})", markup=False)
+        self.call_later(self.reload_bindings)
+
+    def _clear(self, role: str, confirmed: bool | None) -> None:
+        if not confirmed:
+            return
+        try:
+            settings_service.clear_role_binding(role)
+        except Exception as exc:
+            self.notify(f"{role}'s binding not cleared: {exc}", severity="error", markup=False)
+            return
+        self.notify(f"{role}: binding cleared (aisquare team bind {role} --clear)", markup=False)
+        self.call_later(self.reload_bindings)
 
     # --- reset -------------------------------------------------------------------------
 

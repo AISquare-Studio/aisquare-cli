@@ -92,6 +92,8 @@ narrowing their environment would be change without a reason:
     user's own tmux, and ``ps`` for this process's ancestors: whether the session
     is remote. Strings, no model.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
+  * ``cli/ui/terminal.py::wsl_path`` — ``wslpath -u`` on a Windows path pasted into a
+    pane under WSL (#288). A path converter, no model.
   * ``core/paths.py::restrict_to_owner`` — ``icacls``, locking the
     credentials file to this account on Windows. A permissions tool, not a
     model process; it is also the seam that guards the API key, so an
@@ -203,7 +205,13 @@ IDENTITY_ENV_VARS = (*TRACING_ENV_VARS, *MARKER_ENV_VARS)
 #: started pinned every window opened there by hand to that board. The switches
 #: (``AISQUARE_TEAM``, ``AISQUARE_TEAM_DELTA``) are not here: a shell that sets one
 #: has made a choice for its whole fleet.
-TEAM_ENV_VARS = ("AISQUARE_TEAM_HUB", "AISQUARE_FLEET_AGENT", "AISQUARE_ROLE", "AISQUARE_PERSONA")
+TEAM_ENV_VARS = (
+    "AISQUARE_TEAM_HUB",
+    "AISQUARE_FLEET_AGENT",
+    "AISQUARE_ROLE",
+    "AISQUARE_PERSONA",
+    "AISQUARE_BOARD_CONTEXT",
+)
 
 TRACED = "traced"
 EXCLUDED = "excluded"
@@ -255,11 +263,35 @@ SEAMS: dict[str, Seam] = {
         "a detached `aisquare team distill` of ours — a background worker is not an agent session",
         strips_identity=True,
     ),
+    "aisquare/services/github_prs.py::_run_gh": Seam(
+        EXCLUDED,
+        "`gh api` for `aisquare watch` and the captain queue's pull requests (P2-W2, #284). "
+        "No model process; run untraced",
+        strips_identity=True,
+    ),
+    "aisquare/services/github_prs.py::repo_of": Seam(
+        EXCLUDED,
+        "`git remote get-url origin`, to name a project's GitHub repository (P2-W2). No model "
+        "process; stripped, as every git seam is (`git_env()`)",
+        strips_identity=True,
+    ),
+    "aisquare/services/watch.py::_run_source": Seam(
+        EXCLUDED,
+        "an operator's `[watch.sources.<name>]` command (P2-W2, #284). It may run a model "
+        "(a `claude -p` one-shot), so it runs untraced and cannot inherit an identity",
+        strips_identity=True,
+    ),
     "aisquare/services/hooks.py::_detach": Seam(
         EXCLUDED,
         "a detached `aisquare hook hand-over` of ours (#146; review of #205, finding 1) — the "
         "worker that moves a limited agent is not an agent session, and it outlives the pane "
         "whose hook started it",
+        strips_identity=True,
+    ),
+    "aisquare/services/explainability.py::_start_root_worker": Seam(
+        EXCLUDED,
+        "a detached `aisquare explainability post-root` of ours (#129 e) — it posts a "
+        "launched session's Run root off the launch path; a worker, not an agent session",
         strips_identity=True,
     ),
     "aisquare/cli/accounts.py::_exec": Seam(
@@ -295,6 +327,12 @@ SEAMS: dict[str, Seam] = {
         EXCLUDED, "`node --version`, a string — the floor repomix declares"
     ),
     "aisquare/core/snapshot.py::_run_repomix": Seam(EXCLUDED, "repomix packs files; no model"),
+    "aisquare/core/code_index.py::_git_files": Seam(
+        EXCLUDED,
+        "`git ls-files -co --exclude-standard` for the symbol index's file list (#285), in "
+        "`git_env()`; no model",
+        strips_identity=True,
+    ),
     "aisquare/core/workspace.py::git_common_root": Seam(
         EXCLUDED, "`git rev-parse`, in `git_env()`", strips_identity=True
     ),
@@ -314,6 +352,9 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"
+    ),
+    "aisquare/cli/ui/terminal.py::wsl_path": Seam(
+        EXCLUDED, "`wslpath -u` on a Windows path pasted into a pane under WSL; no model"
     ),
     "aisquare/core/paths.py::restrict_to_owner": Seam(
         EXCLUDED, "`icacls` — locks the credentials file to this account; no model"
@@ -377,6 +418,17 @@ SEAMS: dict[str, Seam] = {
         "`doctor --live` needs the EXPLAINABILITY_* environment to diagnose the "
         "machine it is on, the same reason `sdk_doctor` is not",
     ),
+    "aisquare/statusline.py::_wrapped": Seam(
+        EXCLUDED,
+        "`asq-statusline --wrap CMD`: the user's own Claude Code status line, run with the "
+        "payload Claude Code handed ours, as Claude Code would run it (#287); their command, "
+        "in their session's environment; no model process of ours",
+    ),
+    "aisquare/services/adopt.py::_process_args": Seam(
+        EXCLUDED,
+        "`ps -A -o pid=,args=` for `fleet adopt` (#290): whether a live claude names the "
+        "session it would adopt; pids and arguments, no model",
+    ),
     "aisquare/cli/fleet.py::_exec_attach": Seam(
         EXCLUDED,
         "`tmux attach` — a terminal client on the fleet server, not an agent; "
@@ -389,11 +441,24 @@ SEAMS: dict[str, Seam] = {
         "stripped, as every git seam is (`git_env()`)",
         strips_identity=True,
     ),
-    "aisquare/core/tmux.py::_sysctl": Seam(
+    "aisquare/core/memory.py::_sysctl": Seam(
         EXCLUDED,
         "`sysctl -n kern.bootsessionuuid` (macOS) or `kern.boottime` (macOS, the BSDs), at a "
         "fleet spawn and when uninstall, upgrade and fleet shutdown ask whether an agent may "
-        "still run; an identifier and a time, no model",
+        "still run; and `kern.memorystatus_vm_pressure_level` and `hw.memsize` (macOS) for "
+        "the fleet's admission (#283); identifiers, a time and numbers, no model",
+    ),
+    "aisquare/cli/fleet.py::gate": Seam(
+        EXCLUDED,
+        "`aisquare fleet gate -- CMD`: the agent's own heavy command (a test run, a build), "
+        "started once memory allows (#283). It is the agent's shell command, run in the "
+        "agent's own environment as if typed; no model process of ours",
+    ),
+    "aisquare/core/memory.py::_vm_stat": Seam(
+        EXCLUDED,
+        "`vm_stat` (macOS): the page counts the fleet's admission reads as available memory "
+        "(#283); no model",
+        strips_identity=True,
     ),
     "aisquare/services/ngrok_tunnel.py::popen_tied": Seam(
         EXCLUDED,

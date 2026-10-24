@@ -57,7 +57,7 @@ from textual.widgets import (
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.cli.ui.board import COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, BoardPanel
+from aisquare.cli.ui.board import COLUMN_WIDTH_KEY, DETAIL_HEIGHT_KEY, EMPTY_ROW, BoardPanel
 from aisquare.cli.ui.divider import Divider
 from aisquare.cli.ui.terminal import TerminalPane
 from aisquare.cli.ui.views import project as project_view_module
@@ -128,12 +128,13 @@ def drive(
     scenario: Callable[[Pilot[None], Host], Coroutine[Any, Any, T]],
     *,
     refresh_seconds: float = 60.0,
+    size: tuple[int, int] = (120, 50),
 ) -> T:
     """Run ``scenario`` against a mounted Project view and return what it observed."""
 
     async def run() -> T:
         host = Host(project, refresh_seconds=refresh_seconds)
-        async with host.run_test(size=(120, 50)) as pilot:
+        async with host.run_test(size=size) as pilot:
             await pilot.pause()
             return await scenario(pilot, host)
 
@@ -320,6 +321,15 @@ def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[NoTmux]:
     assert not guard.ran, f"a UI test ran tmux: {guard.ran[:3]}"
 
 
+class _NoFleetServer:
+    """A fleet tmux server that is not there: the leftover scan asks it nothing."""
+
+    socket = "asq-none"
+
+    def available(self) -> bool:
+        return False
+
+
 @pytest.fixture(autouse=True)
 def quiet_explainability(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     """No probe dials anything; the client lane answers from a fake; calls are counted."""
@@ -339,6 +349,8 @@ def quiet_explainability(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
         )
 
     monkeypatch.setattr(explainability_service, "shipping_state", shipping_state)
+    # Disable scans for leftovers (#51), the fleet tmux server among them: no server here.
+    monkeypatch.setattr(ops, "_fleet_tmux_server", lambda: _NoFleetServer())
     monkeypatch.setattr(
         ops,
         "probe_proxy",
@@ -789,6 +801,114 @@ def test_refresh_status_pushes_the_managers_state(project: ProjectInfo) -> None:
     assert "no live tmux session" in attach_after  # the coder has no session to attach to
 
 
+def _member(project: ProjectInfo, label: str, role: str, *, ended: bool = False) -> FleetAgent:
+    """A team member of ``role`` in the frame, with an id and pane of its own."""
+    return fake_agent(project, pane_id=f"%{len(label)}", label=label).model_copy(
+        update={
+            "id": f"agt_01test{label.replace('-', '')}",
+            "role": role,
+            "ended_at": datetime.now(tz=UTC) if ended else None,
+        }
+    )
+
+
+def test_the_team_strip_counts_each_role_by_state_and_hides_with_only_the_manager(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P3-W2b (#287): under the manager's info line, the team per role and state, from the
+    shell's frame alone: 2 coders working, 1 tester waiting, 1 reviewer in attention."""
+    manager = fake_agent(project, pane_id="%11")
+    frame = [
+        FleetAgentStatus(agent=manager, state="working"),
+        FleetAgentStatus(agent=_member(project, "coder-a", "coder"), state="working"),
+        FleetAgentStatus(agent=_member(project, "coder-b", "coder"), state="working"),
+        FleetAgentStatus(agent=_member(project, "tester-1", "tester"), state="waiting"),
+        FleetAgentStatus(agent=_member(project, "reviewer-1", "reviewer"), state="attention"),
+        # An ended row the listing keeps while its window stands (#138) is not the team.
+        FleetAgentStatus(agent=_member(project, "coder-old", "coder", ended=True), state="exited"),
+    ]
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, bool, bool]:
+        def no_read(*args: object, **kwargs: object) -> None:
+            raise AssertionError("the strip reads the frame it was handed, nothing else")
+
+        monkeypatch.setattr(fleet_service, "list_agents", no_read)
+        view = host.query_one(ProjectView)
+        view.refresh_status(frame)
+        await pilot.pause()
+        strip = host.query_one("#team-strip", Static)
+        team = (shown(strip), strip.display)
+        view.refresh_status(frame[:1])  # the manager alone
+        await pilot.pause()
+        return (*team, strip.display)
+
+    text, displayed, alone = drive(project, scenario)
+    assert text == "🔨 2▶  🧪 1⏸  👀 1🔔  · board for detail"
+    assert displayed is True
+    assert alone is False
+
+
+def test_the_team_strip_shows_each_state_of_a_role_and_a_role_it_has_no_icon_for(
+    project: ProjectInfo,
+) -> None:
+    frame = [
+        FleetAgentStatus(agent=_member(project, "coder-a", "coder"), state="working"),
+        FleetAgentStatus(agent=_member(project, "coder-b", "coder"), state="limited"),
+        FleetAgentStatus(agent=_member(project, "coder-c", "coder"), state="waiting"),
+        FleetAgentStatus(agent=_member(project, "docs-1", "docs-writer"), state="waiting"),
+    ]
+    text = project_view_module.team_strip_text(frame)
+    assert text is not None
+    assert text.plain == "🔨 1▶ 1⏸ 1⏳  🤖 docs-writer 1⏸  · board for detail"
+    assert project_view_module.team_strip_text(frame[:0]) is None
+
+
+def test_a_narrow_team_strip_is_cut_at_its_end_with_an_ellipsis(project: ProjectInfo) -> None:
+    """Review of #359's walk: under 62 columns the strip word-wrapped and its one row hid
+    the rest, a whole word at a time and unmarked, so a role's counts vanished. One row,
+    cut at its end with an ellipsis."""
+    roles = ("coder", "tester", "reviewer", "validator", "docs-writer")
+    frame = [
+        FleetAgentStatus(agent=_member(project, f"{role}-1", role), state="working")
+        for role in roles
+    ]
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
+        host.query_one(ProjectView).refresh_status(frame)
+        await pilot.pause()
+        strip = host.query_one("#team-strip", Static)
+        # The whole row, padding included: the strip's content starts one cell in.
+        rows = strip.render_lines(Region(0, 0, strip.region.width, strip.region.height))
+        return ["".join(segment.text for segment in row).rstrip() for row in rows]
+
+    [row] = drive(project, scenario, size=(50, 30))
+    assert row.lstrip().startswith("🔨 1▶  🧪 1▶"), row
+    assert row.endswith("…"), row
+
+
+def test_a_click_on_the_team_strip_opens_the_board_tab(project: ProjectInfo) -> None:
+    manager = fake_agent(project, pane_id="%11")
+    coder = _member(project, "coder-a", "coder")
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, str]:
+        view = host.query_one(ProjectView)
+        view.refresh_status(
+            [
+                FleetAgentStatus(agent=manager, state="working"),
+                FleetAgentStatus(agent=coder, state="working"),
+            ]
+        )
+        await pilot.pause()
+        before = view.active
+        await pilot.click("#team-strip")
+        await pilot.pause()
+        return before, view.active
+
+    before, after = drive(project, scenario)
+    assert before == "tab-manager"
+    assert after == "tab-board"
+
+
 def test_a_resize_after_the_manager_leaves_keeps_the_no_manager_text(
     project: ProjectInfo,
 ) -> None:
@@ -933,7 +1053,8 @@ def test_board_tab_shows_this_projects_tasks_and_not_anothers(
     assert other.id != project.id
 
     async def rows(pilot: Pilot[None], host: Host) -> int:
-        return host.query_one("#tasks", DataTable).row_count
+        """The task rows: with none open, the table's one row is the empty state (#286)."""
+        return sum(key.value != EMPTY_ROW for key in host.query_one("#tasks", DataTable).rows)
 
     assert drive(project, rows) == 2
     assert drive(other, rows) == 0  # the panel reads the project it was given, not the cwd
@@ -1361,6 +1482,44 @@ def test_explainability_enable_writes_the_switch_and_disable_clears_it(
     assert any(m.startswith("✓ tracing enabled") for m, _ in notices)
     assert any(m.startswith("✓ tracing disabled") for m, _ in notices)
     assert load_config().explainability.target == "stg"  # nothing else was touched
+
+
+def test_disable_offers_reset_for_a_leftover_proxy_and_reset_removes_it(
+    project: ProjectInfo, quiet_explainability: dict[str, int], tmp_path: Path
+) -> None:
+    """#51: Disable left a settings file's ANTHROPIC_BASE_URL in place, unsaid. Now it
+    names it and offers Reset, which removes it (a backup kept) and goes away again."""
+    config = load_config()
+    config.explainability.enabled = True
+    config.explainability.targets["stg"] = ExplainabilityTarget(
+        gateway_url="https://stg-gateway.example", proxy_url="https://stg-proxy.example:9443"
+    )
+    save_config(config)
+    settings = project.root / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://stg-proxy.example:9443"}}),
+        encoding="utf-8",
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[bool, bool, list[Any]]:
+        host.query_one(ProjectView).active = "tab-explainability"
+        await settle(pilot)
+        reset = host.query_one("#explainability-reset", Button)
+        hidden_before = not reset.display
+        await pilot.click("#explainability-disable")
+        await settle(pilot)
+        offered = bool(reset.display)
+        reset.press()
+        await settle(pilot)
+        return hidden_before and not reset.display, offered, list(host.notices)
+
+    hidden, offered, notices = drive(project, scenario)
+    assert offered, notices
+    assert hidden, "hidden until Disable finds something, and again once Reset ran"
+    assert any(str(settings) in m and s == "warning" for m, s in notices), notices
+    assert any(m.startswith("✓ removed the proxy from 1 place") for m, _ in notices), notices
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"env": {}}
 
 
 def test_explainability_ship_drains_through_the_service_and_register_refuses_unconfigured(

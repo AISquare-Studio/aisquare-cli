@@ -13,7 +13,7 @@ Three ideas carry the feature:
   runs from `$AISQUARE_HOME/captain/brain`, and has no tool but its own
   Actions server. `aisquare captain` starts it or attaches to it.
 - **Every effect is a tool call with a receipt.** The captain's hands are the
-  24 tools of `aisquare captain serve --stdio` (the *Actions server*). Each call
+  26 tools of `aisquare captain serve --stdio` (the *Actions server*). Each call
   writes exactly one `captain_action` event carrying your words (the
   *utterance*), what was done and the effect's own event seq (the *receipt*).
   A refusal is an error result that starts `refused:` (a rule said no) or
@@ -96,6 +96,17 @@ On, everything below holds exactly as written.
    playback device**, so make the headset the default before you start; the
    browser asks which microphone to use when the page first opens — pick the
    headset there.
+
+4. Enrol the owner gate, so the captain can act as you (see
+   [The owner gate](#the-owner-gate)):
+
+   ```sh
+   pip install 'aisquare-cli[gate]'
+   aisquare captain gate enroll
+   ```
+
+   Scan the QR it prints with an authenticator app. Until you enrol, the tools
+   that act as you refuse and say this.
 
 ## Talking to the captain
 
@@ -334,6 +345,64 @@ reads working until its first reply.
 - **One captain per home.** A second `aisquare captain` attaches; the fleet
   refuses a second row and refuses `captain` on a project.
 
+## The owner gate
+
+The captain presses keys in panes, pastes, stops, spawns and restarts: it acts
+as you. So does anyone at your terminal, or a misheard line. While the captain
+is on, the tools that act as you refuse unless an **act-as-owner window** is
+open: `press`, `paste`, `stop`, `spawn`, `restart`, `wololo`,
+`attach_persona` and `act`. A code from your authenticator app opens a window
+for 15 minutes. Say it to the captain ("captain, unlock 123 456"), or type it:
+
+```sh
+aisquare captain gate unlock 123456
+aisquare captain gate lock      # close the window now
+aisquare captain gate status    # on or off, ready or why not, the open window
+```
+
+- **What never needs a code.** Every other tool: the reads (`board`,
+  `attention`, `since`, `read_pane` and the rest), `tell` and the manager ask,
+  notes, tasks, the queue's `resolve` and `snooze`, `ui`, `speak`, and `bt`, so
+  the brake always works.
+- **The codes are TOTP** (RFC 6238): six digits, a new one every 30 seconds.
+  The step before and the step after are accepted too, for clock drift. A code
+  that opened a window never opens another, and nor does an earlier one.
+- **Three wrong codes in a row lock code entry for five minutes** (RFC 4226's
+  throttling), and the refusal says so on the home board. Each lock after
+  that, with no correct code between, lasts twice as long as the one before:
+  10 minutes, then 20, 40, and so on, never more than 24 hours. A correct code
+  resets the count and the doubling.
+- **The audit.** Every call of a gated tool records the open window's id
+  (`window` on its `captain_action` event), so each one traces to the code
+  that allowed it. An `unlock`'s audit masks the code, in the arguments and
+  in your words. Every other tool's audit masks a code in your words too,
+  since one can be said alongside another command ("unlock 123 456 and stop
+  coder-1"): run together, spaced, dashed, or joined to a word by a dash
+  ("code-123456"). A date or a longer number stays as you said it.
+- **The secret** is `$AISQUARE_HOME/captain/gate.secret`, mode 0600, written
+  by `aisquare captain gate enroll`. `--replace` makes a new one: the old
+  authenticator entry stops working and any open window closes. The captain
+  has no tool that enrols, so only your terminal can.
+- **Without pyotp, or before you enrol, the gate stays shut.** The tools
+  that act as you refuse with the install line or the enrol command.
+
+**A spoken code can be overheard.** Someone near you, or a microphone that
+picks you up, hears six digits that open a window within about a minute. The
+gate never accepts the same code twice, so a code it already accepted is
+worthless. One heard before you use it is not, until its step passes. Where
+you can be overheard, type the code, or `lock` when you step away.
+
+Switch the gate off in `config.toml`; any other value, a typo included,
+leaves it on:
+
+```toml
+[captain]
+gate = false   # Phase 1: every tool acts as soon as your words allow it
+```
+
+The gate applies only while the captain is on. With the captain off, nothing
+here runs.
+
 ## After a reboot
 
 `aisquare captain` finds the captain's tmux server gone. When its socket file
@@ -375,8 +444,10 @@ is, compare `claude --version` with these.
 
 Named here so nobody re-derives them:
 
-- **Pull requests waiting on you** through a `gh` provider in the queue's
-  sources (the queue has the item kind; the provider is not wired).
+- **Pull requests waiting on you** through a `gh` provider: **done** in `aisquare
+  watch` (P2-W2). With `[watch] github = true`, the queue's `pr` items are the
+  approved pull requests of each project's GitHub repository, read through `gh api`
+  with ETags ([fleet](fleet.md#watching-the-fleet)).
 - **The captain persona in project pickers**: today every bundled persona shows
   in a project's spawn dialog, the captain's included; hiding a captain-only
   persona is a catalogue rule for every picker.
@@ -384,6 +455,5 @@ Named here so nobody re-derives them:
   page binds loopback only until the owner says otherwise.
 - **The queue's memory outside its window**: two near-identical asks more than
   ten minutes apart are two items.
-- **The TOTP identity gate** (plan section 3).
 - **Pre-trusting the brain folder** in Claude Code's config, so a fresh captain
   never shows the trust dialog — your call, not aisquare's.

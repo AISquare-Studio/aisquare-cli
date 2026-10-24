@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Annotated, get_args
 
 import typer
@@ -36,11 +37,17 @@ TaskRef = Annotated[
 ]
 
 
-def _emit_task(task: TeamTask, *, verb: str) -> None:
+def _emit_task(task: TeamTask, *, verb: str, contract: bool = False, peek: bool = False) -> None:
     """Render a task verb line, carrying the write receipt when one exists.
 
     Reads (``task next`` without ``--claim``) leave no delivery behind, so
     their output stays receipt-free and, under ``--json``, unchanged.
+
+    ``contract`` is a claim (``task claim``, ``task next --claim``): the line is followed by
+    the task's contract (``detail``), the newest reopen feedback, and the command for the
+    full task. The coder used to see the title alone, and the contract was a ``task show``
+    nothing named (#74). ``peek`` (``task next``) says a contract exists. ``--json`` is
+    unchanged: it always carried ``detail``.
     """
     delivery = team_service.last_delivery()
     emit_write_warning(delivery)
@@ -49,11 +56,26 @@ def _emit_task(task: TeamTask, *, verb: str) -> None:
         payload.update(delivery_fields(delivery))
         typer.echo(json.dumps(payload))
     else:
-        stdout_console().print(
+        console = stdout_console()
+        # A bare number, never `#N`: in a shell `#` starts a comment, so a copied
+        # `aisquare task show #2` ran `task show` with no ref (P0-FU, #51).
+        ref = str(task.number) if task.number is not None else task.id
+        console.print(
             f"✓ {verb}: {team_service.task_label(task)} [{task.status}] {task.title}"
             f"{receipt_suffix(delivery)}",
             markup=False,
         )
+        if peek and task.detail:
+            console.print(f"  has a contract — `aisquare task show {ref}`", markup=False)
+        if not contract:
+            return
+        feedback = team_service.last_feedback(task)
+        if task.detail:
+            console.print(f"\n{task.detail}", markup=False)
+        if feedback:
+            console.print(f"\nreopened because: {feedback}", markup=False)
+        if task.detail or feedback:
+            console.print(f"\nfull task: `aisquare task show {ref}`", markup=False)
 
 
 @app.command("add")
@@ -63,7 +85,30 @@ def add(
         str | None,
         typer.Option("--key", help="Idempotency key (defaults to a slug of the title)."),
     ] = None,
-    detail: Annotated[str | None, typer.Option("--detail", help="Longer description.")] = None,
+    detail: Annotated[
+        str | None,
+        typer.Option(
+            "--detail",
+            help="The task's contract: objective · why · known · acceptance · boundaries. "
+            "Printed to whoever claims the task.",
+        ),
+    ] = None,
+    detail_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--detail-file",
+            help="Read the contract from this file instead of --detail.",
+            dir_okay=False,
+        ),
+    ] = None,
+    rules: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--rules",
+            help="Rules files the contract cites, by name: testing,git -> "
+            ".aisquare/rules/testing.md, … A missing one refuses the add.",
+        ),
+    ] = None,
     role: Annotated[
         str | None, typer.Option("--role", help="Suggested owner role (advisory).")
     ] = None,
@@ -74,15 +119,64 @@ def add(
             help="Task this one depends on: its number (12, #12) or id (repeat for several).",
         ),
     ] = None,
+    project: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            help="A parent manager's delegation: add it on this member's board "
+            "(a member of a group this board parents).",
+        ),
+    ] = None,
+    origin: Annotated[
+        str | None,
+        typer.Option(
+            "--origin",
+            help="With --project: the task on this board it is delegated from; its status "
+            "changes route back here.",
+        ),
+    ] = None,
     as_session: SessionRef = None,
 ) -> None:
-    """Add a shared task. Re-adding the same task is safe — you get the original."""
+    """Add a shared task. Re-adding the same task is safe — you get the original.
+
+    The contract is checked for ``\\[team] brief_blocks`` (objective:, acceptance:,
+    boundaries:): a missing block warns, or refuses under ``\\[team] brief_strict``."""
+    missing: list[str] = []
+    if detail is not None and detail_file is not None:
+        fail("give --detail or --detail-file, not both", error="invalid_brief", exit_code=2)
+    if detail_file is not None:
+        try:
+            detail = detail_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            fail(f"--detail-file {detail_file}: {exc}", error="invalid_brief", exit_code=2)
+    if detail is not None or rules:
+        try:
+            brief = team_service.build_brief(detail or "", rules=rules or [])
+        except team_service.BriefRefused as exc:
+            fail(str(exc), error="invalid_brief", exit_code=2)
+        detail, missing = brief.detail, brief.missing_blocks
+    if missing:
+        blocks = ", ".join(f"{block}:" for block in missing)
+        typer.echo(
+            f"aisquare: the contract has no {blocks} block — the claim prints the contract, "
+            "so say it there",
+            err=True,
+        )
     try:
         task, created = team_service.add_task(
-            title, key=key, detail=detail, role=role, needs=needs, session_ref=as_session
+            title,
+            key=key,
+            detail=detail,
+            role=role,
+            needs=needs,
+            session_ref=as_session,
+            project=project,
+            origin=origin,
         )
     except ValueError as exc:
-        fail(str(exc), error="invalid_needs")
+        said = str(exc)
+        delegation = said.startswith(("--project", "--origin"))
+        fail(said, error="invalid_delegation" if delegation else "invalid_needs")
     except KeyError as exc:
         # The session resolves first in add_task, so a KeyError here names a
         # --needs ref — blame it, not the (valid) --as session.
@@ -94,6 +188,7 @@ def add(
     if get_state().json_output:
         payload = {"created": created, **task.model_dump(mode="json")}
         payload.update(delivery_fields(delivery))
+        payload["missing_blocks"] = missing
         typer.echo(json.dumps(payload))
     else:
         verb = "added" if created else "already tracked (idempotent)"
@@ -193,7 +288,7 @@ def claim(ref: TaskRef, as_session: SessionRef = None) -> None:
         fail(str(exc), error="claim_lost", ref=exc.task.id)
     except STORE_ERRORS as exc:
         _fail_team(exc, ref)
-    _emit_task(task, verb="claimed")
+    _emit_task(task, verb="claimed", contract=True)
 
 
 @app.command("next")
@@ -207,6 +302,14 @@ def next_(
     claim: Annotated[
         bool, typer.Option("--claim", help="Atomically claim the task (todo only).")
     ] = False,
+    only: Annotated[
+        str | None,
+        typer.Option(
+            "--task",
+            help="Only this task (#n or id), when it is in --status and ready; else nothing.",
+            metavar="TASK",
+        ),
+    ] = None,
     as_session: SessionRef = None,
 ) -> None:
     """Pick up the next available task — built for looped sessions."""
@@ -215,7 +318,7 @@ def next_(
     narrowed: TaskStatus = status  # type: ignore[assignment]
     try:
         task = team_service.next_task(
-            role=role, status=narrowed, claim=claim, session_ref=as_session
+            role=role, status=narrowed, claim=claim, session_ref=as_session, task_ref=only
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -227,7 +330,7 @@ def next_(
         else:
             stdout_console().print(f"Nothing to pick up (status: {status}).")
         return
-    _emit_task(task, verb="claimed" if claim else "next up")
+    _emit_task(task, verb="claimed" if claim else "next up", contract=claim, peek=not claim)
 
 
 @app.command("review")

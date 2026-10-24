@@ -20,8 +20,12 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "aisquare"
 
-_HAND_BUILT = re.compile(r"\baisquare fleet (?!(?:reap|shutdown) --all\b)[a-z]")
-"""``aisquare fleet`` and a word: any verb, except the two that walk every project."""
+_HAND_BUILT = re.compile(
+    r"\baisquare fleet (?!(?:reap|shutdown) --all\b|(?:gate|capacity)\b|adopt\b)[a-z]"
+)
+"""``aisquare fleet`` and a word: any verb, except those that walk every project: ``reap
+--all``, ``shutdown --all``, ``gate`` and ``capacity``, which take no ``--project`` (#283),
+and ``adopt``, which finds the project from the conversation's directory (#290)."""
 
 _NO_PROJECT_IN_QUESTION = (
     "the fleet UI's refusal: it covers every project, and the listing it points to is the "
@@ -153,10 +157,12 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "_replaced"): _FLEET_OP,
     ("services/fleet.py", "_in_hand_over"): _FLEET_OP,
     ("services/fleet.py", "spawn"): _FLEET_OP,
+    ("services/fleet.py", "_refuse_by_group"): _FLEET_OP,
     ("services/fleet.py", "_in_place_of_recorded"): _FLEET_OP,
     ("services/fleet.py", "_exited_note"): "each exited row's own ``project_id``",
     ("services/fleet.py", "_tell"): _FLEET_OP,
     ("services/fleet.py", "_send_it_later"): _FLEET_OP,
+    ("services/fleet.py", "unsent_detail"): "the project the listing reads, whose agent it is",
     ("services/fleet.py", "_past_trust_prompt"): _FLEET_OP,
     ("services/fleet.py", "_forget"): (
         _FLEET_OP + ", or each stranded row's own (``_refuse_a_freed_socket``)"
@@ -165,6 +171,10 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "restart"): _FLEET_OP,
     ("services/fleet.py", "rename"): "the project renamed, with its new codename",
     ("services/fleet.py", "attach_argv"): _FLEET_OP,
+    ("services/hooks.py", "hand_over"): (
+        "the limited agent's own row's project (``agent.project_id``), which the "
+        "hand-over moves it in (#277)"
+    ),
     ("services/project.py", "BoardReader.frees"): (
         "each project whose fleet agents read a hub's board (``ProjectBusyError``, and doctor's "
         "capture-off line of a captured row's board)"

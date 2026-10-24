@@ -309,6 +309,14 @@ class ClaudeUsage(BaseModel):
     week_percent: float | None = None
     """The rolling seven-day window: percent USED (0-100)."""
     week_resets_at: datetime | None = None
+    family_week_percent: dict[str, float] = Field(default_factory=dict)
+    """The per-family weeks (``seven_day_opus`` → ``opus``…): percent USED (0-100). Such a
+    limit applies only to requests to that model family (#277), so a pick counts it for an
+    agent of that family alone (``services.claude_accounts.headroom_percent``). Live
+    readings only: the cache keeps the two shared windows, and a spent family week is
+    remembered as a limit mark instead (``remember_limit``)."""
+    family_week_resets_at: dict[str, datetime] = Field(default_factory=dict)
+    """When each family week resets, where the endpoint said."""
     fetched_at: datetime | None = None
     """When the reading was taken — or, when nothing could be read, when that was found out."""
     last_failed_at: datetime | None = None
@@ -379,6 +387,13 @@ HeadroomLevel = Literal["good", "fair", "low", "critical", "empty", "unknown"]
 """How much room the fleet's accounts have left, in one word (see ``HeadroomSummary``)."""
 
 
+class WeekReset(BaseModel):
+    """The account whose weekly window resets first, and when (#287)."""
+
+    slot: int
+    resets_at: datetime
+
+
 class HeadroomSummary(BaseModel):
     """What is LEFT across the fleet's accounts, in one figure and one word.
 
@@ -400,6 +415,85 @@ class HeadroomSummary(BaseModel):
     the sidebar's agent rows and the agent info line show beside an agent's account."""
     fetched_at: datetime | None = None
     """The OLDEST reading behind the figure: the summary is no staler than this."""
+    week_left_by_slot: dict[int, float] = Field(default_factory=dict)
+    """Each usable account's WEEKLY window LEFT, ``100 - week used`` (#287)."""
+    week_percent_left: float | None = None
+    """The mean of :attr:`week_left_by_slot` (0-100); ``None`` with no week read."""
+    weeks_left: float | None = None
+    """The sum of ``(100 - week used) / 100``: account-weeks left, read as "1.8 of 3"."""
+    week_resets_soonest: WeekReset | None = None
+    """The usable account whose weekly window resets first, and when."""
+
+
+class StatuslineSession(BaseModel):
+    """One Claude Code session as its status line last reported it (#287, 2c).
+
+    Read from ``<aisquare home>/cache/statusline/<session_id>.json``, which
+    ``asq-statusline`` writes on each assistant message of any session carrying it —
+    hand-launched and non-project sessions too. Never a prompt: the ids, the cwd, the
+    model and the figures Claude Code shows.
+    """
+
+    session_id: str
+    updated_at: datetime
+    cwd: str | None = None
+    model: str | None = None
+    config_dir: str | None = None
+    """``CLAUDE_CONFIG_DIR`` in the session's environment; ``None`` for the plain claude."""
+    slot: int | None = None
+    """The account it runs on, from :attr:`config_dir`; ``None`` for a directory not ours."""
+    account: str | None = None
+    """That account's name (its alias, ``account N`` or ``plain claude``)."""
+    fleet_agent: str | None = None
+    """``AISQUARE_FLEET_AGENT``: the fleet row it runs in, when a fleet spawn started it."""
+    fleet_label: str | None = None
+    """That row's label, when the store still has it."""
+    session_percent: float | None = None
+    """The five-hour window, percent USED; ``None`` without ``rate_limits`` (an API key)."""
+    session_resets_at: datetime | None = None
+    week_percent: float | None = None
+    week_resets_at: datetime | None = None
+    context_percent: float | None = None
+    cost_usd: float | None = None
+
+
+class StatuslineSite(BaseModel):
+    """One account's Claude Code ``statusLine``, as ``accounts statusline`` found or left it."""
+
+    slot: int
+    account: str
+    settings_path: str
+    state: Literal["none", "ours", "wrapped", "foreign", "unreadable", "shared"]
+    """``none``; ``ours`` (``asq-statusline``); ``wrapped`` (ours, running the user's own
+    command first); ``foreign`` (the user's own, left alone); ``unreadable`` (a settings
+    file that is not a JSON object, left alone); ``shared`` (the same file as an account
+    listed before it, through ``[accounts] share``)."""
+    theirs: str | None = None
+    """The user's own command: the one left alone, or the one ours wraps."""
+    changed: bool = False
+    """Whether this run wrote the file."""
+    error: str | None = None
+
+
+class AdoptableConversation(BaseModel):
+    """A Claude Code conversation on one of the CLI's accounts that no fleet row owns (#290):
+    what ``fleet adopt --list`` shows and ``fleet adopt`` takes."""
+
+    session_id: str
+    transcript_path: str
+    slot: int
+    """The account whose config dir holds the transcript: the one it resumes on."""
+    account: str
+    cwd: str | None = None
+    """The directory the conversation ran in, as its transcript records it."""
+    project_id: str | None = None
+    """The onboarded project that holds :attr:`cwd`; ``None`` when none does."""
+    last_activity: datetime
+    """When the transcript was last written."""
+    first_prompt: str | None = None
+    """The first thing the user typed, cut to a line."""
+    held_by: int | None = None
+    """The pid of a live ``claude`` still holding the session; ``None`` when none does."""
 
 
 class ClaudeAccountStatus(BaseModel):
@@ -689,6 +783,11 @@ class TeamSession(BaseModel):
     persona: str | None = None
     """The persona the session was launched as (``AISQUARE_PERSONA``), recorded at start —
     what was ASKED, even when it could not be loaded (docs/plans/spawn-personas.md §3.7)."""
+    prompted_at: datetime | None = None
+    """When its last prompt started a turn (``UserPromptSubmit``), however the prompt came:
+    typed, on the command line, or from another session's inbox. ``None`` before the first,
+    and on rows from before schema 34. What a typed delivery's acknowledgement asks
+    (``services.delivery``)."""
 
 
 class TeamTask(BaseModel):
@@ -736,6 +835,13 @@ class TeamEvent(BaseModel):
     task_id: str | None = None
     to_role: str | None = None
     created_at: datetime
+    actor: str | None = None
+    """Who caused it, when not the author (P1 WS-2, #279): a session id, ``user`` (asq or
+    a shell with no session), ``usage-limit`` or ``auto-stop``. ``None``: the author's own
+    act, or unknown."""
+    meta: dict[str, object] | None = None
+    """Its details, by kind: ``agent_exited`` carries ``status``, ``force``, ``released``
+    and ``why``."""
 
     def as_envelope(self) -> DataEnvelope:
         """This event as a capture-pipe envelope (``kind`` namespaced ``team.*``).
@@ -753,6 +859,8 @@ class TeamEvent(BaseModel):
             "text": self.text,
             "task_id": self.task_id,
             "to_role": self.to_role,
+            "actor": self.actor,
+            "meta": self.meta,
         }
         if self.kind == "signal":
             decoded = _SIGNAL_TEXT.match(self.text)
@@ -807,6 +915,9 @@ class OnboardReport(BaseModel):
     pack failed and why. ``None`` when a pack was made or reused. Set beside a
     ``snapshot``, it is a ``--refresh`` that failed: that is the last pack, kept,
     and agents still get it."""
+    code_index: str | None = None
+    """The symbol index's line (#285): what this onboard built or refreshed, or why not.
+    ``None`` with ``[code] enabled = false``."""
 
 
 class ProjectForgetReport(BaseModel):
@@ -821,12 +932,16 @@ class ProjectForgetReport(BaseModel):
     removed: dict[str, int] = Field(default_factory=dict)
     data_dir_removed: bool = False
     active: ProjectInfo | None = None
-    """The active project AFTER the forget — ``None`` when nothing is pinned any
-    more and the active project again follows the working directory."""
+    """The project pinned AFTER the forget. Always ``None`` since #271: a forget clears a
+    pin that named the project and never moves one, so the active project follows the
+    working directory, or the pin it left alone. Kept for ``--json`` readers."""
     active_changed: bool = False
-    """Whether the forgotten project WAS the active one, so the pin moved."""
+    """Whether the pin named the forgotten project, so it was cleared (:attr:`unpinned`)."""
+    unpinned: ProjectInfo | None = None
+    """The project whose pin the forget cleared, else ``None``: there was no pin, or it
+    named another project, and nothing was written (#271)."""
     pin_error: str | None = None
-    """Why the pin could not be moved after the forget, when it could not — the
+    """Why the pin could not be cleared after the forget, when it could not — the
     forget itself is complete; the active project follows the working directory
     until ``project switch`` succeeds."""
     keys_still_live: list[PendingRevocation] = Field(default_factory=list)
@@ -890,9 +1005,13 @@ class ProjectPruneReport(BaseModel):
     dry_run: bool = True
     purged: bool = False
     active: ProjectInfo | None = None
+    """As for ``ProjectForgetReport``: always ``None`` since #271."""
     active_changed: bool = False
+    """Whether the pin named a project the sweep dropped, so it was cleared."""
+    unpinned: ProjectInfo | None = None
+    """The dropped project whose pin the sweep cleared, else ``None`` (#271)."""
     pin_error: str | None = None
-    """Why the pin could not be moved after the sweep, when it could not — the
+    """Why the pin could not be cleared after the sweep, when it could not — the
     registrations are dropped (and purged) regardless."""
     keys_still_live: list[PendingRevocation] = Field(default_factory=list)
     """As for ``ProjectForgetReport``: minted keys of purged projects still live."""
@@ -915,6 +1034,9 @@ FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited"
 ``TeamSession`` row wins (working / waiting / attention); otherwise the tmux
 pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
 when neither source can answer."""
+
+FirstPromptState = Literal["pending", "acked", "unsent"]
+"""Where a fleet agent's first message stands (:attr:`FleetAgent.first_prompt`)."""
 
 
 class ProjectGroup(BaseModel):
@@ -1062,6 +1184,20 @@ class LaunchSpec(BaseModel):
     (``core.orchestrator.window_team_hub``). A restart or switch gives the replacement's
     window the same, whoever runs it (``services.fleet._board_and_hub``). ``None`` on a spec
     recorded before 0.8.1 kept it."""
+    remote_control: bool = False
+    """Whether it was spawned with Claude Code's Remote Control asked for (#289): the
+    spawn's ``--remote-control``/``--no-remote-control``, else the role's
+    ``[fleet.roles.<role>] remote_control``. A restart and a switch replay it; ``False`` on a
+    spec recorded before it existed."""
+    model: str | None = None
+    """The ``--model`` the spawn resolved down the role's ladder (#129 b), ``None`` when it
+    passed none: another binary, a model already in the arguments, or an untiered role."""
+    effort: str | None = None
+    """The ``--effort`` passed beside ``model``."""
+    board_context: str | None = None
+    """What of the board the agent reads (``all``, ``relevant``, ``none``; P1 WS-2, #279),
+    as its spawn resolved it, so a restart or switch keeps it. ``None`` on a spec recorded
+    before it: the role's setting applies."""
 
 
 class FleetAgent(BaseModel):
@@ -1124,6 +1260,16 @@ class FleetAgent(BaseModel):
     persona: str | None = None
     """The persona the agent was spawned with: ``--persona``, else the role's
     ``[fleet.roles.<role>].persona``, else none."""
+    first_prompt: FirstPromptState | None = None
+    """Whether the first message it was given started a turn (P0-W1a, #122): ``pending``
+    from the spawn until its ``UserPromptSubmit``, then ``acked``; ``unsent`` once a
+    listing found it still pending past ``[fleet] prompt_ack_seconds`` at an idle input
+    box, or a typed delivery left it in the box. ``None`` when it was given none, and on
+    rows from before schema 34 ("not tracked")."""
+    first_prompt_at: datetime | None = None
+    """When ``first_prompt`` last changed: given (``pending``), taken (``acked``), found
+    not taken (``unsent``). An ``acked`` row's ``first_prompt_at - created_at`` is how long
+    the agent took to start its first turn (doctor's ``fleet-delivery`` row)."""
 
 
 class FleetAgentStatus(BaseModel):

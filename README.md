@@ -87,7 +87,7 @@ aisquare doctor                        # is everything wired? (and how to fix an
 One agent above every project: the **captain** runs every fleet for you, and you
 talk to it, typed or spoken. `aisquare captain` starts it (or attaches to it),
 and `aisquare captain say "what is up"` asks it what needs you, across every
-board. Every effect is one of its 24 tools, each leaving one audit event with
+board. Every effect is one of its 26 tools, each leaving one audit event with
 your words; `stop`, `spawn` and `restart` happen only when your words name what
 they act on, and a refusal is said, never faked.
 
@@ -115,6 +115,7 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 - [Claude Code](https://claude.com/claude-code) for the agents, and tmux 3.2+
   for the fleet.
 - Node 22+, optional, for the codebase snapshot each session starts from.
+  The symbol index (`aisquare code find|refs|similar`) needs nothing extra for Python.
 
 The package is `aisquare-cli`; the command is `aisquare`, with `asq` as the
 short alias.
@@ -127,6 +128,7 @@ short alias.
 | [Memory](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/memory.md) | Your agent remembers preferences and project conventions, and starts every session oriented. For everyone; nothing to run after setup |
 | [The fleet](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/fleet.md) | The UI, the roles, `aisquare fleet …`, Claude accounts, and every default you can change |
 | [Orchestration](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/orchestration.md) | Several agent sessions work one problem as a team, with a shared task board. Opt-in, per repo |
+| [Which instructions an agent follows](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/instructions.md) | Your CLAUDE.md, the role cycle, the persona and memory: where each lands, and how to settle a conflict between them |
 | [Phone control](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/remote.md) | Optional: the fleet on your phone through your own ngrok tunnel. What needs you across every project, each agent's screen, the board, and once you allow writes, the keys to answer |
 | [Reference](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/reference.md) | The hooks, the `~/.aisquare` layout, the main command tree and the global flags |
 | [The AISquare platform](https://github.com/AISquare-Studio/aisquare-cli/blob/main/docs/platform.md) | Optional: signing in, Explainability, the Collective Intelligence test bed |

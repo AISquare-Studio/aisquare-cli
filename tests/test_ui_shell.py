@@ -22,6 +22,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
@@ -90,7 +91,7 @@ from aisquare.core.config import load_config, save_config
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import update_state
 from aisquare.core.store import ContextStore, SqliteStore, store_session
-from aisquare.core.tmux import Completed
+from aisquare.core.tmux import Completed, TmuxServer
 from aisquare.models import (
     CheckStatus,
     ClaudeAccount,
@@ -106,6 +107,7 @@ from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
 from tests import guard_clock, toast_log
+from tests.fleet_fakes import list_agents_as
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
 from tests.ui_workers import settle_page
 
@@ -194,7 +196,7 @@ def script(monkeypatch: pytest.MonkeyPatch) -> Script:
     def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return list(agents.get(project.id, []))
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     return agents
 
 
@@ -681,7 +683,13 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
         }
         await pilot.resize_terminal(140, 30)
         await settle(app)
+        # Until the header has followed the resize: one settle read the 90-column layout
+        # on windows-latest (`37 > 60`, run 40013597204), the reflow still to come.
         seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
+        deadline = time.monotonic() + FLEET_HOLD_S
+        while seen["wide"][0] <= 60 and time.monotonic() < deadline:
+            await pilot.pause(0.05)
+            seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
         return seen
 
     seen = drive(
@@ -2796,7 +2804,7 @@ def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
         with store_session() as store:
             yield store
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[str, str, bool]:
         app = fleet_app(pilot)
@@ -2816,6 +2824,48 @@ def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
     main = threading.main_thread()
     assert all(t is not main for seen in threads.values() for t in seen), threads
     assert row_a.rstrip().endswith("▶") and row_b.rstrip().endswith("▶")  # …and painted
+
+
+def test_a_tick_that_changed_nothing_repaints_no_row_and_a_change_repaints_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With 50 listed projects every tick repainted every card, 15 ms of the UI thread at
+    50 (#83): a card shown what it already shows is skipped, and one agent's change costs
+    that agent's row."""
+    seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None), ("prj_c", "gamma", None))
+    answer = {"prj_a": "waiting", "prj_b": "waiting", "prj_c": "waiting"}
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        return [status(project.id, "manager", "manager", answer[project.id])]
+
+    list_agents_as(monkeypatch, fake)
+    painted: list[str] = []
+    show = AgentRow.show
+
+    def counting(row: AgentRow, fresh: FleetAgentStatus) -> None:
+        painted.append(fresh.agent.id)
+        show(row, fresh)
+
+    monkeypatch.setattr(AgentRow, "show", counting)
+
+    async def go(pilot: Pilot[None]) -> tuple[list[str], list[str], str]:
+        app = fleet_app(pilot)
+        app.refresh_data()
+        await settle(app)
+        painted.clear()
+        app.refresh_data()  # the same answer
+        await settle(app)
+        same = list(painted)
+        painted.clear()
+        answer["prj_b"] = "working"
+        app.refresh_data()
+        await settle(app)
+        return same, list(painted), shown(row_for(app, "agt_b_manager"))
+
+    same, changed, row_b = drive(go)
+    assert same == []
+    assert changed == ["agt_b_manager"]
+    assert row_b.rstrip().endswith("▶")
 
 
 def test_ticks_while_a_fleet_read_is_in_flight_start_no_second_read_and_cost_one_after_it(
@@ -2849,7 +2899,7 @@ def test_ticks_while_a_fleet_read_is_in_flight_start_no_second_read_and_cost_one
             with counting:
                 running[0] -= 1
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[int, str, str]:
         app = fleet_app(pilot)
@@ -2915,7 +2965,7 @@ def test_a_frame_painted_late_leaves_the_owed_read_to_the_read_in_flight(
             with counting:
                 running[0] -= 1
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> int:
         app = fleet_app(pilot)
@@ -2974,7 +3024,7 @@ def test_a_fleet_read_that_hangs_labels_the_frame_kept_once_it_has_waited_long_e
             gate.wait(FLEET_HOLD_S)
         return [status(project.id, "manager", "manager", "working")]
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[bool, str, str, bool]:
         app = fleet_app(pilot)
@@ -3014,7 +3064,7 @@ def test_agent_errors_fail_open_with_the_cost_shown(
             raise fleet_service.FleetUnavailable("tmux 3.1 is too old (need 3.2)")
         return list(healthy)
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[int, bool, str, int, bool, dict[str, str]]:
         app = fleet_app(pilot)
@@ -3058,7 +3108,7 @@ def test_a_fleet_read_that_failed_open_keeps_the_live_manager_pane(
             raise failure[0]
         return list(live)
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     State = tuple[str | None, bool, bool, str]
 
     async def go(pilot: Pilot[None]) -> tuple[State, State, str, State]:
@@ -3297,6 +3347,7 @@ class StopRecorder:
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         self.calls.append((project.id, label, force, agent_id))
         if self.refuse is not None:
@@ -3358,7 +3409,7 @@ def test_stop_from_an_agent_view_still_asks_after_its_projects_read_failed(
             raise failing[0]
         return list(live)
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
 
     async def go(pilot: Pilot[None]) -> tuple[str, list[str]]:
         app = fleet_app(pilot)
@@ -3555,11 +3606,12 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         stopped.append(True)
         return fleet_service.StopReceipt(ended(live.agent), [])
 
-    monkeypatch.setattr(fleet_service, "list_agents", list_agents)
+    list_agents_as(monkeypatch, list_agents)
     monkeypatch.setattr(fleet_service, "stop", stop)
 
     async def go(pilot: Pilot[None]) -> tuple[list[str], int, str | None]:
@@ -3781,6 +3833,7 @@ def test_the_app_stays_live_while_a_stop_is_in_flight(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         entered.set()
         if not release.wait(10):
@@ -3831,10 +3884,11 @@ def test_a_refusal_re_reads_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         raise fleet_service.FleetError("tmux did not answer, so its row is left live")
 
-    monkeypatch.setattr(fleet_service, "list_agents", list_agents)
+    list_agents_as(monkeypatch, list_agents)
     monkeypatch.setattr(fleet_service, "stop", refusing_stop)
 
     async def go(pilot: Pilot[None]) -> tuple[int, bool]:
@@ -6413,3 +6467,238 @@ def test_the_settings_tab_follows_a_rename_made_on_the_card_or_in_a_shell(
     assert out["cleared"] == (("", "project settings — alpha"), None), (
         "a blank Save clears a nickname set elsewhere"
     )
+
+
+# --- a paste no focused widget took goes to the one live pane (#288) ------------------------
+
+
+class PasteRecordingPane(TerminalPane):
+    """A live pane on the test's socket whose ``_forward`` records instead of sending."""
+
+    def __init__(self, id: str = "paste-pane") -> None:
+        super().__init__("%9", server=TmuxServer(PRIVATE_SOCKET, binary=sys.executable), id=id)
+        self.forwarded: list[tuple[str, str | bytes]] = []
+
+    def _forward(self, kind: Any, value: str | bytes) -> bool:
+        self.forwarded.append((kind, value))
+        return True
+
+
+def test_a_paste_the_sidebar_got_reaches_the_one_live_pane_and_focuses_it(
+    tmp_path: Path, script: Script
+) -> None:
+    """#288: a terminal hands a dropped file over as a paste, and Textual gives a paste to
+    the focused widget alone. With the sidebar focused, a screenshot dropped on `asq`
+    reached no agent; it goes to the pane on screen now, which takes the keyboard."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str | bytes]], bool, bool]:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        app.sidebar.focus()
+        await pilot.pause()
+        was_sidebar = app.focused is app.sidebar
+        app.post_message(events.Paste("/tmp/shot.png"))
+        await settle(app)
+        return pane.forwarded, was_sidebar, app.focused is pane
+
+    forwarded, was_sidebar, focused = drive(go)
+    assert was_sidebar, "the premise: the sidebar had the keyboard"
+    assert forwarded == [("paste", "/tmp/shot.png")]
+    assert focused, "the pane took the keyboard with it"
+
+
+def test_a_paste_with_no_live_pane_on_screen_is_one_toast_and_no_tmux_call(
+    tmp_path: Path, script: Script, no_real_tmux: list[tuple[str, ...]]
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    toasts: list[str] = []
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, ...]]:
+        app = fleet_app(pilot)
+        real_notify = app.notify
+
+        def notify(message: str, **kwargs: Any) -> None:
+            toasts.append(message)
+            real_notify(message, **kwargs)
+
+        app.notify = notify  # type: ignore[method-assign]
+        app.sidebar.focus()
+        await pilot.pause()
+        before = list(no_real_tmux)
+        app.post_message(events.Paste("/tmp/shot.png"))
+        await settle(app)
+        return no_real_tmux[len(before) :]
+
+    tmux_calls = drive(go)
+    assert toasts == ["nothing to paste into — open an agent first"]
+    assert not any("paste" in " ".join(argv) or "buffer" in " ".join(argv) for argv in tmux_calls)
+
+
+def test_a_paste_with_two_live_panes_on_screen_says_to_pick_one(
+    tmp_path: Path, script: Script
+) -> None:
+    """With two live panes on screen the router does not guess, and the toast said "nothing to
+    paste into" (#340's review): it says what to do instead."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    toasts: list[str] = []
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, str | bytes]]:
+        app = fleet_app(pilot)
+        real_notify = app.notify
+
+        def notify(message: str, **kwargs: Any) -> None:
+            toasts.append(message)
+            real_notify(message, **kwargs)
+
+        app.notify = notify  # type: ignore[method-assign]
+        first = PasteRecordingPane()
+        await app.content.add_content(first, set_current=True)
+        second = PasteRecordingPane(id="paste-pane-2")
+        await app.screen.mount(second)
+        app.sidebar.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("/tmp/shot.png"))
+        await settle(app)
+        return [*first.forwarded, *second.forwarded]
+
+    forwarded = drive(go)
+    assert forwarded == []
+    pastes = [toast for toast in toasts if "paste" in toast]  # not the fake panes' own
+    assert pastes == ["2 panes on screen — click the one to paste into, then paste again"]
+
+
+def test_a_windows_path_pasted_under_wsl_is_converted_off_the_ui_thread(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`wslpath` may take its whole 2 s timeout, and the paste ran it on the UI thread, so
+    a slow one froze asq (#340's review). It runs in a worker now, and the paste reaches
+    the agent, converted, when it answers."""
+    import subprocess
+    from types import SimpleNamespace
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+    shot = tmp_path / "c" / "shot.png"
+    shot.parent.mkdir(parents=True)
+    shot.write_bytes(b"png")
+    on_ui_thread: list[bool] = []
+
+    run = subprocess.run  # patched on the module, so every other caller gets the real one
+
+    def wslpath(argv: list[str], **kwargs: Any) -> Any:
+        if argv[:1] != ["wslpath"]:
+            return run(argv, **kwargs)
+        on_ui_thread.append(threading.current_thread() is threading.main_thread())
+        return SimpleNamespace(returncode=0, stdout=f"{shot}\n", stderr="")
+
+    monkeypatch.setattr("aisquare.cli.ui.terminal.subprocess.run", wslpath)
+    monkeypatch.setattr("aisquare.cli.ui.terminal.in_wsl", lambda environ: True)
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, str | bytes]]:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        pane.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("C:\\shot.png"))
+        await settle(app)
+        app.post_message(events.Paste("/tmp/plain.png"))  # no worker for a path as sent
+        await settle(app)
+        return pane.forwarded
+
+    forwarded = drive(go)
+    assert on_ui_thread == [False], "asked once, off the UI thread"
+    assert forwarded == [("paste", str(shot)), ("paste", "/tmp/plain.png")]
+
+
+def test_a_paste_into_a_dialogs_input_never_reaches_a_pane_and_nothing_passes_a_dialog(
+    tmp_path: Path, script: Script
+) -> None:
+    """The Spawn dialog's label keeps its own paste; and with the dialog open, a paste its
+    focused widget did not take is not handed to the pane behind it."""
+    from textual.widgets import Button, Input
+
+    from aisquare.cli.ui.spawn import SpawnDialog
+
+    [project] = seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[tuple[str, str | bytes]]]:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        app.push_screen(SpawnDialog(project, accounts=None))
+        await settle(app)
+        label = app.screen.query_one("#spawn-label", Input)
+        label.value = ""
+        label.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("coder-pasted"))
+        await settle(app)
+        app.screen.query_one("#spawn-cancel", Button).focus()
+        await pilot.pause()
+        app.post_message(events.Paste("/tmp/shot.png"))
+        await settle(app)
+        return label.value, pane.forwarded
+
+    value, forwarded = drive(go)
+    assert value == "coder-pasted"
+    assert forwarded == []
+
+
+def test_a_paste_a_text_area_took_is_not_sent_to_the_pane_as_well(
+    tmp_path: Path, script: Script
+) -> None:
+    """Textual's ``TextArea`` inserts a paste without stopping it, so it bubbles on to the
+    shell: a text area on the main screen must not have its paste typed into the agent too."""
+    from textual.widgets import TextArea
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[tuple[str, str | bytes]]]:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        area = TextArea(id="paste-area")
+        await app.screen.mount(area)
+        area.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("a note"))
+        await settle(app)
+        return area.text, pane.forwarded
+
+    text, forwarded = drive(go)
+    assert text == "a note"
+    assert forwarded == []
+
+
+def test_the_paste_log_records_each_paste_where_it_lands_only_when_asked(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#288's reproduction matrix is filled from what a terminal sends on a drop: with
+    `AISQUARE_PASTE_LOG` naming a file, each paste adds its length, its head and the
+    widget that had the keyboard. Without it, nothing is written."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    log = tmp_path / "paste.log"
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        app.sidebar.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("/tmp/shot.png"))  # the router's: the sidebar had it
+        await settle(app)
+        app.post_message(events.Paste("again"))  # the pane's own: it has the keyboard now
+        await settle(app)
+
+    drive(go)
+    unasked = log.exists()
+    monkeypatch.setenv("AISQUARE_PASTE_LOG", str(log))
+    drive(go)
+
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert not unasked, "off by default: a paste may be a secret"
+    assert len(lines) == 2, lines
+    assert "focused=Sidebar" in lines[0] and "len=13 head='/tmp/shot.png'" in lines[0]
+    assert "focused=PasteRecordingPane#paste-pane" in lines[1] and "len=5" in lines[1]

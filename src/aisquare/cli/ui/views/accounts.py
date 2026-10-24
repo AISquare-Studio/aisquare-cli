@@ -50,9 +50,9 @@ from __future__ import annotations
 import contextlib
 import math
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar, NamedTuple
 
@@ -67,6 +67,7 @@ from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.common import format_reset, local_time
+from aisquare.cli.ui.adopt_picker import AdoptPicker
 from aisquare.cli.ui.terminal import InPlaceField, TerminalPane
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core import browser, paths
@@ -80,13 +81,17 @@ from aisquare.models import (
     ClaudeAccountStatus,
     ClaudeIdentity,
     ClaudeUsage,
+    ProjectInfo,
+    StatuslineSession,
     UsageTrend,
 )
+from aisquare.services import adopt as adopt_service
 from aisquare.services import auth as auth_service
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import credits as credits_service
 from aisquare.services import destinations, device_flow, iam
 from aisquare.services import fleet as fleet_service
+from aisquare.services import project as project_service
 from aisquare.services.credits import WorkspaceCredits
 
 USAGE_SECONDS = accounts_service.USAGE_MAX_AGE_SECONDS
@@ -116,6 +121,45 @@ all (asked afresh), else discarded (``settle_sign_in``)."""
 REMOVE_WORKER = "claude-remove"
 ARRANGE_WORKER = "claude-arrange"
 RENAME_WORKER = "claude-rename"
+SESSIONS_WORKER = "machine-sessions"
+ADOPT_LIST_WORKER = "adopt-list"
+"""Reads the conversations *Adopt a conversation…* offers (``services.adopt.recent``)."""
+ADOPT_WORKER = "adopt-conversation"
+"""Adopts the one picked (``services.adopt.adopt``): a fleet spawn, so a writer."""
+"""Reads the sessions the status line reported (``statusline_sessions``): files and a store."""
+SESSIONS_WINDOW = timedelta(minutes=15)
+"""How recent a session's report must be for *Sessions on this machine* (#287, 2c)."""
+
+
+def machine_sessions_text(sessions: Sequence[StatuslineSession], now: datetime) -> Text:
+    """*Sessions on this machine*: each Claude Code session whose status line reported in
+    :data:`SESSIONS_WINDOW`, as ``accounts sessions`` lists them: its account, short id, cwd,
+    model, context and five-hour use, how long ago, and its fleet label. Hand-launched ones
+    and ones outside any project too; with none, how to make them report."""
+    text = Text("Sessions on this machine", style="bold")
+    if not sessions:
+        text.append(
+            " — none reported in the last 15 min; `aisquare accounts statusline --install` "
+            "adds the status line that reports them",
+            style="dim",
+        )
+        return text
+    for session in sessions:
+        age = max(int((now - session.updated_at).total_seconds()), 0)
+        ago = f"{age}s" if age < 60 else f"{age // 60}m" if age < 3600 else f"{age // 3600}h"
+        text.append("\n")
+        text.append(session.account or session.config_dir or "not ours", style="bold")
+        parts = [session.session_id[:8], session.cwd or "—", session.model or "—"]
+        if session.context_percent is not None:
+            parts.append(f"ctx {round(session.context_percent)}%")
+        if session.session_percent is not None:
+            parts.append(f"5h {round(session.session_percent)}%")
+        parts.append(f"{ago} ago")
+        text.append(" · " + " · ".join(parts))
+        if session.fleet_label:
+            text.append(f" · {session.fleet_label}", style="cyan")
+    return text
+
 
 _BAR_CELLS = 5
 _WARN_AT = 50.0
@@ -175,6 +219,48 @@ class AccountsChanged(Message):
 class UsageRead(Message):
     """The page's usage read landed (a tick, or *↻ Refresh usage*): the sidebar's status line
     reads the same cache again now, at no request, rather than at its next minute."""
+
+
+class SignInLanded(Message):
+    """A Claude Code sign-in the page watched landed and was wired: ``slot`` holds it. The
+    shell goes back to where it was started from, or names the next step (#286)."""
+
+    def __init__(self, slot: int) -> None:
+        self.slot = slot
+        super().__init__()
+
+
+class SignInAbandoned(Message):
+    """A sign-in the page started ended with no login to use — cancelled, its window closed,
+    or it never opened: the shell drops where it would have gone back to."""
+
+
+class WelcomeRequested(Message):
+    """The next step's *Go to Welcome* (``w``)."""
+
+
+@dataclass(frozen=True)
+class NextStep:
+    """The one thing to do after a sign-in that came from nowhere in particular (#286)."""
+
+    text: str
+    welcome: bool = False
+    """Whether the step is Welcome's: the line offers *Go to Welcome*."""
+
+
+def next_step(projects: Sequence[ProjectInfo], managed: Collection[str]) -> NextStep:
+    """The step after a sign-in, from the shell's frame — derived, never stored.
+
+    ``projects`` are the listed ones, in the sidebar's order; ``managed`` the ids of those
+    with a live manager. No project: add one. None of them managed: start the first one's
+    manager, which Welcome walks through. Otherwise the fleet is up: spawn under a project.
+    """
+    if not projects:
+        return NextStep("Next: add a project (+ beside Fleet)")
+    if not any(project.id in managed for project in projects):
+        name = project_service.display_name(projects[0])
+        return NextStep(f"Next: open {name} and press Start manager", welcome=True)
+    return NextStep("Next: \uff0b spawn agent under a project")  # the sidebar's own row
 
 
 # --- pure helpers (unit-testable without a running app) ----------------------------------
@@ -825,13 +911,16 @@ class AccountsView(Vertical):
     AccountsView #usage-bar Button { margin: 0 2 0 0; }
     AccountsView #usage-age { width: auto; height: 1; color: $text-muted; }
     AccountsView #accounts-notice { height: auto; margin-top: 1; }
+    AccountsView #accounts-next-row { height: auto; }
+    AccountsView #accounts-next { width: auto; height: auto; padding-top: 1; }
+    AccountsView #accounts-next-welcome { margin-left: 2; }
     AccountsView #login-box { height: 1fr; min-height: 12; border-top: solid $primary; }
     AccountsView #login-header { height: auto; padding: 0 1; }
     AccountsView #login-pane { height: 1fr; }
     AccountsView #login-actions { height: auto; padding: 0 1; }
     """
 
-    BINDINGS: ClassVar = []
+    BINDINGS: ClassVar = [Binding("w", "go_welcome", "welcome", show=False)]
 
     def __init__(
         self,
@@ -901,12 +990,19 @@ class AccountsView(Vertical):
                 refresh.tooltip = "ask every account now — otherwise at most once every 5 minutes"
                 yield refresh
                 yield Static(Text("last refreshed never", style="dim"), id="usage-age")
+            yield Static("", id="fleet-summary")
             with AccountsTable(id="claude-table"):
                 yield AccountsHeader(id="claude-header")
                 yield Vertical(id="claude-rows")
             with Horizontal(classes="actions", id="claude-actions"):
                 yield Button("+ Add Claude account", id="claude-add", variant="primary")
+            yield Static("", id="machine-sessions")
+            with Horizontal(classes="actions", id="sessions-actions"):
+                yield Button("Adopt a conversation…", id="sessions-adopt", compact=True)
             yield Static("", id="accounts-notice")
+            with Horizontal(id="accounts-next-row"):
+                yield Static("", id="accounts-next")
+                yield Button("Go to Welcome (w)", id="accounts-next-welcome", compact=True)
         with Vertical(id="login-box"):
             yield Static("", id="login-header")
             yield TerminalPane(None, escape_key=self.escape_key, id="login-pane")
@@ -917,6 +1013,7 @@ class AccountsView(Vertical):
         self.query_one("#aisquare-code", Static).display = False
         self.query_one("#aisquare-cancel", Button).display = False
         self.query_one("#login-box", Vertical).display = False
+        self.query_one("#accounts-next-row", Horizontal).display = False
         self._paint_aisquare()
         if self.overview is not None:
             self._paint_claude(self.overview)
@@ -1092,6 +1189,20 @@ class AccountsView(Vertical):
             self.trends.pop(stale.slot, None)  # a re-used slot must not inherit a projection
             self._read_at.pop(stale.slot, None)
             stale.remove()
+        self._paint_fleet_summary(overview)
+
+    def _paint_fleet_summary(self, overview: AccountsOverview | None = None) -> None:
+        """The fleet in one line under the usage bar (#287), from the readings this page holds:
+        ``Fleet: 58% left now · week: 1.8 of 3 accounts left · next weekly reset …``. Pure
+        arithmetic on what was already read (``fleet_headroom``); empty with no reading."""
+        frame = overview if overview is not None else self.overview
+        statuses = frame.accounts if frame is not None else []
+        summary = accounts_service.fleet_headroom(
+            [status.account for status in statuses], self.usage
+        )
+        labels = {status.account.slot: status.label for status in statuses}
+        sentence = accounts_service.summary_sentence(summary, labels)
+        self.query_one("#fleet-summary", Static).update(Text(sentence or "", style="bold"))
 
     def _name_of(self, account: ClaudeAccount) -> str:
         """What the page calls ``account``: its row's name (the alias, which a plain
@@ -1108,6 +1219,30 @@ class AccountsView(Vertical):
     def _notice(self, text: str, tone: str = "dim") -> None:
         style = {"ok": "green", "warn": "yellow", "error": "bold red"}.get(tone, "dim")
         self.query_one("#accounts-notice", Static).update(Text(text, style=style))
+        self.query_one("#accounts-next-row", Horizontal).display = False  # said since
+
+    def show_next_step(self, step: NextStep) -> None:
+        """Under the notice of a sign-in that landed: the one step after it (#286)."""
+        self.query_one("#accounts-next", Static).update(Text(step.text, style="bold"))
+        self.query_one("#accounts-next-welcome", Button).display = step.welcome
+        self.query_one("#accounts-next-row", Horizontal).display = True
+
+    def next_step_shown(self) -> str | None:
+        """The next step's text while it is shown, else ``None`` (what a test reads)."""
+        if not self.query_one("#accounts-next-row", Horizontal).display:
+            return None
+        visual = self.query_one("#accounts-next", Static).visual
+        return getattr(visual, "plain", None)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "go_welcome":
+            button = self.query_one("#accounts-next-welcome", Button)
+            return bool(self.query_one("#accounts-next-row", Horizontal).display and button.display)
+        return True
+
+    @on(Button.Pressed, "#accounts-next-welcome")
+    def action_go_welcome(self) -> None:
+        self.post_message(WelcomeRequested())
 
     # --- usage (the one thing here that costs a request) ---------------------------------------
 
@@ -1143,6 +1278,14 @@ class AccountsView(Vertical):
         """
         if not self._on_screen or self.overview is None:
             return
+        self.run_worker(
+            lambda: accounts_service.statusline_sessions(since=SESSIONS_WINDOW),
+            name=SESSIONS_WORKER,
+            group=SESSIONS_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
         accounts = [status.account for status in self.overview.accounts if status.signed_in]
         if not accounts:
             return
@@ -1258,6 +1401,7 @@ class AccountsView(Vertical):
             if row.slot in fetched:
                 usage, trend = fetched[row.slot]
                 row.show(row.status, usage, trend=trend)
+        self._paint_fleet_summary()
 
     # --- AISquare: the device flow as a card ------------------------------------------------------
 
@@ -1625,6 +1769,7 @@ class AccountsView(Vertical):
             account = accounts_service.begin_sign_in(slot)
         except accounts_service.AccountsError as exc:
             self._notice(f"✗ {exc}", "error")
+            self.post_message(SignInAbandoned())
             return
         if slot is None:
             self._open_login_window(account, fresh=True, since=None)
@@ -1653,6 +1798,7 @@ class AccountsView(Vertical):
                 else f"it could not be read ({error or 'cancelled'})"
             )
             self._notice(f"✗ {self._name_of(account)}: no log-in opened — {why}", "error")
+            self.post_message(SignInAbandoned())
             return
         self._open_login_window(account, fresh=False, since=worker.result[1])
 
@@ -1670,6 +1816,7 @@ class AccountsView(Vertical):
             if fresh:
                 accounts_service.abandon_sign_in(account)
             self._notice(f"✗ could not open a sign-in window: {exc}", "error")
+            self.post_message(SignInAbandoned())
             return
         self.login = _ClaudeLogin(account, window.pane_id, server, fresh, since)
         header = Text()
@@ -1785,8 +1932,10 @@ class AccountsView(Vertical):
             who = status.identity.email if status.identity else name
             hooks = "hooks installed" if status.hooks_installed else "hooks NOT installed"
             self._notice(f"✓ {name}: {who} · {hooks}", "ok" if status.hooks_installed else "warn")
+            self.post_message(SignInLanded(status.account.slot))
         elif state is WorkerState.ERROR:
             self._notice(_hooks_did_not_install(worker.error), "warn")
+            self.post_message(SignInAbandoned())
         self.post_message(AccountsChanged())
 
     def _abandon_login(self, reason: str) -> None:
@@ -1797,6 +1946,7 @@ class AccountsView(Vertical):
             return
         if not login.fresh:
             self._notice(f"sign-in cancelled — {reason}; nothing changed", "warn")
+            self.post_message(SignInAbandoned())
             self.post_message(AccountsChanged())
             return
         account = login.account
@@ -1832,6 +1982,8 @@ class AccountsView(Vertical):
         else:
             what = "the new slot was discarded" if settled is True else "nothing changed"
             self._notice(f"sign-in cancelled — {reason}; {what}", "warn")
+        # Cancelled, so nothing is reopened, even a login that landed and was kept.
+        self.post_message(SignInAbandoned())
         self.post_message(AccountsChanged())
 
     @on(Button.Pressed, "#login-cancel")
@@ -1872,6 +2024,52 @@ class AccountsView(Vertical):
             self._notice(f"✗ {worker.error}", "error")
         self.post_message(AccountsChanged())
 
+    # --- adopting a conversation (#290) ---------------------------------------------------------
+
+    @on(Button.Pressed, "#sessions-adopt")
+    def _adopt_pressed(self, event: Button.Pressed) -> None:
+        """``fleet adopt --list`` as a picker: read off the UI thread, then shown."""
+        event.stop()
+        self.run_worker(
+            lambda: adopt_service.recent(),
+            name=ADOPT_LIST_WORKER,
+            group=ADOPT_LIST_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _adopt_listed(self, worker: Worker[Any], state: WorkerState) -> None:
+        if state is WorkerState.SUCCESS and isinstance(worker.result, list):
+            picker = AdoptPicker(worker.result, datetime.now(tz=UTC))
+            self.app.push_screen(picker, self._adopt_chosen)
+        elif state is WorkerState.ERROR:
+            self._notice(f"✗ the conversations could not be read: {worker.error}", "error")
+
+    def _adopt_chosen(self, session_id: str | None) -> None:
+        if session_id is None:
+            return
+        self._notice(f"adopting {session_id[:8]}…")
+        self.run_worker(
+            lambda: adopt_service.adopt(session_id),
+            name=ADOPT_WORKER,
+            group=ADOPT_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _adopt_finished(self, worker: Worker[Any], state: WorkerState) -> None:
+        if state is WorkerState.SUCCESS and isinstance(worker.result, fleet_service.SpawnReceipt):
+            agent = worker.result.agent
+            self._notice(
+                f"✓ adopted {(agent.session_id or '')[:8]} as {agent.label}: "
+                "it runs in the fleet now, on its project in the sidebar",
+                "ok",
+            )
+        elif state is WorkerState.ERROR:
+            self._notice(f"✗ {worker.error}", "error")
+
     # --- worker results -----------------------------------------------------------------------
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
@@ -1890,6 +2088,15 @@ class AccountsView(Vertical):
         elif worker.name == CREDITS_WORKER:
             if state is WorkerState.SUCCESS and isinstance(worker.result, tuple):
                 self._show_credits(*worker.result)
+        elif worker.name == ADOPT_LIST_WORKER:
+            self._adopt_listed(worker, state)
+        elif worker.name == ADOPT_WORKER:
+            self._adopt_finished(worker, state)
+        elif worker.name == SESSIONS_WORKER:
+            if state is WorkerState.SUCCESS and isinstance(worker.result, list):
+                self.query_one("#machine-sessions", Static).update(
+                    machine_sessions_text(worker.result, accounts_service._now())
+                )
         elif worker.name == SIGN_IN_WORKER:
             self._sign_in_finished(worker, state)
         elif worker.name == SIGN_OUT_WORKER:

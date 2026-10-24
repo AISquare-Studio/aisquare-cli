@@ -133,6 +133,17 @@ voice = [
   "faster-whisper>=1.0",
   "segno>=1.6",
 ]
+gate = [
+  # The captain's owner gate (#216, services/captain/gate.py): RFC 6238 TOTP codes from the
+  # owner's authenticator open a 15-minute act-as-owner window. An extra, never core: the
+  # captain is experimental and off by default, and the gate imports pyotp only where it
+  # verifies or enrols. Without it the gate fails closed and names this extra. 2.9 is the
+  # release whose TOTP takes the interval and digits used here and whose provisioning_uri
+  # takes issuer_name. segno (the voice extra's QR, pure Python) draws the QR `gate enroll`
+  # prints for the authenticator to scan; without it only the URI is shown.
+  "pyotp>=2.9",
+  "segno>=1.6",
+]
 remote = [
   # `asq remote serve` and the fleet UI's Remote modal (services/remote_server.py):
   # one local HTTP+WebSocket port that ngrok exposes to a phone. starlette and
@@ -149,6 +160,18 @@ remote = [
   # Web Push, and the page says how to get it. A floor, not a pin: every call
   # used (ECDH, AESGCM, from_encoded_point, decode_dss_signature) is far older.
   "cryptography>=42",
+]
+code = [
+  # `aisquare code`'s TypeScript and JavaScript parsers (core/code_index.py, #285).
+  # Python is indexed with the standard library's `ast` and needs nothing here.
+  # The per-grammar wheels, not tree-sitter-language-pack: each wheel carries its
+  # compiled grammar AND its own queries/tags.scm, so nothing is downloaded at
+  # index time (the language pack fetches its grammars on first parse, and the
+  # index promises that nothing leaves the machine). Floors: the versions the
+  # parser was written and measured against.
+  "tree-sitter>=0.25",
+  "tree-sitter-typescript>=0.23",
+  "tree-sitter-javascript>=0.25",
 ]
 tui = [
   # Kept as a no-op alias for one release: `pipx install 'aisquare-cli[tui]'`
@@ -168,6 +191,15 @@ experiment = [
 ]
 dev = [
   "pytest>=9.1.1",
+  # The [code] extra's parsers, so tests/test_code_index.py exercises the
+  # TypeScript and JavaScript paths in CI rather than skipping them.
+  "tree-sitter>=0.25",
+  "tree-sitter-typescript>=0.23",
+  "tree-sitter-javascript>=0.25",
+  # `make test` runs the suite on every core (#129 d). Each test already has a home,
+  # a tmux folder and a `claude` stand-in of its own (tests/conftest.py), so workers
+  # share nothing a test writes.
+  "pytest-xdist>=3.6",
   "mypy>=1.10",
   "ruff>=0.5",
   # Both bounds are load-bearing, not caution. mcp 2.0.0 renamed FastMCP to
@@ -199,6 +231,9 @@ dev = [
   # against the real `messages.parse` signature (the `mcp`/`serve` precedent).
   # Tests never call it: they install a fake `anthropic` module.
   "anthropic>=1",
+  # The gate extra's TOTP, so tests/test_captain_gate.py verifies real codes and mypy
+  # --strict checks the verifier against pyotp's own hints.
+  "pyotp>=2.9",
   # The remote extra's one addition, so the dev env can run tests/test_remote_server.py
   # (starlette + uvicorn already arrive through mcp above).
   "websockets>=12",
@@ -218,6 +253,7 @@ dev = [
 [project.scripts]
 aisquare = "aisquare.cli.app:main"
 asq = "aisquare.cli.app:main"
+asq-statusline = "aisquare.statusline:main"
 
 [project.urls]
 Homepage = "https://aisquare.studio"
@@ -236,6 +272,9 @@ exclude = ["/docs/demo.gif", "/docs/demo/*.png"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# A test still running after 5 minutes dumps every thread's stack to stderr (it is not
+# failed: CI's step timeout does that), so a hang names itself in the log.
+faulthandler_timeout = 300
 
 [tool.ruff]
 line-length = 100
@@ -260,4 +299,10 @@ plugins = ["pydantic.mypy"]
 # dev extra does not install them (faster-whisper drags in ctranslate2 and av); mypy
 # still walks the import lines. Untyped here, checked for real under [voice].
 module = ["faster_whisper", "faster_whisper.*", "numpy", "segno"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# The code index's TypeScript/JavaScript parsers (#285), imported lazily from the
+# optional [code] extra, which the dev extra does not install.
+module = ["tree_sitter", "tree_sitter_javascript", "tree_sitter_typescript"]
 ignore_missing_imports = true

@@ -81,6 +81,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
+from tests.fleet_fakes import list_agents_as
 from tests.ui_workers import settle_page, settle_workers
 
 T = TypeVar("T")
@@ -223,6 +224,7 @@ UNTOUCHED: Kwargs = {
     "agent_args": [],
     "account": None,
     "persona": None,
+    "remote_control": None,
 }
 """What a Spawn press sends for a form nobody changed: the role's default everywhere."""
 
@@ -369,7 +371,7 @@ def fleet(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[FleetAgentStatus]]:
     def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return list(agents.get(project.id, []))
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     return agents
 
 
@@ -668,6 +670,7 @@ def test_spawn_sends_exactly_the_chosen_values_with_the_agent_args_shlex_split(
                 "agent_args": ["--model", "opus", "--append-system-prompt", "be brief"],
                 "account": "2",
                 "persona": None,
+                "remote_control": None,
             },
         )
     ]
@@ -720,6 +723,56 @@ def test_untouched_defaults_follow_the_role_and_touched_ones_stay(
     assert seen[1] == ("plan", False)  # both untouched: they followed coder → tester
     assert seen[2] == ("acceptEdits", True)  # the touched mode stayed; the switch followed
     assert seen[3] == "acceptEdits"  # and differs from the reviewer's default: it is sent
+
+
+def test_the_remote_control_switch_follows_the_role_until_touched_and_is_sent_then(
+    git_project: ProjectInfo,
+) -> None:
+    """#289: *Remote control* opens at the role's ``remote_control``, follows a role change
+    while untouched, and is sent only when it differs from the role's default."""
+    config = load_config()
+    config.fleet.roles["reviewer"] = FleetRoleSettings.model_validate({"remote_control": True})
+    save_config(config)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        remote = dialog.query_one("#spawn-remote", Switch)
+        seen: list[Any] = [remote.value, dialog.spawn_kwargs()["remote_control"]]
+        select(dialog, "role").value = "reviewer"
+        await pilot.pause()
+        seen += [remote.value, dialog.spawn_kwargs()["remote_control"]]
+        remote.value = False  # touched: off for this one reviewer
+        await pilot.pause()
+        seen.append(dialog.spawn_kwargs()["remote_control"])
+        select(dialog, "role").value = "coder"
+        await pilot.pause()
+        seen += [remote.value, dialog.spawn_kwargs()["remote_control"]]
+        return seen
+
+    seen = drive(git_project, scenario)
+    assert seen[:2] == [False, None], "a coder: off, the role's default, sent as None"
+    assert seen[2:4] == [True, None], "untouched, it followed the reviewer's default"
+    assert seen[4] is False, "touched off over the reviewer's default: sent"
+    assert seen[5:] == [False, None], "back to coder: off is coder's default again"
+
+
+def test_the_remote_control_note_wraps_at_80_columns(git_project: ProjectInfo) -> None:
+    """At 80 columns the note beside *Remote control* was laid out on one line wider than
+    its row and painted cut, '…or the Cl' (#335's walk). It wraps in its row now."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str:
+        await pilot.resize_terminal(80, 45)
+        widget = dialog.query_one("#spawn-remote-note", Static)
+        widget.scroll_visible(animate=False)
+        await settle(pilot)
+        x, y, width, height = widget.region
+        # What the screen paints there, not the layout: a line wider than its row is laid
+        # out whole and painted cut (test_ui_remote.painted_in).
+        update = host.screen._compositor.render_full_update()
+        rows = ["".join(chop.text for chop in row) for row in update.strips]
+        return " ".join(" ".join(row[x : x + width] for row in rows[y : y + height]).split())
+
+    painted = drive(git_project, scenario)
+    assert painted == "continue it from claude.ai/code or the Claude app"
 
 
 def test_the_manager_role_locks_the_label_and_a_live_manager_greys_it_out(
@@ -1161,7 +1214,7 @@ def test_pick_opens_the_picker_in_new_order_and_fills_who_runs_it(
     git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, spawns: SpawnRecorder
 ) -> None:
     settings_service.bind_role("coder2", agent_bin="claude2")
-    monkeypatch.setattr(fleet_service, "list_agents", lambda project, *, live_only=True: [])
+    list_agents_as(monkeypatch, lambda project, *, live_only=True: [])
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = []
@@ -1458,8 +1511,11 @@ def test_take_over_locks_the_label_and_task_to_the_teammates_and_asks_first(
         await pilot.click("#take-over-no")
         await settle(pilot)
         assert isinstance(host.screen, SpawnDialog) and hand_offs.calls == []
-        await pilot.click("#spawn-submit")
-        await settle(pilot)
+        # Pressed, not clicked, and the question awaited: a click right after the question
+        # closed opened nothing on windows-latest (`NoMatches: '#take-over-yes' on
+        # SpawnDialog()`, rc/p0 run 39985702872), the dialog not yet hit-testable again.
+        submit(dialog).press()
+        await wait_for_screen(pilot, spawn_module.ConfirmTakeOverScreen)
         await pilot.click("#take-over-yes")
         await settle(pilot)
         return list(host.results)

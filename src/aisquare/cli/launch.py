@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -37,6 +38,7 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 import typer
 from rich.text import Text
@@ -44,14 +46,14 @@ from rich.text import Text
 from aisquare.cli.common import fail
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, orchestrator, paths, personas
-from aisquare.core.config import load_config
+from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.core.workspace import git_common_root
 from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as claude_accounts_service
+from aisquare.services import delivery, explainability_ops
 from aisquare.services import explainability as explainability_service
-from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
@@ -169,6 +171,95 @@ SYSTEM_PROMPT_FLAG = "--append-system-prompt-file"
 """Claude Code's seam for appending to its default system prompt — a FILE, so the body
 never sits in argv, which ``ps`` shows (the name travels as ``AISQUARE_PERSONA``)."""
 _SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
+REMOTE_CONTROL_FLAG = "--remote-control"
+"""Claude Code's Remote Control: the session, titled, can be continued from claude.ai/code
+and the Claude app (#289)."""
+_REMOTE_CONTROL_FLAGS = (REMOTE_CONTROL_FLAG, "--rc")
+ANTHROPIC_HOST = "api.anthropic.com"
+
+
+def _remote_control_args(
+    title: str, binary: str, args: Sequence[str], env: dict[str, str]
+) -> list[str]:
+    """``--remote-control <title>`` for Claude Code, where Claude Code would take it (#289).
+
+    Nothing, with one dim line naming why, when the binary is not Claude Code (no other
+    agent has it); when the launch line already carries ``--remote-control`` or ``--rc``,
+    the operator's own, which wins; when ``ANTHROPIC_BASE_URL`` names another host than
+    the Anthropic API, as the explainability proxy's does; or when
+    ``CLAUDE_CODE_OAUTH_TOKEN`` is set, a ``claude setup-token`` token that "can only make
+    model requests". Claude Code refuses Remote Control in the last two cases. ``env`` is
+    the agent's own, read after the tracing wiring, which may have set the base URL.
+    """
+
+    def stand_aside(why: str) -> list[str]:
+        stderr_console().print(f"remote control: {why} — not turned on", style="dim", markup=False)
+        return []
+
+    if any(
+        arg == flag or arg.startswith(f"{flag}=") for arg in args for flag in _REMOTE_CONTROL_FLAGS
+    ):
+        return stand_aside("the launch line already carries it, as given")
+    if not harness.is_default_agent(binary):
+        return stand_aside(f"{os.path.basename(binary)!r} is not Claude Code")
+    base_url = env.get("ANTHROPIC_BASE_URL", "").strip()
+    host = urlparse(base_url).hostname if base_url else None
+    if base_url and host != ANTHROPIC_HOST:
+        # The host only: a base URL can carry credentials in its user part or query.
+        return stand_aside(
+            f"ANTHROPIC_BASE_URL points at {host or 'another host'}, and Claude Code refuses "
+            "Remote Control behind any host but the Anthropic API"
+        )
+    if env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return stand_aside(
+            "CLAUDE_CODE_OAUTH_TOKEN is set, and that token can make model requests only, "
+            "not Remote Control sessions"
+        )
+    return [REMOTE_CONTROL_FLAG, title]
+
+
+def _named(args: Sequence[str]) -> str | None:
+    """The ``--name`` a fleet spawn passes its window: the agent's label."""
+    for index, arg in enumerate(args):
+        if arg.startswith("--name="):
+            return arg.split("=", 1)[1] or None
+        if arg == "--name" and index + 1 < len(args):
+            return args[index + 1]
+    return None
+
+
+def _with_shared_memory(
+    binary: str, role_args: Sequence[str], operator_args: Sequence[str]
+) -> list[str]:
+    """``role_args`` with ``[accounts] share = ["memory"]``'s shared auto-memory directory for
+    this folder in their ``--settings`` (P2-W7, #198). Claude Code only.
+
+    ONE ``--settings`` for every key aisquare sets: the role's skill listing (P1 WS-1,
+    ``harness.tool_policy``) and the memory directory merge into one JSON. Two flags are not
+    two settings: Claude Code reads one, and the memory stood down on the role's own flag,
+    so a coder or a tester shared no memory at all (sync #367). An ``--settings`` the
+    operator's line carries (``operator_args``: a binding's ``--arg``, a fleet
+    ``extra_args``, what was typed) still wins, as each feature says; the memory's
+    stand-down is said in one dim line.
+    """
+    out = list(role_args)
+    wanted = claude_accounts_service.memory_settings_args(Path.cwd())
+    if not wanted:
+        return out
+    if any(arg == "--settings" or arg.startswith("--settings=") for arg in operator_args):
+        stderr_console().print(
+            "accounts: memory is not shared into this launch — its own --settings wins",
+            style="dim",
+        )
+        return out
+    if not harness.is_default_agent(binary):
+        return out
+    memory = json.loads(wanted[1])
+    for index, arg in enumerate(out[:-1]):
+        if arg == "--settings":
+            out[index + 1] = json.dumps({**json.loads(out[index + 1]), **memory})
+            return out
+    return [*out, *wanted]
 
 
 def _persona_system_prompt(
@@ -245,9 +336,31 @@ def _persona_system_prompt(
     return [SYSTEM_PROMPT_FLAG, str(path)]
 
 
+def _role_remote_control(role: str) -> bool:
+    """The role's ``[fleet.roles.<role>] remote_control``; off when the config is unreadable,
+    which a line above has already said."""
+    try:
+        settings = load_config().fleet.roles.get(role)
+    except Exception:
+        return False
+    return settings is not None and settings.remote_control
+
+
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     """Replace this process with the agent (indirection so tests can intercept)."""
     os.execve(binary, argv, env)
+
+
+def _fleet() -> FleetSettings:
+    """The ``[fleet]`` settings the role's tool policy reads; the built-in ones, said, when the
+    config cannot be read. A role's safety list is code, so it holds either way."""
+    try:
+        return load_config().fleet
+    except Exception as exc:  # the same fail-open bar as tracing's config read
+        stderr_console().print(
+            f"tool policy: config unreadable ({exc}) — the built-in deny list", style="dim"
+        )
+        return FleetSettings()
 
 
 def _await_fleet_row() -> None:
@@ -360,6 +473,26 @@ def launch(
             help="Persona this session runs as (see `aisquare persona list`): exported as "
             "AISQUARE_PERSONA and briefed once, at session start.",
             metavar="NAME",
+        ),
+    ] = None,
+    remote_control: Annotated[
+        bool | None,
+        typer.Option(
+            "--remote-control/--no-remote-control",
+            help="Start Claude Code with its Remote Control, titled '<project> · <label>', "
+            "so claude.ai/code and the Claude app can continue the session (default: the "
+            "role's \\[fleet.roles.<role>] remote_control).",
+            show_default=False,
+        ),
+    ] = None,
+    first_prompt_file: Annotated[
+        Path | None,
+        typer.Option(
+            delivery.FIRST_PROMPT_FLAG,
+            help="A file holding the agent's first message: read, deleted, and passed to the "
+            "agent as its prompt, after `--` (what `fleet spawn` gives a Claude Code agent).",
+            metavar="PATH",
+            hidden=True,
         ),
     ] = None,
 ) -> None:
@@ -509,8 +642,16 @@ def launch(
     defaults = harness.role_defaults(
         role, binary=resolution.binary, args=[*profile.args, *ctx.args]
     )
-    role_args = defaults.args
-    for note in defaults.notes:
+    # The role's tools and skill listing (`harness.tool_policy`), here as in `team spawn`
+    # and every fleet window (whose `extra_args` arrive in `ctx.args`): its safety list
+    # holds whatever the config says, and every `--disallowedTools` the binding or this
+    # line carries is merged into ONE token beside the role's own flags.
+    policy = harness.tool_policy(
+        role, binary=resolution.binary, args=[*profile.args, *ctx.args], fleet=_fleet()
+    )
+    role_args = [*defaults.args, *policy.args]
+    binding_args, agent_args = policy.strip(profile.args), policy.strip(ctx.args)
+    for note in [*defaults.notes, *policy.notes]:
         # A withheld flag is otherwise invisible: the launch succeeds and the
         # role degrades silently (a ui-tester with no browser reopens every UI
         # task). Same surface and style as the tracing notes below.
@@ -543,7 +684,7 @@ def launch(
             )
         # The EFFECTIVE argument list, not just what this invocation typed.
         # `argv` below is
-        # `[binary, *profile.args, *role_args, *ctx.args, *pinned_id]`, so a
+        # `[binary, *binding_args, *role_args, *agent_args, *pinned_id]`, so a
         # role bound with `--session-id`, `--resume` or `--continue` via
         # `team bind --arg` — or handed one by its own `RoleProfile.default_args`
         # — carries it here without appearing in `ctx.args`.
@@ -555,7 +696,7 @@ def launch(
         # board row and one Run. `team spawn` already passes its profile args
         # (cli/team.py), so this path was the asymmetric one.
         identity = explainability_service.plan_session_identity(
-            resolution.binary, [*profile.args, *role_args, *ctx.args]
+            resolution.binary, [*binding_args, *role_args, *agent_args]
         )
         # The ACTIVE target's overrides folded onto the settings the wiring
         # reads. `explainability enable --target prod --proxy-url …` writes
@@ -613,12 +754,57 @@ def launch(
     # resolve inside cannot fail here.
     persona_args = (
         _persona_system_prompt(
-            persona, project, resolution.binary, [*profile.args, *role_args, *ctx.args]
+            persona, project, resolution.binary, [*binding_args, *role_args, *agent_args]
         )
         if persona is not None
         else []
     )
-    argv = [resolution.binary, *profile.args, *role_args, *persona_args, *ctx.args, *pinned_id]
+    # Claude Code's own Remote Control (#289): decided here, after the tracing wiring,
+    # whose proxy base URL Claude Code would refuse it behind.
+    wanted = remote_control if remote_control is not None else _role_remote_control(role)
+    board = (project.root.name or project.id) if project is not None else "no board"
+    remote_args = (
+        _remote_control_args(
+            f"{board} · {_named(ctx.args) or role}",
+            resolution.binary,
+            [*profile.args, *role_args, *ctx.args],
+            env,
+        )
+        if wanted
+        else []
+    )
+    role_args = _with_shared_memory(resolution.binary, role_args, [*binding_args, *agent_args])
+    argv = [
+        resolution.binary,
+        *binding_args,
+        *role_args,
+        *persona_args,
+        *remote_args,
+        *agent_args,
+        *pinned_id,
+    ]
+    # The first message (P0-W1a, #122), last: Claude Code's positional prompt, after `--`.
+    # Read from a file and the file deleted, so the window's command, which tmux carries and
+    # the row records, never holds the text, and a replay of that command finds no file and
+    # starts without one: a restart is given a line of its own.
+    if first_prompt_file is not None:
+        try:
+            first = delivery.take_prompt_file(first_prompt_file)
+        except delivery.NotAPromptFile as exc:
+            stderr_console().print(
+                f"first prompt: {exc} — not read, not deleted; starting without one",
+                style="dim",
+                markup=False,
+            )
+            first = ""
+        if first is None:
+            stderr_console().print(
+                f"first prompt: {first_prompt_file} is not there (read by an earlier launch) "
+                "— starting without one",
+                style="dim",
+            )
+        elif first:
+            argv += delivery.argv_tail(first)
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

@@ -88,9 +88,12 @@ CONTRACT_TOOLS = frozenset(
         "thinking",
         "bt",
         "wololo",
+        "unlock",
+        "lock",
     }
 )
-"""The tool list posted on the T1 card (seq 13010) — the vocabulary T2..T7 build on."""
+"""The tool list posted on the T1 card (seq 13010) — the vocabulary T2..T7 build on — and
+the owner gate's ``unlock`` and ``lock`` (#216)."""
 
 
 # --- recorders --------------------------------------------------------------------------
@@ -145,6 +148,10 @@ class FakeServer:
     def at(self, path: Path | None) -> FakeServer:
         """The server at ``path`` (``tmux -S``, 0.8.0): this fake is the only one there is."""
         return self
+
+    socket = "asq"
+    """Its name, as a real server's: with :meth:`socket_path`, the key of a pane's typing
+    lease (P0-W2), which the captain's typed writes ask through ``delivery.draft_guard``."""
 
     def socket_path(self) -> Path:
         return self._socket if self._socket is not None else Path("/nonexistent/tmux-0/asq")
@@ -880,6 +887,8 @@ EVERY_CALL: list[tuple[str, dict[str, Any]]] = [
     ("thinking", {"state": "on"}),
     ("bt", {}),
     ("wololo", {"project": "alpha", "label": "coder-3", "task": "tsk_nothing"}),
+    ("unlock", {"code": "000000"}),
+    ("lock", {}),
 ]
 
 
@@ -1288,7 +1297,9 @@ def test_stop_refuses_without_confirm_and_never_reaches_the_fleet(
     result = ok(
         actions.stop("alpha", "coder-1", force=True, confirm=True, utterance="force-stop coder-1")
     )
-    assert fleet_rec.calls == [("stop", {"project": alpha.id, "label": "coder-1", "force": True})]
+    assert fleet_rec.calls == [
+        ("stop", {"project": alpha.id, "label": "coder-1", "force": True, "actor": "user"})
+    ]
     assert result["label"] == "coder-1"
     assert result["released"] == []
 

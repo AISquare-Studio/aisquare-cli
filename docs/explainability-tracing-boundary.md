@@ -101,8 +101,10 @@ on each root, not the key.
 
 Fixed by making the pipeline id the SOURCE of the trace id
 (`trace_identity`: SHA-256, first 16 bytes trace id, next 8 root span id). The
-launcher posts the Run's root span with those ids before the agent starts and
-hands the proxy a `traceparent` naming it; the shipper attaches its spans under
+launcher hands the proxy a `traceparent` naming the Run's root span, and a
+detached worker posts that root with those ids as the agent starts (off the
+launch path since #129 (e); the gateway holds child batches with no route until
+the root lands); the shipper attaches its spans under
 that same root. Re-measured after the fix: one Run per session, both lanes in
 it. `joins.jsonl` now records that `trace_id`, and it is the id
 `GET /v1/workspaces/{ws}/runs/{run_id}` reads back with the workspace key.

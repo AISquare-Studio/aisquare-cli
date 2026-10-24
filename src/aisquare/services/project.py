@@ -25,6 +25,7 @@ from aisquare.core.workspace import (
     active_project,
     find_project_root,
     pin_project,
+    pinned_project_id,
     project_id_for,
     worktree_principal,
 )
@@ -71,7 +72,10 @@ def capture_on() -> bool:
     """``[projects] capture``: whether a directory a hooked session merely runs in gets a
     row of its own, captured and unlisted (#139). Off by default since 0.8.1; an unreadable
     config costs the setting, never the hook, as every section's does, and is read again on
-    the next ask (review of #259, round 18).
+    the next ask (review of #259, round 18). The default it falls back to is off, so an
+    unreadable config captures nothing more: the same direction as ``capture.enabled``,
+    which fails closed on purpose (``hooks.capture_prompt``, #268): both record less, never
+    more.
 
     Asked twice a SessionStart, once a prompt, and on asq's UI thread every refresh tick:
     :func:`~aisquare.core.config.load_config` parses the file again only when it changed."""
@@ -442,9 +446,9 @@ def forget(ref: str, *, purge: bool = False) -> ProjectForgetReport:
     when it cannot be yet, kept owed and named in the report
     (:func:`_revoke_owed`).
 
-    If the project was the ACTIVE one — pinned, or the one the working
-    directory resolves to — the pin moves to the most recently touched
-    remaining project, or is cleared when none remain; the report says which.
+    If the pin (``project switch``) named the project, it is cleared, and the
+    active project follows the working directory again; the report says so. A
+    pin is never moved, and none is written where there was none (#271).
     """
     return forget_project(resolve(ref), purge=purge)
 
@@ -465,18 +469,18 @@ def forget_project(project: ProjectInfo, *, purge: bool = False) -> ProjectForge
         busy = _busy(store, project)
         if busy is not None:
             raise busy
-        was_active = active_project(store).id == project.id
+        was_pinned = pinned_project_id() == project.id
         removed = store.purge_project(project.id) if purge else {}
         if not purge:
             store.forget_project(project.id)
-        active, pin_error = _repin(store) if was_active else (None, None)
+        pin_error = _clear_pin() if was_pinned else None
     return ProjectForgetReport(
         project=project,
         purged=purge,
         removed=removed,
         data_dir_removed=purge and _remove_data_dir(project.id),
-        active=active,
-        active_changed=was_active,
+        active_changed=was_pinned,
+        unpinned=project if was_pinned else None,
         pin_error=pin_error,
         keys_still_live=_revoke_owed([project.id]) if purge else [],
     )
@@ -827,7 +831,7 @@ def prune(
     kept: list[PruneCandidate] = []
     ran: dict[str, PruneCandidate] = {}
     with store_session() as store:
-        active_id = active_project(store).id
+        pinned_id = pinned_project_id()
         rootless: set[str] = set()
         why = _why_stale(
             store,
@@ -872,8 +876,11 @@ def prune(
             else:
                 store.forget_project(project_id)
             dropped.append(project_id)
-        active_changed = active_id in dropped
-        active, pin_error = _repin(store) if active_changed else (None, None)
+        unpinned = next(
+            (c.project for c in candidates if c.project.id == pinned_id and pinned_id in dropped),
+            None,
+        )
+        pin_error = _clear_pin() if unpinned is not None else None
     if purge:
         for project_id in dropped:
             _remove_data_dir(project_id)
@@ -888,8 +895,8 @@ def prune(
         root_gone=root_gone,
         dry_run=False,
         purged=purge,
-        active=active,
-        active_changed=active_changed,
+        active_changed=unpinned is not None,
+        unpinned=unpinned,
         pin_error=pin_error,
         keys_still_live=_revoke_owed(dropped) if purge else [],
     )
@@ -915,28 +922,27 @@ def _revoke_owed(project_ids: list[str]) -> list[PendingRevocation]:
     return destinations.revoke_owed(iam.signed_in_quietly(), project_ids=set(project_ids)).owed
 
 
-def _repin(store: ContextStore) -> tuple[ProjectInfo | None, str | None]:
-    """Pin the most recently touched remaining project (clear the pin when none remain).
+def _clear_pin() -> str | None:
+    """Clear the pin, which named a project just forgotten; why it could not be, else None.
 
-    Returns the project now pinned and, when the pin could not be written, why.
-    The pin is the least important thing in a forget that has already
-    committed — with ``--purge`` the rows are gone and the data directory is
-    about to be — so a ``state.json`` that refuses it is reported in the result
-    and never raised over a purge that has already happened: raised, it told
-    the operator the command failed, left the data directory orphaned (its
-    registration gone, nothing left to name it), and a re-run said "no project
-    matches".
+    Cleared, never moved (#271): the pin is machine-wide, and moved to the most recently
+    touched project it pointed every terminal and every fleet's ``fleet ls`` at a project
+    nobody chose. Asked only when the pin named a project that went: one that was not
+    pinned, the working directory's, was taken for the active one, and a ``state.json``
+    was written to pin another in its place.
+
+    The pin is the least important thing in a forget that has already committed — with
+    ``--purge`` the rows are gone and the data directory is about to be — so a
+    ``state.json`` that refuses it is reported in the result and never raised over a purge
+    that has already happened: raised, it told the operator the command failed, left the
+    data directory orphaned (its registration gone, nothing left to name it), and a re-run
+    said "no project matches".
     """
-    remaining = store.list_projects()
-    newest: ProjectInfo | None = None
-    if remaining:
-        activity = store.project_activity()
-        newest = max(remaining, key=lambda project: activity.get(project.id, ""))
     try:
-        pin_project(None if newest is None else newest.id)
+        pin_project(None)
     except StateUnwritableError as exc:
-        return None, str(exc)
-    return newest, None
+        return str(exc)
+    return None
 
 
 def _remove_data_dir(project_id: str) -> bool:
@@ -1013,7 +1019,29 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
                     store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
                 )
     snapshot, note = _ensure_snapshot(project, refresh=refresh)
-    return OnboardReport(seeded=seeded, snapshot=snapshot, snapshot_note=note)
+    return OnboardReport(
+        seeded=seeded,
+        snapshot=snapshot,
+        snapshot_note=note,
+        code_index=_ensure_code_index(project, refresh=refresh),
+    )
+
+
+def _ensure_code_index(project: ProjectInfo, *, refresh: bool) -> str | None:
+    """Start building or refreshing the symbol index (#285) detached, as one line for the
+    report; ``None`` when ``[code] enabled`` is off. Never inline: a first index of a large
+    checkout takes minutes, and the onboard (and ``init``) returns at once. Incremental
+    unless ``refresh``; never fails the onboard."""
+    from aisquare.services import code as code_service  # lazy: onboard imports this module
+    from aisquare.services import hooks as hooks_service  # lazy: hooks imports this module
+
+    if not code_service.settings().enabled:
+        return None
+    try:
+        hooks_service.start_code_index(project, full=refresh)
+    except Exception as exc:  # an index is optional; the onboard is not
+        return f"not started ({exc}) — build it with `aisquare code index`"
+    return "building in the background — `aisquare code index --status` says when it is ready"
 
 
 def snapshot_settings() -> SnapshotSettings:

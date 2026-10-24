@@ -25,6 +25,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -154,6 +155,7 @@ def import_source(
     progress: Callable[[str], None] | None = None,
     stdin: bytes | None = None,
     cancelled: Callable[[], bool] | None = None,
+    cancel: threading.Event | None = None,
 ) -> ImportResult:
     """Import ``source`` into ``layer``: ``-`` (stdin — or ``stdin``'s bytes, for a UI
     that has no stdin to hand over), a skill directory, a SKILL.md or other file, an
@@ -175,6 +177,10 @@ def import_source(
     ``cancelled``); ``False`` means the publish is next and can no longer be
     stopped. The TUI passes it because its user can leave the dialog while this
     runs; without it nothing is asked. The LLM path's last question is ``confirm``.
+
+    ``cancel`` stops a running engine (#211): once it is set, the manager engine's
+    ``claude -p`` is ended within two seconds, an api answer is dropped, and the import
+    ends as ``cancelled``, with nothing written. Set, it is a yes to ``cancelled`` too.
     """
     base = _layer_dir(layer, root)
     if engine is not None and engine not in _ENGINES:
@@ -227,6 +233,7 @@ def import_source(
             model=model,
             confirm=confirm,
             progress=progress,
+            cancel=cancel,
         )
     assert text is not None
 
@@ -263,7 +270,7 @@ def import_source(
         else:
             _write_provenance(staged, source=src.origin, skill_bytes=src.skill_bytes)
 
-    if cancelled is not None and cancelled():
+    if (cancelled is not None and cancelled()) or (cancel is not None and cancel.is_set()):
         # A recognised skill needs no confirmation, so nothing else stood between a
         # user who had backed out and the copy — or, under --force, the replacement.
         raise PersonaError("the import was cancelled — nothing was written", code="cancelled")
@@ -327,6 +334,7 @@ def _import_with_llm(
     model: str | None,
     confirm: Callable[[PersonaDraftView], bool],
     progress: Callable[[str], None] | None,
+    cancel: threading.Event | None = None,
 ) -> ImportResult:
     """§3.9's LLM path: draft → render → the recognised path's validator (one retry
     with its rule) → keep the draft → confirm → save with provenance.
@@ -389,7 +397,12 @@ def _import_with_llm(
                 model=api_model,
                 feedback=feedback,
                 progress=progress,
+                cancel=cancel,
             )
+        except persona_import.ImportCancelled:
+            raise PersonaError(
+                "the import was cancelled — nothing was written", path=where, code="cancelled"
+            ) from None
         except persona_import.ImportRefused as exc:
             raise PersonaError(exc.message, path=where, code=exc.code) from None
         skill_name = name or drafted.name.strip()
@@ -791,9 +804,19 @@ def save(name: str, text: str, *, root: Path | None, layer: Layer | None = None)
         raise PersonaError(
             f"no {layer} persona named '{name}' ({directory.parent})", code="unknown_persona"
         )
+    check(name, text, root=root, layer=layer)
+    _replace_file(directory / core.SKILL_FILE, text.encode("utf-8"))
+    return core.load(directory, layer=layer)
+
+
+def check(name: str, text: str, *, root: Path | None, layer: Layer | None = None) -> Persona:
+    """``text`` held to the recognised test and the caps as ``name``'s SKILL.md, as
+    :func:`save` holds it, with nothing written. A :class:`PersonaError` says the file is
+    unchanged."""
+    layer, directory = _target(name, root, layer)
     skill = directory / core.SKILL_FILE
     try:
-        core.parse_skill(text, name=name, path=directory, layer=layer)
+        return core.parse_skill(text, name=name, path=directory, layer=layer)
     except PersonaError as exc:
         raise PersonaError(
             f"{exc.rule} — not saved; {skill} is unchanged",
@@ -801,8 +824,20 @@ def save(name: str, text: str, *, root: Path | None, layer: Layer | None = None)
             line=exc.line,
             code=exc.code,
         ) from None
-    _replace_file(skill, text.encode("utf-8"))
-    return core.load(directory, layer=layer)
+
+
+def finish_edit(
+    name: str, before: str, after: str, *, root: Path | None, layer: Layer | None = None
+) -> Persona | None:
+    """The end of an edit made in an editor outside this process (the fleet UI's
+    ``$EDITOR`` pane, #212): ``after`` is checked (:func:`check`) and then saved through
+    :func:`save`, the one writer. Text that is still ``before`` is checked and nothing is
+    written, so neither the SKILL.md nor its provenance sidecar changes; ``None`` then.
+    """
+    if after == before:
+        check(name, after, root=root, layer=layer)
+        return None
+    return save(name, after, root=root, layer=layer)
 
 
 def edit(name: str, *, root: Path | None, layer: Layer | None = None) -> Persona | None:

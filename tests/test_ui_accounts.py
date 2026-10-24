@@ -604,9 +604,9 @@ def test_tick_frames_that_paint_after_the_accounts_wait_still_cost_one_read_afte
     counting = threading.Lock()
     read_fleet = shell_module._read_fleet
 
-    def slow_fleet(show_captured: bool) -> Any:
+    def slow_fleet(show_captured: bool, viewed: Any = None, scope: Any = None) -> Any:
         frames.wait(HOLD_S)
-        return read_fleet(show_captured)
+        return read_fleet(show_captured, viewed, scope)
 
     def reader() -> AccountsOverview:
         with counting:
@@ -676,9 +676,9 @@ def test_a_frame_orders_its_calls_and_the_accounts_reads_by_count_not_by_the_clo
     frames.set()
     read_fleet = shell_module._read_fleet
 
-    def slow_fleet(show_captured: bool) -> Any:
+    def slow_fleet(show_captured: bool, viewed: Any = None, scope: Any = None) -> Any:
         frames.wait(HOLD_S)
-        return read_fleet(show_captured)
+        return read_fleet(show_captured, viewed, scope)
 
     def reader() -> AccountsOverview:
         reads[0] += 1  # one read at a time
@@ -1605,6 +1605,42 @@ def test_cancel_stops_a_sign_in_and_a_sign_in_of_an_existing_slot_is_never_disca
     assert begun == 2  # the row's button signs THAT slot in
     assert seen["abandoned"] == []  # an existing slot is kept, login or not
     assert said.startswith("sign-in cancelled — cancelled; nothing changed")
+
+
+@pytest.mark.parametrize("lands", [True, False], ids=["landed", "cancelled"])
+def test_a_landed_sign_in_is_told_to_the_shell_once_and_a_cancelled_one_never(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, lands: bool
+) -> None:
+    """#286: the shell goes back to where a sign-in was started from on ``SignInLanded``.
+    It is posted once per landing, and never for a sign-in that did not land: that one is
+    ``SignInAbandoned``, which reopens nothing."""
+    _script_claude_sign_in(monkeypatch, tmp_path, lands=lands)
+    told: list[str] = []
+
+    async def landed(self: FleetApp, event: accounts_view.SignInLanded) -> None:
+        told.append(f"landed:{event.slot}")
+
+    def abandoned(self: FleetApp, event: accounts_view.SignInAbandoned) -> None:
+        told.append("abandoned")
+
+    monkeypatch.setattr(FleetApp, "on_sign_in_landed", landed)
+    monkeypatch.setattr(FleetApp, "on_sign_in_abandoned", abandoned)
+
+    async def go(pilot: Pilot[None]) -> list[str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await pilot.click("#claude-add")
+        await settle(app)
+        if lands:
+            view._poll_login()
+        else:
+            await pilot.click("#login-cancel")
+        await pilot.pause()
+        await settle(app)
+        await pilot.pause()
+        return told
+
+    assert drive(go) == (["landed:2"] if lands else ["abandoned"])
 
 
 def test_cancel_after_the_login_landed_keeps_the_new_slot_and_wires_it(

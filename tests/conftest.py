@@ -12,7 +12,6 @@ import contextlib
 import os
 import shlex
 import shutil
-import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator, Sequence
@@ -30,7 +29,11 @@ from aisquare.core import agents as agent_core
 from aisquare.core import experimental
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
+from aisquare.models import ProjectInfo
 from aisquare.services import ci_client
+from aisquare.services import hooks as hooks_service
+from aisquare.services import project as project_service
+from tests import private_fleets
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -103,6 +106,10 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     reason = _foreign_package_reason(aisquare.__file__, SRC)
     if reason is not None:
         pytest.exit(reason, returncode=4)
+    # Once per run, in the process that starts it: an xdist worker's siblings are alive,
+    # so a sweep there would find nothing more, only race the others for it.
+    if not hasattr(session.config, "workerinput"):
+        private_fleets.sweep_orphans()
 
 
 def _sdk_installed() -> bool:
@@ -137,6 +144,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     per-test failures are already loud, and this is the sentence that explains
     them.
     """
+    # An xdist worker notes what it saw outside every test's home in its own process,
+    # and only the controller prints the summary: hand it over (pytest_testnodedown).
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:
+        workeroutput["outside_a_test"] = dict(_OUTSIDE_A_TEST)
     if _sdk_installed() and not _SDK_AT_START:
         session.exitstatus = max(exitstatus, 1)
         print(
@@ -202,6 +214,9 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_ROLE",
     # Exported by `launch --persona`; a fleet agent running the suite has one.
     "AISQUARE_PERSONA",
+    # Exported on every fleet window since P1 WS-2 (#279): a reviewer running the suite
+    # reads the board as `none`, and every delta test read nothing.
+    "AISQUARE_BOARD_CONTEXT",
     # Read off the ambient env by `services/mcp_server.py` to attribute remote
     # calls — same family as the two above, and missed for the same reason.
     "AISQUARE_SERVE_CLIENT",
@@ -449,6 +464,14 @@ def pytest_runtest_logfinish(nodeid: str, location: tuple[str, int | None, str])
         _OUTSIDE_A_TEST.setdefault(str(path), nodeid)
 
 
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: object, error: object) -> None:
+    """Take in what an xdist worker saw outside every test's home (its sessionfinish)."""
+    seen = getattr(node, "workeroutput", {}).get("outside_a_test", {})
+    for path, nodeid in seen.items():
+        _OUTSIDE_A_TEST.setdefault(path, nodeid)
+
+
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
     """Say what a test left running wrote outside its own home, and after which test.
 
@@ -498,13 +521,7 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
-def _uid() -> int:
-    """This user's id — the ``tmux-<uid>`` folder. Windows has neither, nor tmux; a test
-    that removes ``os.getuid`` (to stand for Windows) reads as uid 0 here, never a crash."""
-    if sys.platform == "win32":
-        return 0
-    getuid = getattr(os, "getuid", None)
-    return getuid() if callable(getuid) else 0
+_uid = private_fleets.uid
 
 
 #: Where tmux keeps the OWNER's sockets — read once, at import, before any fixture
@@ -580,7 +597,7 @@ def _sweep_private_fleets() -> Iterator[None]:
     tmux = shutil.which("tmux")
     for folder in _PRIVATE_FLEETS:
         if folder.exists():
-            _kill_private_servers(folder, _uid(), tmux)
+            private_fleets.end_private_servers(folder, _uid(), tmux)
             shutil.rmtree(folder, ignore_errors=True)
 
 
@@ -616,7 +633,7 @@ def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     from aisquare.core import tmux as tmux_core
     from aisquare.core.tmux import Completed
 
-    private = Path(tempfile.mkdtemp(prefix="asqtx", dir="/tmp"))
+    private = private_fleets.private_folder()
     _PRIVATE_FLEETS.append(private)
     # Read once, now: a test may remove os.getuid, or patch sys.platform, to stand for
     # Windows (test_tmux.py, test_windows_contention.py) — and teardown runs under it.
@@ -655,25 +672,10 @@ def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
         # raised TypeError here and ERRORED the test. Whatever this pass cannot do, the
         # session's sweep does, with nothing patched.
         with contextlib.suppress(Exception):
-            _kill_private_servers(private, guard.uid, guard.tmux)
+            private_fleets.end_private_servers(private, guard.uid, guard.tmux)
             shutil.rmtree(private, ignore_errors=True)
     if verdict is not None:
         pytest.fail(verdict)
-
-
-def _kill_private_servers(private: Path, uid: int, tmux: str | None) -> None:
-    """End every tmux server a test left under its private ``TMUX_TMPDIR``, with its panes."""
-    folder = private / f"tmux-{uid}"
-    if tmux is None or not folder.is_dir():
-        return
-    for socket in folder.iterdir():
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            subprocess.run(
-                [tmux, "-S", str(socket), "kill-server"],
-                capture_output=True,
-                timeout=10,
-                check=False,
-            )
 
 
 @pytest.fixture
@@ -738,11 +740,7 @@ def private_ui_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     def private() -> Path:
         if not made:
-            made.append(
-                Path(
-                    tempfile.mkdtemp(prefix="asq", dir=None if sys.platform == "win32" else "/tmp")
-                )
-            )
+            made.append(private_fleets.private_folder())
             _PRIVATE_UI_ROOTS.append(made[0])
         root = real()
         return made[0] / root.relative_to(root.anchor)
@@ -832,6 +830,92 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(core, "_now", lambda: CLAUDE_ACCOUNTS_NOW)
     monkeypatch.setattr(service, "_now", lambda: CLAUDE_ACCOUNTS_NOW)
     return home
+
+
+#: The detached start of an index build (#285), as written, for the tests of it:
+#: ``no_detached_code_index_build`` replaces it for every other test.
+REAL_START_CODE_INDEX = hooks_service.start_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_detached_code_index_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No ``init`` or ``project onboard`` in the suite starts a detached ``aisquare code
+    index``: it would run in a session of its own that outlives the test. A test that wants
+    an index builds one (``code_service.build_index``)."""
+    monkeypatch.setattr(hooks_service, "start_code_index", lambda _project, *, full=False: None)
+
+
+#: The session-start refresh of the symbol index (#285), as written, for the tests of it:
+#: ``no_detached_code_refresh`` replaces it for every other test.
+REAL_REFRESH_CODE_INDEX = hooks_service._refresh_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_detached_code_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No session start in the suite starts a detached ``aisquare code index`` (#285).
+
+    ``init`` and ``project onboard`` build an index now, so every later session-start
+    hook would start one, in a session of its own that outlives the test.
+    """
+    monkeypatch.setattr(hooks_service, "_refresh_code_index", lambda _project: None)
+
+
+REAL_ENSURE_CODE_INDEX = project_service._ensure_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_index_of_this_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """``init`` and ``project onboard`` build a symbol index only under pytest's temp dirs.
+
+    A test that runs either where it stands onboards this repository, and a full index of
+    it per test (a fresh home each time, so never incremental) took rc/p2's CI from ~20 to
+    60-90 minutes. Elsewhere the onboard reports no index, as with ``[code] enabled`` off.
+    """
+    base = tmp_path_factory.getbasetemp().resolve()
+
+    def ensure(project: ProjectInfo, *, refresh: bool) -> str | None:
+        if not project.root.resolve().is_relative_to(base):
+            return None
+        return REAL_ENSURE_CODE_INDEX(project, refresh=refresh)
+
+    monkeypatch.setattr(project_service, "_ensure_code_index", ensure)
+
+
+@pytest.fixture(autouse=True)
+def roomy_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every spawn in the suite sees plenty of memory, whatever the runner has (#283).
+
+    ``min_free_mb`` is on by default, so a CI runner short of 2 GB would otherwise refuse
+    the spawn a test is about. A test of admission sets its own headroom; the probes'
+    own tests call ``linux_headroom`` / ``darwin_headroom`` with their fixtures.
+    """
+    from aisquare.core import memory
+
+    monkeypatch.setattr(
+        memory, "headroom", lambda: memory.Headroom(65_536, 131_072, "normal", None, "test")
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_detached_root_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No in-process test starts the detached worker that posts a Run's root (#129 e).
+
+    It runs in a session of its own and outlives the test, retrying a gateway the test
+    has already shut down. A test of the worker patches ``_start_root_worker`` itself; a
+    test of a traced launch patches ``_post_run_root``. Reaching this is a test that did
+    neither, and it fails loudly rather than leave a process behind.
+    """
+    from aisquare.services import explainability
+
+    def refuse(argv: list[str], key: bytes) -> None:
+        raise AssertionError(
+            "a test started a detached root worker: patch explainability._post_run_root "
+            f"or _start_root_worker ({' '.join(argv[-5:])})"
+        )
+
+    monkeypatch.setattr(explainability, "_start_root_worker", refuse)
 
 
 @pytest.fixture(autouse=True)
@@ -972,11 +1056,26 @@ carry it: a test that fails with the captain off and is not about the captain is
 of the off path, to be fixed in the code (review of #240)."""
 
 
+CAPTAIN_GATE = "captain_gate"
+"""The marker of a test of the captain's owner gate (#216): it runs with ``[captain] gate``
+as the config says. Every other test runs with the gate off, as Phase 1 had none."""
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         f"{NEEDS_CAPTAIN}: needs the experimental captain on; skipped when "
         f"{SUITE_CAPTAIN_ENV}=off runs the suite with it off, as it ships",
+    )
+    config.addinivalue_line(
+        "markers",
+        f"{CAPTAIN_GATE}: the owner gate applies as the config says; every other test runs "
+        "with it off",
+    )
+    config.addinivalue_line(
+        "markers",
+        "e2e: drives a real, signed-in Claude Code (and spends tokens); skipped unless the "
+        "test's own variables name what to drive",
     )
 
 
@@ -1007,6 +1106,24 @@ def captain_on(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(experimental.CAPTAIN_ENV, raising=False)
         return
     monkeypatch.setenv(experimental.CAPTAIN_ENV, "1")
+
+
+@pytest.fixture(autouse=True)
+def captain_gate_off(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The captain's owner gate (#216) off, unless the test is marked :data:`CAPTAIN_GATE`.
+
+    The gate is on by default while the captain is, and the suite runs with the captain on
+    (:func:`captain_on`), so every Phase 1 pin of a privileged tool would meet a locked
+    gate. Phase 1 had no gate: those pins run as they were. The gate's own pins
+    (``tests/test_captain_gate.py``) read ``[captain] gate`` from the config like a user.
+    Patched here, never through the environment: the product has no variable that
+    switches the gate off.
+    """
+    if request.node.get_closest_marker(CAPTAIN_GATE) is not None:
+        return
+    from aisquare.services.captain import gate
+
+    monkeypatch.setattr(gate, "configured", lambda: False)
 
 
 @pytest.fixture

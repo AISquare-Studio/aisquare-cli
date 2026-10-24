@@ -129,7 +129,8 @@ def test_remote_tools_act_as_an_attributed_virtual_session(
             }
         ),
     )
-    assert "Windows Chrome" in delta.stdout and "mcp:remo" in delta.stdout
+    # One line per event, its author named by its role (P1 WS-2, #279): the remote's.
+    assert "Windows Chrome" in delta.stdout and " remote result: " in delta.stdout
 
 
 def test_remote_task_lifecycle_and_guards(work_dir: Path) -> None:

@@ -85,6 +85,109 @@ def test_task_add_is_idempotent_on_key(work_dir: Path) -> None:
     assert again.id == first.id
 
 
+# --- task keys in any script (#270) --------------------------------------------
+
+
+def test_two_titles_in_another_script_are_two_tasks(work_dir: Path) -> None:
+    """#270: the key kept `[a-z0-9]` only, so every title with no ASCII letter keyed `task`:
+    the second Cyrillic title answered "already tracked" with the first task."""
+    first, made_first = team_service.add_task("Исправить вход")
+    second, made_second = team_service.add_task("Добавить тесты")
+    login, made_login = team_service.add_task("修复登录")
+    tests, made_tests = team_service.add_task("添加测试")
+
+    assert made_first and made_second and made_login and made_tests
+    assert (first.number, second.number, login.number, tests.number) == (1, 2, 3, 4)
+    again, made_again = team_service.add_task("Исправить вход")
+    assert not made_again and again.id == first.id, "the same title is still the same task"
+
+
+def test_a_title_in_any_script_keys_by_its_own_words() -> None:
+    assert team_service.task_key("Исправить вход") == "исправить-вход"
+    assert team_service.task_key("修复登录") == "修复登录"
+    assert team_service.task_key("Fix вход") == "fix-вход"
+    # Marks are kept, so a Devanagari word is not split at its virama or vowel signs.
+    assert team_service.task_key("हिन्दी परीक्षण") == "हिन्दी-परीक्षण"
+    assert (
+        team_service.task_key("\uff26\uff55\uff4c\uff4c\u3000\uff57\uff49\uff44\uff54\uff48")
+        == "full-width"
+    ), "NFKC"
+    assert team_service.task_key("Straße") == "strasse", "casefolded"
+    # Nothing left to slug: a hash of the title, never one shared constant.
+    rocket, party = team_service.task_key("🚀🔥"), team_service.task_key("🎉")
+    assert rocket.startswith("t-") and len(rocket) == 14 and rocket != party
+
+
+def test_an_emoji_with_a_variation_selector_is_hashed_not_keyed_by_the_selector(
+    work_dir: Path,
+) -> None:
+    """Review of #314: U+FE0F, the selector after most text-default emoji, is a mark, and
+    every mark was kept, so `⚠️`, `✔️` and `❤️` all keyed the invisible selector alone and
+    the second `task add` answered with the first. A mark is kept only after a letter, a
+    digit or a mark it belongs to, as a Devanagari vowel sign or virama is."""
+    keys = [team_service.task_key(title) for title in ("⚠️", "✔️", "❤️", "☀️", "#️⃣")]
+    assert all(key.startswith("t-") and len(key) == 14 for key in keys), keys
+    assert len(set(keys)) == len(keys), keys
+    for title in ("Ship it ✔️", "Ship it ❤️", "Fix ☀️ mode"):
+        key = team_service.task_key(title)
+        assert "\ufe0f" not in key and key.isprintable(), (title, key)
+    assert team_service.task_key("Ship it ✔️") == "ship-it", "the emoji is not a word of it"
+
+    warned, made_warned = team_service.add_task("⚠️")
+    checked, made_checked = team_service.add_task("✔️")
+    assert made_warned and made_checked and warned.id != checked.id
+
+
+@pytest.mark.parametrize(
+    ("title", "key"),
+    [
+        ("wire auth", "wire-auth"),
+        ("Wire the auth flow!", "wire-the-auth-flow"),
+        ("  P3-W6c: tasks -- keys  ", "p3-w6c-tasks-keys"),
+        ("snake_case_name", "snake-case-name"),
+        ("tabs\tand\nnewlines", "tabs-and-newlines"),
+        ("x" * 70, "x" * 64),
+        ("a" * 63 + " b", "a" * 63 + "-"),  # clipped after the strip, as it always was
+        ("???", "task"),
+        ("", "task"),
+    ],
+)
+def test_an_ascii_title_keeps_the_key_it_always_had(title: str, key: str) -> None:
+    """Every task on a board today keyed by an ASCII title is found again by the same key."""
+    assert team_service.task_key(title) == key
+
+
+def test_every_ascii_title_keys_as_the_legacy_slug_did() -> None:
+    import random
+    import string
+
+    pick = random.Random(270)
+    titles = [
+        *string.printable,
+        *("".join(pick.choices(string.printable, k=pick.randint(0, 90))) for _ in range(3000)),
+    ]
+    for title in titles:
+        assert team_service.task_key(title) == team_service._legacy_task_key(title), repr(title)
+
+
+def test_re_adding_a_mixed_title_from_before_the_upgrade_is_still_idempotent(
+    work_dir: Path,
+) -> None:
+    """A mixed title's key changed with #270 (`Fix вход` keyed `fix`, now `fix-вход`). A task
+    stored under the old key is found by its identical title, so a manager re-emitting its
+    plan after the upgrade gets "already tracked", not a second task."""
+    project = team_project(work_dir)
+    with store_session() as store:
+        store.ensure_project(project)
+        old, _ = store.upsert_task(_task(project.id, "Fix вход", "fix"))
+
+    again, created = team_service.add_task("Fix вход")
+    other, created_other = team_service.add_task("Fix тесты")
+
+    assert not created and again.id == old.id
+    assert created_other and other.key == "fix-тесты", "the old key alone is not the same task"
+
+
 def test_concurrent_claims_have_exactly_one_winner(work_dir: Path) -> None:
     project = team_project(work_dir)
     with store_session() as store:
@@ -325,7 +428,7 @@ def test_prompt_submit_delivers_teammate_delta_once(
     runner.invoke(app, ["task", "add", "wire auth", "--as", "bbbb2222"])
 
     first = _prompt(runner, PLANNER, work_dir)
-    assert "<aisquare-team-delta>" in first.stdout
+    assert "<aisquare-team-delta board=" in first.stdout
     assert "wire auth" in first.stdout
     second = _prompt(runner, PLANNER, work_dir)  # nothing new → nothing injected
     assert second.stdout.strip() == ""
@@ -1767,5 +1870,149 @@ def test_each_delta_line_names_its_board_and_only_the_sessions_own_board_is_read
 
     lines = [line for line in delta.splitlines() if line.startswith("- ")]
     assert lines, delta
-    assert all(line.startswith(f"- [{board.root.name}] ") for line in lines), lines
+    # Named once, in the block's header: one delta reads one board (P1 WS-2, #279).
+    assert f'<aisquare-team-delta board="{board.root.name}">' in delta
+    assert all(line.startswith("- #") for line in lines), lines
     assert "wire auth" in delta and "the other train's news" not in delta
+
+
+# --- P0-W3b: a cross-account resume reports a transcript that never exists ---------------------
+#
+# Measured by P0-W0 (Claude Code 2.1.309 and 2.1.223): `claude --resume <path>` under another
+# CLAUDE_CONFIG_DIR hands SessionStart a transcript_path under the NEW account's projects/ that
+# is never created; the records keep going to the original file, and UserPromptSubmit hands the
+# original path. Stored, the missing path raised a false collision banner at every prompt, and
+# the next restart or switch started fresh because the row named no file to resume.
+
+
+def _cross_account(tmp_path: Path) -> tuple[Path, Path]:
+    """The real transcript under account 2, and the path account 3's resume reports."""
+    sid = "c0ffee00-1111-2222-3333-444444444444"
+    real = tmp_path / "accounts" / "2" / "projects" / "-work" / f"{sid}.jsonl"
+    real.parent.mkdir(parents=True)
+    real.write_text('{"type":"user"}\n', encoding="utf-8")
+    reported = tmp_path / "accounts" / "3" / "projects" / "-work" / f"{sid}.jsonl"
+    return real, reported
+
+
+def test_a_cross_account_resume_keeps_the_real_transcript_and_raises_no_banner(
+    work_dir: Path, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(app, ["team", "on"])
+    sid = "c0ffee00-1111-2222-3333-444444444444"
+    real, reported = _cross_account(tmp_path)
+    _start_tp(runner, sid, work_dir, str(real))
+
+    resumed = _start_tp(runner, sid, work_dir, str(reported))
+    prompt = _prompt_tp(runner, sid, work_dir, str(real))
+
+    assert "session-collision" not in resumed.output
+    assert "session-collision" not in prompt.output
+    with store_session() as store:
+        session = store.get_session(sid)
+    assert session is not None
+    assert session.transcript_path == str(real)  # the file a restart can resume
+    assert session.account == str(reported.parents[2])  # the account it runs on now
+
+
+def test_a_row_that_recorded_the_missing_path_heals_at_the_next_prompt(
+    work_dir: Path, tmp_path: Path
+) -> None:
+    """A row an earlier build wrote: the stored path is not on disk, the prompt's is."""
+    runner = CliRunner()
+    runner.invoke(app, ["team", "on"])
+    sid = "c0ffee00-1111-2222-3333-444444444444"
+    real, reported = _cross_account(tmp_path)
+    _start_tp(runner, sid, work_dir, str(reported))  # what was stored before the fix
+
+    prompt = _prompt_tp(runner, sid, work_dir, str(real))
+
+    assert "session-collision" not in prompt.output
+    with store_session() as store:
+        session = store.get_session(sid)
+    assert session is not None and session.transcript_path == str(real)
+
+
+def test_two_live_agents_with_real_transcripts_are_still_warned(
+    work_dir: Path, tmp_path: Path
+) -> None:
+    """The control: the guard is about a path that does not exist, never about two that do."""
+    runner = CliRunner()
+    runner.invoke(app, ["team", "on"])
+    sid = "c0ffee00-1111-2222-3333-444444444444"
+    real, other = _cross_account(tmp_path)
+    other.parent.mkdir(parents=True)
+    other.write_text('{"type":"user"}\n', encoding="utf-8")
+    _start_tp(runner, sid, work_dir, str(real))
+
+    assert "aisquare-session-collision" in _start_tp(runner, sid, work_dir, str(other)).output
+    assert "aisquare-session-collision" in _prompt_tp(runner, sid, work_dir, str(real)).output
+
+
+def test_the_limited_line_says_who_moves_the_agent() -> None:
+    """P0-W3 (#277): with the hand-over coming, the line names no `fleet switch` and wakes no
+    manager; without it, the manager is the one to move the agent, as before."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.models import ProjectInfo
+
+    project = ProjectInfo(id="prj_x", root=Path("/tmp/x"))
+    notice = accounts_core.LimitNotice("weekly", None)
+    by_hand = team_service._limited_text("coder-db", "msg", notice, project=project)
+    moving = team_service._limited_text(
+        "coder-db", "msg", notice, project=project, handing_over=True
+    )
+    assert "fleet switch" in by_hand and "automatically" not in by_hand
+    assert "fleet switch" not in moving
+    assert 'moving it to another account automatically (`on_limit = "switch"`)' in moving
+    now = datetime.now(tz=UTC)
+
+    def event(kind: str, text: str) -> Any:
+        from aisquare.models import TeamEvent
+
+        return TeamEvent(id="e", project_id="p", kind=kind, text=text, created_at=now)
+
+    from aisquare.models import TeamSession
+
+    manager = TeamSession(id="m", project_id="p", role="manager", started_at=now, last_seen_at=now)
+
+    def wakes(one: Any) -> bool:
+        return team_service.wake_class(one, manager) == "wake"  # P1 WS-2's one rule (#279)
+
+    assert wakes(event("limited", by_hand))
+    # On the KIND, never the wording (review of #304): the phrase in a plain `limited` line
+    # still wakes, and the hand-over's own kind does not, whatever it says.
+    assert wakes(event("limited", moving))
+    assert not wakes(event(team_service.LIMITED_HANDING_OVER, by_hand))
+    assert "handover_failed" in team_service.MANAGER_WAKE_KINDS
+    from aisquare.services import remote_needs
+
+    assert remote_needs.LIMITED_EVENT_KINDS == team_service.LIMITED_KINDS
+
+
+@pytest.mark.parametrize("role", ["coder", "manager", "reviewer"])
+def test_a_session_start_reads_waiting_for_every_role_until_its_first_prompt(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """#123: the start upsert wrote `working`, and only the captain was set back to
+    `waiting`. A just-spawned idle agent then read busy for the row's whole fresh window,
+    `fleet tell` filed a note it never read, and an agent whose first prompt was never
+    submitted looked busy to everyone who could have reached it."""
+    monkeypatch.setenv("AISQUARE_ROLE", role)
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+
+    def state() -> str:
+        with store_session() as store:
+            session = store.get_session(CODER)
+            assert session is not None
+            return session.state
+
+    assert state() == "waiting"
+    _prompt(runner, CODER, work_dir)
+    assert state() == "working"
+    # A compaction can come mid-turn, so it keeps what the turn said (the control).
+    _start(runner, CODER, work_dir, source="compact")
+    assert state() == "working"
+    _start(runner, CODER, work_dir, source="resume")
+    assert state() == "waiting"

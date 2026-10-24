@@ -388,6 +388,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     SpawnDialog #spawn-worktree-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
     SpawnDialog #spawn-prompt { height: 6; width: 1fr; }
     SpawnDialog #spawn-how { width: auto; height: auto; }
+    SpawnDialog #spawn-how > RadioButton { width: auto; }
     SpawnDialog #spawn-fresh { margin-left: 2; }
     SpawnDialog #spawn-status { height: auto; padding: 0 0 0 0; }
     SpawnDialog #spawn-buttons { height: auto; align-horizontal: right; padding-bottom: 1; }

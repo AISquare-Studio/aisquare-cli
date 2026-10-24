@@ -292,12 +292,13 @@ def drive(
     *,
     accounts: Callable[[], AccountsOverview] | None = None,
     presets: dict[str, str] | None = None,
+    size: tuple[int, int] = SIZE,
 ) -> T:
     """Run ``scenario`` against the dialog open over a bare host."""
 
     async def run() -> T:
         host = Host(project, accounts=accounts, presets=presets)
-        async with host.run_test(size=SIZE) as pilot:
+        async with host.run_test(size=size) as pilot:
             await settle(pilot)
             dialog = host.screen
             assert isinstance(dialog, SpawnDialog)
@@ -1504,6 +1505,37 @@ def test_start_fresh_and_a_changed_role_are_sent(
     [(_, source, sent)] = hand_offs.calls
     assert source == "coder-1" and (sent["fresh"], sent["role"]) == (True, "tester")
     assert sent["persona"] is None and sent["mode"] == "fork"
+
+
+@pytest.mark.parametrize("size", [(80, 24), (200, 50)])
+def test_start_fresh_shows_beside_the_how_radios_and_a_click_checks_it(
+    git_project: ProjectInfo,
+    hand_offs: HandOffRecorder,
+    teammates: list[FleetAgentStatus],
+    size: tuple[int, int],
+) -> None:
+    """SMOKE8 #127: each RadioButton's own ``width: 1fr`` stretched the How RadioSet over
+    the row, so Start fresh sat past the dialog's right edge, unseen and unclickable. It
+    is on screen inside the dialog, on the How row, and a click on it checks it."""
+    teammates.append(teammate(git_project))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> None:
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        fresh = dialog.query_one("#spawn-fresh", Checkbox)
+        box = dialog.query_one("#spawn-box").region
+        row = dialog.query_one("#spawn-how-row").region
+        assert box.contains_region(fresh.region) and row.contains_region(fresh.region)
+        assert dialog.get_widget_at(*fresh.region.center)[0] is fresh
+        assert await pilot.click("#spawn-fresh")
+        await settle(pilot)
+        assert fresh.value
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+
+    drive(git_project, scenario, size=size)
+    [(_, _, sent)] = hand_offs.calls
+    assert sent["fresh"] is True and sent["mode"] == "fork"
 
 
 @pytest.mark.needs_captain

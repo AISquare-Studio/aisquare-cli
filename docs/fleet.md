@@ -108,7 +108,10 @@ tmux can see and its row says so (`no hooks`).
    them (`docs/personas.md`).
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
-   state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
+   state chip — **▶ working**, **⏸ waiting** (a fresh agent reads waiting until its
+   first prompt starts a turn, and one whose pane has been quiet for
+   `busy_quiet_seconds` with Claude Code idle at its prompt reads *idle (the board
+   said working)*: a turn ended with Esc fires no hook), **🔔 NEEDS YOU** (with a terminal
    bell), **⏳ limited** (parked on a Claude usage limit, with the reset time),
    **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it. The header
@@ -893,7 +896,9 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   and Sonnet limits apply only to requests to that model family, so an account
   whose Opus week is spent is no room for an Opus agent and still is for a
   Sonnet one (the family is the session's model, or for a spawn its `--model`
-  or the role's ladder). A window the endpoint marks locked reads 100 % used.
+  or the role's ladder). A spent family week is no answer at all for that
+  family, not even the least bad one a switch by hand would take. A window the
+  endpoint marks locked reads 100 % used.
   `[accounts] prefer = "reset-soonest"` (*under the line, prefer* in App
   settings) takes, of the accounts under `switch_at`, the one whose week resets
   first, so an allowance is spent before it lapses; `priority`, the default,
@@ -1168,6 +1173,8 @@ worktree_dir = ".aisquare-worktrees"      # relative to the repo root; kept out 
 disable_native_agent_teams = true         # exports CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0 into fleet launches
 max_continuations_per_hour = 30           # cap on the manager's Stop-hook continuations
 pane_clipboard = "off"                    # "on": a program in a pane may set your clipboard (OSC 52)
+busy_quiet_seconds = 30                   # a "working" row whose pane printed nothing this long is
+                                          # checked once: an idle Claude Code prompt reads waiting
 
 [fleet.roles.manager]
 permission_mode = "auto"                  # any Claude Code mode; "" = pass no flag

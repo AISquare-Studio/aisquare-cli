@@ -69,7 +69,7 @@ def test_a_claim_prints_the_contract(board: CliRunner) -> None:
 
     assert "✓ claimed: #1 tsk_" in out and "[doing] wire auth" in out
     assert CONTRACT in out
-    assert "aisquare task show #1" in out
+    assert "`aisquare task show 1`" in out  # a bare number: `#1` is a shell comment
 
 
 def test_next_claim_prints_the_contract_and_next_alone_says_there_is_one(
@@ -103,3 +103,25 @@ def test_json_and_a_task_without_a_contract_are_unchanged(board: CliRunner) -> N
 
     machine = json.loads(_ok(board, "--json", "task", "claim", "1", "--as", CODER[:8]))
     assert machine["detail"] == CONTRACT and "feedback" not in machine
+
+
+def _copyable_commands(text: str) -> list[str]:
+    """Every backticked ``aisquare …`` command in ``text`` — what a reader copies into a shell."""
+    import re
+
+    return [cmd for cmd in re.findall(r"`([^`]+)`", text) if cmd.startswith("aisquare ")]
+
+
+def test_every_printed_command_survives_a_shell(board: CliRunner) -> None:
+    """P0-FU (#51): the hints printed `aisquare task show #1`, and in bash `#1` starts a
+    COMMENT, so a copied command ran `task show` with no ref. Each command a claim or a peek
+    prints is split as a shell splits it (`shlex`, comments on) and must keep its ref."""
+    import shlex
+
+    printed = _ok(board, "task", "next", "--role", "coder", "--as", CODER[:8])
+    printed += _ok(board, "task", "claim", "1", "--as", CODER[:8])
+    commands = _copyable_commands(printed)
+    assert len(commands) == 2, printed  # the peek's and the claim's
+    for command in commands:
+        words = shlex.split(command, comments=True)
+        assert words == ["aisquare", "task", "show", "1"], (command, words)

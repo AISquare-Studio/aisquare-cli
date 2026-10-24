@@ -469,6 +469,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   family week counting for an agent of that family, and every limit an agent hits
   is remembered on its account until the reset it named, so no pick by headroom
   sends an agent back before then. (#277)
+- **An idle agent reads waiting, not working.** A session start wrote `working`,
+  and only the captain was set back to `waiting`, so a just-spawned agent sitting
+  at an empty prompt read busy for up to 30 minutes: `fleet tell` filed a note it
+  never read, and an agent whose first prompt was never submitted looked busy to
+  everyone who could have reached it. Every role now reads `waiting` from its
+  session start until a prompt starts a turn (a compaction keeps what the turn
+  said). And a `working` row whose pane has printed nothing for `[fleet]
+  busy_quiet_seconds` (30) is checked once: if Claude Code sits idle at its prompt —
+  a turn ended with Esc fires no hook — it reads ⏸ waiting, *idle (the board said
+  working)*. (#123)
 
 - **A killed test run no longer leaves its tmux servers running.** Teardown ends every
   server a test starts, but a run that is killed (a timeout, `kill`, an xdist worker that

@@ -99,7 +99,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import auto_mode, delivery, explainability_ops
+from aisquare.services import auto_mode, delivery, explainability_ops, pane_idle
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import project as project_service
@@ -2347,8 +2347,17 @@ def _derive(
     observed: bool,
     now: datetime,
     held: bool = False,
+    idle_box: Callable[[], bool] | None = None,
+    quiet: timedelta = timedelta(seconds=30),
 ) -> tuple[FleetAgentState, str | None]:
     """State from the board first, tmux second (§5.1) — with two honest exceptions.
+
+    And one check (#123): a fresh board ``working`` is trusted while the pane has
+    printed within ``quiet`` (``[fleet] busy_quiet_seconds``). Past that, ``idle_box``
+    (``services.pane_idle.box_idle_now``, one capture) is asked whether Claude Code sits
+    idle at its prompt — a turn ended with Esc fires no Stop — and an idle box reads
+    ``waiting``, "idle (the board said working)". Only rows in that state are captured;
+    without ``idle_box`` the row is trusted as before.
 
     A dead or vanished pane is a hard fact no board row can contradict: a
     process that has exited cannot be waiting, however recently its hooks
@@ -2416,6 +2425,15 @@ def _derive(
             if answered:
                 return "working", None
             return "attention", None
+        elif fresh and board_state == "working":
+            quiet_pane = (
+                observed
+                and pane is not None
+                and (pane.last_output is None or now - pane.last_output > quiet)
+            )
+            if quiet_pane and idle_box is not None and idle_box():
+                return "waiting", IDLE_SAID_WORKING
+            return "working", None
         elif fresh and board_state is not None:
             return board_state, None
     if not observed or pane is None:
@@ -2428,6 +2446,9 @@ def _derive(
     busy = pane.last_output is not None and now - pane.last_output <= ACTIVITY_WINDOW
     return ("working" if busy else "waiting"), hooks
 
+
+IDLE_SAID_WORKING = "idle (the board said working)"
+"""``_derive``'s detail for a ``working`` row whose quiet pane shows an idle prompt (#123)."""
 
 _LIMIT_GRACE = timedelta(minutes=10)
 """How long past its named reset a ``limited`` row is still believed (the reset
@@ -2628,7 +2649,16 @@ def _status(
     held = _held_by_another(agent, observed)
     observed = _own_view(agent, observed)
     pane = _pane_in(agent, observed) if observed is not None else None
-    state, detail = _derive(agent, session, pane, observed=observed is not None, now=now, held=held)
+    state, detail = _derive(
+        agent,
+        session,
+        pane,
+        observed=observed is not None,
+        now=now,
+        held=held,
+        idle_box=lambda: pane_idle.box_idle_now(server_of(agent, config), agent.pane_id),
+        quiet=timedelta(seconds=config.busy_quiet_seconds),
+    )
     return FleetAgentStatus(
         agent=agent,
         state=state,

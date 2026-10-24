@@ -244,6 +244,11 @@ head1 "RUN 3: re-run with every package manager stubbed"
 #   --offline — so the assertion does not depend on the tree's version matching
 #     whatever PyPI currently serves. With no version to compare against, an
 #     installed CLI is "current", which is exactly the state §3.9.4 is about.
+#
+# AISQUARE_INSTALL_NO_HANDOFF=1 here and in run 4: without AISQUARE_INSTALL_PACKAGE
+# main's script would hand off to the latest release's own install.sh, and these
+# runs grade THIS tree's script. (--offline turns the hand-off off as well; the
+# variable says so where a reader looks.)
 
 # A stub that RECORDS and fails. Recording rather than only failing, because
 # "was it called?" is the actual question — a stub that merely fails could be
@@ -279,7 +284,7 @@ version_before=$(aisquare --version)
 
 set +e
 # shellcheck disable=SC2086
-PATH="$STUBDIR:$PATH" env -u AISQUARE_INSTALL_PACKAGE \
+PATH="$STUBDIR:$PATH" env -u AISQUARE_INSTALL_PACKAGE AISQUARE_INSTALL_NO_HANDOFF=1 \
     sh "$INSTALLER" --yes --offline $AGENT_FLAG >"${TMPDIR:-/tmp}/run3.log" 2>&1
 run3=$?
 set -e
@@ -375,9 +380,10 @@ else
     [ "$staged" = "$pinned" ] || fail "staging did not take: aisquare is $staged, wanted $pinned"
 
     # No AISQUARE_INSTALL_PACKAGE: the PyPI-named target is the only one with a
-    # "latest" to move to.
+    # "latest" to move to. No hand-off either (see run 3): THIS tree's upgrade.
     # shellcheck disable=SC2086
-    env -u AISQUARE_INSTALL_PACKAGE sh "$INSTALLER" --yes $AGENT_FLAG >"${TMPDIR:-/tmp}/run4.log" 2>&1 ||
+    env -u AISQUARE_INSTALL_PACKAGE AISQUARE_INSTALL_NO_HANDOFF=1 \
+        sh "$INSTALLER" --yes $AGENT_FLAG >"${TMPDIR:-/tmp}/run4.log" 2>&1 ||
         {
             cat "${TMPDIR:-/tmp}/run4.log"
             fail "the upgrade run failed"

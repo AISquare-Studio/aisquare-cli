@@ -58,6 +58,9 @@ CLAUDE_INSTALLER_URL="https://claude.ai/install.sh"
 FNM_INSTALLER_URL="https://fnm.vercel.app/install"
 NODESOURCE_DEB_URL="https://deb.nodesource.com/setup_NODEMAJOR.x"
 NODESOURCE_RPM_URL="https://rpm.nodesource.com/setup_NODEMAJOR.x"
+#: Where every release since 0.9.0 attaches its stamped install.sh (see
+#: `hand_off`, scripts/stamp_installers.py and .github/workflows/installers.yml).
+RELEASES_URL="https://github.com/AISquare-Studio/aisquare-cli/releases"
 
 DEFAULT_PYTHON="3.13"
 # The highest version CI actually tests (.github/workflows/ci.yml is 3.11–3.13).
@@ -108,6 +111,7 @@ VERBOSE=0
 UPGRADE_ALL=0
 OFFLINE=0
 FORCE=0
+NO_HANDOFF=${AISQUARE_INSTALL_NO_HANDOFF:-0}
 
 # --- state the steps fill in ------------------------------------------------
 
@@ -420,6 +424,155 @@ version_lt() {
         _field=$((_field + 1))
     done
     return 1
+}
+
+# ---------------------------------------------------------------------------
+#  0  hand_off — main's copy runs the release's own installer
+# ---------------------------------------------------------------------------
+
+# MAIN'S COPY RUNS THE RELEASE'S OWN install.sh, and carries on itself only when
+# it cannot. This file installs the latest release from PyPI, but the copy on
+# `main` has main's steps and checks, and those can be ahead of that release:
+# #399 dropped `--with tiktoken` here while the latest release's doctor still
+# had a tiktoken row, and every install-matrix cell went amber. A release's own
+# copy is stamped (STAMPED_VERSION) and matches the package it installs, so an
+# UNSTAMPED copy downloads it, from releases/latest/download or, for
+# --version V, from vV's, and runs it with the same arguments.
+#
+# Whatever goes wrong is one quiet line and this script carrying on, never an
+# error: no network, a timeout, a 404 (a release before 0.9.0 has no installer
+# attached, and a new release has none until its installers job runs), or a
+# download that fails a check in `release_checked`. Not tried at all for a
+# stamped copy (a release never hands off), for a second hop
+# (AISQUARE_INSTALL_HANDED_OFF), with --no-handoff or AISQUARE_INSTALL_NO_HANDOFF=1,
+# with AISQUARE_INSTALL_PACKAGE (CI testing THIS tree must run this tree's
+# script), or with --offline (the checks need GitHub and PyPI).
+#
+# A CHILD, NOT `exec`, so the download can be removed: an exec'd release script
+# (0.9.0's included) does not know to delete itself. The traps remove it when
+# the run is interrupted too. Neither script reads stdin — the release's prompts
+# go through /dev/tty like this one's — and under `curl … | sh` this shell has
+# read its whole text before it gets here, because `main` is called on the last
+# line. tests/test_install_script_handoff.py holds all of it.
+HANDOFF_FILE=""
+HANDOFF_VERSION=""
+HANDOFF_WHY=""
+
+hand_off() {
+    [ -z "$STAMPED_VERSION" ] || return 0
+    if [ "${AISQUARE_INSTALL_HANDED_OFF:-0}" = 1 ]; then
+        debug "hand-off: this run was handed off to already; not hopping again"
+        return 0
+    fi
+    if [ "$NO_HANDOFF" = 1 ] || [ "$OFFLINE" = 1 ] || [ "$INSTALL_TARGET" != "$PYPI_PACKAGE" ]; then
+        debug "hand-off: off (--no-handoff, --offline or AISQUARE_INSTALL_PACKAGE)"
+        return 0
+    fi
+    have curl && HAVE_CURL=1
+    have wget && HAVE_WGET=1
+    # No downloader at all: `preflight` refuses that next, in its own words.
+    [ "$HAVE_CURL" = 1 ] || [ "$HAVE_WGET" = 1 ] || return 0
+
+    if ! HANDOFF_FILE=$(mktemp "${TMPDIR:-/tmp}/aisquare-release-XXXXXX"); then
+        note "using this installer (no temporary file for the release's)"
+        return 0
+    fi
+    trap 'rm -f "$HANDOFF_FILE"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    if release_checked "$@"; then
+        note "using the v$HANDOFF_VERSION installer"
+        AISQUARE_INSTALL_HANDED_OFF=1
+        export AISQUARE_INSTALL_HANDED_OFF
+        _ho_rc=0
+        sh "$HANDOFF_FILE" "$@" || _ho_rc=$?
+        exit "$_ho_rc"
+    fi
+    note "using this installer ($HANDOFF_WHY)"
+    rm -f "$HANDOFF_FILE"
+    trap - EXIT HUP INT TERM
+}
+
+# Download the release's install.sh into HANDOFF_FILE and check it. True when it
+# can run, with HANDOFF_VERSION set; false with HANDOFF_WHY saying why not.
+#
+# Its own download rather than `fetch`, for the timeout: uv and Node can take
+# minutes, and nothing else here wants a limit, but a 100 KB script that has not
+# arrived in 30 seconds is not worth waiting for when this one is already here.
+# PyPI is asked through `latest_version`, as `resolve` asks it, and only once
+# the download has passed every other check.
+release_checked() {
+    _rc_want=$PIN_VERSION
+    [ "$_rc_want" = latest ] && _rc_want=""
+    if [ -n "$_rc_want" ]; then
+        _rc_url="$RELEASES_URL/download/v$_rc_want/install.sh"
+        _rc_release="v$_rc_want"
+    else
+        _rc_url="$RELEASES_URL/latest/download/install.sh"
+        _rc_release="the latest release"
+    fi
+    debug "hand-off: fetching $_rc_url"
+    _rc_status=0
+    if [ "$HAVE_CURL" = 1 ]; then
+        curl -fsSL --connect-timeout 5 --max-time 30 -o "$HANDOFF_FILE" "$_rc_url" \
+            2>/dev/null || _rc_status=$?
+    else
+        wget -q -T 30 -O "$HANDOFF_FILE" "$_rc_url" 2>/dev/null || _rc_status=$?
+    fi
+    case "$_rc_status" in
+        0) ;;
+        22)
+            HANDOFF_WHY="$_rc_release has no installer attached"
+            return 1
+            ;;
+        28)
+            HANDOFF_WHY="GitHub did not answer in time"
+            return 1
+            ;;
+        *)
+            HANDOFF_WHY="could not download $_rc_release's installer"
+            return 1
+            ;;
+    esac
+
+    # A POSIX sh script that parses, and not an error page or half a file.
+    if [ "$(head -n 1 "$HANDOFF_FILE")" != "#!/bin/sh" ] || ! sh -n "$HANDOFF_FILE" 2>/dev/null; then
+        HANDOFF_WHY="$_rc_release's installer is not a POSIX sh script"
+        return 1
+    fi
+    HANDOFF_VERSION=$(sed -n 's/^STAMPED_VERSION="\([^"]*\)"$/\1/p' "$HANDOFF_FILE" | head -n 1)
+    if [ -z "$HANDOFF_VERSION" ]; then
+        HANDOFF_WHY="$_rc_release's installer carries no release stamp"
+        return 1
+    fi
+    # The release installs the version it was stamped with, so that is the one
+    # that has to be wanted: the pin, or else what PyPI calls the latest.
+    if [ -z "$_rc_want" ]; then
+        _rc_want=$(latest_version 2>/dev/null || true)
+        if [ -z "$_rc_want" ]; then
+            HANDOFF_WHY="could not read the latest version from PyPI to check v$HANDOFF_VERSION against"
+            return 1
+        fi
+    fi
+    if [ "$HANDOFF_VERSION" != "$_rc_want" ]; then
+        HANDOFF_WHY="$_rc_release's installer is stamped $HANDOFF_VERSION, not $_rc_want"
+        return 1
+    fi
+    # An option only main's copy knows would make the release's exit 64, after
+    # the point where this one could still have carried on. Its text names
+    # every option it parses, so an option it does not mention is one it lacks.
+    for _rc_arg in "$@"; do
+        case "$_rc_arg" in
+            -*) ;;
+            *) continue ;;
+        esac
+        if ! grep -qF -e "${_rc_arg%%=*}" "$HANDOFF_FILE"; then
+            HANDOFF_WHY="the v$HANDOFF_VERSION installer has no ${_rc_arg%%=*} option"
+            return 1
+        fi
+    done
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -2283,7 +2436,9 @@ Options
       --version V      Pin aisquare-cli to V, or `latest` (default: latest, or
                        the release a release asset was downloaded from).
       --python V       Interpreter uv resolves for the tool env (default: 3.13).
-      --offline        Do not ask PyPI what the latest version is.
+      --offline        Do not ask PyPI what the latest version is (and do not
+                       hand off, below).
+      --no-handoff     Run this copy of the script, not the release's own.
       --upgrade-all    Also move uv itself and the system packages.
       --force          Reinstall aisquare-cli even when the version matches.
       --dry-run        Print every command; run none.
@@ -2297,8 +2452,17 @@ Environment
   AISQUARE_INSTALL_PACKAGE=P     install P instead of aisquare-cli — a wheel,
                                 sdist or project directory. For testing this
                                 script against a local build; turns the PyPI
-                                version comparison off.
+                                version comparison and the hand-off off.
+  AISQUARE_INSTALL_NO_HANDOFF=1 same as --no-handoff
   NO_COLOR=1                    no ANSI colour
+
+Which installer runs
+  The copy of this script on main hands off to the latest release's own
+  install.sh, or to release V's with --version V, so the steps and checks are
+  the ones that release was tested with. It runs itself instead when that
+  copy cannot be downloaded or checked, or with --no-handoff, --offline or
+  AISQUARE_INSTALL_PACKAGE, and says which in one line. A release's own copy
+  never hands off.
 
 Exit codes
   0  installed (or nothing to do), with nothing unexpected
@@ -2338,6 +2502,7 @@ parse_args() {
                 ;;
             --python=*) PYTHON_VERSION=${1#--python=} ;;
             --offline) OFFLINE=1 ;;
+            --no-handoff) NO_HANDOFF=1 ;;
             --upgrade-all) UPGRADE_ALL=1 ;;
             --force) FORCE=1 ;;
             --dry-run) DRY_RUN=1 ;;
@@ -2400,6 +2565,7 @@ choose_project() {
 
 main() {
     parse_args "$@"
+    hand_off "$@"
     preflight
     detect_os
     pkg_manager

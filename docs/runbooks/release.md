@@ -39,8 +39,13 @@ The latest URL follows GitHub's "Latest" release, so a **pre-release** or a
 release published with *Set as the latest release* unticked does not move it.
 From the moment the release is published until **installers** finishes, the
 latest URLs answer 404: GitHub already calls the new release the latest, and it
-has no assets yet. The copies on `main` are unstamped and install the latest
-release from PyPI.
+has no assets yet. The copies on `main` are unstamped. They hand off to the
+latest release's own installer once it is attached: main's `install.sh`
+downloads it, checks its stamp against PyPI's latest version, and runs it with
+the user's arguments, and main's `install.ps1` does the same inside WSL. Until
+then (the 404 window above, or for good if **installers** fails), they carry on
+as main's own script and install the latest release from PyPI. So the main
+one-liner keeps working throughout, and says in one line which installer ran.
 
 ## Still by hand, in order
 
@@ -56,8 +61,9 @@ release from PyPI.
 4. If **precheck** fails, nothing has reached PyPI: fix the cause, delete the
    release and its tag, and publish again.
 5. If **installers** fails, do not delete and recreate the release: PyPI will
-   not take the same version twice. If PyPI was only slow, **re-run the failed
-   job** from the Actions page. A re-run checks out the tag again, so if
+   not take the same version twice. Users are not blocked meanwhile: the main
+   one-liner falls back to main's own script. If PyPI was only slow, **re-run
+   the failed job** from the Actions page. A re-run checks out the tag again, so if
    something else broke, fix it on a branch cut from the tag and run *Release
    installers* from that branch with the release's tag and **upload** ticked.
 

@@ -140,6 +140,69 @@ Write-Host ''
 # Deliberately NOT `--yes`: the point of the one-liner is that it ends by
 # offering the UI, and a user who ran this by hand is sitting at a terminal.
 $inner = "set -e; curl -fsSL '$InstallUrl' | sh -s -- $Pin$Forward"
+
+# THE HAND-OFF, for main's copy only: a release's copy is stamped above and
+# already fetches its own release's install.sh. main's install.sh installs the
+# latest release, but its steps and checks can be ahead of that release, so this
+# fetches the release's OWN install.sh instead -- the latest release's, or V's
+# for --version V -- into a file inside WSL, and runs it if it is a POSIX sh
+# script stamped with the version wanted: V, or what PyPI calls the latest. On
+# any failure it runs main's install.sh as before, told not to try the same
+# hand-off again. install.sh's own `hand_off` makes the same checks; this is the
+# Windows end of it. --no-handoff, --offline and AISQUARE_INSTALL_NO_HANDOFF=1
+# skip it, as they do there.
+#
+# Only single quotes reach bash: Windows PowerShell 5.1 does not escape a double
+# quote inside an argument to a native command, so none is put in one.
+if (-not $StampedVersion) {
+    $Want = ''
+    $NoHandoff = $env:AISQUARE_INSTALL_NO_HANDOFF -eq '1'
+    for ($i = 0; $i -lt $args.Count; $i++) {
+        if ($args[$i] -eq '--no-handoff' -or $args[$i] -eq '--offline') { $NoHandoff = $true }
+        elseif ($args[$i] -eq '--version' -and $i + 1 -lt $args.Count) { $Want = $args[$i + 1] }
+        elseif ($args[$i] -like '--version=*') { $Want = $args[$i].Substring(10) }
+    }
+    if ($Want -eq 'latest') { $Want = '' }
+    $ReleaseUrl = "https://github.com/$Repo/releases/latest/download/install.sh"
+    if ($Want) {
+        $ReleaseUrl = "https://github.com/$Repo/releases/download/v$Want/install.sh"
+    }
+    elseif (-not $NoHandoff) {
+        try {
+            $Pypi = Invoke-RestMethod -Uri 'https://pypi.org/pypi/aisquare-cli/json' -TimeoutSec 15 -UseBasicParsing
+            $Want = [string]$Pypi.info.version
+        }
+        catch {
+            $Want = ''
+        }
+    }
+    # A version and nothing else, since it is written into a bash command.
+    if ($Want -notmatch '^[0-9][0-9A-Za-z.]*$') { $Want = '' }
+    # Every option given has to be one the release's script names, or it would
+    # exit 64 where main's could have carried on (install.sh checks the same).
+    $Knows = ''
+    foreach ($option in @($args | Where-Object { $_ -like '-*' })) {
+        $flag = ($option -split '=')[0]
+        if ($flag -notmatch '^-[-A-Za-z0-9]+$') { $Want = '' }
+        $Knows += " && grep -qF -e '$flag' `$f"
+    }
+
+    $Fallback = "curl -fsSL '$InstallUrl' | AISQUARE_INSTALL_NO_HANDOFF=1 sh -s -- $Forward"
+    if ($NoHandoff -or -not $Want) {
+        $inner = "set -e; $Fallback"
+    }
+    else {
+        # The stamp line is STAMPED_VERSION="V"; each `.` around V stands for
+        # one of its double quotes.
+        $StampLine = 'STAMPED_VERSION=.' + ($Want -replace '\.', '\.') + '.'
+        $inner = "set -e; f=`$(mktemp); trap 'rm -f `$f' EXIT; " +
+        "if curl -fsSL --connect-timeout 5 --max-time 30 -o `$f '$ReleaseUrl' && " +
+        "head -n 1 `$f | grep -qx '#!/bin/sh' && sh -n `$f && grep -qx '$StampLine' `$f$Knows; then " +
+        "echo '  using the v$Want installer'; AISQUARE_INSTALL_HANDED_OFF=1 sh `$f $Forward; " +
+        "else echo '  using this installer'; $Fallback; fi"
+    }
+}
+
 & wsl.exe -d $target -- bash -lc $inner
 $code = $LASTEXITCODE
 

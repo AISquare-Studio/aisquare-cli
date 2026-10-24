@@ -1270,13 +1270,26 @@ class AgentAdapter(Protocol):
         ``notice.hide_rate_limit_model_nudge`` and ``check_for_update_on_startup``."""
         ...
 
-    def settings_layer(self, settings: Mapping[str, Any], file: Path) -> LaunchPart | None:
-        """What gives the session ``settings`` as a settings layer of its own, above the
-        operator's (the :class:`LaunchPart` settings a launch's slots answered,
-        :func:`merged_settings`), writing ``file`` (this launch's own, its directory made)
-        where the layer is a file: Claude Code's ``--settings <file>``, Codex's ``-c``
-        pairs, Gemini CLI's ``GEMINI_CLI_SYSTEM_DEFAULTS_PATH``. ``None`` for an agent with
-        none, whose slots answer no settings."""
+    def settings_layer(
+        self,
+        settings: Mapping[str, Any],
+        file: Path,
+        *,
+        home: Path,
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> LaunchPart | None:
+        """What gives the session ``settings`` as a settings layer of its own, ABOVE the
+        operator's: a value their own config sets (a user's, a project's) loses to it. The
+        settings are the :class:`LaunchPart` settings a launch's slots answered
+        (:func:`merged_settings`); ``file`` is this launch's own, its directory made, written
+        where the layer is a file; the session runs from config dir ``home`` in ``cwd`` with
+        the launch's environment ``env``, which an agent whose top layer stands in for a
+        file of the machine's reads that file by, to keep it: Claude Code's ``--settings
+        <file>``, Codex's ``-c`` pairs, Gemini CLI's ``GEMINI_CLI_SYSTEM_SETTINGS_PATH``
+        (its system settings, over every other settings file, the machine's own carried in
+        it). Its ``notes`` say what of ``settings`` such a file of the machine's kept out.
+        ``None`` for an agent with none, whose slots answer no settings."""
         ...
 
     def unattended_env(self) -> Mapping[str, str]:

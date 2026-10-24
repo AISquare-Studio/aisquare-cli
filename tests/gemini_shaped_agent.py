@@ -6,8 +6,9 @@ shared code once assumed: its launch variable ``GEMINI_CLI_HOME`` names the fold
 config dir ``.gemini`` is in (``AgentAccounts.config_dir``, S1), its hook timeouts are
 milliseconds (``AgentAdapter.hook_entry``, S2), and every hook reply is JSON. And, of
 lane L7's: its MCP server, sub-agent switch and update notice are settings in a settings
-layer of the launch's own, and its label a variable (``LaunchPart``, ``settings_layer``,
-S3); it has no reviewer of its own, so ``auto`` runs as ``ask`` (S4); a tool call's result
+layer of the launch's own, its system settings over the operator's files (review r18 of
+#113, finding 5), and its label a variable (``LaunchPart``, ``settings_layer``, S3); it has
+no reviewer of its own, so ``auto`` runs as ``ask`` (S4); a tool call's result
 arrives in a later ``$patch`` line its ``records`` fold (S5); its quotas are a window of a
 day per model (``UsageWindow``, S6); it signs in from its TUI (S7); its telemetry has a
 reader of its own (B7); and it declares no screen. Its installers, what it keeps of
@@ -71,6 +72,7 @@ from aisquare.core.agent_adapters.types import (
     TelemetryReader,
     WriteScope,
     config_home,
+    merged_settings,
     option_values,
     package_version,
     payload_cwd,
@@ -98,6 +100,10 @@ EVENTS: dict[str, EventKind] = {
 EXTENSION = "aisquare"
 #: Where its sessions record the day's quotas, per model, in its config dir.
 QUOTA = "quota.json"
+#: Its system settings file on Linux (docs/reference/configuration.md), over every other
+#: settings file; the variable names another (macOS and Windows have their own paths).
+SYSTEM_SETTINGS = Path("/etc/gemini-cli/settings.json")
+SYSTEM_SETTINGS_ENV = "GEMINI_CLI_SYSTEM_SETTINGS_PATH"
 DAY_MINUTES = 24 * 60
 #: ``-r``/``--resume``, ``-m``/``--model`` and the rest that take a value (cli-reference.md).
 VALUE_OPTIONS = frozenset(
@@ -261,6 +267,19 @@ class GeminiShapedTranscript:
                 if record.get("content"):
                     said.insert(0, str(record["content"]))
         return None
+
+
+def _overridden(ours: Mapping[str, Any], theirs: Mapping[str, Any], prefix: str = "") -> list[str]:
+    """The dotted keys of ``ours`` whose leaf ``theirs`` sets otherwise."""
+    found: list[str] = []
+    for key, value in ours.items():
+        if key not in theirs:
+            continue
+        if isinstance(value, Mapping) and isinstance(theirs[key], Mapping):
+            found += _overridden(value, theirs[key], f"{prefix}{key}.")
+        elif theirs[key] != value:
+            found.append(f"{prefix}{key}")
+    return found
 
 
 def _answered(call: Mapping[str, Any]) -> bool:
@@ -744,11 +763,32 @@ class GeminiShapedAdapter:
             return LaunchPart()
         return LaunchPart(settings={"general": {"enableAutoUpdateNotification": False}})
 
-    def settings_layer(self, settings: Mapping[str, Any], file: Path) -> LaunchPart | None:
-        """A settings file of the launch's own, which ``GEMINI_CLI_SYSTEM_DEFAULTS_PATH`` names
-        (docs/reference/configuration.md): the system-defaults layer, under every operator's."""
-        file.write_text(json.dumps(settings), encoding="utf-8")
-        return LaunchPart(env={"GEMINI_CLI_SYSTEM_DEFAULTS_PATH": str(file)})
+    def settings_layer(
+        self,
+        settings: Mapping[str, Any],
+        file: Path,
+        *,
+        home: Path,
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> LaunchPart | None:
+        """A settings file of the launch's own, which ``GEMINI_CLI_SYSTEM_SETTINGS_PATH`` names
+        (docs/reference/configuration.md): its system settings, which "take precedence over all
+        other settings files", the operator's user and project ones among them (its system
+        DEFAULTS, ``GEMINI_CLI_SYSTEM_DEFAULTS_PATH``, are under them all). The file stands in
+        for the machine's own (that variable's in ``env``, else :data:`SYSTEM_SETTINGS`),
+        which is carried in it and wins: an administrator's value is left as they set it,
+        with a note for each of ``settings`` it keeps out. Another launch's file, inherited
+        from a session spawned inside one, is no machine's."""
+        named = env.get(SYSTEM_SETTINGS_ENV, "").strip()
+        machine = Path(named) if named and Path(named).parent != file.parent else SYSTEM_SETTINGS
+        kept = agents.read_json(machine)
+        notes = tuple(
+            f"{self.label}'s {key} is left as the administrator's {machine} sets it"
+            for key in _overridden(settings, kept)
+        )
+        file.write_text(json.dumps(merged_settings(settings, kept)), encoding="utf-8")
+        return LaunchPart(env={SYSTEM_SETTINGS_ENV: str(file)}, notes=notes)
 
     def unattended_env(self) -> Mapping[str, str]:
         return {}

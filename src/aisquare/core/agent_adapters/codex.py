@@ -1316,7 +1316,15 @@ class CodexAdapter:
             given += ["-c", setting]
         return LaunchPart(tuple(given), notes=tuple(notes))
 
-    def settings_layer(self, settings: Mapping[str, Any], file: Path) -> LaunchPart | None:
+    def settings_layer(
+        self,
+        settings: Mapping[str, Any],
+        file: Path,
+        *,
+        home: Path,
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> LaunchPart | None:
         """Its ``-c`` overrides, the top layer of its config, one a leaf (``a.b=<TOML>``):
         no file. Each value is the TOML Codex parses back as it was (:func:`_toml_value`),
         and ``ValueError`` refuses what a ``-c`` cannot say: a ``None`` (TOML has none) and

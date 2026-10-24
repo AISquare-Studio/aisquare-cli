@@ -645,7 +645,15 @@ class FakeAgentAdapter:
     def fleet_settings(self, home: Path, args: Sequence[str]) -> LaunchPart:
         return LaunchPart(("--no-tips",))  # its tip of the day waits for a key
 
-    def settings_layer(self, settings: Mapping[str, Any], file: Path) -> LaunchPart | None:
+    def settings_layer(
+        self,
+        settings: Mapping[str, Any],
+        file: Path,
+        *,
+        home: Path,
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> LaunchPart | None:
         file.write_text(json.dumps(settings), encoding="utf-8")
         return LaunchPart(("--settings-file", str(file)))
 

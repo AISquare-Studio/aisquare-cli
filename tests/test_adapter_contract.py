@@ -1855,7 +1855,9 @@ def test_every_launch_slot_answers_a_launch_part_and_its_settings_reach_the_agen
     answered = merged_settings(*(part.settings for part in parts))
     file = tmp_path / "launch-settings" / "launch-1.json"
     file.parent.mkdir()
-    layer = adapter.settings_layer(answered or {"aisquare": {"conformance": True}}, file)
+    layer = adapter.settings_layer(
+        answered or {"aisquare": {"conformance": True}}, file, home=tmp_path, env={}, cwd=tmp_path
+    )
     assert layer is not None or not answered, f"{adapter.id} answers settings with no layer"
     if layer is None:
         return

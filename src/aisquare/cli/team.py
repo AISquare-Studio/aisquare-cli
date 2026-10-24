@@ -647,7 +647,13 @@ def spawn(
         native_trace, native_trace_note = agent_launch.telemetry_args(selected, env, argv[1:])
         if native_trace_note:
             typer.echo(native_trace_note, err=True)
-        argv = [argv[0], *agent_launch.compose(selected, env, native_trace, mcp), *argv[1:]]
+        try:
+            composed, composed_notes = agent_launch.compose(selected, env, native_trace, mcp)
+        except ValueError as exc:
+            fail(str(exc), error="agent_configuration")
+        for note in composed_notes:
+            typer.echo(note, err=True)
+        argv = [argv[0], *composed, *argv[1:]]
         # As `aisquare launch`: the store is read-only in the agent's sandbox, and its
         # board calls go through this launch's broker.
         try:

@@ -1070,7 +1070,9 @@ def test_codex_settings_layer_writes_each_value_as_the_toml_codex_reads_back(
     """Review r18 of #113, finding 9: ``settings_layer`` wrote each leaf as
     ``-c key=<json.dumps(value)>``. JSON is not TOML: a list of tables did not parse, and
     Codex took it as a string. Each leaf is now the TOML value Codex parses back as it was."""
-    layer = CodexAdapter().settings_layer({"tools": {"web": {"leaf": value}}}, tmp_path / "f")
+    layer = CodexAdapter().settings_layer(
+        {"tools": {"web": {"leaf": value}}}, tmp_path / "f", home=tmp_path, env={}, cwd=tmp_path
+    )
     assert layer is not None and layer.args[0] == "-c" and len(layer.args) == 2
     assert _override(layer.args[1]) == (["tools", "web", "leaf"], value)
     assert not (tmp_path / "f").exists()
@@ -1092,7 +1094,7 @@ def test_codex_settings_layer_refuses_what_a_c_override_cannot_say(
     ``"null"``; and Codex splits a ``-c`` key on every dot, so ``my.server`` named another
     path. Both are refused, as the adapter refuses such a server name elsewhere."""
     with pytest.raises(ValueError):
-        CodexAdapter().settings_layer(settings, tmp_path / "f")
+        CodexAdapter().settings_layer(settings, tmp_path / "f", home=tmp_path, env={}, cwd=tmp_path)
 
 
 def test_a_codex_launch_carrying_a_setting_its_c_cannot_say_is_refused_not_launched(

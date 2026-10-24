@@ -536,7 +536,15 @@ class ClaudeCodeAdapter:
         """None: its dialogs in a running pane reach the board through ``Notification``."""
         return LaunchPart()
 
-    def settings_layer(self, settings: Mapping[str, Any], file: Path) -> LaunchPart | None:
+    def settings_layer(
+        self,
+        settings: Mapping[str, Any],
+        file: Path,
+        *,
+        home: Path,
+        env: Mapping[str, str],
+        cwd: Path,
+    ) -> LaunchPart | None:
         """``--settings <file>``, a JSON layer above the operator's settings files. None of its
         slots answers settings today; an agent's own would come here."""
         import json

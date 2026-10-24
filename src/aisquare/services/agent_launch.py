@@ -490,17 +490,23 @@ def _carried(raw: str | None) -> dict[str, Any]:
     return carried if isinstance(carried, dict) else {}
 
 
-def compose(selected: ResolvedAgent, env: dict[str, str], *parts: LaunchPart) -> list[str]:
+def compose(
+    selected: ResolvedAgent, env: dict[str, str], *parts: LaunchPart
+) -> tuple[list[str], list[str]]:
     """The arguments ``parts`` add to this launch, in order, with their environment applied to
     ``env``, and their settings and the spawn's (:data:`LAUNCH_SETTINGS_ENV`, taken out of
-    ``env``) given as the agent's one settings layer of this launch
+    ``env``) given as the agent's one settings layer of this launch, above the operator's
     (``AgentAdapter.settings_layer``: a file under the cache named for the launch, for an
-    agent whose layer is a file). ``ValueError`` for settings answered for an agent with no
-    layer, which the conformance suite refuses an adapter."""
+    agent whose layer is a file, from this launch's home in this directory); and the notes
+    the parts and the layer say, which the launch prints. ``ValueError`` for settings
+    answered for an agent with no layer, which the conformance suite refuses an adapter, and
+    for settings its layer cannot say."""
     args: list[str] = []
+    notes: list[str] = []
     for part in parts:
         args += part.args
         env.update(part.env)
+        notes += part.notes
     settings = merged_settings(
         _carried(env.pop(LAUNCH_SETTINGS_ENV, None)), *(part.settings for part in parts)
     )
@@ -509,12 +515,15 @@ def compose(selected: ResolvedAgent, env: dict[str, str], *parts: LaunchPart) ->
         file = paths.cache_dir() / "launch-settings" / f"{launch}.json"
         file.parent.mkdir(parents=True, exist_ok=True)
         _prune_settings(file.parent)
-        layer = selected.adapter.settings_layer(settings, file)
+        layer = selected.adapter.settings_layer(
+            settings, file, home=_launch_home(selected, env), env=env, cwd=Path.cwd()
+        )
         if layer is None:
             raise ValueError(f"{selected.adapter.label} has no settings layer for {settings}")
         args += layer.args
         env.update(layer.env)
-    return args
+        notes += layer.notes
+    return args, notes
 
 
 _SETTINGS_KEPT_SECONDS = 7 * 24 * 3600

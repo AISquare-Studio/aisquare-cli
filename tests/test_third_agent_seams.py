@@ -395,12 +395,108 @@ def test_a_fleet_spawn_launches_it_by_its_variables_and_one_settings_layer(
         assert not {"--mcp-config", "--mcp", "--name", "-c"} & set(argv), argv
         assert "AISQUARE_LAUNCH_SETTINGS" not in launched, "the agent never sees the carrier"
         assert launched["CLI_TITLE"] == label
-        layer = json.loads(Path(launched["GEMINI_CLI_SYSTEM_DEFAULTS_PATH"]).read_text("utf-8"))
+        layer = json.loads(Path(launched["GEMINI_CLI_SYSTEM_SETTINGS_PATH"]).read_text("utf-8"))
         assert layer["experimental"] == {"enableAgents": False}
         assert layer["general"] == {"enableAutoUpdateNotification": False}
         server = layer["mcpServers"]["aisquare"]
         assert server["args"][-4:] == ["serve", "--stdio", "--close-after", "0"]
         assert server["env"]["AISQUARE_HOME"] == "$AISQUARE_HOME"
+    finally:
+        unregister(adapter.id)
+
+
+def _gemini_session_settings(home: Path, env: dict[str, str], cwd: Path) -> dict[str, Any]:
+    """What a Gemini CLI session reads of its settings files, layered as its
+    docs/reference/configuration.md says, each over the one before: the system defaults
+    (``GEMINI_CLI_SYSTEM_DEFAULTS_PATH``), the user's ``settings.json`` in its config dir, the
+    project's ``.gemini/settings.json``, and the system settings, which "take precedence
+    over all other settings files" (``GEMINI_CLI_SYSTEM_SETTINGS_PATH``)."""
+    from aisquare.core.agent_adapters.types import merged_settings
+
+    def read(path: str | Path | None) -> dict[str, Any]:
+        return agent_core.read_json(Path(path)) if path else {}
+
+    return merged_settings(
+        read(env.get("GEMINI_CLI_SYSTEM_DEFAULTS_PATH")),
+        read(home / "settings.json"),
+        read(cwd / ".gemini" / "settings.json"),
+        read(env.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH")),
+    )
+
+
+def test_its_launchs_settings_layer_is_over_the_operators_own_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """Review r18 of #113, finding 5: ``settings_layer`` is a layer above the operator's, but
+    the Gemini-shaped one was its system DEFAULTS, the layer under every settings file: a
+    user's ``experimental.enableAgents: true`` kept its teams on despite ``[fleet]
+    disable_native_agent_teams``, and their ``mcpServers.aisquare`` replaced aisquare's
+    server. Its layer is its system SETTINGS file, over every other, which stands in for
+    the machine's own: the slot is given the launch's environment, by which that file is
+    read and kept in it, an administrator's value over aisquare's, said in a note."""
+    from importlib import import_module
+    from unittest.mock import Mock
+
+    from aisquare.core.config import FleetRoleSettings, load_config, save_config
+    from aisquare.core.orchestrator import team_project
+    from aisquare.services import fleet as fleet_service
+    from tests import fakebin
+    from tests.test_fleet_service import FakeTmux
+
+    adapter = GeminiShapedAdapter()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        config = load_config()
+        config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+        config.agents.mcp = True
+        save_config(config)
+        home = _home(adapter)
+        (home / "settings.json").write_text(
+            json.dumps(
+                {
+                    "experimental": {"enableAgents": True},
+                    "mcpServers": {"aisquare": {"command": "/opt/theirs/aisquare"}},
+                    "ui": {"theme": "Dracula"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        machine = tmp_path / "etc" / "gemini-cli" / "settings.json"
+        machine.parent.mkdir(parents=True)
+        machine.write_text(
+            json.dumps({"general": {"enableAutoUpdateNotification": True}, "security": {"x": 1}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("GEMINI_CLI_SYSTEM_SETTINGS_PATH", str(machine))
+        bin_dir = tmp_path / "bin"
+        fakebin.executable_fake(bin_dir, "gemini", windows="set /p line=", posix="read line")
+        fakebin.prepend_to_path(bin_dir, monkeypatch)
+        tmux = FakeTmux()
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+        project = team_project(tmp_path)
+        fleet_service.spawn(project, "coder", agent=adapter.id)
+        spawned = tmux.spawned[-1]
+        command, window = spawned["command"], spawned["env"]
+        assert isinstance(command, list) and isinstance(window, dict)
+        for name in ("CLI_TITLE", "AISQUARE_LAUNCH_SETTINGS", "AISQUARE_FLEET_AGENT"):
+            monkeypatch.setenv(name, window[name])
+        execute = Mock()
+        monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+
+        result = runner.invoke(app, command[command.index("launch") :])
+
+        assert result.exit_code == 0, result.output
+        launched = execute.call_args.args[2]
+        session = _gemini_session_settings(home, launched, Path.cwd())
+        assert session["experimental"]["enableAgents"] is False, "the teams switch wins"
+        assert session["mcpServers"]["aisquare"]["args"][-2:] == ["--close-after", "0"]
+        assert session["ui"] == {"theme": "Dracula"}, "the operator's own settings stay"
+        assert session["security"] == {"x": 1}, "the machine's system settings stay"
+        assert session["general"]["enableAutoUpdateNotification"] is True, "theirs, not ours"
+        assert "left as the administrator's" in result.output and str(machine) in result.output
+        assert launched["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] != str(machine), "a file of its own"
+        assert json.loads(machine.read_text("utf-8"))["security"] == {"x": 1}, "never edited"
     finally:
         unregister(adapter.id)
 

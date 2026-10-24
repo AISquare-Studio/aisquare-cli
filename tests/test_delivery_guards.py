@@ -452,3 +452,33 @@ def test_turn_end_delivery_respects_stop_hook_active_and_the_cap(
         capped.setattr(team_service, "continuation_cap", lambda: 0)
         assert team_service.hook_stop(coder.session_id, project.root) is None
     assert team_service.hook_stop(coder.session_id, project.root) is not None, "then it goes"
+
+
+@pytest.mark.parametrize(
+    ("context", "verdict_shown"),
+    [("none", False), ("relevant", False), ("all", True)],
+)
+def test_turn_end_delivery_reads_the_board_through_the_agents_board_context(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    context: str,
+    verdict_shown: bool,
+) -> None:
+    """Sync #365 (P0-W2 x P1 WS-2): a note to a busy reviewer reaches it at its turn's end,
+    and nothing more of the board than its board context lets its prompt's delta read. A
+    cold reviewer (``none``, the reviewer default) was handed another reviewer's verdict
+    with the note; ``relevant`` keeps what is addressed to it; ``all`` is the board."""
+    reviewer = fleet_service.spawn(project, "reviewer", worktree=False).agent
+    assert reviewer.session_id is not None
+    _session(project, reviewer.session_id, "reviewer")
+    other = _session(project, "eeee5555-0000-0000-0000-000000000000", "coder")
+    team_service.add_note("PASS #12: verified", kind="result", session_ref=other.id)
+    _note(project, "please look at #361 next", to=reviewer.label)
+    monkeypatch.setenv("AISQUARE_BOARD_CONTEXT", context)
+
+    decision = team_service.hook_stop(reviewer.session_id, project.root)
+
+    assert decision is not None and "please look at #361 next" in decision.reason
+    assert ("PASS #12: verified" in decision.reason) is verdict_shown, decision.reason

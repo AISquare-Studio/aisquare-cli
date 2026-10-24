@@ -2064,10 +2064,15 @@ def _board_reading(store: ContextStore, session: TeamSession) -> tuple[bool, Rel
     if context == "none":
         return False, None
     tasks = {t.id for t in store.team_tasks(session.project_id) if t.claimed_by == session.id}
-    named = _hook_named_row(store)
+    # The window's row, else the one bound to the session: a Stop or a prompt asked from
+    # outside its window still reads as that agent.
+    named = _hook_named_row(store) or store.fleet_agent_for_session(session.id)
     if named is not None and named.task_id:
         tasks.add(named.task_id)
-    names = tuple(n for n in {session.role, session.label or ""} if n)
+    # Its fleet label too: `fleet tell` files a note to the label, which the session row's
+    # own `label` (`team join --label`) is not (sync #365).
+    row_label = named.label if named is not None else ""
+    names = tuple(sorted(n for n in {session.role, session.label or "", row_label} if n))
     return True, Relevance(task_ids=tuple(sorted(tasks)), names=names)
 
 
@@ -2426,11 +2431,18 @@ def _turn_end_delivery(
     # label a `fleet tell` addresses, and live (P0-W2) a coder read "→ busy-head" as
     # someone else's note and left it.
     you = row.label if row is not None else me.role
+    # Its board context, as its prompt's delta reads the board (P1 WS-2): `relevant` keeps
+    # its tasks, what is addressed to it and decisions. `none` reads no board at all, but a
+    # note addressed to it is no board update: it is handed that and nothing else, or a
+    # `fleet tell` to a busy cold reviewer never reached it (sync #365, W2's check).
+    reads, relevant = _board_reading(store, me)
     return _wakeup(
         store,
         me,
         stop_hook_active=stop_hook_active,
         wakes=addressed,
+        relevant=relevant,
+        keep=None if reads else addressed,
         act=(
             f"You are {you}: what is addressed to {you} or to {base_role(me.role)} is "
             "addressed to you. Act on it, then carry on with your cycle."
@@ -2482,7 +2494,9 @@ def _count(raw: str | None) -> int:
         return 0
 
 
-def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
+def _wake_candidates(
+    store: ContextStore, me: TeamSession, relevant: Relevance | None = None
+) -> list[TeamEvent]:
     """The board since a manager's cursor, exactly as its next prompt would read it.
 
     One function so the wake-up and the deferral below can never disagree about
@@ -2492,6 +2506,8 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
     out IN the query: a Stop that wakes nobody moves no cursor, so dropped after the
     LIMIT, a run of audit lines was the whole page at every Stop, and the result behind
     it woke nobody until something else was written (review of #240, finding 11).
+    ``relevant`` is ``me``'s board context (:func:`_board_reading`), applied in the query
+    as the prompt's delta applies it: a manager reads everything.
     """
     return store.events_since(
         me.project_id,
@@ -2499,6 +2515,7 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
         exclude_session=me.id,
         exclude_kinds=HUMAN_BOARD_KINDS,
         exclude_actor=me.id,
+        relevant=relevant,
         limit=_DELTA_LIMIT * 3 + 1,
     )
 
@@ -2549,16 +2566,21 @@ def _wakeup(
     stop_hook_active: bool,
     wakes: Callable[[TeamEvent], bool],
     act: str | None = None,
+    relevant: Relevance | None = None,
+    keep: Callable[[TeamEvent], bool] | None = None,
 ) -> StopDecision | None:
     """Keep ``me`` going on the board since its cursor when an event there ``wakes`` it, or
     ``None`` to let it wait: the manager's wake-up (§7.3) and every other role's turn-end
     delivery (P0-W2) alike. ``act`` is the reason's last instruction (the manager's, by
-    default).
+    default). ``relevant`` and ``keep`` are ``me``'s board context, as its prompt's delta
+    reads it (P1 WS-2): ``relevant`` in the query, ``keep`` on what it returned.
 
-    Reads the delta exactly as :func:`hook_prompt_heartbeat` does — same source,
-    same exclusions, same limit — because the reason IS that delta, delivered a
-    turn early. Muted deltas (``AISQUARE_TEAM_DELTA=0``) mute this too: it is the
-    same injection through a different door.
+    Reads the delta as :func:`hook_prompt_heartbeat` does — same source, same
+    exclusions, same limit, the same board context (``relevant``) — because the reason IS
+    that delta, delivered a turn early. One exception, ``keep``: an agent whose board
+    context is ``none`` reads no delta at all, and its turn end hands it only the notes
+    addressed to it (sync #365). Muted deltas (``AISQUARE_TEAM_DELTA=0``) mute this too:
+    it is the same injection through a different door.
 
     Order of the writes matters. The hourly counter is bumped BEFORE the cursor
     moves and the row flips to ``working``: a lost increment costs one of thirty
@@ -2567,7 +2589,9 @@ def _wakeup(
     """
     if stop_hook_active or not orchestrator.delta_enabled():
         return None
-    events = _wake_candidates(store, me)
+    events = _wake_candidates(store, me, relevant)
+    if keep is not None:
+        events = [event for event in events if keep(event)]
     if not any(wakes(event) for event in events):
         return None
     key = continuation_key(me.id, _now())

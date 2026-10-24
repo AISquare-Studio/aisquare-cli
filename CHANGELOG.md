@@ -18,20 +18,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   copies reach tmux's paste buffer either way. Applies to a server started after the
   change.
 
-- **Accounts can share memory, skills, agents, commands and CLAUDE.md** (#198).
-  `[accounts] share` (empty by default) and `aisquare accounts share --status |
-  --enable <parts> | --disable <parts> [--json]`. `memory` gives every launch one
-  auto-memory directory per project under `~/.aisquare/claude-shared/memory`
-  (Claude Code's `autoMemoryDirectory`, passed as `--settings`), merged from every
-  account the first time with nothing overwritten. `skills`, `agents`, `commands`
-  and `claude_md` make each managed account's entry a link to the plain claude's,
-  its own kept beside it, and `--disable` puts it back exactly; a launch on an
-  account added since links it. `plugins` is experimental. Transcripts are never
-  shared. `aisquare doctor` has a `claude-accounts sharing` line. Cross-account
-  resume is verified on Claude Code 2.1.309: a session moved to another account
-  keeps its id and what was said, and its turns go on the original transcript
-  (`docs/runbooks/cross-account-resume.md`).
-
 - **`[accounts] prefer = "reset-soonest"`** (*under the line, prefer* in App
   settings): of the accounts under `switch_at`, a spawn and a hand-over take the
   one whose week resets first, priority breaking ties, so a week's allowance is
@@ -469,13 +455,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   CI experiment, its own opt-in, still consults its endpoint. A config that cannot
   be read records no prompt and says so on stderr: privacy fails closed.
   `config set capture.enabled false` says in one line what stops and what does not.
-
-- **A session is attributed to the account its fleet row launched it on.** The
-  account was read from the transcript path, which under a shared directory (a
-  slot's `projects/` linked to the plain claude's) named the plain claude for a
-  session running on slot 3. The row's account comes first, then the launch's
-  `CLAUDE_CONFIG_DIR`, then the path.
-
 - **One usage limit moves an agent once, to an account that can take it.**
   With `on_limit = "switch"` the `limited` line woke the manager with a `fleet
   switch` while the hand-over was already moving the agent, and once that had

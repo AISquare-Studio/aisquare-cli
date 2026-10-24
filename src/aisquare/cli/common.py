@@ -739,15 +739,24 @@ def emit_onboard(report: OnboardReport) -> None:
             console.print(f"  - {entry.text}")
 
 
+def connect_hint() -> str:
+    """What an empty prompt, turn or token listing tells the user to run: ``agents connect``
+    for every agent whose hooks aisquare installs (Claude Code, Codex), never one by name."""
+    from aisquare.core.agent_adapters import adapters
+
+    hooked = [adapter.id for adapter in adapters() if adapter.capabilities.hooks]
+    return "Connect your coding agent: " + " or ".join(
+        f"aisquare agents connect {agent}" for agent in hooked
+    )
+
+
 def emit_prompts(prompts: list[PromptRecord]) -> None:
     """Render captured prompt history — a JSON array under ``--json``, a table otherwise."""
     if get_state().json_output:
         typer.echo(json.dumps([prompt.model_dump(mode="json") for prompt in prompts]))
         return
     if not prompts:
-        stdout_console().print(
-            "No prompts captured yet. Connect Claude Code: aisquare agents connect claude-code"
-        )
+        stdout_console().print(f"No prompts captured yet. {connect_hint()}")
         return
     table = Table(show_header=True, header_style="bold")
     table.add_column("WHEN", no_wrap=True)
@@ -768,9 +777,7 @@ def emit_metrics_summary(summary: MetricsSummary) -> None:
         return
     console = stdout_console()
     if not summary.turns:
-        console.print(
-            "No turns recorded yet. Connect Claude Code: aisquare agents connect claude-code"
-        )
+        console.print(f"No turns recorded yet. {connect_hint()}")
         return
 
     table = Table(show_header=True, header_style="bold")
@@ -821,7 +828,7 @@ def emit_token_summary(summary: TokenSummary) -> None:
     if not summary.sessions:
         console.print(
             "No session usage recorded yet — it is read off the transcript at each Stop. "
-            "Connect Claude Code: aisquare agents connect claude-code"
+            + connect_hint()
         )
         return
     table = Table(show_header=True, header_style="bold")

@@ -256,9 +256,9 @@ def _spawn_client(argv: list[str]) -> subprocess.Popen[bytes]:
 
     Stripped like ``core.tmux._tmux``, team variables too (``tmux_client_env``):
     ``attach-session`` starts a server when none is running, and a server inherits the
-    environment of whoever started it. Its
-    own session (``start_new_session``), so the outer terminal's job-control signals
-    — ``SIGINT``, ``SIGTSTP``, ``SIGWINCH`` — reach the UI and never the client.
+    environment of whoever started it. Its own session (``start_new_session``), so the
+    outer terminal's job-control signals — ``SIGINT``, ``SIGTSTP``, ``SIGWINCH`` — reach
+    the UI and never the client.
     """
     try:
         return subprocess.Popen(

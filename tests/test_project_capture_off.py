@@ -574,7 +574,7 @@ def test_doctor_names_a_captured_hub_prune_keeps_apart_with_the_project_that_rea
                 )
             )  # fmt: skip
             if label == "manager":
-                store.end_fleet_agent(row.id, exit_status=0)
+                store.end_fleet_agent(row.id, exit_status=0, ended_by="stopped")
 
     def forget(name: str) -> str:
         return install_route.command_line(["aisquare", "project", "forget", str(rows[name].root)])
@@ -647,7 +647,7 @@ def test_doctor_names_every_project_reading_a_captured_hub_with_what_frees_each(
                     board=rows[board].id,
                 )
             )  # fmt: skip
-        store.end_fleet_agent(agents["api"].id, exit_status=0)
+        store.end_fleet_agent(agents["api"].id, exit_status=0, ended_by="stopped")
         store.forget_project(rows["old"].id)
 
     def forget(name: str) -> str:
@@ -672,7 +672,9 @@ def test_doctor_names_every_project_reading_a_captured_hub_with_what_frees_each(
     assert runner.invoke(app, ["project", "onboard", str(rows["old"].root)]).exit_code == 0
     with store_session() as store:
         for reader in ("old", "web"):
-            store.end_fleet_agent(agents[reader].id, exit_status=0)  # its `fleet stop`
+            store.end_fleet_agent(
+                agents[reader].id, exit_status=0, ended_by="stopped"
+            )  # its `fleet stop`
     for name in ("old", "api", "web", "notes", "tools"):
         done = runner.invoke(app, ["project", "forget", str(rows[name].root)])
         assert done.exit_code == 0, (name, done.output)
@@ -754,7 +756,7 @@ def test_doctor_frees_a_row_outside_the_plan_of_a_reader_that_prune_drops(
                 board=rows["notes"].id,
             )
         )  # fmt: skip
-        store.end_fleet_agent(manager.id, exit_status=0)
+        store.end_fleet_agent(manager.id, exit_status=0, ended_by="stopped")
     forget = install_route.command_line(["aisquare", "project", "forget", str(rows["notes"].root)])
 
     [check] = diagnostics._check_captured_projects()

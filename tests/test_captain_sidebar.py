@@ -134,7 +134,10 @@ def test_with_no_captain_the_section_says_how_to_start_one(tmp_path: Path, scrip
         await refreshed(app)
         section = app.query_one("#captain-section")
         assert not section.query(AgentRow)
-        assert "aisquare captain" in shown(app.query_one("#captain-empty"))  # type: ignore[arg-type]
+        start = app.query_one("#captain-empty")
+        # A Start captain line now (#33), and the command it stands for under the pointer.
+        assert shown(start) == "▶ Start captain"  # type: ignore[arg-type]
+        assert "aisquare captain" in str(start.tooltip)
 
     drive(body)
 
@@ -449,3 +452,117 @@ def test_a_captain_read_that_failed_keeps_the_captain_row_and_says_why(
     assert failed == ([captain_id], False, locked), "the live captain's row survived the failure"
     assert kept, "…and so did the snapshot's home and row: Stop and Restart still resolve"
     assert none == ([], True, ""), "the fleet ANSWERED none: the empty line, and no notice"
+
+
+# --- delta review of #274 (#40): the home's own agents are no captain ---------------------------
+
+
+def _home_added_with_a_coder() -> tuple[ProjectInfo, FleetAgentStatus]:
+    """The home added on purpose (D5), so its own agents are in the frame, and a coder there."""
+    home = captain_state.home_project()
+    with store_session() as store:
+        store.onboard_project(home, explicit=True)
+    return home, status(home.id, "coder-1", "coder", "working")
+
+
+@pytest.mark.needs_captain
+def test_a_failed_captain_read_never_shows_a_home_coder_as_the_captain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delta review of #274, m2: a captain read that failed keeps the last frame's row, and
+    ``_captain`` took the first of the home's rows. With the home added (D5) those are its
+    own agents too, so with no captain the Captain section showed the coder, and its Stop and
+    Restart acted on it. The home's card is read first, the captain's row second: the second
+    is the read that fails here."""
+    seed(tmp_path, ("prj_aaa", "alpha", None))
+    home, coder = _home_added_with_a_coder()
+    failing: list[bool] = []
+    reads: list[str] = []
+
+    def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        if project.id != home.id:
+            return []
+        reads.append(project.id)
+        if failing and len(reads) % 2 == 0:  # the captain's read, after the card's
+            raise sqlite3.OperationalError("database is locked")
+        return [coder]
+
+    monkeypatch.setattr(fleet_service, "list_agents", fake)
+
+    async def body(pilot: Pilot[None]) -> tuple[list[str], list[str], str]:
+        app = fleet_app(pilot)
+        await refreshed(app)
+        section = app.query_one("#captain-section")
+        answered = [row.status.agent.id for row in section.query(AgentRow)]
+        reads.clear()
+        failing.append(True)
+        await refreshed(app)
+        notice = next(iter(section.query("#captain-notice").results(Static)), None)
+        said = shown(notice) if notice is not None and notice.display else ""
+        return answered, [row.status.agent.id for row in section.query(AgentRow)], said
+
+    answered, failed, said = drive(body)
+    assert answered == [], "the premise: no captain, the coder is the home card's"
+    assert "database is locked" in said, "the premise: the captain's read failed"
+    assert failed == [], "the home's coder is no captain"
+
+
+@pytest.mark.needs_captain
+def test_selecting_a_home_coder_scopes_the_doctor_to_the_home_project(
+    tmp_path: Path, script: Script
+) -> None:
+    """Delta review of #274, m3: ``_doctor_scope_of`` read any row on the home's board as the
+    captain's and ran the global checks. Added (D5), the home is a project, and its coder's
+    Doctor is that project's. The control: the captain's own stays global."""
+    seed(tmp_path, ("prj_aaa", "alpha", None))
+    home, coder = _home_added_with_a_coder()
+    captain = status(home.id, "captain", "captain", "waiting")
+    script[home.id] = [captain, coder]
+
+    async def body(pilot: Pilot[None]) -> tuple[str | None, str | None]:
+        app = fleet_app(pilot)
+        await refreshed(app)
+        row_for(app, coder.agent.id).activate()
+        await until(pilot, agent_opened(pilot, coder.agent.id), what="the home coder selected")
+        on_coder = app.doctor_scope
+        row_for(app, captain.agent.id).activate()
+        await until(pilot, agent_opened(pilot, captain.agent.id), what="the captain selected")
+        await quiet(pilot)
+        return on_coder, app.doctor_scope
+
+    on_coder, on_captain = drive(body)
+    assert on_coder == home.id, "a home coder's Doctor is the home project's"
+    assert on_captain is None, "the control: the captain's is global"
+
+
+@pytest.mark.needs_captain
+def test_stopping_a_home_coder_goes_back_to_the_home_project_not_the_welcome_page(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delta review of #274, m3: ``stop_finished`` sent any row of the home's board to the
+    Welcome page, the captain's way out. Added (D5), the home has a page, and a stopped coder
+    there goes back to it as any agent goes back to its project."""
+    seed(tmp_path, ("prj_aaa", "alpha", None))
+    home, coder = _home_added_with_a_coder()
+    script[home.id] = [coder]
+    recorder = ui_suite.stopper(monkeypatch, coder.agent)
+
+    async def body(pilot: Pilot[None]) -> tuple[str | None, str | None, list[str]]:
+        app = fleet_app(pilot)
+        await refreshed(app)
+        await ui_suite.open_stop_dialog(pilot, app, coder.agent.id)
+        script[home.id] = [FleetAgentStatus(agent=ui_suite.ended(coder.agent), state="exited")]
+        await pilot.click("#stop-confirm")
+        await ui_suite.settle(app)
+        await until(
+            pilot, lambda: app.sidebar.selected_key != f"agent:{coder.agent.id}", what="left"
+        )
+        await quiet(pilot)
+        pages = [view.project.id for view in app.query(ProjectView)]
+        return app.content.current, app.sidebar.selected_key, pages
+
+    current, selected, pages = drive(body)
+    assert recorder.calls == [(home.id, "coder-1", False, coder.agent.id)], "the premise"
+    assert current != "welcome", "a home coder is no captain"
+    assert selected == f"project:{home.id}"
+    assert home.id in pages

@@ -1075,13 +1075,15 @@ def role_cycle(
     paused: str = PAUSE_SIGNAL,
     task: str | None = None,
     state_file: str | None = None,
+    escalate_to_parent: bool = False,
 ) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
 
     ``task`` is the task the agent was spawned for (``12`` or its id, never ``#12``, which a
     shell reads as a comment), when it was: a
     tester or ui-tester then verifies that one task and stops after its verdict (#129 a).
-    ``state_file`` is where a manager keeps its state (P1 WS-4, #281).
+    ``state_file`` is where a manager keeps its state (P1 WS-4, #281). ``escalate_to_parent``:
+    the project's group has a parent manager, whom a manager asks before the human (P2-W6).
 
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
     the role it is a seat of — the number is an identity, not a new role. Every
@@ -1092,7 +1094,13 @@ def role_cycle(
     """
     role = base_role(role)
     core = _role_cycle_core(
-        role, session_short_id, fleet=fleet, paused=paused, task=task, state_file=state_file
+        role,
+        session_short_id,
+        fleet=fleet,
+        paused=paused,
+        task=task,
+        state_file=state_file,
+        escalate_to_parent=escalate_to_parent,
     )
     if not core:
         return []
@@ -1210,6 +1218,7 @@ def _role_cycle_core(
     paused: str = PAUSE_SIGNAL,
     task: str | None = None,
     state_file: str | None = None,
+    escalate_to_parent: bool = False,
 ) -> list[str]:
     """The role-specific half of the cycle for an already-normalised ``role``;
     see :func:`role_cycle`."""
@@ -1320,8 +1329,19 @@ def _role_cycle_core(
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
             *_auto_stop_line(),
             *_state_rule(state_file),
-            "Never write code. Never merge. Blocked twice on one task? Ask the human:",
-            f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',
+            *(
+                [
+                    "Never write code. Never merge. Blocked twice on one task? Ask your parent",
+                    f'manager: `aisquare note "…" --kind question --to parent --as {sid}`. Labels',
+                    "are unique and descriptive",
+                ]
+                if escalate_to_parent
+                else [
+                    "Never write code. Never merge. Blocked twice on one task? Ask the human:",
+                    f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and '
+                    "descriptive",
+                ]
+            ),
             "(coder-auth, not coder-2).",
         ]
     if role == "ui-tester":

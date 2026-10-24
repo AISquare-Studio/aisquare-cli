@@ -806,7 +806,14 @@ that moment the row is renamed anyway and the next `reap` reconciles.
 ```sh
 aisquare fleet pause
 aisquare fleet resume
+aisquare fleet pause --group <name>       # the group's members and its parent
 ```
+
+`--group` pauses (or resumes) every member of a project group and its parent at once
+(see [A manager over a group](orchestration.md#a-manager-over-a-group)), and under a
+parent an agent's own spawn (`fleet spawn --as …`, a parent manager restarting a child) on
+a paused board is refused, not only advised against. A person's spawn goes ahead, and a
+project with no parent above or below it behaves as before.
 
 Sets (and clears) a named board signal, the project's `fleet-paused`, that the
 manager's cycle respects: while it is on, the manager spawns nothing. Running

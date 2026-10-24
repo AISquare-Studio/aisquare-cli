@@ -82,10 +82,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   project with its own card, which never shows the captain's row; it warns once
   that the folder holds aisquare's settings, the fleet database and every Claude
   account's login data, which agents working there can read and change. It is
-  never packed into a codebase snapshot, so agents there get no packed overview
-  (a pack of it left from before is not served, and is deleted). Removing it from
-  the fleet hides it again. Every other role, fleet row and board, and the store
-  (schema v33), are the same either way. Four fleet changes that came with it are
+  never packed into a codebase snapshot, not even by `project onboard`, and `init`
+  there says so rather than that the pack is opt-in (a pack of it left from before
+  is not served, and the next onboard or `init` deletes it). Removing it from the
+  fleet hides it again. Every other role, fleet row and board, and the store
+  (schema v35), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line
   names, and `serve --stdio`'s idle clock (all under Fixed, below).

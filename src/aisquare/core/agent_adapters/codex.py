@@ -66,6 +66,8 @@ _APPROVAL_SWITCHES = frozenset(
 #: ``request_user_input``, which no feature switches off and which says it is only
 #: available in Plan mode, and, beside an MCP server, Codex's three readers of MCP
 #: resources (``list_mcp_resources``, ``list_mcp_resource_templates``, ``read_mcp_resource``).
+#: ``worktrees`` is the TUI's (:data:`TUI_TOOLS_SERVER`): it switches that off on 0.162.1, and
+#: on 0.164.0, where the feature is "removed" and always on, it is accepted and does nothing.
 TOOL_FEATURES = (
     "shell_tool",
     "unified_exec",
@@ -81,7 +83,15 @@ TOOL_FEATURES = (
     "skill_search",
     "in_app_browser",
     "image_generation",
+    "worktrees",
 )
+#: The MCP server Codex's TUI starts for itself, whose tools every TUI session is offered as
+#: ``mcp__codex_worktrees`` (``create_worktree``, ``list_worktrees``, …; ``exec`` offers none).
+#: A server of that name in the config "owns the TUI tools namespace", and the TUI starts
+#: none: one switched off leaves it no tool, measured on 0.162.1 and on 0.164.0, where
+#: ``--disable worktrees`` leaves it in and ``enabled=false`` alone is refused ("invalid
+#: transport", the name being no layer's).
+TUI_TOOLS_SERVER = "codex_worktrees"
 #: A ``-c`` key splits on every dot, so an MCP server's name in one is a bare TOML key.
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 #: aisquare's Codex plugin (``plugins/codex``), by the name ``codex plugin add
@@ -841,8 +851,13 @@ class CodexAdapter:
         with ``HOME``, ``LC_CTYPE``, ``PATH`` and its ``env`` table alone (measured), so the
         names in ``inherit`` go in as its ``env_vars``, which hands it the session's values.
         ``ValueError`` for a server name, the server's or an operator's, that is not a bare
-        TOML key, which a ``-c`` key cannot hold."""
-        others = [name for name in _mcp_servers(home, launch_args, cwd) if name != server]
+        TOML key, which a ``-c`` key cannot hold.
+
+        Last, the TUI's own server (:data:`TUI_TOOLS_SERVER`) is named, with the server's
+        command, and switched off: with the features above off, the TUI still offered its
+        worktree tools beside the server's (SMOKE8 8b, 0.162.1 and 0.164.0)."""
+        mine = (server, TUI_TOOLS_SERVER)
+        others = [name for name in _mcp_servers(home, launch_args, cwd) if name not in mine]
         for name in (server, *others):
             if not _BARE_KEY.fullmatch(name):
                 raise ValueError(
@@ -865,6 +880,10 @@ class CodexAdapter:
             "-c",
             f'{table}.default_tools_approval_mode="approve"',
             *(arg for name in others for arg in ("-c", f"mcp_servers.{name}.enabled=false")),
+            "-c",
+            f"mcp_servers.{TUI_TOOLS_SERVER}.command={_toml_string(command)}",
+            "-c",
+            f"mcp_servers.{TUI_TOOLS_SERVER}.enabled=false",
         ]
 
     def context_files(self, home: Path) -> tuple[Path, ...]:

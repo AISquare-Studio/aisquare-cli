@@ -33,9 +33,10 @@ adapter.**
   yours.
 - The captain on Codex, experimental (`[team.profiles.captain] agent =
   "codex"`, [the captain on Codex](docs/captain.md#the-captain-on-codex)):
-  every tool feature off, its server's tools approved, and every MCP server its
-  config layers name switched off for its session, as Codex has no
-  `--strict-mcp-config`. It is confined anew at every launch, a restart's too.
+  every tool feature off, its TUI's worktree tools (`mcp__codex_worktrees`)
+  off, its server's tools approved, and every MCP server its config layers name
+  switched off for its session, as Codex has no `--strict-mcp-config`. It is
+  confined anew at every launch, a restart's too.
 - A hand-off's Fork of a Codex teammate forks its thread (`codex fork <id>`);
   a Fork or a Take over onto another account's home starts fresh with a
   hand-off prompt, and says so.

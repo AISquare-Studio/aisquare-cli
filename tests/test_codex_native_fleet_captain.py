@@ -17,6 +17,10 @@ every request): no account, login, provider credential or model spend.
 - A hand-off Fork into its own worktree (SMOKE8 of #113, check 12): Codex comes up in the
   worktree with the source's turns and the fork's line, never at its ``Working directory ·
   fork`` chooser, whose default is the source's checkout.
+- The captain on Codex (SMOKE8 8a, 8b): ``aisquare captain say`` starts a Codex captain,
+  whose start command once handed Codex launch's ``-e`` pairs and died, types to it, and
+  prints its reply; the captain's request offers its server's tools and M11's known residue
+  alone, never the TUI's own ``mcp__codex_worktrees``.
 """
 
 from __future__ import annotations
@@ -42,7 +46,12 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import agents, selfcli
 from aisquare.core.agent_adapters.types import store_dir, store_read_only
-from aisquare.core.config import load_config, save_config
+from aisquare.core.config import (
+    FleetRoleSettings,
+    RoleLaunchProfile,
+    load_config,
+    save_config,
+)
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import ProjectInfo
@@ -351,3 +360,38 @@ def test_the_captain_presses_yes_and_no_at_a_real_codex_approval(
         live.until(lambda: not asking(), 20, "the approval view gone", pane)
         time.sleep(2)
         assert not second.exists(), "a No runs nothing"
+
+
+#: What a confined Codex captain's request may offer (``tools_only_args``): its server's
+#: namespace, and M11's residue, ``request_user_input`` (Plan mode only) and the readers of
+#: MCP resources, which no feature switches off.
+CAPTAIN_TOOLS = {
+    "mcp__captain",
+    "request_user_input",
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+}
+
+
+@pytest.mark.needs_captain
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_captain_say_reaches_a_real_codex_captain_offered_its_own_tools_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    with _codex_fleet(tmp_path, monkeypatch, "say") as live:
+        config = load_config()
+        config.team.profiles["captain"] = RoleLaunchProfile(agent="codex")
+        config.fleet.roles.setdefault("captain", FleetRoleSettings()).agent_args["codex"] = NATIVE
+        save_config(config)
+
+        said = runner.invoke(app, ["captain", "say", "--timeout", "120", "hello captain"])
+
+        assert said.exit_code == 0, said.output
+        assert "local fixture complete" in said.output, "the reply, from its rollout"
+        turns = [r for r in live.requests if "hello captain" in _user_texts(r)]
+        assert turns, "the captain's turn reached the provider"
+        offered = {tool.get("name") or tool.get("type") for tool in turns[0]["tools"]}
+        assert offered == CAPTAIN_TOOLS, offered
+        (captain,) = [t for t in turns[0]["tools"] if t.get("name") == "mcp__captain"]
+        assert {"tell", "press", "board"} <= {tool["name"] for tool in captain["tools"]}

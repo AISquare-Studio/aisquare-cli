@@ -354,8 +354,10 @@ launch, a restart's too, the fleet asks Codex's adapter for the session
 (`tools_only_args`):
 
 - every tool feature is off (its shell, its file and image tools, its sub-agents,
-  web search), so only the Actions server's tools, `request_user_input` (Plan
-  mode only) and Codex's readers of MCP resources remain;
+  web search), and the TUI's own worktree tools (`mcp__codex_worktrees`) are
+  switched off by a server of that name, off, which owns their namespace, so only
+  the Actions server's tools, `request_user_input` (Plan mode only) and Codex's
+  readers of MCP resources remain;
 - the Actions server's tools are approved for it, so a call is never held for a
   yes no one can give;
 - every other MCP server its config layers name is switched off for that session

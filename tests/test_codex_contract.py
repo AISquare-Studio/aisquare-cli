@@ -21,7 +21,7 @@ from aisquare.core import agents
 from aisquare.core.agent_adapters import codex as codex_module
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.agent_adapters import get_adapter as _get_adapter
-from aisquare.core.agent_adapters.codex import TOOL_FEATURES, CodexAdapter
+from aisquare.core.agent_adapters.codex import TOOL_FEATURES, TUI_TOOLS_SERVER, CodexAdapter
 from aisquare.core.agent_adapters.codex_transcript import CodexTranscript
 from aisquare.core.agent_adapters.types import (
     BadEffortError,
@@ -707,6 +707,8 @@ def test_codexs_tools_only_session_is_its_tool_features_off_and_one_approved_ser
         "mcp_servers.captain.env": {"K": 'v "1"'},
         "mcp_servers.captain.env_vars": ["TMUX_TMPDIR"],
         "mcp_servers.captain.default_tools_approval_mode": "approve",
+        "mcp_servers.codex_worktrees.command": "C:\\py\\python.exe",
+        "mcp_servers.codex_worktrees.enabled": False,
     }
     disabled = [item for flag, item in pairwise(only) if flag == "--disable"]
     assert disabled == list(TOOL_FEATURES)
@@ -729,11 +731,38 @@ def _trust(home: Path, folder: Path) -> None:
 
 
 def _switched_off(only: list[str]) -> list[str]:
+    """The servers ``only`` switches off, less the TUI's own, which every one does."""
     return [
         key.split(".")[1]
         for key, value in _settings(only).items()
-        if key.endswith(".enabled") and value is False
+        if key.endswith(".enabled") and value is False and key.split(".")[1] != TUI_TOOLS_SERVER
     ]
+
+
+def test_the_tuis_own_tools_server_is_named_and_switched_off_once(
+    layers: Path, tmp_path: Path
+) -> None:
+    """SMOKE8 8b: with every tool feature off, Codex's TUI still offered the captain
+    ``mcp__codex_worktrees`` (``create_worktree``, ``list_worktrees``, …), on 0.162.1 and on
+    0.164.0, where ``worktrees`` is "removed" and always on. Measured on both: a server of that
+    name in the config owns the TUI's tools namespace, and switched off it leaves no tool; a
+    bare ``enabled=false`` is refused ("invalid transport"), so it is named with a command.
+    An operator's server of that name is switched off once, not twice."""
+
+    def only() -> list[str]:
+        args = codex.tools_only_args(
+            "captain", "/opt/py", [], {}, inherit=(), home=layers, cwd=tmp_path, launch_args=[]
+        )
+        assert args is not None
+        return args
+
+    first = only()
+    assert _settings(first)[f"mcp_servers.{TUI_TOOLS_SERVER}.command"] == "/opt/py"
+    assert _settings(first)[f"mcp_servers.{TUI_TOOLS_SERVER}.enabled"] is False
+    assert "worktrees" in [item for flag, item in pairwise(first) if flag == "--disable"]
+    _server(layers / "config.toml", TUI_TOOLS_SERVER)
+    switches = [item for flag, item in pairwise(only()) if flag == "-c"]
+    assert switches.count(f"mcp_servers.{TUI_TOOLS_SERVER}.enabled=false") == 1
 
 
 def test_every_server_of_the_operators_that_codex_would_load_is_switched_off(

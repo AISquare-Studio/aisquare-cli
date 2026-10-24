@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import sqlite3
 import threading
 import time
 from collections.abc import Callable, Coroutine, Iterator, Sequence
@@ -36,6 +37,7 @@ from textual.pilot import Pilot
 from textual.widgets import (
     Button,
     Checkbox,
+    Collapsible,
     Input,
     OptionList,
     RadioButton,
@@ -45,11 +47,12 @@ from textual.widgets import (
     TextArea,
 )
 
+from aisquare.cli.ui import app as app_module
 from aisquare.cli.ui import spawn as spawn_module
 from aisquare.cli.ui.app import FleetApp
 from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
-from aisquare.cli.ui.sidebar import SpawnAgent, SpawnRow, agent_row_text
+from aisquare.cli.ui.sidebar import AddProject, SpawnAgent, SpawnRow, agent_row_text
 from aisquare.cli.ui.spawn import (
     LABEL_RULE,
     NO_TASK,
@@ -81,6 +84,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
+from aisquare.services.captain import state as captain_state
 from tests.ui_workers import settle_page, settle_workers
 
 T = TypeVar("T")
@@ -338,6 +342,30 @@ def select(dialog: SpawnDialog, name: str) -> Select[str]:
     return widget
 
 
+def advanced(dialog: SpawnDialog) -> Collapsible:
+    return dialog.query_one("#spawn-advanced", Collapsible)
+
+
+async def open_advanced(pilot: Pilot[Any]) -> None:
+    """Unfold *Advanced* as the owner does, with a click on its title. Folded, its fields are
+    not on screen, and a click at one of them lands on nothing at all."""
+    dialog = pilot.app.screen
+    assert isinstance(dialog, SpawnDialog)
+    if advanced(dialog).collapsed:
+        await pilot.click("#spawn-advanced CollapsibleTitle")
+        await unfolded(pilot)
+    assert not advanced(dialog).collapsed
+
+
+async def unfolded(pilot: Pilot[Any]) -> None:
+    """Wait out a fold or an unfold: the box grows or shrinks and centres again, and the
+    section scrolls itself into view (``Collapsible.scroll_visible``, animated). A click
+    before that lands where a widget was."""
+    await settle(pilot)
+    await pilot.wait_for_scheduled_animations()
+    await pilot.pause()
+
+
 # --- the row opens it -----------------------------------------------------------------
 
 
@@ -547,6 +575,7 @@ def test_dice_offers_role_adjective_animal_matching_the_label_rule(
     git_project: ProjectInfo, spawns: SpawnRecorder
 ) -> None:
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> tuple[str, bool]:
+        await open_advanced(pilot)
         await pilot.click("#spawn-dice")
         await pilot.pause()
         rolled = label_input(dialog).value
@@ -575,8 +604,9 @@ def test_dice_fits_every_role_in_the_limit_and_refuses_a_role_too_long() -> None
     assert dice_label("a-very-long-custom-role") is None
 
 
-def test_role_choices_are_the_fleet_roles_then_the_bound_ones_sorted() -> None:
-    assert role_choices(["zeta", "coder", "alpha"]) == [
+def test_role_choices_are_none_then_the_fleet_roles_then_the_bound_ones_sorted() -> None:
+    assert role_choices(["zeta", "coder", "alpha", fleet_service.PLAIN_ROLE]) == [
+        fleet_service.PLAIN_ROLE,  # (none): offered once, first, even when bound
         *fleet_service.FLEET_ROLES,
         "alpha",
         "zeta",
@@ -727,7 +757,7 @@ def test_the_manager_role_locks_the_label_and_a_live_manager_greys_it_out(
 ) -> None:
     async def pick_manager(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         overlay = select(dialog, "role").query_one(OptionList)
-        greyed = overlay.get_option_at_index(list(fleet_service.FLEET_ROLES).index("manager"))
+        greyed = overlay.get_option_at_index(role_choices([]).index("manager"))
         label_input(dialog).value = "coder-auth"
         await pilot.pause()
         select(dialog, "role").value = "manager"
@@ -988,6 +1018,146 @@ def test_a_receipt_dismisses_toasts_it_and_its_notes_refreshes_and_opens_the_new
     assert [call[1] for call in spawns.calls] == ["coder"]
 
 
+async def _submit_spawn(pilot: Pilot[None], app: RecordingFleetApp) -> None:
+    """Open prj_a's spawn dialog from its row and press Spawn."""
+    await pilot.click(spawn_row(app, "prj_a"))
+    await pilot.pause()
+    assert isinstance(app.screen, SpawnDialog)
+    await pilot.click("#spawn-submit")
+
+
+def test_a_spawn_whose_next_read_finds_the_store_unreadable_says_its_row_comes_next(
+    tmp_path: Path,
+    fleet: dict[str, list[FleetAgentStatus]],
+    spawns: SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #272, m1: the frame read after a spawn found the store unreadable and kept
+    the frame shown, and the select that waited for it said "that agent is no longer
+    listed" of the agent just spawned. It says its row comes on the next refresh, as a
+    restart's does, and moves nothing."""
+    (tmp_path / "alpha" / ".git").mkdir(parents=True)
+    register(tmp_path / "alpha", project_id="prj_a", codename="amber-otter")
+
+    def unreadable() -> Any:
+        raise sqlite3.OperationalError("database is locked")
+
+    def answer(target: ProjectInfo, role: str) -> fleet_service.SpawnReceipt:
+        receipt = receipt_for(target, label="coder-1-2")
+        fleet[target.id] = [FleetAgentStatus(agent=receipt.agent, state="working")]
+        monkeypatch.setattr(app_module, "store_session", unreadable)  # the read after it
+        return receipt
+
+    spawns.answer = answer
+
+    async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> list[Any]:
+        shown_before = app.content.current
+        await _submit_spawn(pilot, app)
+        await settle_workers(app)
+        for _ in range(3):
+            await pilot.pause()
+        assert app.store_error is not None, "the premise: the read after it found no store"
+        return [shown_before, app.content.current, app.notices]
+
+    shown_before, current, notices = drive_app(scenario)
+    assert ("that agent is no longer listed", "warning") not in notices, notices
+    assert ("coder-1-2 spawned — its row appears on the next refresh", "information") in notices
+    assert current == shown_before
+
+
+def test_a_spawn_whose_read_outlives_the_users_move_leaves_them_where_they_went(
+    tmp_path: Path,
+    fleet: dict[str, list[FleetAgentStatus]],
+    spawns: SpawnRecorder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #272, m2: the new agent is opened off a frame read after the spawn, and a
+    read that hung for seconds then moved the view and the focus off wherever the user
+    had gone meanwhile. A restart's select never did (``_show_restarted``); nor does this."""
+    (tmp_path / "alpha" / ".git").mkdir(parents=True)
+    register(tmp_path / "alpha", project_id="prj_a", codename="amber-otter")
+    spawned = threading.Event()
+    held = threading.Event()
+    gate = threading.Event()
+    listing = fleet_service.list_agents
+
+    def answer(target: ProjectInfo, role: str) -> fleet_service.SpawnReceipt:
+        receipt = receipt_for(target, label="coder-1-2")
+        fleet[target.id] = [FleetAgentStatus(agent=receipt.agent, state="working")]
+        spawned.set()
+        return receipt
+
+    def hung(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        if spawned.is_set():  # the read after the spawn
+            held.set()
+            gate.wait(10)
+        return listing(project, live_only=live_only)
+
+    spawns.answer = answer
+    monkeypatch.setattr(fleet_service, "list_agents", hung)
+
+    async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> list[Any]:
+        try:
+            await _submit_spawn(pilot, app)
+            for _ in range(200):
+                if held.is_set():
+                    break
+                await pilot.pause(0.02)
+            assert held.is_set(), "the premise: the read after the spawn is held"
+            app.post_message(AddProject())  # the user goes elsewhere meanwhile
+            for _ in range(200):
+                if app.content.current == "onboard":
+                    break
+                await pilot.pause(0.02)
+        finally:
+            gate.set()
+        await settle_workers(app)
+        for _ in range(3):
+            await pilot.pause()
+        return [app.content.current, app.notices]
+
+    current, notices = drive_app(scenario)
+    assert current == "onboard", "where the user went"
+    assert not any("no longer listed" in message for message, _ in notices), notices
+
+
+@pytest.mark.needs_captain
+def test_a_first_captain_whose_next_read_fails_says_its_row_comes_next(
+    fleet: dict[str, list[FleetAgentStatus]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #272, m3: the first captain ever spawned, and the captain's read in the
+    frame after it failed. That frame keeps the last frame's home, which had none, so the
+    select said "that agent is no longer listed" of the captain just started."""
+    home = captain_state.home_project()
+    listing = fleet_service.list_agents
+
+    def failing(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
+        if project.id == home.id:
+            raise fleet_service.FleetUnavailable("database is locked")
+        return listing(project, live_only=live_only)
+
+    monkeypatch.setattr(fleet_service, "list_agents", failing)
+    captain = spawned_agent(home, label="captain", role=fleet_service.CAPTAIN_ROLE)
+
+    async def scenario(pilot: Pilot[None], app: RecordingFleetApp) -> list[Any]:
+        assert app.snapshot is not None and app.snapshot.home is None, "no home shown yet"
+        shown_before = app.content.current
+        app.spawn_finished(
+            fleet_service.SpawnReceipt(
+                agent=captain, asked_label=None, tmux_session="asq-home", notes=[]
+            )
+        )
+        await settle_workers(app)
+        for _ in range(3):
+            await pilot.pause()
+        return [shown_before, app.content.current, app.notices]
+
+    shown_before, current, notices = drive_app(scenario)
+    assert ("that agent is no longer listed", "warning") not in notices, notices
+    assert ("captain spawned — its row appears on the next refresh", "information") in notices
+    assert current == shown_before
+
+
 def test_the_module_names_its_workers_apart_from_the_manager_tabs() -> None:
     from aisquare.cli.ui.views import project as project_view
 
@@ -1010,14 +1180,22 @@ def option_prompts(dialog: SpawnDialog, name: str) -> list[str]:
     return [str(overlay.get_option_at_index(i).prompt) for i in range(overlay.option_count)]
 
 
-def test_the_fields_read_who_runs_it_then_as_whom(git_project: ProjectInfo) -> None:
-    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
-        return [str(label.render()) for label in dialog.query(".spawn-row > Label")]
+def test_the_fields_read_role_hand_off_and_account_then_advanced_who_runs_it_then_as_whom(
+    git_project: ProjectInfo,
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[list[str]]:
+        folded = advanced(dialog)
+        labels = list(dialog.query(".spawn-row > Label"))
+        return [
+            [str(label.render()) for label in labels if folded not in label.ancestors],
+            [str(label.render()) for label in labels if folded in label.ancestors],
+        ]
 
-    labels = drive(git_project, scenario)
-    # Hand off from, and its How row, come first (HANDOFF, tsk_01m3ns5a736s): who it comes from
-    # decides who runs it.
-    assert labels[:7] == ["Hand off from", "How", "Role", "Account", "Binary", "Persona", "Label"]
+    basic, folded = drive(git_project, scenario)
+    # The owner's three (tsk_01m5mm2sz23b): the role, the teammate it comes from with its
+    # How row, the account. Then, folded, who runs it — the bind, the binary — and as whom.
+    assert basic == ["Role", "Hand off from", "How", "Account"]
+    assert folded[:4] == ["Bind", "Binary", "Persona", "Label"]
 
 
 def test_the_persona_select_lists_none_and_the_catalogue_with_the_description_below(
@@ -1165,6 +1343,7 @@ def test_pick_opens_the_picker_in_new_order_and_fills_who_runs_it(
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
         seen: list[Any] = []
+        await open_advanced(pilot)
         await pilot.click("#spawn-pick")
         picker = await wait_for_screen(pilot, AttachTargetScreen)
         await settle(pilot)
@@ -1215,6 +1394,7 @@ def test_import_beside_the_persona_select_selects_what_it_imports(
     monkeypatch.setattr(personas_service, "importable_skills", lambda root: [])
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        await open_advanced(pilot)
         await pilot.click("#spawn-import")
         importer = await wait_for_screen(pilot, ImportPersonaScreen)
         await settle(pilot)
@@ -1534,3 +1714,80 @@ def test_account_set_to_this_shells_is_sent_as_this_shells(
     [(_, _, sent)] = hand_offs.calls
     assert sent["mode"] == ("take_over" if take_over else "fork")
     assert sent["account"] == fleet_service.THIS_SHELL_ACCOUNT
+
+
+# --- review of #240, R2-m5: the captain's label in the dialog ---------------------------------
+
+
+@pytest.mark.needs_captain
+def test_on_the_label_captain_is_refused_in_the_dialog_as_the_fleet_refuses_it(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spawn was enabled for a coder labelled ``captain``, and the fleet then refused it. The
+    dialog keeps the switch it opened with: flipped off while it is open, it still refuses."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        monkeypatch.setenv(experimental.CAPTAIN_ENV, "0")
+        label_input(dialog).value = "captain"
+        await pilot.pause()
+        return [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
+
+    disabled, rule = drive(git_project, scenario)
+    assert disabled is True and rule is not None and "reserved for the captain" in rule
+
+
+def test_off_the_label_captain_is_a_label_like_any_in_the_dialog(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(experimental.CAPTAIN_ENV, raising=False)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        label_input(dialog).value = "captain"
+        await pilot.pause()
+        return [submit(dialog).disabled, note(dialog, "#spawn-label-rule")]
+
+    assert drive(git_project, scenario) == [False, None]
+
+
+@pytest.mark.needs_captain
+def test_a_declared_captain_role_shows_the_label_it_sends_and_gives_the_typed_one_back(
+    git_project: ProjectInfo,
+) -> None:
+    """``_relabel`` kept the typed label for any role but the manager's, so picking a
+    declared ``captain`` showed the typed label in a locked field, and sent none of it."""
+    from aisquare.core.config import AppConfig, RoleLaunchProfile, TeamSettings
+
+    save_config(AppConfig(team=TeamSettings(profiles={"captain": RoleLaunchProfile(bin="echo")})))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        label_input(dialog).value = "coder-auth"
+        await pilot.pause()
+        select(dialog, "role").value = "captain"
+        await pilot.pause()
+        seen: list[Any] = [label_input(dialog).value, label_input(dialog).disabled]
+        select(dialog, "role").value = "coder"
+        await pilot.pause()
+        return [*seen, label_input(dialog).value]
+
+    assert drive(git_project, scenario) == ["captain", True, "coder-auth"]
+
+
+def test_off_the_spawn_dialog_preset_to_a_declared_captain_is_an_ordinary_spawn(
+    git_project: ProjectInfo, spawns: SpawnRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #240, R2-m3: ``_label_fixed`` and ``self._captain`` off."""
+    from aisquare.core.config import AppConfig, RoleLaunchProfile, TeamSettings
+
+    monkeypatch.delenv(experimental.CAPTAIN_ENV, raising=False)
+    save_config(AppConfig(team=TeamSettings(profiles={"captain": RoleLaunchProfile(bin="echo")})))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        label = label_input(dialog)
+        seen: list[Any] = [label.disabled, select(dialog, "role").disabled]
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return seen
+
+    seen = drive(git_project, scenario, presets={"role": "captain"})
+    assert seen == [False, False], "a label of its own and a role that can change"
+    assert [call[1] for call in spawns.calls] == ["captain"], "through fleet.spawn"

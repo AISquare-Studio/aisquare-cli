@@ -6,7 +6,12 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import emit_metrics_summary, emit_turn_metrics, refuse_conflicting_scope
+from aisquare.cli.common import (
+    emit_metrics_summary,
+    emit_token_summary,
+    emit_turn_metrics,
+    refuse_conflicting_scope,
+)
 from aisquare.services import metrics as metrics_service
 
 app = typer.Typer(
@@ -55,4 +60,24 @@ def list_(
     project_id = _scope(project, all_projects, session)
     emit_turn_metrics(
         metrics_service.recent(project_id=project_id, session_id=session, limit=limit)
+    )
+
+
+@app.command("tokens")
+def tokens(
+    session: Annotated[
+        str | None, typer.Option("--session", help="One session (an id or its prefix).")
+    ] = None,
+    project: Annotated[str | None, typer.Option("--project", help=_PROJECT_HELP)] = None,
+    all_projects: Annotated[bool, typer.Option("--all", help=_ALL_HELP)] = False,
+) -> None:
+    """Token usage of recorded sessions: raw, cost-weighted and at list price.
+
+    Read off each session's transcript by the Stop hook, deduplicated per API
+    request.
+    """
+    project_id = _scope(project, all_projects, session)
+    sessions = metrics_service.session_usages(project_id=project_id, session_id=session)
+    emit_token_summary(
+        metrics_service.summarize_tokens(sessions, project_id=project_id, session_id=session)
     )

@@ -29,9 +29,14 @@ experiment never measured.
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
+from pathlib import Path
+from statistics import median
 
-from aisquare.core.ids import new_trace_id
+from aisquare.core import paths, pricing
+from aisquare.core import usage as usage_core
+from aisquare.core.ids import new_trace_id, new_usage_id
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.workspace import active_project
 from aisquare.models import (
@@ -41,7 +46,11 @@ from aisquare.models import (
     ClientReason,
     HookTrigger,
     MetricsSummary,
+    SessionUsage,
+    TokenSummary,
     TurnMetric,
+    TurnUsage,
+    UsageTrigger,
 )
 
 
@@ -81,19 +90,21 @@ def open_turn(metric: TurnMetric, *, store: ContextStore | None = None) -> str |
     return metric.trace_id
 
 
-def close_turn(session_id: str | None, *, store: ContextStore | None = None) -> None:
-    """Close this session's newest open turn. Silent when there is nothing open."""
+def close_turn(session_id: str | None, *, store: ContextStore | None = None) -> str | None:
+    """Close this session's newest open turn; its trace id, or ``None`` when nothing
+    was open (or the write failed). Silent either way."""
     if not session_id:
-        return
+        return None
     ended_at = datetime.now(tz=UTC)
     try:
         if store is not None:
-            store.close_turn(session_id, ended_at=ended_at)
+            closed = store.close_turn(session_id, ended_at=ended_at)
         else:
             with store_session() as owned:
-                owned.close_turn(session_id, ended_at=ended_at)
+                closed = owned.close_turn(session_id, ended_at=ended_at)
     except Exception:  # never disrupt the session for a metrics write
-        return
+        return None
+    return closed.trace_id if closed is not None else None
 
 
 def recent(
@@ -185,3 +196,205 @@ def percentile(values: list[int | None], rank_percent: int) -> int | None:
         return None
     rank = max(1, (rank_percent * len(present) + 99) // 100)
     return present[min(rank, len(present)) - 1]
+
+
+# --- token usage, read off the transcript ---------------------------------------------
+
+_LOG_LIMIT_BYTES = 1_000_000
+
+
+def record_usage(
+    session_id: str | None,
+    transcript_path: str | None,
+    cwd: Path | None,
+    *,
+    trigger: UsageTrigger,
+    trace_id: str | None = None,
+    ended: bool = False,
+) -> TurnUsage | None:
+    """Read what the session's transcript added since the last record, and store it.
+
+    Called by the Stop, StopFailure and SessionEnd hooks. Reads only the bytes
+    appended since the session's previous record (``core.usage.scan``), writes
+    one turn row for them and folds them into the session's row, and fills the
+    ``metric`` row the turn closed (``trace_id``) with the counts it was
+    waiting for. Returns the turn row, or ``None`` when there was nothing new,
+    nothing to read, or anything at all went wrong — NEVER raises: a failure is
+    appended to ``log/metrics.log`` and costs the record, not the session.
+    """
+    if not session_id or not transcript_path:
+        return None
+    try:
+        return _record_usage(
+            session_id, Path(transcript_path), cwd, trigger=trigger, trace_id=trace_id, ended=ended
+        )
+    except Exception as exc:  # never disrupt the session for a metrics write
+        _log_failure(f"usage not recorded for {session_id} ({trigger})", exc)
+        return None
+
+
+def _record_usage(
+    session_id: str,
+    transcript: Path,
+    cwd: Path | None,
+    *,
+    trigger: UsageTrigger,
+    trace_id: str | None,
+    ended: bool,
+) -> TurnUsage | None:
+    # Lazy: services.project imports the store layer this module is imported by.
+    from aisquare.services import project as project_service
+
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        existing = store.session_usage(session_id)
+        if existing is None:
+            # The project is resolved once, at the session's first record: it costs a
+            # `git rev-parse`, and a session does not change projects.
+            project = active_project(store, cwd)
+            if not project_service.tracked(store, project):
+                return None
+            project_id = project.id
+        else:
+            project_id = existing.project_id
+        state = usage_core.ScanState.parse(existing.state if existing else None)
+        began = time.perf_counter()
+        delta, state = usage_core.scan(transcript, state)
+        scan_ms = (time.perf_counter() - began) * 1000
+        if delta.is_empty() and not ended and existing is not None:
+            return None
+        total = usage_core.Usage.from_dict(existing.usage) if existing else usage_core.Usage()
+        total.add(delta)
+        session_totals = total.totals()
+        turn_totals = delta.totals()
+        turns = (existing.turns if existing else 0) + (0 if delta.is_empty() else 1)
+        session = SessionUsage(
+            session_id=session_id,
+            project_id=project_id,
+            transcript_path=str(transcript),
+            state=state.to_json(),
+            usage={**total.to_dict(), "first_edit": state.first_edit()},
+            turns=turns,
+            total_tokens=session_totals.total,
+            weighted=session_totals.weighted,
+            cost_usd=session_totals.cost_usd,
+            started_at=existing.started_at if existing else now,
+            updated_at=now,
+            # A turn recorded after the session ended is the session running again (a
+            # `claude --resume` of the same id): no longer ended (#45, n3). A record that is
+            # not an end and adds nothing returned above.
+            ended_at=now if ended else None,
+        )
+        turn = (
+            None
+            if delta.is_empty()
+            else TurnUsage(
+                id=new_usage_id(),
+                session_id=session_id,
+                project_id=project_id,
+                trace_id=trace_id,
+                seq=turns,
+                trigger=trigger,
+                recorded_at=now,
+                usage=delta.to_dict(),
+                total_tokens=turn_totals.total,
+                weighted=turn_totals.weighted,
+                cost_usd=turn_totals.cost_usd,
+                scan_ms=round(scan_ms, 3),
+            )
+        )
+        counts = (
+            turn_totals.input + turn_totals.cache_write + turn_totals.cache_read,
+            turn_totals.output,
+            delta.tool_calls,
+        )
+        written = store.record_usage(
+            session,
+            turn,
+            previous_state=existing.state if existing else None,
+            metric_counts=counts,
+        )
+    return turn if written else None
+
+
+def _log_failure(what: str, exc: BaseException) -> None:
+    """Append one line to ``log/metrics.log``; silent if even that fails.
+
+    Not stderr: a Stop hook's stderr reaches the operator's screen in verbose
+    mode on every turn, and a metrics failure is not worth that. The file is
+    kept under :data:`_LOG_LIMIT_BYTES` by rotating it to ``metrics.log.1``.
+    """
+    try:
+        directory = paths.log_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        log = directory / "metrics.log"
+        if log.exists() and log.stat().st_size > _LOG_LIMIT_BYTES:
+            log.replace(directory / "metrics.log.1")
+        stamp = datetime.now(tz=UTC).isoformat(timespec="seconds")
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} {what}: {type(exc).__name__}: {exc}\n")
+    except Exception:  # the log is the last resort; there is nothing behind it
+        return
+
+
+def session_usages(
+    *, project_id: str | None = None, session_id: str | None = None
+) -> list[SessionUsage]:
+    """Recorded sessions' usage, most recently updated first."""
+    with store_session() as store:
+        return store.session_usages(project_id=project_id, session_id=session_id)
+
+
+def summarize_tokens(
+    sessions: list[SessionUsage],
+    *,
+    project_id: str | None = None,
+    session_id: str | None = None,
+) -> TokenSummary:
+    """Sum recorded sessions into a :class:`~aisquare.models.TokenSummary`."""
+    summary = TokenSummary(
+        project_id=project_id,
+        session_id=session_id,
+        sessions=len(sessions),
+        prices_as_of=pricing.PRICES_AS_OF,
+        prices_source=pricing.PRICES_SOURCE,
+    )
+    total = usage_core.Usage()
+    before_tokens: list[int] = []
+    before_calls: list[int] = []
+    for session in sessions:
+        total.add(usage_core.Usage.from_dict(session.usage))
+        summary.turns += session.turns
+        first_edit = session.usage.get("first_edit")
+        if isinstance(first_edit, dict) and first_edit.get("edited"):
+            summary.sessions_with_edit += 1
+            before_tokens.append(int(first_edit.get("tokens", 0)))
+            before_calls.append(int(first_edit.get("tool_calls", 0)))
+    for name, model in sorted(total.models.items()):
+        summary.models[name] = model.as_dict()
+        summary.requests += model.requests
+        summary.input_tokens += model.input
+        summary.cache_write_tokens += model.cache_write
+        summary.cache_read_tokens += model.cache_read
+        summary.output_tokens += model.output
+        if model.priced:
+            summary.weighted_tokens += model.weighted
+            summary.cost_usd += model.cost_usd
+        else:
+            summary.unpriced_models.append(name)
+            summary.unpriced_tokens += model.total
+    summary.total_tokens = (
+        summary.input_tokens
+        + summary.cache_write_tokens
+        + summary.cache_read_tokens
+        + summary.output_tokens
+    )
+    summary.tools = dict(sorted(total.tools.items(), key=lambda item: (-item[1], item[0])))
+    summary.tool_calls = total.tool_calls
+    summary.tool_result_chars = total.tool_result_chars
+    summary.lookup_calls = total.lookup_calls
+    summary.injected_chars = total.injected_chars
+    if before_tokens:
+        summary.median_tokens_before_edit = int(median(before_tokens))
+        summary.median_tool_calls_before_edit = int(median(before_calls))
+    return summary

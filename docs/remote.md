@@ -30,30 +30,24 @@ phone loads ships inside aisquare-cli.
 
 ## Install
 
-```sh
-uv tool install --python 3.13 --with tiktoken 'aisquare-cli[remote]'   # installed by install.sh or uv
-pipx inject aisquare-cli starlette uvicorn websockets cryptography     # installed with pipx
-pipx install 'aisquare-cli[remote]'                                    # not installed yet, with pipx
-pip install 'aisquare-cli[remote]'                                     # in a virtualenv
-```
+Nothing to install: Remote comes with aisquare-cli. The web server (starlette,
+uvicorn, websockets), `cryptography` for Web Push and the ngrok agent (the
+official ngrok Python SDK, which gives the machine an https address a phone can
+reach) are core dependencies, so the one-line install and `asq upgrade` bring
+them. `aisquare-cli[remote]` still resolves, and adds nothing.
 
-The `remote` extra adds the web server (starlette, uvicorn, websockets) and
-`cryptography`, which Web Push needs; without it the page works and says
-notifications are unavailable. Use the line for how aisquare-cli was installed.
-uv cannot add a package to a tool, so the first line installs it again, and that
-keeps only what the line names: tiktoken, as install.sh installs it. A tool
-installed with more needs that named too, or it goes: another extra such as
-`serve` (`'aisquare-cli[remote,serve]'`), another `--with`. Without the extra,
-`aisquare remote serve` and the R panel print the line for this machine, with
-everything its tool was installed with. An upgrade through install.sh installs
-aisquare-cli again without its extras, and Remote then says its line again.
+The one thing to set up is your ngrok token, once: open *⚙ Settings* →
+*Remote control*, paste the token from
+https://dashboard.ngrok.com/get-started/your-authtoken (a free account has one)
+and Save. It is checked with ngrok, kept in `~/.aisquare/ngrok-authtoken`
+(owner-only), and never shown again. An ngrok you already signed in
+(`NGROK_AUTHTOKEN`, or the token in your own `ngrok.yml`) keeps working, with
+nothing to paste.
 
-Then ngrok, which gives the machine an https address a phone can reach. Install
-it from ngrok.com, then sign in once:
-
-```sh
-ngrok config add-authtoken <your-ngrok-token>
-```
+The bundled agent runs inside aisquare, so it has no traffic inspector and no
+local agent API on `127.0.0.1:4040`. Only an install that lost it (a damaged
+one), or a platform ngrok ships no wheel for, starts an `ngrok` on PATH instead,
+with its agent API turned off as below.
 
 **Use a static domain.** ngrok's free plan gives every account one, and it is
 what keeps the link, the phone's sign-in and a Home Screen app working across
@@ -64,14 +58,37 @@ to open the new link and unlock again. Tell aisquare which one is yours:
 export AISQUARE_REMOTE_NGROK_URL=https://your-name.ngrok-free.app
 ```
 
-With it set, the fleet UI starts ngrok on that domain (`--url=`), and the server
-uses it for the links in notifications.
+With it set, the fleet UI's ngrok serves on that domain, and the server uses it
+for the links in notifications.
 
 ---
 
 ## Start
 
-**From the fleet UI.** Run `aisquare ui` and press `R`. Switch Remote on: the
+**From the fleet UI's Settings.** Run `aisquare ui` and open *⚙ Settings*: its
+*Remote control* link opens *App settings* on its *Remote* tab, which has *Turn on
+remote control*. The first time, it asks
+for your ngrok token instead: paste the one from
+https://dashboard.ngrok.com/get-started/your-authtoken (a free account has one)
+and Save. ngrok is asked whether it takes the token; one it refuses is said
+beside the field, in plain words, and not kept. A kept one is never shown again.
+If ngrok later refuses the token Remote signed in with (one reset on ngrok's
+dashboard, say), or Remote was turned on with none, the field comes back, on or
+off, as *Replace your ngrok token*; *Change ngrok token* under *Advanced* opens it
+at any time. A token saved while Remote is on starts ngrok again at once. While
+`NGROK_AUTHTOKEN` is set, ngrok signs in with it rather than with a token saved
+here, and a line under the field says so.
+Only a damaged install, without the bundled ngrok, says so in one line, with
+*Check again*. On, the tab
+shows the link, copies it by itself once ngrok's link arrives (a toast says so),
+and shows a Copy button, the QR code, the passphrase and *Turn off*. *Advanced*,
+folded until clicked, has *Change ngrok token* and the rest of the panel's
+controls: a new passphrase, the write switch, auto-off and the connected devices
+with Revoke. It is the same
+Remote as the `R` panel's below, and while it is on the sidebar shows
+`📡 remote · N devices`, which opens the panel.
+
+**From the fleet UI's `R` panel.** Press `R` (the footer shows it). Switch Remote on: the
 panel starts the server and ngrok, shows the link, a QR code and the passphrase,
 the write switch, the auto-off timer (30, 60 or 120 minutes, or Never) and the
 devices that have unlocked. Scan the QR code with the phone; until ngrok is up
@@ -79,10 +96,12 @@ the panel shows the local link alone, and no QR, since no phone can open that
 link. If ngrok stops, the UI restarts it within half a minute, and once a minute
 until it is up, the first ngrok of a Remote too (its static domain still held by an
 ngrok that has not let go of it yet, say); not a Remote's first ngrok that
-stopped for want of an authtoken, or too old for `--url`, which the panel says
-how to fix. A restart that stopped so is tried each minute all the same: an
-authtoken put back while Remote is on brings the phones back with no off and on,
-which would sign every one out. An ngrok missing when Remote came on is looked
+stopped for want of a token, or for one ngrok refused, which the panel says how to
+fix. A restart that stopped so is tried each minute all the same: a token pasted
+again while Remote is on brings the phones back with no off and on, which would
+sign every one out. The bundled ngrok signs in again by itself after the network
+drops; a session it cannot sign in again within 20 seconds (a token reset meanwhile)
+ends, and the restart says why. An ngrok missing when Remote came on is looked
 for each minute too, so one installed meanwhile starts within the minute. A link
 ngrok announces late (a network still coming up) is shown, and used for
 notifications, as soon as it comes. A Remote that was on when the UI last
@@ -606,8 +625,10 @@ browser's own key (RFC 8291), so the push service sees only that a message went.
   and answer on its local web interface (`127.0.0.1:4040`), which asks for no
   password: the passphrase you unlock with, every device's cookie, the token and
   the transcripts, readable by any user of the machine. The agent API on that
-  port asks for none either, and starts, stops and inspects tunnels. The panel
-  starts ngrok with `--inspect=false` and, in a config it merges over your own
+  port asks for none either, and starts, stops and inspects tunnels. The bundled
+  ngrok has neither: it runs inside aisquare, and listens on no local port. An
+  ngrok on PATH, which only an install without the bundled one starts, is started
+  with `--inspect=false` and, in a config it merges over your own
   `ngrok.yml`, `web_addr: false`. Where it cannot (no `ngrok.yml` where ngrok keeps
   it; an ngrok that says it cannot read yours or that config, as a snap's may not; or
   one that cannot sign in once that config is merged over a version 3 `ngrok.yml`)

@@ -4555,6 +4555,12 @@ def _type_prompt(
             what="the prompt",
             guard=guard,
         )
+    if done.refused is not None and done.in_box:
+        notes.append(
+            f"the prompt was NOT sent: {done.refused}. Read its input box before you send it "
+            f"again: {_send_it_later(*to)}"
+        )
+        return "no", None
     if done.refused is not None:
         notes.append(
             f"the prompt was NOT typed: {done.refused}, which nothing types over. Send it "
@@ -5072,7 +5078,8 @@ def tell(
 
     It types through the one door (``delivery.deliver_typed``, P0-W2, #276): never over a
     draft in the agent's input box or while someone types in its pane (``draft_guard``) —
-    then it is filed as a note and says why ("a draft is in its input box") — and an
+    then it is filed as a note and says why ("a draft is in its input box"; one that
+    appears as the text is pasted stops it before its Enter, and says so) — and an
     Enter the agent dropped is pressed again only while the text provably still waits
     there, the agent's ``UserPromptSubmit`` its acknowledgement. A busy agent gets the note
     at the end of its turn (``team.hook_stop``, ``[fleet] deliver_notes_at_turn_end``).
@@ -5124,6 +5131,8 @@ def tell(
                 done="typed into its pane (it was waiting)",
                 guard=settings().draft_quiet_seconds,
             )
+        if done.refused is not None and done.in_box:
+            return TellResult("no", noted(done.refused))
         if done.refused is not None:
             return TellResult("no", noted(f"{done.refused}, which nothing types over"))
         told = done.told

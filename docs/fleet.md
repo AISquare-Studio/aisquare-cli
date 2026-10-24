@@ -393,7 +393,12 @@ into the pane in `asq` within `[fleet] draft_quiet_seconds` (10). That covers a
 tell, the manager's nudge, a typed first message and the Remote's paste.
 Claude Code's own dim words in an empty box (its placeholder, its suggestion
 after a turn) are not a draft. A tell held back this way is filed as a note and
-says why ("a draft is in its input box, which nothing types over"). A manager's
+says why ("a draft is in its input box, which nothing types over"). A draft
+that appears in the instant the tell is pasted, a human typing between the check
+and the paste, stops it before its Enter: the text stays in the box with the
+draft, unsent, and the tell says so ("a draft appeared in its input box while
+the text was being typed; ours is in the box with it, unsent, and nothing was
+sent") and is filed as a note. A manager's
 nudge waits, and goes out once the box is clear: `asq` retries it as it
 refreshes, and the next board write does too. If the human sends the draft
 first, that prompt hands the manager the same board update, and the nudge is

@@ -239,14 +239,14 @@ def test_cost_from_usage_is_within_two_percent_of_claude_codes_total_cost(
 
 
 def _big_transcript(path: Path) -> None:
-    """About 5 MB of history before the turns under test: tool results and the
-    api-request blobs Claude Code writes beside each reply."""
+    """2.6 MB of history (2,616,380 bytes) before the turns under test: 600 replies,
+    each with a 4,000-character api-request blob beside it, as Claude Code writes."""
     filler = "x" * 4_000
     with path.open("w", encoding="utf-8") as handle:
         for n in range(600):
             handle.write(json.dumps(_assistant(f"old{n}", "Read")) + "\n")
             handle.write(json.dumps({"type": "api-request-blob", "blob": filler}) + "\n")
-    assert path.stat().st_size > 2_000_000
+    assert path.stat().st_size > 2_500_000
 
 
 def test_a_stop_reads_only_the_bytes_appended_since_the_last(
@@ -286,10 +286,11 @@ def test_a_stop_reads_only_the_bytes_appended_since_the_last(
 def test_the_stop_hooks_recording_has_no_lock_wait_in_it(tmp_path: Path) -> None:
     """A budget, not a stopwatch (tests/budgets.py): it catches the catastrophic.
 
-    Measured p95 per Stop (scan the appended bytes, write both rows, behind a 5 MB
-    history): about 1.3 ms on a Mac, 33.7 ms on the windows-latest runner (CI run
-    40039412881). A full rescan of that history is only ~27 ms, so time cannot tell
-    one from a slow runner; the byte test above holds that. What time can catch is a
+    Measured p95 per Stop (scan the appended bytes, write both rows): about 1.45 ms
+    on a Mac behind this 2.6 MB history; 33.7 ms on the windows-latest runner (CI run
+    40039412881, the test's earlier form, with no history behind it). A full rescan of
+    this history takes about 7.5 ms on that Mac, so time cannot tell one from a slow
+    runner; the byte test above holds that. What time can catch is a
     write that waits on the store's lock, whose busy timeout is 5 s: 0.5 s is over an
     order of magnitude above every measured figure and an order below that wait."""
     transcript = tmp_path / f"{SESSION}.jsonl"

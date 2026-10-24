@@ -170,7 +170,8 @@ def test_wrap_prints_the_users_own_line_first(monkeypatch: pytest.MonkeyPatch) -
 
 
 def _settings(config_dir: Path) -> dict[str, Any]:
-    return json.loads((config_dir / "settings.json").read_text())
+    data: dict[str, Any] = json.loads((config_dir / "settings.json").read_text())
+    return data
 
 
 def test_install_sets_ours_only_where_none_is_set_and_wrap_keeps_the_users(

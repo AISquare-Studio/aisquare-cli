@@ -48,7 +48,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from aisquare import statusline
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
@@ -79,6 +78,7 @@ from aisquare.models import (
 from aisquare.services import agents as agents_service
 from aisquare.services import install_route
 from aisquare.services import settings as settings_service
+from aisquare.statusline import FLEET_FILE as STATUSLINE_FLEET_FILE
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 """What Claude Code's ``/usage`` reads; ``anthropic-beta: oauth-2025-04-20`` is required."""
@@ -1765,7 +1765,7 @@ def _read_statusline_records(now: datetime) -> list[StatuslineSession]:
     except OSError:
         return []
     for file in files:
-        if file.name == statusline.FLEET_FILE:
+        if file.name == STATUSLINE_FLEET_FILE:
             continue
         try:
             session = _statusline_session(json.loads(file.read_text(encoding="utf-8")))
@@ -1939,9 +1939,9 @@ def write_statusline_fleet(
         "updated_at": (now or _now()).timestamp(),
     }
     with contextlib.suppress(OSError):
-        temporary = directory / f".{statusline.FLEET_FILE}.{os.getpid()}.tmp"
+        temporary = directory / f".{STATUSLINE_FLEET_FILE}.{os.getpid()}.tmp"
         temporary.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(temporary, directory / statusline.FLEET_FILE)
+        os.replace(temporary, directory / STATUSLINE_FLEET_FILE)
 
 
 # --- the refusal memory (#277) -------------------------------------------------------------------

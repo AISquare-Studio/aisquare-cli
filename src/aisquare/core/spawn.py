@@ -382,6 +382,12 @@ SEAMS: dict[str, Seam] = {
         "`doctor --live` needs the EXPLAINABILITY_* environment to diagnose the "
         "machine it is on, the same reason `sdk_doctor` is not",
     ),
+    "aisquare/statusline.py::_wrapped": Seam(
+        EXCLUDED,
+        "`asq-statusline --wrap CMD`: the user's own Claude Code status line, run with the "
+        "payload Claude Code handed ours, as Claude Code would run it (#287); their command, "
+        "in their session's environment; no model process of ours",
+    ),
     "aisquare/cli/fleet.py::_exec_attach": Seam(
         EXCLUDED,
         "`tmux attach` — a terminal client on the fleet server, not an agent; "

@@ -15,10 +15,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after the report is saved; a command that cannot start is a saved 126 or 127),
   `interrupted_by`, whether both streams were kept whole, and any launch error. Both
   streams' originals are kept, the first 1 MiB each by default, with truncation
-  marked. Interrupts go to the command's process group, the second as SIGTERM and
-  the third as SIGKILL, and a background process holding the output pipe no longer
-  keeps the wrapper waiting: it stops after two seconds of silence, ten seconds
-  after the exit at most, and records `output_pipes_held_open`. With `--project`, the report holds the checkout's
+  marked. Interrupts go to the command's process group, and on Linux and macOS the
+  second is sent as SIGTERM and the third as SIGKILL. A background process holding
+  the output pipe no longer keeps the wrapper waiting: it stops after two seconds of
+  silence, ten seconds after the exit at most, and records
+  `output_pipes_held_open`. With `--project`, the report holds the checkout's
   per-file source identity before and after the command: content, not Git HEAD;
   build directories left out among untracked files only; submodule and nested-repo
   content counted; a worktree as its own files; the home tree refused; and a
@@ -54,22 +55,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The evidence gate** (`docs/work-briefs.md`). `aisquare task done` on a task
   linked to a brief's requirements refuses unless that task recorded a fresh pass
   for each, naming every requirement and its state (`missing`, `failed`, `blocked`
-  or `stale`) in text and as a list under `--json` (`task_not_proven`). The check
+  or `stale`, and `unreadable` for a damaged brief that names the task) in text and
+  as a list under `--json` (`task_not_proven`). The check
   and the status write are one transaction, so a correction landing in between
   fails the completion (`brief_changed`); a task is gated only by the briefs that
   link it, and a task no brief links is done exactly as before. `brief evidence
   --report ID` records a check backed by an `asq exec --project` report: a pass
   needs exit 0, no interruption, both streams whole, no launch error, a known
   source identity and the same identity before, after and now, compared file by
-  file in the report's own checkout; a report taken with `--task` backs only that
-  task. Manual `--artifact` passes keep their checkout's whole-tree fingerprint.
+  file in the report's own checkout: only files the check itself created are
+  ignored, so an added `conftest.py` stales a pass, and the reason names the first
+  changed files. `asq exec --task` takes the task's number or id, like every other
+  `--task`, and a report taken with it backs only that task. Manual `--artifact`
+  passes keep their checkout's whole-tree fingerprint.
   `aisquare brief check BRIEF [--source-root PATH]` re-checks every pass against
-  the source now and exits 1 while anything is missing, failed, blocked or stale;
-  `--source-root` compares every pass with one checkout of the project and refuses
-  any other path. A session whose task is linked sees those requirements at start,
-  clipped to 2,500 characters and failing open on its own. Reports that recorded
-  evidence cites are never pruned, and when the brief store cannot be read nothing
-  is.
+  the source now and exits 1 while anything is missing, failed, blocked, stale or
+  unlinked; `--source-root` compares every pass with one checkout of the project
+  and refuses any other path with exit 2. A session whose task is linked sees those
+  requirements at start, in at most 2,500 characters and only the room the session
+  start leaves under the 10,000-character hook cap, failing open on its own.
+  Reports that recorded evidence cites are kept by `asq reports prune` (it says how
+  many) until the briefs citing them are purged, and when the brief store cannot be
+  read nothing is pruned.
 
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in

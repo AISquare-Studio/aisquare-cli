@@ -32,6 +32,8 @@ concurrency-tested against racing parallel sessions):
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
 ├── projects/     # per-project data — snapshot/ (Repomix pack), brain/ (gbrain)
+├── reports/      # what `asq exec` saved: argv, the streams' first bytes, source hashes (0700)
+├── briefs/       # copies of the artifacts brief checks recorded, per project and brief (0700)
 ├── cache/        # disposable (e.g. last_injection.json)
 └── log/          # capture and diagnostic logs
 ```

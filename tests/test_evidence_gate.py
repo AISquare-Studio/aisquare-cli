@@ -178,7 +178,7 @@ def test_the_source_changing_during_or_after_the_run_refuses_a_pass(repo: Path) 
     _git(repo, "checkout", "--", "app.py")
     after = _run(_py("print('ok')"), task=task)
     (repo / "app.py").write_text("def answer():\n    return 41\n")
-    with pytest.raises(ValueError, match="has changed since it ran; run it again"):
+    with pytest.raises(ValueError, match=r"has changed since it ran \(app.py\); run it again"):
         _record(brief, task, after)
 
 
@@ -190,17 +190,167 @@ def test_a_new_file_the_check_wrote_does_not_stop_its_pass(repo: Path) -> None:
     assert _check(brief) == {"R1": "pass"}
 
 
+def test_a_file_added_since_the_check_stales_its_pass(repo: Path) -> None:
+    """Validator round on #136, M2 (manager's decision): a pass ignores only the paths its
+    check created. A conftest.py added after a PROVEN brief changes what the check means:
+    the pass goes stale, though no file the check saw changed."""
+    brief, task = _linked()
+    _record(brief, task, _run(_py("print('ok')"), task=task))
+    assert _check(brief) == {"R1": "pass"}
+    (repo / "conftest.py").write_text("raise RuntimeError('collection fails now')\n")
+    result = briefs.check(brief.id).requirements[0]
+    assert result.state == "stale" and "conftest.py" in result.reason
+    with pytest.raises(briefs.TaskNotProven):
+        team.finish_task(task.id)
+
+
+def test_the_checks_own_output_never_stales_its_pass(repo: Path) -> None:
+    """The other half: a file the check itself wrote (a --junitxml report) is its output,
+    in its after map and not its before, and stays ignored however often it is read."""
+    brief, task = _linked()
+    report = _run(_py("open('junit.xml', 'w').write('<testsuite/>')"), task=task)
+    _record(brief, task, report)
+    (repo / "junit.xml").write_text("<testsuite tests='2'/>")  # rewritten by the next run
+    assert _check(brief) == {"R1": "pass"}
+
+
+def test_a_stale_pass_on_an_assembled_checkout_names_what_changed(repo: Path) -> None:
+    """Validator round on #136, M5: on an assembled checkout every pass read "stale" and
+    named no file. The reason names the first changed paths, up to five."""
+    worktree = repo.parent / "wt-assembled-m5"
+    _git(repo, "worktree", "add", "-q", str(worktree), "-b", "assembled-m5")
+    brief, task = _linked()
+    _record(brief, task, _run(_py("print('ok')"), task=task))
+    (worktree / "app.py").write_text("def answer():\n    return 7\n")
+    for n in range(6):
+        (worktree / f"extra_{n}.py").write_text("x = 1\n")
+    status = briefs.check(brief.id, source_root=worktree).requirements[0]
+    assert status.state == "stale"
+    named = status.reason.split("changed since the check ran: ")[1]
+    assert named.startswith("app.py, extra_0.py, extra_1.py, extra_2.py, extra_3.py")
+    assert named.endswith("and 2 more")
+
+
 def test_a_report_captured_for_a_task_backs_only_that_task() -> None:
     brief, task = _linked()
     other, _ = team.add_task("Another part", role="coder")
     briefs.link(brief.id, other.id, ["R1"])
     report = _run(_py("print('ok')"), task=task)
-    with pytest.raises(ValueError, match=f"captured for task {task.id}: it backs only that"):
+    with pytest.raises(ValueError) as refused:
         _record(brief, other, report)
+    said = str(refused.value)
+    assert f"captured for task {task.id}, not #{other.number} {other.id}" in said
+    assert f"`asq exec --project {brief.project_id} --task {other.id} -- …`" in said
     _record(brief, task, report)  # its own task, fine
     untagged = _run(_py("print('ok')"))
     _record(brief, other, untagged)  # a report with no --task backs whoever records it
     assert _check(brief) == {"R1": "pass"}
+
+
+def _exec(runner: CliRunner, *args: str) -> Any:
+    return runner.invoke(app, ["--json", "exec", "--project", _project_id(), *args])
+
+
+def test_exec_task_takes_a_board_ref_as_every_other_task_does(runner: CliRunner) -> None:
+    """Validator round on #136, M1: `asq exec --task 1` stored "1", and evidence from task
+    #1 was refused as "captured for task 1". The natural flow now works."""
+    brief, task = _linked()
+    ran = _exec(runner, "--task", str(task.number), "--", *_py("print('ok')"))
+    assert ran.exit_code == 0, ran.output
+    report = json.loads(ran.stdout)["report"]
+    assert report["task_id"] == task.id, "the ref is recorded as the task's id"
+    recorded = runner.invoke(
+        app,
+        ["brief", "evidence", "B1", "R1", "--task", str(task.number), "--verdict", "pass",
+         "--summary", "ran", "--report", report["id"]],
+    )  # fmt: skip
+    assert recorded.exit_code == 0, recorded.output
+    assert _check(brief) == {"R1": "pass"}
+
+
+def test_exec_refuses_a_task_ref_the_board_does_not_have_and_runs_nothing(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    _linked()
+    marker = tmp_path / "ran"
+    before = {r.id for r in reports.list_reports()}
+    result = _exec(runner, "--task", "#99", "--", *_py(f"open({str(marker)!r}, 'w')"))
+    assert result.exit_code == 2, result.output
+    assert json.loads(result.stdout)["error"] == "unknown_task"
+    assert not marker.exists(), "nothing was run"
+    assert {r.id for r in reports.list_reports()} == before, "nothing was saved"
+
+
+def test_a_report_that_stored_the_ref_as_typed_still_backs_its_task() -> None:
+    """A report saved by a build that kept `--task 1` as typed names task #1 all the same."""
+    brief, task = _linked()
+    report = _run(_py("print('ok')"))
+    _rewrite_report(report, task_id=str(task.number))
+    _record(brief, task, report)
+    assert _check(brief) == {"R1": "pass"}
+
+
+def test_the_hints_name_the_real_project_and_task(
+    monkeypatch: pytest.MonkeyPatch, repo: Path
+) -> None:
+    brief, task = _linked()
+    _start(monkeypatch, repo)
+    team.claim_task(task.id, session_ref=CODER)
+    started = _start(monkeypatch, repo)
+    assert f"asq exec --project {brief.project_id} --task {task.id} -- CMD" in started
+    assert f"asq brief evidence B1 R1 --task {task.id}" in started
+    assert "--task TASK" not in started
+
+
+def test_an_unknown_option_right_after_exec_is_refused_not_run(runner: CliRunner) -> None:
+    """Validator round on #136, n2: `asq exec --json -- true` saved argv ['--json', 'true']
+    and a 127. An option exec does not know is a usage error; nothing runs."""
+    before = {r.id for r in reports.list_reports()}
+    result = runner.invoke(app, ["exec", "--json", "--", *_py("print('x')")])
+    assert result.exit_code == 2, result.output
+    assert "put global flags such as --json before exec" in result.output
+    assert {r.id for r in reports.list_reports()} == before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_an_interrupt_during_the_drain_is_recorded_and_the_output_still_comes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validator round on #136, m4: the doc said such an interrupt exits 130 with no
+    output; the code records it in interrupted_by (no pass) and the run returns its
+    report. The doc now says what the code does, and this pins the code."""
+    import os
+    import signal as signals
+
+    real_capture = reports._capture
+
+    def capture_then_interrupt(*args: Any, **kwargs: Any) -> Any:
+        captured = real_capture(*args, **kwargs)  # the command has exited; still draining
+        os.kill(os.getpid(), signals.SIGINT)
+        return captured
+
+    monkeypatch.setattr(reports, "_capture", capture_then_interrupt)
+    report = reports.run_command(_py("print('drained')"))
+    assert report.interrupted_by == signals.SIGINT
+    assert report.exit_code == 0
+    assert reports.read_stream(report.id, "stdout", raw=True).strip() == b"drained"
+
+
+def test_manual_is_said_only_of_a_pass(runner: CliRunner, tmp_path: Path) -> None:
+    """Validator round on #136, n3: a requirement one task passed manually and another
+    had not checked read "[missing (manual)]"."""
+    brief, task = _linked()
+    other, _ = team.add_task("Another part", role="coder")
+    briefs.link(brief.id, other.id, ["R1"])
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"x")
+    briefs.record_evidence(
+        brief.id, "R1", task_ref=task.id, verdict="pass", summary="looked", artifact=shot
+    )
+    shown = runner.invoke(app, ["brief", "show", "B1"]).stdout
+    checked = runner.invoke(app, ["brief", "check", "B1"]).stdout
+    assert "R1 r1 [missing] " in shown and "(manual)" not in shown
+    assert "R1 [missing]" in checked and "(manual)" not in checked
 
 
 def test_a_report_from_another_board_cannot_back_a_check(tmp_path: Path) -> None:
@@ -324,7 +474,8 @@ def test_task_done_names_each_requirement_and_its_state(runner: CliRunner) -> No
 
     assert text.exit_code == 1 and as_json.exit_code == 1
     assert "B1 R2 [failed]" in text.output and "B1 R3 [missing]" in text.output
-    assert "R1" not in text.output.split("cannot be done")[1].split("Record one")[0]
+    assert "R1 [" not in text.output, "a passing requirement is not listed"
+    assert f"--project {task.project_id} --task {task.id}" in text.output, "the real ids"
     payload = json.loads(as_json.stdout)
     assert payload["error"] == "task_not_proven" and payload["ref"] == task.id
     assert [(r["requirement"], r["state"]) for r in payload["requirements"]] == [
@@ -767,9 +918,8 @@ def test_no_header_in_the_block_is_left_without_a_requirement(
         assert " is linked to B1" in header and requirement.startswith("  R1")
         # The frame, the first brief whole, and the second's header, not its requirement.
         assert " is linked to B2" in full[4]
-        frame = sum(
-            len(part) for part in (briefs._OPEN, briefs._CLOSE, briefs._MORE, briefs._RECORD)
-        )
+        reserved = briefs.record_hint(session.project_id, "t" * len(task.id), "B999999")
+        frame = sum(len(part) for part in (briefs._OPEN, briefs._CLOSE, briefs._MORE, reserved))
         budget = frame + 2 + sum(len(line) + 1 for line in full[2:5]) + 10
         block = briefs.session_requirements(store, session, None, budget=budget).splitlines()
 
@@ -796,6 +946,23 @@ def test_a_report_recorded_evidence_cites_is_never_pruned() -> None:
     assert reports.protected_report_ids() == {cited.id}
     removed = reports.prune_reports(keep=0, days=0, protect=reports.protected_report_ids())
     assert loose.id in removed and cited.id not in removed
+    assert reports.load_report(cited.id).id == cited.id
+
+
+def test_prune_says_how_many_reports_it_kept_for_evidence(runner: CliRunner) -> None:
+    """Validator round on #136, M3: a prune of everything printed "Removed 1 saved
+    reports." and silently kept the reports evidence cites. It now says so."""
+    brief, task = _linked()
+    cited = _run(_py("print('ok')"), task=task)
+    _record(brief, task, cited)
+    _run(_py("print('loose')"))
+
+    text = runner.invoke(app, ["reports", "prune", "--keep", "0", "--days", "0"])
+    assert text.exit_code == 0, text.output
+    assert "Removed 1 saved reports; kept 1 that recorded evidence cites" in text.stdout
+    as_json = runner.invoke(app, ["--json", "reports", "prune", "--keep", "0", "--days", "0"])
+    payload = json.loads(as_json.stdout)
+    assert payload == {"removed": [], "protection_known": True, "kept_for_evidence": 1}
     assert reports.load_report(cited.id).id == cited.id
 
 

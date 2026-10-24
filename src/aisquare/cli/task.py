@@ -312,9 +312,9 @@ def _not_proven(exc: briefs_service.TaskNotProven) -> NoReturn:
             console.print(
                 f"  {item.brief} {item.requirement} [{item.state}] {item.reason}", markup=False
             )
+        brief = exc.items[0].brief if exc.items else "BRIEF"
         console.print(
-            "  Record one: asq exec --project PROJECT --task TASK -- CHECK, then "
-            "asq brief evidence BRIEF R1 --task TASK --verdict pass --summary … --report ID",
+            "  " + briefs_service.record_hint(exc.task.project_id, exc.task.id, brief),
             markup=False,
         )
     raise typer.Exit(1)

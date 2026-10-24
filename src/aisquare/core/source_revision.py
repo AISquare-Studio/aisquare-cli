@@ -21,7 +21,7 @@ import hashlib
 import os
 import stat
 import subprocess
-from collections.abc import Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from pathlib import Path
 
 from aisquare.core.paths import aisquare_home
@@ -258,9 +258,33 @@ def source_fingerprint(root: Path) -> str:
     return fingerprint_of(source_file_hashes(root))
 
 
-def source_unchanged(recorded: Mapping[str, str], current: Mapping[str, str]) -> bool:
-    """Whether every file in ``recorded`` is byte-identical in ``current``.
+def changed_paths(
+    recorded: Mapping[str, str],
+    current: Mapping[str, str],
+    *,
+    output: Collection[str] | None = None,
+) -> list[str]:
+    """The paths that make ``current`` differ from ``recorded``, sorted: each recorded
+    file that changed or vanished, and, given ``output``, each path new since the record
+    that is not in it.
 
-    A path only in ``current`` is new since the record (a per-run output file) and does
-    not count. A recorded path that changed or vanished does."""
-    return all(current.get(name) == digest for name, digest in recorded.items())
+    Without ``output``, a path only in ``current`` never counts: comparing a run's own
+    before and after, every new path is the run's output. Later, against the checkout
+    now, ``output`` is what the run created (its after minus its before), and any OTHER
+    new path is a change: an added ``conftest.py`` changes what a pytest check means
+    (validator round on #136, M2)."""
+    changed = [name for name, digest in recorded.items() if current.get(name) != digest]
+    if output is not None:
+        made = set(output)
+        changed += [name for name in current if name not in recorded and name not in made]
+    return sorted(changed)
+
+
+def source_unchanged(
+    recorded: Mapping[str, str],
+    current: Mapping[str, str],
+    *,
+    output: Collection[str] | None = None,
+) -> bool:
+    """Whether ``current`` is ``recorded``, as :func:`changed_paths` judges it."""
+    return not changed_paths(recorded, current, output=output)

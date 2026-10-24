@@ -117,6 +117,18 @@ def exec_command(
     """
     if not ctx.args:
         fail("Provide a command: asq exec -- COMMAND [ARGS...]", error="usage", exit_code=2)
+    if ctx.args[0].startswith("-"):
+        # An option `exec` does not know (`asq exec --json -- true`) arrived as the
+        # command's first argument: it was run as a command named `--json`, a saved 127.
+        # No command starts with a dash (validator round on #136, n2).
+        fail(
+            f"exec has no option {ctx.args[0]}: put global flags such as --json before exec, "
+            "and the command after --",
+            error="usage",
+            exit_code=2,
+        )
+    if task is not None:
+        task = _board_task(task, project)
     try:
         report = service.run_command(
             ctx.args,
@@ -153,6 +165,32 @@ def exec_command(
             signal.signal(report.signal, signal.SIG_DFL)
         os.kill(os.getpid(), report.signal)
     raise typer.Exit(report.exit_code)
+
+
+def _board_task(ref: str, project: str | None) -> str:
+    """``--task`` read as every other ``--task`` reads it: ``12``, ``#12`` or an id
+    (prefix ok), on the ``--project`` board or the caller's, recorded as the task's id.
+    Stored as typed, ``--task 1`` was a report "captured for task 1" that evidence from
+    task #1 then refused (validator round on #136, M1). A ref the board does not have is
+    refused before anything runs. With no board to read (the orchestrator off, the store
+    unreadable), the ref is kept as typed: a report needs no board."""
+    from aisquare.core.store import AmbiguousIdError
+    from aisquare.services import briefs  # lazy: the board is not every run's business
+    from aisquare.services.team import NoSuchTaskNumber, TeamDisabledError
+
+    try:
+        return briefs.resolve_task_ref(ref, project)
+    except TeamDisabledError:
+        return ref
+    except (NoSuchTaskNumber, ValueError) as exc:
+        why = str(exc)
+    except AmbiguousIdError:
+        why = f"{ref!r} matches several tasks; use more of its id"
+    except KeyError:
+        why = f"no task matches {ref!r} on this board"
+    except Exception:  # the store cannot be read: a report needs no board
+        return ref
+    fail(f"--task {ref}: {why}; nothing was run", error="unknown_task", exit_code=2)
 
 
 @app.command("show")
@@ -240,12 +278,26 @@ def prune(
         removed = service.prune_reports(keep=keep, days=days, protect=protect)
     except (OSError, ValueError) as exc:
         fail(str(exc), error="reports_unavailable")
+    if protect is None:
+        if get_state().json_output:
+            typer.echo(json.dumps({"removed": removed, "protection_known": False}))
+        else:
+            typer.echo(
+                f"Removed {len(removed)} abandoned runs; no report was removed, because which "
+                "reports back recorded evidence could not be read."
+            )
+        return
+    # Said, not silent: a prune of everything that left the reports evidence cites
+    # read as though it had removed them all (validator round on #136, M3).
+    kept = len(protect & {report.id for report in service.list_reports()})
     if get_state().json_output:
-        typer.echo(json.dumps({"removed": removed, "protection_known": protect is not None}))
-    elif protect is None:
+        payload = {"removed": removed, "protection_known": True, "kept_for_evidence": kept}
+        typer.echo(json.dumps(payload))
+    elif kept:
         typer.echo(
-            f"Removed {len(removed)} abandoned runs; no report was removed, because which "
-            "reports back recorded evidence could not be read."
+            f"Removed {len(removed)} saved reports; kept {kept} that recorded evidence "
+            "cites. They stay until the briefs that cite them are purged "
+            "(`aisquare project forget --purge`)."
         )
     else:
         typer.echo(f"Removed {len(removed)} saved reports.")

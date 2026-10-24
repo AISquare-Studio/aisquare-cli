@@ -24,7 +24,8 @@ aisquare brief create "Login page" \
   --boundary "No single sign-on"
 ```
 
-The brief is `B1` on this board (its id works too, or any unambiguous part of it).
+The brief is `B1` on this board. Its id works too, and so does the start or the end of
+its id, when only one brief matches.
 Link the board tasks that build it. One task can cover several requirements, and one
 requirement can need several tasks:
 
@@ -33,7 +34,8 @@ aisquare brief link B1 12 -r R1 -r R2
 aisquare brief link B1 13 -r R2
 ```
 
-When a task's work is checked, run the check through `aisquare exec`
+When a task's work is checked, run the check through `aisquare exec` (`asq` is the
+short name of `aisquare`; both work)
 ([command reports](command-reports.md)) with the project, so the run is saved with the
 source it ran on, and record it against the requirement with the report ID it prints:
 
@@ -60,9 +62,16 @@ A report backs a **pass** only if the run:
 
 The source is compared **file by file**, in the checkout the report ran in, not the one
 you record from: a check run in a worktree is about that worktree. A file the check
-wrote that did not exist before it (`--junitxml report.xml`) is new output and does not
-count; a file that existed and changed or went does. A report taken with `--task` backs
-only that task. A failed run can always back `--verdict fail`.
+itself created (in the run's after-identity and not its before: `--junitxml
+report.xml`) is its output and never counts. Every other change does: a file that
+existed and changed or went, and a file that is new since the check and that the check
+did not create, such as an added `conftest.py`, which changes what the check means. The
+reason names the first files that changed. A report taken with `--task` backs only
+that task; `--task` takes the task's number or id, as everywhere.
+
+A run of any exit status can back `--verdict fail`, but it must still be a report taken
+with `--project` for this brief's board, and, if it was taken with `--task`, for that
+task.
 
 A recorded pass goes `stale` when a file it covered changes, or when its report changes
 or is gone. Reports that recorded evidence cites are never pruned
@@ -157,8 +166,8 @@ one that lost the race is refused with `brief_changed`: read the brief and retry
 `aisquare task done` on a task linked to a requirement needs a **fresh pass recorded by
 that task** for every requirement it is linked to: fresh meaning against the
 requirement as it reads now and the source in its checkout now. Otherwise the task
-stays as it is and each requirement is named with its state, `missing`, `failed`,
-`blocked` or `stale`, and why:
+stays as it is and each requirement is named with its state and why: `missing` (no
+check recorded by this task), `failed`, `blocked` (the task is blocked) or `stale`:
 
 ```text
 ✗ #12 tsk_… cannot be done: it needs a fresh pass for each of
@@ -182,8 +191,9 @@ aisquare brief check B1 --source-root ../wt-assembled
 ```
 
 `brief check` prints every requirement's standing, each pass checked against the
-source now, and exits 1 while anything is missing, failed, blocked or stale; 0 means
-the brief is proven. By default each pass is compared with the checkout it was
+source now, and exits 1 while anything is `missing`, `failed`, `blocked`, `stale` or
+`unlinked` (no live task is linked to it: its tasks were all dropped, or it was never
+linked); 0 means the brief is proven. By default each pass is compared with the checkout it was
 recorded in. `--source-root` compares every pass with that one checkout instead,
 which is the check a validator runs on the assembled work. It must be this project's
 directory or one of its worktrees (the same repository), or a checkout one of its
@@ -191,6 +201,14 @@ checks was recorded in. Anything else, an unrelated repository included even und
 `AISQUARE_TEAM_HUB`, is a usage error with exit code 2, not a page of `stale`, so a
 script can tell a typo from NOT PROVEN.
 Passes that rest on manual evidence are listed for the validator to judge.
+
+On an assembled checkout, the passes recorded in each worktree usually read `stale`:
+the merge changed files they covered, a CHANGELOG at least. Each reason names the
+first files that changed. To prove the brief on the assembled work, run each
+requirement's check there, without `--task`, and record that one report for each
+linked task: `aisquare exec --project PROJECT -- CHECK` in the assembled checkout, then
+`aisquare brief evidence BRIEF R1 --task TASK --verdict pass --summary … --report ID`
+once per task. `brief check BRIEF --source-root ASSEMBLED` then reads PROVEN.
 
 ## At session start
 

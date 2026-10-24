@@ -38,6 +38,7 @@ from aisquare.core import atomic, insights, orchestrator, paths
 from aisquare.core.ids import new_brief_id, new_event_id, new_evidence_id
 from aisquare.core.source_revision import (
     _toplevel,
+    changed_paths,
     fingerprint_of,
     git_common_dir,
     source_file_hashes,
@@ -302,9 +303,11 @@ def _source_stale(evidence: BriefEvidence, sources: _Sources) -> str | None:
         except ValueError as exc:
             return str(exc)
         if saved is not None:
-            if source_unchanged(saved.before, current):
+            paths = changed_paths(saved.before, current, output=_created(saved))
+            if not paths:
                 return None
-        elif fingerprint_of(current) == report.source_fingerprint_before:
+            return f"the source in {root} changed since the check ran: {_listed(paths)}"
+        if fingerprint_of(current) == report.source_fingerprint_before:
             return None
         return f"the source in {root} changed since the check ran"
     root = sources.root(evidence.source_root)
@@ -317,6 +320,33 @@ def _source_stale(evidence: BriefEvidence, sources: _Sources) -> str | None:
     if fingerprint_of(current) == evidence.source_fingerprint:
         return None
     return f"the source in {root} changed since the check"
+
+
+def resolve_task_ref(ref: str, project_id: str | None = None) -> str:
+    """The id of the task ``ref`` names (``12``, ``#12``, an id or a prefix), on
+    ``project_id``'s board, else the caller's: what ``asq exec --task`` records, so the
+    report names the same task every other ``--task`` does. ``KeyError`` when it names
+    none, ``ValueError`` when it is another board's."""
+    with store_session() as store:
+        board = project_id or team._caller_board_id(store, None, None)
+        task = team.find_task(store, ref, board)
+        if task is None:
+            raise KeyError(ref)
+        if task.project_id != board:
+            raise ValueError(f"task {team.task_label(task)} is on another board than {board}")
+        return task.id
+
+
+def _same_task(store: ContextStore, recorded: str, task: TeamTask) -> bool:
+    """Whether a report's recorded ``--task`` names ``task``: its id, or, from a build that
+    stored the ref as typed (``1``, ``#1``, a prefix), a ref that resolves to it."""
+    if recorded == task.id:
+        return True
+    try:
+        found = team.find_task(store, recorded, task.project_id)
+    except (KeyError, LookupError, ValueError):
+        return False
+    return found is not None and found.id == task.id
 
 
 def _pass_refusals(
@@ -347,14 +377,29 @@ def _pass_refusals(
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         why.append(f"the source in {report.source_root} cannot be read now ({exc})")
         return why
-    unchanged = (
-        source_unchanged(saved.before, current)
-        if saved is not None
-        else fingerprint_of(current) == report.source_fingerprint_before
-    )
-    if not unchanged:
+    if saved is not None:
+        paths = changed_paths(saved.before, current, output=_created(saved))
+        if paths:
+            why.append(
+                f"the source in {report.source_root} has changed since it ran "
+                f"({_listed(paths)}); run it again"
+            )
+    elif fingerprint_of(current) != report.source_fingerprint_before:
         why.append(f"the source in {report.source_root} has changed since it ran; run it again")
     return why
+
+
+def _created(saved: command_reports.SourceFiles) -> set[str]:
+    """The paths a run created: in its after map and not its before. Only these are its
+    output; any other path new since is a change to the checkout (M2)."""
+    return set(saved.after or {}) - set(saved.before)
+
+
+def _listed(paths: Sequence[str], limit: int = 5) -> str:
+    """The first ``limit`` changed paths, and how many more: enough to see why a pass on
+    an assembled checkout went stale (validator round on #136, M5)."""
+    shown = ", ".join(paths[:limit])
+    return shown + (f" and {len(paths) - limit} more" if len(paths) > limit else "")
 
 
 def _event(brief: WorkBrief, write: _Write, session: TeamSession | None) -> TeamEvent:
@@ -701,11 +746,18 @@ def _clip(text: str, limit: int = _CLIP) -> str:
 _OPEN = "\n<aisquare-requirements>\n"
 _CLOSE = "\n</aisquare-requirements>"
 _MORE = "More are linked: `asq brief show` has them all."
-_RECORD = (
-    "Record a check: `asq exec --project PROJECT --task TASK -- CMD`, then "
-    "`asq brief evidence BRIEF R1 --task TASK --verdict pass --summary … --report ID`. "
-    "`asq brief check BRIEF` re-checks each pass against the source."
-)
+
+
+def record_hint(project_id: str, task_id: str, brief: str) -> str:
+    """How to record a check, with the real ids: what the session start and the
+    ``task done`` refusal both say. Written with placeholders, an agent copied
+    ``--task TASK`` and its own number, and the report named no task the evidence
+    could match (validator round on #136, M1)."""
+    return (
+        f"Record a check: `asq exec --project {project_id} --task {task_id} -- CMD`, then "
+        f"`asq brief evidence {brief} R1 --task {task_id} --verdict pass --summary … "
+        f"--report ID`. `asq brief check {brief}` re-checks each pass against the source."
+    )
 
 
 def session_requirements(
@@ -734,10 +786,14 @@ def session_requirements(
     rows = store.briefs(session.project_id)
     lines: list[str] = []
     linked_to: dict[str, str] = {}  # brief label → the first task of this session it links
+    linked_ids: dict[str, str] = {}  # brief label → that task's id
     omitted = False
     # Room for the lines themselves: the frame (tags, the "more" and "record" lines,
-    # their separators) is always reserved, so it can always be added.
-    room = budget - len(_OPEN) - len(_CLOSE) - len(_MORE) - len(_RECORD) - 2
+    # their separators) is always reserved, so it can always be added. The record line
+    # names the first linked brief, known only below: reserved at its longest label.
+    longest = max(len(t.id) for t in wanted)
+    reserved = len(record_hint(session.project_id, "t" * longest, "B" + "9" * 6))
+    room = budget - len(_OPEN) - len(_CLOSE) - len(_MORE) - reserved - 2
 
     def size() -> int:
         return sum(len(line) + 1 for line in lines)
@@ -758,6 +814,7 @@ def session_requirements(
                 brief = _parse(row)
             except ValidationError:
                 linked_to.setdefault(f"B{row.number}", team.task_label(own_task))
+                linked_ids.setdefault(f"B{row.number}", own_task.id)
                 if not add(f"B{row.number} names #{own_task.number} but cannot be read here."):
                     omitted = True
                     break
@@ -766,6 +823,7 @@ def session_requirements(
             if not linked:
                 continue
             linked_to.setdefault(brief.label, team.task_label(own_task))
+            linked_ids.setdefault(brief.label, own_task.id)
             states = {s.id: s for s in status_of(_own_part(brief, linked, own_task.id), tasks)}
             header = (
                 f"{team.task_label(own_task)} is linked to {brief.label} r{brief.revision} "
@@ -804,7 +862,8 @@ def session_requirements(
         return pointer if len(pointer) <= budget else ""
     if omitted:
         lines.append(_MORE)
-    lines.append(_RECORD)
+    first = next(iter(linked_to))
+    lines.append(record_hint(session.project_id, linked_ids[first], first))
     return _OPEN + "\n".join(lines) + _CLOSE
 
 
@@ -1208,10 +1267,12 @@ def _record(
                     f"report {report.id[:12]} was not captured for this board: run the check "
                     f"with `asq exec --project {brief.project_id} --task {task.id} -- …`"
                 )
-            if report.task_id is not None and report.task_id != task.id:
+            if report.task_id is not None and not _same_task(store, report.task_id, task):
                 raise ValueError(
-                    f"report {report.id[:12]} was captured for task {report.task_id}: "
-                    "it backs only that task"
+                    f"report {report.id[:12]} was captured for task {report.task_id}, not "
+                    f"{team.task_label(task)}: a report taken with --task backs only that task. "
+                    f"Run the check again with `asq exec --project {brief.project_id} "
+                    f"--task {task.id} -- …`"
                 )
             if verdict == "pass":
                 refusals = _pass_refusals(report, saved)

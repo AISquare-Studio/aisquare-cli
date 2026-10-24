@@ -128,7 +128,7 @@ def _render(view: BriefView) -> None:
     _out(f"{brief.label} {brief.id} r{brief.revision}: {brief.title}")
     for requirement in brief.requirements:
         status = statuses[requirement.id]
-        label = status.state + (" (manual)" if status.manual else "")
+        label = status.state + (" (manual)" if status.manual and status.state == "pass" else "")
         _out(f"  {requirement.id} r{requirement.revision} [{label}] {requirement.text}")
         if requirement.check:
             _out(f"      check: {requirement.check}")
@@ -152,7 +152,7 @@ def _render(view: BriefView) -> None:
             artifact = f" ({evidence.artifact})" if evidence.artifact else ""
             _out(
                 f"  {evidence.id} {evidence.requirement_id} r{evidence.requirement_revision} "
-                f"{what} [{evidence.kind}] by {evidence.task_id}: {evidence.summary}{artifact}"
+                f"{what}{_backing(evidence)} by {evidence.task_id}: {evidence.summary}{artifact}"
             )
     if brief.corrections:
         _out("Corrections:")
@@ -261,8 +261,11 @@ def update(
     ] = False,
     as_session: SessionRef = None,
 ) -> None:
-    """Correct a brief. Ids stay; what changed makes its evidence stale and reopens its
-    tasks in review or done. Re-sending what is already there changes nothing."""
+    """Correct a brief; its ids stay.
+
+    What changed makes its evidence stale,
+    and reopens its tasks in review or done.
+    Re-sending what is already there changes nothing."""
     changes = _pairs(requirement, "--requirement")
     checks = _pairs(check, "--check")
     if not (changes or checks or add or title or assumption or boundary) and not (
@@ -304,8 +307,10 @@ def link(
     ],
     as_session: SessionRef = None,
 ) -> None:
-    """Link a board task to requirements. A task can cover several; a requirement can
-    need several tasks, each proving its own part."""
+    """Link a board task to requirements.
+
+    A task can cover several requirements,
+    and a requirement can need several tasks, each proving its own part."""
     brief, linked, changed = _call(
         as_session, lambda: service.link(ref, task, requirement, session_ref=as_session)
     )
@@ -318,11 +323,19 @@ def _task(task: TeamTask) -> dict[str, object]:
     return {"task_id": task.id, "task_number": task.number}
 
 
+def _backing(evidence: BriefEvidence) -> str:
+    """How a record is backed, as its lines label it: ``[report]``, ``[manual]`` for an
+    artifact, and nothing for a finding no artifact shows (there is nothing to judge)."""
+    if evidence.kind == "manual" and evidence.artifact is None:
+        return ""
+    return f" [{evidence.kind}]"
+
+
 def _evidence_written(brief: WorkBrief, evidence: BriefEvidence, changed: bool) -> None:
     what = "finding" if evidence.finding else evidence.verdict
-    verb = f"recorded {evidence.requirement_id} {what} [{evidence.kind}]"
+    verb = f"recorded {evidence.requirement_id} {what}{_backing(evidence)}"
     _written(verb, brief, changed, {"evidence": evidence.model_dump(mode="json")})
-    if changed and not get_state().json_output and evidence.kind == "manual":
+    if changed and not get_state().json_output and evidence.artifact is not None:
         _out("  manual evidence: the validator judges it; nothing checked it here")
 
 
@@ -345,13 +358,14 @@ def evidence(
     ] = None,
     as_session: SessionRef = None,
 ) -> None:
-    """Record a check of a requirement by a linked task, backed by one of --report or
-    --artifact.
+    """Record a check by a linked task, backed by --report or --artifact.
 
-    A --report pass needs the run to have exited 0, uninterrupted, with its output kept
-    whole and its source unchanged before, after and now. Artifact-backed evidence is
-    MANUAL: recorded as such and labelled so everywhere, because only the validator can
-    judge it. A fail has `brief finding`'s effect."""
+    A --report pass needs the run to have exited 0, uninterrupted,
+    with its output kept whole,
+    and its source unchanged before the run, after it and now.
+    Artifact-backed evidence is MANUAL: recorded and labelled as such everywhere,
+    because only the validator can judge it.
+    A fail has `brief finding`'s effect."""
     narrowed: EvidenceVerdict = "pass" if verdict is Verdict.PASS else "fail"
     brief, recorded, changed = _call(
         as_session,
@@ -381,8 +395,10 @@ def check(
     ] = None,
     as_session: SessionRef = None,
 ) -> None:
-    """Check every requirement against the source now. Exits 1 while any is missing,
-    failed, blocked or stale."""
+    """Check every requirement against the source now.
+
+    Exits 1 while any is missing, failed, blocked, stale or unlinked (no live task),
+    and 2 for a --source-root that is not a checkout of the project."""
     result = _call(
         as_session, lambda: service.check(ref, source_root=source_root, session_ref=as_session)
     )
@@ -394,7 +410,7 @@ def check(
         against = f" against {result.source_root}" if result.source_root else ""
         _out(f"{brief.label} r{brief.revision} {brief.title}: {verdict}{against}")
         for status in result.requirements:
-            label = status.state + (" (manual)" if status.manual else "")
+            label = status.state + (" (manual)" if status.manual and status.state == "pass" else "")
             _out(f"  {status.id} [{label}] {status.reason}")
             for proof in status.tasks:
                 if proof.state != status.state:
@@ -422,9 +438,10 @@ def finding(
 ) -> None:
     """Record a failure found in a task's work on a requirement.
 
-    A task in review or done goes back to todo; one being worked on keeps its owner; a
-    dropped one stays dropped. Three distinct failures by one task on one revision of a
-    requirement block the task, so the manager re-plans it."""
+    A task in review or done goes back to todo,
+    one being worked on keeps its owner, and a dropped one stays dropped.
+    Three distinct failures by one task on one revision of a requirement
+    block the task, so the manager re-plans it."""
     brief, recorded, changed = _call(
         as_session,
         lambda: service.finding(

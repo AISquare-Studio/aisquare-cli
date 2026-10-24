@@ -1909,10 +1909,10 @@ def test_codex_reads_its_system_config_under_the_users(
     """Review r14 of #113, finding 9: ``/etc/codex/config.toml``, which 0.162.1 reads, was
     skipped: a system-wide ``writable_roots`` was missed, and a system-wide
     ``danger-full-access`` read as workspace-write."""
-    from aisquare.core.agent_adapters import codex as codex_module
+    from aisquare.core.agent_adapters import codex_config
 
     system = beyond_tmp / "etc-codex.toml"
-    monkeypatch.setattr(codex_module, "SYSTEM_CONFIG", system)
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", system)
     home, cwd = beyond_tmp / "codex-home", beyond_tmp / "w"
     home.mkdir()
     cwd.mkdir()
@@ -2071,11 +2071,11 @@ def test_codex_reads_its_managed_config_over_the_users(
 ) -> None:
     """Review r15 of #113, finding 4: ``/etc/codex/managed_config.toml``, which 0.162.1
     reads over every user's config, was skipped."""
-    from aisquare.core.agent_adapters import codex as codex_module
+    from aisquare.core.agent_adapters import codex_config
 
     managed = beyond_tmp / "managed.toml"
-    monkeypatch.setattr(codex_module, "MANAGED_CONFIG", managed)
-    monkeypatch.setattr(codex_module, "SYSTEM_CONFIG", beyond_tmp / "no-system.toml")
+    monkeypatch.setattr(codex_config, "MANAGED_CONFIG", managed)
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", beyond_tmp / "no-system.toml")
     home, cwd = beyond_tmp / "codex-home", beyond_tmp / "w"
     home.mkdir()
     cwd.mkdir()

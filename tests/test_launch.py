@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import paths, personas
-from aisquare.core.agent_adapters import claude_code, codex, register, unregister
+from aisquare.core.agent_adapters import claude_code, codex_config, register, unregister
 from aisquare.core.config import AppConfig, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, store_session
@@ -1056,8 +1056,8 @@ def test_launch_persona_on_codex_adds_it_to_the_operators_developer_instructions
     home.mkdir()
     (home / "config.toml").write_text('developer_instructions = "Answer in French."\n')
     monkeypatch.setenv("CODEX_HOME", str(home))
-    monkeypatch.setattr(codex, "SYSTEM_CONFIG", tmp_path / "no-system.toml")
-    monkeypatch.setattr(codex, "MANAGED_CONFIG", tmp_path / "no-managed.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "no-system.toml")
+    monkeypatch.setattr(codex_config, "MANAGED_CONFIG", tmp_path / "no-managed.toml")
 
     result = runner.invoke(app, ["launch", "coder", "--agent", "codex", "--persona", "skeptic"])
 

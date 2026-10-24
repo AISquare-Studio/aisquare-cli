@@ -21,8 +21,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import paths
-from aisquare.core.agent_adapters import codex as codex_module
-from aisquare.core.agent_adapters import register, unregister
+from aisquare.core.agent_adapters import codex_config, register, unregister
 from aisquare.core.agent_adapters.codex import TOOL_FEATURES
 from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.core.harness import role_cycle
@@ -298,8 +297,8 @@ def test_a_codex_captain_launches_confined_as_codex_spells_it(
         '[mcp_servers.mine]\ncommand = "/opt/mine"\n', encoding="utf-8"
     )
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
-    monkeypatch.setattr(codex_module, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
-    monkeypatch.setattr(codex_module, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
+    monkeypatch.setattr(codex_config, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")
     _captain_runs("codex")
 
     receipt = brain.start()

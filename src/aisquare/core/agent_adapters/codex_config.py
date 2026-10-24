@@ -1,12 +1,14 @@
 """Codex's config layers, as aisquare reads them for a launch, and its OpenTelemetry.
 
-The layers a Codex launch may read (the system's and the home's ``config.toml``, its ``-c``
-overrides, the ``-p`` profile's file and legacy table, a trusted project's ``.codex``), asked
-whether the operator set a key (:func:`operator_sets`: the fleet's ``-c`` settings stand down
-before one), whether they export OpenTelemetry already (:func:`operator_configured`) and what
-they keep out of the shells Codex's tools run in (:func:`tool_shell_excludes`). And
-:class:`CodexTelemetry`, the adapter's ``telemetry_reader``: those, and the attributes of its
-OTLP log records the receiver keeps (``services.native_telemetry``).
+The one reader of the layers a Codex launch may read (:func:`layers`: the system's and the
+home's ``config.toml``, the ``-p`` profile's file, a trusted project's ``.codex``, the
+administrator's managed config over them; :func:`read_layer`, lenient or strict), which the
+adapter (``codex.py``) asks too. Over them and its ``-c`` overrides: whether the operator
+set a key (:func:`operator_sets`: the fleet's ``-c`` settings stand down before one), whether
+they export OpenTelemetry already (:func:`operator_configured`) and what they keep out of
+the shells Codex's tools run in (:func:`tool_shell_excludes`). And :class:`CodexTelemetry`,
+the adapter's ``telemetry_reader``: those, and the attributes of its OTLP log records the
+receiver keeps (``services.native_telemetry``).
 """
 
 from __future__ import annotations
@@ -21,14 +23,26 @@ from typing import Any
 
 from aisquare.core.agent_adapters.types import option_values
 
+#: The system layer of Codex's config, under every user's: 0.162.1 reads it (in its binary,
+#: review r14 of #113, finding 9).
 SYSTEM_CONFIG = Path("/etc/codex/config.toml")
+#: The managed layer an administrator sets over every user's config, also in 0.162.1's
+#: binary (review r15 of #113, finding 4), under the launch's ``-c`` overrides alone. Its
+#: ``requirements.toml`` beside it only narrows what may be chosen, and its macOS MDM and
+#: cloud-managed layers are not files.
+MANAGED_CONFIG = Path("/etc/codex/managed_config.toml")
 
 
 class NativeConfigError(ValueError):
     """A config layer could contain operator settings we cannot safely inspect."""
 
 
-def _read_config(path: Path, layer: str) -> dict[str, Any]:
+def read_layer(path: Path, layer: str = "", *, strict: bool = False) -> dict[str, Any]:
+    """``path``'s TOML table, ``{}`` for one that is absent. One that cannot be read (not a
+    regular file, which a FIFO would block the read of; unreadable; not TOML; under a home
+    that is a file) is ``{}`` too, or, ``strict``, :class:`NativeConfigError` naming it as
+    Codex's ``layer`` config: what a check that must stand down before an operator's
+    setting it cannot see asks (:func:`operator_sets`, :func:`operator_configured`)."""
     problem: Exception
     cause: BaseException
     try:
@@ -43,10 +57,92 @@ def _read_config(path: Path, layer: str) -> dict[str, Any]:
         problem, cause = NotADirectoryError(f"{path.parent} is not a directory"), exc
     except (OSError, ValueError, RecursionError) as exc:
         problem = cause = exc
+    if not strict:
+        return {}
     raise NativeConfigError(
         f"Cannot inspect Codex {layer} config {path}: {problem}. "
         "Native telemetry configuration left unchanged."
     ) from cause
+
+
+def _plain_profile(profile: object) -> str | None:
+    """``profile`` where it can name a profile file beside the home (``<name>.config.toml``):
+    a plain file name, no NUL in it; else ``None``."""
+    if (
+        not isinstance(profile, str)
+        or not profile
+        or "\x00" in profile
+        or Path(profile).name != profile
+        or profile in {".", ".."}
+    ):
+        return None
+    return profile
+
+
+def selected_profile(args: Sequence[str]) -> str | None:
+    """The profile ``-p``/``--profile`` in ``args`` selects (the last), a plain name; else
+    ``None``. Measured on 0.162.1, only ``-p`` selects a profile file."""
+    return _plain_profile(next(reversed(option_values(args, "-p", "--profile")), None))
+
+
+def layers(
+    home: Path, args: Sequence[str], cwd: Path | None = None, *, strict: bool = False
+) -> list[dict[str, Any]]:
+    """The config tables Codex layers for a session launched with ``args`` from ``home``,
+    lowest first: :data:`SYSTEM_CONFIG`, ``config.toml`` in ``home``, the profile's file
+    beside it (:func:`selected_profile`), with ``cwd`` a trusted
+    project's own (:func:`project_files`) over them, and the administrator's
+    :data:`MANAGED_CONFIG` over every file. The ``-c`` overrides in ``args`` are over
+    them all and are not read here. Each read as :func:`read_layer` reads it, ``strict``
+    or not. Measured on 0.162.1 and 0.164.0: a trusted project's
+    ``developer_instructions`` won over ``config.toml``'s and the ``-p`` profile's, and the
+    folder nearest ``cwd`` over its root's."""
+    profile = selected_profile(args)
+    files = [("system", SYSTEM_CONFIG), ("user", home / "config.toml")]
+    if profile:
+        files.append((f"profile {profile!r}", home / f"{profile}.config.toml"))
+    files.append(("managed", MANAGED_CONFIG))
+    *below, managed = [read_layer(path, layer, strict=strict) for layer, path in files]
+    if cwd is None:
+        return [*below, managed]
+    project = [
+        read_layer(path, "project", strict=strict)
+        for path in project_files([*below, managed], args, cwd)
+    ]
+    return [*below, *project, managed]
+
+
+def project_files(trust: Sequence[Mapping[str, Any]], args: Sequence[str], cwd: Path) -> list[Path]:
+    """The project's own config files Codex layers for a session in ``cwd`` (``-C``/``--cd``
+    in ``args`` moved from it), outermost first, as measured on 0.162.1: only for a project
+    ``trust`` (its other layers) says ``trust_level = "trusted"`` of, by the real path of its
+    root; in a git checkout ``.codex/config.toml`` in its root and in every folder from
+    there down to ``cwd`` (none above the root, none for a trusted ``cwd`` under an
+    untrusted root), outside one in ``cwd`` alone (none in its parents)."""
+    for value in option_values(args, "-C", "--cd"):
+        cwd = cwd / value
+    here = Path(os.path.realpath(cwd))
+    walk = [here, *here.parents]
+    root = next((folder for folder in walk if (folder / ".git").exists()), here)
+    trusted = False
+    for table in trust:
+        projects = table.get("projects")
+        entry = projects.get(str(root)) if isinstance(projects, dict) else None
+        level = entry.get("trust_level") if isinstance(entry, dict) else None
+        if isinstance(level, str):
+            trusted = level == "trusted"
+    if not trusted:
+        return []
+    return [folder / ".codex" / "config.toml" for folder in reversed(walk[: walk.index(root) + 1])]
+
+
+def sets(table: object, key: str) -> bool:
+    """Whether ``table`` sets the dotted ``key``, whatever the value."""
+    for part in key.split("."):
+        if not isinstance(table, dict) or part not in table:
+            return False
+        table = table[part]
+    return True
 
 
 def _overrides(args: list[str]) -> list[tuple[str, dict[str, Any]]]:
@@ -74,29 +170,19 @@ def _overrides(args: list[str]) -> list[tuple[str, dict[str, Any]]]:
 def _layers(
     config_dir: Path, args: list[str], overrides: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """The config layers ``config_dir``'s launch may read (its system and user config,
-    ``overrides`` and the selected profile's file), with the profile that selects; a
-    reader asks them all, whatever their order. Measured on 0.162.1, only ``-p`` selects
-    a profile file: a ``profile`` key in config.toml loads none, ``-c profile=`` and a
-    legacy ``[profiles.<p>]`` table beside ``-p`` refuse the launch, so reading them
-    too only ever reads more."""
-    configs = [
-        _read_config(SYSTEM_CONFIG, "system"),
-        _read_config(config_dir / "config.toml", "user"),
-        *overrides,
-    ]
-    profile = next((config["profile"] for config in reversed(configs) if "profile" in config), None)
-    for value in option_values(args, "-p", "--profile"):
-        profile = value
-    if (
-        not isinstance(profile, str)
-        or "\x00" in profile
-        or Path(profile).name != profile
-        or profile in {".", ".."}
-    ):
-        profile = None
-    if profile:
-        configs.append(_read_config(config_dir / f"{profile}.config.toml", f"profile {profile!r}"))
+    """The config layers ``config_dir``'s launch may read (:func:`layers`, read strictly:
+    the system, user and selected profile's config, the administrator's managed config,
+    and ``overrides``), with the profile that selects; a reader asks them all, whatever
+    their order. Measured on 0.162.1, only ``-p`` selects a profile file: a ``profile``
+    key in config.toml loads none, ``-c profile=`` and a legacy ``[profiles.<p>]`` table
+    beside ``-p`` refuse the launch, so reading them too only ever reads more."""
+    configs = [*layers(config_dir, args, strict=True), *overrides]
+    named = next((config["profile"] for config in reversed(configs) if "profile" in config), None)
+    profile = selected_profile(args) or _plain_profile(named)
+    if profile and profile != selected_profile(args):
+        configs.append(
+            read_layer(config_dir / f"{profile}.config.toml", f"profile {profile!r}", strict=True)
+        )
     return configs, profile
 
 
@@ -111,7 +197,8 @@ def _selected(config: dict[str, Any], profile: str | None) -> list[dict[str, Any
 
 
 def operator_configured(config_dir: Path, args: list[str]) -> bool:
-    """Preserve exporters in native user/system config and the selected profile.
+    """Preserve exporters in native user/system config, the selected profile and the
+    administrator's managed config (:func:`_layers`).
 
     Codex ignores `otel` in project-local config. Other account homes and
     unselected profile files are not layers of this launch either.
@@ -125,21 +212,12 @@ def operator_configured(config_dir: Path, args: list[str]) -> bool:
 
 def operator_sets(config_dir: Path, args: list[str], key: str) -> bool:
     """Whether a config layer of this launch sets the dotted ``key``: an override in
-    ``args``, the system or user config, or the selected profile's file or legacy table
-    (:func:`_layers`), whatever the value. Raises :class:`NativeConfigError` for a layer
-    that cannot be read."""
-    path = key.split(".")
-
-    def sets(table: Any) -> bool:
-        for part in path:
-            if not isinstance(table, dict) or part not in table:
-                return False
-            table = table[part]
-        return True
-
+    ``args``, the system or user config, the selected profile's file or legacy table, or
+    the administrator's managed config (:func:`_layers`), whatever the value. Raises
+    :class:`NativeConfigError` for a layer that cannot be read."""
     overrides = [parsed for _, parsed in _overrides(args)]
     configs, profile = _layers(config_dir, args, overrides)
-    return any(sets(table) for config in configs for table in _selected(config, profile))
+    return any(sets(table, key) for config in configs for table in _selected(config, profile))
 
 
 TOOL_SHELL_POLICY = "shell_environment_policy"
@@ -172,7 +250,7 @@ def tool_shell_excludes(config_dir: Path, args: list[str], cwd: Path) -> list[st
         cwd = cwd / value
     for directory in (cwd, *cwd.parents):
         if (directory / ".codex").is_dir():
-            configs.append(_read_config(directory / ".codex" / "config.toml", "project"))
+            configs.append(read_layer(directory / ".codex" / "config.toml", "project", strict=True))
     patterns: list[str] = []
     for config in configs:
         for table in _selected(config, profile):

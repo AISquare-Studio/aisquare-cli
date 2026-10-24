@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from aisquare.core.agent_adapters import codex as codex_module
+from aisquare.core.agent_adapters import codex_config
 from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.services.captain import brain
 from tests import test_fleet_service as fleet_suite
@@ -58,8 +58,8 @@ def test_a_server_only_the_spawners_home_names_is_switched_off_where_the_window_
         '[mcp_servers.linear]\ncommand = "/opt/linear"\n', encoding="utf-8"
     )
     monkeypatch.setenv("CODEX_HOME", str(spawners))
-    monkeypatch.setattr(codex_module, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
-    monkeypatch.setattr(codex_module, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
+    monkeypatch.setattr(codex_config, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")
     config = load_config()
     config.team.profiles["captain"] = RoleLaunchProfile(agent="codex")
     save_config(config)

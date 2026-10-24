@@ -38,7 +38,7 @@ from aisquare.cli.ui.views.agent import key_spellings
 from aisquare.cli.ui.views.app_settings import launch_line
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import harness, launch_seal
-from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.agent_adapters.types import AgentAdapter, prepare_store, screen_of, store_dir
 from aisquare.core.config import (
     REVIEWER_ARGS,
@@ -998,6 +998,47 @@ def test_a_fleet_codex_window_starts_with_no_update_dialog_unless_the_operator_a
     window = {"CODEX_HOME": str(home), "AISQUARE_FLEET_AGENT": "agt-1"}
     given = list(agent_launch.fleet_settings(selected, window, args).args)
     assert (["-c", "check_for_update_on_startup=false"] in _pairs(given)) is added
+
+
+def test_a_setting_the_administrators_managed_config_sets_is_left_to_it_and_said(
+    codex_agent: tuple[Codex, TeamTask],
+    tmux: FakeTmux,  # noqa: F811
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r18 of #113, finding 14: ``operator_sets`` read no
+    ``/etc/codex/managed_config.toml``, so a fleet window's ``-c
+    check_for_update_on_startup=false`` went over an administrator's ``true`` (a ``-c`` is
+    over the managed layer too). It is left as they set it, and the window's launch says
+    so; the setting they did not make is still added."""
+    managed = tmp_path / "etc" / "managed_config.toml"
+    managed.parent.mkdir()
+    managed.write_text("check_for_update_on_startup = true\n", encoding="utf-8")
+    monkeypatch.setattr(codex_config, "MANAGED_CONFIG", managed)
+    codex, _ = codex_agent
+    spawned = tmux.spawned[-1]
+    environment = spawned["env"]
+    assert isinstance(environment, dict)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    command = _command(tmux)
+
+    result = runner.invoke(app, command[command.index("launch") :])
+    codex.become()
+
+    assert result.exit_code == 0, result.output
+    argv: list[str] = execute.call_args.args[1]
+    assert ["-c", "check_for_update_on_startup=false"] not in _pairs_anywhere(argv)
+    assert ["-c", "notice.hide_rate_limit_model_nudge=true"] in _pairs_anywhere(argv)
+    assert "check_for_update_on_startup is left as the administrator's" in result.output
+    assert str(managed) in result.output
+
+
+def _pairs_anywhere(argv: list[str]) -> list[list[str]]:
+    return [argv[at : at + 2] for at in range(len(argv))]
 
 
 def _waiting_manager_on(

@@ -44,6 +44,7 @@ from aisquare.core import claude_sharing, harness
 from aisquare.core.agent_adapters import (
     adapter_for_binary,
     adapters,
+    codex_config,
     get_adapter,
     register,
     unregister,
@@ -767,8 +768,8 @@ def test_a_tools_only_session_loads_no_server_of_the_operators_and_keeps_what_it
     agent reads servers (:func:`_operator_server`) is kept out (:data:`EXPECTED_OPERATOR_OFF`)
     and the captain's is never switched off; and the variables ``inherit`` names reach the
     server (:func:`_inherits`). An adapter that cannot be confined so answers ``None``."""
-    monkeypatch.setattr(codex_adapter, "SYSTEM_CONFIG", tmp_path / "system.toml")
-    monkeypatch.setattr(codex_adapter, "MANAGED_CONFIG", tmp_path / "managed.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "MANAGED_CONFIG", tmp_path / "managed.toml")
     home, cwd = _home(adapter, tmp_path), tmp_path / "brain"
     cwd.mkdir()
     _operator_server(adapter, home, cwd)

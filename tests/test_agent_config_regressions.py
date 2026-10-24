@@ -622,6 +622,41 @@ def test_an_exporter_in_the_home_of_the_account_the_launch_runs_on_is_kept(
     assert start.call_count == 1
 
 
+def test_an_exporter_the_administrators_managed_config_sets_is_kept(
+    tmp_path: Path,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r18 of #113, finding 14: ``operator_configured`` read no
+    ``/etc/codex/managed_config.toml``, so a launch added its own ``-c otel.*`` exporter
+    over an administrator's, a ``-c`` being over the managed layer. It is kept, the launch
+    says so and starts no receiver; one that cannot be read may set one, and stands down."""
+    config = load_config()
+    config.explainability.enabled = config.explainability.ship = True
+    save_config(config)
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    managed = tmp_path / "managed_config.toml"
+    managed.write_text('[otel]\nexporter = "none"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "MANAGED_CONFIG", managed)
+    monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
+    start = Mock(return_value=(LaunchPart(("-c", "fixture.receiver=true")), "receiver started"))
+    monkeypatch.setattr(native_telemetry, "start_receiver", start)
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", Mock())
+
+    result = runner.invoke(app, ["launch", "coder", "--agent", "codex"])
+
+    assert result.exit_code == 0, result.output
+    assert "keeps your configured exporter" in result.output and not start.called
+    assert codex_config.operator_configured(home, [])
+    managed.unlink()
+    managed.mkdir()
+    with pytest.raises(codex_config.NativeConfigError, match="managed config"):
+        codex_config.operator_configured(home, [])
+
+
 def test_nul_profile_from_native_file_does_not_break_telemetry_inspection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

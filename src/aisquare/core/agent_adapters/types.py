@@ -53,11 +53,14 @@ class LaunchPart:
     settings layer (:meth:`AgentAdapter.settings_layer`), each where the agent takes it.
     Claude Code's and Codex's slots answer arguments (``--mcp-config``, ``-c``); an agent
     whose only seams are its environment and its settings files (Gemini CLI's
-    ``mcpServers``, ``experimental.enableAgents``, ``CLI_TITLE``) answers those."""
+    ``mcpServers``, ``experimental.enableAgents``, ``CLI_TITLE``) answers those. ``notes``
+    are what the launch prints of it, as a receipt: a setting it left to the operator's
+    administrator (Codex's ``fleet_settings`` under a managed config that sets one)."""
 
     args: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict)
     settings: Mapping[str, Any] = field(default_factory=dict)
+    notes: tuple[str, ...] = ()
 
     def __bool__(self) -> bool:
         return bool(self.args or self.env or self.settings)

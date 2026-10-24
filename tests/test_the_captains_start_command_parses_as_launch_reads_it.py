@@ -18,7 +18,7 @@ from typer.main import get_command
 
 from aisquare.cli.app import app
 from aisquare.core import agent_adapters, launch_seal, paths
-from aisquare.core.agent_adapters import codex as codex_module
+from aisquare.core.agent_adapters import codex_config
 from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import TEAM_HUB_ENV_VAR
 from aisquare.services import fleet as fleet_service
@@ -69,8 +69,8 @@ def captain_on_its_agent(
     home = tmp_path / "agent-home"
     home.mkdir()
     monkeypatch.setenv(adapter.home_env, str(home))
-    monkeypatch.setattr(codex_module, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
-    monkeypatch.setattr(codex_module, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
+    monkeypatch.setattr(codex_config, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")
     config = load_config()
     config.team.profiles["captain"] = RoleLaunchProfile(agent=agent)
     save_config(config)

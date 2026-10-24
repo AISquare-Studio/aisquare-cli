@@ -672,15 +672,12 @@ def launch(
     )
     # The launch slots (``LaunchPart``): their arguments here, in this order, their environment
     # into the agent's, and their settings, with the spawn's, as its one settings layer.
+    fleet_part = agent_launch.fleet_settings(selected, env, arguments.argv)
+    for note in fleet_part.notes:
+        stderr_console().print(note, markup=False)
     # Settings its one layer cannot say (a null, a key the agent would split) are refused.
     try:
-        launched = agent_launch.compose(
-            selected,
-            env,
-            native_trace,
-            agent_launch.fleet_settings(selected, env, arguments.argv),
-            aisquare_server,
-        )
+        launched = agent_launch.compose(selected, env, native_trace, fleet_part, aisquare_server)
     except ValueError as exc:
         fail(str(exc), error="agent_configuration")
     argv = [

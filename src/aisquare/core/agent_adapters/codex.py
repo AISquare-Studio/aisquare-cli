@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Any
 
 from aisquare.core import harness
+from aisquare.core.agent_adapters import codex_config
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
@@ -191,16 +192,9 @@ _SCOPES: dict[str, WriteScope] = {"read-only": "read_only", "workspace-write": "
 #: the aisquare store added (:meth:`CodexAdapter.store_access`).
 PERMISSION_PROFILE = "aisquare"
 
-#: The system layer of Codex's config, under every user's (``services.native_telemetry``
-#: reads it too): 0.162.1 reads it (in its binary, review r14 of #113, finding 9).
-SYSTEM_CONFIG = Path("/etc/codex/config.toml")
 #: What a fleet window's Codex launches with (:meth:`CodexAdapter.fleet_settings`), each
 #: unless a config layer of the operator's sets its key.
 FLEET_SETTINGS = ("notice.hide_rate_limit_model_nudge=true", "check_for_update_on_startup=false")
-#: The managed layer an administrator sets over every user's config, also in 0.162.1's
-#: binary (review r15 of #113, finding 4). Its ``requirements.toml`` beside it only
-#: narrows what may be chosen, and its macOS MDM and cloud-managed layers are not files.
-MANAGED_CONFIG = Path("/etc/codex/managed_config.toml")
 _BUILT_IN_PROFILES = {"read_only": ":read-only", "workspace": ":workspace"}
 #: ``-c`` keys (and their tables) that choose the sandbox: given natively, the sandbox is
 #: the operator's, and Codex refuses ``sandbox_mode`` beside ``default_permissions``.
@@ -685,7 +679,7 @@ class CodexAdapter:
         from aisquare.core.agent_adapters.lasting import fetches_aisquare, runs_aisquare
 
         path = agents.dir_identity(home / "config.toml")
-        config = _read_toml(path)
+        config = codex_config.read_layer(path)
         servers = config.get("mcp_servers")
         plugins = config.get("plugins")
         found = [
@@ -922,7 +916,7 @@ class CodexAdapter:
         """Codex's own browser, as ``config.toml`` in ``home`` has it: the ``browser_use``
         feature (stable and on unless ``[features] browser_use = false``, 0.162.1) and each
         enabled ``browser@<marketplace>`` plugin (``browser@openai-bundled``)."""
-        config = _read_toml(home / "config.toml")
+        config = codex_config.read_layer(home / "config.toml")
         features = config.get("features")
         found = []
         if not (isinstance(features, dict) and features.get("browser_use") is False):
@@ -1121,10 +1115,10 @@ class CodexAdapter:
         self, args: Sequence[str], cwd: Path, home: Path | None = None
     ) -> SandboxWrites | None:
         """What Codex's sandbox may write for a session with ``args`` in ``cwd``, read as
-        Codex layers its settings: the system's :data:`SYSTEM_CONFIG`, ``config.toml`` in
-        ``home`` (its Codex home; ``None`` is this shell's), the profile ``-p`` selects
-        (``<name>.config.toml`` beside it), the administrator's :data:`MANAGED_CONFIG` over
-        them, then ``args`` (review r13 of #113, finding 6; r14, finding 9; r15, finding
+        Codex layers its settings (``codex_config.layers``): the system's config,
+        ``config.toml`` in ``home`` (its Codex home; ``None`` is this shell's), the profile
+        ``-p`` selects (``<name>.config.toml`` beside it), the administrator's managed config
+        over them, then ``args`` (review r13 of #113, finding 6; r14, finding 9; r15, finding
         4). ``None`` with no sandbox (``--sandbox danger-full-access``, ``sandbox_mode =
         "danger-full-access"``, the bypass flags). The sandbox is ``--sandbox``, else a
         ``-c sandbox_mode``, else the store's profile in ``args`` (which holds over a
@@ -1142,11 +1136,7 @@ class CodexAdapter:
         if any(arg in ("--dangerously-bypass-approvals-and-sandbox", "--yolo") for arg in args):
             return None
         codex_home = home if home is not None else _codex_home(None)
-        files = [_read_toml(SYSTEM_CONFIG), _read_toml(codex_home / "config.toml")]
-        profile = next(reversed(option_values(args, "-p", "--profile")), None)
-        if profile and Path(profile).name == profile and profile not in {".", ".."}:
-            files.append(_read_toml(codex_home / f"{profile}.config.toml"))
-        files.append(_read_toml(MANAGED_CONFIG))  # over the user's, the files' last word
+        files = codex_config.layers(codex_home, args)  # the managed one the files' last word
         settings: dict[str, str] = {}
         for value in option_values(args, "-c", "--config"):
             parsed = config_assignment(value)
@@ -1298,25 +1288,33 @@ class CodexAdapter:
     def fleet_settings(self, home: Path, args: Sequence[str]) -> LaunchPart:
         """``-c`` for each of :data:`FLEET_SETTINGS` no config layer of the operator's sets
         (``codex_config.operator_sets``: their overrides in ``args``, the system and user
-        config of ``home``, its ``-p`` profile; a layer that cannot be read may set it, and is
-        left to): ``notice.hide_rate_limit_model_nudge=true`` keeps its ``Switch to
-        gpt-6-luna for lower credit usage?`` dialog, opened past a turn near the five-hour
-        limit while its hooks say waiting, out of a pane the fleet types into (measured on
-        0.162.1), and ``check_for_update_on_startup=false`` its ``Update available`` dialog
-        out of a starting pane: an npm-installed 0.162.1 opened it once 0.163.0 was out (CI
-        on 72a88fc0), its first choice, which an Enter picks, running ``npm install -g
-        @openai/codex``."""
-        from aisquare.core.agent_adapters import codex_config
-
+        config of ``home``, its ``-p`` profile, the administrator's managed config; a layer
+        that cannot be read may set it, and is left to): ``notice.
+        hide_rate_limit_model_nudge=true`` keeps its ``Switch to gpt-6-luna for lower credit
+        usage?`` dialog, opened past a turn near the five-hour limit while its hooks say
+        waiting, out of a pane the fleet types into (measured on 0.162.1), and
+        ``check_for_update_on_startup=false`` its ``Update available`` dialog out of a
+        starting pane: an npm-installed 0.162.1 opened it once 0.163.0 was out (CI on
+        72a88fc0), its first choice, which an Enter picks, running ``npm install -g
+        @openai/codex``. A ``-c`` is over the managed config too, so one the administrator
+        set is left as they set it, with a note that says so (review r18 of #113, 14)."""
         given: list[str] = []
+        notes: list[str] = []
+        managed = codex_config.read_layer(codex_config.MANAGED_CONFIG)
         for setting in FLEET_SETTINGS:
+            key, _, value = setting.partition("=")
             try:
-                if codex_config.operator_sets(home, list(args), setting.partition("=")[0]):
+                if codex_config.operator_sets(home, list(args), key):
+                    if codex_config.sets(managed, key):
+                        notes.append(
+                            f"{self.label}'s {key} is left as the administrator's "
+                            f"{codex_config.MANAGED_CONFIG} sets it, not {value}"
+                        )
                     continue
             except codex_config.NativeConfigError:
                 continue
             given += ["-c", setting]
-        return LaunchPart(tuple(given))
+        return LaunchPart(tuple(given), notes=tuple(notes))
 
     def settings_layer(self, settings: Mapping[str, Any], file: Path) -> LaunchPart | None:
         """Its ``-c`` overrides, the top layer of its config, one a leaf (``a.b=<TOML>``):
@@ -1538,76 +1536,25 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
 
 
-def _user_layers(home: Path, args: Sequence[str]) -> list[Path]:
-    """The config files Codex layers for a session launched with ``args`` from ``home``,
-    lowest first, but its project's: the system's :data:`SYSTEM_CONFIG`, ``config.toml`` in
-    ``home``, the profile ``-p`` selects (``<name>.config.toml`` beside it), then the
-    administrator's :data:`MANAGED_CONFIG`."""
-    files = [SYSTEM_CONFIG, home / "config.toml"]
-    profile = next(reversed(option_values(args, "-p", "--profile")), None)
-    if profile and Path(profile).name == profile and profile not in {".", ".."}:
-        files.append(home / f"{profile}.config.toml")
-    files.append(MANAGED_CONFIG)
-    return files
-
-
 def _developer_instructions(home: Path, args: Sequence[str], cwd: Path) -> str | None:
     """The operator's own ``developer_instructions``, as Codex layers its config for a session
-    launched with ``args`` from ``home`` in ``cwd`` (:func:`_config_layers`), the last that
+    launched with ``args`` from ``home`` in ``cwd`` (``codex_config.layers``), the last that
     sets it a string winning; ``None`` when none does."""
     found = None
-    for table in _config_layers(home, args, cwd):
+    for table in codex_config.layers(home, args, cwd):
         value = table.get("developer_instructions")
         if isinstance(value, str):
             found = value
     return found
 
 
-def _project_layers(
-    trust: Sequence[Mapping[str, Any]], args: Sequence[str], cwd: Path
-) -> list[Path]:
-    """The project's own config files Codex layers for a session in ``cwd`` (``-C``/``--cd``
-    in ``args`` moved from it), outermost first, as measured on 0.162.1: only for a project
-    ``trust`` (its user layers, :func:`_user_layers`) says ``trust_level = "trusted"`` of, by
-    the real path of its root; in a git checkout ``.codex/config.toml`` in its root and in
-    every folder from there down to ``cwd`` (none above the root, none for a trusted ``cwd``
-    under an untrusted root), outside one in ``cwd`` alone (none in its parents)."""
-    for value in option_values(args, "-C", "--cd"):
-        cwd = cwd / value
-    here = Path(os.path.realpath(cwd))
-    walk = [here, *here.parents]
-    root = next((folder for folder in walk if (folder / ".git").exists()), here)
-    trusted = False
-    for table in trust:
-        projects = table.get("projects")
-        entry = projects.get(str(root)) if isinstance(projects, dict) else None
-        level = entry.get("trust_level") if isinstance(entry, dict) else None
-        if isinstance(level, str):
-            trusted = level == "trusted"
-    if not trusted:
-        return []
-    return [folder / ".codex" / "config.toml" for folder in reversed(walk[: walk.index(root) + 1])]
-
-
-def _config_layers(home: Path, args: Sequence[str], cwd: Path) -> list[dict[str, Any]]:
-    """The config tables Codex layers for a session launched with ``args`` from ``home`` in
-    ``cwd``, lowest first: its user layers (:func:`_user_layers`) with its project's
-    (:func:`_project_layers`) over them and under the administrator's :data:`MANAGED_CONFIG`.
-    Measured on 0.162.1 and 0.164.0: a trusted project's ``developer_instructions`` won
-    over ``config.toml``'s and the ``-p`` profile's, and the folder nearest ``cwd`` over its
-    root's."""
-    user = [_read_toml(path) for path in _user_layers(home, args)]
-    *below, managed = user
-    return [*below, *map(_read_toml, _project_layers(user, args, cwd)), managed]
-
-
 def _mcp_servers(home: Path, args: Sequence[str], cwd: Path) -> list[str]:
     """The MCP servers Codex's config hands a session launched with ``args`` from ``home`` in
     ``cwd``, by name, in the order its layers first name them: every ``mcp_servers`` table of
-    its config layers (:func:`_config_layers`), then its ``-c`` overrides in ``args``
+    its config layers (``codex_config.layers``), then its ``-c`` overrides in ``args``
     (``mcp_servers.<name>.…``, or a whole ``mcp_servers`` inline table)."""
     names: dict[str, None] = {}
-    for table in _config_layers(home, args, cwd):
+    for table in codex_config.layers(home, args, cwd):
         servers = table.get("mcp_servers")
         if isinstance(servers, dict):
             names.update(
@@ -1682,7 +1629,7 @@ def _codex_home(config_dir: Path | None) -> Path:
 def _enabled_install(home: Path) -> tuple[str, Path, dict[str, Any]] | None:
     """``(plugin id, installed copy, config.toml's table)`` for the first ``aisquare@
     <marketplace>`` that ``home`` enables and has a copy of, else ``None``."""
-    config = _read_toml(home / "config.toml")
+    config = codex_config.read_layer(home / "config.toml")
     tables = config.get("plugins")
     if not isinstance(tables, dict):
         return None
@@ -1713,17 +1660,6 @@ def _plugin_trusted(config: Mapping[str, Any], plugin_id: str) -> bool:
         if not isinstance(trusted, str) or not trusted:
             return False
     return True
-
-
-def _read_toml(path: Path) -> dict[str, Any]:
-    """``path``'s TOML table, or ``{}``: absent, not a file, unreadable, or not TOML."""
-    try:
-        if not path.is_file():  # a FIFO would block the read
-            return {}
-        with path.open("rb") as handle:
-            return tomllib.load(handle)
-    except (OSError, ValueError, RecursionError):
-        return {}
 
 
 def _manifest(root: Path) -> Path:

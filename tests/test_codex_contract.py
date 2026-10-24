@@ -18,8 +18,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents
-from aisquare.core.agent_adapters import codex as codex_module
-from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.agent_adapters import get_adapter as _get_adapter
 from aisquare.core.agent_adapters.codex import TOOL_FEATURES, TUI_TOOLS_SERVER, CodexAdapter
 from aisquare.core.agent_adapters.codex_transcript import CodexTranscript
@@ -726,8 +725,8 @@ def _settings(only: list[str]) -> dict[str, object]:
 def layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Codex's system and managed layers, under ``tmp_path`` (none there yet); returns a
     Codex home beside them."""
-    monkeypatch.setattr(codex_module, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
-    monkeypatch.setattr(codex_module, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "etc" / "config.toml")
+    monkeypatch.setattr(codex_config, "MANAGED_CONFIG", tmp_path / "etc" / "managed.toml")
     home = tmp_path / "codex-home"
     home.mkdir()
     return home
@@ -822,11 +821,11 @@ def test_every_server_of_the_operators_that_codex_would_load_is_switched_off(
     above the root), outside git ``cwd``'s alone. A server no layer of this launch names is
     not, since ``enabled=false`` on a name Codex does not have makes it refuse its config
     ("invalid transport")."""
-    _server(codex_module.SYSTEM_CONFIG, "system")
+    _server(codex_config.SYSTEM_CONFIG, "system")
     _server(layers / "config.toml", "home", "captain")
     _server(layers / "work.config.toml", "profiled")
     _server(layers / "other.config.toml", "unselected")
-    _server(codex_module.MANAGED_CONFIG, "managed", "home")
+    _server(codex_config.MANAGED_CONFIG, "managed", "home")
     top = tmp_path / "top"
     repo, cwd = top / "repo", top / "repo" / "mid" / "cwd"
     cwd.mkdir(parents=True)

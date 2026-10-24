@@ -293,6 +293,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **App settings shows the bare minimum, and Remote and the Captain live in it** (#41,
+  the owner's placement): a third tab, *Remote*, is Remote control, with Turn on/off,
+  the ngrok token field when one is needed and the link, QR and password while on in
+  view, and the rest under its *Advanced*. The *Captain (experimental)* box tops *Agent
+  settings*, still live with no restart and greyed while
+  `AISQUARE_EXPERIMENTAL_CAPTAIN` decides. *Agent settings* shows that box, how launches
+  pick an account and what a usage limit does; the roles, the fleet and the rest of the
+  accounts' rules fold under **Advanced**, which a *Save* refused for one of them opens.
+  *User preferences* folds its note on setting a preference from a shell. Both follow the
+  form's look: a bold heading with a dim line, rows, dim help lines. The hub links to
+  each (*Remote control*, *Captain*), so there is still one way in, and `R` still opens
+  the Remote panel. Save, Reload and Reset all hide on *Remote*, which acts at once; the
+  Captain box now follows *Reload* and *Reset all*, which left it, the ★ and the
+  Captain section as they were until a restart.
 - **`fleet spawn --task` with no `--prompt` tells the agent to start on its
   task** (#32; the owner's decision, board seq 671): its first message names the
   task and says to read it with `aisquare task show N`, then do what its

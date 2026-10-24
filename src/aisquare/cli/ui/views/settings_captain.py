@@ -11,26 +11,31 @@ took ``config set`` and a restart, which the owner could not find.
 set, the box shows the state it forces, greyed, and one line says why: a tick would save
 a setting the variable overrides.
 
-Self-contained, so a later Settings layout moves it with the line that mounts it
-(``views.settings_hub``).
+It tops App settings' *Agent settings* tab (the owner's placement, #41), in that form's
+format: a section heading, the box as a row, a dim help line, styled by the form's own
+``.section``/``.row``/``.about`` rules. It saves at once, as it did, not with the form's
+*Save*; the form's Reload and Reset all re-read the file under it
+(:meth:`CaptainToggle.reread`), so the box and the shell follow what the file holds.
 """
 
 from __future__ import annotations
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import Checkbox, Static
 
 from aisquare.core import experimental
-from aisquare.core.config import load_config, save_config
+from aisquare.core.config import AppConfig, load_config, save_config
 
 ABOUT = (
     "the home-level agent that unblocks your agents: ★ beside Fleet, and its section above "
     "the projects"
 )
 """The line under the box while the config decides."""
+TITLE = ("Captain", "experimental")
+"""The section heading: its name, and what it is, dim (``app_settings.section_title``)."""
 
 
 def forced_text(on: bool) -> str:
@@ -54,25 +59,42 @@ class CaptainToggle(Vertical):
     """*Captain (experimental)*: a box that saves the setting and posts :class:`CaptainSwitched`."""
 
     DEFAULT_CSS = """
-    CaptainToggle { height: auto; margin-bottom: 1; }
-    CaptainToggle #captain-toggle-title { height: 1; text-style: bold; margin: 1 0 1 0; }
-    CaptainToggle #captain-toggle-about { height: auto; color: $text-muted; }
+    CaptainToggle { height: auto; }
     """
 
     def compose(self) -> ComposeResult:
+        # Here, not at the top: App settings, which holds the form's format, mounts this.
+        from aisquare.cli.ui.views.app_settings import section_title
+
         forced = experimental.captain_forced()
         # What the shell shows now, which a config set from a shell meanwhile has not moved.
         shown = bool(getattr(self.app, "captain_on", experimental.captain_enabled()))
-        yield Static(Text("Captain"), id="captain-toggle-title")
-        yield Checkbox(
-            "Captain (experimental)",
-            value=shown if forced is None else forced,
-            disabled=forced is not None,
-            id="captain-toggle",
-            compact=True,
-        )
+        yield Static(section_title(*TITLE), id="captain-toggle-title", classes="section")
+        with Horizontal(classes="row preference"):
+            yield Checkbox(
+                "Captain (experimental)",
+                value=shown if forced is None else forced,
+                disabled=forced is not None,
+                id="captain-toggle",
+                compact=True,
+            )
         about = ABOUT if forced is None else forced_text(forced)
-        yield Static(Text(about), id="captain-toggle-about")
+        yield Static(Text(about), id="captain-toggle-about", classes="about")
+
+    def reread(self, config: AppConfig) -> None:
+        """The form re-read the file (Reload, Save, Reset all): the box shows what it holds,
+        and the shell follows when that moved the switch — Reset all turned a ticked captain
+        off in the file while the ★ and the Captain section stayed until a restart. While
+        the variable decides, the box keeps the state it forces."""
+        if experimental.captain_forced() is not None:
+            return
+        box = self.query_one("#captain-toggle", Checkbox)
+        with self.prevent(Checkbox.Changed):
+            box.value = config.experimental.captain
+        if config.experimental.captain != bool(getattr(self.app, "captain_on", box.value)):
+            # To the app itself, not bubbled: Reset all re-reads from its dialog's callback,
+            # which runs as the app, and Textual never bubbles a message up to its sender.
+            self.app.post_message(CaptainSwitched(config.experimental.captain))
 
     def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
         if event.checkbox.id != "captain-toggle":

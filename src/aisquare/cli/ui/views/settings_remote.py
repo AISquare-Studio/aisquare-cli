@@ -32,7 +32,9 @@ The controller is the model and every control calls it and repaints from it, on 
 one-second tick while the section shows, as the modal does; the public link arrives from
 ngrok's log on a thread of the controller's. What Remote needs is looked at on a thread
 worker (:meth:`RemoteSection.remote_check`). Self-contained, so a later Settings layout
-moves it with the line that mounts it (``views.settings_hub``).
+moves it with the line that mounts it: App settings' own *Remote* tab now (the owner's
+placement, #41), whose ``.section`` and ``.about`` rules give its heading and help lines
+that form's format.
 
 :class:`RemoteChip` is the sidebar's ``📡 remote · N devices`` while Remote is on: a click
 opens the ``R`` modal.
@@ -84,6 +86,8 @@ CHECK_WORKER = "settings-remote-check"
 """The worker that looks at what Remote needs (:func:`remote_needs`)."""
 
 OFF_ABOUT = "the fleet on your phone: a link, its QR code and a password"
+TITLE = ("Remote control", "the fleet on your phone")
+"""The section heading: its name, and what it is, dim (``app_settings.section_title``)."""
 TOKEN_TITLE = "Paste your ngrok token"
 REPLACE_TITLE = "Replace your ngrok token"
 TOKEN_ABOUT = "Remote reaches your phone through ngrok: a free account's token, once."
@@ -166,7 +170,6 @@ class RemoteSection(Vertical):
     DEFAULT_CSS = """
     RemoteSection { height: auto; }
     RemoteSection Vertical { height: auto; }
-    RemoteSection #settings-remote-title { height: 1; text-style: bold; margin: 1 0 1 0; }
     RemoteSection .remote-about { height: auto; color: $text-muted; }
     RemoteSection .remote-buttons { height: auto; margin: 1 0 0 0; }
     RemoteSection .remote-buttons Button { margin: 0 2 0 0; }
@@ -216,9 +219,12 @@ class RemoteSection(Vertical):
     # --- layout -----------------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Static(Text("Remote control"), id="settings-remote-title")
+        # Here, not at the top: App settings, which holds the form's format, mounts this.
+        from aisquare.cli.ui.views.app_settings import section_title
+
+        yield Static(section_title(*TITLE), id="settings-remote-title", classes="section")
         with Vertical(id="settings-remote-off"):
-            yield Static(Text(OFF_ABOUT), id="settings-remote-about", classes="remote-about")
+            yield Static(Text(OFF_ABOUT), id="settings-remote-about", classes="remote-about about")
             yield NgrokMissing(id="settings-remote-ngrok-missing")
         with Vertical(id="settings-remote-on-head"):
             yield Static("", id="settings-remote-state")

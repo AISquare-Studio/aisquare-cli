@@ -1,12 +1,23 @@
 """App settings: the machine-wide settings, whatever project is open.
 
-Two tabs. *Agent settings* (shown first) is everything ``~/.aisquare/config.toml``
+Three tabs. *Agent settings* (shown first) is everything ``~/.aisquare/config.toml``
 holds that is not about one project: permission mode, worktree, persona and account
 per role, the fleet's escape key, agent cap, worktree root and native-teams switch,
 how launches pick an account, what a usage limit does and what the accounts share.
 *User preferences* is ``[ui]``, how ``asq`` shows things to the person at it: today
-*Always show project directory* (``ui.always_show_project_path``). Save, Reload and
-Reset all sit under the tabs and act on both. The project's own
+*Always show project directory* (``ui.always_show_project_path``). *Remote* is Remote
+control (``views.settings_remote``). Save, Reload and Reset all sit under the tabs and
+act on the first two; they hide on *Remote*, whose every control acts at once.
+
+**What shows, and what is folded** (#41, the owner's D8: the bare minimum that works in
+view, the rest a click away). *Agent settings* shows the *Captain (experimental)* box on
+top (``views.settings_captain``: it saves at once, as it did on the hub) and how launches
+pick an account and what a usage limit does; its *Advanced* holds the roles, the fleet
+and the rest of the accounts' rules. *User preferences* shows its switch, and folds the
+note on setting it from a shell. *Remote* shows Turn on/off, the token field when one is
+needed and the link, QR and password while on; its own *Advanced* holds the rest. A
+Save refused for a folded field opens that *Advanced*, so the reason is never out of
+sight. The project's own
 Settings tab keeps what IS the project's (its nickname). Written through
 ``core.config.save_config`` — the one writer, which keeps only what differs
 from the system defaults — and re-read
@@ -58,10 +69,22 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Select, Static, Switch, TabbedContent, TabPane
+from textual.widgets import (
+    Button,
+    Collapsible,
+    Input,
+    Label,
+    Select,
+    Static,
+    Switch,
+    TabbedContent,
+    TabPane,
+)
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.sidebar import short_path
+from aisquare.cli.ui.views.settings_captain import CaptainToggle
+from aisquare.cli.ui.views.settings_remote import RemoteSection
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import paths, personas
 from aisquare.core.config import (
@@ -124,6 +147,12 @@ AGENT_TAB = "tab-agent-settings"
 """The *Agent settings* tab's pane id: roles, the fleet, accounts. Shown first."""
 PREFERENCES_TAB = "tab-user-preferences"
 """The *User preferences* tab's pane id: ``[ui]``."""
+REMOTE_TAB = "tab-remote"
+"""The *Remote* tab's pane id: Remote control, which acts at once (no Save)."""
+AGENT_ADVANCED = "agent-settings-advanced"
+"""*Agent settings*' fold: the roles, the fleet and the rest of the accounts' rules."""
+PREFERENCES_ADVANCED = "user-preferences-advanced"
+"""*User preferences*' fold: the note on setting a preference from a shell."""
 
 
 def role_order(fleet: FleetSettings) -> list[str]:
@@ -278,8 +307,9 @@ class ConfirmReset(ModalScreen[bool]):
 
 
 class AppSettingsView(Vertical):
-    """The machine-wide settings form in two tabs — *Agent settings* (roles, fleet,
-    accounts) and *User preferences* (``[ui]``) — and under them Save, Reload, Reset all."""
+    """The machine-wide settings in three tabs — *Agent settings* (the captain, roles,
+    fleet, accounts), *User preferences* (``[ui]``) and *Remote* — and under the first two
+    Save, Reload, Reset all."""
 
     DEFAULT_CSS = """
     AppSettingsView { padding: 1 1 0 1; }
@@ -304,6 +334,8 @@ class AppSettingsView(Vertical):
     AppSettingsView .row.preference { margin-bottom: 0; }
     AppSettingsView .row .preference-label { width: 32; }
     AppSettingsView .about { color: $text-muted; height: auto; margin-bottom: 1; }
+    AppSettingsView .advanced { margin-top: 1; padding: 0; border: none; }
+    AppSettingsView .advanced > Contents { padding: 0 0 0 1; }
     AppSettingsView #settings-buttons { height: 1; }
     AppSettingsView #settings-buttons Button { min-width: 0; margin-right: 1; }
     AppSettingsView #settings-note {
@@ -325,7 +357,11 @@ class AppSettingsView(Vertical):
     )
     ACCOUNTS_SECTION: ClassVar[tuple[str, str]] = (
         "Accounts",
-        "how launches pick one, what a usage limit does, what they share",
+        "how launches pick one, what a usage limit does",
+    )
+    MORE_ACCOUNTS_SECTION: ClassVar[tuple[str, str]] = (
+        "Accounts",
+        "when to switch, how long to wait, what they share",
     )
     SIDEBAR_SECTION: ClassVar[tuple[str, str]] = ("Sidebar", "how the project list reads")
     ALWAYS_SHOW_PATH_ABOUT: ClassVar[str] = (
@@ -464,14 +500,24 @@ class AppSettingsView(Vertical):
                 TabPane("Agent settings", id=AGENT_TAB),
                 VerticalScroll(id="agent-settings", classes="tab-body"),
             ):
-                yield from self._compose_roles()
-                yield from self._compose_fleet()
+                yield CaptainToggle(id="settings-captain")
                 yield from self._compose_accounts()
+                with Collapsible(
+                    title="Advanced", collapsed=True, id=AGENT_ADVANCED, classes="advanced"
+                ):
+                    yield from self._compose_roles()
+                    yield from self._compose_fleet()
+                    yield from self._compose_more_accounts()
             with (
                 TabPane("User preferences", id=PREFERENCES_TAB),
                 VerticalScroll(id="user-preferences", classes="tab-body"),
             ):
                 yield from self._compose_preferences()
+            with (
+                TabPane("Remote", id=REMOTE_TAB),
+                VerticalScroll(id="remote-settings", classes="tab-body"),
+            ):
+                yield RemoteSection(id="settings-remote")
         with Horizontal(id="settings-buttons"):
             yield Button("Save", id="save-settings", variant="primary", compact=True)
             yield Button("Reload", id="reload-settings", compact=True)
@@ -556,9 +602,6 @@ class AppSettingsView(Vertical):
                 PICK_MODES, value=self.accounts.pick, allow_blank=False, id="accounts-pick"
             )
         with Horizontal(classes="row"):
-            yield Label("switch at (% used)")
-            yield Input(value=str(self.accounts.switch_at), type="integer", id="accounts-switch-at")
-        with Horizontal(classes="row"):
             yield Label("on a usage limit")
             yield Select(
                 ON_LIMIT_MODES,
@@ -566,6 +609,12 @@ class AppSettingsView(Vertical):
                 allow_blank=False,
                 id="accounts-on-limit",
             )
+
+    def _compose_more_accounts(self) -> ComposeResult:
+        yield Static(section_title(*self.MORE_ACCOUNTS_SECTION), classes="section")
+        with Horizontal(classes="row"):
+            yield Label("switch at (% used)")
+            yield Input(value=str(self.accounts.switch_at), type="integer", id="accounts-switch-at")
         with Horizontal(classes="row"):
             yield Label("wait if reset within (min)")
             yield Input(
@@ -605,17 +654,35 @@ class AppSettingsView(Vertical):
             Text(self.ALWAYS_SHOW_PATH_ABOUT), id="ui-always-show-path-about", classes="about"
         )
         before, after = self.PREFERENCES_FROM_A_SHELL
-        yield Static(
-            Text.assemble(
-                before, ("aisquare config set ui.always_show_project_path true", "bold"), after
-            ),
-            id="preferences-from-a-shell",
-            classes="about",
-        )
+        with Collapsible(
+            title="Advanced", collapsed=True, id=PREFERENCES_ADVANCED, classes="advanced"
+        ):
+            yield Static(
+                Text.assemble(
+                    before, ("aisquare config set ui.always_show_project_path true", "bold"), after
+                ),
+                id="preferences-from-a-shell",
+                classes="about",
+            )
 
     def on_mount(self) -> None:
         self._shown = self._field_values()
         self._load_accounts()
+
+    def show_tab(self, tab: str) -> None:
+        """Bring ``tab`` (:data:`AGENT_TAB`, :data:`PREFERENCES_TAB`, :data:`REMOTE_TAB`) to
+        the front: the hub's *Remote control* and *Captain* links land on theirs."""
+        self.query_one("#app-settings-tabs", TabbedContent).active = tab
+        if tab == AGENT_TAB:
+            self.query_one("#agent-settings", VerticalScroll).scroll_home(animate=False)
+
+    @on(TabbedContent.TabActivated, "#app-settings-tabs")
+    def _tab_shown(self, event: TabbedContent.TabActivated) -> None:
+        """Save, Reload and Reset all, and the note on what Save writes, are the first two
+        tabs': *Remote* acts as each control is used, and has nothing for them to do."""
+        forms = event.pane.id != REMOTE_TAB
+        self.query_one("#settings-buttons").display = forms
+        self.query_one("#settings-note").display = forms
 
     def _field_values(self) -> dict[str, object]:
         """Every field's value by its id — not the account selects, which keep their own
@@ -677,6 +744,7 @@ class AppSettingsView(Vertical):
         self.ui = config.ui
         for wid, key in _UI_SWITCHES.items():
             self.query_one(f"#{wid}", Switch).value = getattr(self.ui, key)
+        self.query_one(CaptainToggle).reread(config)
         for role in self._roles:
             row = self._role_row(role)
             if row is None:
@@ -830,13 +898,13 @@ class AppSettingsView(Vertical):
         changed = self._changed()
         result = self._form_fleet(config.fleet, changed)
         if isinstance(result, str):
-            self.notify(result, severity="error", timeout=6, markup=False)
+            self._refused(result)
             return
         config.fleet = result
         self._apply_account_bindings(config)
         accounts = self._form_accounts(config.accounts, changed)
         if isinstance(accounts, str):
-            self.notify(accounts, severity="error", timeout=6, markup=False)
+            self._refused(accounts)
             return
         config.accounts = accounts
         config.ui = self._form_ui(config.ui, changed)
@@ -852,6 +920,13 @@ class AppSettingsView(Vertical):
             return
         self.reload_form()
         self.notify(f"✓ settings saved to {written}", timeout=5, markup=False)
+
+    def _refused(self, why: str) -> None:
+        """Save said no: say why, and unfold *Agent settings*' Advanced, where every field a
+        save can refuse is (the agent cap, switch at, wait-if-reset-within), on its tab."""
+        self.notify(why, severity="error", timeout=6, markup=False)
+        self.show_tab(AGENT_TAB)
+        self.query_one(f"#{AGENT_ADVANCED}", Collapsible).collapsed = False
 
     # --- reset -------------------------------------------------------------------------
 

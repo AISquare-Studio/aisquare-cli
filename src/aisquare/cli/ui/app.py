@@ -2318,8 +2318,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.query_one("#settings-hub", SettingsHubView).focus_first()
 
     async def on_app_settings_selected(self, event: AppSettingsSelected) -> None:
-        """The hub's *App settings*: the machine-wide settings, under *⚙ Settings*."""
+        """The hub's *App settings*: the machine-wide settings, under *⚙ Settings*, on the
+        tab the link names (*Remote control*'s, *Captain*'s)."""
         await self._show("app-settings", lambda: AppSettingsView(id="app-settings"))
+        if event.tab is not None:
+            self.query_one("#app-settings", AppSettingsView).show_tab(event.tab)
         self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("app-settings")
 

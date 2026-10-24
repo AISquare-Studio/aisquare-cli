@@ -17,11 +17,15 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
-from textual.widgets import Button, Input, Select, Static, Switch, TabbedContent
+from textual.widgets import Button, Collapsible, Input, Select, Static, Switch, TabbedContent
 
+from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.views.app_settings import (
+    AGENT_ADVANCED,
     AGENT_TAB,
+    PREFERENCES_ADVANCED,
     PREFERENCES_TAB,
+    REMOTE_TAB,
     AppSettingsView,
     ConfirmReset,
     UiSettingsChanged,
@@ -40,6 +44,8 @@ class AppHost(App[None]):
 
     def __init__(self) -> None:
         super().__init__()
+        self.remote = RemoteController()
+        """What ``FleetApp.remote`` is: the one Remote the *Remote* tab is a view over."""
         self.notices: list[tuple[str, str]] = []
         self.ui_told: list[bool] = []
         """``always_show_project_path`` of each ``UiSettingsChanged`` the form posted."""
@@ -121,16 +127,26 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml() -> None:
 
 
 def test_settings_rejects_a_bad_agent_cap_and_writes_nothing() -> None:
-    async def scenario(pilot: Pilot[None], host: AppHost) -> list[tuple[str, str]]:
+    """And shows the field: Save pressed from *User preferences* brings *Agent settings* to the
+    front with its *Advanced* open, where the agent cap is folded (#41)."""
+
+    async def scenario(
+        pilot: Pilot[None], host: AppHost
+    ) -> tuple[list[tuple[str, str]], str, bool]:
         await pilot.pause()
         host.query_one("#max-agents", Input).value = "0"
+        tabs = host.query_one("#app-settings-tabs", TabbedContent)
+        tabs.active = PREFERENCES_TAB
+        await settle(pilot)
         host.query_one("#save-settings", Button).press()
         await settle(pilot)
-        return host.notices
+        field = host.query_one("#max-agents", Input)
+        return host.notices, tabs.active, field.region.area > 0
 
-    notices = drive(scenario)
+    notices, active, field_shown = drive(scenario)
     assert any("at least 1" in m and severity == "error" for m, severity in notices), notices
     assert not paths.config_path().exists()  # a refused form never reaches the writer
+    assert (active, field_shown) == (AGENT_TAB, True), "the refused field, unfolded"
 
 
 def test_settings_binds_an_account_per_role_and_a_cleared_one_leaves_no_empty_profile() -> None:
@@ -760,7 +776,9 @@ def test_the_form_opens_on_agent_settings_beside_a_user_preferences_tab() -> Non
     async def scenario(pilot: Pilot[None], host: AppHost) -> dict[str, object]:
         tabs = host.query_one("#app-settings-tabs", TabbedContent)
         seen: dict[str, object] = {
-            "labels": [str(tabs.get_tab(pane).label) for pane in (AGENT_TAB, PREFERENCES_TAB)],
+            "labels": [
+                str(tabs.get_tab(pane).label) for pane in (AGENT_TAB, PREFERENCES_TAB, REMOTE_TAB)
+            ],
             "active": tabs.active,
             "agent fields": all(
                 host.query_one(f"#{AGENT_TAB}").query(wid)
@@ -782,7 +800,7 @@ def test_the_form_opens_on_agent_settings_beside_a_user_preferences_tab() -> Non
         return seen
 
     seen = drive(scenario)
-    assert seen["labels"] == ["Agent settings", "User preferences"]
+    assert seen["labels"] == ["Agent settings", "User preferences", "Remote"]
     assert seen["active"] == AGENT_TAB
     assert seen["agent fields"] is True
     assert seen["in preferences"] is True
@@ -870,3 +888,76 @@ def test_reset_all_turns_always_show_project_directory_off() -> None:
     assert (before, after) == (True, False)
     assert told == [False], "the app is told the preference is off again"
     assert not paths.config_path().exists() and load_config().ui.always_show_project_path is False
+
+
+#: Per tab, what shows as it opens (the owner's bare minimum, #41) and what its *Advanced*
+#: folds — the list posted to the board before the fold was built.
+IN_VIEW = {
+    AGENT_TAB: ("#captain-toggle", "#accounts-pick", "#accounts-on-limit"),
+    PREFERENCES_TAB: ("#ui-always-show-path", "#ui-always-show-path-about"),
+    REMOTE_TAB: ("#settings-remote-title",),
+}
+FOLDED = {
+    AGENT_TAB: (
+        "#role-perm-coder",
+        "#role-acct-coder",
+        "#escape-key",
+        "#max-agents",
+        "#worktree-dir",
+        "#native-teams",
+        "#accounts-switch-at",
+        "#accounts-wait-minutes",
+        "#accounts-share-trust",
+        "#accounts-share-settings",
+        "#agent-settings-note",
+    ),
+    PREFERENCES_TAB: ("#preferences-from-a-shell",),
+    REMOTE_TAB: ("#settings-remote-regen", "#settings-remote-write", "#settings-remote-auto-off"),
+}
+ADVANCED = {
+    AGENT_TAB: f"#{AGENT_ADVANCED}",
+    PREFERENCES_TAB: f"#{PREFERENCES_ADVANCED}",
+    REMOTE_TAB: "#settings-remote-advanced",
+}
+
+
+def test_each_tab_shows_the_bare_minimum_and_folds_the_rest_under_advanced() -> None:
+    """The fold (#41): what a new user needs shows, the rest is one click on *Advanced* away;
+    the Captain box tops *Agent settings*; Save, Reload and Reset all hide on *Remote*, whose
+    controls act at once, and come back on the form's tabs."""
+
+    def area(host: AppHost, wid: str) -> int:
+        return host.query_one(wid).region.area
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> dict[str, object]:
+        tabs = host.query_one("#app-settings-tabs", TabbedContent)
+        seen: dict[str, object] = {
+            "first": host.query_one("#agent-settings").children[0].id,
+        }
+        for tab in (AGENT_TAB, PREFERENCES_TAB, REMOTE_TAB):
+            tabs.active = tab
+            await settle(pilot)
+            seen[f"{tab} in view"] = [wid for wid in IN_VIEW[tab] if area(host, wid) == 0]
+            seen[f"{tab} folded"] = [wid for wid in FOLDED[tab] if area(host, wid) > 0]
+            seen[f"{tab} buttons"] = area(host, "#save-settings") > 0
+            host.query_one(ADVANCED[tab], Collapsible).collapsed = False
+            await settle(pilot)
+            for wid in FOLDED[tab]:
+                host.query_one(wid).scroll_visible(animate=False)
+                await settle(pilot)
+                if area(host, wid) == 0:
+                    seen.setdefault(f"{tab} unfolded", []).append(wid)  # type: ignore[union-attr]
+        tabs.active = AGENT_TAB
+        await settle(pilot)
+        seen["buttons back"] = area(host, "#save-settings") > 0
+        return seen
+
+    seen = drive(scenario)
+    assert seen["first"] == "settings-captain"
+    for tab in (AGENT_TAB, PREFERENCES_TAB, REMOTE_TAB):
+        assert seen[f"{tab} in view"] == [], f"{tab}: shown as it opens"
+        assert seen[f"{tab} folded"] == [], f"{tab}: folded until Advanced is opened"
+        assert f"{tab} unfolded" not in seen, f"{tab}: shown once Advanced is opened"
+    assert (seen[f"{AGENT_TAB} buttons"], seen[f"{PREFERENCES_TAB} buttons"]) == (True, True)
+    assert seen[f"{REMOTE_TAB} buttons"] is False, "nothing on Remote for Save to save"
+    assert seen["buttons back"] is True

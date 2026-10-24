@@ -108,10 +108,13 @@ def announce(tunnel: FakeTunnel, url: str = PUBLIC) -> None:
 
 
 async def opened(pilot: Pilot[None]) -> RemoteSection:
-    """Open Settings as a click on *⚙ Settings* does; its Remote section."""
+    """Open Settings as a click on *⚙ Settings* does, then its *Remote control* link; App
+    settings' Remote tab, where it lands (#41)."""
     app = pilot.app
     assert isinstance(app, FleetApp)
     await pilot.click(app.query_one(SettingsRow))
+    await settle_page(app)
+    await pilot.click("#hub-remote")
     await settle_page(app)
     return app.query_one(RemoteSection)
 

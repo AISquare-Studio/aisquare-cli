@@ -156,7 +156,12 @@ class SettingsSelected(Message):
 
 
 class AppSettingsSelected(Message):
-    """The hub's *App settings*: the machine-wide settings page."""
+    """The hub's *App settings*: the machine-wide settings page — on ``tab`` when given (the
+    hub's *Remote control* and *Captain* open it on theirs), else on the tab it shows."""
+
+    def __init__(self, tab: str | None = None) -> None:
+        self.tab = tab
+        super().__init__()
 
 
 class RenameProject(Message):

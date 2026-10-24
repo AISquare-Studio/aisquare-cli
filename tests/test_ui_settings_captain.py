@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Checkbox, Input, Static
+from textual.widgets import Button, Checkbox, Input, Static
 
 from aisquare.cli.ui.receiver import ui_receiver
 from aisquare.cli.ui.sidebar import (
@@ -30,7 +30,7 @@ from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.cli.ui.views.captain import WHAT_IS_UP
 from aisquare.cli.ui.views.settings_captain import ABOUT, CaptainToggle
 from aisquare.core import experimental
-from aisquare.core.config import load_config
+from aisquare.core.config import load_config, save_config
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import state as captain_state
@@ -50,9 +50,12 @@ captain_door = say_suite.captain
 
 
 async def _settings(pilot: Pilot[None]) -> CaptainToggle:
-    """Open Settings, as a click on *⚙ Settings* does, and hand back its Captain section."""
+    """Open Settings, as a click on *⚙ Settings* does, then its *Captain* link, and hand back
+    the box atop App settings' Agent settings tab (#41)."""
     app = fleet_app(pilot)
     await pilot.click(app.query_one(SettingsRow))
+    await settle_page(app)
+    await pilot.click("#hub-captain")
     await settle_page(app)
     return app.query_one(CaptainToggle)
 
@@ -107,6 +110,47 @@ def test_ticking_the_captain_box_shows_the_captain_at_once_and_unticking_hides_i
     assert before == (False, False, [], False, False)
     assert ticked == (True, True, ["captain"], True, True), "★, section, its row, receiver, saved"
     assert unticked == (False, False, [], False, False)
+
+
+def test_reset_all_and_reload_move_the_box_and_the_shell_with_the_file(
+    tmp_path: Path, script: Script, captain_off: None
+) -> None:
+    """The box sits in App settings' form now (#41), whose Reset all and Reload re-read the
+    file: the box and the shell follow it. Reset all with the captain ticked put the file's
+    captain back to off while the box stayed ticked and the ``★`` stayed lit until a restart;
+    a ``config set`` from a shell, then Reload, left both as they were."""
+    seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
+    Seen = tuple[bool, bool, bool]
+
+    async def body(pilot: Pilot[None]) -> tuple[Seen, Seen, Seen]:
+        app = fleet_app(pilot)
+
+        def seen() -> Seen:
+            box = app.query_one("#captain-toggle", Checkbox)
+            return box.value, app.captain_on, bool(app.query(CaptainButton))
+
+        await refreshed(app)
+        toggle = await _settings(pilot)
+        await _tick(pilot, toggle.query_one("#captain-toggle", Checkbox))
+        ticked = seen()
+        await pilot.click("#reset-settings")
+        await pilot.pause()
+        app.screen.query_one("#reset-confirm", Button).press()
+        await settle_page(app)
+        await refreshed(app)
+        reset = seen()
+        config = load_config()
+        config.experimental.captain = True  # what `config set experimental.captain true` writes
+        save_config(config)
+        await pilot.click("#reload-settings")
+        await settle_page(app)
+        await refreshed(app)
+        return ticked, reset, seen()
+
+    ticked, reset, reloaded = drive(body)
+    assert ticked == (True, True, True)
+    assert reset == (False, False, False), "the box, the switch, the ★: off with the file"
+    assert reloaded == (True, True, True), "a shell's config set, after Reload"
 
 
 def _in_section(row: AgentRow) -> bool:

@@ -764,10 +764,11 @@ The app — what bare `asq` runs. Explicit so a script or alias can reach it, an
 so `aisquare ui --help` exists. Without an interactive terminal it refuses with
 the reason (`not_a_tty`) rather than starting a full-screen app into a pipe.
 
-*⚙ Settings ▸ Remote control* turns Remote on: the fleet on your phone through
+*⚙ Settings ▸ Remote control* (App settings' own *Remote* tab) turns Remote on: the fleet on your phone through
 your own ngrok tunnel, with the link, a QR code and the passphrase; the first time,
 it asks for your ngrok token. `R` opens the same Remote in one
-panel — see [Phone control](remote.md). *⚙ Settings ▸ Captain* switches the
+panel — see [Phone control](remote.md). *⚙ Settings ▸ Captain* (the box at the top
+of *App settings ▸ Agent settings*) switches the
 experimental captain on and off with no restart; `AISQUARE_EXPERIMENTAL_CAPTAIN`,
 when set, wins over it ([docs/captain.md](captain.md)).
 
@@ -1067,10 +1068,16 @@ Three places to change one:
   `aisquare config set fleet.roles.coder.permission_mode acceptEdits`, or edit
   the file directly;
 - **in the UI** — *⚙ Settings ▸ App settings* writes the same config: its *Agent
-  settings* tab holds these, and *User preferences* how `asq` shows things (`[ui]`).
-  Its *Reset all settings to default* is `config reset`. Its *Save* writes only the
-  settings changed on either tab, so one changed in a shell while it was open is
-  kept. A project's own *Settings* tab holds only that project's nickname.
+  settings* tab holds these, and *User preferences* how `asq` shows things (`[ui]`);
+  its third tab, *Remote*, is Remote control. Each tab shows the few settings a new
+  user needs — *Agent settings* the *Captain (experimental)* box, how launches pick
+  an account and what a usage limit does — and folds the rest under **Advanced**
+  (click to open): the roles, the fleet and the rest of the accounts' rules here.
+  A *Save* refused for a folded field opens it. Its *Reset all settings to default*
+  is `config reset`, and the Captain box follows it, as it follows *Reload*. Its
+  *Save* writes only the settings changed on the first two tabs, so one changed in a
+  shell while it was open is kept; *Remote* and the Captain box act at once. A
+  project's own *Settings* tab holds only that project's nickname.
 
 **Your file holds your changes and nothing else.** The defaults are built in, and
 `~/.aisquare/config.toml` is your layer over them: a save writes only the keys

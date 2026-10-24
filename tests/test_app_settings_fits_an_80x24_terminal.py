@@ -5,6 +5,10 @@ Reload, Reset all (three lines) and an eleven-line note were pinned under the ta
 User preferences switch was off screen behind a two-row viewport, where main's single
 scroll had shown four whole role rows. The buttons are one compact line and the note one
 line now, and the tab body takes the rest.
+
+Folded (#41), the Agent settings tab opens on the Captain box and the first of how
+launches pick an account, whole, with no scrolling; its *Advanced*, opened and scrolled to
+the roles, still shows as many whole role rows as main's single scroll did.
 """
 
 from __future__ import annotations
@@ -12,10 +16,10 @@ from __future__ import annotations
 from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Button, Static, Switch, TabbedContent
+from textual.widgets import Button, Collapsible, Static, Switch, TabbedContent
 
 from aisquare.cli.ui.sidebar import AppSettingsSelected
-from aisquare.cli.ui.views.app_settings import PREFERENCES_TAB, AppSettingsView
+from aisquare.cli.ui.views.app_settings import AGENT_ADVANCED, PREFERENCES_TAB, AppSettingsView
 from aisquare.core.config import load_config
 from tests.test_ui_shell import drive, fleet_app, settle
 from tests.test_ui_shell import no_real_tmux as _no_real_tmux
@@ -43,13 +47,24 @@ def test_at_80x24_the_tabs_keep_mains_rows_and_the_preference_is_on_screen() -> 
         view = app.query_one(AppSettingsView)
         agent = app.query_one("#agent-settings")
         seen: dict[str, object] = {
-            "agent rows": sum(_whole(row, agent.region) for row in agent.query(".row")),
+            # Rows, as main's measure is: a select past a row's right edge is #302's own
+            # layout at this width, the same in every row.
+            "in view": [
+                _whole(app.query_one(wid), agent.region)
+                for wid in ("#captain-toggle", "#captain-toggle-about")
+            ]
+            + [_whole(app.query_one("#accounts-pick").parent, agent.region)],  # type: ignore[arg-type]
             "buttons": [
                 _whole(app.query_one(wid, Button), view.region)
                 for wid in ("#save-settings", "#reload-settings", "#reset-settings")
             ],
             "note lines": app.query_one("#settings-note", Static).region.height,
         }
+        app.query_one(f"#{AGENT_ADVANCED}", Collapsible).collapsed = False
+        await settle(app)
+        app.query_one("#role-perm-manager").scroll_visible(animate=False, top=True)
+        await settle(app)
+        seen["agent rows"] = sum(_whole(row, agent.region) for row in agent.query(".row"))
         app.query_one("#app-settings-tabs", TabbedContent).active = PREFERENCES_TAB
         await settle(app)
         prefs = app.query_one("#user-preferences")
@@ -63,6 +78,7 @@ def test_at_80x24_the_tabs_keep_mains_rows_and_the_preference_is_on_screen() -> 
         return seen
 
     seen = drive(go, size=(80, 24))
+    assert seen["in view"] == [True, True, True], "the Captain box, its line, launches pick"
     assert isinstance(seen["agent rows"], int)
     assert seen["agent rows"] >= MAIN_WHOLE_ROWS, seen
     assert seen["buttons"] == [True, True, True], "Save, Reload and Reset all, whole"

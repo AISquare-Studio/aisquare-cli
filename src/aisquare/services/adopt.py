@@ -22,8 +22,11 @@ whose pid was reused can only make it refuse, which is the safe way to be wrong.
 from __future__ import annotations
 
 import contextlib
+import glob
+import itertools
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Iterator, Sequence
@@ -44,6 +47,8 @@ SCAN_LINES = 400
 PROMPT_CHARS = 80
 """How much of the first prompt the picker shows."""
 PS_TIMEOUT = 5.0
+_SESSION_CHARS = re.compile(r"[0-9A-Za-z-]+")
+"""What a session id (or the start of one) is made of."""
 
 
 class AdoptRefused(fleet_service.FleetError):
@@ -133,13 +138,20 @@ def _registry_holders(accounts: Sequence[ClaudeAccount]) -> dict[str, int]:
     return held
 
 
-def _process_args() -> list[tuple[int, str]]:
-    """``(pid, arguments)`` of every process this user can see; none where ``ps`` cannot run."""
+Process = tuple[int, int, str]
+"""``(pid, parent pid, arguments)`` of one process, as ``ps`` lists it."""
+
+_SESSION_FLAGS = frozenset({"--resume", "-r", "--session-id"})
+"""The ``claude`` flags that name the session a process runs."""
+
+
+def _process_args() -> list[Process]:
+    """Every process this user can see; none where ``ps`` cannot run."""
     if sys.platform == "win32":
         return []
     try:
         done = subprocess.run(
-            ["ps", "-A", "-o", "pid=,args="],
+            ["ps", "-A", "-o", "pid=,ppid=,args="],
             capture_output=True,
             text=True,
             timeout=PS_TIMEOUT,
@@ -147,12 +159,36 @@ def _process_args() -> list[tuple[int, str]]:
         )
     except (OSError, subprocess.SubprocessError):
         return []
-    listed: list[tuple[int, str]] = []
+    listed: list[Process] = []
     for line in done.stdout.splitlines():
-        pid, _, args = line.strip().partition(" ")
-        if pid.isdigit():
-            listed.append((int(pid), args))
+        fields = line.split(None, 2)
+        if len(fields) == 3 and fields[0].isdigit() and fields[1].isdigit():
+            listed.append((int(fields[0]), int(fields[1]), fields[2]))
     return listed
+
+
+def _ancestors(processes: Sequence[Process], pid: int) -> set[int]:
+    """``pid`` and every process above it: the shell and the ``claude`` that run this
+    command are no holder of the session it adopts (review of #370)."""
+    parents = {child: parent for child, parent, _args in processes}
+    seen: set[int] = set()
+    while pid and pid not in seen:
+        seen.add(pid)
+        pid = parents.get(pid, 0)
+    return seen
+
+
+def _names_session(args: str, session_id: str, transcript: Path) -> bool:
+    """Whether ``args`` is a ``claude`` program given this session by a session flag: a
+    word naming ``claude`` and ``--resume``/``-r``/``--session-id`` followed by the id or
+    the transcript. A shell whose command line merely mentions the id is no holder."""
+    words = args.split()
+    if not any(Path(word).name in {"claude", "claude.exe"} for word in words):
+        return False
+    named = {session_id, str(transcript)}
+    given = list(itertools.pairwise(words))
+    given += [(flag, value) for flag, _, value in (w.partition("=") for w in words if "=" in w)]
+    return any(flag in _SESSION_FLAGS and value in named for flag, value in given)
 
 
 def holder(
@@ -160,18 +196,17 @@ def holder(
     transcript: Path,
     accounts: Sequence[ClaudeAccount],
     *,
-    processes: list[tuple[int, str]] | None = None,
+    processes: list[Process] | None = None,
 ) -> int | None:
     """The pid of a live process holding the conversation, or ``None``: the registry first,
-    then a ``claude`` whose arguments name the session or its transcript."""
+    then a ``claude`` given this session by a session flag, never this command's own
+    process or one above it."""
     if (pid := _registry_holders(accounts).get(session_id)) is not None:
         return pid
-    for pid, args in _process_args() if processes is None else processes:
-        if (
-            pid != os.getpid()
-            and "claude" in args
-            and (session_id in args or str(transcript) in args)
-        ):
+    listed = _process_args() if processes is None else processes
+    mine = _ancestors(listed, os.getpid())
+    for pid, _parent, args in listed:
+        if pid not in mine and _names_session(args, session_id, transcript):
             return pid
     return None
 
@@ -270,16 +305,32 @@ def find(ref: str) -> tuple[AdoptableConversation, Path]:
             )
         path, account = candidates[0], homes[0]
     else:
+        # An id or the start of one (the list shows eight characters): only the characters
+        # a session id has, escaped all the same, and a prefix must name ONE conversation
+        # (review of #370: `*` matched every transcript).
+        if not ref or not _SESSION_CHARS.fullmatch(ref):
+            raise AdoptRefused(
+                "no_such_conversation",
+                f"{ref!r} is no session id (or the start of one) — "
+                "`aisquare fleet adopt --list` shows the recent ones",
+            )
         matches = [
             (path, account)
             for account in accounts
-            for path in (account.config_dir / "projects").glob(f"*/{ref}.jsonl")
+            for path in (account.config_dir / "projects").glob(f"*/{glob.escape(ref)}*.jsonl")
         ]
         if not matches:
             raise AdoptRefused(
                 "no_such_conversation",
                 f"no conversation {ref!r} under the accounts the CLI knows — "
                 "`aisquare fleet adopt --list` shows the recent ones",
+            )
+        sessions = sorted({path.stem for path, _account in matches})
+        if len(sessions) > 1:
+            raise AdoptRefused(
+                "ambiguous",
+                f"{ref!r} starts {len(sessions)} conversations ({', '.join(sessions[:4])}"
+                f"{', …' if len(sessions) > 4 else ''}): give more of the id",
             )
         # The newest copy: a resume on another account goes on writing the original.
         path, account = max(matches, key=lambda m: m[0].stat().st_mtime)

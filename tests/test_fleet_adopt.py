@@ -35,9 +35,9 @@ SESSION = "11111111-2222-3333-4444-555555555555"
 
 
 @pytest.fixture(autouse=True)
-def no_processes(fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, str]]:
-    """No real `ps`: the processes a test says are running, and none else."""
-    running: list[tuple[int, str]] = []
+def no_processes(fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int, str]]:
+    """No real `ps`: the processes a test says are running (pid, parent, args), none else."""
+    running: list[tuple[int, int, str]] = []
     monkeypatch.setattr(adopt_service, "_process_args", lambda: list(running))
     return running
 
@@ -99,7 +99,7 @@ def test_a_conversation_a_live_claude_holds_is_refused(
     tmux: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
-    no_processes: list[tuple[int, str]],
+    no_processes: list[tuple[int, int, str]],
 ) -> None:
     """Two processes would write one conversation: held by Claude Code's own registry, or by
     a process whose arguments name it. Nothing is spawned."""
@@ -112,7 +112,7 @@ def test_a_conversation_a_live_claude_holds_is_refused(
     with pytest.raises(adopt_service.AdoptRefused) as by_registry:
         adopt_service.adopt(SESSION)
     registry.unlink()
-    no_processes.append((4242, f"claude --resume {SESSION}"))
+    no_processes.append((4242, 1, f"claude --resume {SESSION}"))
     with pytest.raises(adopt_service.AdoptRefused) as by_args:
         adopt_service.adopt(SESSION)
 
@@ -123,6 +123,50 @@ def test_a_conversation_a_live_claude_holds_is_refused(
     no_processes.clear()
     registry.write_text(json.dumps({"pid": 999_999_999, "sessionId": SESSION}))
     assert adopt_service.adopt(SESSION).agent.session_id == SESSION
+
+
+def test_the_adopting_command_and_its_own_shell_and_claude_hold_nothing(tmp_path: Path) -> None:
+    """Review of #370: run from an agent, adopt's parent is Claude Code's Bash wrapper
+    (``zsh -c source ~/.claude/shell-snapshots/… && eval 'aisquare fleet adopt <id>'``),
+    whose arguments hold 'claude' and the id: every adopt was refused 'held'. Only a claude
+    program given the session by a session flag holds it, and never one above this command."""
+    me = os.getpid()
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    above = [
+        (me, 500, f"python -m aisquare fleet adopt {SESSION}"),
+        (
+            500,
+            400,
+            "zsh -c source ~/.claude/shell-snapshots/s.sh && "
+            f"eval 'aisquare fleet adopt {SESSION}'",
+        ),
+        (400, 1, "/usr/local/bin/claude --session-id 99999999-aaaa"),
+        (900, 1, f"grep {SESSION} claude.log"),  # names the id, is no claude given it
+    ]
+    assert adopt_service.holder(SESSION, transcript, [], processes=above) is None
+    elsewhere = [*above, (901, 1, f"/usr/local/bin/claude --resume={transcript}")]
+    assert adopt_service.holder(SESSION, transcript, [], processes=elsewhere) == 901
+    an_ancestor = [(me, 400, "aisquare fleet adopt"), (400, 1, f"claude --resume {SESSION}")]
+    assert adopt_service.holder(SESSION, transcript, [], processes=an_ancestor) is None
+
+
+def test_the_listed_short_id_adopts_and_a_glob_or_an_ambiguous_start_is_refused(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #370: --list shows eight characters, which find() could not take, and a
+    ref went into glob unescaped ('*' matched every transcript)."""
+    slot = core.create_account()
+    _transcript(slot, SESSION, project.root)
+    _transcript(slot, "abcdef00-1111-2222-3333-444444444444", project.root)
+    _transcript(slot, "abcdef00-5555-6666-7777-888888888888", project.root)
+
+    assert adopt_service.adopt(SESSION[:8]).agent.session_id == SESSION
+    with pytest.raises(adopt_service.AdoptRefused) as starred:
+        adopt_service.adopt("*")
+    with pytest.raises(adopt_service.AdoptRefused) as ambiguous:
+        adopt_service.adopt("abcdef00")
+    assert starred.value.code == "no_such_conversation"
+    assert ambiguous.value.code == "ambiguous" and "abcdef00-1111" in str(ambiguous.value)
 
 
 def test_a_directory_no_project_holds_is_refused_with_how_to_onboard_it(
@@ -167,7 +211,10 @@ def test_only_the_known_accounts_are_searched(
 
 
 def test_the_list_is_newest_first_limited_and_leaves_out_what_the_fleet_owns(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, no_processes: list[tuple[int, str]]
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    no_processes: list[tuple[int, int, str]],
 ) -> None:
     plain, second = core.default_account(), core.create_account()
     owned = "00000000-0000-0000-0000-00000000000a"
@@ -176,7 +223,7 @@ def test_the_list_is_newest_first_limited_and_leaves_out_what_the_fleet_owns(
     _transcript(plain, "00000000-0000-0000-0000-00000000000b", project.root, "the newest", age=20)
     _transcript(second, "00000000-0000-0000-0000-00000000000c", "/nowhere", "x" * 200, age=30)
     _transcript(plain, "00000000-0000-0000-0000-00000000000d", project.root, "oldest", age=40)
-    no_processes.append((77, "claude --resume 00000000-0000-0000-0000-00000000000c"))
+    no_processes.append((77, 1, "claude --resume 00000000-0000-0000-0000-00000000000c"))
 
     listed = adopt_service.recent(limit=2)
 

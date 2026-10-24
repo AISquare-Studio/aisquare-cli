@@ -129,11 +129,16 @@ The UI fetches once a minute while the page is on screen and never elsewhere;
 reaches the endpoint (`tests/test_no_network_on_the_primary_path.py` still
 holds).
 
-Read since #277 (2026-10-23): every top-level `seven_day_<family>` that holds a
-window (`seven_day_opus`, `seven_day_sonnet`; the recorded payload's is null) goes
-into `ClaudeUsage.family_week_percent` / `family_week_resets_at`, keyed by family;
-each `limits[]` entry (`kind`, `percent`) is folded into the window of its kind
-(`session`/`five_hour`, `weekly`/`seven_day`, a family) as the fuller figure; a
+Read since #277 (2026-10-23): the per-family weeks go into
+`ClaudeUsage.family_week_percent` / `family_week_resets_at`, keyed by family. Where
+the endpoint really sends them (P0-W0, Claude Code 2.1.309) is `limits[]`: an entry
+of kind `weekly_scoped` whose `scope.model.display_name` names the model ("Fable",
+"Opus"), mapped to its family by `core.harness.model_family` (P0-W3c). A top-level
+`seven_day_<family>` window is read too, for a known family only: in W0's payloads
+every one was null, and `seven_day_breakdown`-style keys are `seven_day_*` dicts
+that are no window. Each other `limits[]` entry (`kind`, `percent`) is folded into
+the window of its kind (`session`/`five_hour`, `weekly_all`/`weekly`/`seven_day`)
+as the fuller figure; a
 window with a non-null `locked_reason` reads 100 % used. Unknown keys and entries
 of an unknown shape are ignored. The usage cache (`claude_usage`) keeps the two
 shared windows only, so a live reading that shows a family week spent leaves a
@@ -389,15 +394,17 @@ for the long ones.
   `week_resets_at` is earliest (none last; priority breaks ties). Spawn picks and
   hand-overs both.
 
-**Verified on 2026-10-23 (P0-W0).** Resuming a transcript written under one
-`CLAUDE_CONFIG_DIR` from another works on Claude Code 2.1.309 and 2.1.223: the
-session keeps its id and its history, and a prompt passed with the resume runs
-(`docs/plans/handoff-p0-reliability.md`, "W0 results" §2). Claude Code keeps
-appending to the ORIGINAL file under the first account's `projects/`; nothing is
-written under the second. Its `SessionStart` hook is handed a `transcript_path`
-under the second account that is never created, which the fleet now records as
-the real one (P0-W3b). Copying transcripts between config directories was not
-done, per the issue.
+**Verified, 2026-10-23, Claude Code 2.1.309** (P2-W7, #198; P0-W0 saw the same on
+2.1.309 and 2.1.223). Resuming a transcript written under one `CLAUDE_CONFIG_DIR`
+from another, by its absolute path, keeps the session id, recalls what was said
+before the move, and appends the new turns to the ORIGINAL account's transcript;
+the new account gets no transcript of its own for the session. The SessionStart
+hook is handed a path under the new account that is never created, which #308
+(P0-W3b) keeps out of the session row. Run with two signed-in slots:
+`tests/test_cross_account_e2e.py` (`-m e2e`, skipped without
+`AISQUARE_E2E_CLAUDE_A`/`_B`) and [the runbook](../runbooks/cross-account-resume.md).
+`--fresh` stays the way around a resume that fails on another build. Copying
+transcripts between config directories was not done, per the issue.
 
 ## 11. The macOS Keychain (2026-10-15)
 

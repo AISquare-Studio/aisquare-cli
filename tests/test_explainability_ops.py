@@ -938,7 +938,9 @@ def test_a_shadowed_package_root_is_surfaced_with_its_repair(
 
 
 def test_fix_turns_tracing_on_and_says_so() -> None:
-    actions = ops.apply_fixes(confirm=lambda _: False)
+    """With the deployment named: without one, ``--fix`` leaves tracing off (#51,
+    tests/test_explainability_routing.py)."""
+    actions = ops.apply_fixes(target="stg", confirm=lambda _: False)
     assert any("enabled" in action for action in actions)
     assert load_config().explainability.enabled is True
 

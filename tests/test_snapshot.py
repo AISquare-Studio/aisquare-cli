@@ -568,3 +568,72 @@ def test_generate_hands_the_operators_patterns_to_repomix_after_the_defaults(
     expected = [*snapshot.DEFAULT_IGNORE, "vendor/fork/**", "docs/generated/**"]
     assert len(seen) == 2, "the full pack and the best-effort skeleton"
     assert seen == [expected, expected]
+
+
+# --- index.json one entry per line; no stale skeleton (P2-W5x, from P1-WS3) -----------
+
+
+@pytest.mark.parametrize("budget", ["fits", "skeleton_only"])
+def test_the_index_is_one_entry_per_line_and_still_one_json_array(
+    fake_repomix: None, monkeypatch: pytest.MonkeyPatch, budget: str
+) -> None:
+    """P1-WS3's finding: the index was ONE JSON line, so a Read returned it whole and a
+    Grep for one file matched every file. #129's 'over' fixture: 34k chars, 402 files,
+    read whole by every agent. One entry per line keeps it a JSON array for any reader."""
+    over = budget == "skeleton_only"
+    monkeypatch.setattr(
+        snapshot, "_total_tokens", lambda _t, _o: snapshot.MAX_TOKENS + 1 if over else 100
+    )
+    snapshot.generate("prj_lines", Path("/tmp/repo"))
+    text = snapshot.index_path("prj_lines").read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert lines[0] == "[" and lines[-1] == "]"
+    assert [json.loads(line.rstrip(","))["path"] for line in lines[1:-1]] == ["a.py", "b.py"]
+    assert [entry["path"] for entry in json.loads(text)] == ["a.py", "b.py"]
+
+
+def test_an_empty_index_is_an_empty_array() -> None:
+    assert json.loads(snapshot._index_json([])) == []
+
+
+def test_a_compressed_pack_removes_the_skeleton_an_earlier_run_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1-WS3's finding: the compressed-ready branch makes no skeleton, and the last run's
+    stayed on disk beside a pack it no longer matches."""
+
+    def _fake(_root: Path, *, compress: bool, ignore: Sequence[str] = ()) -> tuple[str, str]:
+        return (SKEL, "") if compress else (FULL, "")
+
+    monkeypatch.setattr(snapshot, "_run_repomix", _fake)
+    monkeypatch.setattr(snapshot, "_total_tokens", lambda _t, _o: 100)
+    snapshot.generate("prj_stale", Path("/tmp/repo"))  # fits: a skeleton is written
+    assert snapshot.skeleton_path("prj_stale").exists()
+    monkeypatch.setattr(
+        snapshot, "_total_tokens", lambda text, _o: 10 if text == SKEL else snapshot.MAX_TOKENS + 1
+    )
+    meta = snapshot.generate("prj_stale", Path("/tmp/repo"))
+    assert meta.compressed is True and meta.skeleton_token_count == 0
+    assert not snapshot.skeleton_path("prj_stale").exists()
+
+
+def test_a_full_pack_whose_skeleton_failed_removes_the_last_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same leak on the other branch: the best-effort skeleton fails, the full pack
+    ships, and the previous run's skeleton must not stay beside it."""
+    monkeypatch.setattr(snapshot, "_total_tokens", lambda _t, _o: 100)
+    calls: list[bool] = []
+
+    def _fake(_root: Path, *, compress: bool, ignore: Sequence[str] = ()) -> tuple[str, str]:
+        calls.append(compress)
+        if compress and len(calls) > 2:
+            raise subprocess.SubprocessError("repomix --compress died")
+        return (SKEL, "") if compress else (FULL, "")
+
+    monkeypatch.setattr(snapshot, "_run_repomix", _fake)
+    snapshot.generate("prj_fail", Path("/tmp/repo"))
+    assert snapshot.skeleton_path("prj_fail").exists()
+    meta = snapshot.generate("prj_fail", Path("/tmp/repo"))
+    assert meta.status == "ready" and meta.skeleton_token_count == 0
+    assert not snapshot.skeleton_path("prj_fail").exists()

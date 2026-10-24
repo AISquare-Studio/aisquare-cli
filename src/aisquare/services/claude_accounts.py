@@ -52,8 +52,8 @@ from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
 from aisquare.core import paths
-from aisquare.core.config import AccountsSettings, FleetSettings, load_config
-from aisquare.core.harness import MODEL_FAMILIES
+from aisquare.core.config import AccountsSettings, FleetSettings, load_config, save_config
+from aisquare.core.harness import MODEL_FAMILIES, model_family
 from aisquare.core.names import name_key
 from aisquare.core.spawn import untraced_env
 from aisquare.core.store import ContextStore, store_session
@@ -779,51 +779,86 @@ _FAMILY_WEEK = "seven_day_"
 _FAMILIES = frozenset(MODEL_FAMILIES.values())
 """The model families a per-family window or limit can name (``opus``, ``sonnet``…)."""
 _SESSION_KINDS = frozenset({"session", "five_hour"})
-_WEEK_KINDS = frozenset({"weekly", "week", "seven_day"})
+_WEEK_KINDS = frozenset({"weekly", "weekly_all", "week", "seven_day"})
+_SCOPED_KIND = "weekly_scoped"
+"""The ``limits[]`` kind of a per-family week (P0-W0, Claude Code 2.1.309): its
+``scope.model.display_name`` names the family ("Fable", "Opus")."""
 
 
 def _fuller(a: float | None, b: float | None) -> float | None:
     return b if a is None else a if b is None else max(a, b)
 
 
+@dataclass(frozen=True)
+class _Limit:
+    """One ``limits[]`` entry: its kind, percent USED, the model family a ``weekly_scoped``
+    entry is scoped to (``None`` otherwise, or when the name is no family), and its reset."""
+
+    kind: str
+    percent: float
+    family: str | None = None
+    resets_at: datetime | None = None
+
+
 def _family_weeks(payload: Mapping[str, Any]) -> tuple[dict[str, float], dict[str, datetime]]:
-    """Every per-family week in ``payload``: each top-level ``seven_day_<family>`` that holds
-    a window, keyed by ``<family>``, with a ``limits[]`` entry of that family's kind folded in
-    (the fuller figure wins). A family week the endpoint sends as null is no reading."""
+    """Every per-family week in ``payload``, keyed by family, the fuller figure winning.
+
+    Two places can say it. ``limits[]`` entries of kind ``weekly_scoped``, scoped to a
+    model by ``scope.model.display_name``, are where the endpoint really sends it (P0-W0:
+    every ``seven_day_<family>`` key was null). A top-level ``seven_day_<family>`` window
+    is read too, but only for a known family: ``seven_day_breakdown`` and its like are
+    ``seven_day_*`` dicts that are no window (#277, P0-W3c). A ``limits[]`` kind named
+    after a family (``opus``, ``seven_day_opus``) counts as that family's week as well.
+    """
     percents: dict[str, float] = {}
     resets: dict[str, datetime] = {}
     for key, raw in payload.items():
-        if not key.startswith(_FAMILY_WEEK) or not isinstance(raw, dict):
-            continue
         family = key.removeprefix(_FAMILY_WEEK)
+        if not key.startswith(_FAMILY_WEEK) or family not in _FAMILIES:
+            continue
         percent, when = _window(raw)
         if percent is not None:
             percents[family] = percent
         if when is not None:
             resets[family] = when
-    for kind, percent in _limits(payload):
-        family = kind.removeprefix(_FAMILY_WEEK)
-        if family in _FAMILIES:
-            percents[family] = max(percents.get(family, percent), percent)
+    for limit in _limits(payload):
+        named = limit.kind.removeprefix(_FAMILY_WEEK)
+        scoped = limit.family or (named if named in _FAMILIES else None)
+        if scoped is None:
+            continue
+        percents[scoped] = max(percents.get(scoped, limit.percent), limit.percent)
+        if limit.resets_at is not None and scoped not in resets:
+            resets[scoped] = limit.resets_at
     return percents, resets
 
 
-def _limits(payload: Mapping[str, Any]) -> list[tuple[str, float]]:
-    """``limits[]`` as ``(kind, percent)``: an entry without a string kind or a number is
+def _limits(payload: Mapping[str, Any]) -> list[_Limit]:
+    """``limits[]`` as :class:`_Limit`: an entry without a string kind or a number is
     skipped — the field is undocumented, and an unknown shape costs it, never the reading."""
     raw = payload.get("limits")
-    found: list[tuple[str, float]] = []
+    found: list[_Limit] = []
     for entry in raw if isinstance(raw, list) else []:
         if not isinstance(entry, dict):
             continue
         kind, percent = entry.get("kind"), entry.get("percent", entry.get("utilization"))
-        if isinstance(kind, str) and isinstance(percent, int | float):
-            found.append((kind.lower(), float(percent)))
+        if not isinstance(kind, str) or not isinstance(percent, int | float):
+            continue
+        family = _scoped_family(entry) if kind.lower() == _SCOPED_KIND else None
+        _percent, when = _window({"resets_at": entry.get("resets_at")})
+        found.append(_Limit(kind.lower(), float(percent), family, when))
     return found
 
 
+def _scoped_family(entry: Mapping[str, Any]) -> str | None:
+    """The family a ``weekly_scoped`` entry's ``scope.model.display_name`` names, or ``None``."""
+    scope = entry.get("scope")
+    model = scope.get("model") if isinstance(scope, dict) else None
+    name = model.get("display_name") if isinstance(model, dict) else None
+    return model_family(name) if isinstance(name, str) else None
+
+
 def _limit_of(payload: Mapping[str, Any], kinds: frozenset[str]) -> float | None:
-    return max((percent for kind, percent in _limits(payload) if kind in kinds), default=None)
+    return max((limit.percent for limit in _limits(payload) if limit.kind in kinds), default=None)
 
 
 def usage(
@@ -2142,7 +2177,12 @@ def headroom_choice(
     for account in candidates:
         reading = readings[account.slot]
         percent = headroom_percent(reading, family)
-        if percent is not None:
+        own = reading.family_week_percent.get(family) if family is not None else None
+        if own is not None and own >= 100:
+            # Spent for this agent's family: it refuses the first request, so it is no
+            # answer at all, not even the least bad one a switch by hand takes (P0-W3c).
+            notes.append(f"headroom: {core.label(account)} skipped — its {family} week is spent")
+        elif percent is not None:
             measured.append((account, percent))
         else:
             notes.append(
@@ -2714,7 +2754,7 @@ def share_for_launch(
     """
     try:
         knobs = accounts_settings()
-        if not (knobs.share_trust or knobs.share_settings):
+        if not (knobs.share_trust or knobs.share_settings or knobs.share):
             return []
         accounts = list_accounts()
         if len(accounts) < 2:
@@ -2736,6 +2776,7 @@ def share_for_launch(
             notes += _share_trust_into(target, scope, accounts)
         if knobs.share_settings and target.managed:
             notes += _share_settings_into(target)
+        notes += _share_parts_into(target)
         return notes
     except Exception as exc:  # an observer of the launch: it costs the sharing, never the launch
         return [f"nothing was shared into this launch's account ({exc})"]
@@ -2967,3 +3008,197 @@ def unshare_settings() -> tuple[Path, list[SettingsChange]]:
         state = sharing.settings_state(account, source)
         changes.append(SettingsChange(account, "unshared" if unlinked else state))
     return source, changes
+
+
+# --- [accounts] share: memory, skills, agents, commands, CLAUDE.md, plugins (P2-W7) -------
+
+
+@dataclass(frozen=True)
+class PartChange:
+    """What ``accounts share`` did to one part on one account, or what it holds there."""
+
+    account: ClaudeAccount
+    part: sharing.SharePart
+    outcome: Literal[
+        "linked",
+        "already",
+        "unlinked",
+        "restored",
+        "refused",
+        "failed",
+        "shared",
+        "own",
+        "none",
+        "elsewhere",
+        "merged",
+    ]
+    detail: str | None = None
+    """The kept copy's name, the reason a part was refused, or what a memory merge noted."""
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "slot": self.account.slot,
+            "account": core.label(self.account),
+            "part": self.part,
+            "outcome": self.outcome,
+            "detail": self.detail,
+        }
+
+
+def shared_memory_root() -> Path:
+    """Where ``memory`` keeps each project's auto memory: under the aisquare home, outside
+    every ``.claude`` path on purpose (anthropics/claude-code#98044: since 2.1.280 every
+    auto-memory write prompts when it lands under a linked ``.claude`` directory)."""
+    return paths.aisquare_home() / "claude-shared" / "memory"
+
+
+def memory_settings_args(cwd: Path) -> list[str]:
+    """``--settings`` pointing Claude Code's auto memory at the shared directory for the
+    project in ``cwd``, when ``[accounts] share`` names ``memory``; else nothing.
+
+    ``autoMemoryDirectory`` is read from any settings scope, ``--settings`` included
+    (Claude Code, Memory). Every launch gets it, the plain claude's too, so all of them
+    read and write one directory per project."""
+    try:
+        if "memory" not in accounts_settings().share:
+            return []
+    except Exception:  # an unreadable config shares nothing
+        return []
+    directory = shared_memory_root() / sharing.memory_key(cwd)
+    return ["--settings", json.dumps({"autoMemoryDirectory": str(directory)})]
+
+
+def share_status() -> list[PartChange]:
+    """What every account holds for every part: the linked parts per managed slot, and
+    ``memory`` as on (``shared``) or off (``none``) for the machine."""
+    knobs = accounts_settings()
+    source = core.default_account().config_dir
+    held: list[PartChange] = []
+    for account in list_accounts():
+        for part in sharing.SHARE_PARTS:
+            if part == "memory":
+                held.append(
+                    PartChange(account, part, "shared" if "memory" in knobs.share else "none")
+                )
+            elif account.managed:
+                held.append(
+                    PartChange(account, part, sharing.part_state(account.config_dir, part, source))
+                )
+    return held
+
+
+def enable_share(
+    parts: Sequence[sharing.SharePart], *, now: datetime | None = None
+) -> list[PartChange]:
+    """Turn ``parts`` on: write them into ``[accounts] share`` and apply them now.
+
+    Linked parts link every managed slot's entry (its own kept beside it); one linked
+    anywhere else is refused and left as it is. ``memory`` merges every account's
+    ``projects/<key>/memory/`` into the shared directory the first time it is turned on
+    (nothing overwritten; a file that differs is kept as ``<name>.slot<N>.md``).
+    Idempotent: a part already on changes nothing.
+    """
+    config = load_config()
+    first_memory = "memory" in parts and "memory" not in config.accounts.share
+    config.accounts.share = list(dict.fromkeys([*config.accounts.share, *parts]))
+    save_config(config)
+    moment = now or _now()
+    source = core.default_account().config_dir
+    changes: list[PartChange] = []
+    for part in parts:
+        if part == "memory":
+            changes += _merge_memory() if first_memory else []
+            continue
+        for account in list_accounts():
+            if account.managed:
+                changes.append(_link_part(account, part, source, moment))
+    return changes
+
+
+def disable_share(parts: Sequence[sharing.SharePart]) -> list[PartChange]:
+    """Turn ``parts`` off: out of ``[accounts] share``, and every linked entry back to the
+    slot's own copy (the one :func:`enable_share` kept), exactly as it was. ``memory``
+    stops being passed to launches; the shared directory stays where it is."""
+    config = load_config()
+    config.accounts.share = [part for part in config.accounts.share if part not in parts]
+    save_config(config)
+    source = core.default_account().config_dir
+    changes: list[PartChange] = []
+    for part in parts:
+        if part == "memory":
+            continue
+        for account in list_accounts():
+            if not account.managed:
+                continue
+            was = sharing.part_state(account.config_dir, part, source)
+            if was != "shared":  # nothing of ours to undo: say what it holds
+                changes.append(PartChange(account, part, was))
+                continue
+            try:
+                restored = sharing.unlink_part(account.config_dir, part, source)
+            except OSError as exc:
+                changes.append(PartChange(account, part, "failed", exc.strerror or str(exc)))
+                continue
+            if restored is not None:
+                changes.append(PartChange(account, part, "restored", restored.name))
+            else:
+                changes.append(PartChange(account, part, "unlinked"))
+    return changes
+
+
+def _link_part(
+    account: ClaudeAccount, part: sharing.SharePart, source: Path, now: datetime
+) -> PartChange:
+    if sharing.part_state(account.config_dir, part, source) == "shared":
+        return PartChange(account, part, "already")
+    try:
+        kept = sharing.link_part(account.config_dir, part, source, now=now)
+    except sharing.SharingError as exc:
+        return PartChange(account, part, "refused", str(exc))
+    except OSError as exc:
+        return PartChange(account, part, "failed", exc.strerror or str(exc))
+    return PartChange(account, part, "linked", kept.name if kept is not None else None)
+
+
+def _merge_memory() -> list[PartChange]:
+    """Every account's per-project memory into the shared root, once (:func:`enable_share`)."""
+    root = shared_memory_root()
+    changes: list[PartChange] = []
+    accounts = list_accounts()
+    keys = sorted(
+        {
+            memory.parent.name
+            for account in accounts
+            for memory in (account.config_dir / "projects").glob("*/memory")
+            if memory.is_dir()
+        }
+    )
+    for key in keys:
+        sources = [
+            (f"slot{account.slot}", account.config_dir / "projects" / key / "memory")
+            for account in accounts
+        ]
+        by_label = {f"slot{account.slot}": account for account in accounts}
+        for label, note in sharing.merge_memory(sources, root / key):
+            changes.append(PartChange(by_label[label], "memory", "merged", f"{key}: {note}"))
+    return changes
+
+
+def _share_parts_into(target: ClaudeAccount) -> list[str]:
+    """``[accounts] share`` at a launch: link the parts ``target`` does not have yet (a slot
+    made after they were turned on), saying what changed or why it could not."""
+    knobs = accounts_settings()
+    linked = [part for part in knobs.share if part in sharing.LINKED_PARTS]
+    if not linked or not target.managed:
+        return []
+    source = core.default_account().config_dir
+    notes: list[str] = []
+    for part in linked:
+        change = _link_part(target, part, source, _now())
+        name = core.label(target)
+        if change.outcome == "linked":
+            kept = f" (its own kept as {change.detail})" if change.detail else ""
+            notes.append(SharedNote(f"{name} now shares the plain claude's {part}{kept}"))
+        elif change.outcome in ("refused", "failed"):
+            notes.append(f"{part} is not shared into {name}: {change.detail}")
+    return notes

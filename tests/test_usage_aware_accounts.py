@@ -2082,7 +2082,8 @@ def test_a_spent_opus_week_is_no_room_for_an_opus_agent(fake_home: Path) -> None
         service.list_accounts(), switch_at=85, family="opus", fetch=fetch
     )
     assert picked is not None and picked.slot == 3
-    assert any("account 2 10% used (opus week 100% used, 0% left)" in note for note in notes)
+    # Spent for an Opus agent: skipped outright, never ranked (P0-W3c).
+    assert any("account 2 skipped — its opus week is spent" in note for note in notes), notes
 
     # The control: the Opus week binds an Opus agent only; another family, or none, is
     # judged on the windows shared by every model, and slot 2 leads again.
@@ -2189,6 +2190,98 @@ def test_a_switch_by_hand_never_falls_back_to_a_marked_account(
     assert any("account 3 skipped — weekly limit until " in note for note in by_hand.notes)
     named = service.choose_for_handover("3", role="coder", project=work, exclude=(2,))
     assert named.account is not None and named.account.slot == 3  # --to is the operator's
+
+
+# --------------------------------------------------------------------------- P0-W3c
+#
+# What the endpoint really sends (P0-W0, 2026-10-23, Claude Code 2.1.309): every
+# `seven_day_<family>` key is null, and the per-family week is a `limits[]` entry of kind
+# `weekly_scoped` whose `scope.model.display_name` names the family; the shared week is
+# `weekly_all`. W3 read only the null keys, so a spent family week never blocked a pick.
+
+
+def _w0_payload(
+    *, session: float, week: float, scoped: float, family: str = "Opus"
+) -> dict[str, Any]:
+    """W0's recorded shape (values invented), with the family week at ``scoped`` percent."""
+    resets = (NOW + timedelta(days=3)).isoformat()
+    return {
+        "five_hour": {
+            "utilization": session,
+            "resets_at": (NOW + timedelta(hours=3)).isoformat(),
+            "limit_dollars": None,
+            "locked_reason": None,
+        },
+        "seven_day": {"utilization": week, "resets_at": resets, "locked_reason": None},
+        "seven_day_oauth_apps": None,
+        "seven_day_opus": None,
+        "seven_day_sonnet": None,
+        "seven_day_breakdown": {"utilization": 99.0, "resets_at": resets},  # not a window
+        "limits": [
+            {"kind": "session", "group": "session", "percent": session, "scope": None},
+            {"kind": "weekly_all", "group": "weekly", "percent": week, "scope": None},
+            {
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": scoped,
+                "resets_at": resets,
+                "scope": {"model": {"id": None, "display_name": family}, "surface": None},
+            },
+        ],
+        "weekly_scoped_shares": [{"limit_index": 2, "used_percent_of_weekly": 9}],
+    }
+
+
+def test_a_weekly_scoped_limit_is_the_family_week_and_a_spent_one_blocks_a_pick(
+    fake_home: Path, work: ProjectInfo
+) -> None:
+    _slot("spent@example.com", "tok-spent")  # slot 2: first in order, its Opus week spent
+    _slot("room@example.com", "tok-room")  # slot 3
+    fetch = _Usage(
+        {
+            "tok-spent": _w0_payload(session=20, week=30, scoped=100),
+            "tok-room": _w0_payload(session=40, week=50, scoped=10),
+        }
+    )
+
+    reading = service.usage(service.resolve("2"), fetch=fetch)
+    assert reading.family_week_percent == {"opus": 100.0}  # breakdown is no family
+    assert reading.family_week_resets_at["opus"] == NOW + timedelta(days=3)
+    assert service.headroom_percent(reading, "opus") == 100.0
+    assert service.headroom_percent(reading, "sonnet") == 30.0
+
+    picked, _ = service.headroom_choice(
+        service.list_accounts(), switch_at=85, family="opus", fetch=fetch
+    )
+    assert picked is not None and picked.slot == 3
+    # The live reading left a mark, so a launch picking from the cache (which keeps the two
+    # shared windows only) skips slot 2 too…
+    with store_session() as store:
+        assert list(store.list_meta("account_limit:2:")) == ["account_limit:2:opus"]
+    service.remember_limit(2, "opus", NOW - timedelta(hours=1))  # the mark, lifted
+    # …and without the mark, the reading itself rules it out. A switch by hand takes the
+    # least bad, but never an account whose family week is spent.
+    _spent_too = _Usage(
+        {
+            "tok-spent": _w0_payload(session=20, week=30, scoped=100),
+            "tok-room": _w0_payload(session=95, week=96, scoped=10),
+        }
+    )
+    by_hand = service.choose_for_handover(
+        role="coder", project=work, exclude=(), fetch=_spent_too, family="opus"
+    )
+    assert by_hand.account is not None and by_hand.account.slot == 3
+    assert any("account 2 skipped — its opus week is spent" in n for n in by_hand.notes), (
+        by_hand.notes
+    )
+
+
+def test_weekly_all_is_the_shared_week(fake_home: Path) -> None:
+    _slot("one@example.com", "tok-one")
+    payload = _w0_payload(session=10, week=20, scoped=5)
+    payload["limits"][1]["percent"] = 90  # the shared week reads fuller in limits[] than seven_day
+    reading = service.usage(service.resolve("2"), fetch=_Usage({"tok-one": payload}))
+    assert reading.week_percent == 90.0
 
 
 # --- the weekly aggregate (P3-W2a, #287) ------------------------------------------------

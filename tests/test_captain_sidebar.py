@@ -27,6 +27,7 @@ from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import state as captain_state
 from tests import test_ui_shell as ui_suite
+from tests.fleet_fakes import list_agents_as
 from tests.test_ui_shell import Script, drive, fleet_app, refreshed, row_for, seed, shown, status
 
 # The UI suite's fixtures, bound here so pytest finds them for this module's tests
@@ -406,7 +407,7 @@ def test_a_captain_read_that_failed_keeps_the_captain_row_and_says_why(
             raise failure[0]
         return list(live)
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake)
+    list_agents_as(monkeypatch, fake)
     State = tuple[list[str], bool, str]
 
     async def body(pilot: Pilot[None]) -> tuple[State, State, State, bool, State]:

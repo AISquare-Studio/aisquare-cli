@@ -6694,7 +6694,7 @@ def test_a_nudge_wakes_a_manager_only_for_a_write_on_the_board_it_reads(hubbed: 
     assert hubbed.tmux.typed == [], "its manager reads the hub's board, where neither is"
     team_service.add_note("which branch?", kind="question", session_ref=hubbed.coder_sid)
     assert hubbed.tmux.typed == [
-        (hubbed.manager.pane_id, "literal", NUDGE_TEXT),
+        (hubbed.manager.pane_id, "paste", NUDGE_TEXT),
         (hubbed.manager.pane_id, "key", "Enter"),
     ], "a write on the board it reads does wake it"
 
@@ -6726,7 +6726,7 @@ def test_under_a_hub_a_waiting_manager_is_woken_by_its_coders_writes_and_its_own
         team_service.finish_task(hubbed.task.id, session_ref=hubbed.coder_sid)
 
     assert hubbed.tmux.typed == [
-        (hubbed.manager.pane_id, "literal", NUDGE_TEXT),
+        (hubbed.manager.pane_id, "paste", NUDGE_TEXT),
         (hubbed.manager.pane_id, "key", "Enter"),
     ]
     delta = team_service.hook_prompt_heartbeat(hubbed.manager_sid, hubbed.fleet.root)
@@ -11235,7 +11235,7 @@ def test_reap_nudges_a_waiting_manager_when_an_agent_exits(
     tmux.die(coder.pane_id, 1)
     fleet_service.reap(project)
     assert tmux.typed == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
 
@@ -12565,7 +12565,7 @@ def test_nudge_types_one_fixed_line_into_a_waiting_manager(
     manager = _waiting_manager(tmux, project)
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     assert tmux.typed == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
     assert not NUDGE_TEXT.startswith(("/", "!")), "Claude Code's command prefixes"
@@ -12623,7 +12623,7 @@ def test_nudge_refuses_a_stale_waiting_row_that_ls_and_tell_call_working(
     assert fleet_service.status_of(manager).state == "waiting"
     assert fleet_service.nudge_manager(project.id, reason="task_review") is True
     assert tmux.typed == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
 
@@ -13271,7 +13271,8 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
     with store_session() as store:
         revived = store.get_session(agent.session_id or "")
         still = store.get_task(task.id)
-    assert revived is not None and revived.ended_at is None and revived.state == "working"
+    # A resumed session sits at its prompt until the resume line is typed (#123): `waiting`.
+    assert revived is not None and revived.ended_at is None and revived.state == "waiting"
     assert still is not None and still.status == "doing" and still.claimed_by == agent.session_id
 
 
@@ -14242,7 +14243,7 @@ def test_a_listing_records_a_dead_pane_as_ended_and_keeps_the_row_while_its_wind
     assert row is not None and row.ended_at is not None and row.exit_status == 130
     assert _events(project, "agent_exited") == ["coder-1 exited (130)"]
     assert tmux.typed == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
     # Idempotent: the next listing writes nothing and says nothing more.
@@ -16276,7 +16277,7 @@ def test_a_restart_whose_replacement_never_starts_wakes_the_manager_it_held_back
 
     assert len(_events(project, "agent_exited")) == 1
     assert [typed for typed in tmux.typed if typed[0] == manager.pane_id] == [
-        (manager.pane_id, "literal", NUDGE_TEXT),
+        (manager.pane_id, "paste", NUDGE_TEXT),
         (manager.pane_id, "key", "Enter"),
     ]
 
@@ -18409,6 +18410,259 @@ def test_fleet_ls_json_says_whether_each_agent_asked_for_remote_control(
     assert agents == {"coder-rc": True, "coder-plain": False}
 
 
+# --- admission: memory and the fleet-wide budget (#283, P2-W1a) -----------------------
+
+
+def _memory(monkeypatch: pytest.MonkeyPatch, available_mb: int, pressure: str = "normal") -> None:
+    from aisquare.core import memory
+
+    monkeypatch.setattr(
+        memory,
+        "headroom",
+        lambda: memory.Headroom(available_mb, 16_384, pressure, None, "test"),  # type: ignore[arg-type]
+    )
+
+
+def _second_project(tmp_path: Path) -> ProjectInfo:
+    path = tmp_path / "repo-b"
+    path.mkdir()
+    _git("init", "-q", "-b", "main", cwd=path)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=path)
+    info = team_project(path)
+    with store_session() as store:
+        store.onboard_project(info)
+    return info
+
+
+def test_spawn_refuses_below_the_memory_floor_before_any_window_opens(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failing-first case: on the base a spawn at 1,500 MB available started."""
+    _settings(monkeypatch, min_free_mb=2048)
+    _memory(monkeypatch, 1500)
+    with pytest.raises(fleet_service.CapacityRefused) as refused:
+        _coder(project)
+    assert refused.value.code == "capacity_memory"
+    assert "1500 MB available" in str(refused.value) and "2048 MB" in str(refused.value)
+    assert "aisquare fleet capacity" in str(refused.value)
+    assert tmux.spawned == [], "refused before any window"
+    # Negative control: the floor off admits the same spawn.
+    _settings(monkeypatch, min_free_mb=0)
+    assert _coder(project).label == "coder-1"
+
+
+def test_critical_pressure_refuses_and_warn_pressure_admits_with_a_note(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings(monkeypatch, min_free_mb=2048)
+    _memory(monkeypatch, 9000, "critical")
+    with pytest.raises(fleet_service.CapacityRefused, match="pressure is critical"):
+        _coder(project)
+    _memory(monkeypatch, 9000, "warn")
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+    assert any("memory pressure is warn" in note for note in receipt.notes), receipt.notes
+
+
+def test_unknown_headroom_admits_and_says_so(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core import memory
+
+    _settings(monkeypatch, min_free_mb=2048)
+    monkeypatch.setattr(memory, "headroom", lambda: memory.UNKNOWN)
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+    assert any("could not read this machine's memory" in note for note in receipt.notes)
+
+
+def test_after_a_memory_refusal_admission_wants_more_for_five_minutes(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GNU parallel's lesson: a floor with no margin flaps. 2,100 MB clears 2,048 but not
+    the 2,560 required for five minutes after a refusal."""
+    now = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(fleet_service, "_now", lambda: now)
+    _settings(monkeypatch, min_free_mb=2048)
+    _memory(monkeypatch, 1500)
+    with pytest.raises(fleet_service.CapacityRefused):
+        _coder(project)
+    _memory(monkeypatch, 2100)
+    with pytest.raises(fleet_service.CapacityRefused, match="2560 MB"):
+        _coder(project)
+    now = now + timedelta(minutes=6)
+    assert _coder(project).label == "coder-1"
+
+
+def test_the_fleet_wide_budget_spans_projects_and_names_each_count(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings(monkeypatch, max_agents_total=3)
+    other = _second_project(tmp_path)
+    _coder(project)
+    _coder(project)
+    assert _coder(other).label == "coder-1", "one spawn in B fits the budget"
+    with pytest.raises(fleet_service.CapacityRefused) as refused:
+        _coder(other)
+    assert refused.value.code == "capacity_fleet"
+    message = str(refused.value)
+    assert "3 live agents across the fleet (max_agents_total = 3)" in message
+    shown = project_service.display_name
+    assert f"{shown(project)} 2, {shown(other)} 1" in message, (
+        "each project's count, as lists name it"
+    )
+    assert len(tmux.spawned) == 3
+
+
+def test_the_per_project_cap_is_a_capacity_refusal_too(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings(monkeypatch, max_agents_per_project=1)
+    _coder(project)
+    with pytest.raises(fleet_service.CapacityRefused) as refused:
+        _coder(project)
+    assert refused.value.code == "capacity_project"
+
+
+def test_a_spawn_that_races_past_the_fleet_budget_backs_its_row_out(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N parallel spawns at budget - 1 settle to exactly the budget, as the project cap does."""
+    _settings(monkeypatch, max_agents_total=2)
+    other = _second_project(tmp_path)
+    _coder(project)
+    original = tmux.spawn_window
+
+    def spawn_then_fill(*args: object, **kwargs: object) -> WindowInfo:
+        window = original(*args, **kwargs)  # type: ignore[arg-type]
+        with store_session() as store:  # a parallel spawn in B takes the last seat
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=new_agent_id(),
+                    project_id=other.id,
+                    label="coder-racer",
+                    role="coder",
+                    pane_id="%99",
+                    cwd=other.root,
+                    created_at=datetime.now(tz=UTC) - timedelta(seconds=1),
+                )
+            )
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", spawn_then_fill)
+    with pytest.raises(fleet_service.CapacityRefused, match="max_agents_total = 2"):
+        _coder(project)
+    assert tmux.killed == ["%2"]
+    with store_session() as store:
+        live = [a for a in store.live_fleet_agents() if a.role != "captain"]
+    assert len(live) == 2, "the budget holds"
+
+
+def test_admissions_at_the_budget_and_refusals_are_logged(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings(monkeypatch, max_agents_total=1, min_free_mb=2048)
+    _memory(monkeypatch, 4000)
+    _coder(project)
+    with pytest.raises(fleet_service.CapacityRefused):
+        _coder(project)
+    log = paths.aisquare_home() / "fleet" / "admission.jsonl"
+    lines = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert [line["outcome"] for line in lines] == ["admitted-at-budget", "capacity_fleet"]
+    assert lines[1]["live_total"] == 1 and lines[1]["available_mb"] == 4000
+
+
+def test_the_doctor_capacity_row_warns_when_a_spawn_would_be_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aisquare.services import diagnostics
+
+    paths.ensure_home()
+    _settings(monkeypatch, min_free_mb=2048)
+    _memory(monkeypatch, 1500)
+    row = diagnostics._check_fleet_capacity()
+    assert row.status.value == "warn"
+    assert "1500 MB available" in row.detail and "aisquare fleet capacity" in (row.fix or "")
+    _memory(monkeypatch, 8000)
+    row = diagnostics._check_fleet_capacity()
+    assert row.status.value == "ok" and "8000 MB available, pressure normal" in row.detail
+    _memory(monkeypatch, 8000, "warn")
+    assert diagnostics._check_fleet_capacity().status.value == "warn"
+
+
+def test_a_restart_of_a_running_agent_at_low_memory_replaces_it_rather_than_losing_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #323 (major): the replacement was admitted AFTER the stop, so below
+    min_free_mb the agent was stopped and its replacement refused. A live 1:1
+    replacement frees its own seat and memory as it starts: it is not a new spawn."""
+    _settings(monkeypatch, min_free_mb=2048)
+    agent = _coder(project)
+    _memory(monkeypatch, 1500)
+    receipt = fleet_service.restart(project, agent.label)
+    assert receipt.was_running is True
+    assert receipt.started.label == agent.label and receipt.started.ended_at is None
+    with store_session() as store:
+        assert [a.label for a in store.fleet_agents(project.id, live_only=True)] == ["coder-1"]
+
+
+def test_a_restart_of_an_exited_agent_is_a_spawn_and_is_admitted_as_one(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: nothing is stopped, so nothing is lost, and the floor applies."""
+    _settings(monkeypatch, min_free_mb=2048)
+    agent = _coder(project)
+    tmux.die(agent.pane_id, 130)
+    _memory(monkeypatch, 1500)
+    with pytest.raises(fleet_service.CapacityRefused, match="1500 MB available"):
+        fleet_service.restart(project, agent.label)
+
+
+def test_a_switch_at_low_memory_moves_the_agent_rather_than_losing_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings(monkeypatch, min_free_mb=2048)
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _memory(monkeypatch, 1500)
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+    assert receipt.to_slot == 3
+    with store_session() as store:
+        live = store.fleet_agents(project.id, live_only=True)
+    assert [(a.label, a.account_slot) for a in live] == [("coder-1", 3)]
+
+
+def test_two_projects_that_share_a_name_are_counted_apart(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #323 (minor): two checkouts named `repo` were one entry, `repo 2 of 1`."""
+    _settings(monkeypatch, max_agents_per_project=1, max_agents_total=5)
+    path = tmp_path / "elsewhere" / "repo"
+    path.mkdir(parents=True)
+    _git("init", "-q", "-b", "main", cwd=path)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=path)
+    twin = team_project(path)
+    with store_session() as store:
+        store.onboard_project(twin)
+    _coder(project)
+    _coder(twin)
+    live = fleet_service.capacity().live
+    assert live == {f"repo ({project.root})": 1, f"repo ({twin.root})": 1}
+
+
 def test_a_switch_after_a_cross_account_resume_resumes_the_real_transcript(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -18568,3 +18822,114 @@ def test_a_hand_over_worker_that_crashes_posts_handover_failed_and_wakes_the_man
     assert "hand-over worker failed (OperationalError: database is locked)" in failed
     assert "fleet switch" in failed
     assert len(nudges) == 1
+
+
+# --- #123: an idle agent reads waiting, not working (P0-W1b) ---------------------------------
+
+
+def _working_row(now: datetime, *, seen: timedelta) -> tuple[FleetAgent, TeamSession]:
+    agent = FleetAgent(
+        id="agt_idle1",
+        project_id="prj_x",
+        label="coder-1",
+        role="coder",
+        pane_id="%9",
+        session_id="sess-idle",
+        cwd=Path("/tmp"),
+        created_at=now - timedelta(hours=1),
+    )
+    session = TeamSession(
+        id="sess-idle",
+        project_id="prj_x",
+        role="coder",
+        started_at=now - timedelta(hours=1),
+        last_seen_at=now - seen,
+        state="working",
+    )
+    return agent, session
+
+
+def test_a_fresh_working_row_over_a_quiet_idle_pane_reads_waiting() -> None:
+    """A turn that ended with Esc fires no Stop, and an agent whose start upsert said
+    `working` before #123 stayed so: the row was trusted for `_STALE_AFTER` (30 min)
+    whatever the pane showed. Past `busy_quiet_seconds` of a quiet pane, its screen
+    decides — once, and only for a row in that state."""
+    now = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
+    agent, session = _working_row(now, seen=timedelta(minutes=5))
+    quiet = fleet_service._PaneView(False, None, "claude", now - timedelta(seconds=45))
+    asked: list[str] = []
+
+    def idle() -> bool:
+        asked.append("idle")
+        return True
+
+    state = fleet_service._derive(agent, session, quiet, observed=True, now=now, idle_box=idle)
+    assert state == ("waiting", "idle (the board said working)")
+
+    # Busy: the pane printed within the quiet window — trusted, and nothing is captured.
+    asked.clear()
+    busy = fleet_service._PaneView(False, None, "claude", now - timedelta(seconds=3))
+    assert fleet_service._derive(agent, session, busy, observed=True, now=now, idle_box=idle) == (
+        "working",
+        None,
+    )
+    assert asked == []
+    # A quiet pane whose box is not idle (a long tool call, a spinner) is still working.
+    assert fleet_service._derive(
+        agent, session, quiet, observed=True, now=now, idle_box=lambda: False
+    ) == ("working", None)
+
+
+def test_fleet_ls_reads_a_quiet_idle_agent_waiting_within_busy_quiet_seconds(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    from tests.captain_screens import REAL_IDLE, REAL_WORKING
+
+    agent = fleet_service.spawn(project, "coder", worktree=False).agent
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        store.upsert_session(
+            TeamSession(
+                id=agent.session_id or "",
+                project_id=project.id,
+                role="coder",
+                started_at=now,
+                last_seen_at=now - timedelta(minutes=2),
+                state="working",
+            )
+        )
+    tmux.output_at[agent.pane_id] = now - timedelta(minutes=1)
+    tmux.screens[agent.pane_id] = REAL_IDLE
+
+    [idle] = fleet_service.list_agents(project)
+    assert (idle.state, idle.detail) == ("waiting", "idle (the board said working)")
+
+    tmux.screens[agent.pane_id] = REAL_WORKING  # mid-turn, a long tool call: still working
+    [busy] = fleet_service.list_agents(project)
+    assert busy.state == "working"
+
+
+def test_tell_types_into_a_quiet_idle_agent_the_board_calls_working(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """#123's other half, through `fleet tell` (P0-FU, #51): a fresh `working` row whose pane
+    has printed nothing for `busy_quiet_seconds` and shows Claude Code idle at its prompt is
+    waiting, so the tell is TYPED, not filed as a note it would never read. The same row on a
+    screen that is mid-turn still gets the note: never typed into a turn."""
+    from tests.captain_screens import REAL_IDLE, REAL_WORKING
+
+    agent = _coder(project)
+    _board_session(agent, "working")
+    tmux.set_command(agent.pane_id, "claude")  # the agent, not the launcher, is up
+    tmux.output_at[agent.pane_id] = datetime.now(tz=UTC) - timedelta(minutes=1)
+    tmux.screens[agent.pane_id] = REAL_WORKING
+
+    busy = fleet_service.tell(project, "coder-1", "first")
+    assert not busy.delivered and "board note" in busy.how
+    assert tmux.typed == []
+
+    tmux.screens[agent.pane_id] = REAL_IDLE
+    idle = fleet_service.tell(project, "coder-1", "second")
+    assert idle.delivered and "typed" in idle.how
+    assert tmux.typed == [(agent.pane_id, "paste", "second"), (agent.pane_id, "key", "Enter")]
+    assert [n for n in _events(project, "note")] == ["first"]

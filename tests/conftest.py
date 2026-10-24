@@ -827,6 +827,41 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def roomy_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every spawn in the suite sees plenty of memory, whatever the runner has (#283).
+
+    ``min_free_mb`` is on by default, so a CI runner short of 2 GB would otherwise refuse
+    the spawn a test is about. A test of admission sets its own headroom; the probes'
+    own tests call ``linux_headroom`` / ``darwin_headroom`` with their fixtures.
+    """
+    from aisquare.core import memory
+
+    monkeypatch.setattr(
+        memory, "headroom", lambda: memory.Headroom(65_536, 131_072, "normal", None, "test")
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_detached_root_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No in-process test starts the detached worker that posts a Run's root (#129 e).
+
+    It runs in a session of its own and outlives the test, retrying a gateway the test
+    has already shut down. A test of the worker patches ``_start_root_worker`` itself; a
+    test of a traced launch patches ``_post_run_root``. Reaching this is a test that did
+    neither, and it fails loudly rather than leave a process behind.
+    """
+    from aisquare.services import explainability
+
+    def refuse(argv: list[str], key: bytes) -> None:
+        raise AssertionError(
+            "a test started a detached root worker: patch explainability._post_run_root "
+            f"or _start_root_worker ({' '.join(argv[-5:])})"
+        )
+
+    monkeypatch.setattr(explainability, "_start_root_worker", refuse)
+
+
+@pytest.fixture(autouse=True)
 def no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Never read the macOS Keychain of the machine the suite runs on.
 
@@ -979,6 +1014,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         f"{CAPTAIN_GATE}: the owner gate applies as the config says; every other test runs "
         "with it off",
+    )
+    config.addinivalue_line(
+        "markers",
+        "e2e: drives a real, signed-in Claude Code (and spends tokens); skipped unless the "
+        "test's own variables name what to drive",
     )
 
 

@@ -490,3 +490,200 @@ def unlink_settings(account: ClaudeAccount, source: Path) -> bool:
         return False
     atomic.write_replacing(settings_path(account), Path(source).read_bytes())
     return True
+
+
+# --- skills, agents, commands, CLAUDE.md, plugins: one copy, linked (P2-W7, #198) ---------
+
+SharePart = Literal["memory", "skills", "agents", "commands", "claude_md", "plugins"]
+SHARE_PARTS: tuple[SharePart, ...] = (
+    "memory",
+    "skills",
+    "agents",
+    "commands",
+    "claude_md",
+    "plugins",
+)
+"""What ``[accounts] share`` can name. ``plugins`` is experimental: MCP auth and the plugin
+store are per directory, so a linked ``plugins/`` can carry a login one slot made."""
+
+LINKED_PARTS: dict[SharePart, tuple[str, bool]] = {
+    "skills": ("skills", True),
+    "agents": ("agents", True),
+    "commands": ("commands", True),
+    "claude_md": ("CLAUDE.md", False),
+    "plugins": ("plugins", True),
+}
+"""A linked part's entry in a config directory, and whether it is a directory."""
+
+PartState = Literal["shared", "own", "none", "elsewhere"]
+
+#: ``os.symlink`` and, on Windows where that needs a privilege, a junction for a directory:
+#: injected by tests, the junction path through CPython's own ``_winapi.CreateJunction``.
+_platform: Callable[[], str] = lambda: os.name  # noqa: E731
+
+
+def part_entry(config_dir: Path, part: SharePart) -> Path:
+    return config_dir / LINKED_PARTS[part][0]
+
+
+def part_state(config_dir: Path, part: SharePart, source_dir: Path) -> PartState:
+    """``shared`` when the entry links to the plain claude's, ``elsewhere`` when it links to
+    anything else, ``own`` when it is a real file or directory, ``none`` when absent."""
+    entry = part_entry(config_dir, part)
+    if _is_link(entry):
+        same = os.path.realpath(entry) == os.path.realpath(part_entry(source_dir, part))
+        return "shared" if same else "elsewhere"
+    return "own" if os.path.lexists(entry) else "none"
+
+
+def _is_link(path: Path) -> bool:
+    """A symlink, or on Windows a junction (which ``islink`` does not see)."""
+    if os.path.islink(path):
+        return True
+    is_junction = getattr(os.path, "isjunction", None)  # 3.12+
+    return bool(is_junction is not None and is_junction(path))
+
+
+def link_part(config_dir: Path, part: SharePart, source_dir: Path, *, now: datetime) -> Path | None:
+    """Make ``config_dir``'s entry for ``part`` the plain claude's; the copy of its own kept.
+
+    Move-then-link: the slot's own file or directory is RENAMED beside itself as
+    ``<entry>.own-<UTC stamp>`` (never written over: ``-2``, ``-3`` on), then the link
+    is made. The plain claude's entry is created empty when it has none (a directory),
+    so the slot follows whatever is added there later; a ``CLAUDE.md`` it has none of is
+    refused instead, since an empty one would hide the slot's own. Already shared: a
+    no-op, ``None``. An entry linked anywhere else is the operator's and is refused
+    (:class:`SharingError`). Windows: a junction for a directory, and a ``CLAUDE.md`` is
+    COPIED (no link without a privilege): it stops following the plain claude's.
+    """
+    entry = part_entry(config_dir, part)
+    source = part_entry(source_dir, part)
+    state = part_state(config_dir, part, source_dir)
+    if state == "shared":
+        return None
+    if state == "elsewhere":
+        raise SharingError(f"its {entry.name} links to {os.readlink(entry)} — not ours to replace")
+    is_dir = LINKED_PARTS[part][1]
+    if is_dir:
+        source.mkdir(parents=True, exist_ok=True)
+    elif not source.is_file():
+        raise SharingError(f"the plain claude has no {source.name} to share")
+    kept: Path | None = None
+    if state == "own":
+        kept = _free_beside(entry, f"{entry.name}.own-{now:%Y%m%dT%H%M%SZ}")
+        os.replace(entry, kept)
+    try:
+        _make_link(source, entry, is_dir=is_dir)
+    except OSError:
+        if kept is not None:  # put it back: the slot keeps what it had
+            os.replace(kept, entry)
+        raise
+    return kept
+
+
+def unlink_part(config_dir: Path, part: SharePart, source_dir: Path) -> Path | None:
+    """Undo :func:`link_part`: remove the link and put the newest kept copy back; the copy
+    restored, or ``None`` when the slot had none of its own (or was not linked)."""
+    entry = part_entry(config_dir, part)
+    if part_state(config_dir, part, source_dir) != "shared":
+        return None
+    _remove_link(entry)
+    kept = sorted(
+        entry.parent.glob(f"{entry.name}.own-*"), key=lambda p: (p.stat().st_mtime, p.name)
+    )
+    if not kept:
+        return None
+    os.replace(kept[-1], entry)
+    return entry
+
+
+def _free_beside(path: Path, name: str) -> Path:
+    counter = 1
+    while True:
+        candidate = path.with_name(name if counter == 1 else f"{name}-{counter}")
+        if not os.path.lexists(candidate):
+            return candidate
+        counter += 1
+
+
+def _make_link(source: Path, entry: Path, *, is_dir: bool) -> None:
+    try:
+        os.symlink(source, entry, target_is_directory=is_dir)
+        return
+    except OSError:
+        if _platform() != "nt":
+            raise
+    if is_dir:
+        _junction(source, entry)
+    else:
+        shutil.copy2(source, entry)
+
+
+def _junction(source: Path, entry: Path) -> None:
+    """A directory junction (Windows): no privilege needed, unlike a symlink."""
+    import importlib
+
+    # CPython's own Windows module, by name: it exists nowhere else, so the type checker
+    # on another platform sees no such attribute.
+    winapi: Any = importlib.import_module("_winapi")
+    winapi.CreateJunction(str(source), str(entry))
+
+
+def _remove_link(entry: Path) -> None:
+    if os.path.isdir(entry) and not os.path.islink(entry):
+        os.rmdir(entry)  # a junction: rmdir removes the link, never the target's contents
+    else:
+        os.unlink(entry)
+
+
+# --- memory: one directory per project, outside every .claude path (P2-W7) -----------------
+
+MEMORY_INDEX = "MEMORY.md"
+
+
+def memory_key(cwd: Path) -> str:
+    """The project key Claude Code files a folder's transcripts and memory under:
+    ``projects/<key>/``, the folder's path with every character but a letter or a digit a
+    ``-`` (measured: ``/private/tmp/x.y`` is ``-private-tmp-x-y``)."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+
+
+def merge_memory(sources: Iterable[tuple[str, Path]], target: Path) -> list[tuple[str, str]]:
+    """Merge each ``(label, memory dir)`` into ``target``: nothing is ever overwritten.
+
+    A file ``target`` lacks is copied; one with the same bytes is skipped; one that
+    differs is kept as ``<stem>.<label><suffix>`` beside it. ``MEMORY.md`` (the index
+    Claude Code reads first) is merged by line, each line once, in first-seen order.
+    Returns ``(label, note)`` for each file kept under another name.
+    """
+    notes: list[tuple[str, str]] = []
+    target.mkdir(parents=True, exist_ok=True)
+    for label, source in sources:
+        if not source.is_dir():
+            continue
+        for item in sorted(source.rglob("*")):
+            if not item.is_file():
+                continue
+            relative = item.relative_to(source)
+            dest = target / relative
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if relative.as_posix() == MEMORY_INDEX:
+                _merge_lines(item, dest)
+                continue
+            if not dest.exists():
+                shutil.copy2(item, dest)
+            elif dest.read_bytes() != item.read_bytes():
+                other = dest.with_name(f"{dest.stem}.{label}{dest.suffix}")
+                if not other.exists() or other.read_bytes() != item.read_bytes():
+                    shutil.copy2(item, _free_beside(other, other.name))
+                    notes.append((label, f"{relative} differed: kept as {other.name}"))
+    return notes
+
+
+def _merge_lines(source: Path, dest: Path) -> None:
+    have = dest.read_text(encoding="utf-8").splitlines() if dest.exists() else []
+    seen = set(have)
+    added = [line for line in source.read_text(encoding="utf-8").splitlines() if line not in seen]
+    if added or not dest.exists():
+        lines = have + [line for line in dict.fromkeys(added)]
+        dest.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")

@@ -34,6 +34,8 @@ from typer.testing import CliRunner
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.app import app
+from aisquare.core.store import store_session
+from aisquare.core.workspace import project_id_for
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import install_route
@@ -2146,7 +2148,7 @@ def ui_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     import aisquare.cli.ui.app as ui_app
 
     calls: list[str] = []
-    monkeypatch.setattr(ui_app, "run_ui", lambda: calls.append("run_ui"))
+    monkeypatch.setattr(ui_app, "run_ui", lambda **options: calls.append("run_ui"))
     return calls
 
 
@@ -2202,6 +2204,36 @@ def test_ui_runs_the_app_at_an_interactive_terminal(
     assert result.exit_code == 0, result.output
     assert ui_spy == ["run_ui"]
     assert result.output == ""
+
+
+def test_ui_project_and_group_scope_the_app_to_those_projects(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``ui --project a --project b --group g`` hands the app those projects' ids (#83)."""
+    import aisquare.cli.ui.app as ui_app
+
+    monkeypatch.setattr(fleet_cli, "interactive_terminal", lambda: True)
+    scopes: list[object] = []
+    monkeypatch.setattr(ui_app, "run_ui", lambda **options: scopes.append(options["scope"]))
+    with store_session() as store:
+        made = []
+        for name in ("alpha", "beta", "gamma", "delta"):
+            root = (tmp_path / name).resolve()
+            root.mkdir()
+            made.append(store.onboard_project(ProjectInfo(id=project_id_for(root), root=root)))
+        group = store.create_project_group("ops")
+        store.update_project_layout(made[3].id, group_id=group.id)
+
+    result = runner.invoke(app, ["ui", "--project", "alpha", "-P", "beta", "--group", "ops"])
+    assert result.exit_code == 0, result.output
+    assert scopes == [frozenset({made[0].id, made[1].id, made[3].id})]
+
+    scopes.clear()
+    assert runner.invoke(app, ["ui"]).exit_code == 0 and scopes == [None]
+
+    refused = runner.invoke(app, ["ui", "--group", "nope"])
+    assert refused.exit_code == 1 and "no project group named 'nope'" in _plain(refused.stderr)
+    assert scopes == [None]
 
 
 def test_ui_help_exists(runner: CliRunner) -> None:
@@ -2292,3 +2324,135 @@ def test_ls_shows_the_persona_on_its_row_and_json_carries_it(
     assert "tester-1 tester ⏸ waiting %9" in out
     payload = json.loads(as_json.stdout)
     assert [entry["agent"]["persona"] for entry in payload["agents"]] == ["skeptic", None]
+
+
+# --- capacity and the test-run gate (#283) ---------------------------------------------
+
+
+def _headroom(monkeypatch: pytest.MonkeyPatch, *answers: int | None) -> list[float]:
+    """Each probe answers the next of ``answers`` (the last repeats); time passes only
+    when the gate sleeps, so a 15-minute wait is instant."""
+    from aisquare.core import memory
+
+    queue = list(answers)
+    slept: list[float] = []
+    clock = [0.0]
+
+    def probe() -> memory.Headroom:
+        value = queue.pop(0) if len(queue) > 1 else queue[0]
+        return memory.Headroom(value, 16_384, "normal", None, "test")
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(memory, "headroom", probe)
+    monkeypatch.setattr(fleet_service, "_sleep", sleep)
+    monkeypatch.setattr(fleet_service, "_monotonic", lambda: clock[0])
+    return slept
+
+
+def test_capacity_json_names_the_headroom_and_every_limit(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _headroom(monkeypatch, 1500)
+    result = runner.invoke(app, ["--json", "fleet", "capacity"])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.output)
+    assert report["available_mb"] == 1500 and report["min_free_mb"] == 2048
+    assert report["admits"] is False and report["reason"] == "1500 MB available, 2048 MB needed"
+    assert report["live_total"] == 0 and report["max_agents_per_project"] == 4
+
+
+def test_gate_at_the_deadline_runs_nothing_and_exits_75(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    slept = _headroom(monkeypatch, 900)
+    marker = tmp_path / "ran"
+    result = runner.invoke(
+        app,
+        ["fleet", "gate", "--min-free-mb", "2048", "--wait", "12s", "--", "touch", str(marker)],
+    )
+    assert result.exit_code == 75, result.output
+    assert "not run: 900 MB available, 2048 MB needed for 12s" in result.output
+    assert not marker.exists()
+    assert slept == [5.0, 5.0, 2.0], "every 5 s, and no further than the deadline"
+
+
+def test_gate_with_headroom_returns_the_commands_exit_code(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    _headroom(monkeypatch, 900, 900, 4000)
+    result = runner.invoke(
+        app,
+        ["--json", "fleet", "gate", "--min-free-mb", "2048", "--wait", "1m", "--",
+         sys.executable, "-c", "raise SystemExit(3)"],
+    )  # fmt: skip
+    assert result.exit_code == 3, result.output
+    [line] = result.output.strip().splitlines()
+    report = json.loads(line)
+    assert report["passed"] is True and report["exit_code"] == 3
+    assert report["waited_seconds"] == 10.0
+
+
+def test_gate_json_at_the_deadline_is_one_object(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _headroom(monkeypatch, 900)
+    result = runner.invoke(app, ["--json", "fleet", "gate", "--wait", "1s"])
+    assert result.exit_code == 75
+    [line] = result.output.strip().splitlines()
+    assert json.loads(line) == {
+        "passed": False,
+        "ran": None,
+        "available_mb": 900,
+        "needed_mb": 2048,
+        "waited_seconds": 1.0,
+        "pressure": "normal",
+    }
+
+
+def test_gate_takes_test_gate_mb_over_min_free_mb(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core.config import FleetSettings
+
+    monkeypatch.setattr(fleet_service, "settings", lambda: FleetSettings(test_gate_mb=6000))
+    _headroom(monkeypatch, 4000)
+    result = runner.invoke(app, ["--json", "fleet", "gate", "--wait", "0s"])
+    assert json.loads(result.output)["needed_mb"] == 6000
+
+
+def test_a_capacity_refusal_carries_its_own_json_code(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise fleet_service.CapacityRefused("capacity_memory", "1500 MB available, 2048 MB needed")
+
+    monkeypatch.setattr(fleet_service, "spawn", refuse)
+    monkeypatch.setattr(fleet_cli, "_project", lambda _ref: None)
+    result = runner.invoke(app, ["--json", "fleet", "spawn", "coder"])
+    assert result.exit_code == 1
+    assert json.loads(result.output)["error"] == "capacity_memory"
+
+
+def test_gate_json_with_a_command_is_still_one_object_on_stdout(tmp_path: Path) -> None:
+    """Review of #323 (minor): the child inherited stdout, so `--json fleet gate -- pytest`
+    printed pytest's output and then the object. Under --json the child's stdout goes
+    to stderr. A real process: CliRunner cannot see what a child writes to fd 1."""
+    import subprocess
+    import sys
+
+    from aisquare.core import selfcli
+
+    child = [sys.executable, "-c", "print('the child speaks'); raise SystemExit(4)"]
+    argv = selfcli.argv_for(
+        ["--json", "fleet", "gate", "--min-free-mb", "0", "--wait", "0s", "--", *child]
+    )
+    done = subprocess.run(argv, capture_output=True, text=True, timeout=120, cwd=tmp_path)
+    assert done.returncode == 4, done.stderr
+    [line] = done.stdout.strip().splitlines()
+    assert json.loads(line)["exit_code"] == 4
+    assert "the child speaks" in done.stderr

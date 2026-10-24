@@ -316,19 +316,25 @@ def test_the_typed_way_is_kept_for_type_and_it_waits_for_the_box(
     monkeypatch.setattr(fleet_service, "server", lambda config=None: fake)
     monkeypatch.setattr(tmux_core, "desktop_environment", lambda environ=None: {})
     monkeypatch.setattr(fleet_service, "settings", lambda: FleetSettings(first_prompt="type"))
-    looks = 0
-    original = fake.pane_facts
+    looks, captures = 0, 0
+    original, original_capture = fake.pane_facts, fake.capture
 
     def coming_up(pane_id: str) -> Any:
         nonlocal looks
         looks += 1
         if looks == 2:
             fake.set_command(pane_id, "claude")
-        if looks == 4:
-            fake.screens[pane_id] = _box()  # the box comes a beat after the exec
         return original(pane_id)
 
+    def drawn_a_beat_later(pane_id: str, **kwargs: Any) -> Any:
+        nonlocal captures
+        captures += 1
+        if captures == 3 and pane_id not in fake.screens:
+            fake.screens[pane_id] = _box()  # the box comes a beat after the exec
+        return original_capture(pane_id, **kwargs)
+
     monkeypatch.setattr(fake, "pane_facts", coming_up)
+    monkeypatch.setattr(fake, "capture", drawn_a_beat_later)
 
     def hook(pane_id: str) -> None:
         agent_id = str(fake.spawned[-1]["env"]["AISQUARE_FLEET_AGENT"])  # type: ignore[index]
@@ -480,6 +486,9 @@ def test_an_unacknowledged_first_prompt_reads_attention_once(
     later = datetime.now(tz=UTC) + timedelta(seconds=46)
     monkeypatch.setattr(fleet_service, "_now", lambda: later)
 
+    with store_session() as store:
+        named = store.get_project(project.id) or project  # the codename the spawn gave it
+
     def unsent_events() -> list[str]:
         with store_session() as store:
             events = store.events_since(project.id, 0, limit=500)
@@ -488,7 +497,7 @@ def test_an_unacknowledged_first_prompt_reads_attention_once(
     for _ in range(2):
         [status] = fleet_service.list_agents(project)
         assert status.state == "attention"
-        assert status.detail == fleet_service.unsent_detail(project, agent.label)
+        assert status.detail == fleet_service.unsent_detail(named, agent.label)
         assert status.detail.startswith("first prompt not taken — `aisquare fleet tell --project")
     assert len(unsent_events()) == 1 and _row(agent.id).first_prompt == "unsent"
     assert "prompt_unsent" in team_service.MANAGER_WAKE_KINDS

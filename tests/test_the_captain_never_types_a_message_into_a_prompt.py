@@ -17,11 +17,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from aisquare.core import claude_screen
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Capture, TmuxError
 from aisquare.models import FleetAgent, FleetAgentState, ProjectInfo, TeamEvent
@@ -67,7 +68,46 @@ def fleet_rec(monkeypatch: pytest.MonkeyPatch) -> Fleet:
     rec = Fleet(monkeypatch)
     monkeypatch.setattr(fleet, "tell", real_tell)
     monkeypatch.setattr(fleet, "attach_persona", real_attach)
+    _agents_take_what_is_sent(monkeypatch)
     return rec
+
+
+def _agents_take_what_is_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The recorder's panes act as a waiting Claude Code does with what a door sends (P0-W2):
+    a paste shows in the input box, which the door reads before its Enter; and the Enter
+    sends it, clearing the box and starting a turn, which the window's ``UserPromptSubmit``
+    reports (``store.mark_prompted``) and the real ``tell`` waits for. Panes that only
+    recorded made every door here wait out its render check and its acknowledgement, real
+    seconds each: the file took 3.5 s before the tell went through the door and 77 s after."""
+    paste, send_keys = FakeServer.paste, FakeServer.send_keys
+    idle: dict[str, list[str]] = {}
+    """Each pane's screen before the paste its box now shows."""
+
+    def pasted_into(server: FakeServer, pane_id: str, text: str) -> None:
+        paste(server, pane_id, text)
+        pane = server._panes[pane_id]
+        marks = [
+            at
+            for at, row in enumerate(pane.screen)
+            if claude_screen.PANE_ESCAPES.sub("", row).lstrip().startswith(shots.MARK)
+        ]
+        if marks:  # the box's own line is the last: a reply above it may quote a chooser
+            idle.setdefault(pane_id, list(pane.screen))
+            line = marks[-1]
+            pane.screen[line : line + 1] = [f"{shots.MARK}\xa0{text}"]
+
+    def sent(server: FakeServer, pane_id: str, *keys: str) -> None:
+        send_keys(server, pane_id, *keys)
+        if keys != ("Enter",) or pane_id not in idle:
+            return
+        server._panes[pane_id].screen = idle.pop(pane_id)
+        with store_session() as store:
+            for row in store.live_fleet_agents():
+                if row.pane_id == pane_id and row.session_id is not None:
+                    store.mark_prompted(row.session_id, datetime.now(tz=UTC), agent_id=row.id)
+
+    monkeypatch.setattr(FakeServer, "paste", pasted_into)
+    monkeypatch.setattr(FakeServer, "send_keys", sent)
 
 
 @dataclass(frozen=True)

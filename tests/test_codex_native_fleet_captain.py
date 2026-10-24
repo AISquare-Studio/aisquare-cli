@@ -20,7 +20,10 @@ every request): no account, login, provider credential or model spend.
 - The captain on Codex (SMOKE8 8a, 8b): ``aisquare captain say`` starts a Codex captain,
   whose start command once handed Codex launch's ``-e`` pairs and died, types to it, and
   prints its reply; the captain's request offers its server's tools and M11's known residue
-  alone, never the TUI's own ``mcp__codex_worktrees``.
+  alone, never the TUI's own ``mcp__codex_worktrees``. Started from a shell whose
+  ``CODEX_HOME`` alone names an MCP server, into a fleet server that holds another home
+  (review r17 of #113, finding 8), it comes up all the same: its window runs under the home
+  its off-list was read from, where Codex refused that list's name ("invalid transport").
 """
 
 from __future__ import annotations
@@ -52,6 +55,7 @@ from aisquare.core.config import (
     load_config,
     save_config,
 )
+from aisquare.core.spawn import tmux_client_env
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import ProjectInfo
@@ -395,3 +399,34 @@ def test_captain_say_reaches_a_real_codex_captain_offered_its_own_tools_alone(
         assert offered == CAPTAIN_TOOLS, offered
         (captain,) = [t for t in turns[0]["tools"] if t.get("name") == "mcp__captain"]
         assert {"tell", "press", "board"} <= {tool["name"] for tool in captain["tools"]}
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_a_real_codex_captain_started_from_another_home_than_its_fleet_servers_comes_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    with _codex_fleet(tmp_path, monkeypatch, "home") as live:
+        config = load_config()
+        config.team.profiles["captain"] = RoleLaunchProfile(agent="codex")
+        config.fleet.roles.setdefault("captain", FleetRoleSettings()).agent_args["codex"] = NATIVE
+        save_config(config)
+        spawners = Path(os.environ["CODEX_HOME"])
+        layer = (spawners / "config.toml").read_text("utf-8")
+        # The fleet server's home: the same provider, and no server of the spawner's.
+        servers = live.outside / "server-codex"
+        servers.mkdir()
+        (servers / "config.toml").write_text(layer, encoding="utf-8")
+        (spawners / "config.toml").write_text(
+            layer + '[mcp_servers.linear]\ncommand = "/nonexistent/linear"\n', encoding="utf-8"
+        )
+        subprocess.run(
+            ["tmux", "-L", config.fleet.tmux_socket, "new-session", "-d", "-s", "keep"],
+            env={**tmux_client_env(), "CODEX_HOME": str(servers)},
+            check=True,
+        )
+
+        said = runner.invoke(app, ["captain", "say", "--timeout", "120", "hello captain"])
+
+        assert said.exit_code == 0, said.output
+        assert "local fixture complete" in said.output, "the reply, from its rollout"
+        assert [r for r in live.requests if "hello captain" in _user_texts(r)]

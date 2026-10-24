@@ -4395,8 +4395,9 @@ def spawn(
             f"--account selects an account, and {selected.adapter.label} has no account slots"
         )
     if experimental.captain_role(role):
-        # Asked of the home the window runs under, the account's: its operator's own MCP
-        # servers are the ones the captain's session must not load.
+        # Asked of the home the window runs under, the account's, else this process's,
+        # which the window is given below: its operator's own MCP servers are the ones the
+        # captain's session must not load.
         native += _the_captains_tools(
             selected.adapter,
             choice.account.config_dir if choice.account is not None else selected.config_dir,
@@ -4536,6 +4537,13 @@ def spawn(
         # #240, finding 13). A window pair, never a `launch -e` one: those reach the
         # agent after that lookup. Read at each start, a restart's included.
         env.update(experimental.captain_environment())
+        if choice.account is None and selected.adapter.capabilities.exports_home_env:
+            # The home its tools were confined against (`_the_captains_tools`), above: the
+            # window's own is the tmux server's, which carries no spawner's (a Codex tool
+            # shell's is stripped, another shell's never there). A Codex captain's off-list
+            # read from this one switched off a server the window's config does not define,
+            # and Codex refused that config (review r17 of #113, finding 8).
+            env[selected.adapter.home_env] = str(selected.config_dir)
     if config.disable_native_agent_teams:
         native_args, native_env = selected.adapter.disable_native_teams()
         native += native_args

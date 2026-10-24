@@ -366,7 +366,9 @@ launch, a restart's too, the fleet asks Codex's adapter for the session
   account home's `config.toml` and its `-p` profile, `-c` overrides, and a trusted
   project's `.codex/config.toml` from its git root down to its folder. Codex
   refuses a config that switches off a name it does not have, so only those
-  servers are named, as their files say at that launch;
+  servers are named, as their files say at that launch. The account home is the
+  chosen account's, else the `CODEX_HOME` of the shell that starts the captain,
+  which its window is then given, so the list and the window read one home;
 - a Codex MCP server starts with little of the window's environment (`HOME`,
   `LC_CTYPE` and `PATH`), so the Actions server is handed by name what it needs:
   `TMUX_TMPDIR`, `TMPDIR`, `XDG_RUNTIME_DIR` (the speaker's `spd-say`), `LANG`

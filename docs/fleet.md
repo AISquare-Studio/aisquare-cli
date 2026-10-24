@@ -111,6 +111,12 @@ tmux can see and its row says so (`no hooks`).
    agent is briefed with, and imports, edits, exports, removes and validates
    them (`docs/personas.md`).
 
+   Once the manager has spawned a team, a line under its info line counts it
+   per role and state, in the sidebar's icons and chips: `🔨 2▶  🧪 1⏸  👀 1🔔
+   · board for detail`. It is read from the same refresh as the sidebar, so it
+   costs nothing; click it for the **Board** tab. With only the manager
+   running, there is no line.
+
    **3a. Reading the board.** The **Board** tab's top line says what needs
    you: `needs you: 🔔 1 waiting · ❓ 2 questions · 👀 1 in review · ⛔ 1
    blocked`, each count a button to the first thing it counts, or "nothing

@@ -4765,11 +4765,14 @@ def _assignment_block(board: str) -> str:
 # #346 gives a session with nobody to coordinate with no team block and the one-line MCP
 # instructions. A fleet agent is a team member by being one: its window carries
 # AISQUARE_FLEET_AGENT and AISQUARE_ROLE, and its own row is a live fleet agent on the board.
-# The briefing it gets is what D2's first message (#32 m1) tells it to follow.
+# The briefing it gets is what D2's first message (#32 m1) tells it to follow. That holds for
+# #303's role-less agent (``agent``, the Spawn dialog's *(none)*) too: it has no cycle, and
+# it is still on its board as a member.
 
 
 @pytest.mark.parametrize("counted", [True, False], ids=["its row counted", "env alone"])
 @pytest.mark.parametrize("task", [True, False], ids=["--task", "no task"])
+@pytest.mark.parametrize("role", ["coder", fleet_service.PLAIN_ROLE])
 def test_a_fleet_agent_alone_on_its_board_is_briefed_as_a_team_member(
     tmux: FakeTmux,
     claude_on_path: Path,
@@ -4777,16 +4780,17 @@ def test_a_fleet_agent_alone_on_its_board_is_briefed_as_a_team_member(
     monkeypatch: pytest.MonkeyPatch,
     task: bool,
     counted: bool,
+    role: str,
 ) -> None:
     """Nobody else on the board: no other session, no task but its own. Its start brings
-    the team block, its role's cycle and, for a ``--task`` spawn, the ASSIGNED TO YOU line
-    the first message D2 types into it names; it is never marked unbriefed, and its MCP
-    server serves the board's protocol. With its own row not counted as a team, its
-    window's variables alone keep it a member."""
+    the team block, its role's cycle (none for the role-less ``agent``) and, for a
+    ``--task`` spawn, the ASSIGNED TO YOU line the first message D2 types into it names; it
+    is never marked unbriefed, and its MCP server serves the board's protocol. With its own
+    row not counted as a team, its window's variables alone keep it a member."""
     from aisquare.services import mcp_server
 
     mine = _task(project, "the only task here") if task else None
-    agent, first = _spawned(project, "coder", mine.id if mine else None, tmux, monkeypatch)
+    agent, first = _spawned(project, role, mine.id if mine else None, tmux, monkeypatch)
     with store_session() as store:
         assert [s.id for s in store.team_sessions(project.id) if s.id != first] == []
     if not counted:
@@ -4797,7 +4801,10 @@ def test_a_fleet_agent_alone_on_its_board_is_briefed_as_a_team_member(
 
     assert "<aisquare-team>" in started, started
     assert f"You are team session {first[:8]}" in started
-    assert "Your standing cycle (coder)" in started
+    if role == fleet_service.PLAIN_ROLE:
+        assert "Your standing cycle" not in started, "the role-less agent has no cycle"
+    else:
+        assert "Your standing cycle (coder)" in started
     with store_session() as store:
         assert store.get_meta(team_service._unbriefed(first)) is None
     assert mcp_server.server_instructions() == mcp_server.TEAM_INSTRUCTIONS

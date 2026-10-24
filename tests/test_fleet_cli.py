@@ -847,7 +847,7 @@ def test_stop_json_returns_the_agent_row(
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"agent", "claims_released", "release_failed"}
+    assert set(payload) == {"agent", "claims_released", "release_failed", "marked_only"}
     assert payload["agent"]["label"] == "coder-auth"
     assert payload["agent"]["ended_at"] is not None
     assert payload["agent"]["exit_status"] == 0

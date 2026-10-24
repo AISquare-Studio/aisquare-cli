@@ -383,7 +383,11 @@ def test_every_way_aisquare_can_reach_a_session_leaves_a_trace(tmp_path: Path) -
 def test_scanning_a_five_megabyte_transcript_fits_the_stop_hooks_budget(tmp_path: Path) -> None:
     """The Stop hook's read: under 50 ms p95 is the contract on the machine it was
     measured on (the review note gives the figures); this bound is an order of
-    magnitude over it, to catch a quadratic or a whole-file reparse per Stop."""
+    magnitude over it, to catch a quadratic or a whole-file reparse per Stop.
+
+    Each figure is the best of three runs: a box loaded by a parallel gate slowed one cold
+    scan past the bound once (final delta review, n8), while a real slowdown slows all
+    three, so the bound keeps its teeth."""
     transcript = tmp_path / "big.jsonl"
     filler = "x" * 4_000
     with transcript.open("w", encoding="utf-8") as handle:
@@ -392,16 +396,22 @@ def test_scanning_a_five_megabyte_transcript_fits_the_stop_hooks_budget(tmp_path
             handle.write(json.dumps(_result(f"t{n}", filler)) + "\n")
             handle.write(json.dumps({"type": "api-request-blob", "blob": filler}) + "\n")
     assert transcript.stat().st_size > 5_000_000
-    began = time.perf_counter()
-    found, state = usage.scan(transcript)
-    cold = time.perf_counter() - began
-    assert found.models[MODEL].requests == 600
+    colds: list[float] = []
+    for _ in range(3):
+        began = time.perf_counter()
+        found, state = usage.scan(transcript)
+        colds.append(time.perf_counter() - began)
+        assert found.models[MODEL].requests == 600
     _write(transcript, _assistant("msg_new", output=1), _result("t_new", filler), mode="a")
-    began = time.perf_counter()
-    usage.scan(transcript, state)
-    incremental = time.perf_counter() - began
-    assert cold < budget(1.0)
-    assert incremental < budget(0.05)
+    incrementals: list[float] = []
+    for _ in range(3):
+        resumed = usage.ScanState.parse(state.to_json())  # the same offsets each time
+        began = time.perf_counter()
+        added, _ = usage.scan(transcript, resumed)
+        incrementals.append(time.perf_counter() - began)
+        assert added.models[MODEL].requests == 1
+    assert min(colds) < budget(1.0), colds
+    assert min(incrementals) < budget(0.05), incrementals
 
 
 # --- #46: the #45 review's n2, n4, n5 --------------------------------------------------
@@ -479,3 +489,29 @@ def test_an_increase_is_priced_at_its_request_s_long_prompt_tier(tmp_path: Path)
     whole = pricing.cost_usd(model, pricing.RequestTokens(input=long_prompt, output=1_000))
     assert whole is not None
     assert found.models[model].cost_usd == pytest.approx(whole)
+
+
+def test_a_rewritten_file_is_measured_against_its_own_newest_entry(tmp_path: Path) -> None:
+    """Final delta review, n6: ``ScanState.newest`` was one mark across the transcript and
+    its subagents' files. A transcript line still being written at a scan (left for the next
+    one) and older than a subagent's line was skipped as already read when the transcript
+    was then rewritten, though it was never counted. Each file keeps its own mark."""
+    transcript = tmp_path / "s.jsonl"
+    subagents = tmp_path / "s" / "subagents"
+    subagents.mkdir(parents=True)
+    first = _assistant("msg_main_1", output=1, stamp="2026-10-23T10:00:00.000Z")
+    late = _assistant("msg_main_2", output=5, stamp="2026-10-23T10:00:01.000Z")
+    padding = {"type": "summary", "summary": "x" * 4000}
+    with transcript.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(padding) + "\n" + json.dumps(first) + "\n")
+        handle.write(json.dumps(late))  # no newline yet: still being written
+    _write(
+        subagents / "agent-1.jsonl",
+        _assistant("msg_sub", output=2, stamp="2026-10-23T10:00:09.000Z"),
+    )
+    found, state = usage.scan(transcript)
+    assert found.models[MODEL].requests == 2, "the first line and the subagent's"
+
+    _write(transcript, first, late)  # rewritten without the padding: it shrank, whole
+    again, _ = usage.scan(transcript, state)
+    assert again.models[MODEL].requests == 1 and again.models[MODEL].output == 5

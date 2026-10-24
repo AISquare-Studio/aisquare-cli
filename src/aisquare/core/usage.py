@@ -278,9 +278,11 @@ class ScanState:
     before_edit_weighted: float = 0.0
     before_edit_tool_calls: int = 0
     """Tool calls made before that first edit call (the edit itself excluded)."""
-    newest: str = ""
-    """The latest timestamp among the entries read so far: a file read again from its start
-    (it shrank) counts only what is newer (#45, n4)."""
+    newest: dict[str, str] = field(default_factory=dict)
+    """The latest timestamp among the entries read so far, per file: a file read again from
+    its start (it shrank) counts only what is newer than its own (#45, n4). One mark across
+    the files skipped a transcript line older than a subagent's that was never counted
+    (final delta review, n6). ``""`` keys a mark from a state written before that."""
 
     def first_edit(self) -> dict[str, Any]:
         """The "before the first edit" figures, as a session's usage row reports them."""
@@ -332,8 +334,15 @@ class ScanState:
             before_edit_tokens=int(data.get("before_edit_tokens", 0)),
             before_edit_weighted=float(data.get("before_edit_weighted", 0.0)),
             before_edit_tool_calls=int(data.get("before_edit_tool_calls", 0)),
-            newest=str(data.get("newest") or ""),
+            newest=_marks(data.get("newest")),
         )
+
+
+def _marks(raw: Any) -> dict[str, str]:
+    """``ScanState.newest`` as stored: per file, or one mark from before (keyed ``""``)."""
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items()}
+    return {"": raw} if isinstance(raw, str) and raw else {}
 
 
 def transcript_files(transcript: Path) -> list[Path]:
@@ -359,13 +368,16 @@ def scan(transcript: Path, state: ScanState | None = None) -> tuple[Usage, ScanS
         raw, consumed, restarted = _read_from(path, start)
         if consumed:
             state.offsets[key] = (0 if restarted else start) + consumed
+        newest = state.newest.get(key, state.newest.get("", ""))
         for line_no, entry in enumerate(_entries(raw)):
             stamp = entry.get("timestamp")
             stamp = stamp if isinstance(stamp, str) else ""
-            if restarted and stamp <= state.newest:
-                continue  # read before the file was rewritten: counted then, or never
+            if restarted and stamp <= newest:
+                continue  # read before the file was rewritten: counted then
             stamped.append((stamp, order, line_no, entry))
-    state.newest = max([state.newest, *(item[0] for item in stamped)])
+            newest = max(newest, stamp)
+        if newest:
+            state.newest[key] = newest
     # Timestamps are ISO-8601 UTC from one clock, so they sort as strings. An entry
     # without one sorts first within its file, where it was found.
     stamped.sort(key=lambda item: (item[0], item[1], item[2]))

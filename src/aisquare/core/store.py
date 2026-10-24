@@ -1482,7 +1482,7 @@ class ContextStore(Protocol):
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
-    def fleet_label_heads(self) -> list[FleetAgent]: ...
+    def fleet_label_heads(self, project_id: str | None = None) -> list[FleetAgent]: ...
     def fleet_agents_ended_since(self, project_id: str, since: datetime) -> list[FleetAgent]: ...
     def fleet_agent_boards(self, project_id: str, *, live_only: bool = False) -> list[str]: ...
     def fleet_board(self, project_id: str) -> str | None: ...
@@ -4281,7 +4281,7 @@ class SqliteStore:
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 
-    def fleet_label_heads(self) -> list[FleetAgent]:
+    def fleet_label_heads(self, project_id: str | None = None) -> list[FleetAgent]:
         """Every live fleet row, and the newest row of each label, live or ended, in every
         project, forgotten ones' included, oldest first: the rows a ``fleet stop`` or a
         ``restart`` by label acts on (:meth:`fleet_agent_by_label`), ended or not.
@@ -4295,12 +4295,18 @@ class SqliteStore:
         ``label``, and was quadratic in a project's rows: 4.6 s at 20 000, on every
         ``project forget`` and ``prune`` and doctor's capture-off line at each ``asq`` start
         (review of #259, round 37, 4/7). Two rows of a label stamped alike, which that
-        query gave both of, give the one of the greater id."""
+        query gave both of, give the one of the greater id.
+
+        ``project_id`` keeps it to one project's rows, in the query: a restart's plan asks
+        for one project, once per project and again per row (final delta review, n5)."""
+        scope, args = ("WHERE project_id = ?", (project_id,)) if project_id else ("", ())
         rows = self._conn.execute(
             f"SELECT {self._fleet_agent_read} FROM fleet_agent WHERE id IN ("
             "SELECT id FROM (SELECT id, ended_at, ROW_NUMBER() OVER ("
             "PARTITION BY project_id, label ORDER BY created_at DESC, id DESC) AS newest "
-            "FROM fleet_agent) WHERE ended_at IS NULL OR newest = 1) ORDER BY created_at, id"
+            f"FROM fleet_agent {scope}) WHERE ended_at IS NULL OR newest = 1) "
+            "ORDER BY created_at, id",
+            args,
         ).fetchall()
         return [_row_to_fleet_agent(row) for row in rows]
 

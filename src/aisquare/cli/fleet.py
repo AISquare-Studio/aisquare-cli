@@ -764,6 +764,9 @@ def _stop_json(receipt: fleet_service.StopReceipt) -> dict[str, object]:
         "agent": receipt.agent.model_dump(mode="json"),
         "claims_released": [task.id for task in receipt.released],
         "release_failed": receipt.release_failed,
+        # An ended agent with no window left was only recorded as stopped (#38): the JSON
+        # says so as the human line does (final delta review, n4).
+        "marked_only": receipt.marked_only,
     }
 
 

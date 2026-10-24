@@ -22,7 +22,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1800,6 +1800,27 @@ def test_a_receipt_that_cannot_be_read_never_turns_a_done_stop_into_an_error(
     event = audit(alpha.id)[-1]
     assert (event["ok"], event["receipt"]) == (True, None)
     assert event["said"] == "stopped coder-1 (receipt unknown: database is locked)"
+
+
+def test_a_stop_that_only_marked_an_ended_agent_says_so(
+    alpha: ProjectInfo,
+    agents: dict[str, FleetAgent],
+    fleet_rec: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final delta review of #274, n4: an agent that had ended with no window left is only
+    recorded as stopped (``StopReceipt.marked_only``); the captain said "stopped" as for a
+    running agent. It says what was done, and the result carries it."""
+    real = fleet_rec.stop
+
+    def marked(project: ProjectInfo, label: str, **kwargs: Any) -> fleet.StopReceipt:
+        return replace(real(project, label, **kwargs), marked_only=True)
+
+    monkeypatch.setattr(fleet, "stop", marked)
+    result = ok(actions.stop("alpha", "coder-1", confirm=True, utterance="stop coder-1"))
+    assert result["marked_only"] is True
+    said = audit(alpha.id)[-1]["said"]
+    assert said.startswith("marked coder-1 stopped: it had already ended"), said
 
 
 def test_a_restart_whose_replacement_re_picked_its_label_still_gets_its_receipt(

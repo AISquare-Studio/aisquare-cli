@@ -509,6 +509,24 @@ def test_stopping_a_dead_agent_whose_server_is_gone_keeps_it_down(
     assert again.exit_code != 0, "stopped already, and nothing left to remove"
 
 
+def test_fleet_stop_json_says_it_only_marked_a_dead_agent_whose_server_is_gone(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    runner: CliRunner,
+) -> None:
+    """Final delta review, n4: the human line said "marked … stopped" and ``--json`` read as
+    a plain stop. It carries ``marked_only``."""
+    coder = fleet.agents["alpha/coder-1"]
+    _kill(tmux, coder)
+    fleet_service.list_agents(fleet.alpha)
+    tmux.kill_server()
+
+    result = runner.invoke(app, ["--json", "fleet", "stop", "--project", "alpha", coder.label])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["marked_only"] is True
+
+
 def test_a_dead_row_no_listing_could_record_still_shows_its_exit_code(
     fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
     tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
@@ -575,3 +593,78 @@ def test_a_fleet_stop_that_lands_mid_restart_is_never_undone(
     assert stopped and len(tmux.spawned) == spawned, "nothing started over the stop"
     assert _row(coder.id).ended_by == "stopped"
     assert not [a for a in _live_rows(fleet.alpha) if a.label == coder.label]
+
+
+def test_a_row_another_reader_recorded_first_wakes_the_manager_once(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """n2: the row exits 0 before its turn, and the UI's tick records it just before the
+    turn's own look: the tick announces it and wakes the manager. The look's
+    ``_end_dead_rows`` hands that row back too, and the look then owed a wake-up for it as
+    if it had held one back: two "exited" for one exit. It owes only its own."""
+    coder = fleet.agents["alpha/coder-1"]
+    _dies_before_its_turn(tmux, coder, 0, monkeypatch)
+    observe = fleet_service._observe_sockets
+    ticked: list[bool] = []
+
+    def the_tick_first(*args: Any, **kwargs: Any) -> Any:
+        if not ticked and tmux.facts[coder.pane_id].dead:
+            ticked.append(True)
+            fleet_service.list_agents(fleet.alpha)  # records it, and wakes the manager
+        return observe(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_service, "_observe_sockets", the_tick_first)
+    nudges = _nudges(monkeypatch)
+
+    report = fleet_service.bulk("restart")
+
+    assert ticked
+    assert _outcomes(fleet, report.receipts)["alpha/coder-1"][0] == "skipped"
+    assert nudges.count(f"{coder.label} exited") == 1
+
+
+def test_a_stop_of_a_dead_agent_on_a_silent_tmux_marks_nothing(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+) -> None:
+    """n3: a server that will not answer (here, a socket this user may not open) reads as
+    "no window" to the lingering-window look, and m3 marked the row stopped saying no window
+    was left, while its dead window may stand. tmux has to vouch for it: no server, or one
+    that answers. Otherwise nothing is changed and the stop says why."""
+    coder = fleet.agents["alpha/coder-1"]
+    _kill(tmux, coder)
+    fleet_service.list_agents(fleet.alpha)  # recorded as died; its dead window stands
+    tmux.socket_denied = True
+
+    with pytest.raises(fleet_service.NoSuchAgent, match="tmux did not answer"):
+        fleet_service.stop(fleet.alpha, coder.label, agent_id=coder.id)
+
+    assert _row(coder.id).ended_by == "died"
+    tmux.socket_denied = False
+    assert fleet_service.stop(fleet.alpha, coder.label, agent_id=coder.id).marked_only is False
+    assert coder.pane_id in tmux.killed and _row(coder.id).ended_by == "stopped"
+
+
+def test_a_projects_label_heads_are_read_for_that_project_alone(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """n5: ``_label_heads`` read the label heads of every project and filtered them in
+    Python, once per plan and again per row. The store is asked for the one project."""
+    from aisquare.core.store import SqliteStore
+
+    real = SqliteStore.fleet_label_heads
+    asked: list[str | None] = []
+
+    def spied(self: SqliteStore, project_id: str | None = None) -> list[FleetAgent]:
+        asked.append(project_id)
+        return real(self, project_id)
+
+    monkeypatch.setattr(SqliteStore, "fleet_label_heads", spied)
+    heads = fleet_service._label_heads(fleet.alpha)
+
+    assert asked == [fleet.alpha.id]
+    assert {row.project_id for row in heads.values()} == {fleet.alpha.id}
+    assert set(heads) == {"manager", "coder-1"}

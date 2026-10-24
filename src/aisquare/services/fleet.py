@@ -4552,14 +4552,16 @@ def _at_input_box(
     """Whether Claude Code is at its input box, ready for the prompt: waited for (bounded).
 
     On the way, Claude Code's first-run Security notes screen ("Press Enter to continue")
-    is pressed past, up to :data:`_SECURITY_PRESSES` times, and never twice on one unchanged
-    screen: typed there, the prompt was
-    lost and its Enter only moved the screen on (#32, L2). The folder-trust question,
-    which can follow it, is :func:`_past_trust_prompt`'s. A screen still at the notes, or
-    at another dialog (:func:`pane_screen.modal_showing`), is not typed into: its Enter
-    would answer the dialog. Any other screen with no box drawn by the deadline is typed
-    into as before, and the note says so. A screen tmux will not show is typed as before.
-    Without ``wait``, one look.
+    is pressed past, up to :data:`_SECURITY_PRESSES` times: typed there, the prompt was
+    lost and its Enter only moved the screen on (#32, L2). Never twice on one unchanged
+    screen within :data:`_SECURITY_REPRESS`, so a second Enter cannot land on what the first
+    one brought; past it the first is read as swallowed and pressed again (on a box starved
+    for longer than that, the accepted trade-off: the second may reach the trust question).
+    The folder-trust question, which can follow it, is :func:`_past_trust_prompt`'s. A
+    screen still at the notes, or at another dialog (:func:`pane_screen.modal_showing`), is
+    not typed into: its Enter would answer the dialog. Any other screen with no box drawn
+    by the deadline is typed into as before, and the note says so. A screen tmux will not
+    show is typed as before. Without ``wait``, one look.
     """
     deadline = _monotonic() + (PROMPT_TIMEOUT if wait else 0.0)
     pressed = 0
@@ -4873,8 +4875,13 @@ def _end_dead_rows(
     nudge: bool = True,
     config: FleetSettings | None = None,
     addresses: Mapping[str, _Address] | None = None,
+    ended_here: list[FleetAgent] | None = None,
 ) -> list[FleetAgent]:
     """Record every LIVE row whose observed pane is dead as ended — reap's rule, on every read.
+
+    ``ended_here``, when given, is filled with the rows THIS call ended, apart from those
+    another reader had (which it announced): for a caller that owes a held-back wake-up for
+    its own alone (:func:`_still_to_restart`).
 
     Returns the ended rows (fresh from the store). Opens the store only when
     there is something to write, so the ordinary listing stays a read.
@@ -4951,6 +4958,8 @@ def _end_dead_rows(
                 row = store.get_fleet_agent(agent.id)
             if row is not None:
                 ended.append(row)
+    if ended_here is not None:
+        ended_here.extend(mine)
     if nudge:
         for row in mine:
             nudge_manager(row.project_id, reason=f"{row.label} exited", board=_board_of_row(row))
@@ -5028,6 +5037,19 @@ def _kill_lingering_window(store: ContextStore, project: ProjectInfo, agent: Fle
     if owner is None or owner.id != agent.id:
         return False
     return _kill_dead(_server_at(address, config), agent.pane_id)
+
+
+def _window_known_gone(agent: FleetAgent) -> bool:
+    """Whether tmux itself vouches that ``agent``'s window is not there: no server behind
+    its socket, or a server that answers (and :func:`_kill_lingering_window` found no
+    window of the row's on it). A server that will not answer vouches for nothing; never
+    raises."""
+    config = settings()
+    srv = _server_at(_address(agent, config), config)
+    try:
+        return srv.server_absent() or _server_answers(srv)
+    except TmuxError:
+        return False
 
 
 def _kill_dead(srv: TmuxServer, pane_id: str) -> bool:
@@ -5420,7 +5442,14 @@ def stop(
                 raise
             # Ended with no window left (its tmux server gone, a row `reap` recorded): the
             # owner's word that it stays down is recorded all the same. Refused, nothing
-            # could keep one dead agent down, and Restart all brought it back (m3).
+            # could keep one dead agent down, and Restart all brought it back (m3). Only
+            # when tmux said so: a server that will not answer reads as "no window" too,
+            # and its dead window may stand (final delta review, n3).
+            if not _window_known_gone(ended):
+                raise NoSuchAgent(
+                    f"{label} ({ended.id}) ended, and tmux did not answer whether its window "
+                    "is left — nothing was changed; run the stop again"
+                ) from None
             return StopReceipt(store.mark_fleet_agent_stopped(ended.id), [], marked_only=True)
     return _stop_row(
         project,
@@ -8808,12 +8837,8 @@ def _label_heads(project: ProjectInfo) -> dict[str, FleetAgent]:
     so the last of a label is its newest), not from every row the project ever had, read
     once per plan and again per row (#274 delta review 2, n4)."""
     with store_session() as store:
-        rows = store.fleet_label_heads()
-    heads: dict[str, FleetAgent] = {}
-    for row in rows:
-        if row.project_id == project.id:
-            heads[row.label] = row
-    return heads
+        rows = store.fleet_label_heads(project.id)
+    return {row.label: row for row in rows}
 
 
 def _left_dead(status: FleetAgentStatus, heads: Mapping[str, FleetAgent]) -> str | None:
@@ -9167,7 +9192,12 @@ def _still_to_restart(row: BulkRow) -> None:
         with suppress(Exception):  # unrecorded, it reads as a death all the same
             # No manager woken for an agent coming back: `restart` holds the wake-up for
             # a replacement that fails to start, as it holds its own (m1).
-            recorded = _end_dead_rows([agent], _observe_sockets([agent], tmux_session), nudge=False)
+            _end_dead_rows(
+                [agent],
+                _observe_sockets([agent], tmux_session),
+                nudge=False,
+                ended_here=recorded,
+            )
         with store_session() as store:
             agent = store.get_fleet_agent(agent.id) or agent
         status = now.model_copy(update={"agent": agent})
@@ -9177,7 +9207,9 @@ def _still_to_restart(row: BulkRow) -> None:
         )
     left = _left_dead(status, _label_heads(project))
     if left is not None:
-        for ended in recorded:  # not coming back after all: the wake-up held back is owed
+        # Not coming back after all: the wake-up THIS look held back is owed. A row another
+        # reader ended was announced by it (final delta review, n2).
+        for ended in recorded:
             nudge_manager(
                 ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended)
             )

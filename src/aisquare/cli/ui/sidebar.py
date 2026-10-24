@@ -156,7 +156,12 @@ class SettingsSelected(Message):
 
 
 class AppSettingsSelected(Message):
-    """The hub's *App settings*: the machine-wide settings page."""
+    """The hub's *App settings*: the machine-wide settings page — on ``tab`` when given (the
+    hub's *Remote control* and *Captain* open it on theirs), else on the tab it shows."""
+
+    def __init__(self, tab: str | None = None) -> None:
+        self.tab = tab
+        super().__init__()
 
 
 class RenameProject(Message):
@@ -224,6 +229,14 @@ def short_path(path: Path, home: Path | None = None) -> str:
         return "~/" + path.relative_to(home).as_posix()
     except ValueError:
         return str(path)
+
+
+def project_subtitle(project: ProjectInfo, names: Counter[str], *, always: bool) -> str | None:
+    """The dim line under a card's name: the project's directory (:func:`short_path`) when
+    ``always`` — ``[ui] always_show_project_path`` — or when another listed project shares
+    its name (``names`` counts the listed projects by :func:`project_name`); ``None``, no
+    line, otherwise."""
+    return short_path(project.root) if always or names[project_name(project)] > 1 else None
 
 
 def ordered_agents(statuses: Iterable[FleetAgentStatus]) -> list[FleetAgentStatus]:
@@ -1067,6 +1080,11 @@ class ProjectCard(Vertical):
             stale.remove()
         self._paint_decorations()
 
+    def show_subtitle(self, subtitle: str | None) -> None:
+        """The dim line under the name alone, the rest of the card as it is."""
+        self.subtitle = subtitle
+        self._paint_decorations()
+
     def toggle(self) -> None:
         """Collapse or expand the agent rows; the header stays."""
         self.collapsed = not self.collapsed
@@ -1453,13 +1471,15 @@ class Sidebar(Vertical):
         *,
         notices: Mapping[str, str] | None = None,
         groups: list[ProjectGroup] | None = None,
+        always_show_paths: bool = False,
     ) -> None:
         """Paint one frame. Cards and rows are updated in place, keyed by id.
 
         ``notices`` says, per project, why its agent rows are missing (the
         cost of a fleet call that failed open); it is shown as a dim line
         where the rows would be, so an empty card is never mistaken for an
-        idle fleet.
+        idle fleet. ``always_show_paths`` is ``[ui] always_show_project_path``, which
+        the app holds (:func:`project_subtitle`).
 
         The ORDER is the arrangement's (#140): a **Pinned** section, then each
         group's header with its members indented under it (hidden while the
@@ -1490,7 +1510,7 @@ class Sidebar(Vertical):
         def card_for(project: ProjectInfo, *, scope: str | None, hidden: bool) -> None:
             nonlocal stripe
             statuses = ordered_agents(agents.get(project.id, []))
-            subtitle = short_path(project.root) if names[project_name(project)] > 1 else None
+            subtitle = project_subtitle(project, names, always=always_show_paths)
             notice = notices.get(project.id)
             card = existing_cards.pop(project.id, None)
             if card is None:
@@ -1553,6 +1573,16 @@ class Sidebar(Vertical):
         self.last_frame = (projects, agents)
         self._ring_on_attention(status for statuses in agents.values() for status in statuses)
         self._apply_selection()
+
+    def show_paths(self, always: bool) -> None:
+        """``[ui] always_show_project_path`` changed (App settings saved, reloaded or reset):
+        every card's directory line follows now, from the frame on screen, rather than at the
+        next frame's read."""
+        if self.last_frame is None:
+            return
+        names = Counter(project_name(project) for project in self.last_frame[0])
+        for card in self.query_one("#projects", VerticalScroll).query(ProjectCard):
+            card.show_subtitle(project_subtitle(card.project, names, always=always))
 
     # --- groups, pins and order (#140) ----------------------------------------------
 

@@ -19,7 +19,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Recording can never fail a hook: a failure is one line in `log/metrics.log`. On this
   Mac the Stop hook's recording takes about 1.3-3.3 ms at p95 (33.7 ms on a Windows CI
   runner); a Stop reads only the bytes appended since the last.
-
+- **App settings has two tabs**: *Agent settings* (shown first: roles, the fleet,
+  accounts — the same fields, ids and save rules as the single page before, under
+  bold section headers, with the pointers to `team harness`/`team bind` as its last
+  line) and *User preferences*. Save, Reload and *Reset all settings to default* sit
+  under the tabs on one compact line, beside a one-line "Saved to …" note, and act on
+  both; at 80x24 the tabs keep the four whole role rows the single page showed. The first
+  preference is **Always show project directory** (`[ui] always_show_project_path`,
+  off by default; `aisquare config get/set ui.always_show_project_path`): on, every
+  card in the sidebar shows its directory under its name, not only two projects that
+  share a name. `asq` reads it at start and takes the new value from App settings
+  when it saves, reloads or resets, so it shows at once and the two-second refresh
+  never reads `config.toml` for it. A `config set` from a shell while `asq` runs
+  shows after App settings' *Reload* or at `asq`'s next start, not live.
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in
@@ -285,9 +297,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the way: a private `_running` on a Textual screen shadows the message
   pump's own flag and silently leaves every button of the screen dead; the
   dialog's flag is `_spawning`.
+- **No role at all**: `aisquare fleet spawn agent` and `aisquare launch agent` start a
+  plain, general-purpose Claude Code session (labelled `agent-1` and on) that joins the
+  board and its fleet row like any agent but has no standing cycle, no mission and no
+  model ladder. It is the Spawn dialog's new first Role option, *(none) —
+  general-purpose Claude*; `coder` stays the one preselected.
 
 ### Changed
 
+- **App settings shows the bare minimum, and Remote and the Captain live in it** (#41,
+  the owner's placement): a third tab, *Remote*, is Remote control, with Turn on/off,
+  the ngrok token field when one is needed and the link, QR and password while on in
+  view, and the rest under its *Advanced*. The *Captain (experimental)* box tops *Agent
+  settings*, still live with no restart and greyed while
+  `AISQUARE_EXPERIMENTAL_CAPTAIN` decides. *Agent settings* shows that box, how launches
+  pick an account and what a usage limit does; the roles, the fleet and the rest of the
+  accounts' rules fold under **Advanced**, which a *Save* refused for one of them opens.
+  *User preferences* folds its note on setting a preference from a shell. Both follow the
+  form's look: a bold heading with a dim line, rows, dim help lines. The hub links to
+  each (*Remote control*, *Captain*), so there is still one way in, and `R` still opens
+  the Remote panel. Save, Reload and Reset all hide on *Remote*, which acts at once; the
+  Captain box now follows *Reload* and *Reset all*, which left it, the ★ and the
+  Captain section as they were until a restart.
 - **`fleet spawn --task` with no `--prompt` tells the agent to start on its
   task** (#32; the owner's decision, board seq 671): its first message names the
   task and says to read it with `aisquare task show N`, then do what its
@@ -312,6 +343,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cost a minute on a large repo. `aisquare project onboard` packs one on demand, as it
   did; doctor's snapshot row reads `none — opt-in: aisquare project onboard packs one`
   instead of warning.
+- In `asq`, the Spawn dialog shows three fields — Role, Hand off from (with its How row
+  once a teammate is picked) and Account — and folds everything else into one
+  **Advanced** section: *Pick…* (moved there from beside Role, where it sat next to the
+  Account it duplicates), Binary, Persona with *Import…*, Label with 🎲, Task,
+  Worktree, Permission mode, Extra agent args and First prompt. Advanced opens with a
+  click or `Enter` on its title, by itself when the dialog opens with a binary or a
+  persona filled in (the Personas tab's flow), and whenever one of its fields is why
+  *Spawn* is disabled, so the reason is never folded out of sight. The box sizes to what
+  it shows instead of 92% of the terminal, and scrolls between its docked header and
+  buttons once Advanced is open on a short one. What a spawn sends is unchanged.
 - The store migrates to schema v35 on first open, from 0.8.2's v32, in three steps: v35
   adds two tables, `usage_session` and `usage_turn`, for `aisquare metrics tokens`. v34
   adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,

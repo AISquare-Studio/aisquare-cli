@@ -108,7 +108,7 @@ from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.accounts import AccountsChanged, AccountsView, UsageRead, read_session
 from aisquare.cli.ui.views.agent import AgentRestarted, AgentView
-from aisquare.cli.ui.views.app_settings import AppSettingsView
+from aisquare.cli.ui.views.app_settings import AppSettingsView, UiSettingsChanged
 from aisquare.cli.ui.views.captain import CaptainView
 from aisquare.cli.ui.views.doctor import DoctorRefreshed, DoctorView
 from aisquare.cli.ui.views.onboard import OnboardFailed, OnboardView, ProjectOnboarded
@@ -139,6 +139,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import diagnostics, project_groups
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
+from aisquare.services import settings as settings_service
 
 DoctorRunner = Callable[[], list[DoctorCheck]]
 """What the Doctor page runs: ``diagnostics.doctor`` in production, a stub in tests."""
@@ -861,6 +862,10 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         (``HeadroomSummary.session_by_slot``): what the agent rows and info lines show. It
         is the slow read's, handed on when it lands — the two-second tick reads no usage."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
+        self.always_show_project_path = settings_service.ui_settings().always_show_project_path
+        """``[ui] always_show_project_path``, read once at the start and again when App
+        settings saves, reloads or resets (``UiSettingsChanged``) — never on the refresh tick,
+        which would read ``config.toml`` every two seconds for a value only that page sets."""
         self.snapshot: FleetSnapshot | None = None
         """The last frame that was read successfully; ``None`` before the first."""
         self.store_error: str | None = None
@@ -1345,7 +1350,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.snapshot = FleetSnapshot(read.projects, agents, read.notices, read.taken_at, home=home)
         sidebar.show_notice(None)
         sidebar.show_captain(captain, notice=captain_notice)
-        sidebar.show_projects(read.projects, cards, notices=read.notices, groups=read.groups)
+        sidebar.show_projects(
+            read.projects,
+            cards,
+            notices=read.notices,
+            groups=read.groups,
+            always_show_paths=self.always_show_project_path,
+        )
         self._feed_open_views(self.snapshot)
         if asked is None or self._accounts_began < asked:
             self.refresh_accounts()
@@ -2307,8 +2318,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             self.query_one("#settings-hub", SettingsHubView).focus_first()
 
     async def on_app_settings_selected(self, event: AppSettingsSelected) -> None:
-        """The hub's *App settings*: the machine-wide settings, under *⚙ Settings*."""
+        """The hub's *App settings*: the machine-wide settings, under *⚙ Settings*, on the
+        tab the link names (*Remote control*'s, *Captain*'s)."""
         await self._show("app-settings", lambda: AppSettingsView(id="app-settings"))
+        if event.tab is not None:
+            self.query_one("#app-settings", AppSettingsView).show_tab(event.tab)
         self.sidebar.select(SETTINGS_KEY)
         self._remember_selection("app-settings")
 
@@ -2331,6 +2345,13 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         self._headroom_due = True
         self.refresh_accounts()
+
+    def on_ui_settings_changed(self, event: UiSettingsChanged) -> None:
+        """App settings saved, reloaded or reset: the sidebar's directory lines follow now."""
+        always = event.ui.always_show_project_path
+        if always != self.always_show_project_path:
+            self.always_show_project_path = always
+            self.sidebar.show_paths(always)
 
     def on_usage_read(self, event: UsageRead) -> None:
         """The Accounts page read usage (a tick, or *↻ Refresh usage*): the dot reads the

@@ -66,7 +66,8 @@ for the links in notifications.
 ## Start
 
 **From the fleet UI's Settings.** Run `aisquare ui` and open *⚙ Settings*: its
-*Remote control* section has *Turn on remote control*. The first time, it asks
+*Remote control* link opens *App settings* on its *Remote* tab, which has *Turn on
+remote control*. The first time, it asks
 for your ngrok token instead: paste the one from
 https://dashboard.ngrok.com/get-started/your-authtoken (a free account has one)
 and Save. ngrok is asked whether it takes the token; one it refuses is said
@@ -78,7 +79,7 @@ at any time. A token saved while Remote is on starts ngrok again at once. While
 `NGROK_AUTHTOKEN` is set, ngrok signs in with it rather than with a token saved
 here, and a line under the field says so.
 Only a damaged install, without the bundled ngrok, says so in one line, with
-*Check again*. On, the section
+*Check again*. On, the tab
 shows the link, copies it by itself once ngrok's link arrives (a toast says so),
 and shows a Copy button, the QR code, the passphrase and *Turn off*. *Advanced*,
 folded until clicked, has *Change ngrok token* and the rest of the panel's

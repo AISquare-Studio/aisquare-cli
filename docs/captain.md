@@ -62,8 +62,8 @@ can read and change. It is never packed into a codebase snapshot (`init`,
 `project onboard` and `--refresh` skip it, and doctor says so), so agents there
 get no packed overview. Removing it from the fleet hides it again.
 
-Turn it on for this home in `asq`: *⚙ Settings ▸ Captain*, tick *Captain
-(experimental)*. The ★ beside Fleet and the Captain section above the projects
+Turn it on for this home in `asq`: *⚙ Settings ▸ Captain* (the box at the top of
+*App settings ▸ Agent settings*), tick *Captain (experimental)*. The ★ beside Fleet and the Captain section above the projects
 show at once, with no restart, and so does the captain's part of the sidebar's
 read and the receiver for its `ui` actions; untick, and they all go at once. From a
 shell, the same setting:

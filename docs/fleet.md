@@ -126,11 +126,17 @@ tmux can see and its row says so (`no hooks`).
    is shown if this view is still the one on screen. Both ignore a click in the
    second after they appear or move.
    **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
-   project, headed with its name and codename. It reads in two steps. First who
-   runs it: role (the fleet's roles plus any role bound with `team bind`;
-   `manager` is greyed out while one runs; *Pick…* beside it opens the target
-   picker — a bound teammate or an account fills these fields), account and
-   binary. Then as whom:
+   project, headed with its name and codename. It shows three fields: **role**
+   (`coder` preselected; first in the list *(none) — general-purpose Claude*, a
+   plain Claude Code session with no standing cycle or mission, `fleet spawn
+   agent` below; then the fleet's roles plus any role bound with `team bind`;
+   `manager` is greyed out while one runs), **hand off from** (a teammate to
+   fork or take over) and **account**. Everything else is folded into
+   **Advanced** — click its title, or `Tab` to it and press `Enter`. It opens
+   by itself when the dialog opens with a binary or persona already filled in,
+   and whenever one of its fields is why *Spawn* is disabled. In it, first who
+   runs it: *Pick…* opens the target picker (a bound teammate or an account
+   fills role, binary and account) and binary. Then as whom:
    **persona** — `(none)` or one of the project's personas, the role's
    `[fleet.roles.<role>].persona` preselected, its description shown under it,
    and *Import…* beside it to bring one in (`docs/personas.md`).
@@ -194,6 +200,12 @@ tier above the work it gates.
 | **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`. Launched without the tools that edit files (`--disallowedTools=Edit Write NotebookEdit`) and with its shell: Claude Code's `--restricted` removes the Bash that `gh pr diff`, `gh pr review` and its `aisquare` cycle need (0.6.0 and 0.7.0 launched it so, and it could do none of them). Its shell could still push or merge: its briefing forbids both and `auto` mode checks each action, but only the credentials it runs with can refuse them (see the table below) | its own worktree |
 | **validator** | `validator` | one final gate over the assembled deliverable before the manager says READY | the repo root |
 | **ui-tester** | new | verifies tasks titled `UI: …` in a **real browser** — Claude in Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever this window has — and measures (screenshots, computed sizes, console, network) instead of eyeballing; `task done` names the branch or commit and the URL it verified, or `task reopen` carries a screenshot. With no browser tool it runs the non-browser checks and reopens the task as "not browser-verified", never passes it. **Asked to be read-only, not made read-only** — its briefing says never edit and never push, and nothing enforces that (see the permission-mode table below: no allowed-tools list is written or passed, and `--restricted` would remove the Bash its own `task done`/`task reopen` need). Launched with `--chrome` by the role itself (`RoleProfile.default_args`), on any machine, unless `--no-chrome` is given | the repo root. Like the tester it gets no worktree and **nothing moves it into the coder's** — worse here, because it fails silently: it opens the URL, sees a working page and measures the PRE-change build honestly. So whoever spawns it names the branch or tree and the URL in its `--prompt` (the manager's loop does), and its verdict says which build it measured |
+
+No role at all is `agent`: `aisquare fleet spawn agent` (the Spawn dialog's
+*(none) — general-purpose Claude*) starts a plain Claude Code session, labelled
+`agent-1` and on, that joins the board like any agent but is briefed with no
+standing cycle and no mission, and runs on the session's own model rather than a
+role's ladder. `aisquare launch agent` is the same outside the fleet.
 
 The manager talks to its agents only through the board — tasks, notes, signals
 — and `fleet tell` nudges. When a sub-agent writes a result to the board, the
@@ -752,10 +764,11 @@ The app — what bare `asq` runs. Explicit so a script or alias can reach it, an
 so `aisquare ui --help` exists. Without an interactive terminal it refuses with
 the reason (`not_a_tty`) rather than starting a full-screen app into a pipe.
 
-*⚙ Settings ▸ Remote control* turns Remote on: the fleet on your phone through
+*⚙ Settings ▸ Remote control* (App settings' own *Remote* tab) turns Remote on: the fleet on your phone through
 your own ngrok tunnel, with the link, a QR code and the passphrase; the first time,
 it asks for your ngrok token. `R` opens the same Remote in one
-panel — see [Phone control](remote.md). *⚙ Settings ▸ Captain* switches the
+panel — see [Phone control](remote.md). *⚙ Settings ▸ Captain* (the box at the top
+of *App settings ▸ Agent settings*) switches the
 experimental captain on and off with no restart; `AISQUARE_EXPERIMENTAL_CAPTAIN`,
 when set, wins over it ([docs/captain.md](captain.md)).
 
@@ -1054,10 +1067,17 @@ Three places to change one:
 - **in config** — `aisquare config set fleet.max_agents_per_project 6`, or
   `aisquare config set fleet.roles.coder.permission_mode acceptEdits`, or edit
   the file directly;
-- **in the UI** — *⚙ Settings ▸ App settings* writes the same config, and its
-  *Reset all settings to default* is `config reset`. Its *Save* writes only the
-  settings changed on the page, so one changed in a shell while it was open is
-  kept. A project's own *Settings* tab holds only that project's nickname.
+- **in the UI** — *⚙ Settings ▸ App settings* writes the same config: its *Agent
+  settings* tab holds these, and *User preferences* how `asq` shows things (`[ui]`);
+  its third tab, *Remote*, is Remote control. Each tab shows the few settings a new
+  user needs — *Agent settings* the *Captain (experimental)* box, how launches pick
+  an account and what a usage limit does — and folds the rest under **Advanced**
+  (click to open): the roles, the fleet and the rest of the accounts' rules here.
+  A *Save* refused for a folded field opens it. Its *Reset all settings to default*
+  is `config reset`, and the Captain box follows it, as it follows *Reload*. Its
+  *Save* writes only the settings changed on the first two tabs, so one changed in a
+  shell while it was open is kept; *Remote* and the Captain box act at once. A
+  project's own *Settings* tab holds only that project's nickname.
 
 **Your file holds your changes and nothing else.** The defaults are built in, and
 `~/.aisquare/config.toml` is your layer over them: a save writes only the keys
@@ -1213,7 +1233,11 @@ display name for people and a slug-safe token for machines.
 **Project display name.** Its nickname when you have given it one, else the
 directory's basename — `aisquare-cli` — for git repos and plain directories
 alike. Two projects sharing a basename also show their parent as a dim subtitle
-(`~/work/api`, `~/oss/api`).
+(`~/work/api`, `~/oss/api`). To see every project's directory under its name, turn
+on *Always show project directory* in *⚙ Settings ▸ App settings ▸ User
+preferences* (`aisquare config set ui.always_show_project_path true`). Saved there,
+it shows at once; set from a shell while `asq` runs, it shows after that page's
+*Reload* or at `asq`'s next start, since `asq` does not re-read the file every refresh.
 
 **Nickname.** Free text on one line, up to 255 characters — `API: auth rewrite
 🚀` — like naming a browser tab for what you are doing there. Emoji are fine,

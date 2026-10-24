@@ -603,3 +603,41 @@ def test_the_page_says_the_fleets_share_left_now_and_of_the_week(
         "Fleet: 70% left now · week: 0.8 of 1 accounts left · "
         f"next weekly reset {reset} (account 2)"
     ), after
+
+
+def test_the_page_lists_the_sessions_on_this_machine(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path
+) -> None:
+    """#287 slice 2c: under the accounts, every session whose status line reported in the
+    last 15 minutes, a hand-launched one too; one older is not listed."""
+    from aisquare import statusline
+
+    no_network["usage"] = lambda account: ClaudeUsage(available=True, fetched_at=clock())
+    frame = _signed_in(2, tmp_path, "tok-two")
+    for session, cwd, age in (("handmade-1", "/scratch", 120), ("old-one-1", "/gone", 3600)):
+        statusline.write_record(
+            statusline.record_dir(),
+            {
+                "session_id": session,
+                "cwd": cwd,
+                "model": "claude-opus-5-5",
+                "config_dir": None,
+                "five_hour": {"used_percentage": 42.0, "resets_at": None},
+                "context_percent": 34.0,
+                "updated_at": clock().timestamp() - age,
+            },
+        )
+
+    async def go(pilot: Pilot[None]) -> str:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(
+            app, lambda: "handmade" in shown(view.query_one("#machine-sessions", Static))
+        )
+        return shown(view.query_one("#machine-sessions", Static))
+
+    listed = drive(go, overview=frame)
+    assert listed.splitlines() == [
+        "Sessions on this machine",
+        "plain claude · handmade · /scratch · claude-opus-5-5 · ctx 34% · 5h 42% · 2m ago",
+    ], listed

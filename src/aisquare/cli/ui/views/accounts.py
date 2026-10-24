@@ -52,7 +52,7 @@ import math
 import threading
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar, NamedTuple
 
@@ -81,6 +81,7 @@ from aisquare.models import (
     ClaudeIdentity,
     ClaudeUsage,
     ProjectInfo,
+    StatuslineSession,
     UsageTrend,
 )
 from aisquare.services import auth as auth_service
@@ -118,6 +119,41 @@ all (asked afresh), else discarded (``settle_sign_in``)."""
 REMOVE_WORKER = "claude-remove"
 ARRANGE_WORKER = "claude-arrange"
 RENAME_WORKER = "claude-rename"
+SESSIONS_WORKER = "machine-sessions"
+"""Reads the sessions the status line reported (``statusline_sessions``): files and a store."""
+SESSIONS_WINDOW = timedelta(minutes=15)
+"""How recent a session's report must be for *Sessions on this machine* (#287, 2c)."""
+
+
+def machine_sessions_text(sessions: Sequence[StatuslineSession], now: datetime) -> Text:
+    """*Sessions on this machine*: each Claude Code session whose status line reported in
+    :data:`SESSIONS_WINDOW`, as ``accounts sessions`` lists them: its account, short id, cwd,
+    model, context and five-hour use, how long ago, and its fleet label. Hand-launched ones
+    and ones outside any project too; with none, how to make them report."""
+    text = Text("Sessions on this machine", style="bold")
+    if not sessions:
+        text.append(
+            " — none reported in the last 15 min; `aisquare accounts statusline --install` "
+            "adds the status line that reports them",
+            style="dim",
+        )
+        return text
+    for session in sessions:
+        age = max(int((now - session.updated_at).total_seconds()), 0)
+        ago = f"{age}s" if age < 60 else f"{age // 60}m" if age < 3600 else f"{age // 3600}h"
+        text.append("\n")
+        text.append(session.account or session.config_dir or "not ours", style="bold")
+        parts = [session.session_id[:8], session.cwd or "—", session.model or "—"]
+        if session.context_percent is not None:
+            parts.append(f"ctx {round(session.context_percent)}%")
+        if session.session_percent is not None:
+            parts.append(f"5h {round(session.session_percent)}%")
+        parts.append(f"{ago} ago")
+        text.append(" · " + " · ".join(parts))
+        if session.fleet_label:
+            text.append(f" · {session.fleet_label}", style="cyan")
+    return text
+
 
 _BAR_CELLS = 5
 _WARN_AT = 50.0
@@ -954,6 +990,7 @@ class AccountsView(Vertical):
                 yield Vertical(id="claude-rows")
             with Horizontal(classes="actions", id="claude-actions"):
                 yield Button("+ Add Claude account", id="claude-add", variant="primary")
+            yield Static("", id="machine-sessions")
             yield Static("", id="accounts-notice")
             with Horizontal(id="accounts-next-row"):
                 yield Static("", id="accounts-next")
@@ -1233,6 +1270,14 @@ class AccountsView(Vertical):
         """
         if not self._on_screen or self.overview is None:
             return
+        self.run_worker(
+            lambda: accounts_service.statusline_sessions(since=SESSIONS_WINDOW),
+            name=SESSIONS_WORKER,
+            group=SESSIONS_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
         accounts = [status.account for status in self.overview.accounts if status.signed_in]
         if not accounts:
             return
@@ -1989,6 +2034,11 @@ class AccountsView(Vertical):
         elif worker.name == CREDITS_WORKER:
             if state is WorkerState.SUCCESS and isinstance(worker.result, tuple):
                 self._show_credits(*worker.result)
+        elif worker.name == SESSIONS_WORKER:
+            if state is WorkerState.SUCCESS and isinstance(worker.result, list):
+                self.query_one("#machine-sessions", Static).update(
+                    machine_sessions_text(worker.result, accounts_service._now())
+                )
         elif worker.name == SIGN_IN_WORKER:
             self._sign_in_finished(worker, state)
         elif worker.name == SIGN_OUT_WORKER:

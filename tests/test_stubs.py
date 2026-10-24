@@ -183,6 +183,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "enable",
             "trust",
             "settings",
+            "statusline",
+            "sessions",
         )
     ),
     *(("metrics", command) for command in ("show", "list")),

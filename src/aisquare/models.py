@@ -425,6 +425,56 @@ class HeadroomSummary(BaseModel):
     """The usable account whose weekly window resets first, and when."""
 
 
+class StatuslineSession(BaseModel):
+    """One Claude Code session as its status line last reported it (#287, 2c).
+
+    Read from ``<aisquare home>/cache/statusline/<session_id>.json``, which
+    ``asq-statusline`` writes on each assistant message of any session carrying it —
+    hand-launched and non-project sessions too. Never a prompt: the ids, the cwd, the
+    model and the figures Claude Code shows.
+    """
+
+    session_id: str
+    updated_at: datetime
+    cwd: str | None = None
+    model: str | None = None
+    config_dir: str | None = None
+    """``CLAUDE_CONFIG_DIR`` in the session's environment; ``None`` for the plain claude."""
+    slot: int | None = None
+    """The account it runs on, from :attr:`config_dir`; ``None`` for a directory not ours."""
+    account: str | None = None
+    """That account's name (its alias, ``account N`` or ``plain claude``)."""
+    fleet_agent: str | None = None
+    """``AISQUARE_FLEET_AGENT``: the fleet row it runs in, when a fleet spawn started it."""
+    fleet_label: str | None = None
+    """That row's label, when the store still has it."""
+    session_percent: float | None = None
+    """The five-hour window, percent USED; ``None`` without ``rate_limits`` (an API key)."""
+    session_resets_at: datetime | None = None
+    week_percent: float | None = None
+    week_resets_at: datetime | None = None
+    context_percent: float | None = None
+    cost_usd: float | None = None
+
+
+class StatuslineSite(BaseModel):
+    """One account's Claude Code ``statusLine``, as ``accounts statusline`` found or left it."""
+
+    slot: int
+    account: str
+    settings_path: str
+    state: Literal["none", "ours", "wrapped", "foreign", "unreadable", "shared"]
+    """``none``; ``ours`` (``asq-statusline``); ``wrapped`` (ours, running the user's own
+    command first); ``foreign`` (the user's own, left alone); ``unreadable`` (a settings
+    file that is not a JSON object, left alone); ``shared`` (the same file as an account
+    listed before it, through ``[accounts] share``)."""
+    theirs: str | None = None
+    """The user's own command: the one left alone, or the one ours wraps."""
+    changed: bool = False
+    """Whether this run wrote the file."""
+    error: str | None = None
+
+
 class ClaudeAccountStatus(BaseModel):
     """Everything the Accounts page shows about one slot, minus the usage it fetches live."""
 

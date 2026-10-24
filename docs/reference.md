@@ -32,7 +32,8 @@ concurrency-tested against racing parallel sessions):
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
 ├── projects/     # per-project data — snapshot/ (Repomix pack), brain/ (gbrain)
-├── cache/        # disposable (e.g. last_injection.json)
+├── cache/        # disposable (e.g. last_injection.json; statusline/: one record per Claude Code
+│                 #   session carrying asq-statusline, kept a day, and fleet.json, the figure it prints)
 └── log/          # capture and diagnostic logs
 ```
 
@@ -64,6 +65,9 @@ aisquare
 │                   alias <slot> <name> [--clear] · order <slot>… · move <slot> up|down|top|bottom
 │                   disable <slot> · enable <slot>   — the default, the order, the names
 │                   usage also shows the pace (≈ N min to the limit) — see [accounts] in config
+│                   statusline [--install [--wrap] | --uninstall] [--slot S | --all]
+│                                            — Claude Code's status line, asq-statusline, opt-in
+│                   sessions [--since 15m]   — every session on this machine that reported
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
 │                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]
 │                                 [--effort LEVEL] · harness

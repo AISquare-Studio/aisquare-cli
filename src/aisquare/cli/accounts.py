@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, NoReturn
+from typing import Annotated, Any, Literal, NoReturn
 
 import typer
 from rich.table import Table
@@ -310,6 +311,7 @@ def usage_(
     for status in asked:
         status.usage = readings.get(status.account.slot)
     fleet = accounts_service.fleet_headroom([status.account for status in asked], readings)
+    accounts_service.write_statusline_fleet(fleet, [status.account for status in asked])
     if get_state().json_output:
         listed = [status.model_dump(mode="json") for status in statuses]
         if summary:
@@ -361,6 +363,151 @@ def usage_(
 
 def _labels(statuses: list[ClaudeAccountStatus]) -> dict[int, str]:
     return {status.account.slot: status.label for status in statuses}
+
+
+# --- the Claude Code status line and the sessions it reports (#287, 2c) -----------------------
+
+_STATUSLINE_SAID = {
+    "none": "no status line",
+    "ours": "asq-statusline",
+    "wrapped": "asq-statusline, after your own",
+    "foreign": "your own, left alone",
+    "unreadable": "settings.json is not a JSON object; left alone",
+    "shared": "the same settings.json as",
+}
+
+
+@app.command("statusline")
+def statusline_(
+    install: Annotated[
+        bool, typer.Option("--install", help="Set asq-statusline where no status line is set.")
+    ] = False,
+    uninstall: Annotated[
+        bool,
+        typer.Option(
+            "--uninstall",
+            help="Remove only the status line aisquare set (a wrapped one goes back).",
+        ),
+    ] = False,
+    slot: Annotated[
+        str | None,
+        typer.Option("--slot", help="One account: slot number, alias or email (default: all)."),
+    ] = None,
+    every: Annotated[bool, typer.Option("--all", help="Every account (the default).")] = False,
+    wrap: Annotated[
+        bool,
+        typer.Option(
+            "--wrap",
+            help="With --install: where you set your own status line, keep it and print its "
+            "line first.",
+        ),
+    ] = False,
+) -> None:
+    """Claude Code's status line on each account: `asq-statusline`, opt-in.
+
+    It shows the account's five-hour and weekly use, the fleet's share left and the
+    session's context, and keeps a record of each session for `accounts sessions` and
+    the usage cache (no prompt is kept). Without --install or --uninstall it says what
+    each account has. A status line you set yourself is never replaced: --wrap runs it
+    first, and --uninstall puts it back.
+    """
+    if install and uninstall:
+        fail("--install and --uninstall are opposites: pass one", error="usage")
+    if wrap and not install:
+        fail("--wrap goes with --install", error="usage")
+    if slot is not None and every:
+        fail("--slot and --all are opposites: pass one", error="usage")
+    slots = [_resolve(slot).slot] if slot is not None else None
+    action: Literal["status", "install", "uninstall"] = (
+        "install" if install else "uninstall" if uninstall else "status"
+    )
+    sites = accounts_service.statusline_sites(slots, action=action, wrap=wrap)
+    if get_state().json_output:
+        typer.echo(json.dumps([site.model_dump(mode="json") for site in sites]))
+    else:
+        console = stdout_console()
+        for site in sites:
+            line = Text(f"slot {site.slot} · {site.account}: ")
+            said = _STATUSLINE_SAID[site.state]
+            if site.state == "shared":
+                said = f"{said} {site.theirs}"
+            line.append(said, style="green" if site.state in {"ours", "wrapped"} else "")
+            if site.changed:
+                line.append(" (changed now)", style="bold")
+            if site.error:
+                line.append(f" — failed: {site.error}", style="red")
+            console.print(line)
+        if install and any(site.state == "foreign" for site in sites):
+            console.print(
+                "a status line of your own is left as it is; --install --wrap keeps it and "
+                "adds ours after it",
+                style="dim",
+                markup=False,
+            )
+    if any(site.error for site in sites):
+        raise typer.Exit(1)
+
+
+def _span(value: str) -> timedelta:
+    """``--since``: a span, ``45s``, ``15m``, ``2h`` or ``1d``."""
+    match = re.fullmatch(r"(\d+)([smhd])", value.strip())
+    if match is None:
+        raise typer.BadParameter(f"{value!r} is not a span (45s, 15m, 2h, 1d)")
+    unit = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}[match.group(2)]
+    return timedelta(**{unit: int(match.group(1))})
+
+
+def _age(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    return f"{int(seconds // 3600)}h"
+
+
+@app.command("sessions")
+def sessions_(
+    since: Annotated[
+        str,
+        typer.Option("--since", help="Sessions that reported within this span: 45s, 15m, 2h, 1d."),
+    ] = "15m",
+) -> None:
+    """Every Claude Code session on this machine that reported in the last --since.
+
+    Hand-launched sessions and ones outside any project too: each session whose account
+    carries `asq-statusline` (`accounts statusline --install`). Account, session, cwd,
+    model, context and five-hour use, how long ago it reported, and its fleet label when
+    a fleet spawn started it. Records are kept a day.
+    """
+    window = _span(since)
+    now = accounts_service._now()
+    sessions = accounts_service.statusline_sessions(since=window, now=now)
+    if get_state().json_output:
+        typer.echo(json.dumps([session.model_dump(mode="json") for session in sessions]))
+        return
+    console = stdout_console()
+    if not sessions:
+        console.print(
+            f"no session reported in the last {since}: `aisquare accounts statusline` says "
+            "which accounts carry the status line",
+            markup=False,
+        )
+        return
+    table = Table(box=None, pad_edge=False, show_edge=False, header_style="bold")
+    for column in ("account", "session", "cwd", "model", "ctx", "5h", "age", "fleet"):
+        table.add_column(column, no_wrap=column in {"account", "session", "age"})
+    for session in sessions:
+        table.add_row(
+            Text(session.account or session.config_dir or "not ours"),
+            Text(session.session_id[:8]),
+            Text(session.cwd or _DASH),
+            Text(session.model or _DASH),
+            _percent(session.context_percent),
+            _percent(session.session_percent),
+            _age((now - session.updated_at).total_seconds()),
+            Text(session.fleet_label or ""),
+        )
+    console.print(table)
 
 
 # --- arranging: default, alias, order, disable (#145) -----------------------------------------

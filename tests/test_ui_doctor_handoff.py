@@ -990,6 +990,8 @@ def test_no_start_on_asqs_own_schedule_begins_once_a_hand_over_is_pending(
             explainability_view.STATUS_WORKER,
             ui_app._DOCTOR_WORKER,  # the shell's, for the project now chosen
             accounts_view.USAGE_WORKER,
+            # Sessions on this machine (#287, 2c), read with the page's usage.
+            accounts_view.SESSIONS_WORKER,
             # The status line's dot, read again from the cache as the page's usage lands.
             ui_app.HEADROOM_WORKER,
             accounts_view.CREDITS_WORKER,

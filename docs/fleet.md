@@ -1195,6 +1195,46 @@ to a role as a launch profile (`aisquare team bind coder1 --env …`, see
 
 ---
 
+### Adopting a session
+
+A conversation you started by hand, `claude` in a terminal, can join the fleet
+and keep going there:
+
+```sh
+aisquare fleet adopt --list            # the recent ones no fleet agent owns, newest first
+aisquare fleet adopt 0636…e0 --role coder --label coder-login
+```
+
+The list shows each conversation's short id, account, directory, how long ago it
+was last written and the first thing you typed (`--limit N`, `--json`). Adopting
+one starts a fleet agent that resumes it (`claude --resume <transcript>`) on the
+account whose directory holds its transcript and in the directory it ran in, on
+that directory's project. It keeps its session id, so the board row is the
+conversation's own. It is refused, with the reason, when:
+
+- a `claude` is still running it (quit that one first: two processes would write
+  one conversation);
+- a fleet agent already owns it (restart that agent instead);
+- its directory is no onboarded project (`aisquare project onboard <dir>` first);
+- its transcript is not under one of the CLI's accounts (its slots and the plain
+  claude's `~/.claude`). A Claude directory the CLI did not create is never
+  adopted (decided with the owner, `docs/plans/claude-accounts.md`).
+
+Nothing lists or adopts conversations on its own. The manager offers the list
+only when you ask what you were working on in Claude outside the CLI.
+
+### Fresh start without losing accounts
+
+To start over without signing every account in again:
+
+1. `aisquare config reset` puts every setting back to its default (the old file
+   is kept beside it as `config.toml.bak-<stamp>`).
+2. `aisquare project prune` (or `project forget <id>`) drops the projects you are
+   done with; the sidebar's *Remove from fleet…* does the same for one.
+3. Leave `~/.aisquare/claude-accounts/` alone. Each slot's directory holds its
+   login (on macOS, a Keychain item keyed by that exact path), and deleting
+   `~/.aisquare`, or moving that directory, costs a fresh sign-in for every one.
+
 ## Permission modes and every default you can change
 
 Autonomy means answering permission prompts. Claude Code offers

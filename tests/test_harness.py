@@ -285,8 +285,11 @@ def test_the_boards_cycles_name_their_project_in_every_fleet_command() -> None:
         "`aisquare fleet reap --project calm-otter`"
     ) in manager
     verbs = re.findall(r"aisquare fleet (\S+)( --project calm-otter)?", manager)
-    assert {verb for verb, _named in verbs} == {"spawn", "tell", "switch", "stop", "reap"}
-    assert all(named for _verb, named in verbs), verbs
+    # `fleet adopt` (#290) takes no --project: the conversation's own directory names it.
+    scoped = [(verb, named) for verb, named in verbs if verb != "adopt"]
+    assert {verb for verb, _named in scoped} == {"spawn", "tell", "switch", "stop", "reap"}
+    assert all(named for _verb, named in scoped), verbs
+    assert "`aisquare fleet adopt --list`" in manager
     assert "`aisquare fleet spawn --project calm-otter tester`" in manager
     assert "`fleet spawn " not in manager, "the short forms name it too"
     coder = cycle("coder")

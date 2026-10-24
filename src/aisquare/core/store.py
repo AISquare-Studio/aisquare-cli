@@ -1432,6 +1432,7 @@ class ContextStore(Protocol):
     def fleet_board(self, project_id: str) -> str | None: ...
     def fleet_manager_board(self, project_id: str) -> str | None: ...
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
+    def fleet_session_ids(self) -> set[str]: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
     def project_groups(self) -> list[ProjectGroup]: ...
@@ -4239,6 +4240,15 @@ class SqliteStore:
             (session_id,),
         ).fetchone()
         return _row_to_fleet_agent(row) if row is not None else None
+
+    def fleet_session_ids(self) -> set[str]:
+        """Every session id a fleet row has recorded, live or ended, in any project: the
+        conversations the fleet already owns, which ``fleet adopt`` neither lists nor takes
+        (#290). An ended row comes back with ``fleet restart``, not by adoption."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT session_id FROM fleet_agent WHERE session_id IS NOT NULL"
+        ).fetchall()
+        return {str(row[0]) for row in rows}
 
     def adopt_fleet_agent_session(
         self, agent_id: str, previous: str | None, session_id: str, lease_until: datetime

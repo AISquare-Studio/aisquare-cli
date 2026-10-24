@@ -394,6 +394,11 @@ SEAMS: dict[str, Seam] = {
         "payload Claude Code handed ours, as Claude Code would run it (#287); their command, "
         "in their session's environment; no model process of ours",
     ),
+    "aisquare/services/adopt.py::_process_args": Seam(
+        EXCLUDED,
+        "`ps -A -o pid=,args=` for `fleet adopt` (#290): whether a live claude names the "
+        "session it would adopt; pids and arguments, no model",
+    ),
     "aisquare/cli/fleet.py::_exec_attach": Seam(
         EXCLUDED,
         "`tmux attach` — a terminal client on the fleet server, not an agent; "

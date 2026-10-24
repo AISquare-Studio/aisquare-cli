@@ -21,15 +21,18 @@ import os
 import re
 import sys
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, NoReturn
 
 import typer
 from rich.console import Console
+from rich.text import Text
 
 from aisquare.cli.common import USAGE_ERROR, fail, refuse_conflicting_scope
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
+from aisquare.services import adopt as adopt_service
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import install_route
@@ -92,7 +95,7 @@ def _fail_fleet(exc: Exception) -> NoReturn:
         fail(str(exc), error="not_found", detail=str(exc))
     if isinstance(exc, fleet_service.NoSuchAgent):
         fail(str(exc), error="no_such_agent", detail=str(exc))
-    if isinstance(exc, fleet_service.CapacityRefused):
+    if isinstance(exc, fleet_service.CapacityRefused | adopt_service.AdoptRefused):
         fail(str(exc), error=exc.code, detail=str(exc))
     fail(str(exc), error="fleet_error", detail=str(exc))
 
@@ -1298,6 +1301,93 @@ def rename(
     # than leave the operator to discover it at the escape hatch.
     for note in notes:
         stdout_console().print(f"  ⚠ {note}")
+
+
+@app.command("adopt")
+def adopt(
+    ref: Annotated[
+        str | None,
+        typer.Argument(help="The conversation: its session id, or its transcript's .jsonl path."),
+    ] = None,
+    role: Annotated[str, typer.Option("--role", help="Role it runs as in the fleet.")] = "coder",
+    label: Annotated[
+        str | None, typer.Option("--label", "-l", help="Agent label (default: <role>-<n>).")
+    ] = None,
+    listing: Annotated[
+        bool,
+        typer.Option(
+            "--list", help="The recent conversations outside the fleet, newest first, to pick."
+        ),
+    ] = False,
+    limit: Annotated[
+        int, typer.Option("--limit", help="With --list: how many.", min=1, max=50)
+    ] = adopt_service.LIST_LIMIT,
+) -> None:
+    """Bring a Claude Code conversation you started by hand under the fleet (#290).
+
+    It resumes on the account whose directory holds its transcript (a slot, or the plain
+    claude's ~/.claude) and in the directory it ran in, as a row on that directory's
+    project, keeping its session id: the board row is its own. Refused while a claude
+    still holds it, when the fleet already owns it, and when its directory is no onboarded
+    project. --list shows the recent ones no fleet row owns: id, account, directory, last
+    activity and the first thing you typed.
+    """
+    if listing:
+        conversations = adopt_service.recent(limit)
+        if get_state().json_output:
+            typer.echo(json.dumps([c.model_dump(mode="json") for c in conversations]))
+            return
+        console = stdout_console()
+        if not conversations:
+            console.print("no conversation outside the fleet on the accounts the CLI knows")
+            return
+        now = datetime.now(tz=UTC)
+        for c in conversations:
+            line = Text(c.session_id[:8], style="bold")
+            line.append(f"  {c.account}  {c.cwd or '—'}  ")
+            line.append(_ago(now - c.last_activity), style="dim")
+            if c.held_by is not None:
+                line.append(f"  held by pid {c.held_by}", style="yellow")
+            if c.project_id is None:
+                line.append("  (no onboarded project)", style="dim")
+            console.print(line)
+            if c.first_prompt:
+                console.print(Text(f"    {c.first_prompt}", style="dim"))
+        return
+    if ref is None:
+        fail("name the conversation (a session id or a .jsonl), or --list", error="usage")
+    try:
+        receipt = adopt_service.adopt(ref, role=role, label=label)
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "agent": receipt.agent.model_dump(mode="json"),
+                    "tmux_session": receipt.tmux_session,
+                    "notes": receipt.notes,
+                }
+            )
+        )
+        return
+    console = stdout_console()
+    console.print(
+        f"✓ adopted {receipt.agent.session_id} as {receipt.agent.label} ({receipt.agent.id}) → "
+        f"{receipt.tmux_session} {receipt.agent.pane_id}",
+        markup=False,
+    )
+    for note in receipt.notes:
+        console.print(f"  {'✓' if note in receipt.shared else '⚠'} {note}", markup=False)
+
+
+def _ago(delta: timedelta) -> str:
+    seconds = max(int(delta.total_seconds()), 0)
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
 
 
 @app.command("capacity")

@@ -22,6 +22,17 @@ the AISquare sign-in is a native card, not a pane; removing an account keeps its
 directory under a `.removed` name; the CLI never adopts a directory it did not
 create — only CLI-made slots exist, for consistency.
 
+**Reaffirmed with the owner on 2026-10-23 (#290).** The P3 handoff's phase A
+(`accounts adopt <dir>`, bringing a hand-made `~/.claude2` in as a slot) is OUT:
+the 2026-09-09 decision stands, nothing onboards an existing Claude directory,
+login or project on its own, and `accounts add` (a fresh login, settings cloned
+from the primary install) stays the way to add an account. IN: phase B,
+`aisquare fleet adopt <session|transcript>`, which brings a conversation started by
+hand under the fleet, found only under the CLI's own accounts (its slots, and the
+plain claude's `~/.claude`) and resumed on the account it lives in; the picker
+`fleet adopt --list`, shown only when the user asks; and phase C, a "fresh start
+without losing accounts" recipe (`docs/fleet.md`).
+
 ## 2. The one idea
 
 A Claude account **is a directory**. Claude Code keeps a login inside the

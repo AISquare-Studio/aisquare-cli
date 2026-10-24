@@ -590,7 +590,11 @@ aisquare fleet attach --project amber-otter
 ```
 
 Replaces this terminal with `tmux attach` on the project's fleet session — the
-full-fidelity escape hatch. Under `--json` it prints the command it would run
+full-fidelity escape hatch. The server has tmux's mouse on: the wheel scrolls
+Claude Code (or tmux's history, over a program that did not ask for the mouse),
+and a plain drag is tmux's own selection, copied to tmux's paste buffer. Hold
+Shift (Option in macOS Terminal and iTerm2) to select in your own terminal
+instead. Under `--json` it prints the command it would run
 instead of running it. The session is found on the server the project's live
 agents are on, at the socket their spawns recorded (`tmux -S`), the line the
 project's Settings tab prints, so it works from a shell under another `TMUX_TMPDIR`. With
@@ -720,11 +724,28 @@ fleet commands name.
 
 ```sh
 aisquare ui
+aisquare ui --project amber-otter --project web   # only these projects
+aisquare ui --group frontend                      # only this group's projects
 ```
 
 The app — what bare `asq` runs. Explicit so a script or alias can reach it, and
 so `aisquare ui --help` exists. Without an interactive terminal it refuses with
 the reason (`not_a_tty`) rather than starting a full-screen app into a pipe.
+
+`--project` (repeatable; codename, name or id prefix) and `--group` (repeatable;
+the group's members as they stand when the app starts) list only those projects
+for this session, plus the captain's section when it is on. A name that matches
+nothing is refused before the app starts.
+
+**What a tick costs.** Every two seconds the sidebar reads the fleet off the UI
+thread: one store session and one `tmux list-panes -a` per server, however many
+projects are listed. A project with no live agent and none that ended in the
+last day is not read at all, and the members of a collapsed group are not read
+either: its header counts their live agents instead, and its bells show once it
+is unfolded. A card whose agents did not change is not repainted. Measured with
+50 listed projects, 10 of them with 3 agents: the read went from 51 store
+sessions and 20 tmux processes (~200 ms) to 1 and 1 (~11 ms), and the UI thread's
+paint from ~15 ms to ~4–7 ms.
 
 Press `R` for Remote control: the fleet on your phone through your own ngrok
 tunnel, with the link, a QR code and the passphrase in one panel — see
@@ -1065,6 +1086,7 @@ max_agents_per_project = 4                # the manager (and you) cannot exceed 
 worktree_dir = ".aisquare-worktrees"      # relative to the repo root; kept out of git via .git/info/exclude
 disable_native_agent_teams = true         # exports CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0 into fleet launches
 max_continuations_per_hour = 30           # cap on the manager's Stop-hook continuations
+pane_clipboard = "off"                    # "on": a program in a pane may set your clipboard (OSC 52)
 
 [fleet.roles.manager]
 permission_mode = "auto"                  # any Claude Code mode; "" = pass no flag
@@ -1384,9 +1406,12 @@ codename `amber-otter`, session `asq-amber-otter`, branches
 config is bundled and regenerated (do not edit it): status line off,
 `escape-time 0` so Esc interrupts Claude immediately, 50,000 lines of history,
 `remain-on-exit on` so a crashed agent's last screen stays readable, truecolor,
-extended keys on so shift+enter and friends reach Claude Code, mouse off (the
-UI owns the mouse), monitor-activity on. One server for every project; one
-session per project; one window per agent.
+extended keys on so shift+enter and friends reach Claude Code, mouse on (so
+the wheel scrolls Claude Code in `fleet attach`; the UI sends its own mouse
+reports straight to the pane and is unaffected), the clipboard off unless
+`[fleet] pane_clipboard` says on, monitor-activity on. One server for every
+project; one session per project; one window per agent. A changed setting
+applies to the next server started.
 
 **Each agent is asked of its own server.** A spawn records the socket its
 server says it listens on, and every fleet command — `fleet ls` and the UI,
@@ -1575,8 +1600,9 @@ through `update-environment`; agents already running keep what they had, and
 the window the same way, so the agent's `launch` joins the project, and traces
 with the key and to the deployment, that the spawner and the UI's Explainability
 tab resolve, not the server's.
-*Passthrough:* the server keeps `set-clipboard off` and no `allow-passthrough`,
-and it does not matter for
+*Passthrough:* the server keeps `set-clipboard off` (unless `[fleet]
+pane_clipboard = "on"`, which lets a program in a pane set your clipboard with
+OSC 52 in `fleet attach`) and no `allow-passthrough`, and it does not matter for
 the UI. The only client the UI attaches is a control-mode client (see *The UI's
 pipe to tmux* below), which has no terminal, so an OSC 52 copy, an OSC 8 link or
 an OSC 9 notification from Claude Code has no terminal to reach; copies arrive
@@ -1759,6 +1785,16 @@ typing the letter.
 ---
 
 ## Troubleshooting
+
+**`asq` lags with many projects listed.** Each tick reads only the projects
+with recent agents, and nothing of a collapsed group's members (see [`ui`](#ui)).
+Fold the groups you are not watching, `aisquare project forget` the projects you
+are done with, or start a session with only the ones you work in:
+`aisquare ui --project a --project b` or `aisquare ui --group <name>`.
+
+**A drag in `fleet attach` selects in tmux, not in my terminal.** The fleet's
+server has the mouse on so the wheel reaches Claude Code. Hold Shift (Option in
+macOS Terminal and iTerm2) while you drag to select in your terminal.
 
 **`asq` prints usage instead of opening the UI.** It is not at an interactive
 terminal: stdin or stdout is a pipe, or `TERM` is empty or `dumb`. That is

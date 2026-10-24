@@ -83,6 +83,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("explainability", "env"),
     ("explainability", "enable"),
     ("explainability", "disable"),
+    ("explainability", "reset"),
+    ("explainability", "post-root"),
     ("explainability", "register"),
     ("explainability", "ship"),
     ("explainability", "key"),

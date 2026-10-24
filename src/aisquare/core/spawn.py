@@ -262,6 +262,12 @@ SEAMS: dict[str, Seam] = {
         "whose hook started it",
         strips_identity=True,
     ),
+    "aisquare/services/explainability.py::_start_root_worker": Seam(
+        EXCLUDED,
+        "a detached `aisquare explainability post-root` of ours (#129 e) — it posts a "
+        "launched session's Run root off the launch path; a worker, not an agent session",
+        strips_identity=True,
+    ),
     "aisquare/cli/accounts.py::_exec": Seam(
         EXCLUDED,
         "`aisquare accounts run` replaces itself with a plain Claude Code session on one "

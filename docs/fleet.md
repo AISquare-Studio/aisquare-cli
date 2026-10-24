@@ -2188,7 +2188,7 @@ and session registry and writes nothing beside them.
 | Key | Default | What it changes |
 | --- | --- | --- |
 | `[fleet.roles.<role>] remote_control` | `false` | The role's Claude Code sessions start with Claude Code's own Remote Control. |
-| `[captain] gate` | `true` | With the captain on, the tools that act as you need a code from your authenticator app. |
+| `[captain] gate` | `true` | With the captain on, the tools that act as you need a code from your authenticator app. Set in `config.toml`, not with `config set` ([captain](captain.md)). |
 
 **What you will notice.**
 
@@ -2196,8 +2196,8 @@ and session registry and writes nothing beside them.
   and `accounts usage` end with the fleet's line, and the Manager tab counts the team
   under the manager's info line.
 - **With the captain on**, its owner tools are shut until you run `aisquare captain gate
-  enroll` (and install the `gate` extra); `aisquare config set captain.gate false` turns
-  the gate off.
+  enroll` (and install the `gate` extra); `gate = false` under `[captain]` in
+  `~/.aisquare/config.toml` turns the gate off (it is no `config set` key).
 - `persona import --from-dir` skips a README or LICENSE (listed `skipped`) instead of
   sending it to an engine.
 - No new agent label is longer than 24 characters.

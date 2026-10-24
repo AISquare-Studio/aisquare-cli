@@ -906,7 +906,7 @@ Keychain (#263), and sign-in works in practice on macOS. No work remains in this
 - [x] **New config keys** with defaults, documented in `docs/reference.md`: `[fleet.roles.<role>]
   remote_control = false` (W4); `[captain] gate = true`, effective only with the captain on (#216, if built
   this train). No `config_version` step expected; confirm against `core/config.py`'s `_keep_unknown` rules.
-  **Done:** `fleet.roles.<role>.remote_control` and `captain.gate` in `docs/reference.md`'s one Configuration keys table; no `config_version` step (`captain.gate` is read from the table with a default, no model field).
+  **Done:** `fleet.roles.<role>.remote_control` in `docs/reference.md`'s one Configuration keys table; `[captain] gate` in `docs/captain.md` and "Upgrading", set in `config.toml` (it is read raw from `[captain]`, no `config set` key, #339's owner call 8). No `config_version` step.
 - [x] **New commands** in `tests/test_stubs.py` `IMPLEMENTED`: `accounts statusline`, `accounts sessions`,
   `accounts adopt` (if decided), `fleet adopt`; and the console script `asq-statusline` in `pyproject.toml`
   `[project.scripts]`.
@@ -957,7 +957,7 @@ The consequential ones (security, a default a user notices, privacy, cost, or ha
 
 | # | Call (PR) | What was chosen | How to flip it |
 | --- | --- | --- | --- |
-| 1 | **The captain's owner gate** (#339) | On while the captain is on, and **fails closed** until `aisquare captain gate enroll` with the `gate` extra. Eight owner tools are gated; `tell`, the manager ask, reads, notes, tasks and `bt` never are. A 15-minute window; three wrong codes lock entry for 5 minutes, doubling to 24 h. | `aisquare config set captain.gate false`; the gated set is `gate.PRIVILEGED` |
+| 1 | **The captain's owner gate** (#339) | On while the captain is on, and **fails closed** until `aisquare captain gate enroll` with the `gate` extra. Eight owner tools are gated; `tell`, the manager ask, reads, notes, tasks and `bt` never are. A 15-minute window; three wrong codes lock entry for 5 minutes, doubling to 24 h. | `[captain] gate = false` in `config.toml`; the gated set is `gate.PRIVILEGED` |
 | 2 | **A spoken code can be overheard** (#339) | Documented in `docs/captain.md`, not engineered around. Only TOTP ships; the verifier is a protocol for Touch ID or Windows Hello later. | docs / a later verifier |
 | 3 | **Remote Control** (#335, #349) | **Off for every role.** Carried on the row's spec and `launch --remote-control`, not an agent argument, so the blockers (another binary, a foreign `ANTHROPIC_BASE_URL`, an OAuth token, tracing) can stand aside. The docs say an agent keeps its role's permission mode and **anyone signed in to that Claude account can drive it**. | `fleet.roles.<role>.remote_control = true`, or `fleet spawn --remote-control` |
 | 4 | **The status line's install** (#362) | **Opt-in.** `--install` sets ours only where no `statusLine` is set, on every account unless `--slot`. A status line of yours is never replaced (`--wrap` keeps it and runs it first). | `--slot S` for one account; `--install --wrap` |

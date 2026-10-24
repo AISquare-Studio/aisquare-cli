@@ -77,6 +77,29 @@ def test_a_codex_restart_after_a_persona_attach_says_the_briefing_carries_it(
     assert not [note for note in after.notes if SEAM in note], "its launch passed skeptic"
 
 
+def test_a_codex_restart_that_drops_its_persona_says_its_seam_keeps_it(
+    codex_agent: tuple[Codex, TeamTask],
+) -> None:
+    """Review r17 of #113, finding 10: a thread begun as skeptic and resumed with no persona
+    (a take-over to *(none)*) still holds skeptic in its system seam, and the row says none."""
+    codex, _ = codex_agent
+    _rollout(codex, THREAD_ONE)
+    codex.start(THREAD_ONE)
+    fleet_service.attach_persona(codex.project, codex.agent.label, "skeptic")
+    began = fleet_service.restart(codex.project, codex.agent.label, fresh=True)
+    codex.agent = began.started
+    codex.become()
+    _rollout(codex, THREAD_TWO)
+    codex.start(THREAD_TWO)
+
+    receipt = fleet_service.restart(codex.project, codex.agent.label, persona="")
+
+    assert receipt.resumed is True and receipt.started.persona is None
+    assert [note for note in receipt.notes if SEAM in note] == [
+        f"no persona: {SEAM}, so its system seam keeps skeptic — restart it with --fresh to drop it"
+    ], receipt.notes
+
+
 def test_a_codex_restart_with_the_persona_its_launch_passed_says_nothing_of_its_seam(
     codex_agent: tuple[Codex, TeamTask],
 ) -> None:

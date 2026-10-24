@@ -552,4 +552,10 @@ def test_a_resume_note_says_codex_keeps_its_first_persona_and_claude_code_needs_
     assert "keeps its first persona" in note and "session-start briefing" in note
     assert service.resume_seam_note("claude-code", "mentor") is None
     assert service.resume_seam_note("codex", None) is None
+    # Review r17 of #113, finding 10: one dropped is still in the thread's seam.
+    assert service.resume_seam_note("codex", None, "mentor") == (
+        "no persona: Codex resumes the thread with the system prompt it began with, so its "
+        "system seam keeps mentor — restart it with --fresh to drop it"
+    )
+    assert service.resume_seam_note("claude-code", None, "mentor") is None
     assert service.resume_seam_note("no-such-agent", "mentor") is None

@@ -743,21 +743,30 @@ def skill_roots(root: Path | None) -> list[SkillRoot]:
     return list(found.values())
 
 
-def resume_seam_note(agent: str, persona: str | None) -> str | None:
+def resume_seam_note(agent: str, persona: str | None, began_as: str | None = None) -> str | None:
     """The receipt line for a launch that RESUMES a session of ``agent`` as ``persona``
     when the agent's resumed thread keeps the system prompt it began with
     (``capabilities.resume_keeps_system_prompt``: Codex's, measured on 0.162.1 — ``codex
     resume`` ignores a new ``developer_instructions``): the persona passed now reaches the
-    agent through the session-start briefing alone. ``None`` for an agent that takes its
-    system prompt again at every launch (Claude Code), an unknown agent, or no persona.
-    The caller asks it for a row whose persona changed since the thread began (``persona
-    attach``, a take-over's)."""
+    agent through the session-start briefing alone. With no persona passed, the thread
+    still holds ``began_as``, the one it began with, which no briefing takes back (review
+    r17 of #113, finding 10). ``None`` for an agent that takes its system prompt again at
+    every launch (Claude Code), an unknown agent, or neither persona. The caller asks it
+    for a row whose persona changed since the thread began (``persona attach``, a
+    take-over's, one dropped)."""
     try:
         adapter = get_adapter(agent)
     except ValueError:
         return None
-    if not persona or not adapter.capabilities.resume_keeps_system_prompt:
+    if not adapter.capabilities.resume_keeps_system_prompt:
         return None
+    if not persona:
+        if not began_as:
+            return None
+        return (
+            f"no persona: {adapter.label} resumes the thread with the system prompt it began "
+            f"with, so its system seam keeps {began_as} — restart it with --fresh to drop it"
+        )
     return (
         f"persona {persona}: {adapter.label} resumes the thread with the system prompt it "
         "began with, so its system seam keeps its first persona — "

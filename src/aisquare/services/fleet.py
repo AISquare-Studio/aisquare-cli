@@ -9804,7 +9804,7 @@ def _respawn(
         # A thread that keeps its first system prompt across a resume (Codex's) is not given
         # the persona this launch passes, which reaches it through the briefing alone: said
         # at every resume while the seam holds another, not only the first after a change.
-        seam = personas_service.resume_seam_note(record.agent, chosen or None)
+        seam = personas_service.resume_seam_note(record.agent, chosen or None, began_as)
         if seam is not None:
             notes.append(seam)
     if resume is not None and session is not None and (session.persona or "") != chosen:

@@ -178,8 +178,9 @@ until a restart. A Codex thread keeps the system prompt it began with when it
 resumes, so a restart of a Codex agent whose persona changed since still has its
 first persona in the system prompt, and the new one through the briefing. Its
 receipt says so at every restart that resumes that thread while the persona
-differs from the thread's first, not only the first after the change. A restart
-or hand-over replays the row's
+differs from the thread's first, not only the first after the change, and when
+the persona was dropped: the thread still holds its first one until a `--fresh`
+restart. A restart or hand-over replays the row's
 persona: the one it was spawned with or given since; if that no longer resolves,
 the role's current default; if that does not either, none — said on the receipt,
 never a refusal.

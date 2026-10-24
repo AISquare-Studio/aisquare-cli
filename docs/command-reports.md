@@ -134,14 +134,12 @@ untracked nonignored file, kept file by file.
   do not count. Tracked files count whatever directory they are in.
 - **Nested repositories count.** A submodule or nested repository adds its own
   files, not only the commit it records.
-- **New files are output.** Because identity is kept per file, a file that did not
-  exist before the command (`pytest --junitxml=report.xml`) is new output. A
-  pre-existing file that changed or vanished is a change. When a report backs brief
-  evidence, an untracked file that holds exactly what a saved `--project` run in that
-  checkout wrote stays output on later runs too, so a check that rewrites its own
-  report file through `asq exec` can be recorded again ([work briefs](work-briefs.md)).
-  For anything else a check writes into the checkout, gitignore it, or write it
-  outside the checkout.
+- **Ignored files are left out.** Files git ignores do not count. Everything else
+  does, a file the command itself wrote included: `pytest --junitxml=report.xml`
+  changes the identity, as an edit or a removal does. When a report backs brief
+  evidence, the identity must be the same before, after and now, so write check
+  output to a gitignored directory (`--junitxml=reports/a.xml` with `reports/` in
+  `.gitignore`) or outside the checkout ([work briefs](work-briefs.md)).
 - **A worktree is its own checkout.** A command run in a linked worktree is about that
   worktree's files, under the board's one project.
 - **The home directory is refused.** A directory that is, or contains, your home or

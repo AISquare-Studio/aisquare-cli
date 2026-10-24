@@ -63,16 +63,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   --report ID` records a check backed by an `asq exec --project` report: a pass
   needs exit 0, no interruption, both streams whole, no launch error, a known
   source identity and the same identity before, after and now, compared file by
-  file in the report's own checkout. An untracked file holding exactly what a saved
-  `--project` run in that checkout wrote is check output and never counts, so two
-  checks writing their own junit reports into the checkout do not stale each other.
-  Any other change does: an added `conftest.py`, a file a run wrote that is now
-  tracked or was edited since (a later read-only run such as `git status` does not
-  change that), a report rewritten outside `asq exec`. Known limit: an untracked
-  source file edited through `asq exec --project` (a codemod, `sed -i`) counts as
-  that run's output; edit untracked source by hand, or commit it first. The reason
-  names the first changed files and says to delete, gitignore or write elsewhere a
-  check's own output. `asq exec --task` takes the task's number or id, like every other
+  file in the report's own checkout: every tracked file and every untracked one
+  git does not ignore, with no exemption for a check's own output. Check output
+  goes in a gitignored directory (`--junitxml=reports/a.xml` with `reports/` in
+  `.gitignore`) or outside the checkout. A run during which a source file is
+  created, changed or removed is refused, and a pass goes stale when one is new,
+  changed or gone since, such as an added `conftest.py`. The reason names the first
+  changed files and says to gitignore, delete or write elsewhere a check's own
+  output. `asq exec --task` takes the task's number or id, like every other
   `--task`, and a report taken with it backs only that task. Manual `--artifact`
   passes keep their checkout's whole-tree fingerprint.
   `aisquare brief check BRIEF [--source-root PATH]` re-checks every pass against

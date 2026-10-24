@@ -776,11 +776,11 @@ def test_project_records_the_identity_before_and_after(tmp_path: Path) -> None:
     assert not source_unchanged(files.before, files.after)
 
 
-def test_a_per_run_output_file_is_new_while_a_changed_or_vanished_file_is_not(
+def test_a_per_run_output_file_is_a_change_like_an_edit_or_a_removal(
     tmp_path: Path,
 ) -> None:
-    """The fingerprint row: a file the check wrote is ignored per file; a pre-existing
-    one that changed or vanished is not."""
+    """The fingerprint row, under the owner's strict rule (M6): a file the check wrote
+    into the checkout changes the source, as an edited or vanished one does."""
     root = tmp_path / "source"
     project_id = _registered_project(root)
     (root / "app.py").write_text("x = 1\n")
@@ -796,16 +796,14 @@ def test_a_per_run_output_file_is_new_while_a_changed_or_vanished_file_is_not(
     output = files_of("open('report.xml','w').write('<testsuite/>')")
     assert output.after is not None and "report.xml" in output.after
     assert "report.xml" not in output.before
-    assert source_unchanged(output.before, output.after), "a new output file is ignored"
+    assert not source_unchanged(output.before, output.after), "a new output file counts"
     edited = files_of("open('app.py','w').write('x = 2\\n')")
     assert edited.after is not None and not source_unchanged(edited.before, edited.after)
     vanished = files_of("import os;os.remove('other.py')")
     assert vanished.after is not None and not source_unchanged(vanished.before, vanished.after)
     regenerated = files_of("open('report.xml','w').write('<testsuite tests=\"2\"/>')")
     assert regenerated.after is not None
-    assert not source_unchanged(regenerated.before, regenerated.after), (
-        "once it existed before the run, report.xml is a pre-existing file like any other"
-    )
+    assert not source_unchanged(regenerated.before, regenerated.after), "rewritten, too"
 
 
 def test_a_failed_capture_leaves_the_proof_unknown_and_the_command_runs(tmp_path: Path) -> None:

@@ -6,10 +6,9 @@ check passed on is still the source in the tree. Content, not history: Git HEAD 
 read, so an empty commit, an amend or a branch switch that leaves every byte alone keeps
 the identity. Uncommitted and untracked nonignored work counts.
 
-Kept per file because "a new file the check wrote" and "an edited source file" look the
-same at the whole-tree level: both change one combined hash. Per file, a path that only
-appears afterwards (``pytest --junitxml=report.xml``) is new output and is ignored, while
-a pre-existing file that changed or vanished is a real change (:func:`source_unchanged`).
+Kept per file so a change can be named (:func:`changed_paths`). No path is exempt: a
+file that is new, changed or gone is a change, whoever wrote it, so a check's own output
+belongs in a gitignored directory or outside the checkout (owner's decision on M6).
 
 Every read that fails raises ``ValueError``: an identity that could not be taken is
 unknown, and unknown must never pass for "unchanged".
@@ -21,7 +20,7 @@ import hashlib
 import os
 import stat
 import subprocess
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 from aisquare.core.paths import aisquare_home
@@ -120,15 +119,6 @@ def git_common_dir(path: Path) -> Path | None:
         return None
     common = Path(text)
     return (common if common.is_absolute() else path / common).resolve()
-
-
-def untracked_paths(root: Path) -> set[str] | None:
-    """The untracked, nonignored paths under ``root`` now, as the identity names them;
-    None when ``root`` is not in a git work tree. ValueError when git cannot list it."""
-    probe = _git(root, "rev-parse", "--show-toplevel", timeout=10)
-    if probe.returncode != 0:
-        return None
-    return set(_git_ls(root, "--others", "--exclude-standard"))
 
 
 def source_root_for(project_root: Path, cwd: Path | None = None) -> Path:
@@ -267,40 +257,17 @@ def source_fingerprint(root: Path) -> str:
     return fingerprint_of(source_file_hashes(root))
 
 
-def changed_paths(
-    recorded: Mapping[str, str],
-    current: Mapping[str, str],
-    *,
-    output: Collection[str] | None = None,
-    ignore: Collection[str] = (),
-) -> list[str]:
+def changed_paths(recorded: Mapping[str, str], current: Mapping[str, str]) -> list[str]:
     """The paths that make ``current`` differ from ``recorded``, sorted: each recorded
-    file that changed or vanished, and, given ``output``, each path new since the record
-    that is not in it. A path in ``ignore`` never counts, whatever happened to it: what
-    checks themselves write (a ``--junitxml`` report rewritten by each run).
-
-    Without ``output``, a path only in ``current`` never counts: comparing a run's own
-    before and after, every new path is the run's output. Later, against the checkout
-    now, ``output`` is what the run created (its after minus its before), and any OTHER
-    new path is a change: an added ``conftest.py`` changes what a pytest check means
-    (validator round on #136, M2)."""
-    skipped = set(ignore)
-    changed = [
-        name
-        for name, digest in recorded.items()
-        if name not in skipped and current.get(name) != digest
-    ]
-    if output is not None:
-        made = set(output) | skipped
-        changed += [name for name in current if name not in recorded and name not in made]
+    file that changed or vanished, and each one new since the record. A new file counts
+    like any other change: an added ``conftest.py`` changes what a pytest check means, and
+    the identity cannot tell a check's own write from an edit made while it ran
+    (validator's M6 on #136; the owner chose this strict rule)."""
+    changed = [name for name, digest in recorded.items() if current.get(name) != digest]
+    changed += [name for name in current if name not in recorded]
     return sorted(changed)
 
 
-def source_unchanged(
-    recorded: Mapping[str, str],
-    current: Mapping[str, str],
-    *,
-    output: Collection[str] | None = None,
-) -> bool:
-    """Whether ``current`` is ``recorded``, as :func:`changed_paths` judges it."""
-    return not changed_paths(recorded, current, output=output)
+def source_unchanged(recorded: Mapping[str, str], current: Mapping[str, str]) -> bool:
+    """Whether ``current`` is ``recorded``, file for file."""
+    return not changed_paths(recorded, current)

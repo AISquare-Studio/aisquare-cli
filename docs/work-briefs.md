@@ -63,45 +63,38 @@ A report backs a **pass** only if the run:
 The source is compared **file by file**, in the checkout the report ran in, not the one
 you record from: a check run in a worktree is about that worktree.
 
-**Check output never counts.** A path is check output only while it is **untracked**
-and holds **exactly what a saved run wrote** there: its content is what some saved
-`asq exec --project` run in that checkout left it as, when that run created or rewrote
-it, recorded as evidence or not. A run that only read the file, such as `asq exec
---project P -- git status`, wrote nothing to it, so it never makes a hand edit output.
+**No file is exempt.** The source is every tracked file and every untracked file git
+does not ignore (`.gitignore`, `.git/info/exclude` or your global excludes). In a
+checkout that is not a git repository, everything but well-known generated directories
+such as `__pycache__`, `node_modules` and `.venv` counts. A pass needs that whole set to
+be identical before the run, after it, and now. Who wrote a file makes no difference:
+the check itself, another `asq exec` run, or you while the check ran.
 
-**A known limit:** an untracked source file edited *through* `asq exec --project` (a
-codemod, `sed -i`) is that run's output by this rule, so a pass can stay PROVEN after
-it. Edit untracked source by hand, not through `asq exec`, or commit it first: a
-tracked file is never check output.
-(In a checkout that is not a git repository, "untracked" means a saved run created it.)
-So R1's `--junitxml=a.xml` and R2's `--junitxml=b.xml` never stale each other, and
-running a check again through `asq exec`, which rewrites its own report file, is not a
-change.
+**So check output goes in a gitignored directory, or outside the checkout.** Commit a
+`.gitignore` line such as `reports/` and point the check there:
 
-Every other change counts:
-- a file that existed and changed or went;
-- a new file no run wrote, such as an added `conftest.py`;
-- a file a run wrote that is now tracked: a scaffold that was then committed, or a file
-  `asq exec -- git merge` brought in;
-- a file a run wrote whose content someone changed since, such as a `conftest.py` a run
-  created empty and that now raises;
-- a report file rewritten outside `asq exec`, by a plain `pytest` for instance.
+```sh
+asq exec --project P --task 1 -- python -m pytest -q --junitxml=reports/a.xml
+```
 
-The reason names the first files that changed and says what to do. If the file is a
-check's own output, delete it, gitignore it, or have the check write it outside the
-checkout. If it is source, record a check of the source as it is now. A report taken with
-`--task` backs only that task; `--task` takes the task's number or id, as everywhere.
+A check that writes `--junitxml=a.xml` into the checkout instead is refused: the file
+is new during the run.
+
+A run during which any source file is created, changed or removed is refused ("the
+source changed while it ran"). A recorded pass goes `stale` when any source file is
+new, changed or gone since the check, such as an added `conftest.py`. Both name the
+first five files and say what to do: if the file is a check's own output, gitignore it,
+delete it, or have the check write it outside the checkout; if it is source, record a
+check of the source as it is now. A report taken with `--task` backs only that task;
+`--task` takes the task's number or id, as everywhere.
 
 A run of any exit status can back `--verdict fail`, but it must still be a report taken
 with `--project` for this brief's board, and, if it was taken with `--task`, for that
 task.
 
-A recorded pass goes `stale` when a file it covered changes, or when its report changes
-or is gone. Reports that recorded evidence cites are never pruned
-([retention](command-reports.md)). Pruning another report can still stale a pass: a
-check's output file holds what the run that last rewrote it wrote, and once that run's
-report is pruned, nothing saved wrote it any more, so it reads as a change. Run the
-check through `asq exec` again, or keep its output outside the checkout.
+A recorded pass also goes `stale` when its report changes or is gone. Reports that
+recorded evidence cites are never pruned ([retention](command-reports.md)), and pruning
+any other report changes no pass.
 
 ## Manual evidence
 

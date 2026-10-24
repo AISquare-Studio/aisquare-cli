@@ -15,6 +15,8 @@ import json
 import sqlite3
 import subprocess
 import sys
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -182,18 +184,25 @@ def test_the_source_changing_during_or_after_the_run_refuses_a_pass(repo: Path) 
         _record(brief, task, after)
 
 
-def test_a_new_file_the_check_wrote_does_not_stop_its_pass(repo: Path) -> None:
+def test_a_file_the_check_writes_into_the_checkout_refuses_its_pass(repo: Path) -> None:
+    """Owner's decision on M6: no path is exempt as a check's output. An un-ignored
+    --junitxml=a.xml is a change made while the check ran, and the refusal names it with
+    the remedy, never only "run it again"."""
     brief, task = _linked()
-    report = _run(_py("open('junit.xml', 'w').write('<testsuite/>')"), task=task)
-    _record(brief, task, report)
-    assert (repo / "junit.xml").exists()
-    assert _check(brief) == {"R1": "pass"}
+    report = _run(_pytest_into("a.xml"), task=task)
+    assert report.exit_code == 0 and (repo / "a.xml").exists()
+    with pytest.raises(ValueError) as refused:
+        _record(brief, task, report)
+    said = str(refused.value)
+    assert "the source changed while it ran: a.xml" in said
+    for remedy in ("gitignore it", "delete it", "write it outside the checkout"):
+        assert said.count(remedy) == 1, said
+    assert "run it again" not in said
 
 
 def test_a_file_added_since_the_check_stales_its_pass(repo: Path) -> None:
-    """Validator round on #136, M2 (manager's decision): a pass ignores only the paths its
-    check created. A conftest.py added after a PROVEN brief changes what the check means:
-    the pass goes stale, though no file the check saw changed."""
+    """Validator round on #136, M2: a conftest.py added after a PROVEN brief changes what
+    the check means: the pass goes stale, though no file the check saw changed."""
     brief, task = _linked()
     _record(brief, task, _run(_py("print('ok')"), task=task))
     assert _check(brief) == {"R1": "pass"}
@@ -204,56 +213,91 @@ def test_a_file_added_since_the_check_stales_its_pass(repo: Path) -> None:
         team.finish_task(task.id)
 
 
-def test_the_checks_own_output_never_stales_its_pass(repo: Path) -> None:
-    """A file the check itself wrote (a --junitxml report) is its output, and stays so
-    when a later `asq exec` run rewrites it: untracked, and holding what a saved run
-    wrote there."""
-    brief, task = _linked()
-    report = _run(_py("open('junit.xml', 'w').write('<testsuite/>')"), task=task)
-    _record(brief, task, report)
-    _run(_py("open('junit.xml', 'w').write('<testsuite tests=\\'2\\'/>')"))  # the next run
-    assert _check(brief) == {"R1": "pass"}
-
-
-def test_a_check_output_rewritten_outside_exec_reads_stale_with_the_remedies(
-    repo: Path,
-) -> None:
-    """Manager's decision on #12, final: output is only what a saved run wrote. The same
-    junit file rewritten by hand (or by a plain pytest outside asq exec) is not, and the
-    reason says what to do about it."""
-    brief, task = _linked()
-    _record(brief, task, _run(_py("open('junit.xml', 'w').write('<testsuite/>')"), task=task))
-    (repo / "junit.xml").write_text("<testsuite tests='2'/>")
-    status = briefs.check(brief.id).requirements[0]
-    assert status.state == "stale" and "junit.xml" in status.reason
-    for remedy in ("delete it", "gitignore it", "write it outside the checkout"):
-        assert remedy in status.reason, status.reason
-
-
 def _pytest_into(report_file: str) -> list[str]:
-    """A real pytest check that writes its junit report into the checkout."""
+    """A real pytest check that writes its junit report to ``report_file``."""
     return [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
             f"--junitxml={report_file}", "test_app.py"]  # fmt: skip
 
 
-def test_two_checks_writing_reports_into_the_checkout_can_both_be_done(repo: Path) -> None:
-    """The tester's finding on #12: R1's check writes a.xml and R2's writes b.xml. At
-    dac09e77 recording R2 staled R1 (b.xml is new and R1's run did not create it), and
-    re-running R1 was refused "changed while it ran (a.xml)" forever. A path some saved
-    run created is check output, for every check in that checkout."""
+def _ignore_reports(repo: Path) -> None:
+    """A committed .gitignore for ``reports/``: where the docs say check output goes."""
+    (repo / ".gitignore").write_text("reports/\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "ignore check output")
+
+
+def test_two_checks_writing_reports_into_a_gitignored_dir_can_both_be_done(
+    repo: Path,
+) -> None:
+    """The tester's two-junit flow on #12, under the strict rule: R1's check writes
+    reports/a.xml and R2's reports/b.xml, in a gitignored directory. Neither stales the
+    other, a re-run that rewrites a.xml is recorded again, and the task reaches done."""
+    _ignore_reports(repo)
     brief, task = _linked("R one", "R two")
-    _record(brief, task, _run(_pytest_into("a.xml"), task=task), req="R1")
-    _record(brief, task, _run(_pytest_into("b.xml"), task=task), req="R2")
-    assert (repo / "a.xml").exists() and (repo / "b.xml").exists()
+    _record(brief, task, _run(_pytest_into("reports/a.xml"), task=task), req="R1")
+    _record(brief, task, _run(_pytest_into("reports/b.xml"), task=task), req="R2")
+    assert (repo / "reports" / "a.xml").exists() and (repo / "reports" / "b.xml").exists()
     assert _check(brief) == {"R1": "pass", "R2": "pass"}
 
-    again = _run(_pytest_into("a.xml"), task=task)  # a.xml is there now, and rewritten
-    _record(brief, task, again, req="R1")
+    _record(brief, task, _run(_pytest_into("reports/a.xml"), task=task), req="R1")
+    (repo / "reports" / "b.xml").write_text("<testsuite tests='9'/>")  # by hand: ignored
     assert _check(brief) == {"R1": "pass", "R2": "pass"}
     assert team.finish_task(task.id).status == "done"
 
     (repo / "conftest.py").write_text("raise RuntimeError('collection fails now')\n")
     assert _check(brief) == {"R1": "stale", "R2": "stale"}, "an added conftest.py still counts"
+
+
+def test_a_hand_edit_during_an_unrelated_run_stales_a_pass(repo: Path) -> None:
+    """Validator's M6 A on #136: an untracked helper.py edited by hand while another
+    `asq exec --project` run was in flight counted as that run's output, and the pass
+    read PROVEN at 462afa91. Whoever wrote it, it is a change."""
+    (repo / "helper.py").write_text("VALUE = 1\n")
+    brief, task = _linked()
+    _record(brief, task, _run(_py("print('the check')"), task=task))
+    started, flag = repo.parent / "started", repo.parent / "edited"
+
+    def edit_by_hand() -> None:
+        deadline = time.monotonic() + 60
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)  # the command runs: its before-identity is taken
+        (repo / "helper.py").write_text("VALUE = 2\n")
+        flag.touch()
+
+    hand = threading.Thread(target=edit_by_hand)
+    hand.start()
+    wait = (
+        f"import os, time\nopen({str(started)!r}, 'w').close()\n"
+        "deadline = time.monotonic() + 60\n"
+        f"while not os.path.exists({str(flag)!r}) and time.monotonic() < deadline:\n"
+        "    time.sleep(0.02)"
+    )
+    other = _run(_py(wait))  # the run in flight, in the main thread (it takes signals)
+    hand.join(timeout=60)
+    assert other.exit_code == 0 and (repo / "helper.py").read_text() == "VALUE = 2\n"
+    status = briefs.check(brief.id).requirements[0]
+    assert status.state == "stale" and "helper.py" in status.reason
+
+
+def test_an_untracked_file_changed_during_the_checks_own_run_refuses_it(repo: Path) -> None:
+    """Validator's M6 B on #136: untracked helper.py edited mid-run of the check itself
+    was accepted at 462afa91 (a regression from 0d06fe04). It is refused, named."""
+    (repo / "helper.py").write_text("VALUE = 1\n")
+    brief, task = _linked()
+    report = _run(_py("open('helper.py', 'w').write('VALUE = 2\\n')"), task=task)
+    with pytest.raises(ValueError, match=r"the source changed while it ran: helper\.py"):
+        _record(brief, task, report)
+
+
+def test_a_conftest_written_during_an_unrelated_run_stales_a_pass(repo: Path) -> None:
+    """Validator's M6 C on #136: a raising conftest.py written while another run was in
+    flight read PROVEN at 462afa91. A run that created it changes nothing about that."""
+    brief, task = _linked()
+    _record(brief, task, _run(_py("print('the check')"), task=task))
+    _run(_py("open('conftest.py', 'w').write('raise RuntimeError(1)\\n')"))
+    assert _check(brief) == {"R1": "stale"}
+    with pytest.raises(briefs.TaskNotProven):
+        team.finish_task(task.id)
 
 
 def _broken_after(repo: Path, made_by_a_run: str, *, then: Any) -> dict[str, str]:
@@ -269,7 +313,7 @@ def _broken_after(repo: Path, made_by_a_run: str, *, then: Any) -> dict[str, str
 
 def test_a_scaffold_a_run_wrote_and_that_was_committed_is_source(repo: Path) -> None:
     """Tester's H1 on #12: a scaffold written through `asq exec`, then committed and
-    broken, read PROVEN at e7490c0c. Tracked now, it is source."""
+    broken, read PROVEN at e7490c0c."""
     _run(_py("open('helper.py', 'w').write('def help():\\n    return 1\\n')"))
 
     def commit() -> None:
@@ -282,9 +326,9 @@ def test_a_scaffold_a_run_wrote_and_that_was_committed_is_source(repo: Path) -> 
 def test_a_tracked_file_put_back_to_what_a_run_once_wrote_is_still_a_change(
     repo: Path,
 ) -> None:
-    """Why "untracked now" is half the rule: a scaffold a run wrote is committed and then
-    edited, and a pass is recorded on the edit. Putting the file back to the scaffold, the
-    exact bytes a saved run wrote, changes the source; tracked, it is no check's output."""
+    """A scaffold a run wrote is committed and then edited, and a pass is recorded on the
+    edit. Putting the file back to the scaffold, the exact bytes a saved run wrote,
+    changes the source."""
     scaffold = "def help():\n    return 1\n"
     _run(_py(f"open('helper.py', 'w').write({scaffold!r})"))
     _git(repo, "add", "helper.py")
@@ -299,7 +343,7 @@ def test_a_tracked_file_put_back_to_what_a_run_once_wrote_is_still_a_change(
 
 def test_a_tracked_file_a_run_brought_in_is_source(repo: Path) -> None:
     """Tester's H2 on #12: `asq exec -- git merge feature` brought tracked feature.py,
-    which then read PROVEN when broken. Tracked now, it is source."""
+    which then read PROVEN when broken."""
     _git(repo, "checkout", "-q", "-b", "feature")
     (repo / "feature.py").write_text("X = 1\n")
     _git(repo, "add", "feature.py")
@@ -314,16 +358,14 @@ def test_a_tracked_file_a_run_brought_in_is_source(repo: Path) -> None:
 
 def test_a_file_a_run_created_and_someone_then_edited_is_source(repo: Path) -> None:
     """Tester's H3 on #12: `asq exec -- touch conftest.py`, then a raising conftest.py,
-    read PROVEN. Its content is no longer what a run wrote: it is source."""
+    read PROVEN."""
     _run(_py("open('conftest.py', 'w').close()"))
     assert _broken_after(repo, "conftest.py", then=lambda: None) == {"R1": "stale"}
 
 
 def test_a_read_only_run_does_not_launder_an_added_conftest(repo: Path) -> None:
     """Tester's H4 on #12: a raising conftest.py added by hand, then `asq exec --project
-    P -- git status --short`, read PASS and `task done` succeeded at d7c9a974, because the
-    run recorded every untracked file it found. A run's digest counts only where it
-    changed the path."""
+    P -- git status --short`, read PASS and `task done` succeeded at d7c9a974."""
     brief, task = _linked()
     _record(brief, task, _run(_py("print('the check')"), task=task))
     (repo / "conftest.py").write_text("raise RuntimeError('collection fails now')\n")
@@ -347,8 +389,8 @@ def test_a_read_only_run_does_not_launder_an_edited_untracked_file(repo: Path) -
 
 
 def test_a_source_file_the_check_changes_is_named_with_the_three_remedies(repo: Path) -> None:
-    """Where a path that existed still changes during a run, the refusal names it and says
-    what to do: delete it, gitignore it, or write check output outside the checkout."""
+    """A tracked file the check rewrites: the refusal names it and says what to do:
+    gitignore it, delete it, or write check output outside the checkout."""
     (repo / "snapshot.txt").write_text("one\n")
     _git(repo, "add", "snapshot.txt")
     _git(repo, "commit", "-q", "-m", "a committed file the check rewrites")

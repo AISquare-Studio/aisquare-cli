@@ -363,6 +363,8 @@ def evidence(
     A --report pass needs an uninterrupted run that exited 0.
     Its output must be kept whole.
     Its source must be unchanged before the run, after it and now.
+    The source is every tracked file and every untracked one git does not ignore.
+    A file the check writes there is a change: gitignore it, or write it outside.
     Artifact-backed evidence is MANUAL, and labelled so everywhere.
     Only the validator can judge it.
     A fail has `brief finding`'s effect."""
@@ -397,6 +399,8 @@ def check(
 ) -> None:
     """Check every requirement against the source now.
 
+    A pass goes stale when any source file is new, changed or gone since its check.
+    Source is every tracked file and every untracked one git does not ignore.
     Exits 1 while any is missing, failed, blocked, stale or unlinked (no live task).
     Exits 2 for a --source-root that is not a checkout of the project."""
     result = _call(

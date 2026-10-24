@@ -26,7 +26,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,7 +43,6 @@ from aisquare.core.source_revision import (
     git_common_dir,
     source_file_hashes,
     source_root_for,
-    untracked_paths,
 )
 from aisquare.core.store import BriefRow, ContextStore, TaskTransition, store_session
 from aisquare.models import (
@@ -245,46 +244,6 @@ class _Sources:
     def __init__(self, override: Path | None = None) -> None:
         self.override = override
         self._files: dict[str, dict[str, str] | str] = {}
-        self._outputs_cache: dict[str, tuple[dict[str, set[str]], set[str]]] = {}
-        self._untracked: dict[str, set[str] | None] = {}
-
-    def outputs(self, root: str, current: Mapping[str, str], *others: str | None) -> set[str]:
-        """The paths in checkout ``root`` that are check output now (manager's decision on
-        #12, final): a path counts only if it is UNTRACKED now and its CURRENT content is
-        what a saved ``--project`` run wrote there: its digest is the one that path got in
-        some saved run that created or rewrote it, in ``root`` or in ``others``. A run that
-        only read a path (``git status``) wrote nothing to it. For a checkout that is not a
-        git work tree, "untracked" is "created by a saved run" (in an after-identity and
-        not its before).
-
-        So a junit report each ``asq exec`` run rewrites stays output, and one check's
-        report never stales another's pass. But a file a run created and that was then
-        committed (a scaffold), a tracked file a run brought in (``git merge``), or one a
-        run created and someone then edited (``touch conftest.py``, then a raising one) is
-        source again, and changing it stales a pass. Reports that cannot be read add
-        nothing, the strict direction."""
-        key = str(Path(root).resolve())
-        roots = {key} | {str(Path(other).resolve()) for other in others if other}
-        written: dict[str, set[str]] = {}
-        created: set[str] = set()
-        for one in roots:
-            if one not in self._outputs_cache:
-                self._outputs_cache[one] = _written_in(one)
-            run_written, run_created = self._outputs_cache[one]
-            for path, digests in run_written.items():
-                written.setdefault(path, set()).update(digests)
-            created |= run_created
-        if key not in self._untracked:
-            try:
-                self._untracked[key] = untracked_paths(Path(key))
-            except ValueError:
-                self._untracked[key] = set()  # cannot tell: nothing is output
-        untracked = self._untracked[key]
-        eligible = untracked if untracked is not None else created
-        return {
-            path for path, digest in current.items()
-            if path in eligible and digest in written.get(path, ())
-        }  # fmt: skip
 
     def root(self, recorded: str | None) -> str | None:
         return str(self.override) if self.override is not None else recorded
@@ -320,9 +279,10 @@ def _source_stale(evidence: BriefEvidence, sources: _Sources) -> str | None:
     """Why a recorded pass no longer describes the source in its checkout; None when it
     still does.
 
-    Report evidence is judged against the REPORT's own source root, file by file: a path
-    that is check output now (:meth:`_Sources.outputs`) is ignored, and any other change
-    makes the pass stale: a recorded file that changed or went, or a new one. Manual
+    Report evidence is judged against the REPORT's own source root, file by file: any
+    change makes the pass stale, a recorded file that changed or went, or a new one. No
+    path is exempt as a check's output (owner's decision on M6): that belongs in a
+    gitignored directory or outside the checkout, where the identity never looks. Manual
     evidence keeps the whole-tree fingerprint of the checkout it was recorded in, so any
     change there does. ``sources.override`` replaces both roots.
     """
@@ -343,8 +303,7 @@ def _source_stale(evidence: BriefEvidence, sources: _Sources) -> str | None:
         except ValueError as exc:
             return str(exc)
         if saved is not None:
-            made = sources.outputs(root, current, report.source_root)
-            paths = changed_paths(saved.before, current, output=made, ignore=made)
+            paths = changed_paths(saved.before, current)
             if not paths:
                 return None
             return _changed(f"the source in {root} changed since the check ran", paths)
@@ -391,12 +350,11 @@ def _same_task(store: ContextStore, recorded: str, task: TeamTask) -> bool:
 
 
 def _pass_refusals(
-    report: command_reports.CommandReport,
-    saved: command_reports.SourceFiles | None,
-    sources: _Sources | None = None,
+    report: command_reports.CommandReport, saved: command_reports.SourceFiles | None
 ) -> list[str]:
-    """Why a saved command run cannot back a pass: every rule, each said. A path some
-    check wrote (:meth:`_Sources.outputs`) changing is no reason."""
+    """Why a saved command run cannot back a pass: every rule, each said. The source must
+    be the same before the run, after it and now, every path of it: a file the check
+    wrote into the checkout is a change like any other (owner's decision on M6)."""
     why: list[str] = []
     if report.launch_error is not None:
         why.append(f"it could not start ({report.launch_error})")
@@ -415,13 +373,12 @@ def _pass_refusals(
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         why.append(f"the source in {report.source_root} cannot be read now ({exc})")
         return why
-    made = (sources or _Sources()).outputs(report.source_root, current)
     during: list[str] = []
     paths: list[str] = []
     if saved is not None:
         if saved.after is not None:
-            during = changed_paths(saved.before, saved.after, ignore=made)
-        paths = changed_paths(saved.before, current, output=made, ignore=made)
+            during = changed_paths(saved.before, saved.after)
+        paths = changed_paths(saved.before, current)
     if during:
         # Once, on the last changed-path reason: both firing said it twice (re-gate, n11).
         why.append(_changed("the source changed while it ran", during, remedy=not paths))
@@ -434,62 +391,24 @@ def _pass_refusals(
         why.append(
             f"the source in {report.source_root} has changed since it ran; its files were "
             "not saved, so which one cannot be said. If a check's own output is in the "
-            "checkout, delete it, gitignore it, or write it outside the checkout"
+            "checkout, gitignore it, delete it, or write it outside the checkout"
         )
     return why
 
 
 _REMEDY = (
-    "If that is a check's own output, delete it, gitignore it, or have the check write it "
+    "If that is a check's own output, gitignore it, delete it, or have the check write it "
     "outside the checkout; if it is source, record a check of the source as it is now"
 )
 
 
 def _changed(what: str, paths: Sequence[str], *, remedy: bool = True) -> str:
     """A changed-path reason that says what to do about it. Never only "run it again": a
-    file a check writes into the checkout and that already existed changes on every
-    run, and running again changes it again (the tester's finding on #12). ``remedy``
+    file a check writes into the checkout changes on every run, and running again
+    changes it again (the tester's finding on #12). ``remedy``
     is left off a reason the same refusal ends with another one that carries it."""
     said = f"{what}: {_listed(paths)}"
     return f"{said}. {_REMEDY}" if remedy else said
-
-
-def _written_in(root: str) -> tuple[dict[str, set[str]], set[str]]:
-    """What the saved ``--project`` runs in checkout ``root`` wrote: for each path a run
-    created or rewrote, the digests it left, and the paths they created (after minus
-    before). A path a run did not change is not something it wrote."""
-    written: dict[str, set[str]] = {}
-    created: set[str] = set()
-    try:
-        saved_reports = command_reports.list_reports()
-    except (OSError, ValueError):
-        return written, created
-    for report in saved_reports:
-        if not report.source_files_saved or report.source_root is None:
-            continue
-        try:
-            if str(Path(report.source_root).resolve()) != root:
-                continue
-            files = command_reports.load_source_files(report.id)
-        except (OSError, ValueError):
-            continue
-        if files is None or files.after is None:
-            continue
-        for path, digest in files.after.items():
-            # Only where this run CHANGED the path (created or rewrote it). A read-only
-            # run (`git status`, `ls`) records every untracked file as it found it, and
-            # taking those digests laundered a hand edit into "what a run wrote"
-            # (tester's H4 on #12).
-            if digest != files.before.get(path):
-                written.setdefault(path, set()).add(digest)
-        created |= _created(files)
-    return written, created
-
-
-def _created(saved: command_reports.SourceFiles) -> set[str]:
-    """The paths a run created: in its after map and not its before. Only these are its
-    output; any other path new since is a change to the checkout (M2)."""
-    return set(saved.after or {}) - set(saved.before)
 
 
 def _listed(paths: Sequence[str], limit: int = 5) -> str:

@@ -25,3 +25,16 @@ def record(app: App[Any]) -> list[str]:
 
     app.notify = recorded  # type: ignore[method-assign]
     return told
+
+
+def record_severities(app: App[Any]) -> list[tuple[str, str]]:
+    """:func:`record`, each toast with its severity: ``(message, severity)``, oldest first."""
+    told: list[tuple[str, str]] = []
+    notify = app.notify
+
+    def recorded(message: str, **kwargs: Any) -> None:
+        told.append((str(message), str(kwargs.get("severity", "information"))))
+        notify(message, **kwargs)
+
+    app.notify = recorded  # type: ignore[method-assign]
+    return told

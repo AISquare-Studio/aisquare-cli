@@ -69,7 +69,7 @@ from aisquare.cli.ui.views.agent import AgentView, info_line
 from aisquare.core.keys import Drop
 from aisquare.core.tmux import BUNDLED_CONF, PASTE_BUFFER, TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
-from tests import guard_clock
+from tests import guard_clock, toast_log
 from tests.pane_harness import (
     FakePane,
     FakeTmux,
@@ -5544,12 +5544,16 @@ def test_agent_view_stop_says_a_release_the_store_refused(
     async def drive() -> list[tuple[str, str]]:
         host = ViewHost()
         async with host.run_test(size=(80, 12)) as pilot:
+            # What the dialog said, as it said it: it notifies, then dismisses, but the toast
+            # is a message on the app's queue and the dismiss a callback the app runs before
+            # its next one, so on windows-latest the dismiss was seen with no toast yet.
+            said = toast_log.record_severities(host)
             await pilot.pause()
             host.push_screen(StopAgentScreen(project, working), callback=closed.append)
             await pilot.pause()
             await pilot.click("#stop-confirm")
             await wait_until(pilot, lambda: len(closed) == 1)
-            return [(str(toast.message), str(toast.severity)) for toast in host._notifications]
+            return said
 
     said = run(drive())
     assert closed == [working.agent]  # dismissed with the receipt's row, as a clean stop is

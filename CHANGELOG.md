@@ -333,6 +333,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   call and no store read. With no open task the table says where tasks come
   from, and `?` lists what a human does on the board.
 
+- **Edit a persona in your own editor, in the fleet UI** (#212). In the Personas tab,
+  *Edit* opens `$VISUAL`, `$EDITOR` or `vi` on the `SKILL.md`, in a pane in place,
+  as the Accounts page hosts a sign-in (the #272 `TerminalPane`). The editor runs
+  in a window on the fleet's tmux server and works on a copy. Save and quit, and
+  the copy is checked and saved through the same writer as `persona edit`, and
+  the list re-reads. A copy you didn't change writes nothing, so the provenance
+  sidecar stays as it was. Text that does not parse is not saved: the dialog says
+  why, and *Reopen editor* opens the same copy again. Without tmux, or with no
+  editor to run, the text box editor opens as before. A bundled persona still
+  opens read-only there, with *Save as…*.
+
 ### Changed
 - **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and
   the suite on one Linux leg (py3.12), the Linux package job and the other jobs

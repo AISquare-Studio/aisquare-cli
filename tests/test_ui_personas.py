@@ -115,6 +115,13 @@ def no_real_tmux(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[str, ..
     assert ran == [], f"the persona UI ran tmux: {ran[:2]}"
 
 
+@pytest.fixture(autouse=True)
+def text_box_editor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Edit opens the text box editor in this file, which runs no tmux: the ``$EDITOR``
+    pane (#212) is tests/test_ui_persona_editor_pane.py's."""
+    monkeypatch.setattr(dialogs, "editor_unavailable", lambda: "this file runs no tmux")
+
+
 @pytest.fixture
 def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A real git repository — ``git_common_root`` asks git — with the cwd elsewhere."""

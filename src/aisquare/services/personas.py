@@ -804,9 +804,19 @@ def save(name: str, text: str, *, root: Path | None, layer: Layer | None = None)
         raise PersonaError(
             f"no {layer} persona named '{name}' ({directory.parent})", code="unknown_persona"
         )
+    check(name, text, root=root, layer=layer)
+    _replace_file(directory / core.SKILL_FILE, text.encode("utf-8"))
+    return core.load(directory, layer=layer)
+
+
+def check(name: str, text: str, *, root: Path | None, layer: Layer | None = None) -> Persona:
+    """``text`` held to the recognised test and the caps as ``name``'s SKILL.md, as
+    :func:`save` holds it, with nothing written. A :class:`PersonaError` says the file is
+    unchanged."""
+    layer, directory = _target(name, root, layer)
     skill = directory / core.SKILL_FILE
     try:
-        core.parse_skill(text, name=name, path=directory, layer=layer)
+        return core.parse_skill(text, name=name, path=directory, layer=layer)
     except PersonaError as exc:
         raise PersonaError(
             f"{exc.rule} — not saved; {skill} is unchanged",
@@ -814,8 +824,20 @@ def save(name: str, text: str, *, root: Path | None, layer: Layer | None = None)
             line=exc.line,
             code=exc.code,
         ) from None
-    _replace_file(skill, text.encode("utf-8"))
-    return core.load(directory, layer=layer)
+
+
+def finish_edit(
+    name: str, before: str, after: str, *, root: Path | None, layer: Layer | None = None
+) -> Persona | None:
+    """The end of an edit made in an editor outside this process (the fleet UI's
+    ``$EDITOR`` pane, #212): ``after`` is checked (:func:`check`) and then saved through
+    :func:`save`, the one writer. Text that is still ``before`` is checked and nothing is
+    written, so neither the SKILL.md nor its provenance sidecar changes; ``None`` then.
+    """
+    if after == before:
+        check(name, after, root=root, layer=layer)
+        return None
+    return save(name, after, root=root, layer=layer)
 
 
 def edit(name: str, *, root: Path | None, layer: Layer | None = None) -> Persona | None:

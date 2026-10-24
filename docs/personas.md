@@ -186,11 +186,25 @@ For the selected persona:
 
 - **Attach to existing** (`a`) and **Attach to new** (`n`) open the target
   picker — see *Attach in two steps* below.
-- **Edit** (`e`) opens the whole `SKILL.md` in the tab. It is checked as you
-  type — the first error, or the warnings — and *Save* is enabled only while it
-  parses; it saves through the same writer as `persona edit`, so a refused edit
-  leaves the file as it was. `Enter` on any row opens it too; a bundled persona
-  opens read-only, with *Save as…* to copy it into your layer or the project's.
+- **Edit** (`e`) opens your editor on the `SKILL.md`, in a pane inside the tab,
+  the way the Accounts page hosts a sign-in. The editor is `$VISUAL`, else
+  `$EDITOR`, else `vi`. It runs in a window on the fleet's tmux server and edits
+  a copy, never the file itself.
+  - **Save and quit** the editor, and the copy is checked and saved through the
+    same writer as `persona edit`. The list then re-reads.
+  - **A copy you didn't change** writes nothing: neither the `SKILL.md` nor its
+    provenance sidecar is touched.
+  - **Text that does not parse is not saved.** The dialog shows the first error,
+    and *Reopen editor* opens the same copy again, so nothing you typed is lost.
+  - **An editor that exits non-zero** (vi's `:cq`) saves nothing.
+  - *Cancel* closes the editor's window. The escape key (`F12` unless
+    `[fleet] escape_key` says otherwise) moves focus out of the pane to *Cancel*.
+
+  Without tmux, or with no editor to run, Edit opens the whole `SKILL.md` in a
+  text box instead. That box is checked as you type (the first error, or the
+  warnings), and *Save* is enabled only while it parses. `Enter` on any row opens
+  the persona too. A bundled persona opens read-only in the text box, with
+  *Save as…* to copy it into your layer or the project's.
 - **Export…** (`x`) writes it into Claude Code's personal skills, the
   project's `.claude/skills`, or a directory — after either skills target it is
   `/<name>` in Claude Code.

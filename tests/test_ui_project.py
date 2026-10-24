@@ -89,6 +89,7 @@ from aisquare.services import explainability_ops as ops
 from aisquare.services import fleet as fleet_service
 from aisquare.services import team as team_service
 from tests.ci_support import git
+from tests.test_captain_sidebar import until
 from tests.ui_workers import settle_page
 
 T = TypeVar("T")
@@ -422,10 +423,21 @@ def test_the_personas_tab_reads_nothing_until_it_is_opened(
     async def scenario(pilot: Pilot[None], host: Host) -> list[tuple[int, int]]:
         view = host.query_one(ProjectView)
         seen = [(len(view.query(PersonasTab)), len(reads))]
-        for tab in ("tab-personas", "tab-board", "tab-personas"):
+
+        # Each opening waits for its read, the handler's last effect: on Windows CI one pause
+        # returned between the tab's mount and its read (main's run 40119046458, #113's
+        # 40134430454: (1, 0)), as ``test_captain_sidebar.until`` says of such handlers.
+        async def opened(tab: str, read: int) -> tuple[int, int]:
             view.active = tab
+            await until(pilot, lambda: len(reads) >= read, what=f"{tab}'s read")
             await pilot.pause()
-            seen.append((len(view.query(PersonasTab)), len(reads)))
+            return len(view.query(PersonasTab)), len(reads)
+
+        seen += [
+            await opened("tab-personas", 1),
+            await opened("tab-board", 1),
+            await opened("tab-personas", 2),
+        ]
         return seen
 
     seen = drive(project, scenario)

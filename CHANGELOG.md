@@ -207,8 +207,9 @@ adapter.**
     agent's first skill directory of the scope, by default the agent a launch here
     picks. Codex's are `~/.agents/skills`, which every Codex home reads, and
     `<repo>/.agents/skills`. `persona import --list` (and *Browse skills* in
-    `asq`) reads every skill directory of every agent and names the agents that
-    read each (`--json` adds `roots`). The Export dialog offers each agent's
+    `asq`) reads every skill directory of every agent, under this shell's home,
+    the plain one and each account slot's, and names the agents that read each
+    (`--json` adds `roots`). The Export dialog offers each agent's
     personal and project skills.
   - The `manager` import engine runs the manager role's own agent on the
     manager's account for that agent. With the manager bound to Codex it used to

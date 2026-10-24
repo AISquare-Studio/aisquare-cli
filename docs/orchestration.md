@@ -129,6 +129,16 @@ event. What of the board an agent reads is its board context
 (its own tasks, what is addressed to its role or label, and decisions) or `none` (the
 reviewer's default: no recent updates at start and no deltas). A manager reads `all`.
 
+A note addressed to a session does not wait for its next prompt. When the
+session's turn ends, its `Stop` hook hands it the notes addressed to its role
+or its fleet label (`aisquare note --to`, `fleet tell` to a busy agent), the
+way the manager is kept going on fresh board decisions. The same guards apply:
+never on a turn already continuing from a stop hook, and at most `[fleet]
+max_continuations_per_hour` an hour. The manager's nudge, the one line typed to
+wake a waiting manager, never goes into a draft a human has started in its
+input box. It waits until the box is clear, and the human's own submit hands
+the manager the same delta meanwhile.
+
 Orchestration is **opt-in per repo** (a role launch or `aisquare team on`)
 and fails open everywhere: the hooks are designed so orchestration can
 never break a Claude session, even when it is broken or absent. Repos
@@ -162,6 +172,24 @@ Claims are single-`UPDATE` atomic (race-tested), leased (default 120
 minutes), and renewed by the session's own lifecycle hooks — so a dead
 session's claims release themselves and the work gets picked up again.
 `task next` only hands out tasks whose dependencies are done.
+
+**Contracts and rules files.** A contract is what the claim prints to whoever
+takes the task, so it carries the whole brief: `objective:`, `acceptance:` and
+`boundaries:`, the blocks `[team] brief_blocks` lists. `task add` warns on
+stderr about a missing block and lists them under `"missing_blocks"` with
+`--json`. With `[team] brief_strict = true` it refuses the add (exit 2).
+Write a long contract to a file and pass `--detail-file brief.md`. Keep rules
+you reuse in `.aisquare/rules/<name>.md` in the project and cite them with
+`--rules testing,git`. The contract then ends with `Rules:
+.aisquare/rules/testing.md, .aisquare/rules/git.md`, and a name with no file
+refuses the add. Text cited by path is read when it is needed. Text pasted
+into `--detail` rides every later request of the manager that wrote it. A
+manager's start pack lists the rules files by path and first line
+([fleet](fleet.md#long-lived-managers-state-file-start-pack-and-quiet-compaction)).
+
+```sh
+aisquare task add "wire auth" --role coder --detail-file briefs/auth.md --rules testing,git
+```
 
 ### Self-check: receipts you can re-prove
 

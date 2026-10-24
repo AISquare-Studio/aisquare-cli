@@ -2311,7 +2311,7 @@ class SqliteStore:
         """Delete the ``team_meta`` rows keyed by the project or by its sessions.
 
         Inside the caller's transaction, in statements of at most
-        :data:`_META_BATCH` sessions each (two terms per session): one statement
+        :data:`_META_BATCH` sessions each (five terms per session): one statement
         per purge was the shape SQLite refused at 500 sessions.
         """
         removed = self._conn.execute(
@@ -2320,7 +2320,7 @@ class SqliteStore:
         ).rowcount
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
-            keys = [f"nudge:{sid}" for sid in batch]
+            keys = [f"{kind}:{sid}" for sid in batch for kind in _SESSION_META_KINDS]
             globs = [f"continuations:{_glob_escape(sid)}:*" for sid in batch]
             clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
             removed += self._conn.execute(
@@ -4727,12 +4727,20 @@ def _event_values(event: TeamEvent) -> tuple[object, ...]:
     )
 
 
+_SESSION_META_KINDS: tuple[str, ...] = ("nudge", "compact", "compact-refused", "compact-armed")
+"""The ``team_meta`` keys kept per session as ``<kind>:<session id>``: the manager's nudge
+debounce, and the quiet compaction's mark, its newest refusal and its latest arm (P1 WS-4)."""
+
+
 class Relevance(NamedTuple):
     """What a ``relevant`` board context keeps (P1 WS-2, #279): events on these tasks,
-    events addressed to these names (a role or a label, any case), and decisions."""
+    events addressed to these names (a role or a label, any case), and decisions unless
+    ``decisions`` is off: what a ``none`` agent's turn end asks for, the notes addressed to
+    it and nothing else (sync #365)."""
 
     task_ids: tuple[str, ...] = ()
     names: tuple[str, ...] = ()
+    decisions: bool = True
 
 
 def _relevant_clause(relevant: Relevance | None) -> tuple[str, list[str]]:
@@ -4741,7 +4749,7 @@ def _relevant_clause(relevant: Relevance | None) -> tuple[str, list[str]]:
     the relevant one is behind (review of #240, finding 11's rule)."""
     if relevant is None:
         return "", []
-    terms = ["kind = 'decision'"]
+    terms = ["kind = 'decision'"] if relevant.decisions else []
     params: list[str] = []
     if relevant.task_ids:
         terms.append(f"task_id IN ({', '.join('?' * len(relevant.task_ids))})")
@@ -4749,6 +4757,8 @@ def _relevant_clause(relevant: Relevance | None) -> tuple[str, list[str]]:
     if relevant.names:
         terms.append(f"lower(to_role) IN ({', '.join('?' * len(relevant.names))})")
         params += [name.strip().lower() for name in relevant.names]
+    if not terms:
+        return "AND 0 ", []  # keeps nothing: no task, no name, no decisions
     return f"AND ({' OR '.join(terms)}) ", params
 
 

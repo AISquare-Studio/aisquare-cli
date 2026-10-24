@@ -269,9 +269,17 @@ class TeamSettings(BaseModel):
 
     Resolution order is flag > env > profile > default; see
     ``aisquare.core.harness.resolve_binary`` and ``resolve_profile``.
+
+    ``brief_blocks`` are the labels a task contract must carry (``objective:`` …), checked
+    by ``task add`` (P1 WS-4, #281): a missing one warns, and with ``brief_strict`` it
+    refuses the add.
     """
 
     profiles: dict[str, RoleLaunchProfile] = Field(default_factory=dict)
+    brief_blocks: list[str] = Field(
+        default_factory=lambda: ["objective", "acceptance", "boundaries"]
+    )
+    brief_strict: bool = False
 
 
 CLAUDE_PERMISSION_MODES: tuple[str, ...] = (
@@ -730,6 +738,20 @@ class FleetSettings(BaseModel):
     says ``working`` before its screen is asked whether Claude Code sits idle at its
     prompt (#123): a turn redraws its spinner every second, so a quiet pane with an
     idle input box is an agent waiting, whatever the row says.
+
+    ``draft_quiet_seconds`` is how long a key typed into an agent's pane in ``asq`` keeps
+    every fleet write out of that pane (P0-W2, #276): a nudge, a tell, a typed first
+    message, the Remote's paste — beside the input box itself, which none of them types
+    into while it holds a draft. ``deliver_notes_at_turn_end`` lets a non-manager agent's
+    ``Stop`` hook hand it the notes addressed to it, so a note sent while it worked reaches
+    it at the end of that turn instead of waiting for a prompt that may never come.
+
+    ``quiet_compact_*`` is the manager's quiet-point compaction (P1 WS-4, #281): a manager
+    idle at its prompt, with no decision pending and a fresh state file, whose context is
+    at least ``quiet_compact_at`` tokens is sent ``/compact`` ``quiet_compact_delay``
+    seconds after its turn ended, at most once per ``quiet_compact_cooldown`` minutes, and
+    only while its state file is under ``quiet_compact_state_max_age`` minutes old.
+    ``quiet_compact_at = 0`` is off (``services.quiet_compact``).
     """
 
     tmux_socket: str = "asq"
@@ -742,6 +764,13 @@ class FleetSettings(BaseModel):
     first_prompt: Literal["argv", "type"] = "argv"
     prompt_ack_seconds: float = Field(default=45.0, ge=0)
     busy_quiet_seconds: int = Field(default=30, ge=1)
+    draft_quiet_seconds: float = Field(default=10.0, ge=0)
+    deliver_notes_at_turn_end: bool = True
+    quiet_compact_at: int = Field(default=0, ge=0)
+    quiet_compact_delay: float = Field(default=45.0, ge=0)
+    quiet_compact_cooldown: float = Field(default=30.0, ge=0)
+    quiet_compact_state_max_age: float = Field(default=20.0, ge=0)
+    quiet_compact_resume: bool = False
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
     max_agents_total: int = 0
     min_free_mb: int = 2048

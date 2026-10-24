@@ -1074,12 +1074,14 @@ def role_cycle(
     fleet: FleetCommand,
     paused: str = PAUSE_SIGNAL,
     task: str | None = None,
+    state_file: str | None = None,
 ) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
 
     ``task`` is the task the agent was spawned for (``12`` or its id, never ``#12``, which a
     shell reads as a comment), when it was: a
     tester or ui-tester then verifies that one task and stops after its verdict (#129 a).
+    ``state_file`` is where a manager keeps its state (P1 WS-4, #281).
 
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
     the role it is a seat of — the number is an identity, not a new role. Every
@@ -1089,7 +1091,9 @@ def role_cycle(
     (:func:`pause_signal`), which a manager obeys.
     """
     role = base_role(role)
-    core = _role_cycle_core(role, session_short_id, fleet=fleet, paused=paused, task=task)
+    core = _role_cycle_core(
+        role, session_short_id, fleet=fleet, paused=paused, task=task, state_file=state_file
+    )
     if not core:
         return []
     if role in ("runner", "tester", "validator") and _test_gate_on():
@@ -1142,6 +1146,23 @@ def _test_gate_on() -> bool:
         return False
 
 
+STATE_FILE_MAX = 4_000
+"""How long a manager's state file may be (P1 WS-4, #281): its start pack quotes it."""
+
+
+def _state_rule(state_file: str | None) -> list[str]:
+    """The manager's two sentences on keeping its state outside its context (P1 WS-4, #281):
+    a compaction or a restart starts from the file, and text pasted inline rides every later
+    request."""
+    where = state_file or "your state file"
+    return [
+        f"Keep your state in {where}; rewrite it (≤ {STATE_FILE_MAX:,} chars: goal ·",
+        "decisions · open items · next step) when a plan step completes and before you stop.",
+        "Reusable scripts and rule text live in files; run and cite them by path, never",
+        "paste them inline.",
+    ]
+
+
 def _verify_start(role: str, sid: str, task: str | None) -> list[str]:
     """A tester's first step: the review pool, or the one task it was spawned for (#129 a)."""
     if task is None:
@@ -1188,6 +1209,7 @@ def _role_cycle_core(
     fleet: FleetCommand,
     paused: str = PAUSE_SIGNAL,
     task: str | None = None,
+    state_file: str | None = None,
 ) -> list[str]:
     """The role-specific half of the cycle for an already-normalised ``role``;
     see :func:`role_cycle`."""
@@ -1297,6 +1319,7 @@ def _role_cycle_core(
             f"gate is PASS: `{fleet('reap')}` again, then",
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
             *_auto_stop_line(),
+            *_state_rule(state_file),
             "Never write code. Never merge. Blocked twice on one task? Ask the human:",
             f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',
             "(coder-auth, not coder-2).",

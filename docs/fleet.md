@@ -414,6 +414,34 @@ Under `--json`, `typed` is `yes`, `no`, `unsent` or `maybe` beside `delivered`:
 its pane to send it), `maybe` when tmux did not answer in time with the text or its
 Enter, which may still arrive. Neither is to be told again: read the agent's pane.
 
+**Never over a draft.** Nothing the fleet types goes into a pane while its input
+box holds something a human typed and has not sent, or while someone has typed
+into the pane in `asq` within `[fleet] draft_quiet_seconds` (10). That covers a
+tell, the manager's nudge, a typed first message and the Remote's paste.
+Claude Code's own dim words in an empty box (its placeholder, its suggestion
+after a turn) are not a draft. A tell held back this way is filed as a note and
+says why ("a draft is in its input box, which nothing types over"). A draft
+that appears in the instant the tell is pasted, a human typing between the check
+and the paste, stops it before its Enter: the text stays in the box with the
+draft, unsent, and the tell says so ("a draft appeared in its input box while
+the text was being typed; ours is in the box with it, unsent, and nothing was
+sent") and is filed as a note. A manager's
+nudge waits, and goes out once the box is clear: `asq` retries it as it
+refreshes, and the next board write does too. If the human sends the draft
+first, that prompt hands the manager the same board update, and the nudge is
+dropped.
+
+**A note reaches a busy agent at the end of its turn.** A note addressed to an
+agent's label or role (`fleet tell` to a busy agent, `aisquare note --to
+<label|role>`) is handed to it by its `Stop` hook when the turn it was working
+on ends, the way the manager is woken: the board update as the reason it keeps
+going. It used to wait for the agent's next prompt, which an agent that had
+finished might never get. It is guarded like the manager's wake-up: not on a
+turn that is already continuing from a stop hook, and at most `[fleet]
+max_continuations_per_hour` times an hour. Only an addressed note does this;
+the rest of the board rides along with one, and waits for the next prompt
+otherwise. `[fleet] deliver_notes_at_turn_end = false` turns it off.
+
 `aisquare persona attach <name> --to <label>` types a persona's briefing into a
 waiting agent the same way, and keeps the persona on the agent's row so a `/clear`
 or a restart briefs it again ([docs/personas.md](personas.md)). A busy agent gets
@@ -1722,6 +1750,16 @@ reports straight to the pane and is unaffected), the clipboard off unless
 project; one session per project; one window per agent. A changed setting
 applies to the next server started.
 
+**The typing lease.** When you type into an agent's pane in `asq`, it touches
+`~/.aisquare/run/typing/<socket>-<server>-<pane>`, at most once a second.
+`<server>` is a digest of the socket's real path, so another `asq` server at
+another path, whose pane ids repeat this one's, is never held by it. For `[fleet]
+draft_quiet_seconds` (10) after your last key, no fleet write types into that
+pane: not a nudge, a tell, a typed first message or the Remote's paste. The
+input box is read too, so a draft you leave there holds them off for as long as
+it stays (see [`fleet tell`](#fleet-tell)). Typing through `tmux attach` leaves
+no lease, and the input box covers it.
+
 **Each agent is asked of its own server.** A spawn records the socket its
 server says it listens on, and every fleet command — `fleet ls` and the UI,
 `tell`, `stop`, `restart`, `switch`, `reap`, `shutdown`, and the doctor — asks
@@ -2091,7 +2129,152 @@ from: a letter arriving within ~100 ms of a lone Escape is read as that chord,
 so pressing Esc and immediately typing `p` switches the model instead of
 typing the letter.
 
+### Long-lived managers: state file, start pack and quiet compaction
+
+A manager is the longest-lived session in a fleet, and every request it makes
+re-sends its whole context. Three things keep that context small.
+
+**The state file.** The manager's cycle asks it to keep its state in
+`~/.aisquare/projects/<project id>/manager/state.md`, at most 4,000 characters:
+goal, decisions, open items, next step. It rewrites the file when a plan step
+completes and before it stops. Scripts and rule text it reuses live in files,
+and it cites them by path rather than pasting them into a prompt.
+
+**The start pack.** At every `SessionStart` (startup, resume, `/clear`, a
+compaction) a manager gets its start pack instead of the plain board. The pack
+holds its state file (up to its 4,000 characters, with its age), every open
+task on one line each (the board shows eight), the unanswered questions, the
+live agents with their task and account, how many wake events wait past its
+cursor, the project's `.aisquare/rules/*.md` by path and first line, and then
+the protocol and its cycle. It is never more than 20,000 characters: the task
+list takes what the rest leaves, and a last line says how many tasks did not
+fit.
+
+**Quiet-point compaction** is off by default (`fleet.quiet_compact_at = 0`).
+Set it to a token count (400,000 is a sensible first value) and a manager is
+compacted only at a quiet point. That is when its turn ends with no decision
+pending, it is not asking a question, it is not in plan mode, and it does not
+need the human. Its Stop hook then starts `aisquare hook compact-check` in the
+background. After `quiet_compact_delay` seconds the check asks everything again,
+and it types `/compact` only if all of these hold:
+
+- the row still reads `waiting` and its cursor has not moved;
+- no wake-class event is pending;
+- the context (the transcript's last request) is at least `quiet_compact_at`;
+- no quiet compaction ran within `quiet_compact_cooldown` minutes;
+- the state file is under `quiet_compact_state_max_age` minutes old and newer
+  than the last decision the manager was woken for;
+- the pane shows the manager idle at its prompt with an empty input box.
+
+A half-typed draft of yours is never sent. The line goes through the same
+verified delivery as a first message. The compaction's own `SessionStart`
+confirms it, and the row reads `waiting` afterwards, so a coder's
+`task review` still nudges it. If no compaction starts within 120 seconds, the
+board gets one human-only line and nothing is retried before the cooldown.
+Each refusal is kept, the newest, under `team_meta` key
+`compact-refused:<session>`. With `quiet_compact_resume = true` the manager
+is also given a one-line resume prompt after the compaction.
+
+Claude Code's own auto-compaction (about 967K tokens on 1M-context models)
+and idle compaction (after about 54 idle minutes at 200K tokens or more) are
+left as they are; aisquare never lowers them. Quiet compaction runs well
+before both, at a moment chosen by what the manager is doing, not by a
+threshold or a timer.
+
 ---
+
+## Upgrading
+
+### To the release with verified first messages (store schema 34)
+
+**The store migrates itself on first open, from v33 to v34, in one step.** v34 adds
+three nullable columns: `team_session.prompted_at` (the session's last
+`UserPromptSubmit`), `fleet_agent.first_prompt` (`pending`, `acked` or `unsent`) and
+`fleet_agent.first_prompt_at` (when that last changed). The step has no script of its
+own: the columns are checked for by presence and added only where absent, as every
+step from v15 on is, so a store that another build already carried past v33 converges
+too. Nothing is rewritten. An agent spawned before the upgrade has no first-message
+state, reads as "not tracked", and is never reported as a message not taken.
+
+**No config migration.** Every new key has a default, and a key you never set
+follows it:
+
+| Key | Default | What it changes |
+| --- | --- | --- |
+| `[fleet] first_prompt` | `argv` | A Claude Code agent's first message rides its command line. `type` types it instead, once the input box is drawn, and never puts it on a command line. |
+| `[fleet] prompt_ack_seconds` | `45` | How long `fleet spawn`, `restart` and `switch` wait for the agent to take its first message. |
+| `[fleet] busy_quiet_seconds` | `30` | How long a `working` agent's pane may stay quiet before one capture checks whether it is idle. |
+| `[fleet] draft_quiet_seconds` | `10` | How long after your last keystroke in a pane the fleet waits before typing into it. |
+| `[fleet] deliver_notes_at_turn_end` | `true` | A note addressed to a busy agent is handed over when its turn ends. |
+| `[accounts] prefer` | `priority` | Of the accounts under the switch threshold, which one a spawn's pick and a hand-over take: the first by priority, or with `reset-soonest` the one whose week resets first. |
+
+**What you will notice.**
+
+- `fleet spawn`, `restart` and `switch` take up to `prompt_ack_seconds` longer and end
+  with `✓ first message taken`, or say it was not.
+- A just-spawned agent reads `waiting` until its first prompt, not `working`.
+- `fleet switch` refuses to move an agent that was just moved, unless you add `--force`.
+  One usage limit now moves an agent once.
+- `capture.enabled = false` now stops prompt capture: `aisquare log` stays empty and
+  nothing is spooled ([reference](reference.md#configuration-keys)).
+- `aisquare doctor` gains a `fleet-delivery` row.
+- **On a shared machine**, a first message on the command line can be read by other
+  local users in `ps` while the agent runs. `aisquare config set fleet.first_prompt
+  type` keeps it off the command line.
+
+**Moving back** to 0.8.2 or earlier with `aisquare upgrade --version <v>` is safe. An
+older build opens a v34 store as it is, without migrating it down, and never reads the
+three columns. It ignores the new config keys and types first messages as it always
+did.
+
+### To the release with the token diet (store schema 35, config version 3)
+
+**The store migrates itself on first open, from v34 to v35, in one step.** v35 adds two
+nullable columns, `team_event.actor` (who caused an event: a session, `user`,
+`usage-limit`, `auto-stop`) and `team_event.meta` (its details as JSON; an `agent_exited`
+carries its status, `--force`, the claims it released and why). They are checked for by
+presence and added only where absent. An event written before the step reads as no actor
+and no details; an old `agent_exited` is read from its text, so an upgrade wakes no
+manager for exits it had already seen.
+
+**The config file moves to version 3, once.** A reviewer whose `extra_args` are exactly
+0.8.2's default (`--disallowedTools=Edit Write NotebookEdit`) loses them, because that
+deny is the role's own now and every launch of a reviewer has it. Every other value you
+set stays as it was. New keys follow their defaults until you set them:
+
+| Key | Default | What it changes |
+| --- | --- | --- |
+| `[fleet] deny_tools` | the eight tools in [Tools and skills per role](#tools-and-skills-per-role) | Every role launches without them. `[]` gives them back. |
+| `[fleet.roles.<role>] skill_listing` | `full` for the manager, `names` for the others | How much of Claude Code's skill listing a role carries. |
+| `[fleet.roles.<role>] deny_tools` / `allow_tools` | `[]` | Tools one role also denies, or gets back. |
+| `[fleet.roles.<role>] board_context` | `none` for the reviewer, `all` for the others | What of the board an agent reads. |
+| `[fleet] quiet_compact_at` | `0` (off) | A manager's context size at which it is compacted at a quiet point. |
+| `[fleet] quiet_compact_delay` / `_cooldown` / `_state_max_age` / `_resume` | `45` s / `30` min / `20` min / `false` | The quiet compaction's timing. |
+| `[team] brief_blocks` / `brief_strict` | `["objective", "acceptance", "boundaries"]` / `false` | The blocks `task add` checks a contract for, and whether a missing one refuses the add. |
+
+**What you will notice.**
+
+- An agent restarted after the upgrade launches with the merged deny token, and its first
+  request is uncached once: the tool list is part of the cached prefix.
+- A manager wakes for decisions, not news: a clean exit, a switch or its own `fleet stop`
+  waits for its next wake. Updates arrive one line each; `aisquare team show <seq>` prints
+  one in full.
+- A reviewer reads no board by default. Set `fleet.roles.reviewer.board_context` to `all`
+  to give it the board back.
+- A manager starts from its start pack, not the board. Its cycle asks it to keep
+  `~/.aisquare/projects/<id>/manager/state.md`.
+- `task add` warns on stderr when a contract lacks `objective:`, `acceptance:` or
+  `boundaries:`.
+- `fleet spawn` passes the role's model ladder (`--model`, `--effort`), and a tester
+  spawned for a task verifies that one task and stops.
+
+**Moving back** with `aisquare upgrade --version <v>` is safe for the store: an older build
+opens a v35 store as it is, without migrating it down, and never reads the two columns.
+For the config, `upgrade --version` to 0.8.2 or earlier names each role that release would
+launch with tools this one denies, with the `config set` that keeps them denied there.
+0.8.1 and 0.8.2 read a version-3 file over their own defaults. An install that shares
+`~/.aisquare` without going through `aisquare upgrade` (a second tool install, a synced
+home) is not warned.
 
 ## Troubleshooting
 

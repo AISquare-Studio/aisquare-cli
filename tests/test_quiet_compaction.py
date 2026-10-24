@@ -30,9 +30,9 @@ from aisquare.core.config import load_config, save_config
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgent, ProjectInfo, TeamSession
+from aisquare.services import delivery, quiet_compact
 from aisquare.services import fleet as fleet_service
 from aisquare.services import hooks as hooks_service
-from aisquare.services import quiet_compact
 from aisquare.services import team as team_service
 from tests import test_fleet_service as fleet_suite
 from tests.test_first_prompt_delivery import ClaudeCode, _box
@@ -392,6 +392,40 @@ def test_each_condition_refuses_and_says_why(
     assert manager.tmux.submitted == [] and manager.tmux.typed == []
     assert outcome.startswith(reason), outcome
     assert manager.refusal() == outcome
+
+
+def test_someone_typing_in_asq_refuses_it(
+    manager: Manager, armed: list[list[str]], slept: list[float], clock: FakeClock
+) -> None:
+    """P0-W2's typing lease: a key typed into the manager's pane in ``asq`` within
+    ``[fleet] draft_quiet_seconds`` holds every fleet write, ``/compact`` included, even
+    with the input box still reading empty (a draft wrapped past the box, a key between
+    reads)."""
+    cursor = manager.stop(armed)
+    delivery.touch_typing_lease(manager.tmux, manager.agent.pane_id)
+
+    assert _check(manager, cursor) == "someone is typing in its pane"
+    assert manager.tmux.submitted == [] and manager.tmux.typed == []
+
+
+def test_a_draft_typed_after_the_check_is_not_sent(
+    manager: Manager, armed: list[list[str]], slept: list[float], clock: FakeClock
+) -> None:
+    """The human types between the pane check and the paste: the paste lands beside the
+    draft, the box holds more than ``/compact``, and P0-W2's delivery presses no Enter into
+    it (#337's race fix). Nothing is sent, the draft stays, and the refusal is kept."""
+    cursor = manager.stop(armed)
+    original = manager.tmux.paste
+
+    def a_human_first(pane_id: str, text: str) -> None:
+        original(pane_id, text)
+        manager.tmux.screens[pane_id] = _box(f"half a thought {text}")
+
+    manager.tmux.paste = a_human_first  # type: ignore[method-assign]
+    outcome = _check(manager, cursor)
+    assert manager.tmux.submitted == []
+    assert outcome.startswith("/compact not typed"), outcome
+    assert manager.tmux.enters(manager.agent.pane_id) == 0
 
 
 def test_a_cursor_that_moved_since_the_stop_refuses(

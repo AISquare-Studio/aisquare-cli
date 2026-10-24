@@ -9529,7 +9529,9 @@ def quiet_prompt_refusal(agent: FleetAgent) -> str | None:
     Its own agent in the foreground (:func:`_its_agent`, what every write into a row's
     pane asks), no dialog, Claude Code's input box drawn and idle (no spinner), and nothing
     in it: a human's half-typed draft is the one thing a ``/compact`` must never be typed
-    into. Never raises: tmux that cannot answer is a refusal too.
+    into. Then P0-W2's own guard (:func:`delivery.draft_guard`), which adds someone typing
+    into the pane in ``asq`` within ``[fleet] draft_quiet_seconds``. Never raises: tmux that
+    cannot answer is a refusal too.
     """
     try:
         srv = server_of(agent)
@@ -9546,14 +9548,18 @@ def quiet_prompt_refusal(agent: FleetAgent) -> str | None:
         return "it is not idle at its prompt"
     if screen_reader.composer_text(lines):
         return "a draft is in its input box"
-    return None
+    try:
+        return delivery.draft_guard(srv, agent.pane_id, quiet=settings().draft_quiet_seconds)
+    except (TmuxError, OSError) as exc:
+        return f"tmux would not show its pane ({exc})"
 
 
 def type_line(agent: FleetAgent, text: str, *, acked: Callable[[], bool]) -> delivery.Delivered:
     """Type one line into ``agent``'s pane and press Enter, through the first message's own
     verified delivery (:func:`delivery.deliver_typed`): pasted, seen in the box, Enter pressed
     again only while the box provably still holds it. The caller asked
-    :func:`quiet_prompt_refusal` first."""
+    :func:`quiet_prompt_refusal` first, and P0-W2's guard (``guard=``) asks again right before
+    the paste, and refuses the Enter when a human's text appeared beside it."""
     return delivery.deliver_typed(
         server_of(agent),
         agent.pane_id,
@@ -9565,6 +9571,7 @@ def type_line(agent: FleetAgent, text: str, *, acked: Callable[[], bool]) -> del
         sleep=_sleep,
         monotonic=_monotonic,
         what="the line",
+        guard=settings().draft_quiet_seconds,
     )
 
 

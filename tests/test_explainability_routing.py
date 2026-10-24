@@ -358,6 +358,25 @@ def test_a_url_is_shown_without_userinfo_or_query(fake_home: Path) -> None:
     assert source.as_json()["base_url"] == "https://corp.example/v1"
 
 
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        # A password holding '@': the userinfo runs to the LAST '@' of the authority.
+        ("https://bob:p@ss-SECRET@corp.example/v1", "https://corp.example/v1"),
+        # No scheme: the authority starts the text.
+        ("bob:tok-SECRET@corp.example:8443/v1", "corp.example:8443/v1"),
+        ("//bob:tok-SECRET@corp.example/v1", "//corp.example/v1"),
+        # Nothing to cut: an '@' past the authority is the path's, and stays.
+        ("http://localhost:8080/v1/@team", "http://localhost:8080/v1/@team"),
+        ("localhost:8080", "localhost:8080"),
+    ],
+)
+def test_a_shown_url_loses_all_its_userinfo_whatever_its_shape(url: str, shown: str) -> None:
+    """Review of #356: '[^/?#@]*@' stopped at a password's own '@' and left the rest of it,
+    and a URL with no scheme kept its 'user:token@' whole."""
+    assert ops._shown_url(url) == shown
+
+
 def test_disable_names_the_leftovers_and_the_reset(
     fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

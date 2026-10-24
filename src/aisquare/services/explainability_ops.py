@@ -2659,10 +2659,19 @@ def _shown_url(url: str) -> str:
 
     A gateway URL can hold ``user:token@`` or a ``?key=`` (the operator's, never
     ours), and the doctor's line is what lands in a pasted bug report. Done on the
-    text rather than through a parser so an unparsable URL is cut as well.
+    text rather than through a parser so an unparsable URL is cut as well. The authority
+    is what follows ``scheme://`` (or ``//``, or nothing: ``user:token@host`` is cut too)
+    up to the first ``/``, ``?`` or ``#``, and its userinfo runs to its LAST ``@``, so a
+    password holding one goes whole (review of #356).
     """
-    shown = re.sub(r"(?<=//)[^/?#@]*@", "", url.strip())
+    lead, authority, rest = _URL_AUTHORITY.match(url.strip()).groups()  # type: ignore[union-attr]
+    shown = (lead or "") + authority.rpartition("@")[2] + rest
     return re.split(r"[?#]", shown, maxsplit=1)[0]
+
+
+_URL_AUTHORITY = re.compile(r"((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)?([^/?#]*)(.*)", re.DOTALL)
+"""A URL's lead (``scheme://`` or ``//``, if any), its authority, and the rest; it matches
+any text."""
 
 
 def _cleaned(values: Mapping[str, str], ours: set[str]) -> dict[str, str | None]:

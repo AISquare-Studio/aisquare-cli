@@ -350,12 +350,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   default, or one carrying our identity headers) with tracing off or on another
   target warns, naming each place and its fix; a URL the agent cannot parse warns;
   your own gateway is information and is never changed. No header value is printed,
-  JSON included, and a URL is shown without its userinfo or query.
-  `aisquare explainability reset [--dry-run] [--yes] [--json]` turns tracing off
-  (targets kept) and removes only what is ours (a proxy URL of ours, and our header
-  lines; your gateway URL and your own headers beside them stay) from settings files
-  (a `settings.json.bak-<stamp>` copy kept, written under Claude Code's own lock),
-  from bindings and from the tmux server, prints the shell's `unset` line and the rc files
+  JSON included. `aisquare explainability reset [--dry-run] [--yes] [--json]` turns
+  tracing off (targets kept), removes the two keys from settings files (a
+  `settings.json.bak-<stamp>` copy kept, written under Claude Code's own lock), from
+  bindings and from the tmux server, prints the shell's `unset` line and the rc files
   that mention them (never edited), and a second run says "nothing to reset".
   `explainability disable` and the Explainability tab's Disable name the leftovers;
   the tab then offers **Reset routing**.

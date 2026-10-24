@@ -307,7 +307,15 @@ class FleetRoleSettings(BaseModel):
 
 
 def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
-    """The six fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6).
+    """The six fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6),
+    and the role-less agent's (``harness.PLAIN_ROLE``, the Spawn dialog's *(none)*).
+
+    ``agent`` is here so ``config get/set/list fleet.roles.agent.*`` know it as they know
+    any role, at the shape spawn gave it when no table named it (``FleetRoleSettings()``).
+    A default, not a table ``set`` seeds: seeded, every unrelated ``config set`` wrote it,
+    and ``holds_a_setting`` then read the file as holding a setting, which undid #261's
+    reset/backup rule (review of #405, M1). At its default it is left out of the file
+    (``_with_whole_role_tables``).
 
     ``ui-tester`` carries no ``extra_args`` here: its ``--chrome`` is the role's own
     default (``harness.ROLE_PROFILES[...].default_args``) and is added by ``launch``
@@ -335,7 +343,15 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
         "reviewer": FleetRoleSettings(worktree=True, extra_args=list(REVIEWER_ARGS)),
         "validator": FleetRoleSettings(),
         "ui-tester": FleetRoleSettings(),
+        _plain_role(): FleetRoleSettings(),
     }
+
+
+def _plain_role() -> str:
+    """``harness.PLAIN_ROLE``, imported here: harness imports this module back."""
+    from aisquare.core.harness import PLAIN_ROLE
+
+    return PLAIN_ROLE
 
 
 #: The reviewer's built-in ``extra_args``: Claude Code without the tools that edit files.
@@ -852,6 +868,12 @@ def _with_whole_role_tables(sparse: dict[str, Any], full: dict[str, Any]) -> dic
     roles = fleet.get("roles") if isinstance(fleet, dict) else None
     if not isinstance(roles, dict) or not roles:
         return sparse
+    # The role-less agent's table, at its default, is not written: no build before it
+    # was a default reads one (each falls back to ``FleetRoleSettings()``, the same
+    # shape), and written, every file a ``config set`` saved carried a role nobody set.
+    plain = _plain_role()
+    if roles.get(plain) == _dumped(FleetRoleSettings()):
+        roles = {role: table for role, table in roles.items() if role != plain}
     whole = dict(sparse)
     whole["fleet"] = {**sparse.get("fleet", {}), "roles": roles}
     return whole

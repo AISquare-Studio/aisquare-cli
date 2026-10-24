@@ -98,7 +98,8 @@ the check itself, another `asq exec` run, or you while the check ran.
   is not seen, since only files there before the run have a change time to compare.
   A rename that changes only letter case (`calc.py` to `Calc.py`) on a
   case-insensitive file system, as macOS and Windows have by default, is not seen
-  either; git does not see it.
+  either; git does not see it. And on Windows a change put back with its old
+  modification time, e.g. via utime or by renaming the original back, is not seen.
 
 **So check output goes in a gitignored directory, or outside the checkout.** The
 directory must not be reachable through a symlinked directory (see below). Commit a

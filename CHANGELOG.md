@@ -79,7 +79,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   own output, and says when a changed path is a linked directory. `brief show` and
   `brief check` print the command that backed each report pass. Known limits: a file
   created and deleted within one run is not seen, nor is a case-only rename on a
-  case-insensitive file system (by git either). `asq exec
+  case-insensitive file system (by git either), and on Windows a change put back with
+  its old modification time, e.g. via utime or by renaming the original back, is not
+  seen. `asq exec
   --task` takes the task's number or id, like every other
   `--task`, and a report taken with it backs only that task. Manual `--artifact`
   passes keep their checkout's whole-tree fingerprint.

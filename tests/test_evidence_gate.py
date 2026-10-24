@@ -301,17 +301,23 @@ def test_a_conftest_written_during_an_unrelated_run_stales_a_pass(repo: Path) ->
         team.finish_task(task.id)
 
 
+# Windows has no ctime and its mtime stands in, so a change put back with its mtime set
+# back too is a documented limit there: the swap puts back only the bytes.
+_PUT_BACK_TIMES = (
+    "" if sys.platform == "win32" else "os.utime({p}, ns=(st.st_atime_ns, st.st_mtime_ns))\n"
+)
+
+
 def test_a_change_put_back_before_the_run_ends_refuses_it(repo: Path) -> None:
     """Tester's X5 on #14: app.py swapped to other bytes mid-run and back before the run
     ended has the same content before and after, and was accepted at d8329003. Its
-    stamp moved, even with its mtime put back too."""
+    stamp moved, even with its mtime put back too (bar Windows)."""
     brief, task = _linked()
     swap = (
         "import os\n"
         "st = os.stat('app.py'); good = open('app.py').read()\n"
         "open('app.py', 'w').write('def answer():\\n    return 41\\n')\n"
-        "open('app.py', 'w').write(good)\n"
-        "os.utime('app.py', ns=(st.st_atime_ns, st.st_mtime_ns))\n"
+        "open('app.py', 'w').write(good)\n" + _PUT_BACK_TIMES.format(p="'app.py'")
     )
     report = _run(_py(swap), task=task)
     saved = reports.load_source_files(report.id)
@@ -476,8 +482,7 @@ def test_a_change_put_back_inside_a_nested_repository_refuses_the_run(repo: Path
         "import os\np = 'vendor/lib/lib.py'\n"
         "st = os.stat(p); good = open(p).read()\n"
         "open(p, 'w').write('VALUE = 2\\n'); open(p, 'w').write(good)\n"
-        "os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))\n"
-    )
+    ) + _PUT_BACK_TIMES.format(p="p")
     report = _run(_py(swap), task=task)
     with pytest.raises(ValueError, match=r"changed while it ran: vendor/lib/lib\.py"):
         _record(brief, task, report)

@@ -141,8 +141,10 @@ untracked nonignored file, kept file by file.
 - **Change times are kept too.** Each file's change time (modification time on
   Windows) is saved before and after, nested repositories included, so a file
   changed and put back while the command ran still shows. A file created and deleted
-  while it ran does not. They are not part of the identity: a branch switch that
-  rewrites a file with the same bytes keeps it.
+  while it ran does not, and on Windows a change put back with its old modification
+  time, e.g. via utime or by renaming the original back, is not seen. They are not
+  part of the identity: a branch switch that rewrites a file with the same bytes
+  keeps it.
 - **Nested repositories count.** A submodule or nested repository adds its own
   files, not only the commit it records.
 - **Ignored files are left out, the rules that ignore them are not.** Files git

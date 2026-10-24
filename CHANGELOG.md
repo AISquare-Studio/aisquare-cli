@@ -384,14 +384,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and suggestion are not a draft. A nudge held back goes out once the box is clear
   (`asq` retries it as it refreshes); if you send the draft first, your prompt
   carries the same board update and the nudge is dropped. A tell held back is filed
-  as a note and says why. (#276)
-- **A note reaches a busy agent at the end of its turn.** A note to an agent's label
-  or role, including a `fleet tell` to an agent that was working, waited for the
-  agent's next prompt, which one that had finished might never get. Its `Stop` hook
-  now hands it the notes addressed to it when the turn ends, as the manager is kept
-  going on fresh board decisions, with the same guards: not on a turn already
-  continuing from a stop hook, and at most `[fleet] max_continuations_per_hour` an
-  hour. `[fleet] deliver_notes_at_turn_end = false` turns it off. (#276)
+  as a note and says why. And a note reaches a busy agent at the end of its turn: a
+  note to an agent's label or role, including a `fleet tell` to an agent that was
+  working, waited for the agent's next prompt, which one that had finished might
+  never get. Its `Stop` hook now hands it the notes addressed to it when the turn
+  ends, as the manager is kept going on fresh board decisions, with the same
+  guards: not on a turn already continuing from a stop hook, and at most `[fleet]
+  max_continuations_per_hour` an hour. `[fleet] deliver_notes_at_turn_end = false`
+  turns it off. (#276)
 - **A coder that claims a task sees its contract.** `task claim` and `task next
   --claim` printed the title line alone, and the contract (`--detail`) was a
   separate `task show` that nothing named, so people pasted contracts into coders'

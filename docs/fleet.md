@@ -872,7 +872,9 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   and Sonnet limits apply only to requests to that model family, so an account
   whose Opus week is spent is no room for an Opus agent and still is for a
   Sonnet one (the family is the session's model, or for a spawn its `--model`
-  or the role's ladder). A window the endpoint marks locked reads 100 % used.
+  or the role's ladder). A spent family week is no answer at all for that
+  family, not even the least bad one a switch by hand would take. A window the
+  endpoint marks locked reads 100 % used.
   `[accounts] prefer = "reset-soonest"` (*under the line, prefer* in App
   settings) takes, of the accounts under `switch_at`, the one whose week resets
   first, so an allowance is spent before it lapses; `priority`, the default,

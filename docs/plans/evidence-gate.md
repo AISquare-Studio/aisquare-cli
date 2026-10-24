@@ -137,6 +137,13 @@ nonignored files, file by file.
   pass, whoever wrote it. Check output goes in a gitignored directory
   (`--junitxml=reports/a.xml`) or outside the checkout. Identity is kept per
   file so the refusal can name the paths and the remedy.
+- The ignore rules are in the identity: every `.gitignore` git reads (a
+  self-ignored one too), `.git/info/exclude` and `core.excludesFile`. A symlink
+  is hashed as its in-checkout target, file or directory.
+- Each file's change time (mtime on Windows) is kept before and after a run, so
+  a change put back before the run ended still refuses it.
+- Known limit: a case-only rename on a case-insensitive file system is not seen,
+  by git either.
 - A worktree is fingerprinted as its own files, under the board's one project.
 
 **The store.** Main is at schema v33. The brief table takes the next free

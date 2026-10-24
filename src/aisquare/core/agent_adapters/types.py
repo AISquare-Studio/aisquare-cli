@@ -1308,7 +1308,14 @@ class AgentAccounts(Protocol):
     """Whether :meth:`usage` leaves the machine (Claude's endpoint) or reads local files."""
 
     def sign_in_args(self) -> tuple[str, ...]:
-        """Arguments to the agent's binary that start its own sign-in in a slot's env."""
+        """Arguments to the agent's binary that start its own sign-in in a slot's env.
+
+        ``()`` means the agent has no sign-in command: it signs in from its own TUI, which
+        starts its first-run sign-in in a slot that has none (Claude Code's, whose ``/login``
+        does it again; Gemini CLI's). A sign-in window then starts the binary in the slot
+        with nothing after it, and waits until :meth:`login_fingerprint` changes
+        (``services.claude_accounts.sign_in_landed``): the human signs in there and leaves
+        it with the adapter's ``exit_command``."""
         ...
 
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:

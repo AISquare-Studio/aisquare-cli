@@ -288,7 +288,7 @@ class GeminiShapedAccounts:
     trust = GeminiShapedTrust()
 
     def sign_in_args(self) -> tuple[str, ...]:
-        return ()
+        return ()  # no login subcommand: its TUI signs in on its first run in the slot
 
     def plain_home(self, home: Path, plain: Mapping[str, str]) -> Path:
         value = plain.get(HOME_ENV, "").strip()

@@ -1626,3 +1626,23 @@ def test_a_binarys_flags_session_id_and_account_are_its_adapters(
     read = home if adapter.capabilities.hook_names_home else tmp_path / "dir"
     assert team_service.session_account(str(transcript), adapter.id) == str(read)
     assert team_service.session_account(None, adapter.id) == str(home)
+
+
+def test_a_sign_in_runs_the_agents_own_command_or_its_tui_bare(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """S7: ``sign_in_args`` is the agent's own sign-in command, run in the slot (Codex's
+    ``login``), or ``()`` for one that signs in from its TUI (Claude Code's, the
+    Gemini-shaped one's): its window starts the binary in the slot with nothing after the
+    slot, and the human leaves it with its ``exit_command``; either way the login has
+    landed once ``login_fingerprint`` reads one."""
+    accounts = adapter.accounts
+    if accounts is None:
+        return
+    account = ClaudeAccount(slot=7, config_dir=tmp_path / "7", managed=True, agent=adapter.id)
+    args = accounts.sign_in_args()
+    command = accounts_service.sign_in_command(account)
+    assert command[-1 - len(args) :] == ["7", *args], command
+    if not args:
+        assert adapter.exit_command.strip(), f"{adapter.id} signs in from its TUI: how to leave it"
+    assert accounts.login_fingerprint(account) is None, "an empty slot holds no login"

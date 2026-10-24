@@ -1029,6 +1029,62 @@ follow-ups all landed in this train: the per-family `weekly_scoped` window W0 fo
 evidence taking a pending first message (#343); and the owed items on W1b, W1c and W4
 (#358).
 
+### Owner calls
+
+The owner approves the train on these. Each row is one call: the default this train
+built (the handoff's proposal where it had one), the PR that built it, and how to flip
+it. "Code" means no key turns it: flipping it is a change in a later PR. The security
+trade-off is first.
+
+| # | Call | Default taken | Where | How to flip |
+| --- | --- | --- | --- | --- |
+| 1 | **A first message on the command line is visible to other local users in `ps`** (`/proc/<pid>/cmdline`) for the life of the agent, as with `claude "query"` itself; the 0600 file it travels in is deleted at launch | `[fleet] first_prompt = "argv"` for Claude Code agents; decide whether a shared box should default to `type` | #330 | `aisquare config set fleet.first_prompt type`: typed once the box is drawn, acknowledged, never on a command line |
+| 2 | A second Enter (reverses #259 round 10's "never a second Enter") | Only while our text is provably still in the box, no turn has started and no dialog is up; at most 8 presses in 60 s; a pane with no box gets one Enter | #330, #337 | Code. Under the default `argv` a Claude Code agent's first message is never typed, so the rule applies to `type` and to tells |
+| 3 | How long a spawn, restart or switch waits for the first message to be taken | `[fleet] prompt_ack_seconds = 45`; the CLI waits, `asq`, the Remote and the hand-over do not | #330 | `aisquare config set fleet.prompt_ack_seconds <s>` |
+| 4 | Which rows can read "first prompt not taken" | Only rows whose session is on the board; a `Stop` or a session's `prompted_at` also takes it; a manager's own `prompt_unsent` nudges nobody | #330, #343 | Code |
+| 5 | The inbox-socket tier | Not built in this train (W0 pinned it for 2.1.309 only; its migration collided with P1's schema 35) | #337, #320 | A later train, behind `[fleet] inbox_delivery = false` |
+| 6 | The manager nudge | A bracketed paste through the delivery door; held while a draft is in the box or you typed within `[fleet] draft_quiet_seconds = 10`; dropped once the manager has prompted since | #337 | `aisquare config set fleet.draft_quiet_seconds <s>` |
+| 7 | Turn-end delivery | On, for notes addressed to the session only, within `max_continuations_per_hour` | #337 | `aisquare config set fleet.deliver_notes_at_turn_end false` |
+| 8 | The receipt when a draft overtakes a paste | `prompt_typed = "no"`, so a restart or switch line still says its hand-off prompt "was NOT typed" while the note says what happened | #363 | Code: a new `prompt_typed` value through `--json` and the Remote page |
+| 9 | That message's wording | "ours is in the box with it", not "after it": tmux pastes at the cursor | #363 | Code |
+| 10 | When a `working` row is checked against its screen | `[fleet] busy_quiet_seconds = 30`; a capture that fails reads `working` (fail closed) | #315 | `aisquare config set fleet.busy_quiet_seconds <s>` |
+| 11 | `switched` as a manager wake | Not a wake: one `switched` per limit, on the manager's next delta; the hand-over's line is `limited_handing_over` and wakes nobody; `handover_failed` wakes | #304 | Code |
+| 12 | Every candidate account marked, or its family week spent | The headroom rung returns nothing: a launch falls to the machine default (which can be a spent account); a hand-over or a switch without `--to` refuses | #304, #350 | Name the account: `fleet switch <agent> --to <slot>` |
+| 13 | A replacement minutes old | Refused for another switch; the phone's Switch has no `--force`, and the refusal names it for the CLI | #304 | `aisquare fleet switch <agent> --force` |
+| 14 | Which account a pick prefers | `[accounts] prefer = "priority"` | #304 | `aisquare config set accounts.prefer reset-soonest` |
+| 15 | When a family week is spent | At 100 % or more, skipped for that family by every headroom pick; below 100 it ranks with the other windows | #350 | Code |
+| 16 | A `weekly_scoped` entry naming no known family | Ignored for picks | #350 | Code |
+| 17 | A family named by both `seven_day_<family>` and `weekly_scoped` | The fuller figure wins, the window's reset kept | #350 | Code |
+| 18 | A cross-account resume | Keeps the recorded transcript; `account` follows the reported path | #308 | Code |
+| 19 | An unreadable config with capture | Records no prompt, one stderr line (privacy fails closed, unlike other settings) | #305 | Fix the config |
+| 20 | The CI consult with capture off | Keeps running: the CI experiment is its own opt-in and sends the prompt to its endpoint while on | #305 | Turn the CI experiment off |
+| 21 | The ref a printed hint names | The bare board number, `aisquare task show 2` (`#2` starts a shell comment) | #358 | Code |
+| 22 | uv in CI | uv 0.13.0; `setup-uv` pinned to v10.3.0's commit; a lock-format bump is by hand | #307 | Edit the pin in `ci.yml` |
+| 23 | Lean CI for sub-PRs into `rc/**` | One Linux check leg (py3.12, captain on), the Linux package job and `lock`; the demo renders on rc pushes and train PRs | #322 | `gh workflow run ci.yml --ref <branch>` runs the full matrix |
+| 24 | P1-WS5d (pytest-xdist) landing via this train | Merged into `rc/p0-reliability` so every train gets it through the syncs; P1's release notes say so; `-n auto` in the Makefile and CI `check`, not `addopts`; the ambient job stays serial | #309 | `pytest -p no:xdist` runs serially |
+| 25 | W0's scale and oldest Claude Code version | 5 sessions, not 20; 2.1.223 as the oldest (the fleet's resume floor) | #320 | The as-written run after all four trains are on `main` |
+| 26 | The version number | 0.9.0 proposed: a store migration (schema 34) and new receipt fields | — | The owner sets it when cutting the release |
+
+### Known gaps
+
+- **The Remote's paste can be overtaken by a draft, undetected (W2).** `remote_actions.action_paste`
+  asks the draft guard, then pastes and presses Enter at once with no check of the box, so
+  a human's keys that land in the milliseconds between are sent with ours. The fleet's
+  own typed writes stop on that race (#337, worded by #363). Proposed follow-up: route the
+  Remote's paste through `deliver_typed` and give its 409 the same sentence.
+- The typing lease is keyed by the socket's name and the pane, so two servers of the same
+  name at different paths share a lease (reviewer-a's minor on #337); it errs towards holding a write back.
+
+### Deferred to the post-main live run (owner decision 2026-10-23)
+
+Run once, after all four trains are on `main`, as the manager tracks them (seq 1135):
+
+1. The soak: a multi-agent fleet on several accounts for a day; `fleet-delivery` shows
+   every first prompt acknowledged.
+2. W2's deferred manager nudge retried by `asq` with a hooked manager, which reviewer-b's
+   walk could not drive (tests cover it).
+3. W0 and W1a at the written scale: 20 agents.
+
 ## Release checklist
 
 Status 2026-10-23 is given in **bold** after each item.
@@ -1061,8 +1117,9 @@ Status 2026-10-23 is given in **bold** after each item.
   typecheck` and targeted tests only.**
 - Soak before tagging: a multi-agent fleet with several accounts runs a day on the
   branch; `fleet-delivery` shows every first prompt acknowledged. **Deferred (owner
-  decision 2026-10-23): the full as-written run, this soak included, happens once after
-  all four trains are on `main`.**
+  decision 2026-10-23) to the post-main live run, with W2's nudge retry and the 20-agent
+  scale: see "Deferred to the post-main live run" above.**
+- Owner calls: **listed in "Owner calls" above, one row each, with how to flip it.**
 
 ## Out of scope
 

@@ -64,7 +64,7 @@ from aisquare.core import experimental, spawn
 from aisquare.core.paths import aisquare_home, expand_user
 
 if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
-    from aisquare.core.config import TeamSettings
+    from aisquare.core.config import FleetSettings, TeamSettings
 
 _OFF_VALUES = {"0", "false", "no", "off"}
 PROBE_TIMEOUT_SECONDS = 150
@@ -139,6 +139,10 @@ class RoleProfile(BaseModel):
     :func:`role_defaults`). A role's tooling is the role's business: the
     ui-tester needs Claude in Chrome, and asking every operator to remember
     ``--chrome`` is how the role silently degrades on the second machine."""
+    denied_tools: list[str] = []
+    """Claude Code tools the role never launches with, wherever it starts: its safety
+    list, which :func:`tool_policy` merges with the operator's denies. Only ``[fleet.roles.
+    <role>] allow_tools`` hands one back; an ``extra_args`` no longer replaces it (#280)."""
 
 
 #: The role -> model x effort matrix. Order within a ladder is the fallback order;
@@ -182,6 +186,9 @@ ROLE_PROFILES: dict[str, RoleProfile] = {
         role="reviewer",
         ladder=["sonnet", "opus"],
         mission="reads the PR as the stranger who will maintain it — read-only findings",
+        # Subagents inherit their session's tools and its permission rules, so a
+        # reviewer's subagents cannot edit either (code.claude.com/docs/en/sub-agents).
+        denied_tools=["Edit", "Write", "NotebookEdit"],
     ),
     "ui-tester": RoleProfile(
         role="ui-tester",
@@ -263,6 +270,113 @@ def role_defaults(role: str, *, binary: str, args: Sequence[str]) -> RoleDefault
             if not _flag_present(args, flag) and not _flag_present(args, _opt_out_of(flag))
         ]
     )
+
+
+#: What ``skill_listing = "names"`` passes Claude Code: every skill description cut to one
+#: character, every name kept. ``skillListingBudgetFraction`` at its smallest (it takes any
+#: fraction above 0) cut the first request by 41 tokens on Claude Code 2.1.309; this, 2,121.
+SKILL_NAMES_SETTINGS = '{"skillListingMaxDescChars": 1}'
+
+
+class ToolPolicy(RoleDefaults):
+    """The tool and skill flags a launch gets (:func:`tool_policy`): :attr:`args` go where
+    the role's own flags go, and every ``--disallowedTools`` already given comes out
+    (:meth:`strip`), so the agent gets ONE, holding :attr:`denied`."""
+
+    denied: list[str] = []
+    """Every tool the launch denies, sorted; empty when the policy was withheld."""
+    skill_listing: str = "full"
+    """The skill listing the launch gets: ``full``, ``names`` or ``off``."""
+    applied: bool = False
+
+    def strip(self, args: Sequence[str]) -> list[str]:
+        """``args`` without the ``--disallowedTools`` :attr:`args` now carries; untouched
+        when the policy was withheld (another agent's flags are its own)."""
+        from aisquare.core.config import split_denied_tools
+
+        return split_denied_tools(args)[1] if self.applied else list(args)
+
+
+def tool_policy(
+    role: str,
+    *,
+    binary: str,
+    args: Sequence[str],
+    fleet: FleetSettings,
+    effort: str | None = None,
+) -> ToolPolicy:
+    """The tools ``role`` launches without and the skill listing it gets, wherever it starts.
+
+    The deny set is the role's safety list (:attr:`RoleProfile.denied_tools`), ``[fleet]
+    deny_tools`` and ``[fleet.roles.<role>] deny_tools``, minus that table's
+    ``allow_tools``, plus every ``--disallowedTools`` already in ``args``: what the
+    operator typed (or a fleet ``extra_args``) is never handed back. ``skill_listing``
+    ``off`` adds ``Skill``; ``names`` passes :data:`SKILL_NAMES_SETTINGS` unless ``args``
+    already carry ``--settings``, which is never merged blindly. A launch at
+    :data:`ULTRACODE` effort (``effort``, as ``team spawn`` resolves it, or ``--effort`` in
+    ``args``) keeps ``Workflow``: ultracode IS xhigh plus workflow orchestration, which
+    the default deny would have turned off without a word (review of #311).
+
+    The reviewer's deny lived in its ``extra_args`` alone, so ``launch reviewer`` and
+    ``team spawn reviewer`` had none, and any ``extra_args`` an operator set replaced it
+    whole: the reviewer launched with ``Edit`` and ``Write`` (#280, #129 f). As
+    :func:`role_defaults`, only for Claude Code (:func:`is_default_agent`), with a note
+    when withheld.
+    """
+    from aisquare.core.config import FleetRoleSettings, split_denied_tools
+
+    seat = base_role(role)
+    profile = ROLE_PROFILES.get(seat)
+    settings = fleet.roles.get(seat) or FleetRoleSettings()
+    asked, _rest = split_denied_tools(args)
+    denied = {*(profile.denied_tools if profile else ()), *fleet.deny_tools, *settings.deny_tools}
+    denied -= set(settings.allow_tools)
+    if settings.skill_listing == "off":
+        denied.add("Skill")
+    notes: list[str] = []
+    if "Workflow" in denied and ULTRACODE in (
+        _normal(effort),
+        _normal(_flag_value(args, "--effort")),
+    ):
+        denied.discard("Workflow")
+        notes.append("Workflow kept: effort ultracode orchestrates workflows")
+    names = settings.skill_listing == "names"
+    if not is_default_agent(binary):
+        withheld = [f"--disallowedTools={' '.join(sorted(denied))}"] if denied else []
+        withheld += ["skill_listing names"] if names else []
+        why = f"{os.path.basename(binary)!r} is not {DEFAULT_AGENT_BINARY}"
+        return ToolPolicy(
+            notes=[f"{', '.join(withheld)} withheld: {why}"] if withheld else [],
+            skill_listing=settings.skill_listing,
+        )
+    denied |= asked
+    flags = [f"--disallowedTools={' '.join(sorted(denied))}"] if denied else []
+    if names and _flag_present(args, "--settings"):
+        notes.append("skill_listing withheld: --settings already given")
+    elif names:
+        flags += ["--settings", SKILL_NAMES_SETTINGS]
+    return ToolPolicy(
+        args=flags,
+        notes=notes,
+        denied=sorted(denied),
+        skill_listing=settings.skill_listing,
+        applied=True,
+    )
+
+
+def _flag_value(args: Sequence[str], flag: str) -> str | None:
+    """The value ``args`` give ``flag`` (``--flag value`` or ``--flag=value``), the last one."""
+    found: str | None = None
+    for index, arg in enumerate(args):
+        if arg.startswith(f"{flag}="):
+            found = arg.partition("=")[2]
+        elif arg == flag and index + 1 < len(args):
+            found = args[index + 1]
+    return found
+
+
+def _normal(value: str | None) -> str | None:
+    return value.strip().lower() if value is not None else None
 
 
 #: A numbered SEAT: a first-class role with a crew index glued on (``coder1``).
@@ -1185,8 +1299,8 @@ def _role_cycle_core(
     if role == "reviewer":
         # §3.3 — reads the PR as the stranger who will maintain it; findings on the
         # PR through `gh pr review`. `--restricted` would remove the Bash every step
-        # below needs, so the fleet launches it denied Edit, Write and NotebookEdit
-        # instead (`config.REVIEWER_ARGS`); never push and never merge are this
+        # below needs, so it launches denied Edit, Write and NotebookEdit instead,
+        # wherever it starts (`RoleProfile.denied_tools`); never push and never merge are this
         # briefing's, and the credentials its shell runs with
         # (`config._default_fleet_roles` says why no allowlist holds it).
         return [

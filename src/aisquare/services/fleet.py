@@ -62,6 +62,8 @@ from aisquare.core import memory as memory_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
+    LAST_ARGS_ONLY_DENY,
+    REVIEWER_ARGS,
     FleetRoleSettings,
     FleetSettings,
     load_config,
@@ -101,7 +103,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import auto_mode, delivery, explainability_ops, pane_idle
+from aisquare.services import auto_mode, delivery, explainability_ops, install_route, pane_idle
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import project as project_service
@@ -3891,13 +3893,23 @@ def _replayed_args(role: str, spec: LaunchSpec, config: FleetSettings) -> list[s
     alone (review of #257). Where it leads the list, as it does before the caller's own
     arguments (round 19), and unless today's ``config`` leads with it too, which says it
     was chosen (round 20). A spec recorded since then (``recorded_by``) is replayed as it
-    is, so a ``--restricted`` chosen in today's config survives a restart.
+    is, so a ``--restricted`` chosen in today's config survives a restart; less, from
+    0.8.0 to 0.8.2, the reviewer's default deny it leads with, now the role's own.
     """
     args = list(spec.extra_args)
-    if spec.recorded_by is None and role == "reviewer":
+    if role != "reviewer":
+        return args
+    if spec.recorded_by is None:
         return replacing_the_former_reviewer_default_first(
             args, role_settings(role, config).extra_args
         )
+    if install_route.is_newer(spec.recorded_by, LAST_ARGS_ONLY_DENY) is False and args[
+        : len(REVIEWER_ARGS)
+    ] == list(REVIEWER_ARGS):
+        # 0.8.0 to 0.8.2 recorded the reviewer's default `extra_args`, its deny, first. It
+        # is the role's own now (`harness.tool_policy`): replayed as a typed deny, it was
+        # one `allow_tools` could never hand back (review of #311).
+        args = args[len(REVIEWER_ARGS) :]
     return args
 
 

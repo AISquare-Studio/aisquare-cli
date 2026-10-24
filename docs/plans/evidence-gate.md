@@ -138,12 +138,16 @@ nonignored files, file by file.
   (`--junitxml=reports/a.xml`) or outside the checkout. Identity is kept per
   file so the refusal can name the paths and the remedy.
 - The ignore rules are in the identity: every `.gitignore` git reads (a
-  self-ignored one too), `.git/info/exclude` and `core.excludesFile`. A symlink
-  is hashed as its in-checkout target, file or directory.
-- Each file's change time (mtime on Windows) is kept before and after a run, so
-  a change put back before the run ended still refuses it.
-- Known limit: a case-only rename on a case-insensitive file system is not seen,
-  by git either.
+  self-ignored one too; not one inside an ignored directory, which git never
+  reads), `.git/info/exclude` and `core.excludesFile`. A symlink is hashed as its
+  in-checkout target, file or directory, walked by the same rules as a checkout
+  without git, links inside included; a link to the checkout or a directory
+  holding it counts by its text.
+- Each file's change time (mtime on Windows) is kept before and after a run,
+  nested repositories included, so a change put back before the run ended still
+  refuses it.
+- Known limits: a file created and deleted within one run, and a case-only
+  rename on a case-insensitive file system (git is blind to it too).
 - A worktree is fingerprinted as its own files, under the board's one project.
 
 **The store.** Main is at schema v33. The brief table takes the next free

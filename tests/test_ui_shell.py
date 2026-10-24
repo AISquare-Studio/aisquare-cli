@@ -1282,10 +1282,10 @@ def test_the_hubs_doctor_link_opens_the_doctor_page_and_runs_the_checks(
         return [
             DoctorCheck(name="python", status=CheckStatus.ok, detail="Python 3.14"),
             DoctorCheck(
-                name="repomix",
+                name="tmux",
                 status=CheckStatus.warn,
-                detail="repomix not found",
-                fix="npm install -g repomix",
+                detail="tmux not found",
+                fix="brew install tmux",
             ),
             DoctorCheck(
                 name="home", status=CheckStatus.fail, detail="~/.aisquare is missing", fix="init"
@@ -1317,7 +1317,7 @@ def test_the_hubs_doctor_link_opens_the_doctor_page_and_runs_the_checks(
     assert before == "welcome"
     assert total == 2  # …and opening the page runs them again
     assert current == "doctor" and selected == "settings"  # a page of Settings'
-    assert "repomix not found" in report and "→ npm install -g repomix" in report
+    assert "tmux not found" in report and "→ brew install tmux" in report
     assert "Python 3.14" in report and "~/.aisquare is missing" in report
 
 
@@ -1347,13 +1347,14 @@ def test_a_crashing_doctor_is_reported_not_raised(tmp_path: Path, script: Script
     assert "crashed" not in drive(healthy)  # a working doctor reports no such thing
 
 
-SNAPSHOT_WARN = DoctorCheck(
-    name="snapshot",
+FACTS_WARN = DoctorCheck(
+    name="facts",
     status=CheckStatus.warn,
-    detail="no codebase snapshot",
-    fix="Pack one: aisquare project onboard",
+    detail="no project facts seeded",
+    fix="Seed them: aisquare project onboard",
 )
-"""A finding whose fix is one of ours and is PROJECT-scoped — the button needs a cwd."""
+"""A finding whose fix is one of ours and is PROJECT-scoped — the button needs a cwd. No
+doctor row offers one today; this stands in for one."""
 CONNECT_WARN = DoctorCheck(
     name="claude-code",
     status=CheckStatus.warn,
@@ -1404,7 +1405,7 @@ def test_the_doctor_page_arms_project_fixes_for_the_project_it_ran_for(
             len(app.query(DoctorView)),
         )
 
-    checks = [SNAPSHOT_WARN, CONNECT_WARN]
+    checks = [FACTS_WARN, CONNECT_WARN]
     global_buttons, global_cwd, selected_buttons, selected_cwd, page_buttons, page_cwd, views = (
         drive(go, doctor=lambda: list(checks))
     )
@@ -1433,7 +1434,7 @@ def test_a_doctor_refreshed_message_updates_the_shells_report(
 
     def doctor() -> list[DoctorCheck]:
         calls.append(1)
-        return [SNAPSHOT_WARN]
+        return [FACTS_WARN]
 
     def counts(app: FleetApp) -> str:
         """The report the shell holds (its Doctor page shows it), as ``✓ n  ⚠ n``."""
@@ -1449,11 +1450,7 @@ def test_a_doctor_refreshed_message_updates_the_shells_report(
         # The report the view was handed is about the scope on screen: adopt it.
         app.post_message(
             DoctorRefreshed(
-                [
-                    DoctorCheck(
-                        name="snapshot", status=CheckStatus.ok, detail="packed 2 minutes ago"
-                    )
-                ],
+                [DoctorCheck(name="facts", status=CheckStatus.ok, detail="seeded 2 minutes ago")],
                 None,
             )
         )

@@ -853,40 +853,10 @@ class TeamEvent(BaseModel):
         )
 
 
-class Snapshot(BaseModel):
-    """A packed snapshot of a project's codebase (Repomix full pack + skeleton)."""
-
-    project_id: str
-    head_sha: str | None = None
-    generated_at: datetime
-    pack_path: Path
-    skeleton_path: Path
-    index_path: Path
-    token_count: int = 0
-    skeleton_token_count: int = 0
-    file_count: int = 0
-    compressed: bool = False
-    status: str = "ready"
-    # What a ``too_large`` verdict was made of, so the failure can say what it
-    # measured: the full pack's size and the budget it was held to
-    # (``token_count`` is the pack that was kept — or, when none was, the
-    # compressed pack's size). Both are None on a snapshot.json written before
-    # they were recorded (0.6.0 and earlier); see ``core.snapshot.too_large_detail``.
-    full_token_count: int | None = None
-    max_tokens: int | None = None
-
-
 class OnboardReport(BaseModel):
-    """Outcome of ``project onboard``: seeded facts and the codebase snapshot."""
+    """Outcome of ``project onboard``: the facts it seeded."""
 
     seeded: list[ContextEntry] = Field(default_factory=list)
-    snapshot: Snapshot | None = None
-    snapshot_note: str | None = None
-    """Why this run packed nothing, as ``onboard`` says it: off, or the pack failed
-    and why. ``None`` when a pack was made or reused, or not asked for (``init``),
-    except in the aisquare home, which says why it is never packed, asked or not. Set
-    beside a ``snapshot``, it is a ``--refresh`` that failed: that is the last pack,
-    kept."""
     warning: str | None = None
     """``project_service.HOME_WARNING`` when this onboarding made the aisquare home a
     project (D5), said once; else ``None``."""

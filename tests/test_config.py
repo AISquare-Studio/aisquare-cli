@@ -10,7 +10,6 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import snapshot
 from aisquare.core.config import (
     CONFIG_VERSION,
     REVIEWER_ARGS,
@@ -19,8 +18,8 @@ from aisquare.core.config import (
     ExperimentSettings,
     FleetSettings,
     RedactionSettings,
-    SnapshotSettings,
     load_config,
+    retired_sections,
     save_config,
 )
 from aisquare.core.paths import aisquare_home, cache_dir, config_path, ensure_home, log_dir
@@ -264,63 +263,56 @@ def test_ensure_home_creates_layout(isolated_home: Path) -> None:
     assert log_dir().is_dir()
 
 
-# --- [snapshot] max_tokens (#82) -----------------------------------------------------------
+# --- [snapshot], retired ---------------------------------------------------------------
 
 
-def test_snapshot_budget_defaults_to_the_packers_constant() -> None:
-    """The knob exists, and its default IS the 150 000 the packer used to hardcode.
-
-    Nobody who has not set it sees a change: ``core.snapshot.MAX_TOKENS`` is now
-    read off this default rather than the other way round, so the two cannot
-    drift.
-    """
-    assert AppConfig().snapshot == SnapshotSettings(max_tokens=150_000)
-    assert AppConfig().snapshot.max_tokens == snapshot.MAX_TOKENS
-
-
-def test_snapshot_budget_loads_from_the_file_and_round_trips(tmp_path: Path) -> None:
-    target = tmp_path / "config.toml"
-    target.write_text("[snapshot]\nmax_tokens = 300000\n", encoding="utf-8")
-    loaded = load_config(target)
-    assert loaded.snapshot.max_tokens == 300_000
-    save_config(loaded, target)
-    assert load_config(target).snapshot.max_tokens == 300_000
-    assert "[snapshot]" in target.read_text(encoding="utf-8")
-
-
-def test_config_set_writes_the_snapshot_budget_and_rejects_a_non_number(
-    runner: CliRunner,
+def test_a_config_with_the_retired_snapshot_section_loads_and_the_next_save_drops_it(
+    tmp_path: Path,
 ) -> None:
-    """The command the failure message names, typed the way it names it."""
-    result = runner.invoke(app, ["config", "set", "snapshot.max_tokens", "300000"])
-    assert result.exit_code == 0, result.output
-    assert load_config().snapshot.max_tokens == 300_000
-    shown = runner.invoke(app, ["config", "get", "snapshot.max_tokens"])
-    assert shown.stdout.strip() == "snapshot.max_tokens = 300000"
+    """The codebase snapshot is gone, and so is its ``[snapshot]`` section: a file that
+    still has one loads as before, with everything else in it, and doctor's config row
+    names it (:func:`retired_sections`). An unknown section is kept by a save, since a
+    newer build may read it; this one is dropped, since no build will."""
+    target = tmp_path / "config.toml"
+    target.write_text(
+        "[snapshot]\nmax_tokens = 300000\nignore = ['**/fixtures/**']\n\n"
+        "[fleet]\nmax_agents_per_project = 6\n\n[future]\nknob = 1\n",
+        encoding="utf-8",
+    )
+    loaded = load_config(target)
+    assert loaded.fleet.max_agents_per_project == 6
+    assert retired_sections(target) == ["snapshot"]
 
-    rejected = runner.invoke(app, ["config", "set", "snapshot.max_tokens", "lots"])
-    assert rejected.exit_code != 0
-    assert load_config().snapshot.max_tokens == 300_000, "a rejected value must not land"
+    save_config(loaded, target)
+    saved = tomllib.loads(target.read_text(encoding="utf-8"))
+    assert "snapshot" not in saved
+    assert saved["future"] == {"knob": 1}, "an unknown section is still kept"
+    assert retired_sections(target) == []
+    assert load_config(target).fleet.max_agents_per_project == 6
 
 
-def test_config_set_takes_the_snapshot_ignore_list_comma_separated(runner: CliRunner) -> None:
-    """A list key is settable from a shell at all — comma-separated, the way repomix's own flag is.
+def test_the_retired_snapshot_keys_are_unknown_to_config_get_and_set(runner: CliRunner) -> None:
+    for argv in (["get", "snapshot.max_tokens"], ["set", "snapshot.ignore", "**/x/**"]):
+        result = runner.invoke(app, ["--json", "config", *argv])
+        assert result.exit_code == 1, result.output
+        assert '"unknown_key"' in result.stdout
+
+
+def test_config_set_takes_a_list_key_comma_separated(runner: CliRunner) -> None:
+    """A list key is settable from a shell at all: comma-separated.
 
     Whitespace around items is trimmed, ``get`` prints the same shape ``set``
     accepts, and an empty string clears the list.
     """
-    assert AppConfig().snapshot.ignore == []
-    result = runner.invoke(
-        app, ["config", "set", "snapshot.ignore", "**/fixtures/**, docs/generated/**"]
-    )
+    result = runner.invoke(app, ["config", "set", "explainability.roles", "coder, reviewer"])
     assert result.exit_code == 0, result.output
-    assert load_config().snapshot.ignore == ["**/fixtures/**", "docs/generated/**"]
-    shown = runner.invoke(app, ["config", "get", "snapshot.ignore"])
-    assert shown.stdout.strip() == "snapshot.ignore = **/fixtures/**,docs/generated/**"
+    assert load_config().explainability.roles == ["coder", "reviewer"]
+    shown = runner.invoke(app, ["config", "get", "explainability.roles"])
+    assert shown.stdout.strip() == "explainability.roles = coder,reviewer"
 
-    cleared = runner.invoke(app, ["config", "set", "snapshot.ignore", ""])
+    cleared = runner.invoke(app, ["config", "set", "explainability.roles", ""])
     assert cleared.exit_code == 0, cleared.output
-    assert load_config().snapshot.ignore == []
+    assert load_config().explainability.roles == []
 
 
 def test_config_get_and_set_cover_the_ui_preference(runner: CliRunner) -> None:

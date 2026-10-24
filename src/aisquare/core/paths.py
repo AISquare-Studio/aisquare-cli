@@ -493,7 +493,7 @@ def remote_push_path() -> Path:
 
 
 def project_data_dir(project_id: str) -> Path:
-    """Per-project data directory (codebase snapshots, future sync artifacts)."""
+    """Per-project data directory (the brain, the explainability key)."""
     return aisquare_home() / "projects" / project_id
 
 

@@ -482,7 +482,7 @@ def test_every_git_seam_runs_in_the_one_git_environment(
     git's environment by hand, and they had drifted apart: the snapshot's stripped the
     identity and set ``GIT_TERMINAL_PROMPT=0``, the fleet's copied the environment as it was.
     Every git seam takes :func:`git_env`, so a fix to one is a fix to all."""
-    from aisquare.core import snapshot, workspace
+    from aisquare.core import workspace
     from aisquare.services import ci_snapshot, fleet
 
     seen: dict[str, dict[str, str] | None] = {}
@@ -495,11 +495,8 @@ def test_every_git_seam_runs_in_the_one_git_environment(
     fleet._git(tmp_path, "status", "--porcelain")
     ci_snapshot._git(tmp_path, "stash", "create", timeout=5)
     workspace.git_common_root(tmp_path)
-    snapshot.head_sha(tmp_path)
 
-    asked = [
-        "--git-common-dir --show-cdup", "rev-parse HEAD", "stash create", "status --porcelain"
-    ]  # fmt: skip
+    asked = ["--git-common-dir --show-cdup", "stash create", "status --porcelain"]
     assert sorted(seen) == asked, seen
     for argv, env in seen.items():
         assert env == git_env(), argv

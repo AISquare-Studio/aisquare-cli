@@ -632,38 +632,6 @@ class FleetSettings(BaseModel):
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
 
 
-class SnapshotSettings(BaseModel):
-    """The codebase snapshot ``aisquare project onboard`` packs with Repomix.
-
-    ``max_tokens`` is the budget a pack must fit. The full pack is tried first,
-    then the compressed one (signatures only); a repo whose compressed pack is
-    STILL over it keeps that pack as the skeleton with its per-file index —
-    status ``skeleton_only``, every count recorded, ``onboard`` and ``doctor``
-    naming the numbers — rather than getting nothing. 150 000 mirrors the
-    server's ``REPO_PACK_MAX_TOKENS`` so artifacts stay consistent for a future
-    sync — raise it for a repo you know is big, or leave more out, with
-    ``ignore`` below or a ``.repomixignore`` at the repo root (#82).
-
-    ``ignore`` is the operator's own list of what to leave out of the pack, in
-    the glob syntax repomix's ``--ignore`` takes (``**/fixtures/**``,
-    ``docs/generated/**``, ``*.snap``). It EXTENDS the built-in list
-    (``core.snapshot.DEFAULT_IGNORE``: dependency trees, build output, caches,
-    this tool's worktrees, and any nested git repository or worktree found
-    below the root) rather than replacing it, and the repo's own ``.gitignore``
-    and ``.repomixignore`` apply on top, read by repomix itself. On the command
-    line the items are comma-separated, as repomix's own flag is::
-
-        aisquare config set snapshot.ignore '**/fixtures/**,docs/generated/**'
-
-    Read from the config file alone, like ``[fleet]``: there is no
-    ``AISQUARE_SNAPSHOT_*`` variable for either key, because this layer has no
-    per-key environment rung and one section is not the place to grow one.
-    """
-
-    max_tokens: int = 150_000
-    ignore: list[str] = Field(default_factory=list)
-
-
 class PersonaImportSettings(BaseModel):
     """``[persona.import]`` — how ``aisquare persona import`` converts a source that is
     not already a skill (docs/plans/spawn-personas.md §3.9).
@@ -775,11 +743,33 @@ class AppConfig(BaseModel):
     team: TeamSettings = Field(default_factory=TeamSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
     accounts: AccountsSettings = Field(default_factory=AccountsSettings)
-    snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
     experimental: ExperimentalSettings = Field(default_factory=ExperimentalSettings)
     persona: PersonaSettings = Field(default_factory=PersonaSettings)
     ui: UiSettings = Field(default_factory=UiSettings)
+
+
+#: Sections an older build read and this one does not, each with why. An unknown section
+#: is kept by a save (:func:`_keep_unknown`), since a newer build may read it; these are
+#: dropped, since no build from this one on will, and doctor's config row names them
+#: until then (:func:`retired_sections`).
+RETIRED_SECTIONS: dict[str, str] = {
+    "snapshot": "aisquare no longer packs a codebase",
+}
+
+
+def retired_sections(path: Path | None = None) -> list[str]:
+    """The :data:`RETIRED_SECTIONS` the config file at ``path`` still holds, in that order.
+
+    Read from the file, since loading drops them. Empty for a file that is absent or will
+    not parse: the config row says that much itself.
+    """
+    target = path or paths.config_path()
+    try:
+        data = _parse_toml(target.read_bytes())
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return []
+    return [name for name in RETIRED_SECTIONS if name in data]
 
 
 def _dumped(model: BaseModel) -> dict[str, Any]:
@@ -1214,6 +1204,8 @@ def save_config(
                 raise
         else:
             dumped = _keep_unknown(existing, dumped, config)
+            for name in RETIRED_SECTIONS:
+                dumped.pop(name, None)
     # Kept in full until here: _keep_unknown follows the model into every section, and
     # a section at its defaults may still hold keys this build does not know.
     dumped = _with_whole_role_tables(_overrides(dumped, system_defaults(), config), dumped)

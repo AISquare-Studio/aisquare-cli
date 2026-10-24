@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import json
 import os
 import re
@@ -20,9 +19,8 @@ from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, orchestrator, paths
-from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
-from aisquare.core.config import load_config
+from aisquare.core.config import RETIRED_SECTIONS, load_config, retired_sections
 from aisquare.core.injection import load_last
 from aisquare.core.keys import EXTENDED_MINIMUM
 from aisquare.core.spawn import TEAM_ENV_VARS
@@ -123,8 +121,8 @@ def doctor(
     explainability gateway round-trip). Everything else stays offline, so a
     plain ``aisquare doctor`` still answers on a train.
 
-    ``cwd`` is the directory whose PROJECT the project-scoped checks (snapshot,
-    brain, harness, self-invocation) report on; ``None`` is the process cwd, which is
+    ``cwd`` is the directory whose PROJECT the project-scoped checks (brain,
+    harness, self-invocation) report on; ``None`` is the process cwd, which is
     what the CLI means. The fleet UI hosts many projects in one process and
     must not ``os.chdir`` (docs/plans/fleet-tui.md §5.6), so it passes the
     selected project's root here and gets that project's report in-process.
@@ -144,14 +142,11 @@ def doctor(
         _check_home_filesystem(),
         _check_config(),
         _check_database(),
-        _check_repomix(),
-        _check_tiktoken(),
         _check_claude_code(cwd),
         *_planned_agent_checks(),
         *_claude_accounts_checks(),
         _check_tmux(),
         _check_gh(),
-        _check_snapshot(cwd),
         _check_brain(cwd),
         _check_harness(cwd),
         _check_self_invocation(cwd),
@@ -162,7 +157,7 @@ def doctor(
         # After the actionable machine checks on purpose. The fleet UI's sidebar
         # showed the first three not-ok rows (a stable sort within the warn
         # group), so a row inserted at position 12 evicted one of `brain` /
-        # `snapshot` / a logged-out `gh` — the ones an operator can act on — from
+        # a logged-out `gh` — the ones an operator can act on — from
         # what was seen first; the Doctor page still lists them in this order. The
         # fleet terminal row (#147) can warn too, about a running server's kept
         # prefix, so it waits here with them rather than beside tmux.
@@ -482,6 +477,13 @@ def _check_config() -> DoctorCheck:
             f"config.toml is invalid: {exc}",
             "Fix it, or reset it to the defaults: aisquare init --reinit --yes",
         )
+    retired = retired_sections()
+    if retired:
+        # Green: the section is ignored, so nothing is wrong, and the next save drops it.
+        said = "; ".join(
+            f"[{name}] is no longer read ({RETIRED_SECTIONS[name]})" for name in retired
+        )
+        return _ok("config", f"config.toml is valid; {said}, and the next save drops it")
     return _ok("config", "config.toml is valid")
 
 
@@ -676,125 +678,6 @@ def _read_line(path: Path) -> str:
         return path.read_text(encoding="utf-8").strip().splitlines()[0]
     except (OSError, IndexError):
         return ""
-
-
-_NODE_FLOOR = snapshot_core.MIN_NODE_TEXT
-
-#: Deliberately NOT ``install_hint("nodejs")``. On the distributions that ship a
-#: Node too old for repomix, the package manager's ``nodejs`` IS the old one --
-#: so ``apt install nodejs`` is advice to reinstall what they already have, and
-#: the check would send them in a circle. The `tmux` check can use the package
-#: manager because every distribution's tmux clears its floor; Node's does not.
-_NODE_UPGRADE = (
-    f"Upgrade Node.js to {_NODE_FLOOR} or newer — from nodejs.org, or a version "
-    "manager such as fnm or nvm. Not your package manager's `nodejs`: on the "
-    "distributions that ship an old one, that is the version you already have."
-)
-
-
-def _check_repomix() -> DoctorCheck:
-    """Repomix, and the Node it actually has to run on.
-
-    ``npx`` EXISTING was the whole test, and it is true of machines that cannot
-    run repomix at all. Repomix 1.18.0 declares ``node >= 22``; Debian 12 ships
-    18 and Ubuntu 22.04 ships 12. On those, ``npx`` resolved, this line was
-    green, and the first ``project onboard`` failed -- a green check over a
-    broken feature, which is the one shape a diagnostic must never have.
-
-    THE FLOOR IS PER PATH, because the two paths run different repomixes.
-    ``npx --yes repomix`` fetches the LATEST release, so :data:`MIN_NODE` is its
-    floor. An installed ``repomix`` is whatever version was pinned, and a
-    machine running ``repomix@0.2`` on Node 18 may pack perfectly well -- so its
-    own ``engines.node`` is read and preferred, and judging it by the latest
-    release's floor would be the same false positive in the other direction.
-
-    THREE OUTCOMES, not two. ``node_version()`` answers ``None`` for a Node that
-    is absent, one that exits non-zero, and one whose output will not parse; the
-    first is a different fact from the other two. ``repomix`` and ``npx`` are
-    both ``#!/usr/bin/env node`` scripts, so no Node at all means packing cannot
-    run -- a warning, not "untested". An unreadable Node stays ``ok``: failing
-    open costs this line its verdict, while guessing "too old" would send
-    someone to reinstall a working toolchain.
-
-    NO NODE AT ALL IS OFF, NOT BROKEN. Snapshots are optional and memory and
-    the hooks never touch Node, so a machine with none of ``repomix``,
-    ``npx`` or ``node`` made a choice rather than a mistake: ``ok``, with
-    :data:`snapshot_core.OFF_DETAIL` and no fix. Any ONE of the three present
-    means someone started on the toolchain, and the warnings below still say
-    what is missing.
-    """
-    name = "repomix"
-    direct = shutil.which("repomix")
-    if direct is None and shutil.which("npx") is None:
-        if shutil.which("node") is None:
-            return _ok(name, snapshot_core.OFF_DETAIL)
-        # A Node IS here, so the missing piece is npm: no npx almost always means
-        # no npm, which Arch, Alpine and Debian's own nodejs package separately.
-        return _warn(
-            name,
-            "repomix not found — codebase snapshots are disabled",
-            f"Install npm (some distributions package it apart from Node; repomix needs "
-            f"Node.js {_NODE_FLOOR}+), then: npm install -g repomix",
-        )
-    how = "repomix found" if direct else "repomix available on demand via npx"
-    if shutil.which("node") is None:
-        # Not "untested": repomix and npx are Node scripts, so this machine
-        # cannot pack, and saying so is the whole point of the rewrite.
-        return _warn(
-            name,
-            f"{how}, but Node is not on PATH — repomix is a Node script, so "
-            "codebase snapshots cannot run",
-            f"Install Node.js {_NODE_FLOOR} or newer, or put the Node you have on PATH "
-            "(a version manager's shims are not on PATH for non-interactive shells)",
-        )
-    node = snapshot_core.node_version()
-    if node is None:
-        return _ok(
-            name,
-            f"{how} — Node version not readable, so untested against the "
-            f"{_NODE_FLOOR} minimum; snapshots enabled",
-        )
-    required, own_floor = snapshot_core.pack_node_floor()
-    found = ".".join(str(part) for part in node)
-    if node < required:
-        wanted = ".".join(str(part) for part in required)
-        whose = "the installed repomix needs" if own_floor else "repomix needs"
-        return _warn(
-            name,
-            f"{how}, but Node {found} is older than {whose} "
-            f"({wanted}+) — codebase snapshots will fail when packed",
-            _NODE_UPGRADE,
-        )
-    return _ok(name, f"{how} on Node {found} — codebase snapshots enabled")
-
-
-def _check_tiktoken() -> DoctorCheck:
-    installed = _has_module("tiktoken")
-    if not snapshot_core.can_pack():
-        # Only packing a snapshot counts tokens, so where nothing can pack there is
-        # nothing for it to sharpen, installed or not. An amber line here was a fix
-        # for a feature that is not running, on exactly the machines that chose not
-        # to run it; "enabled" was a claim about one, and the one-liner always adds
-        # tiktoken. It says packing, not snapshots: a pack made before Node went is
-        # still what agents get, and the snapshot row says so (review of #257).
-        return _ok(
-            "tiktoken",
-            ("installed, but unused" if installed else "off")
-            + " — only packing a codebase snapshot uses it, and nothing can pack here",
-        )
-    if installed:
-        return _ok("tiktoken", "exact snapshot token counts enabled")
-    # `pipx inject` takes the name of an INSTALLED PIPX ENVIRONMENT, which is
-    # this distribution -- so `pipx inject aisquare tiktoken` failed on every
-    # machine that had followed the documented install, naming an environment
-    # that does not exist there. Same root cause as `_GLOBAL_INSTALL`.
-    return _warn(
-        "tiktoken",
-        "tiktoken not installed — snapshot token counts are estimated",
-        f"Install it into the same environment as aisquare: "
-        f"pipx inject {DISTRIBUTION} tiktoken (or: uv tool install --with tiktoken "
-        f"{DISTRIBUTION}; in a plain virtualenv: pip install tiktoken)",
-    )
 
 
 _STALE_HOOKS = (
@@ -2682,58 +2565,6 @@ def _check_gh() -> DoctorCheck:
         )
 
 
-def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
-    """The active project's codebase snapshot; ``cwd`` picks the project (default: process cwd)."""
-    absent = _uncreated_home("snapshot")
-    if absent is not None:
-        return absent
-    try:
-        with store_session() as store:
-            project = active_project(store, cwd)
-        snap = snapshot_core.load(project.id)
-    except Exception as exc:  # diagnostics must never crash
-        return _warn(
-            "snapshot", f"could not check the snapshot: {exc}", "Try: aisquare project onboard"
-        )
-    if snapshot_core.is_the_homes(project.id):
-        # The aisquare home, added as a project, is never packed: no fix to offer.
-        return _ok("snapshot", snapshot_core.HOME_SKIPPED)
-    # A stored pack stays on disk even where nothing can pack any more (Node gone,
-    # or on PATH only for the installer's own run): it says so, rather than "ready"
-    # beside a repomix row that reads off.
-    if snap is not None and snap.status == "ready":
-        return _ok(
-            "snapshot",
-            f"snapshot ready ({snap.file_count} files, {snap.token_count} tokens)"
-            + snapshot_core.unrefreshable_note(snap),
-        )
-    if snap is not None and snap.status == "skeleton_only":
-        # Usable, for whoever opens it: no agent is pointed at a pack. No fix,
-        # deliberately — re-packing would not change it, and a fix here is the
-        # button that was pressed forever with a green tick.
-        return _ok(
-            "snapshot",
-            snapshot_core.skeleton_only_detail(snap) + snapshot_core.unrefreshable_note(snap),
-        )
-    if not snapshot_core.can_pack():
-        # No fix, deliberately: `Pack one: aisquare project onboard` is a one-click
-        # button in the UI (services/onboarding.KNOWN_FIXES), and with nothing to
-        # run repomix it can never turn green. When something of the toolchain IS
-        # here, the repomix row warns and names what is missing. A Node that is
-        # there but too old still packs-and-fails, so it keeps this row's warning:
-        # can_pack() reads PATH only (snapshot_core.can_pack). Asked before a
-        # `too_large` verdict too: it stores nothing agents get, and its Re-pack
-        # button could no more turn green here (review of #257).
-        return _ok("snapshot", snapshot_core.off_detail())
-    if snap is not None and snap.status == "too_large":
-        # Not "no snapshot": there IS a verdict, and it names its numbers (#82).
-        # The fix is `--refresh` because a plain `onboard` only reloads this
-        # verdict — which is how the line stayed a warning forever.
-        return _warn("snapshot", snapshot_core.too_large_detail(snap), snapshot_core.REPACK_HINT)
-    # Nothing to fix: the pack is opt-in (`init` makes none) and no agent reads one.
-    return _ok("snapshot", "none — opt-in: aisquare project onboard packs one")
-
-
 def _check_brain(cwd: Path | None = None) -> DoctorCheck:
     """The team's long-term memory: gbrain presence, brain state, distill lag.
 
@@ -3036,13 +2867,6 @@ def _display_url(url: str) -> str:
     host = parts.netloc.rsplit("@", 1)[-1]
     path = parts.path.rstrip("/")
     return f"{parts.scheme}://{host}{path}" if parts.scheme else f"{host}{path}"
-
-
-def _has_module(name: str) -> bool:
-    try:
-        return importlib.util.find_spec(name) is not None
-    except ModuleNotFoundError:
-        return False
 
 
 def last_injection() -> InjectionRecord | None:

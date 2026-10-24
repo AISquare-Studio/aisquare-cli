@@ -548,9 +548,9 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
     "On purpose" is read off what the row already carries: context entries, a
     codename (it entered the fleet), linked repos, board activity, a fleet
     agent — and a codebase snapshot on disk, which ``project onboard`` and
-    ``init`` write. Everything else — the 23 of 27 registrations on the
-    reporting machine that held nothing but captured prompts — stays hidden,
-    reachable through ``project list --all``.
+    ``init`` wrote up to 0.8 (:func:`_snapshot_on_disk`). Everything else — the
+    23 of 27 registrations on the reporting machine that held nothing but
+    captured prompts — stays hidden, reachable through ``project list --all``.
 
     A FORGOTTEN row is never adopted, whatever it carries: ``forget`` clears
     ``onboarded_at`` so that the next prompt there revives the row captured,

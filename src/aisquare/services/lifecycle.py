@@ -105,10 +105,6 @@ def _configured_explainability(settings: ExplainabilitySettings) -> str | None:
     return "; ".join(parts) or None
 
 
-#: What ``init`` says about the Repomix pack it no longer makes (doctor words it as a row).
-SNAPSHOT_OPT_IN = "not packed (opt-in: aisquare project onboard packs one)"
-
-
 def initialize(
     path: Path | None,
     *,
@@ -196,14 +192,8 @@ def initialize(
 
     onboarded = 0
     if onboard:
-        # No Repomix pack: no agent is pointed at one, and it cost init a minute on a
-        # large repo. `project onboard` packs one on demand.
-        report = project_service.onboard(path, refresh=False, pack=False)
+        report = project_service.onboard(path, refresh=False)
         onboarded = len(report.seeded)
-        if report.snapshot is None:
-            # The home's own sentence where it has one: it is never packed, so the opt-in
-            # line would name a `project onboard` that packs nothing there (D5, #42).
-            notes.append(f"Snapshot: {report.snapshot_note or SNAPSHOT_OPT_IN}.")
 
     for agent in agents:
         try:

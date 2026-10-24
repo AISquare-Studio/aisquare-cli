@@ -2788,10 +2788,11 @@ def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
 
 
 def _old_pack(project_id: str) -> Path:
-    """The codebase pack a build up to 0.8 left for ``project_id``, as it wrote it."""
+    """A codebase pack as a build up to 0.8 left one for ``project_id``: its files, and the
+    ``snapshot.json`` the v17 backfill reads as evidence."""
     pack = paths.project_data_dir(project_id) / "snapshot"
     pack.mkdir(parents=True, exist_ok=True)
-    for name in ("pack.repomix.xml", "skeleton.repomix.xml", "index.json"):
+    for name in ("pack.xml", "skeleton.xml", "index.json"):
         (pack / name).write_text("", encoding="utf-8")
     (pack / "snapshot.json").write_text("{}", encoding="utf-8")
     return pack
@@ -2822,12 +2823,16 @@ def test_a_pack_is_the_evidence_first_and_deleted_after(isolated_home: Path) -> 
 def test_old_packs_go_once_and_nothing_outside_projects_is_followed(
     isolated_home: Path, tmp_path: Path
 ) -> None:
-    """Every project's ``snapshot/`` goes on the first open, and only that: not a file of
-    that name, not a symlink's target, not a pack reached through a project directory
-    that is a symlink out of the home. A pack written after that open stays: the cleanup
-    ran, and records it."""
+    """Every project's ``snapshot/`` goes on the first open, the aisquare home's own among
+    them (D5: its pack copied the home's login data), and only that: not a file of that
+    name, not a symlink's target, not a pack reached through a project directory that is a
+    symlink out of the home. A pack written after that open stays: the cleanup ran, and
+    records it."""
+    from aisquare.core.workspace import project_id_for
+
     first = _old_pack("prj_a")
     second = _old_pack("prj_b")
+    homes = _old_pack(project_id_for(paths.aisquare_home().resolve()))
     (paths.project_data_dir("prj_b") / "explainability-key").write_text("k", encoding="utf-8")
     (paths.project_data_dir("prj_file")).mkdir(parents=True)
     (paths.project_data_dir("prj_file") / "snapshot").write_text("not ours", encoding="utf-8")
@@ -2843,7 +2848,7 @@ def test_old_packs_go_once_and_nothing_outside_projects_is_followed(
 
     with store_session():
         pass
-    assert not first.exists() and not second.exists()
+    assert not first.exists() and not second.exists() and not homes.exists()
     assert (paths.project_data_dir("prj_b") / "explainability-key").exists()
     assert (paths.project_data_dir("prj_file") / "snapshot").read_text(encoding="utf-8")
     assert (outside / "snapshot" / "keep.txt").exists(), "never followed out of the home"

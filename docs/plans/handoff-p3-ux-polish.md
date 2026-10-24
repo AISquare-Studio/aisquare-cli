@@ -945,6 +945,7 @@ Every workstream, its PR, and what was measured. Reduced scale throughout (the o
 - **P3-W2b** (#359, squash 5188caa9): a `TeamStrip` under the Manager tab's info line counts live non-manager agents per role and state, using the sidebar's icons. It adds no reads, is hidden when only the manager runs, and opens the Board tab on click (#287). Scale/measurement: none (unit/pilot tests only). Not done here:
 - **P3-W2c** (#362, squash 467fa675): `asq-statusline` (standard library only) records each Claude Code session's rate limits and prints a one-line status. `accounts statusline --install/--wrap/--uninstall` and `aisquare uninstall` manage it. The usage cache ingests these readings, so the endpoint is asked less. `accounts sessions` and the Accounts page's "Sessions on this machine" list the device's sessions (#287). Scale/measurement: import cost **20.3 ms** (median of 9, range 19.2 to 22.4; target ≤ 30 ms) against 173 ms for the full CLI. A whole run took **50 ms** wall (49 to 52). Live run at reduced scale: Claude Code 2.1.310, one session on slot 4, one prompt; the status line read `acct 4 · 5h 9% · wk 7% · ctx 4%` against the endpoint's 10%/7%. Not done here: the one-hour endpoint-request baseline (4 agents on 3 accounts) was not measured.
 - **P3-W5** (#370, squash 40f3b4f0): `fleet adopt <session-id|transcript>` resumes a hand-started conversation as a fleet agent, on its own account and in its own directory, keeping its session id. Refusal codes are `held`, `owned_by_the_fleet`, `not_onboarded`, `no_such_conversation` and `not_on_a_known_account`. `fleet adopt --list` is the picker, and the manager cycle gains one sentence. Adds the phase C docs (#290). Scale/measurement: none (unit/pilot tests only). Not done here: phase A (`accounts adopt <dir>`) is out of scope by owner decision. asq's *Adopt a conversation…* is #378.
+- **P3-W5 (asq)** (#378, squash 00831dbd): the Accounts page's *Adopt a conversation…* under *Sessions on this machine* opens `fleet adopt --list` as a picker, read in a worker; a conversation a `claude` still holds, or whose directory is no onboarded project, says why and cannot be picked, and Enter on another adopts it in a worker (a writer in the hand-over table) (#290). Scale/measurement: none (a pilot test). Walked by reviewer-a at 80x30 and 200x50 (UI evidence on task #45).
 
 ## Owner calls taken
 
@@ -1072,9 +1073,12 @@ The consequential ones (security, a default a user notices, privacy, cost, or ha
 | P3-W5 | #370 | 2. Where adopted agent runs | Conversation's cwd, `worktree=False` | code change |
 | P3-W5 | #370 | 3. Ended fleet row | Counts as owned (`fleet restart` instead) | code change |
 | P3-W5 | #370 | 4. Picker source | Transcripts, not W2c's status-line registry | code change |
-| P3-W5 | #370 | 5. asq "Adopt into fleet…" | Follow-up PR after #362 | (#378, open) |
+| P3-W5 | #370 | 5. asq "Adopt into fleet…" | Follow-up PR after #362 | shipped as #378 |
 | P3-W5 | #370 | 6. Defaults | Role `coder`, label `<role>-<n>` | `--role R` / `--label L` |
 | P3-W5 | #370 | 7. Cycle sentence | Kept despite per-prompt token cost | move to an on-request skill |
+| P3-W5 | #378 | 1. Picker vs a button per session | A picker over `fleet adopt --list` (the sessions view lists mostly live sessions, which adopt refuses) | code change |
+| P3-W5 | #378 | 2. Rows that cannot be adopted | Listed, disabled, with the reason | code change |
+| P3-W5 | #378 | 3. Role | `coder`, the CLI's default; no role picker | code change |
 
 Note: #334's owner calls are an unnumbered bullet list; each bullet is one row above.
 

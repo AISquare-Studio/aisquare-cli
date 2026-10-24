@@ -24,7 +24,6 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -63,7 +62,7 @@ from aisquare.models import (
     TeamTask,
     WorkBrief,
 )
-from aisquare.services import command_reports, team
+from aisquare.services import command_reports, install_route, team
 
 #: Distinct failures by one task against one revision of a requirement that block
 #: the task, so the manager re-plans instead of the task looping through review.
@@ -593,13 +592,13 @@ def status_of(
 
 
 def _command_of(report_id: str | None) -> str | None:
-    """The command a saved report ran, quoted as a shell would take it; None when the
+    """The command a saved report ran, quoted for this shell to paste; None when the
     report cannot be read (its proof then says why)."""
     try:
         argv = command_reports.load_report(report_id or "").argv
     except (OSError, ValueError):
         return None
-    return _clip(shlex.join(argv), 300)
+    return _clip(install_route.command_line(argv), 300)
 
 
 def show(ref: str, *, session_ref: str | None = None, cwd: Path | None = None) -> BriefView:

@@ -231,7 +231,7 @@ def _rule_files(root: Path) -> list[tuple[str, Path]]:
     return [(label, path) for label, path in found if path.is_file()]
 
 
-def _stamp(status: os.stat_result) -> str:
+def _change_stamp(status: os.stat_result) -> str:
     """When a file last changed in any way: its ctime, which neither a write that puts
     the old bytes back nor ``touch``/``utime`` can restore (tester's X5 on #14). Windows
     has no such time, and its mtime stands in."""
@@ -239,7 +239,7 @@ def _stamp(status: os.stat_result) -> str:
 
 
 def _hash_file(path: Path, entry: hashlib._Hash) -> str:
-    """Add ``path``'s mode and bytes to ``entry``; its :func:`_stamp`. ValueError when it
+    """Add ``path``'s mode and bytes to ``entry``; its :func:`_change_stamp`. ValueError when it
     cannot be read whole, or changed while it was read."""
     try:
         before = path.stat()
@@ -254,7 +254,7 @@ def _hash_file(path: Path, entry: hashlib._Hash) -> str:
         raise ValueError(f"cannot read source file {path}: {exc}") from None
     if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
         raise ValueError(f"source changed while checking: {path}")
-    return _stamp(after)
+    return _change_stamp(after)
 
 
 def _hash_link(root: Path, path: Path, entry: hashlib._Hash) -> str:
@@ -262,7 +262,7 @@ def _hash_link(root: Path, path: Path, entry: hashlib._Hash) -> str:
     an untracked ``conftest.py`` linked to a file in an ignored directory is that file's
     content, not the link's (tester's X3 on #14). A target outside the checkout counts
     by its link text only. The stamp covers the link and every file hashed through it."""
-    stamps = [_stamp(path.lstat())]
+    stamps = [_change_stamp(path.lstat())]
     entry.update(b"link\0" + os.fsencode(os.readlink(path)))
     target = path.resolve()
     if not target.is_relative_to(root) or not target.exists():
@@ -290,7 +290,7 @@ def _iter_source_entries(root: Path) -> Iterator[tuple[str, str, str | None]]:
     combined fingerprint cannot disagree about what counts. A symlink is hashed with
     what it points at inside the checkout, never followed out of it. A submodule or
     nested repository adds its recorded commit AND its own content, so an edit, a new
-    file or a local commit inside it changes the identity. The stamp (:func:`_stamp`)
+    file or a local commit inside it changes the identity. The stamp (:func:`_change_stamp`)
     is None for a path with no file to time: deleted, or a directory entry.
     """
     root = root.resolve()

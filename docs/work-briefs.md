@@ -73,7 +73,9 @@ the check itself, another `asq exec` run, or you while the check ran.
 - **The ignore rules are source too.** Every `.gitignore` git reads counts, including
   one that ignores itself, and so do `.git/info/exclude` and your `core.excludesFile`
   (named `.git/core.excludesFile` in a reason). A new rule that hides a `conftest.py`
-  changes the identity.
+  changes the identity. A `.gitignore` inside an ignored directory does not count: git
+  never reads it, so it cannot hide anything, and rebuilding `.venv` or
+  `node_modules` leaves a pass alone.
 - **A symlink counts as what it points at** inside the checkout, a file or a whole
   directory, even an ignored one. A link out of the checkout counts by its text.
 - **A change put back is still a change.** Each file's change time is kept before and

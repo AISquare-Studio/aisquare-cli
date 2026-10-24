@@ -142,7 +142,8 @@ untracked nonignored file, kept file by file.
   files, not only the commit it records.
 - **Ignored files are left out, the rules that ignore them are not.** Files git
   ignores do not count, but every `.gitignore` git reads does (one that ignores itself
-  too), and so do `.git/info/exclude` and `core.excludesFile`. Everything else
+  too; not one inside an ignored directory, which git never reads), and so do
+  `.git/info/exclude` and `core.excludesFile`. Everything else
   counts, a file the command itself wrote included: `pytest --junitxml=report.xml`
   changes the identity, as an edit or a removal does. When a report backs brief
   evidence, the identity must be the same before, after and now, so write check

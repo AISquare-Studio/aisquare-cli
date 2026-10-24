@@ -12,7 +12,6 @@ with the whole session start tested against the 10,000-character hook cap.
 from __future__ import annotations
 
 import json
-import shlex
 import sqlite3
 import subprocess
 import sys
@@ -28,7 +27,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core.store import BriefChangedError, store_session
 from aisquare.models import RequirementStatus, TeamTask, WorkBrief
-from aisquare.services import briefs, team
+from aisquare.services import briefs, install_route, team
 from aisquare.services import command_reports as reports
 from aisquare.services import fleet as fleet_service
 from tests.projects import add_project
@@ -699,7 +698,7 @@ def test_show_and_check_print_the_command_that_backed_a_pass(runner: CliRunner) 
     brief, task = _linked()
     briefs.update(brief.id, checks={"R1": "pytest -q test_app.py"})
     _record(brief, task, _run(_py("print('ok')"), task=task))
-    ran = f"ran: {shlex.join(_py('print(' + chr(39) + 'ok' + chr(39) + ')'))}"
+    ran = f"ran: {install_route.command_line(_py('print(' + chr(39) + 'ok' + chr(39) + ')'))}"
     shown = runner.invoke(app, ["brief", "show", "B1"]).stdout
     assert "check: pytest -q test_app.py" in shown and ran in shown, shown
     checked = runner.invoke(app, ["brief", "check", "B1"]).stdout

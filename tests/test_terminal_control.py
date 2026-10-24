@@ -439,7 +439,10 @@ def test_real_tmux_a_killed_control_client_hands_the_pane_to_polling_within_a_se
         host = Host(live, pane_id)
         async with host.run_test(size=(80, 24)) as pilot:
             pane = host.pane
-            await wait_until(pilot, lambda: _serving(pane), timeout=5.0)
+            # Killed once tmux has answered it: attached, as a client serving a pane is. The
+            # pane counts a client as serving from its spawn, and killed while it was still
+            # telling tmux who it is, tmux 3.4 (CI's) crashed, taking the pane with it.
+            await wait_until(pilot, lambda: _serving(pane) and _client(pane).answered, 5.0)
             pid = _client(pane).pid
             assert pid is not None
             os.kill(pid, signal.SIGKILL)

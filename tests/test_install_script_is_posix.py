@@ -24,6 +24,7 @@ script or is one edit away.
 
 from __future__ import annotations
 
+import os
 import re
 import stat
 import sys
@@ -32,7 +33,10 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "install.sh"
+#: AISQUARE_TEST_INSTALL_SH points these tests at another copy: the release
+#: workflow (.github/workflows/installers.yml) runs them on the STAMPED install.sh
+#: it is about to upload, so a release asset is held to the same guards.
+SCRIPT = Path(os.environ.get("AISQUARE_TEST_INSTALL_SH") or REPO / "install.sh")
 CELL = REPO / "tests/install/cell.sh"
 CELL_NONROOT = REPO / "tests/install/cell-nonroot.sh"
 MATRIX = REPO / "tests/install/matrix.sh"

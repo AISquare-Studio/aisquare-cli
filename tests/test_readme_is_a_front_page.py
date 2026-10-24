@@ -84,10 +84,15 @@ _ABSOLUTE = re.compile(r"^(?:https?://|mailto:)", re.IGNORECASE)
 #: The two spellings of a link into this repository's `main` the README uses.
 _BLOB = "https://github.com/AISquare-Studio/aisquare-cli/blob/main"
 _RAW = "https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main"
-#: A URL into this repository's `main`, on github.com or as a raw download.
+#: A release asset: install.sh and install.ps1, stamped copies of the files of
+#: the same name (scripts/stamp_installers.py), so the asset is read as that path.
+_RELEASE = "https://github.com/AISquare-Studio/aisquare-cli/releases/"
+#: A URL into this repository's `main`, on github.com or as a raw download, or a
+#: release asset.
 _REPO_URL = re.compile(
     r"https://(?:github\.com/AISquare-Studio/aisquare-cli/(?:blob|tree|raw)/main"
-    r"|raw\.githubusercontent\.com/AISquare-Studio/aisquare-cli/(?:refs/heads/)?main)"
+    r"|raw\.githubusercontent\.com/AISquare-Studio/aisquare-cli/(?:refs/heads/)?main"
+    r"|github\.com/AISquare-Studio/aisquare-cli/releases/(?:latest/download|download/v[^/\s]+))"
     r"/([^\s)\"'<>\]`]+)",
     re.IGNORECASE,
 )
@@ -239,7 +244,7 @@ def test_every_repo_link_in_the_readme_resolves() -> None:
     # Counted a second, independent way: a plain substring count of each URL
     # form. If either half of _REPO_URL goes blind, the regex reads fewer links
     # than the text plainly holds.
-    written = text.count(_BLOB + "/") + text.count(_RAW + "/")
+    written = text.count(_BLOB + "/") + text.count(_RAW + "/") + text.count(_RELEASE)
     assert written and len(links) >= written, (
         f"the README holds {written} links into this repo but only {len(links)} were "
         "read — the URL pattern went blind, so the check below is vacuous"

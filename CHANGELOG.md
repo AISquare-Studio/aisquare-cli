@@ -8,6 +8,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Versioned installers on every release**: from 0.9.0 on, each GitHub Release
+  carries `install.sh` and `install.ps1` stamped to its own version, so
+  `https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.sh`
+  installs exactly 0.9.0 and `…/releases/latest/download/install.sh` the latest.
+  `publish.yml` attaches them after the PyPI publish, once PyPI serves the
+  version (`.github/workflows/installers.yml`, `scripts/stamp_installers.py`).
+  `--version V` still overrides a stamped pin, and `--version latest` drops it.
+  The README, `docs/install.md` and the repair command `asq upgrade` prints now
+  give the latest-release URL; the copies on `main` keep working.
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]
   [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
   read only the bytes the session's transcript gained since the last record, plus its

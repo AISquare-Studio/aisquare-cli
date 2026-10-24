@@ -46,8 +46,11 @@ One line. It works out what your machine already has, installs only what is
 missing, and ends by offering to open the UI:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh
+curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.sh | sh
 ```
+
+That installs the latest release. To pin one, every release from 0.9.0 on
+carries its own copy: `curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.sh | sh`.
 
 macOS, Linux and WSL2. It installs uv, a Python 3.13 for the CLI alone,
 `aisquare-cli`, tmux, gh, git, Node and Claude Code, then registers the git repo

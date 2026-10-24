@@ -54,7 +54,10 @@ if sys.platform == "win32":  # pragma: no cover - the POSIX installer's own test
     pytest.skip("install.sh is a POSIX shell script", allow_module_level=True)
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "install.sh"
+#: AISQUARE_TEST_INSTALL_SH points these tests at another copy: the release
+#: workflow (.github/workflows/installers.yml) runs them on the STAMPED install.sh
+#: it is about to upload, so a release asset is held to the same guards.
+SCRIPT = Path(os.environ.get("AISQUARE_TEST_INSTALL_SH") or REPO / "install.sh")
 
 #: Resolved from the REAL PATH, once, and passed to `subprocess.run` absolutely.
 #: Every test below hands the child a narrowed PATH so an absent tool is really
@@ -95,6 +98,10 @@ def sh(
         environment["PATH"] = path
     if env:
         environment.update(env)
+    # An empty pin means "unpinned". On a stamped copy (see SCRIPT) "" falls back
+    # to the stamped version, so it is said the way that copy understands too.
+    if environment["AISQUARE_INSTALL_VERSION"] == "":
+        environment["AISQUARE_INSTALL_VERSION"] = "latest"
     return subprocess.run(
         [SH, "-c", f'. "{SCRIPT}"\n{snippet}\n'],
         capture_output=True,
@@ -983,7 +990,8 @@ def _piped_into_sh_with_a_terminal(
             "HOME": str(home),
             "NO_COLOR": "1",
             "AISQUARE_INSTALL_LIB": "0",
-            "AISQUARE_INSTALL_VERSION": "",
+            # `latest`, not "": "" falls back to a stamped copy's pin (see SCRIPT).
+            "AISQUARE_INSTALL_VERSION": "latest",
         }
     )
 

@@ -93,7 +93,14 @@ WANT_AGENT=1
 WANT_SYSTEM_DEPS=1
 WANT_PROJECT=1
 PROJECT_DIR=""
-PIN_VERSION=${AISQUARE_INSTALL_VERSION:-}
+# THE RELEASE STAMP. Empty in the repository, so the copy on `main` installs the
+# latest release. A release asset (releases/download/vX.Y.Z/install.sh) has this
+# set to its own version by scripts/stamp_installers.py, so that URL installs
+# exactly that version. Either way --version V and AISQUARE_INSTALL_VERSION=V
+# still win, and `--version latest` drops the pin. Keep it ONE line: the stamper
+# replaces this exact text and refuses a file where it is missing or doubled.
+STAMPED_VERSION=""
+PIN_VERSION=${AISQUARE_INSTALL_VERSION:-$STAMPED_VERSION}
 PYTHON_VERSION="$DEFAULT_PYTHON"
 DRY_RUN=0
 VERBOSE=0
@@ -674,6 +681,8 @@ resolve() {
         _resolve_system
         return 0
     fi
+    # `latest` is the way out of a stamped pin: the newest release, as unstamped.
+    [ "$PIN_VERSION" = latest ] && PIN_VERSION=""
     if [ -n "$PIN_VERSION" ]; then
         LATEST_VERSION=$PIN_VERSION
         note "pinned to $PIN_VERSION"
@@ -2270,7 +2279,8 @@ Options
       --no-system-deps Skip tmux, gh and Node.
       --project DIR    Register DIR as the project (default: $PWD if a git repo).
       --no-project     Machine setup only; register nothing.
-      --version V      Pin aisquare-cli to V (default: latest).
+      --version V      Pin aisquare-cli to V, or `latest` (default: latest, or
+                       the release a release asset was downloaded from).
       --python V       Interpreter uv resolves for the tool env (default: 3.13).
       --offline        Do not ask PyPI what the latest version is.
       --upgrade-all    Also move uv itself and the system packages.

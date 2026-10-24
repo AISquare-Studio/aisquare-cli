@@ -10,8 +10,21 @@ One line. It works out what your machine already has, installs only what is
 missing, and ends by offering to open the UI:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh
+curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.sh | sh
 ```
+
+That is the latest release. Every release from 0.9.0 on carries its own
+`install.sh` and `install.ps1`, which install exactly that version, so to pin
+one, put its tag in the URL:
+
+```sh
+curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.sh | sh
+```
+
+`--version V` (or `AISQUARE_INSTALL_VERSION=V`) still overrides the version a
+script was released with, and `--version latest` drops it. The copy on `main`,
+`https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh`,
+installs the latest release too.
 
 macOS, Linux and WSL2. It installs [uv](https://docs.astral.sh/uv/), a Python
 3.13 for the CLI alone, `aisquare-cli`, tmux, gh, git, Node and
@@ -23,8 +36,11 @@ On **Windows**, everything runs inside WSL2 — the UI gives each agent a real
 tmux pane and Windows has no tmux. This does both steps for you, in PowerShell:
 
 ```text
-irm https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.ps1 | iex
+irm https://github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.ps1 | iex
 ```
+
+A release's own `install.ps1` pins the same way:
+`irm https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.ps1 | iex`.
 
 <details>
 <summary><b>Piping a script into a shell, and how not to</b></summary>
@@ -33,7 +49,7 @@ Fair. Read it first, or skip it entirely — nothing here needs it.
 
 ```sh
 # See exactly what it would do, and run none of it:
-curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh -o install.sh
+curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.sh -o install.sh
 less install.sh
 sh install.sh --dry-run
 ```
@@ -60,7 +76,7 @@ curl -fsSL .../install.sh | sh -s -- --yes --no-agent
 | `--project DIR` | Register `DIR` instead of the current directory. |
 | `--no-project` | Set up the machine, register nothing. |
 | `--offline` | Do not ask PyPI what the latest version is. |
-| `--version V` | Pin `aisquare-cli` to `V`. |
+| `--version V` | Pin `aisquare-cli` to `V`, or `latest` to undo a release's own pin. |
 
 It refuses to run as root outside a container, uses `sudo` only for the system
 packages and one command at a time, and never edits your shell profile beyond

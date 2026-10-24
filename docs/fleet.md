@@ -1419,6 +1419,56 @@ posted its result)`). It wakes nobody: the manager reads it with its next update
 Coders are not in the default list, because a coder in review may be reopened; add
 `"coder"` to opt in. A manager or the captain is never stopped.
 
+### Watching the fleet
+
+A manager that watches panes, CI or pull requests with its own turns (a Monitor, a
+`sleep` loop, a `gh` poll) pays for its whole context on every look, and most looks
+find nothing; a Monitor also expires after 30 minutes at most. `aisquare watch` is
+one plain process that looks instead, and wakes a manager only for something new:
+
+```text
+aisquare watch [--interval 60] [--once] [--json]
+aisquare watch --detach | --stop | --status
+aisquare watch show [<path> | --last] [--json]
+```
+
+Every `[watch] interval_seconds` (60) it looks at:
+
+- **what needs you**: the same scan as the phone's *Needs you* cards, the phone's
+  dismissals honoured. That covers a permission or question dialog, an agent asking,
+  a usage limit, a crashed, lost or failed agent, and a manager or fleet down;
+- **stale agents**: the captain queue's rule for an agent that shows no sign of life;
+- **pull requests**, with `[watch] github = true` (off by default, since it leaves the
+  machine): each project's GitHub repository (its `origin`) through `gh api`, every
+  `github_every_seconds` (120). Each request carries the last ETag, so an unchanged
+  answer is a 304 that costs no rate limit and makes no further call. It reports
+  `pr_approved`, `pr_changes_requested` and `pr_checks_done`;
+- **your own sources**: `[watch.sources.<name>]` with `command = [...]` and
+  `every_seconds = 300`. A command prints JSON lines `{"id", "project", "kind",
+  "summary"}`; `project` is a codename or an id. aisquare ships no integration with any
+  outside service: a source for an inbox is your own script. One that fails is said
+  once per streak while the others carry on.
+
+**What it delivers.** Each item has a stable id, kept in `~/.aisquare/watch/state.json`,
+so the same news is never new twice and a new prompt is a new item. For each project
+with something new, the full items go to `~/.aisquare/watch/<project>/<UTC stamp>.json`
+(mode 600: pane excerpts stay on this machine). Then one board line of kind `watch`,
+addressed to the manager, carries the counts and that path and never an excerpt:
+`watch: 3 new (2 permission, 1 pr_approved): aisquare watch show <path>`. The manager
+then gets one nudge. A working manager is handed the line when its turn ends, because a
+line addressed to it wakes it. With `[watch] auto_stop` (on), each look also stops the
+workers that have finished (see *Auto-stop* under [Capacity](#capacity)).
+
+**One watcher per home.** `--detach` starts it in the `asq-watch` session of the fleet's
+own tmux server and returns; a second refuses and names the first. `--status` says
+whether one runs and how long ago it last looked, and `aisquare doctor`'s `fleet watcher`
+row says the same, and warns when a running watcher has not looked for three intervals.
+`--stop` ends it, and so does a `fleet shutdown` that leaves no agent live on the
+machine: it watches every project, so one project's shutdown leaves it running.
+`--once` looks once, delivers and exits, which suits a cron line. Beside a running
+watcher's look it waits a moment, then exits 1 with `busy` (`{"error": "busy"}` under
+`--json`) rather than deliver the same news twice.
+
 ### Tools and skills per role
 
 Every tool schema and the skill listing ride every request of every agent, for the
@@ -2283,55 +2333,51 @@ launch with tools this one denies, with the `config set` that keeps them denied 
 `~/.aisquare` without going through `aisquare upgrade` (a second tool install, a synced
 home) is not warned.
 
-### Watching the fleet
+### To the release with capacity and setup (store schema 36)
 
-A manager that watches panes, CI or pull requests with its own turns (a Monitor, a
-`sleep` loop, a `gh` poll) pays for its whole context on every look, and most looks
-find nothing; a Monitor also expires after 30 minutes at most. `aisquare watch` is
-one plain process that looks instead, and wakes a manager only for something new:
+**The store migrates itself on first open, from v35 to v36, in one step.** v36 adds five
+nullable columns for a parent manager over a group: `project_group.parent_project_id`,
+`project_group.route` and `project_group.max_agents`, and `team_task.origin_task_id` and
+`team_task.origin_project_id` (a task delegated from a parent's). They are checked for by
+presence and added only where absent. A group without a parent, and every task written
+before the step, reads as before. The symbol index is its own SQLite file per project
+(`~/.aisquare/projects/<id>/code/`), not part of the store.
 
-```text
-aisquare watch [--interval 60] [--once] [--json]
-aisquare watch --detach | --stop | --status
-aisquare watch show [<path> | --last] [--json]
-```
+**The config file keeps version 3.** Every new key follows its default until you set it:
 
-Every `[watch] interval_seconds` (60) it looks at:
+| Key | Default | What it changes |
+| --- | --- | --- |
+| `[fleet] max_agents_total` | `0` (no budget) | Live agents across every project, the captain excluded. |
+| `[fleet] min_free_mb` | `2048` | A spawn is refused below this much available memory. `0` turns it off. |
+| `[fleet] test_gate_mb` / `test_gate_wait_minutes` | `0` / `15` | What `aisquare fleet gate` waits for before a heavy run. |
+| `[fleet] auto_stop_finished` / `auto_stop_idle_minutes` / `auto_stop_roles` | `true` / `5` / every checking role | Finished workers stop by themselves; coders opt in. |
+| `[fleet] pane_clipboard` | `off` | Whether a pane program may set your clipboard. |
+| `[watch] interval_seconds` / `github` / `github_every_seconds` / `auto_stop` / `sources` | `60` / `false` / `120` / `true` / `{}` | `aisquare watch`, which nothing starts until you do. |
+| `[code] enabled` / `max_file_kb` | `true` / `1024` | The symbol index behind `aisquare code`. |
+| `[accounts] share` | `[]` | What every Claude account shares. Nothing until you enable a part. |
 
-- **what needs you**: the same scan as the phone's *Needs you* cards, the phone's
-  dismissals honoured. That covers a permission or question dialog, an agent asking,
-  a usage limit, a crashed, lost or failed agent, and a manager or fleet down;
-- **stale agents**: the captain queue's rule for an agent that shows no sign of life;
-- **pull requests**, with `[watch] github = true` (off by default, since it leaves the
-  machine): each project's GitHub repository (its `origin`) through `gh api`, every
-  `github_every_seconds` (120). Each request carries the last ETag, so an unchanged
-  answer is a 304 that costs no rate limit and makes no further call. It reports
-  `pr_approved`, `pr_changes_requested` and `pr_checks_done`;
-- **your own sources**: `[watch.sources.<name>]` with `command = [...]` and
-  `every_seconds = 300`. A command prints JSON lines `{"id", "project", "kind",
-  "summary"}`; `project` is a codename or an id. aisquare ships no integration with any
-  outside service: a source for an inbox is your own script. One that fails is said
-  once per streak while the others carry on.
+**What you will notice.**
 
-**What it delivers.** Each item has a stable id, kept in `~/.aisquare/watch/state.json`,
-so the same news is never new twice and a new prompt is a new item. For each project
-with something new, the full items go to `~/.aisquare/watch/<project>/<UTC stamp>.json`
-(mode 600: pane excerpts stay on this machine). Then one board line of kind `watch`,
-addressed to the manager, carries the counts and that path and never an excerpt:
-`watch: 3 new (2 permission, 1 pr_approved): aisquare watch show <path>`. The manager
-then gets one nudge. A working manager is handed the line when its turn ends, because a
-line addressed to it wakes it. With `[watch] auto_stop` (on), each look also stops the
-workers that have finished (see *Auto-stop* under [Capacity](#capacity)).
+- On a machine with under 2 GB available, a spawn is refused and names both numbers. Lower
+  `fleet.min_free_mb` (or set it to `0`) to spawn anyway. A refusal for the per-project cap
+  says `capacity_project` under `--json`, where it said `fleet_error`.
+- A tester, reviewer, validator or ui-tester that has finished stops by itself after five
+  idle minutes, and its exit wakes nobody. `fleet.auto_stop_finished = false` keeps them.
+- The fleet's tmux server turns the mouse on: in `fleet attach` a plain drag is tmux's
+  selection; hold Shift (Option in macOS Terminal and iTerm2) to select in your terminal.
+  It applies to a server started after the upgrade.
+- `project onboard` and `init` start a symbol index in the background, and a session start
+  in a project with an index names `aisquare code` in two lines. `code.enabled = false`
+  leaves `aisquare code index` as the only way to build one.
+- `aisquare doctor` has new rows: `fleet capacity`, `code index`, `anthropic routing`,
+  `claude-accounts sharing` and `fleet watcher`.
 
-**One watcher per home.** `--detach` starts it in the `asq-watch` session of the fleet's
-own tmux server and returns; a second refuses and names the first. `--status` says
-whether one runs and how long ago it last looked, and `aisquare doctor`'s `fleet watcher`
-row says the same, and warns when a running watcher has not looked for three intervals.
-`--stop` ends it, and so does a `fleet shutdown` that leaves no agent live on the
-machine: it watches every project, so one project's shutdown leaves it running.
-`--once` looks once, delivers and exits, which suits a cron line. Beside a running
-watcher's look it waits a moment, then exits 1 with `busy` (`{"error": "busy"}` under
-`--json`) rather than deliver the same news twice.
+**Moving back** with `aisquare upgrade --version <v>` is safe for the store: an older build
+opens a v36 store as it is, without migrating it down, and never reads the five columns. A
+group's parent, its routes and its cap, and every task's link to its origin, are then
+ignored, and come back on the next upgrade. The new config keys are ignored by an older
+build. Shared accounts stay linked: run `aisquare accounts share --disable <parts>` before
+moving back to put each account's own entries back.
 
 ## Troubleshooting
 

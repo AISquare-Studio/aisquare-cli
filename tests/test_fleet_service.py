@@ -18447,7 +18447,14 @@ def test_a_limit_with_on_limit_switch_moves_the_agent_once_and_wakes_no_manager(
     assert nudges == []
     with store_session() as store:
         events = store.recent_events(project.id, limit=50)
-    assert not any(team_service._wakes_manager(event) for event in events)
+    manager = TeamSession(
+        id="mgr",
+        project_id=project.id,
+        role="manager",
+        started_at=datetime.now(UTC),
+        last_seen_at=datetime.now(UTC),
+    )
+    assert not any(team_service.wake_class(event, manager) == "wake" for event in events)
 
     # The manager's cycle used to switch the replacement again once the hand-over was done.
     with pytest.raises(fleet_service.FleetError, match="usage-limit hand-over; `--force`"):

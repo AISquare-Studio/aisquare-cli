@@ -90,6 +90,7 @@ from pathlib import Path
 from typing import Literal
 
 from aisquare.core import paths
+from aisquare.core.memory import _sysctl
 from aisquare.core.spawn import tmux_client_env
 
 DEFAULT_SOCKET = "asq"
@@ -393,8 +394,6 @@ def _tmux(argv: Sequence[str], stdin: bytes | None, *, timeout: float | None = N
 
 #: Where Linux names this boot: a random UUID the kernel draws as it boots.
 _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
-#: Where macOS keeps ``sysctl``, for a PATH without ``/usr/sbin`` (launchd, cron).
-_SYSCTL = ("/usr/sbin/sysctl", "/sbin/sysctl")
 #: Where Linux says when it booted (``btime``, seconds since the epoch).
 _PROC_STAT = Path("/proc/stat")
 
@@ -437,23 +436,6 @@ def _ask_boot_id() -> str | None:
         return None
     asked = _sysctl("kern.bootsessionuuid")
     return asked or None
-
-
-def _sysctl(name: str) -> str | None:
-    """What ``sysctl -n <name>`` says, from ``sysctl`` on PATH or where macOS keeps it;
-    ``None`` when it cannot be asked or does not answer."""
-    sysctl = shutil.which("sysctl") or next(
-        (place for place in _SYSCTL if os.access(place, os.X_OK)), None
-    )
-    if sysctl is None:
-        return None
-    try:
-        completed = subprocess.run(
-            [sysctl, "-n", name], capture_output=True, text=True, timeout=5, check=False
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return completed.stdout.strip() if completed.returncode == 0 else None
 
 
 #: When this boot started once :func:`boot_started` has found it; ``None`` until then.

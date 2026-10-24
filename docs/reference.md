@@ -93,6 +93,7 @@ aisquare
 │                   shutdown [--all] [--yes] [--force] [--forget] · attach
 │                   reap [--all] [--server-down]
 │                   rename <codename> · pause · resume
+│                   capacity · gate [--min-free-mb N] [--wait 15m] [-- CMD …]
 │                   (all with [--project P]; spawn · tell · restart · switch · pause · resume
 │                   take [--as SESSION])
 ├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami

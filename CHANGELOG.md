@@ -8,6 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The fleet admits a spawn against the machine, not only the project** (#283).
+  `[fleet] max_agents_total` (0, no budget) caps the live agents across every
+  project, the captain excluded, and its refusal names each project's count;
+  `min_free_mb` (2048) refuses a spawn below that much available memory, or with
+  the kernel's memory pressure at critical, naming both numbers, and admits at warn
+  pressure with a note. After a memory refusal the floor is 512 MB higher for five
+  minutes, so admission does not flap. Parallel spawns at the budget's last seat
+  settle to exactly the budget, as the per-project cap does. `--json` errors are
+  `capacity_project`, `capacity_fleet` and `capacity_memory`. Memory is
+  `MemAvailable` and PSI on Linux and WSL, the pressure level and `vm_stat` on
+  macOS; elsewhere admission admits and says it could not tell.
+  `aisquare fleet capacity [--json]` shows the headroom and every limit, and
+  `aisquare doctor` has it as `fleet capacity`. `aisquare fleet gate [-- CMD]` waits
+  for memory before a heavy run and exits 75 at the deadline without running it;
+  with `test_gate_mb` set, the tester's and validator's cycles name it. Refusals and
+  admissions at the budget go to `~/.aisquare/fleet/admission.jsonl`.
+
 - **`aisquare ui --project <ref>` and `--group <name>`** (both repeatable) list only
   those projects for the session, plus the captain's section when it is on; a name
   that matches nothing is refused before the app starts (#83).

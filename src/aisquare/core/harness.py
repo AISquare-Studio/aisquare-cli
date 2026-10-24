@@ -969,10 +969,30 @@ def role_cycle(
     core = _role_cycle_core(role, session_short_id, fleet=fleet, paused=paused)
     if not core:
         return []
+    if role in ("runner", "tester", "validator") and _test_gate_on():
+        core = [*core, *_GATE_LINE]
     if role in _CLEANS_UP:
         core = [*core, *(line.format(reap=fleet("reap")) for line in _CLEANUP)]
     merge_said = any("merge" in line.lower() for line in core)
     return [*core, *_lane_rule(role, session_short_id, merge_said=merge_said, fleet=fleet)]
+
+
+_GATE_LINE = (
+    "Run a heavy check (the full test suite, a build) through the memory gate:",
+    "`aisquare fleet gate -- <command>` waits for headroom, and exit 75 means it never",
+    "came: say so on the board rather than run it anyway.",
+)
+
+
+def _test_gate_on() -> bool:
+    """Whether ``[fleet] test_gate_mb`` is set (#283): only then do the checking roles'
+    cycles name ``fleet gate``. An unreadable config names nothing."""
+    try:
+        from aisquare.core.config import load_config
+
+        return load_config().fleet.test_gate_mb > 0
+    except Exception:
+        return False
 
 
 def _role_cycle_core(

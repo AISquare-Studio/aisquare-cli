@@ -624,6 +624,12 @@ class FleetSettings(BaseModel):
     cannot spawn help the sidebar cannot see; ``max_continuations_per_hour`` caps
     how often the manager's Stop hook may keep it going on new board events.
 
+    Admission (#283): ``max_agents_total`` caps the live agents across every project,
+    the captain excluded (``0``: no budget); ``min_free_mb`` refuses a spawn below that
+    much available memory, or at critical memory pressure (``0``: off);
+    ``test_gate_mb`` is ``fleet gate``'s floor (``0``: ``min_free_mb``) and
+    ``test_gate_wait_minutes`` how long the gate waits for it.
+
     ``first_prompt`` is how an agent's first message reaches it (P0-W1a, #122):
     ``argv``, Claude Code's own command line (``claude -- "<prompt>"``), for a Claude
     Code agent, and typed into its input box for any other binary; ``type`` types it
@@ -642,6 +648,10 @@ class FleetSettings(BaseModel):
     first_prompt: Literal["argv", "type"] = "argv"
     prompt_ack_seconds: float = Field(default=45.0, ge=0)
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
+    max_agents_total: int = 0
+    min_free_mb: int = 2048
+    test_gate_mb: int = 0
+    test_gate_wait_minutes: int = 15
     pane_clipboard: Literal["off", "on"] = "off"
     """Whether a program in an agent's pane may set your clipboard (OSC 52, tmux's
     ``set-clipboard``). Off by default: on, any program a pane runs can write it. Applies

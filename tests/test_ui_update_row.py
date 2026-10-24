@@ -765,7 +765,12 @@ def test_an_ask_unanswered_after_five_seconds_counts_as_unanswered(
     """By the clock, not by the lookup's own timeout, which is per read with DNS outside it:
     a server trickling its answer held *Restart & update* off for 36 s (review of #301, m5).
     Past the deadline the button is on and the dialog says it is not confirmed; PyPI's answer,
-    landing after, changes nothing. Here the deadline is cut to 0.3 s."""
+    landing after, changes nothing. Here the deadline is cut to 0.3 s.
+
+    The button off before the deadline is shown, under the minute's deadline, by
+    ``test_the_dialog_asks_pypi_as_it_opens_and_restart_waits_for_the_answer``. Read here, after
+    an open that took longer than 0.3 s on a loaded runner, it was already on (ambient
+    (proxy-down), run 40114070143)."""
     assert REFRESH_DEADLINE_SECONDS == 5.0, "what docs/install.md says"
     monkeypatch.setattr(ui_app, "REFRESH_DEADLINE_SECONDS", 0.3)
     _two_alive(tmp_path, script)
@@ -774,20 +779,20 @@ def test_an_ask_unanswered_after_five_seconds_counts_as_unanswered(
 
     async def body(pilot: Pilot[None], app: FleetApp) -> tuple[Any, ...]:
         screen = await _open(app)
-        held = _looks(screen)
         await settle_until(
             app,
             lambda: not screen.query_one("#update-confirm", Button).disabled,
             group=PLAN_WORKER,
         )
         overdue = _looks(screen)
+        out = any(w.group == REFRESH_WORKER and not w.is_finished for w in app.workers)
         fresh.gate.set()
         await settle_page(app)
-        return held, overdue, _looks(screen), shown(app.query_one(UpdateRow))
+        return out, overdue, _looks(screen), shown(app.query_one(UpdateRow))
 
-    held, overdue, landed, row = _drive(body)
+    out, overdue, landed, row = _drive(body)
 
-    assert held[:2] == ("Update aisquare 0.9.0", True), "control: off while the ask is out"
+    assert out is True, "control: the ask was still out as the button came on"
     assert overdue[:2] == ("Update aisquare 0.9.0", False), "on once the deadline passed"
     assert overdue[2].startswith(_LAST_CHECKED) and overdue[2].endswith(UNCONFIRMED), overdue
     assert fresh.asked == 1, "control: the ask landed, the one there was"

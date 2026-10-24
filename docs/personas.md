@@ -303,9 +303,11 @@ line names the links it skipped (`skipped_links` under `--json`; the dialogs in
 itself a link is refused (`symlink_refused`), since there is no persona without
 it — replace it with a real file.
 
-`import --list` reads every skill directory of every coding agent, the personal
-ones first, and names the agents that read each skill (`--json` adds `roots`, the
-directories it read). It marks a skill `imported` when a user or project persona's
+`import --list` reads every skill directory of every coding agent, under every
+home it has — this shell's, the plain one and each account slot's (a Codex slot's
+own `$CODEX_HOME/skills`, a Claude Code slot's `skills`) — the personal ones first,
+each directory once, and names the agents that read each skill (`--json` adds
+`roots`, the directories it read). It marks a skill `imported` when a user or project persona's
 `.persona.json` names that skill as its source, whatever the persona was called.
 A persona of the same name that did not come from it (a bundled one, say) is
 not an import: the row ends `(name taken by bundled careful)`, which is why

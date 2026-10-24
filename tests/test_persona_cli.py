@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents as agents_core
+from aisquare.core import claude_accounts
 from aisquare.core import personas as core
 from tests import bundled_personas
 
@@ -427,6 +428,45 @@ def test_import_list_reads_every_skill_directory_of_every_agent(
     assert _tree(_user_layer() / "codex-project") == _tree(
         roots["codex-project"][0] / "codex-project"
     )
+
+
+def test_import_list_reads_each_account_slots_own_skills_dir_for_every_agent(
+    runner: CliRunner, claude_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE8 #128: a Codex on slot 2 lists its ``$CODEX_HOME/skills``, so ``import --list``
+    reads each agent's skill dirs under every home the accounts layer knows — this shell's,
+    the plain one and each slot — each dir once. A Claude Code slot's ``skills`` likewise,
+    and a slot's skill imports by its name."""
+    codex_home = tmp_path / "codex-home"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    claude_slot = claude_accounts.create_account().config_dir
+    codex_slot = claude_accounts.create_account("codex").config_dir
+    _skill(claude_slot / "skills", "claude-slot")
+    _skill(codex_slot / "skills", "codex-slot")
+    _skill(codex_home / "skills", "codex-plain")
+
+    code, payload = _json(runner, "import", "--list")
+    imported = runner.invoke(app, ["persona", "import", "codex-slot"])
+
+    assert code == 0
+    listed = {
+        skill["name"]: (Path(skill["path"]).parent, skill["agents"]) for skill in payload["skills"]
+    }
+    assert listed == {
+        "claude-slot": (claude_slot / "skills", ["claude-code"]),
+        "codex-plain": (codex_home / "skills", ["codex"]),
+        "codex-slot": (codex_slot / "skills", ["codex"]),
+    }
+    roots = [Path(root["path"]) for root in payload["roots"] if root["scope"] == "user"]
+    assert roots == [
+        claude_dir / "skills",
+        claude_slot / "skills",
+        agents_core.home() / ".agents" / "skills",
+        codex_home / "skills",
+        codex_slot / "skills",
+    ]
+    assert imported.exit_code == 0, imported.output
+    assert (_user_layer() / "codex-slot" / "SKILL.md").is_file()
 
 
 def test_import_list_with_no_skills_names_where_it_looked(

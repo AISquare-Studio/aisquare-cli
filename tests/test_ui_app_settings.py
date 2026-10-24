@@ -102,7 +102,17 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml() -> None:
     assert on_disk["coder"]["permission_mode"] == "plan"  # the bytes, not the widget
     assert on_disk["coder"]["worktree"] is True  # the role's table whole, for older builds
     assert load_config().fleet.roles["coder"].worktree is True  # untouched fields survive
-    assert on_disk["manager"] == {"permission_mode": "auto", "worktree": False, "extra_args": []}
+    # The role's table whole, WS-1's tool policy at its defaults included (an older build
+    # ignores a key it does not know).
+    assert on_disk["manager"] == {
+        "permission_mode": "auto",
+        "worktree": False,
+        "extra_args": [],
+        "deny_tools": [],
+        "allow_tools": [],
+        "skill_listing": "full",
+        "board_context": "all",
+    }
     assert fleet_on_disk["worktree_dir"] == ".fleet-trees"  # the worktree root (§4.2)
     assert "escape_key" not in fleet_on_disk  # an untouched fleet field keeps its default
     assert load_config().fleet.escape_key == "f12"
@@ -308,6 +318,7 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line() -> None:
         host.query_one("#accounts-switch-at", Input).value = "70"
         host.query_one("#accounts-on-limit", Select).value = "wait"
         host.query_one("#accounts-wait-minutes", Input).value = "5"
+        host.query_one("#accounts-prefer", Select).value = "reset-soonest"
         host.query_one("#save-settings", Button).press()
         await settle(pilot)
         return host.notices
@@ -320,6 +331,7 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line() -> None:
         "switch_at": 70,
         "on_limit": "wait",
         "wait_if_reset_within_minutes": 5,
+        "prefer": "reset-soonest",
     }
     assert load_config().accounts.pick == "default"
 

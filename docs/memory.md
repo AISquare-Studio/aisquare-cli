@@ -4,9 +4,9 @@
 claude-code` installs lifecycle hooks into `~/.claude/settings.json` (merged
 carefully — your existing hooks are never touched). From then on, each session
 begins with a directive pointing Claude at a packed snapshot of the codebase
-(structure-only skeleton first, full contents on demand — orders of magnitude
-cheaper than grepping around), your in-scope context entries, and the
-project's prompt history.
+(a structure-only skeleton, read first when it fits one Read; a per-file index
+into the rest, opened on demand — orders of magnitude cheaper than grepping
+around), your in-scope context entries, and the project's prompt history.
 
 **Your agent remembers what you tell it.** `aisquare remember "prefer pytest
 over unittest"` persists across every session and every project. Context
@@ -48,6 +48,12 @@ Prompts are recorded only in a project you added (`aisquare project onboard`,
 keeps nothing. `[projects] capture = true` records them in every directory, as
 0.8.0 did ([fleet](fleet.md#naming)).
 
+`aisquare config set capture.enabled false` stops recording prompts
+everywhere: `aisquare log` stays empty and nothing is spooled for
+Explainability. Teammate updates still arrive, and each turn still gets its
+metrics row, without the text. A config file that cannot be read records no
+prompt either, and says so on stderr.
+
 The **active project** is whichever repo contains your working directory, or
 the one you pin with `aisquare project switch <name>`. Everything —
 context, snapshots, prompt history, team state — scopes to it consistently.
@@ -80,9 +86,17 @@ aisquare project prune --missing --worktrees  # the stale ones, after a confirma
 `aisquare project onboard` (also run by `init`) packs the codebase with
 Repomix into three artifacts under `~/.aisquare/projects/<id>/snapshot/`: a
 **full pack** (every file), a **skeleton** (structure + signatures — the
-cheap thing agents read first), and a **per-file index** (char offsets +
+cheap thing agents orient from), and a **per-file index** (char offsets +
 token counts, so an agent can open one file's slice of the pack instead of
 all of it). Re-run with `--refresh` after big changes.
+
+The session-start directive says "read this FIRST" only of a skeleton (the
+pack when there is no skeleton) of at most 12 000 tokens, as the snapshot
+counts them: one default Read. Claude Code's Read returns a page of at most
+25 000 of its own tokens, which held about 14 000 of these on a measured
+skeleton. A bigger one is named with its size and "never read it from the
+top": the agent finds the files it needs in the index and reads only their
+slices, so a skeleton paged in whole is never carried by every later request.
 
 A pack has to fit a **token budget**: `[snapshot] max_tokens` in
 `~/.aisquare/config.toml`, 150 000 by default (the cap the server packs with).
@@ -90,7 +104,8 @@ The full pack is tried first, then a compressed one; when even that is over,
 the compressed pack is kept as the **skeleton** with its per-file index and the
 full pack is skipped — `onboard` and `aisquare doctor` both say `snapshot:
 skeleton only: 2030000 tokens, 1234 files indexed; full pack skipped over
-budget 150000 (10990000 tokens)`, and agents are oriented from it as usual.
+budget 150000 (10990000 tokens)`, and agents are oriented from it through its
+index, told its size and never to read it from the top.
 The budget gates only the full pack: an agent is handed paths and opens slices
 through the index, never a whole pack in a prompt. To keep the full pack too,
 raise the budget or leave more out, then re-pack:

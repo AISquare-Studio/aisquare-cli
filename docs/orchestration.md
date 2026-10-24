@@ -117,8 +117,27 @@ re-reported — so a missing chip means *not reported*, never *wrong*. Tiering
 is enforced at launch, not policed in the store.
 
 On every prompt, each session receives a compact delta of what teammates did
-since its last turn. Nothing needs forwarding; the coordination is the
-ambient state of the board.
+since its last turn. The board lists task titles; the contract travels with
+the claim: `task claim` and `task next --claim` print the task's contract
+(`--detail`) and the reason it was last reopened, so nobody pastes a contract
+into a coder's pane. `task show <ref>` prints the whole task. The rest of the
+coordination is the ambient state of the board. Each event is one line —
+`#812 coder-auth review #12: PR #300 ready … → aisquare team show 812` — with the
+board named once in the block's header; `aisquare team show <seq>` prints the whole
+event. What of the board an agent reads is its board context
+(`[fleet.roles.<role>] board_context`, `fleet spawn --board-context`): `all`, `relevant`
+(its own tasks, what is addressed to its role or label, and decisions) or `none` (the
+reviewer's default: no recent updates at start and no deltas). A manager reads `all`.
+
+A note addressed to a session does not wait for its next prompt. When the
+session's turn ends, its `Stop` hook hands it the notes addressed to its role
+or its fleet label (`aisquare note --to`, `fleet tell` to a busy agent), the
+way the manager is kept going on fresh board decisions. The same guards apply:
+never on a turn already continuing from a stop hook, and at most `[fleet]
+max_continuations_per_hour` an hour. The manager's nudge, the one line typed to
+wake a waiting manager, never goes into a draft a human has started in its
+input box. It waits until the box is clear, and the human's own submit hands
+the manager the same delta meanwhile.
 
 Orchestration is **opt-in per repo** (a role launch or `aisquare team on`)
 and fails open everywhere: the hooks are designed so orchestration can
@@ -128,10 +147,13 @@ that never opt in see nothing.
 ### Tasks: idempotent, atomic, dependency-aware
 
 ```sh
-aisquare task add "wire auth" --role coder        # idempotent — safe to re-emit (#1)
+aisquare task add "wire auth" --role coder --detail "<objective · why · acceptance>"
+                                                  # idempotent — safe to re-emit (#1)
 aisquare task add "ship it" --needs 1             # held until #1 is done
 aisquare task next --role coder --claim --as <id> # atomic claim — exactly one winner; a
-                                                  # fleet agent's own assigned task comes first
+                                                  # fleet agent's own assigned task comes first;
+                                                  # prints the contract and any reopen reason
+aisquare task next --status review --task 12      # only #12, when it is in review; else nothing
 aisquare task review 1 --note "how to verify" --as <id>
 aisquare task reopen '#1' --reason "fails on py3.11" --as <id>
 aisquare note "JWT it is" --kind decision --as <id>
@@ -151,6 +173,24 @@ minutes), and renewed by the session's own lifecycle hooks — so a dead
 session's claims release themselves and the work gets picked up again.
 `task next` only hands out tasks whose dependencies are done.
 
+**Contracts and rules files.** A contract is what the claim prints to whoever
+takes the task, so it carries the whole brief: `objective:`, `acceptance:` and
+`boundaries:`, the blocks `[team] brief_blocks` lists. `task add` warns on
+stderr about a missing block and lists them under `"missing_blocks"` with
+`--json`. With `[team] brief_strict = true` it refuses the add (exit 2).
+Write a long contract to a file and pass `--detail-file brief.md`. Keep rules
+you reuse in `.aisquare/rules/<name>.md` in the project and cite them with
+`--rules testing,git`. The contract then ends with `Rules:
+.aisquare/rules/testing.md, .aisquare/rules/git.md`, and a name with no file
+refuses the add. Text cited by path is read when it is needed. Text pasted
+into `--detail` rides every later request of the manager that wrote it. A
+manager's start pack lists the rules files by path and first line
+([fleet](fleet.md#long-lived-managers-state-file-start-pack-and-quiet-compaction)).
+
+```sh
+aisquare task add "wire auth" --role coder --detail-file briefs/auth.md --rules testing,git
+```
+
 ### Self-check: receipts you can re-prove
 
 Every successful write prints a receipt (`✓ … · seq N on <board>`; under
@@ -159,6 +199,7 @@ any time:
 
 ```sh
 aisquare team verify 42                     # is seq 42 really on this board? exit 0/1
+aisquare team show 42                       # the whole event: author, actor, task, details, text
 aisquare team verify evt_01k… --as <id>     # by event id (prefix ok), session's board
 aisquare team log --mine --as <id>          # read back your own recent writes
 aisquare team log --by aaaa1111 --since 15m --kind decision   # filters compose
@@ -340,6 +381,7 @@ Orchestration has no config files — a handful of env knobs:
 | `AISQUARE_TEAM=0` | master off switch — hooks and commands no-op |
 | `AISQUARE_TEAM_HUB` | point sessions from several repos at one shared board |
 | `AISQUARE_TEAM_DELTA=0` | mute per-prompt teammate deltas for a session |
+| `AISQUARE_BOARD_CONTEXT` | `all`, `relevant` or `none`: what of the board a session reads (set per fleet window from the role's `board_context`; a manager reads `all`) |
 | `AISQUARE_TEAM_LEASE_MIN` | task-claim lease in minutes (default 120) |
 | `AISQUARE_MODEL_<ROLE>` | pin a role's model outright (skips the harness ladder) |
 | `AISQUARE_EFFORT` | base effort for spawned roles (default `high`, else inherits `CLAUDE_EFFORT`) |
@@ -418,6 +460,8 @@ aisquare config set accounts.pick headroom   # the default: spawns take, in prio
 aisquare config set accounts.pick default    # …or every spawn on the machine default
 aisquare config set accounts.switch_at 85    # the line (default 85 %)
 aisquare config set accounts.on_limit wait   # when an agent hits its limit, leave it parked (default: switch)
+aisquare config set accounts.prefer reset-soonest   # under the line, the account whose week ends
+                                             # first (default: priority, the first in order)
 aisquare fleet switch coder-auth             # move one by hand: same label, task and worktree,
                                              # on the account with headroom, resuming its session
 aisquare fleet switch coder-auth --to work --fresh   # a named account, and a fresh session with a
@@ -426,14 +470,20 @@ aisquare fleet switch coder-auth --to work --fresh   # a named account, and a fr
 
 When an agent's turn ends on a usage limit — Claude Code's `StopFailure` hook,
 `You've hit your session limit · resets 12:30am` — its row shows **⏳ limited**
-with the reset time, the manager is woken with the one command that moves it,
-and Claude Code's own wait-and-continue at the reset is left in place. With
-`on_limit = switch`, the default, and a second signed-in account to go to, the fleet
-hands the agent over on its own: it stops the
+with the reset time, and Claude Code's own wait-and-continue at the reset is left
+in place. With `on_limit = switch`, the default, and a second signed-in account to
+go to, the fleet hands the agent over on its own — the `limited` line says so and
+wakes no manager, and a hand-over that cannot go ahead posts `handover_failed`,
+which does — and otherwise the manager is woken with the one command that moves
+it. One limit moves an agent once: `fleet switch` refuses a replacement the
+hand-over started minutes ago unless given `--force`. The hand-over stops the
 agent, starts it again on the account with the most headroom, and resumes the
 same session by its transcript (`claude --resume <path>`), unless the limit
 lifts within `wait_if_reset_within_minutes` (a reset ten minutes away is cheaper
-than a cold start). Every usage reading is kept, so `accounts usage` and the
+than a cold start). A pick counts the account's per-family weeks for an agent of
+that family (Opus and Sonnet limits apply to that family alone) and skips an
+account that refused with a limit until the reset it named. Every usage reading
+is kept, so `accounts usage` and the
 Accounts page can say *≈ 40 min to the limit* at the current pace, and
 `doctor --live` warns when every account is over the line.
 

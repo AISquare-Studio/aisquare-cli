@@ -1022,6 +1022,21 @@ _SCHEMA_V32 = ""
 # in :data:`_PRODUCTS`, added only where absent, and a row from before them keeps NULL,
 # which reads as no persona.
 _SCHEMA_V33 = ""
+# v34 (P0-W1a, #122): whether a fleet agent's first message started a turn. The session's
+# last ``UserPromptSubmit`` (``team_session.prompted_at``), and on the agent's row where its
+# first message stands (``fleet_agent.first_prompt``: pending, acked, unsent) and since when
+# (``first_prompt_at``). Nullable: a row from before them reads as "not tracked", never as
+# a message that was not taken. The columns are the whole step, so the script is empty:
+# they are in :data:`_PRODUCTS`, added only where absent.
+_SCHEMA_V34 = ""
+
+# P1 WS-2 (#279): who caused a board event (``team_event.actor``) and its details as JSON
+# (``team_event.meta``), so a manager's own stop wakes nobody and an exit says its status.
+# Step 35, after P0-W1a's 34 (the numbers are reserved per train). Both columns are
+# nullable and in :data:`_PRODUCTS`, added only where absent, so a store another line
+# stamped v34 still gains them; a row from before them reads NULL: no actor (the agent's
+# own act, or unknown) and no details.
+_SCHEMA_V35_WS2 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1057,6 +1072,8 @@ _MIGRATIONS = (
     _SCHEMA_V31,
     _SCHEMA_V32,
     _SCHEMA_V33,
+    _SCHEMA_V34,
+    _SCHEMA_V35_WS2,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1114,6 +1131,14 @@ _PRODUCTS: dict[int, _Products] = {
     32: _Products(
         columns=(("team_session", "persona", "TEXT"), ("fleet_agent", "persona", "TEXT"))
     ),
+    33: _Products(
+        columns=(
+            ("team_session", "prompted_at", "TEXT"),
+            ("fleet_agent", "first_prompt", "TEXT"),
+            ("fleet_agent", "first_prompt_at", "TEXT"),
+        )
+    ),
+    34: _Products(columns=(("team_event", "actor", "TEXT"), ("team_event", "meta", "TEXT"))),
 }
 
 _PROJECT_COLUMNS = (
@@ -1178,7 +1203,7 @@ in the wall-clock median. Older than this it stays open and is excluded
 instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path, account, model, effort, limit_resets_at, persona"
+    "transcript_path, account, model, effort, limit_resets_at, persona, prompted_at"
 )
 _USAGE_COLUMNS = (
     "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at, "
@@ -1190,12 +1215,14 @@ _TASK_COLUMNS = (
     "id, project_id, number, key, title, detail, status, role, needs, "
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
 )
-_EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
+_EVENT_COLUMNS = (
+    "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at, actor, meta"
+)
 _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
     "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
-    "board", "persona",
+    "board", "persona", "first_prompt", "first_prompt_at",
 )  # fmt: skip
 _FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
 
@@ -1310,6 +1337,7 @@ class ContextStore(Protocol):
     def mark_handover(self, session_id: str, *, held_after: datetime) -> bool: ...
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
+    def set_transcript_path(self, session_id: str, transcript_path: str) -> None: ...
     def unmark_handover(self, session_id: str, state: str) -> None: ...
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
     def release_claims(self, session_id: str) -> list[TeamTask]: ...
@@ -1334,6 +1362,7 @@ class ContextStore(Protocol):
         role: str | None = None,
         status: TaskStatus = "todo",
         prefer: str | None = None,
+        only: str | None = None,
     ) -> TeamTask | None: ...
     def task_statuses(self, project_id: str) -> dict[str, str]: ...
     def adopt_fleet_agent_session(
@@ -1362,10 +1391,17 @@ class ContextStore(Protocol):
         *,
         exclude_session: str | None = None,
         exclude_kinds: Collection[str] = (),
+        exclude_actor: str | None = None,
+        relevant: Relevance | None = None,
         limit: int = 50,
     ) -> list[TeamEvent]: ...
     def recent_events(
-        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+        self,
+        project_id: str,
+        *,
+        exclude_kinds: Collection[str] = (),
+        relevant: Relevance | None = None,
+        limit: int = 10,
     ) -> list[TeamEvent]: ...
     def filtered_events(
         self,
@@ -1398,6 +1434,14 @@ class ContextStore(Protocol):
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
     def codenames_in_use(self) -> set[str]: ...
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
+    def mark_prompted(
+        self, session_id: str, at: datetime, *, agent_id: str | None = None
+    ) -> bool: ...
+    def mark_first_prompt_unsent(self, agent_id: str, at: datetime) -> bool: ...
+    def take_first_prompt(
+        self, at: datetime, *, session_id: str, agent_id: str | None = None
+    ) -> bool: ...
+    def first_prompt_rows(self, since: datetime) -> list[FleetAgent]: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
@@ -1560,6 +1604,8 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         branch=row["branch"],
         board=row["board"],  # never NULL as read (`_FLEET_AGENT_READ`)
         persona=row["persona"],
+        first_prompt=row["first_prompt"],
+        first_prompt_at=_maybe_dt(row["first_prompt_at"]),
     )
 
 
@@ -1691,6 +1737,7 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         effort=row["effort"],
         limit_resets_at=_maybe_dt(row["limit_resets_at"]),
         persona=row["persona"],
+        prompted_at=_maybe_dt(row["prompted_at"]),
     )
 
 
@@ -1736,6 +1783,8 @@ def _row_to_event(row: sqlite3.Row) -> TeamEvent:
         task_id=row["task_id"],
         to_role=row["to_role"],
         created_at=datetime.fromisoformat(row["created_at"]),
+        actor=row["actor"],
+        meta=json.loads(row["meta"]) if row["meta"] else None,
     )
 
 
@@ -2261,7 +2310,7 @@ class SqliteStore:
         """Delete the ``team_meta`` rows keyed by the project or by its sessions.
 
         Inside the caller's transaction, in statements of at most
-        :data:`_META_BATCH` sessions each (two terms per session): one statement
+        :data:`_META_BATCH` sessions each (five terms per session): one statement
         per purge was the shape SQLite refused at 500 sessions.
         """
         removed = self._conn.execute(
@@ -2270,7 +2319,7 @@ class SqliteStore:
         ).rowcount
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
-            keys = [f"nudge:{sid}" for sid in batch]
+            keys = [f"{kind}:{sid}" for sid in batch for kind in _SESSION_META_KINDS]
             globs = [f"continuations:{_glob_escape(sid)}:*" for sid in batch]
             clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
             removed += self._conn.execute(
@@ -2396,7 +2445,7 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
@@ -2404,7 +2453,8 @@ class SqliteStore:
             "account = COALESCE(excluded.account, account), "
             "model = COALESCE(excluded.model, model), "
             "effort = COALESCE(excluded.effort, effort), "
-            "persona = COALESCE(excluded.persona, persona)",
+            "persona = COALESCE(excluded.persona, persona), "
+            "prompted_at = COALESCE(excluded.prompted_at, prompted_at)",
             (
                 session.id,
                 session.project_id,
@@ -2422,6 +2472,7 @@ class SqliteStore:
                 session.effort,
                 session.limit_resets_at.isoformat() if session.limit_resets_at else None,
                 session.persona,
+                session.prompted_at.isoformat() if session.prompted_at else None,
             ),
         )
         self._conn.commit()
@@ -2628,6 +2679,19 @@ class SqliteStore:
         )
         self._conn.commit()
         return cursor.rowcount == 1
+
+    def set_transcript_path(self, session_id: str, transcript_path: str) -> None:
+        """Point the row at the transcript its agent writes, and touch nothing else (P0-W3b).
+
+        For a row whose recorded transcript is not on disk: a cross-account resume reports
+        one under the new account that Claude Code never creates. ``upsert_session`` would
+        also revive the row and set it ``working``, over a hand-over's or a limit's state.
+        """
+        self._conn.execute(
+            "UPDATE team_session SET transcript_path = ? WHERE id = ?",
+            (transcript_path, session_id),
+        )
+        self._conn.commit()
 
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None:
         """The session's turn ended on a usage limit (#146): park it as ``limited``.
@@ -2926,8 +2990,12 @@ class SqliteStore:
         role: str | None = None,
         status: TaskStatus = "todo",
         prefer: str | None = None,
+        only: str | None = None,
     ) -> TeamTask | None:
         """The oldest *ready* task in ``status`` a session of ``role`` could pick up.
+
+        ``only`` narrows the pool to that one task id, under the same rules (``task next
+        --task``: a tester spawned for one task takes it and nothing else, #129 a).
 
         Tasks without a role hint are available to every role; tasks with one
         only match sessions of that role (or an unfiltered query). A ``todo``
@@ -2943,6 +3011,9 @@ class SqliteStore:
         if role is not None:
             clauses.append("(role IS NULL OR role = ?)")
             params.append(role)
+        if only is not None:
+            clauses.append("id = ?")
+            params.append(only)
         order = "ORDER BY id"
         if prefer is not None:
             order = "ORDER BY (id = ?) DESC, id"
@@ -3129,17 +3200,9 @@ class SqliteStore:
             for event, meta_key, meta_value in writes:
                 cursor = self._conn.execute(
                     "INSERT INTO team_event (id, project_id, session_id, kind, text, "
-                    "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        event.id,
-                        event.project_id,
-                        event.session_id,
-                        event.kind,
-                        event.text,
-                        event.task_id,
-                        event.to_role,
-                        event.created_at.isoformat(),
-                    ),
+                    "task_id, to_role, created_at, actor, meta) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    _event_values(event),
                 )
                 stamped = {**meta_value, "seq": cursor.lastrowid}
                 self._conn.execute(
@@ -3153,17 +3216,8 @@ class SqliteStore:
     def add_team_event(self, event: TeamEvent) -> TeamEvent:
         cursor = self._conn.execute(
             "INSERT INTO team_event (id, project_id, session_id, kind, text, "
-            "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                event.id,
-                event.project_id,
-                event.session_id,
-                event.kind,
-                event.text,
-                event.task_id,
-                event.to_role,
-                event.created_at.isoformat(),
-            ),
+            "task_id, to_role, created_at, actor, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            _event_values(event),
         )
         self._conn.commit()
         return event.model_copy(update={"seq": cursor.lastrowid})
@@ -3260,34 +3314,58 @@ class SqliteStore:
         *,
         exclude_session: str | None = None,
         exclude_kinds: Collection[str] = (),
+        exclude_actor: str | None = None,
+        relevant: Relevance | None = None,
         limit: int = 50,
     ) -> list[TeamEvent]:
         """A cursor page: the OLDEST ``limit`` events past ``seq``, oldest first.
+
+        ``exclude_actor`` leaves out what that session caused, as ``exclude_session`` leaves
+        out what it wrote: a manager's own ``fleet stop`` is written under the stopped
+        agent's session, with the manager as its actor. ``relevant`` keeps only what a
+        ``relevant`` board context reads (:class:`Relevance`).
 
         ``exclude_kinds`` leaves those kinds out INSIDE the query, as
         :meth:`filtered_events` does, so ``limit`` counts rows the caller can use.
         Dropped after the LIMIT, a run of the captain's audit lines filled the whole
         page, and the event behind it was not read at all (review of #240, finding 11).
         """
+        keep, kept = _relevant_clause(relevant)
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
             "WHERE project_id = ? AND seq > ? "
             "AND (session_id IS NULL OR session_id != ?) "
-            f"{_and_not_kinds(exclude_kinds)}ORDER BY seq LIMIT ?",
-            (project_id, seq, exclude_session or "", *exclude_kinds, limit),
+            "AND (actor IS NULL OR actor != ?) "
+            f"{_and_not_kinds(exclude_kinds)}{keep}ORDER BY seq LIMIT ?",
+            (
+                project_id,
+                seq,
+                exclude_session or "",
+                exclude_actor or "",
+                *exclude_kinds,
+                *kept,
+                limit,
+            ),
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 
     def recent_events(
-        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+        self,
+        project_id: str,
+        *,
+        exclude_kinds: Collection[str] = (),
+        relevant: Relevance | None = None,
+        limit: int = 10,
     ) -> list[TeamEvent]:
         """A window: the NEWEST ``limit`` events, oldest first. ``exclude_kinds`` is left
         out inside the query, as in :meth:`events_since`: the window stays ``limit`` long
-        however many of those kinds are newer than the events it shows."""
+        however many of those kinds are newer than the events it shows. ``relevant`` as
+        there."""
+        keep, kept = _relevant_clause(relevant)
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
-            f"WHERE project_id = ? {_and_not_kinds(exclude_kinds)}ORDER BY seq DESC LIMIT ?",
-            (project_id, *exclude_kinds, limit),
+            f"WHERE project_id = ? {_and_not_kinds(exclude_kinds)}{keep}ORDER BY seq DESC LIMIT ?",
+            (project_id, *exclude_kinds, *kept, limit),
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
 
@@ -3407,10 +3485,15 @@ class SqliteStore:
         A second LIVE agent with the same label in the same project trips the
         partial unique index and raises ``sqlite3.IntegrityError`` — the service
         layer picks the suffixed label and retries; the store never guesses.
+
+        The first message's state is written with the row and never by an update here:
+        only its own transitions move it (:meth:`mark_prompted`,
+        :meth:`mark_first_prompt_unsent`), so an upsert of a row read before its
+        ``UserPromptSubmit`` cannot put an ``acked`` message back to ``pending``.
         """
         self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
@@ -3442,12 +3525,82 @@ class SqliteStore:
                 agent.branch,
                 agent.board if agent.board is not None else agent.project_id,
                 agent.persona,
+                agent.first_prompt,
+                agent.first_prompt_at.isoformat() if agent.first_prompt_at else None,
             ),
         )
         self._conn.commit()
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
+
+    def mark_prompted(self, session_id: str, at: datetime, *, agent_id: str | None = None) -> bool:
+        """A prompt started a turn in ``session_id`` (``UserPromptSubmit``): stamp the session's
+        ``prompted_at``, and take the first message of the fleet row it belongs to.
+
+        The row is the one ``agent_id`` names (``AISQUARE_FLEET_AGENT``, the window's own) or,
+        failing that, the live one bound to the session. Only a ``pending`` message is taken:
+        one already ``acked`` keeps its time, and an ``unsent`` one becomes ``acked`` too,
+        since a human's Enter sent it after the listing gave up on it. Returns whether this
+        prompt took one. One transaction, an indexed read and at most two indexed updates:
+        every prompt of every session pays it, and no row is read back.
+        """
+        self._conn.execute(
+            "UPDATE team_session SET prompted_at = ? WHERE id = ?", (at.isoformat(), session_id)
+        )
+        return self.take_first_prompt(at, session_id=session_id, agent_id=agent_id)
+
+    def take_first_prompt(
+        self, at: datetime, *, session_id: str, agent_id: str | None = None
+    ) -> bool:
+        """Mark the first message of ``session_id``'s fleet row taken (``acked``), as
+        :meth:`mark_prompted` does, without stamping ``prompted_at``: for a ``Stop``, which
+        ends a turn that only a prompt starts. A ``UserPromptSubmit`` whose own record failed
+        (a locked store; the hook fails open) left the row ``pending`` under a turn that ran,
+        and a listing read it "first prompt not taken" (review of #330, round 1). Not the
+        stamp: a tell's acknowledgement asks ``prompted_at``, and a Stop is no prompt.
+        Returns whether this took one."""
+        stamp = at.isoformat()
+        # A read, then a compare-and-set on what it found: no ``RETURNING``, which the SQLite
+        # of an older Python lacks.
+        found = self._conn.execute(
+            "SELECT id FROM fleet_agent "
+            "WHERE first_prompt IN ('pending', 'unsent') AND ended_at IS NULL "
+            "AND (id = ? OR (? IS NULL AND session_id = ?)) LIMIT 1",
+            (agent_id, agent_id, session_id),
+        ).fetchone()
+        taken = found is not None and (
+            self._conn.execute(
+                "UPDATE fleet_agent SET first_prompt = 'acked', first_prompt_at = ? "
+                "WHERE id = ? AND first_prompt IN ('pending', 'unsent')",
+                (stamp, found["id"]),
+            ).rowcount
+            == 1
+        )
+        self._conn.commit()
+        return taken
+
+    def mark_first_prompt_unsent(self, agent_id: str, at: datetime) -> bool:
+        """Move ``agent_id``'s first message from ``pending`` to ``unsent``: compare and set,
+        so of two listings that both found it overdue exactly one moves it, and only that one
+        writes the board's ``prompt_unsent``. False when it was not pending any more."""
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET first_prompt = 'unsent', first_prompt_at = ? "
+            "WHERE id = ? AND first_prompt = 'pending'",
+            (at.isoformat(), agent_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def first_prompt_rows(self, since: datetime) -> list[FleetAgent]:
+        """Every fleet row given a first message since ``since``, in any project: what doctor's
+        ``fleet-delivery`` row counts."""
+        rows = self._conn.execute(
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
+            "WHERE first_prompt IS NOT NULL AND created_at >= ? ORDER BY created_at",
+            (since.isoformat(),),
+        ).fetchall()
+        return [_row_to_fleet_agent(row) for row in rows]
 
     # --- project groups, pins and order (#140) ------------------------------------------
 
@@ -4539,6 +4692,57 @@ def _glob_prefix(ref: str) -> str:
     """
     stripped = _ref_stripped(ref)
     return f"{stripped}*" if stripped else ""
+
+
+def _event_values(event: TeamEvent) -> tuple[object, ...]:
+    """``event``'s values for an ``INSERT INTO team_event`` of every written column."""
+    return (
+        event.id,
+        event.project_id,
+        event.session_id,
+        event.kind,
+        event.text,
+        event.task_id,
+        event.to_role,
+        event.created_at.isoformat(),
+        event.actor,
+        None if event.meta is None else json.dumps(event.meta, sort_keys=True),
+    )
+
+
+_SESSION_META_KINDS: tuple[str, ...] = ("nudge", "compact", "compact-refused", "compact-armed")
+"""The ``team_meta`` keys kept per session as ``<kind>:<session id>``: the manager's nudge
+debounce, and the quiet compaction's mark, its newest refusal and its latest arm (P1 WS-4)."""
+
+
+class Relevance(NamedTuple):
+    """What a ``relevant`` board context keeps (P1 WS-2, #279): events on these tasks,
+    events addressed to these names (a role or a label, any case), and decisions unless
+    ``decisions`` is off: what a ``none`` agent's turn end asks for, the notes addressed to
+    it and nothing else (sync #365)."""
+
+    task_ids: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()
+    decisions: bool = True
+
+
+def _relevant_clause(relevant: Relevance | None) -> tuple[str, list[str]]:
+    """``AND (…) `` keeping only what ``relevant`` keeps, with its parameters; nothing for
+    ``None``. In the query, before the LIMIT: forty irrelevant events must not fill a page
+    the relevant one is behind (review of #240, finding 11's rule)."""
+    if relevant is None:
+        return "", []
+    terms = ["kind = 'decision'"] if relevant.decisions else []
+    params: list[str] = []
+    if relevant.task_ids:
+        terms.append(f"task_id IN ({', '.join('?' * len(relevant.task_ids))})")
+        params += relevant.task_ids
+    if relevant.names:
+        terms.append(f"lower(to_role) IN ({', '.join('?' * len(relevant.names))})")
+        params += [name.strip().lower() for name in relevant.names]
+    if not terms:
+        return "AND 0 ", []  # keeps nothing: no task, no name, no decisions
+    return f"AND ({' OR '.join(terms)}) ", params
 
 
 def _and_not_kinds(kinds: Collection[str]) -> str:

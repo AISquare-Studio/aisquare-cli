@@ -263,7 +263,16 @@ def test_spawn_json_carries_the_documented_keys(
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
-    assert set(payload) == {"agent", "asked_label", "tmux_session", "notes"}
+    assert set(payload) == {
+        "agent",
+        "asked_label",
+        "tmux_session",
+        "notes",
+        # How the first message went (P0-W1a): as restart and switch say it.
+        "prompt_typed",
+        "prompt_delivery",
+        "prompt_acked",
+    }
     assert payload["asked_label"] == "coder-auth"
     assert payload["tmux_session"] == SESSION
     assert payload["notes"] == receipt.notes
@@ -330,6 +339,8 @@ def test_spawn_consumes_its_own_options_and_forwards_nothing_else(
         "spawned_by": "mgr-session",
         "account": None,
         "persona": None,
+        "ack_wait": 45.0,  # [fleet] prompt_ack_seconds: the CLI waits for the first turn
+        "board_context": None,
     }
 
 
@@ -806,11 +817,11 @@ def test_stop_confirms_and_passes_force_through(
     gentle = runner.invoke(app, ["fleet", "stop", "coder-auth"])
     assert gentle.exit_code == 0, gentle.output
     assert "✓ stopped coder-auth (agt_coderauth)" in _plain(gentle.stdout)
-    assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": False})
+    assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": False, "actor": "user"})
 
     forced = runner.invoke(app, ["fleet", "stop", "coder-auth", "--force"])
     assert forced.exit_code == 0, forced.output
-    assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": True})
+    assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": True, "actor": "user"})
 
 
 @pytest.mark.parametrize("worktree", [True, False], ids=["worktree", "no-worktree"])
@@ -1312,9 +1323,12 @@ def test_restart_and_stop_of_one_label_are_as_they_were(
     assert runner.invoke(app, ["fleet", "stop", "coder-auth"]).exit_code == 0
 
     assert restart.calls == [
-        ((PROJECT, "coder-auth"), {"fresh": False, "spawned_by": "user", "permission_mode": None})
+        (
+            (PROJECT, "coder-auth"),
+            {"fresh": False, "spawned_by": "user", "permission_mode": None, "ack_wait": 45.0},
+        )
     ]
-    assert stop.calls == [((PROJECT, "coder-auth"), {"force": False})]
+    assert stop.calls == [((PROJECT, "coder-auth"), {"force": False, "actor": "user"})]
     assert bulk.calls == []
 
 
@@ -1389,7 +1403,10 @@ def test_shutdown_asks_at_a_terminal_and_stops_nothing_when_the_answer_is_no(
     agreed = runner.invoke(app, ["fleet", "shutdown"])
 
     assert agreed.exit_code == 0, agreed.output
-    assert shutdown.calls[-1] == ((PROJECT,), {"force": False, "forget": False})
+    assert shutdown.calls[-1] == (
+        (PROJECT,),
+        {"force": False, "forget": False, "actor": "user"},
+    )
 
 
 def test_shutdown_asks_about_the_sessions_when_no_agent_is_live(
@@ -1492,7 +1509,7 @@ def test_shutdown_reports_each_row_with_the_reason_the_service_gave(
     assert "fleet-paused signal on api was cleared" in out
     assert "were NOT ended" in out, "the operator is told which rows they still own"
     assert "was not running" not in out, "the CLI never asserts a cause the service did not give"
-    assert shutdown.calls[-1] == ((PROJECT,), {"force": True, "forget": False})
+    assert shutdown.calls[-1] == ((PROJECT,), {"force": True, "forget": False, "actor": "user"})
 
 
 def test_shutdown_all_never_resolves_a_project_and_a_clean_run_exits_zero(
@@ -1663,7 +1680,7 @@ def test_shutdown_forget_shows_every_row_ended_unchecked_and_passes_the_word_on(
     assert plan.calls[0] == ((PROJECT,), {"forget": True})
     assert json.loads(as_json.stdout)["tmux_unusable"] == "tmux is not installed"
     assert ran.exit_code == 0, ran.output
-    assert shutdown.calls == [((PROJECT,), {"force": False, "forget": True})]
+    assert shutdown.calls == [((PROJECT,), {"force": False, "forget": True, "actor": "user"})]
 
 
 def test_shutdown_maps_a_refusal_onto_the_fail_contract(

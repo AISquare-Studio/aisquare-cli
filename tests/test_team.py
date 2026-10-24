@@ -325,7 +325,7 @@ def test_prompt_submit_delivers_teammate_delta_once(
     runner.invoke(app, ["task", "add", "wire auth", "--as", "bbbb2222"])
 
     first = _prompt(runner, PLANNER, work_dir)
-    assert "<aisquare-team-delta>" in first.stdout
+    assert "<aisquare-team-delta board=" in first.stdout
     assert "wire auth" in first.stdout
     second = _prompt(runner, PLANNER, work_dir)  # nothing new → nothing injected
     assert second.stdout.strip() == ""
@@ -1767,5 +1767,149 @@ def test_each_delta_line_names_its_board_and_only_the_sessions_own_board_is_read
 
     lines = [line for line in delta.splitlines() if line.startswith("- ")]
     assert lines, delta
-    assert all(line.startswith(f"- [{board.root.name}] ") for line in lines), lines
+    # Named once, in the block's header: one delta reads one board (P1 WS-2, #279).
+    assert f'<aisquare-team-delta board="{board.root.name}">' in delta
+    assert all(line.startswith("- #") for line in lines), lines
     assert "wire auth" in delta and "the other train's news" not in delta
+
+
+# --- P0-W3b: a cross-account resume reports a transcript that never exists ---------------------
+#
+# Measured by P0-W0 (Claude Code 2.1.309 and 2.1.223): `claude --resume <path>` under another
+# CLAUDE_CONFIG_DIR hands SessionStart a transcript_path under the NEW account's projects/ that
+# is never created; the records keep going to the original file, and UserPromptSubmit hands the
+# original path. Stored, the missing path raised a false collision banner at every prompt, and
+# the next restart or switch started fresh because the row named no file to resume.
+
+
+def _cross_account(tmp_path: Path) -> tuple[Path, Path]:
+    """The real transcript under account 2, and the path account 3's resume reports."""
+    sid = "c0ffee00-1111-2222-3333-444444444444"
+    real = tmp_path / "accounts" / "2" / "projects" / "-work" / f"{sid}.jsonl"
+    real.parent.mkdir(parents=True)
+    real.write_text('{"type":"user"}\n', encoding="utf-8")
+    reported = tmp_path / "accounts" / "3" / "projects" / "-work" / f"{sid}.jsonl"
+    return real, reported
+
+
+def test_a_cross_account_resume_keeps_the_real_transcript_and_raises_no_banner(
+    work_dir: Path, tmp_path: Path
+) -> None:
+    runner = CliRunner()
+    runner.invoke(app, ["team", "on"])
+    sid = "c0ffee00-1111-2222-3333-444444444444"
+    real, reported = _cross_account(tmp_path)
+    _start_tp(runner, sid, work_dir, str(real))
+
+    resumed = _start_tp(runner, sid, work_dir, str(reported))
+    prompt = _prompt_tp(runner, sid, work_dir, str(real))
+
+    assert "session-collision" not in resumed.output
+    assert "session-collision" not in prompt.output
+    with store_session() as store:
+        session = store.get_session(sid)
+    assert session is not None
+    assert session.transcript_path == str(real)  # the file a restart can resume
+    assert session.account == str(reported.parents[2])  # the account it runs on now
+
+
+def test_a_row_that_recorded_the_missing_path_heals_at_the_next_prompt(
+    work_dir: Path, tmp_path: Path
+) -> None:
+    """A row an earlier build wrote: the stored path is not on disk, the prompt's is."""
+    runner = CliRunner()
+    runner.invoke(app, ["team", "on"])
+    sid = "c0ffee00-1111-2222-3333-444444444444"
+    real, reported = _cross_account(tmp_path)
+    _start_tp(runner, sid, work_dir, str(reported))  # what was stored before the fix
+
+    prompt = _prompt_tp(runner, sid, work_dir, str(real))
+
+    assert "session-collision" not in prompt.output
+    with store_session() as store:
+        session = store.get_session(sid)
+    assert session is not None and session.transcript_path == str(real)
+
+
+def test_two_live_agents_with_real_transcripts_are_still_warned(
+    work_dir: Path, tmp_path: Path
+) -> None:
+    """The control: the guard is about a path that does not exist, never about two that do."""
+    runner = CliRunner()
+    runner.invoke(app, ["team", "on"])
+    sid = "c0ffee00-1111-2222-3333-444444444444"
+    real, other = _cross_account(tmp_path)
+    other.parent.mkdir(parents=True)
+    other.write_text('{"type":"user"}\n', encoding="utf-8")
+    _start_tp(runner, sid, work_dir, str(real))
+
+    assert "aisquare-session-collision" in _start_tp(runner, sid, work_dir, str(other)).output
+    assert "aisquare-session-collision" in _prompt_tp(runner, sid, work_dir, str(real)).output
+
+
+def test_the_limited_line_says_who_moves_the_agent() -> None:
+    """P0-W3 (#277): with the hand-over coming, the line names no `fleet switch` and wakes no
+    manager; without it, the manager is the one to move the agent, as before."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.models import ProjectInfo
+
+    project = ProjectInfo(id="prj_x", root=Path("/tmp/x"))
+    notice = accounts_core.LimitNotice("weekly", None)
+    by_hand = team_service._limited_text("coder-db", "msg", notice, project=project)
+    moving = team_service._limited_text(
+        "coder-db", "msg", notice, project=project, handing_over=True
+    )
+    assert "fleet switch" in by_hand and "automatically" not in by_hand
+    assert "fleet switch" not in moving
+    assert 'moving it to another account automatically (`on_limit = "switch"`)' in moving
+    now = datetime.now(tz=UTC)
+
+    def event(kind: str, text: str) -> Any:
+        from aisquare.models import TeamEvent
+
+        return TeamEvent(id="e", project_id="p", kind=kind, text=text, created_at=now)
+
+    from aisquare.models import TeamSession
+
+    manager = TeamSession(id="m", project_id="p", role="manager", started_at=now, last_seen_at=now)
+
+    def wakes(one: Any) -> bool:
+        return team_service.wake_class(one, manager) == "wake"  # P1 WS-2's one rule (#279)
+
+    assert wakes(event("limited", by_hand))
+    # On the KIND, never the wording (review of #304): the phrase in a plain `limited` line
+    # still wakes, and the hand-over's own kind does not, whatever it says.
+    assert wakes(event("limited", moving))
+    assert not wakes(event(team_service.LIMITED_HANDING_OVER, by_hand))
+    assert "handover_failed" in team_service.MANAGER_WAKE_KINDS
+    from aisquare.services import remote_needs
+
+    assert remote_needs.LIMITED_EVENT_KINDS == team_service.LIMITED_KINDS
+
+
+@pytest.mark.parametrize("role", ["coder", "manager", "reviewer"])
+def test_a_session_start_reads_waiting_for_every_role_until_its_first_prompt(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, role: str
+) -> None:
+    """#123: the start upsert wrote `working`, and only the captain was set back to
+    `waiting`. A just-spawned idle agent then read busy for the row's whole fresh window,
+    `fleet tell` filed a note it never read, and an agent whose first prompt was never
+    submitted looked busy to everyone who could have reached it."""
+    monkeypatch.setenv("AISQUARE_ROLE", role)
+    _start(runner, CODER, work_dir)
+    monkeypatch.delenv("AISQUARE_ROLE")
+
+    def state() -> str:
+        with store_session() as store:
+            session = store.get_session(CODER)
+            assert session is not None
+            return session.state
+
+    assert state() == "waiting"
+    _prompt(runner, CODER, work_dir)
+    assert state() == "working"
+    # A compaction can come mid-turn, so it keeps what the turn said (the control).
+    _start(runner, CODER, work_dir, source="compact")
+    assert state() == "working"
+    _start(runner, CODER, work_dir, source="resume")
+    assert state() == "waiting"

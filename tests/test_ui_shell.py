@@ -681,7 +681,13 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
         }
         await pilot.resize_terminal(140, 30)
         await settle(app)
+        # Until the header has followed the resize: one settle read the 90-column layout
+        # on windows-latest (`37 > 60`, run 40013597204), the reflow still to come.
         seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
+        deadline = time.monotonic() + FLEET_HOLD_S
+        while seen["wide"][0] <= 60 and time.monotonic() < deadline:
+            await pilot.pause(0.05)
+            seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
         return seen
 
     seen = drive(
@@ -3297,6 +3303,7 @@ class StopRecorder:
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         self.calls.append((project.id, label, force, agent_id))
         if self.refuse is not None:
@@ -3555,6 +3562,7 @@ def test_a_successful_stop_toasts_the_ended_row_re_reads_and_leaves_its_view(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         stopped.append(True)
         return fleet_service.StopReceipt(ended(live.agent), [])
@@ -3781,6 +3789,7 @@ def test_the_app_stays_live_while_a_stop_is_in_flight(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         entered.set()
         if not release.wait(10):
@@ -3831,6 +3840,7 @@ def test_a_refusal_re_reads_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         raise fleet_service.FleetError("tmux did not answer, so its row is left live")
 

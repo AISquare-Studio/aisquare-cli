@@ -2207,6 +2207,11 @@ def test_without_cryptography_push_says_how_to_get_it_and_nothing_else_breaks(
     app: Any, runtime: Runtime, roster: set[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, _device = unlocked(app, runtime, roster)
+    # The phone's subscription is made BEFORE the package goes: the test's Browser makes its
+    # keys with cryptography, whose EC backend is imported on first use. After the monkeypatch
+    # that import failed whenever no earlier test in the process had made one (alone, or an
+    # xdist worker's first; #315's lean check), so the test passed or failed by its order.
+    body = Browser(f"{FCM}x").subscription()
     monkeypatch.setitem(sys.modules, "cryptography", None)
     assert client.get(f"{base(runtime)}/api/push").json() == {
         "supported": False,
@@ -2214,7 +2219,6 @@ def test_without_cryptography_push_says_how_to_get_it_and_nothing_else_breaks(
         "vapid_public_key": None,
         "subscribed": False,
     }
-    body = Browser(f"{FCM}x").subscription()
     refused = client.post(f"{base(runtime)}/api/push/subscribe", json=body)
     assert (refused.status_code, refused.json()["error"]) == (503, "push_unavailable")
     assert client.post(f"{base(runtime)}/api/push/test").status_code == 503

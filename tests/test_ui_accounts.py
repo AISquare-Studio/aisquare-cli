@@ -3036,10 +3036,11 @@ def _columns_at(view: AccountsView) -> dict[str, list[tuple[int, int]]]:
         "header-login": [(cell.region.x, cell.region.width) for cell in header.query(".col-login")],
     }
     for account_row in view.rows():
+        line = account_row.query_one(".account-line")  # its cells; its windows go under it
         spans = [
             (cell.region.x, cell.region.width)
             for cell in account_row.query(".cell")
-            if cell.parent is account_row and not isinstance(cell, Button)
+            if cell.parent is line and not isinstance(cell, Button)
         ]
         lines[f"row {account_row.slot}"] = spans
         for button in account_row.query(Button):

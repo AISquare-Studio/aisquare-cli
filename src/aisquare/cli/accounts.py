@@ -169,6 +169,24 @@ def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> t
     return session, week
 
 
+def _windows_cell(usage: ClaudeUsage | None, *, now: datetime | None = None) -> str | None:
+    """Each window of a reading whose windows are called otherwise than session and week
+    (``ClaudeUsage.own_windows``: an agent of daily per-model quotas), one a line, as the
+    session and week cells read: ``gemini-2.5-pro daily 70% · resets … · limits`` for the
+    one that limits (``ClaudeUsage.limiting``, the figure the sidebar shows). ``None`` for a
+    reading the two columns show whole."""
+    if usage is None or not usage.available or not usage.own_windows:
+        return None
+    limiting = usage.limiting
+    lines = []
+    for window in usage.own_windows:
+        line = f"{window.name} {_percent(window.used_percent)}"
+        if window.resets_at is not None:
+            line += f" · resets {format_reset(window.resets_at, now=now)}"
+        lines.append(line + (" · limits" if window == limiting else ""))
+    return "\n".join(lines)
+
+
 def _short(path: object) -> str:
     text = str(path)
     home = str(core._home())
@@ -218,9 +236,15 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         table.add_column(column)
     for column in ("plan", "hooks"):
         table.add_column(column)
+    # An agent's windows of other names have a column of their own, there only when one has.
+    windowed = with_usage and any(
+        _windows_cell(status.usage) is not None for status in overview.accounts
+    )
     if with_usage:
         table.add_column("session used")
         table.add_column("week used")
+    if windowed:
+        table.add_column("windows used")
     table.add_column("directory", overflow="fold")
     for status in overview.accounts:
         who = Text(status.identity.email) if status.identity else Text("not signed in", style="dim")
@@ -240,13 +264,20 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         ]
         if with_usage:
             session, week = _usage_cells(status.usage)
+            windows = _windows_cell(status.usage)
             if status.usage is not None and status.usage.available:
-                week += (
+                age = (
                     ""
                     if core.kind(status.account.agent).network_usage
                     else _usage_age(status.usage)
                 )
+                if windows is None:
+                    week += age
+                else:
+                    windows += age
             cells.extend((session, week))
+            if windowed:
+                cells.append(windows or "")
         cells.append(Text(_short(status.account.config_dir), style="dim"))
         table.add_row(*cells)
     console.print(table)
@@ -369,7 +400,9 @@ def usage_(
     40% used is 60% left. A reading is shared for five minutes between this
     command, `list --usage` and asq's Accounts page; `--refresh` fetches now. A
     Codex account's is what its newest session recorded, read from its home with
-    no request — "as of" says how old that reading is.
+    no request — "as of" says how old that reading is. An agent whose windows are
+    others (a daily quota per model) shows each by its name under "windows used",
+    and which one limits it.
     """
     # The arranged list, like every other account surface: priority order, the
     # alias as the label, disabled marked — and one concurrent read for all of
@@ -397,18 +430,28 @@ def usage_(
     table.add_column("label", no_wrap=True, min_width=widest)
     for column in ("signed in as", "session used", "week used"):
         table.add_column(column)
+    # An agent's windows of other names (daily per-model quotas) have a column of their own.
+    windowed = any(_windows_cell(status.usage) is not None for status in statuses)
+    if windowed:
+        table.add_column("windows used")
     for status, label in zip(statuses, labels, strict=True):
         who = Text(status.identity.email) if status.identity else Text("not signed in", style="dim")
         session, week = _usage_cells(status.usage)
+        windows = _windows_cell(status.usage)
         slots = core.kind(status.account.agent)
         if status.usage and status.usage.available:
             # A reading its sessions recorded says how old it is; another agent's row than
             # Claude Code's says whose it is (Codex's "· codex").
-            week += "" if slots.network_usage else _usage_age(status.usage)
+            age = "" if slots.network_usage else _usage_age(status.usage)
+            if windows is None:
+                week += age
+            else:
+                windows += age
             if not slots.legacy_slots:
                 binary = get_adapter(status.account.agent).binary
                 label = Text.assemble(label, (f" · {binary}", "dim"))
-        table.add_row(str(status.account.slot), label, who, session, week)
+        row: list[Text | str] = [str(status.account.slot), label, who, session, week]
+        table.add_row(*row, *([windows or ""] if windowed else []))
     console.print(table)
     if (line := _refreshed_line(asked)) is not None:
         console.print(line)

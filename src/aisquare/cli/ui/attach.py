@@ -158,16 +158,19 @@ def agent_text(status: FleetAgentStatus) -> str:
 
 
 def account_text(status: ClaudeAccountStatus, *, agent: bool = False) -> str:
-    """``2 · me@example.com · max · session 12%`` — slot, who, plan, usage when read; with
-    ``agent``, the slot's agent after its number (``5 · Codex · …``), for a list that holds
-    more than one agent's slots."""
+    """``2 · me@example.com · max · session 12%`` — slot, who, plan, usage when read: its
+    window that limits, by name (``week 90%``, ``gemini-2.5-pro daily 70%``), the figure the
+    sidebar shows beside its agents (``ClaudeUsage.ranked_percent``); with ``agent``, the
+    slot's agent after its number (``5 · Codex · …``), for a list that holds more than one
+    agent's slots."""
     who = status.identity.email if status.identity is not None else "not signed in"
     parts = [str(status.account.slot), who, status.subscription or "plan unknown"]
     if agent:
         parts.insert(1, accounts_core.agent_label(status.account.agent))
     usage = status.usage
-    if usage is not None and usage.available and usage.session_percent is not None:
-        parts.append(f"session {usage.session_percent:.0f}%")
+    limiting = usage.limiting if usage is not None else None
+    if usage is not None and limiting is not None and usage.ranked_percent is not None:
+        parts.append(f"{limiting.name} {usage.ranked_percent:.0f}%")
     return " · ".join(parts)
 
 

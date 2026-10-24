@@ -423,13 +423,23 @@ class ClaudeUsage(BaseModel):
         """The window called ``name``, or ``None`` when the reading has none."""
         return next((window for window in self.windows if window.name == name), None)
 
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def limiting(self) -> UsageWindow | None:
         """The window that limits: the most used of those read (the shorter on a tie), or
-        ``None`` with none read. What the agent rows, the info line and a pick go by: a
-        weekly or a daily limit refuses requests exactly as a five-hour one does."""
+        ``None`` with none read. What the agent rows, the info line, a pick, the Accounts
+        page and ``accounts usage`` go by, and the JSON says: a weekly or a daily limit
+        refuses requests exactly as a five-hour one does."""
         read = [window for window in self.windows if window.used_percent is not None]
         return max(read, key=lambda window: window.used_percent or 0.0, default=None)
+
+    @property
+    def own_windows(self) -> tuple[UsageWindow, ...]:
+        """Every window, when one is called other than ``session`` and ``week`` (an agent of
+        daily per-model quotas), for the listings to show each by its name; ``()`` for a
+        reading their session and week columns show whole (Claude Code's, Codex's)."""
+        named = {SESSION_WINDOW, WEEK_WINDOW}
+        return self.windows if any(w.name not in named for w in self.windows) else ()
 
     @property
     def ranked_percent(self) -> float | None:

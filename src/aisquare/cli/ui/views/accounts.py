@@ -361,6 +361,8 @@ needs doing reads, and can be done, without scrolling sideways at 160 columns wi
 sidebar at its default width. When each window resets is the detail that can wait.
 """
 
+_SESSION = next(column for column in COLUMNS if column.key == "session")
+
 LOGIN_COLUMN = Column("login", "", 8)
 """*Log in*'s column, beside the status that says why it is there."""
 
@@ -466,6 +468,33 @@ def account_cells(
         text.no_wrap = True
         text.overflow = "ellipsis"
     return cells
+
+
+def windows_text(
+    status: ClaudeAccountStatus, usage: ClaudeUsage | None, *, now: datetime | None = None
+) -> Text | None:
+    """The line under a row whose reading has windows called otherwise than session and week
+    (``ClaudeUsage.own_windows``: an agent of daily per-model quotas): each window a line,
+    by its name, its bar and percent USED and its reset, starting under the session column,
+    and ``limits`` beside the one that limits (``ClaudeUsage.limiting``, the figure the
+    sidebar and the info line show). ``None`` for a row the two columns show whole."""
+    if not status.signed_in or usage is None or not usage.available or not usage.own_windows:
+        return None
+    indent = " " * sum(column.width + 1 for column in LAYOUT[: LAYOUT.index(_SESSION)])
+    widest = max(len(window.name) for window in usage.own_windows)
+    limiting = usage.limiting
+    lines: list[Text] = []
+    for window in usage.own_windows:
+        line = Text(indent + window.name.ljust(widest) + " ", style="dim")
+        if window.used_percent is None:
+            line.append("—", style="dim")
+        else:
+            line.append_text(usage_bar(window.used_percent))
+        line.append(_resets(window.resets_at, now=now), style="dim")
+        if window == limiting:
+            line.append(" · limits", style="bold")
+        lines.append(line)
+    return Text("\n", no_wrap=True).join(lines)
 
 
 def reading_age(usage: ClaudeUsage, *, now: datetime | None = None) -> str:
@@ -687,8 +716,9 @@ class NameCell(Static):
                 row.post_message(AccountRow.RenameRequested(row.slot))
 
 
-class AccountRow(Horizontal, can_focus=True):
-    """One slot as a table row: its cells (:data:`LAYOUT`), then its arranging buttons.
+class AccountRow(Vertical, can_focus=True):
+    """One slot as a table row: its cells (:data:`LAYOUT`), then its arranging buttons, and
+    under them each of its windows when they are called otherwise (:func:`windows_text`).
 
     *Log in*, beside the status, shows when the slot has no login or its token is
     missing, expired or rejected (:func:`needs_login`); *Default* makes it the
@@ -709,7 +739,9 @@ class AccountRow(Horizontal, can_focus=True):
     """
 
     DEFAULT_CSS = """
-    AccountRow { width: auto; height: 1; }
+    AccountRow { width: auto; height: auto; }
+    AccountRow .account-line { width: auto; height: 1; }
+    AccountRow .account-windows { width: auto; height: auto; }
     AccountRow:focus { background: $boost; }
     AccountRow:focus-within { background: $boost; }
     AccountRow .col-name { layout: horizontal; }
@@ -747,6 +779,18 @@ class AccountRow(Horizontal, can_focus=True):
         return self.status.account.slot
 
     def compose(self) -> ComposeResult:
+        with Horizontal(classes="account-line"):
+            yield from self._cells()
+            with Horizontal(classes="account-actions"):
+                for stem, label, width in _ACTIONS:
+                    button = Button(label, id=f"account-{stem}-{self.slot}", compact=True)
+                    button.styles.width = width
+                    yield button
+        windows = Static(id=f"account-windows-{self.slot}", classes="account-windows")
+        windows.display = False
+        yield windows
+
+    def _cells(self) -> ComposeResult:
         for column in LAYOUT:
             classes = f"cell col-{column.key}"
             if column is LOGIN_COLUMN:
@@ -775,11 +819,6 @@ class AccountRow(Horizontal, can_focus=True):
                 field.tooltip = f"{core.ALIAS_HINT} · Enter saves, empty clears, Esc cancels"
                 field.display = False
                 yield field
-        with Horizontal(classes="account-actions"):
-            for stem, label, width in _ACTIONS:
-                button = Button(label, id=f"account-{stem}-{self.slot}", compact=True)
-                button.styles.width = width
-                yield button
 
     def on_mount(self) -> None:
         self._paint()
@@ -873,6 +912,10 @@ class AccountRow(Horizontal, can_focus=True):
             if column.key in ("name", "email", "status"):
                 # The whole value, for the cell that cut it short with an ellipsis.
                 cell.tooltip = self._cell_tooltip(column.key, cells[column.key])
+        windows = windows_text(self.status, self.usage)
+        line = self.query_one(f"#account-windows-{self.slot}", Static)
+        line.update(windows or "")
+        line.display = windows is not None
         login = self.query_one(f"#account-login-{self.slot}", Button)
         login.tooltip = f"log in again: {_sign_in_opens(account.agent)}"
         self._offer(login, needs_login(self.status, self.usage))

@@ -35,6 +35,7 @@ from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters import register, unregister
 from aisquare.core.agent_adapters.types import AgentAdapter
 from aisquare.core.selfcli import CliResult
+from aisquare.models import ClaudeAccount, ClaudeUsage
 from aisquare.services import agents as agents_service
 from aisquare.services import first_run, lifecycle
 from tests.fake_agent import FakeAgentAdapter
@@ -277,6 +278,101 @@ def test_its_daily_per_model_quotas_are_its_usage_and_the_info_line_shows_the_on
         )
         line = info_line(FleetAgentStatus(agent=row, state="waiting"), None, summary.limit_by_slot)
         assert f"{accounts_core.label(slot)} · 70%" in line.plain, line.plain
+    finally:
+        unregister(adapter.id)
+
+
+def _signed_in_slot(adapter: GeminiShapedAdapter) -> ClaudeAccount:
+    """A new slot of the Gemini-shaped agent's, signed in, its quotas recorded: its
+    fixture's ``login`` (flash 10 %, pro 70 %)."""
+    slot = accounts_core.create_account(adapter.id)
+    for name, text in json.loads((FIXTURES / f"{adapter.id}.json").read_text("utf-8"))["accounts"][
+        "login"
+    ].items():
+        (slot.config_dir / name).parent.mkdir(parents=True, exist_ok=True)
+        (slot.config_dir / name).write_text(text, encoding="utf-8")
+    return slot
+
+
+def test_every_window_it_reports_is_listed_by_name_and_all_agree_on_the_one_that_limits(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """r18 finding 4: its windows are called by their models, not ``session`` and ``week``.
+    ``accounts usage`` and ``accounts --usage`` list each by name with its percent USED and
+    reset, the Accounts page draws each under the row, the JSON says which one limits, and
+    every one of them names the window the sidebar's figure is (pro's, 70 %), as does the
+    picker's line. Claude Code's and Codex's tables keep their two columns alone."""
+    import asyncio
+
+    from textual.app import App, ComposeResult
+    from textual.widgets import Static
+
+    from aisquare.cli.ui.attach import account_text
+    from aisquare.cli.ui.views.accounts import AccountRow, windows_text
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_ui_accounts import shown
+
+    adapter = GeminiShapedAdapter()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        slot = _signed_in_slot(adapter)
+        summary = accounts_service.read_fleet_headroom(agent=adapter.id)
+        assert summary.limit_by_slot == {slot.slot: 70.0}, "the sidebar's figure"
+
+        monkeypatch.setenv("COLUMNS", "200")  # a line a window, as a wide terminal shows it
+        listed = runner.invoke(app, ["accounts", "usage"])
+        assert listed.exit_code == 0, listed.output
+        assert "windows used" in listed.output, listed.output
+        flash = next(row for row in listed.output.splitlines() if "flash daily" in row)
+        pro = next(row for row in listed.output.splitlines() if "pro daily" in row)
+        assert "gemini-2.5-flash daily 10% · resets" in flash and "limits" not in flash
+        assert "gemini-2.5-pro daily 70% · resets" in pro and "limits" in pro
+        overview = runner.invoke(app, ["accounts", "list", "--usage"])
+        assert overview.exit_code == 0, overview.output
+        assert "windows used" in overview.output and "pro daily 70%" in overview.output
+
+        dumped = json.loads(runner.invoke(app, ["--json", "accounts", "usage"]).output)
+        usage = next(row["usage"] for row in dumped if row["account"]["slot"] == slot.slot)
+        assert [w["name"] for w in usage["windows"]] == [
+            "gemini-2.5-flash daily",
+            "gemini-2.5-pro daily",
+        ]
+        assert (usage["limiting"]["name"], usage["limiting"]["used_percent"]) == (
+            "gemini-2.5-pro daily",
+            70.0,
+        )
+
+        status = accounts_service.describe(slot)
+        reading = accounts_service.usage(slot)
+        status.usage = reading
+        assert account_text(status).endswith("· gemini-2.5-pro daily 70%"), account_text(status)
+        text = windows_text(status, reading)
+        assert text is not None
+        flash_line, pro_line = text.plain.splitlines()
+        assert "gemini-2.5-flash daily" in flash_line and "10%" in flash_line
+        assert "gemini-2.5-pro daily" in pro_line and "70%" in pro_line
+        assert "limits" in pro_line and "limits" not in flash_line
+
+        class Row(App[None]):
+            def compose(self) -> ComposeResult:
+                yield AccountRow(status, id="row")
+
+        async def drawn() -> tuple[bool, str]:
+            row_app = Row()
+            async with row_app.run_test(size=(200, 10)) as pilot:
+                row_app.query_one(AccountRow).show(status, reading)
+                await pilot.pause()
+                line = row_app.query_one(f"#account-windows-{slot.slot}", Static)
+                return line.display, shown(line)
+
+        displayed, under = asyncio.run(drawn())
+        assert displayed and under == text.plain
+
+        # Claude Code's and Codex's windows are the two columns, and no line is under them.
+        two = ClaudeUsage(available=True, session_percent=12.0, week_percent=40.0)
+        assert two.own_windows == () and two.limiting is not None
+        assert two.limiting.name == "week"
     finally:
         unregister(adapter.id)
 

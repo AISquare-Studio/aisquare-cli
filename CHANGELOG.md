@@ -40,7 +40,12 @@ adapter.**
   window alone (a business plan) now counts in the sidebar's Codex headroom by
   that week: in the `Nx codex` count, the dot's colour and its agents'
   `#slot·NN%`. Before, it was left out of all three. A week it has spent is no
-  room: its dot is the empty one and its figure reads 100 %. An agent with no
+  room: its dot is the empty one and its figure reads 100 %. The account
+  picker's line names that same window and figure (`week 90%` where the week is
+  fuller, not the five hours' `session 12%`), and `accounts usage --json` says
+  which window it is (`limiting`). An agent whose windows have other names (a
+  daily quota per model) shows each by its name on the Accounts page and in
+  `accounts usage`, the one that limits marked. An agent with no
   automatic reviewer of its own runs the built-in `workspace:auto` as
   `workspace:ask`, and its spawn's receipt says so.
 - The captain reads each agent's pane by that agent's own screens. On a Codex

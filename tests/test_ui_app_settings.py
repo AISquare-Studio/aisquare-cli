@@ -942,11 +942,13 @@ def test_each_tab_shows_the_bare_minimum_and_folds_the_rest_under_advanced() -> 
             seen[f"{tab} buttons"] = area(host, "#save-settings") > 0
             host.query_one(ADVANCED[tab], Collapsible).collapsed = False
             await settle(pilot)
+            hidden: list[str] = []
             for wid in FOLDED[tab]:
                 host.query_one(wid).scroll_visible(animate=False)
                 await settle(pilot)
                 if area(host, wid) == 0:
-                    seen.setdefault(f"{tab} unfolded", []).append(wid)  # type: ignore[union-attr]
+                    hidden.append(wid)
+            seen[f"{tab} unfolded"] = hidden
         tabs.active = AGENT_TAB
         await settle(pilot)
         seen["buttons back"] = area(host, "#save-settings") > 0
@@ -957,7 +959,7 @@ def test_each_tab_shows_the_bare_minimum_and_folds_the_rest_under_advanced() -> 
     for tab in (AGENT_TAB, PREFERENCES_TAB, REMOTE_TAB):
         assert seen[f"{tab} in view"] == [], f"{tab}: shown as it opens"
         assert seen[f"{tab} folded"] == [], f"{tab}: folded until Advanced is opened"
-        assert f"{tab} unfolded" not in seen, f"{tab}: shown once Advanced is opened"
+        assert seen[f"{tab} unfolded"] == [], f"{tab}: shown once Advanced is opened"
     assert (seen[f"{AGENT_TAB} buttons"], seen[f"{PREFERENCES_TAB} buttons"]) == (True, True)
     assert seen[f"{REMOTE_TAB} buttons"] is False, "nothing on Remote for Save to save"
     assert seen["buttons back"] is True

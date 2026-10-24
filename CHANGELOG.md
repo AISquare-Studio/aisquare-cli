@@ -67,7 +67,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--project` run in that checkout wrote is check output and never counts, so two
   checks writing their own junit reports into the checkout do not stale each other.
   Any other change does: an added `conftest.py`, a file a run wrote that is now
-  tracked or was edited since, a report rewritten outside `asq exec`. The reason
+  tracked or was edited since (a later read-only run such as `git status` does not
+  change that), a report rewritten outside `asq exec`. The reason
   names the first changed files and says to delete, gitignore or write elsewhere a
   check's own output. `asq exec --task` takes the task's number or id, like every other
   `--task`, and a report taken with it backs only that task. Manual `--artifact`

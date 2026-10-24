@@ -64,8 +64,10 @@ The source is compared **file by file**, in the checkout the report ran in, not 
 you record from: a check run in a worktree is about that worktree.
 
 **Check output never counts.** A path is check output only while it is **untracked**
-and holds **exactly what a saved run wrote** there: its content is what that path held
-after some saved `asq exec --project` run in that checkout, recorded as evidence or not.
+and holds **exactly what a saved run wrote** there: its content is what some saved
+`asq exec --project` run in that checkout left it as, when that run created or rewrote
+it, recorded as evidence or not. A run that only read the file, such as `asq exec
+--project P -- git status`, wrote nothing to it, so it never makes a hand edit output.
 (In a checkout that is not a git repository, "untracked" means a saved run created it.)
 So R1's `--junitxml=a.xml` and R2's `--junitxml=b.xml` never stale each other, and
 running a check again through `asq exec`, which rewrites its own report file, is not a

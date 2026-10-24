@@ -319,6 +319,33 @@ def test_a_file_a_run_created_and_someone_then_edited_is_source(repo: Path) -> N
     assert _broken_after(repo, "conftest.py", then=lambda: None) == {"R1": "stale"}
 
 
+def test_a_read_only_run_does_not_launder_an_added_conftest(repo: Path) -> None:
+    """Tester's H4 on #12: a raising conftest.py added by hand, then `asq exec --project
+    P -- git status --short`, read PASS and `task done` succeeded at d7c9a974, because the
+    run recorded every untracked file it found. A run's digest counts only where it
+    changed the path."""
+    brief, task = _linked()
+    _record(brief, task, _run(_py("print('the check')"), task=task))
+    (repo / "conftest.py").write_text("raise RuntimeError('collection fails now')\n")
+    assert _check(brief) == {"R1": "stale"}
+    _run(["git", "status", "--short"])
+    assert _check(brief) == {"R1": "stale"}
+    with pytest.raises(briefs.TaskNotProven):
+        team.finish_task(task.id)
+
+
+def test_a_read_only_run_does_not_launder_an_edited_untracked_file(repo: Path) -> None:
+    """Tester's H4b on #12: an untracked helper.py the check relies on, edited by hand,
+    then a listing run (`ls`), read PASS. It still reads stale."""
+    (repo / "helper.py").write_text("VALUE = 1\n")
+    brief, task = _linked()
+    _record(brief, task, _run(_py("print('the check')"), task=task))
+    (repo / "helper.py").write_text("VALUE = 2\n")
+    assert _check(brief) == {"R1": "stale"}
+    _run(_py("import os; print(sorted(os.listdir('.')))"))
+    assert _check(brief) == {"R1": "stale"}
+
+
 def test_a_source_file_the_check_changes_is_named_with_the_three_remedies(repo: Path) -> None:
     """Where a path that existed still changes during a run, the refusal names it and says
     what to do: delete it, gitignore it, or write check output outside the checkout."""

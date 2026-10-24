@@ -251,8 +251,9 @@ class _Sources:
     def outputs(self, root: str, current: Mapping[str, str], *others: str | None) -> set[str]:
         """The paths in checkout ``root`` that are check output now (manager's decision on
         #12, final): a path counts only if it is UNTRACKED now and its CURRENT content is
-        what a saved ``--project`` run wrote there (its digest is that path's in some saved
-        run's after-identity, in ``root`` or in ``others``). For a checkout that is not a
+        what a saved ``--project`` run wrote there: its digest is the one that path got in
+        some saved run that created or rewrote it, in ``root`` or in ``others``. A run that
+        only read a path (``git status``) wrote nothing to it. For a checkout that is not a
         git work tree, "untracked" is "created by a saved run" (in an after-identity and
         not its before).
 
@@ -448,8 +449,9 @@ def _changed(what: str, paths: Sequence[str]) -> str:
 
 
 def _written_in(root: str) -> tuple[dict[str, set[str]], set[str]]:
-    """What the saved ``--project`` runs in checkout ``root`` wrote: each path's digests
-    in their after-identities, and the paths they created (after minus before)."""
+    """What the saved ``--project`` runs in checkout ``root`` wrote: for each path a run
+    created or rewrote, the digests it left, and the paths they created (after minus
+    before). A path a run did not change is not something it wrote."""
     written: dict[str, set[str]] = {}
     created: set[str] = set()
     try:
@@ -468,7 +470,12 @@ def _written_in(root: str) -> tuple[dict[str, set[str]], set[str]]:
         if files is None or files.after is None:
             continue
         for path, digest in files.after.items():
-            written.setdefault(path, set()).add(digest)
+            # Only where this run CHANGED the path (created or rewrote it). A read-only
+            # run (`git status`, `ls`) records every untracked file as it found it, and
+            # taking those digests laundered a hand edit into "what a run wrote"
+            # (tester's H4 on #12).
+            if digest != files.before.get(path):
+                written.setdefault(path, set()).add(digest)
         created |= _created(files)
     return written, created
 

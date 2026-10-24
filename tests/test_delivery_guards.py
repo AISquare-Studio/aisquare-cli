@@ -20,6 +20,7 @@ drawn the way W0 captured it on 2.1.309.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -249,6 +250,9 @@ def test_the_pane_touches_the_typing_lease_at_most_once_a_second(
     assert touched == [("asq-test", "%3"), ("asq-test", "%3"), ("asq-test", "%4")]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX only: no tmux socket path, so the lease is the name"
+)
 def test_the_typing_lease_is_the_servers_not_every_server_of_its_name(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

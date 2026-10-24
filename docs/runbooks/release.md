@@ -42,7 +42,8 @@ latest URLs answer 404: GitHub already calls the new release the latest, and it
 has no assets yet. The copies on `main` are unstamped. They hand off to the
 latest release's own installer once it is attached: main's `install.sh`
 downloads it, checks its stamp against PyPI's latest version, and runs it with
-the user's arguments, and main's `install.ps1` does the same inside WSL. Until
+the user's arguments (main's `install.ps1` runs main's `install.sh` inside WSL,
+so Windows gets the same). Until
 then (the 404 window above, or for good if **installers** fails), they carry on
 as main's own script and install the latest release from PyPI. So the main
 one-liner keeps working throughout, and says in one line which installer ran.

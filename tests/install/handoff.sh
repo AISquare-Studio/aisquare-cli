@@ -4,16 +4,17 @@
 # runs it. .github/workflows/install.yml's `handoff` job runs this.
 #
 # What tests/test_install_script_handoff.py cannot show and this can: the real
-# curl (its flags, its exit codes, a real HTTP 404), the real mktemp and traps,
-# and main's script run by dash and by BusyBox ash, as /bin/sh is on Debian and
-# Alpine. What it cannot reach is GitHub itself. The release is THIS tree
+# curl, GNU wget and BusyBox wget (their flags, and what each says for a real
+# HTTP 404), the real mktemp and traps, and main's script run by dash and by
+# BusyBox ash, as /bin/sh is on Debian and Alpine. What it cannot reach is GitHub itself. The release is THIS tree
 # stamped by scripts/stamp_installers.py and served by a local http.server, and
 # a curl wrapper first on PATH points the release and PyPI URLs at it; every
 # other URL reaches the real curl unchanged.
 #
 # Every run is a --dry-run, so nothing is installed.
 #
-# Usage, from the repository root (needs python3, curl, dash; busybox if there):
+# Usage, from the repository root (needs python3, curl, dash; wget and busybox
+# are used when present):
 #   sh tests/install/handoff.sh
 
 set -eu
@@ -68,13 +69,27 @@ done
 PORT=$(cat "$WORK/port.tmp")
 LOCAL="http://127.0.0.1:$PORT"
 
-REAL_CURL=$(command -v curl) || fail "this needs curl"
-cat >"$WORK/bin/curl" <<WRAPPER
+# A downloader on PATH that points the release and PyPI URLs at the local server
+# and logs what it was asked. $1 is the directory, $2 its name, $3 the real
+# command. curl's `--proto =https` cannot reach an http:// server, so the
+# wrapper drops it, after the log line that shows it was asked for.
+make_wrapper() {
+    mkdir -p "$1"
+    cat >"$1/$2" <<WRAPPER
 #!/bin/sh
-# Points the release and PyPI URLs at $LOCAL; the rest goes as it came.
+printf '%s\n' "\$*" >>"$WORK/fetch.log"
+skip=0
 for arg do
     shift
+    if [ "\$skip" = 1 ]; then
+        skip=0
+        continue
+    fi
     case "\$arg" in
+        --proto | --proto-redir)
+            skip=1
+            continue
+            ;;
         https://github.com/AISquare-Studio/aisquare-cli/releases/*)
             arg="$LOCAL/releases/\${arg#https://github.com/AISquare-Studio/aisquare-cli/releases/}"
             ;;
@@ -82,22 +97,35 @@ for arg do
     esac
     set -- "\$@" "\$arg"
 done
-printf '%s\n' "\$*" >>"$WORK/curl.log"
-exec "$REAL_CURL" "\$@"
+exec $3 "\$@"
 WRAPPER
-chmod +x "$WORK/bin/curl"
+    chmod +x "$1/$2"
+}
+
+REAL_CURL=$(command -v curl) || fail "this needs curl"
+make_wrapper "$WORK/bin" curl "$REAL_CURL"
+
+# For the wget runs: the tools a dry run uses, and no curl or wget among them,
+# so the wrapper is the only downloader install.sh can find.
+mkdir -p "$WORK/tools"
+for tool in sh uname id sed grep head cut tr mktemp rm cat sort wc dirname basename \
+    env tee readlink chmod mkdir ls touch; do
+    found=$(command -v "$tool") || fail "no $tool on this machine"
+    ln -s "$found" "$WORK/tools/$tool"
+done
 
 DRY="--dry-run --yes --no-project --no-agent --no-system-deps"
 
-# One run of main's install.sh: $1 is the shell, the rest are its arguments.
-# Output in $WORK/out, status in $RC, and the TMPDIR must be empty after.
+# One run of main's install.sh: $1 is the PATH, $2 the shell, the rest are its
+# arguments. Output in $WORK/out, status in $RC, and the TMPDIR must be empty.
 installer() {
-    _shell=$1
-    shift
-    : >"$WORK/curl.log"
+    _path=$1
+    _shell=$2
+    shift 2
+    : >"$WORK/fetch.log"
     set +e
     # shellcheck disable=SC2086  # the shell is "busybox ash" for one run.
-    env PATH="$WORK/bin:$PATH" HOME="$WORK/home" TMPDIR="$WORK/tmp" NO_COLOR=1 \
+    env PATH="$_path" HOME="$WORK/home" TMPDIR="$WORK/tmp" NO_COLOR=1 \
         $_shell "$ROOT/install.sh" "$@" >"$WORK/out" 2>&1
     RC=$?
     set -e
@@ -106,6 +134,28 @@ installer() {
 }
 
 expect() { grep -qF -e "$1" "$WORK/out" || fail "$2"; }
+fetched() { grep -qF -e "$1" "$WORK/fetch.log" || fail "$2"; }
+
+# PyPI is asked once a run at most: the hand-off asks, and a fallback reuses it.
+asked_pypi_once() {
+    [ "$(grep -c 'pypi.org/pypi/aisquare-cli/json' "$WORK/fetch.log")" -le 1 ] ||
+        fail "PyPI was asked more than once"
+}
+
+# Main's script, falling back on a real HTTP 404 from the local server.
+falls_back_on_404() {
+    mv "$LATEST/install.sh" "$WORK/held.sh"
+    # shellcheck disable=SC2086
+    installer "$1" "$2" $DRY
+    mv "$WORK/held.sh" "$LATEST/install.sh"
+    [ "$RC" = 0 ] || fail "the fallback dry run exited $RC"
+    expect "using this installer (the latest release has no installer attached)" \
+        "a 404 did not fall back in one line"
+    expect "nothing above was actually run" "main's own dry run did not run"
+    if grep -qF "pinned to" "$WORK/out"; then
+        fail "the fallback pinned a version, so the release's script ran after all"
+    fi
+}
 
 SHELLS="dash"
 if command -v busybox >/dev/null 2>&1; then
@@ -117,10 +167,11 @@ fi
 for name in $SHELLS; do
     shell=$name
     [ "$name" = busybox_ash ] && shell="busybox ash"
+    CURL_PATH="$WORK/bin:$PATH"
 
     head1 "$shell: main's script hands off to the latest release ($VERSION)"
     # shellcheck disable=SC2086
-    installer "$shell" $DRY
+    installer "$CURL_PATH" "$shell" $DRY
     [ "$RC" = 0 ] || fail "the handed-off dry run exited $RC"
     [ "$(head -n 1 "$WORK/out")" = "  using the v$VERSION installer" ] ||
         fail "the first line is not the hand-off"
@@ -129,24 +180,26 @@ for name in $SHELLS; do
     grep -q -e "aisquare-cli==$VERSION" -e "aisquare-cli@$VERSION" "$WORK/out" ||
         fail "the release's installer did not install $VERSION"
     expect "nothing above was actually run" "--dry-run was not passed through"
-    grep -q "$LOCAL/releases/latest/download/install.sh" "$WORK/curl.log" ||
-        fail "the latest release's installer was not fetched"
-    grep -q -e '--max-time' "$WORK/curl.log" || fail "the download had no timeout"
+    fetched "github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.sh" \
+        "the latest release's installer was not fetched"
+    fetched "--max-time" "the download had no timeout"
+    fetched "--proto =https" "the download was not held to HTTPS"
+    asked_pypi_once
 
     head1 "$shell: --version $VERSION fetches that release's installer"
     # shellcheck disable=SC2086
-    installer "$shell" $DRY --version "$VERSION"
+    installer "$CURL_PATH" "$shell" $DRY --version "$VERSION"
     [ "$RC" = 0 ] || fail "the pinned hand-off exited $RC"
     expect "using the v$VERSION installer" "a pin did not hand off"
-    grep -q "$LOCAL/releases/download/v$VERSION/install.sh" "$WORK/curl.log" ||
-        fail "the pinned release's installer was not fetched"
+    fetched "github.com/AISquare-Studio/aisquare-cli/releases/download/v$VERSION/install.sh" \
+        "the pinned release's installer was not fetched"
 
     head1 "$shell: piped, as curl … | sh runs it"
-    : >"$WORK/curl.log"
+    : >"$WORK/fetch.log"
     set +e
     # shellcheck disable=SC2086
     cat "$ROOT/install.sh" |
-        env PATH="$WORK/bin:$PATH" HOME="$WORK/home" TMPDIR="$WORK/tmp" NO_COLOR=1 \
+        env PATH="$CURL_PATH" HOME="$WORK/home" TMPDIR="$WORK/tmp" NO_COLOR=1 \
             $shell -s -- $DRY >"$WORK/out" 2>&1
     RC=$?
     set -e
@@ -156,17 +209,32 @@ for name in $SHELLS; do
     [ -z "$(ls -A "$WORK/tmp")" ] || fail "the piped run left its download behind"
 
     head1 "$shell: a real 404 falls back to this script"
-    mv "$LATEST/install.sh" "$WORK/held.sh"
+    falls_back_on_404 "$CURL_PATH" "$shell"
+    asked_pypi_once
+done
+
+# wget, where there is no curl: `-t 1 -T 30` (GNU wget would otherwise try 20
+# times), and its own words for a 404. GNU wget is on GitHub's Ubuntu runners;
+# BusyBox's is Alpine's only downloader.
+WGETS=""
+command -v wget >/dev/null 2>&1 && WGETS="gnu"
+busybox --list 2>/dev/null | grep -qx wget && WGETS="$WGETS busybox"
+[ -n "$WGETS" ] || head1 "no wget here: curl only"
+for kind in $WGETS; do
+    real=$(command -v wget || true)
+    [ "$kind" = busybox ] && real="busybox wget"
+    make_wrapper "$WORK/wget-$kind" wget "$real"
+    WGET_PATH="$WORK/wget-$kind:$WORK/tools"
+
+    head1 "$kind wget: main's script hands off"
     # shellcheck disable=SC2086
-    installer "$shell" $DRY
-    mv "$WORK/held.sh" "$LATEST/install.sh"
-    [ "$RC" = 0 ] || fail "the fallback dry run exited $RC"
-    expect "using this installer (the latest release has no installer attached)" \
-        "a 404 did not fall back in one line"
-    expect "nothing above was actually run" "main's own dry run did not run"
-    if grep -qF "pinned to" "$WORK/out"; then
-        fail "the fallback pinned a version, so the release's script ran after all"
-    fi
+    installer "$WGET_PATH" dash $DRY
+    [ "$RC" = 0 ] || fail "the $kind wget hand-off exited $RC"
+    expect "using the v$VERSION installer" "$kind wget did not hand off"
+    fetched "-t 1 -T 30" "$kind wget was not limited to one try"
+
+    head1 "$kind wget: a real 404 falls back to this script"
+    falls_back_on_404 "$WGET_PATH" dash
 done
 
 head1 "the hand-off works end to end"

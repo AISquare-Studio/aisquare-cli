@@ -50,9 +50,9 @@ tmux pane and Windows has no tmux. This does both steps for you, in PowerShell:
 irm https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.ps1 | iex
 ```
 
-main's `install.ps1` fetches the latest release's `install.sh` into WSL the
-same way (V's with `--version V`), and falls back to main's `install.sh`.
-A release's own `install.ps1` pins the same way:
+It runs main's `install.sh` inside WSL, so the hand-off above happens there,
+with the same checks and the same one line. A release's own `install.ps1`
+pins the same way:
 `irm https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.ps1 | iex`.
 
 <details>

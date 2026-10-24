@@ -181,15 +181,16 @@ jobs:
           if ($found) { $found | Format-Table -AutoSize | Out-String | Write-Host; exit 1 }
           Write-Host "analyzer: clean (PSAvoidUsingWriteHost excluded, see comment)"
 
-      - name: The hand-off command install.ps1 builds (WSL stood in for)
+      - name: The command install.ps1 hands to WSL (WSL stood in for)
         shell: pwsh
-        # The runner has no WSL distribution, so `wsl.exe` here is a FUNCTION
-        # (a function wins over an application of the same name): it names one
-        # distribution and keeps the command install.ps1 hands to bash. Each
-        # command is then parsed by Git Bash, so a quoting slip fails here, and
-        # its URLs are checked: the latest release's install.sh, V's with
-        # --version V, and none at all with --no-handoff. The unpinned case
-        # asks PyPI for the latest version, as a user's run does.
+        # wsl.exe gives `bash -lc <command>` to the distribution's DEFAULT SHELL,
+        # which sees the command inside double quotes: a `$`, a backtick, a `"`
+        # or a `\` in it would be expanded there, before bash runs it. So the
+        # command must be main's install.sh piped into `sh -s --` with the
+        # arguments and nothing else; main's install.sh hands off to the
+        # release's own inside WSL. The runner has no WSL distribution, so
+        # `wsl.exe` here is a FUNCTION (a function wins over an application of
+        # the same name) that names one distribution and keeps the command.
         run: |
           function global:wsl.exe {
             if ($args -contains '--list') {
@@ -199,31 +200,22 @@ jobs:
             $global:Inner = $args[-1]
             $global:LASTEXITCODE = 0
           }
-          $bash = 'C:\Program Files\Git\bin\bash.exe'
+          $main = 'https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh'
           $cases = @(
-            @{ Args = @('--yes'); Url = '/releases/latest/download/install.sh' },
-            @{ Args = @('--yes', '--version', '0.9.0'); Url = '/releases/download/v0.9.0/install.sh' },
-            @{ Args = @('--yes', '--no-handoff'); Url = '' }
+            @{ Args = @('--yes'); Tail = '--yes' },
+            @{ Args = @('--yes', '--version', '0.9.0'); Tail = '--yes --version 0.9.0' },
+            @{ Args = @('--no-handoff'); Tail = '--no-handoff' }
           )
           foreach ($case in $cases) {
             $global:Inner = $null
             $forward = $case.Args
             ./install.ps1 @forward
-            if (-not $global:Inner) { Write-Host "no command reached WSL for $forward"; exit 1 }
+            $want = "set -e; curl -fsSL '$main' | sh -s -- $($case.Tail)"
             Write-Host "$forward -> $global:Inner"
-            & $bash -n -c $global:Inner
-            if ($LASTEXITCODE -ne 0) { Write-Host "bash cannot parse it"; exit 1 }
-            if (-not $global:Inner.Contains('AISQUARE_INSTALL_NO_HANDOFF=1 sh -s --')) {
-              Write-Host 'the fallback to main''s install.sh is missing'; exit 1
-            }
-            if ($case.Url -and -not $global:Inner.Contains($case.Url)) {
-              Write-Host "expected $($case.Url)"; exit 1
-            }
-            if (-not $case.Url -and $global:Inner.Contains('/releases/')) {
-              Write-Host '--no-handoff still fetches a release'; exit 1
-            }
+            if ($global:Inner -ne $want) { Write-Host "expected: $want"; exit 1 }
+            if ($global:Inner -match '[$`"\\]') { Write-Host 'WSL default shell would expand it'; exit 1 }
           }
-          Write-Host 'hand-off commands: parse, and fetch what they should'
+          Write-Host 'install.ps1 hands WSL main''s install.sh, untouched by its default shell'
 
       # The WSL DELEGATION ITSELF IS NOT TESTED HERE, said out loud rather than
       # left as a gap a reader has to notice: GitHub's windows-latest runners do
@@ -308,7 +300,8 @@ jobs:
     # The release is this tree stamped by scripts/stamp_installers.py and served
     # from a local http.server (GitHub itself is not reachable from a PR), and
     # the real curl downloads it: hand-off, pin, `curl … | sh`, and a real 404
-    # falling back. All dry runs; tests/install/handoff.sh has the details.
+    # falling back; then GNU wget and BusyBox wget, with no curl on PATH. All
+    # dry runs; tests/install/handoff.sh has the details.
     steps:
       - uses: actions/checkout@v7
 

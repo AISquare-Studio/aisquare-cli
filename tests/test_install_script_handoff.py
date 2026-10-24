@@ -16,7 +16,9 @@ arguments, and carries on itself on any failure. What is pinned here:
 * the download is removed after the run, and after an interrupted one;
 * under ``curl … | sh`` the child never reads stdin, so the rest of the parent's
   input is still unread when it ends, and the release's prompt reads the
-  terminal.
+  terminal;
+* install.ps1 has no hand-off of its own: it hands WSL main's install.sh, in a
+  command WSL's default shell passes through untouched.
 
 Every test drives the real script with ``sh install.sh`` or ``sh -s`` and a fake
 downloader on PATH that serves files from a directory, so nothing reaches the
@@ -83,20 +85,31 @@ def stamped_copy(version: str = STAMP) -> str:
 def reporting_release(
     version: str = STAMP,
     *,
-    options: str = "--yes --no-agent --no-system-deps --no-project --project --version --dry-run",
+    options: tuple[str, ...] = (
+        "--yes",
+        "--no-agent",
+        "--no-system-deps",
+        "--no-project",
+        "--project",
+        "--version",
+        "--version=*",
+        "--dry-run",
+    ),
     body: str = "exit 3",
 ) -> str:
     """A stamped release installer that reports how it was run.
 
-    Its text names the options it "parses", which is what the hand-off's option
-    check reads; exit 3 is a status neither script uses, so it can only have
-    come from here.
+    Its `case` has a branch for each of ``options``, written as install.sh's
+    parse_args writes them, which is what the hand-off's option check reads;
+    exit 3 is a status neither script uses, so it can only have come from here.
     """
+    branches = "".join(f"        {option}) ;;\n" for option in options)
     return (
         "#!/bin/sh\n"
-        f"# parses: {options}\n"
         f'STAMPED_VERSION="{version}"\n'
+        'for arg in "$@"; do\n    case "$arg" in\n' + branches + "    esac\ndone\n"
         'printf "RELEASE RAN handed_off=%s\\n" "${AISQUARE_INSTALL_HANDED_OFF:-}"\n'
+        'printf "RELEASE IS %s\\n" "$0"\n'
         'for arg in "$@"; do printf "ARG[%s]\\n" "$arg"; done\n'
         f"{body}\n"
     )
@@ -134,17 +147,26 @@ _TOOLS = (
 def _fake_downloader(name: str, served: Path, log: Path) -> str:
     """curl or wget, serving release URLs and PyPI's JSON from ``served``.
 
-    A missing file is curl's HTTP-error exit (22); a ``STATUS`` file makes every
-    release URL fail with the exit code it holds (6 cannot resolve, 28 timed out).
+    A missing file is an HTTP 404, and an ``HTTP`` file makes every release URL
+    answer the status it holds. Either is reported the way the real tool does it:
+    curl exits 22 saying "error: 404", GNU wget exits 8 saying "ERROR 404". A
+    ``STATUS`` file makes every release URL fail with the exit code it holds
+    instead (6 cannot resolve, 28 timed out), and a ``HANG`` file makes it hang,
+    after touching ``HANG.started``.
     """
+    if name == "curl":
+        http_error = 'echo "curl: (22) The requested URL returned error: $1" >&2; exit 22'
+    else:
+        http_error = 'echo "ERROR $1: Not Found." >&2; exit 8'
     return f"""#!/bin/sh
 printf '%s %s\\n' {name} "$*" >>"{log}"
+http_error() {{ {http_error}; }}
 out=-
 url=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -o | -O) out=$2; shift ;;
-        -qO-) out=- ;;
+        -qO- | -O-) out=- ;;
         http*) url=$1 ;;
     esac
     shift
@@ -152,12 +174,14 @@ done
 case "$url" in
     {RELEASES}/*)
         [ ! -f "{served}/STATUS" ] || exit "$(cat "{served}/STATUS")"
+        if [ -f "{served}/HANG" ]; then touch "{served}/HANG.started"; sleep 30; fi
+        [ ! -f "{served}/HTTP" ] || http_error "$(cat "{served}/HTTP")"
         file="{served}/${{url#{RELEASES}/}}"
         ;;
     {PYPI_URL}) file="{served}/pypi.json" ;;
     *) exit 7 ;;
 esac
-[ -f "$file" ] || exit 22
+[ -f "$file" ] || http_error 404
 if [ "$out" = - ]; then cat "$file"; else cat "$file" >"$out"; fi
 """
 
@@ -279,23 +303,35 @@ def test_main_hands_off_to_the_latest_release_with_the_same_arguments(machine: M
     assert result.returncode == 3, f"not the release's status:\n{result.stdout}\n{result.stderr}"
     assert _args(result.stdout) == ["--yes", "--project", str(spaced), "--no-agent"]
     assert result.stdout.count("using the v7.7.7 installer") == 1, result.stdout
-    assert "RELEASE RAN handed_off=1" in result.stdout, "the child must get the second-hop guard"
+    # The second-hop guard names the script it was handed to, which is the child.
+    child = re.search(r"^RELEASE IS (.+)$", result.stdout, re.MULTILINE)
+    assert child and child.group(1).startswith(str(machine.tmp)), result.stdout
+    assert f"RELEASE RAN handed_off={child.group(1)}" in result.stdout, result.stdout
     # main's own steps never ran: the hand-off comes before anything prints.
     assert "Checking this machine" not in result.stdout, result.stdout
     assert machine.requests() == [LATEST_URL, PYPI_URL]
     assert machine.leftovers() == [], "the downloaded installer was left behind"
 
 
-def test_the_download_has_a_short_timeout(machine: Machine) -> None:
-    """A release installer that has not arrived in seconds is not worth the wait."""
+def test_both_downloads_are_short_and_https_only(machine: Machine) -> None:
+    """The release's installer and PyPI's answer: seconds, not minutes, over HTTPS.
+
+    A hand-off that hung on a stalled GitHub or PyPI before printing a line
+    would read as a frozen installer; and a redirect must not leave HTTPS.
+    """
     machine.serve_latest(reporting_release())
     machine.pypi(STAMP)
     machine.run("--yes")
-    line = next(
-        line for line in machine.log.read_text(encoding="utf-8").splitlines() if LATEST_URL in line
-    )
-    assert "--connect-timeout" in line and "--max-time" in line, line
-    assert "-fsSL" in line, line
+    lines = machine.log.read_text(encoding="utf-8").splitlines()
+    for url in (LATEST_URL, PYPI_URL):
+        line = next(line for line in lines if url in line)
+        for flag in (
+            "--connect-timeout 5",
+            "--max-time 30",
+            "--proto =https",
+            "--proto-redir =https",
+        ):
+            assert flag in line, f"{url} was fetched without {flag}: {line}"
 
 
 def test_a_release_copy_of_this_tree_runs_its_own_dry_run(machine: Machine) -> None:
@@ -331,10 +367,33 @@ def test_a_wget_only_machine_hands_off_too(machine: Machine) -> None:
 
     assert result.returncode == 3, f"{result.stdout}\n{result.stderr}"
     assert "using the v7.7.7 installer" in result.stdout
-    release = next(
-        line for line in machine.log.read_text(encoding="utf-8").splitlines() if LATEST_URL in line
-    )
-    assert release.startswith("wget ") and "-T" in release.split(), release
+    # One try: GNU wget's default is 20, and -T limits each read, not the download.
+    for url in (LATEST_URL, PYPI_URL):
+        line = next(
+            line for line in machine.log.read_text(encoding="utf-8").splitlines() if url in line
+        )
+        assert line.startswith("wget ") and "-t 1 -T 30" in line, line
+
+
+@pytest.mark.parametrize(
+    ("status", "why"),
+    [
+        ("404", "the latest release has no installer attached"),
+        ("503", "GitHub answered with an error for the latest release's installer"),
+    ],
+)
+def test_wgets_http_errors_read_like_curls(machine: Machine, status: str, why: str) -> None:
+    """GNU wget exits 8 for any HTTP error, and says which in its own words."""
+    (machine.bin / "curl").unlink()
+    _executable(machine.bin / "wget", _fake_downloader("wget", machine.served, machine.log))
+    machine.serve_latest(reporting_release())
+    machine.pypi(STAMP)
+    (machine.served / "HTTP").write_text(status, encoding="utf-8")
+
+    result = machine.run(*DRY)
+
+    assert result.returncode == 0, result.stderr
+    assert f"using this installer ({why})" in result.stdout, result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -375,9 +434,23 @@ def _half(text: str) -> str:
         ),
         (
             lambda m: m.serve_latest(
-                reporting_release(options="--dry-run --yes --no-agent --no-project")
+                reporting_release(options=("--dry-run", "--yes", "--no-agent", "--no-project"))
             ),
             "the v7.7.7 installer has no --no-system-deps option",
+        ),
+        (
+            # Named in its text, as a usage line would, but not a branch it parses.
+            lambda m: m.serve_latest(
+                reporting_release(
+                    options=("--dry-run", "--yes", "--no-agent", "--no-project"),
+                    body="# --no-system-deps   Skip tmux, gh and Node.\nexit 3",
+                )
+            ),
+            "the v7.7.7 installer has no --no-system-deps option",
+        ),
+        (
+            lambda m: (m.served / "HTTP").write_text("503", encoding="utf-8"),
+            "GitHub answered with an error for the latest release's installer",
         ),
     ],
     ids=[
@@ -390,6 +463,8 @@ def _half(text: str) -> str:
         "no-stamp",
         "mismatched-stamp",
         "unknown-option",
+        "mentioned-not-parsed",
+        "http-503",
     ],
 )
 def test_a_failed_hand_off_falls_back_in_one_line(
@@ -408,6 +483,20 @@ def test_a_failed_hand_off_falls_back_in_one_line(
     assert "Checking this machine" in result.stdout
     assert "nothing above was actually run" in result.stdout
     assert machine.leftovers() == [], "the refused download was left behind"
+
+
+def test_a_fallback_reuses_pypis_answer(machine: Machine) -> None:
+    """The hand-off asked PyPI already; `resolve` does not ask again."""
+    machine.serve_latest(stamped_copy("7.7.6"))
+    machine.pypi(STAMP)
+
+    result = machine.run(*DRY)
+
+    assert "is stamped 7.7.6, not 7.7.7" in result.stdout, result.stdout
+    assert machine.requests().count(PYPI_URL) == 1, machine.requests()
+    # And resolve has that answer: 0.6.0 is behind 7.7.7, with no warning.
+    assert "Upgrading aisquare-cli 0.6.0 -> 7.7.7" in result.stdout, result.stdout
+    assert "could not read the latest" not in result.stdout + result.stderr
 
 
 def test_an_unreadable_pypi_falls_back(machine: Machine) -> None:
@@ -442,15 +531,59 @@ def test_a_stamped_copy_never_hands_off(machine: Machine) -> None:
 
 
 def test_the_guard_stops_a_second_hop(machine: Machine) -> None:
-    """The child gets AISQUARE_INSTALL_HANDED_OFF=1 (asserted above); with it set, no hop."""
+    """The child gets AISQUARE_INSTALL_HANDED_OFF naming itself (asserted above):
+    the script it names does not hop again."""
     machine.serve_latest(reporting_release())
     machine.pypi(STAMP)
 
-    result = machine.run(*DRY, env={"AISQUARE_INSTALL_HANDED_OFF": "1"})
+    result = machine.run(*DRY, env={"AISQUARE_INSTALL_HANDED_OFF": str(SCRIPT)})
 
     assert result.returncode == 0, result.stderr
     assert machine.release_requests() == []
     assert "RELEASE RAN" not in result.stdout
+
+
+@pytest.mark.parametrize("stale", ["1", "/tmp/aisquare-release-gone"])
+def test_a_guard_inherited_from_an_old_hand_off_does_not_stop_this_one(
+    machine: Machine, stale: str
+) -> None:
+    """0.9.0 does not unset the guard, so asq, tmux and every agent it starts
+    inherit it; the one-liner run later from an agent's pane must still hand off."""
+    machine.serve_latest(reporting_release())
+    machine.pypi(STAMP)
+
+    result = machine.run("--yes", env={"AISQUARE_INSTALL_HANDED_OFF": stale})
+
+    assert result.returncode == 3, f"{result.stdout}\n{result.stderr}"
+    assert f"handed_off={stale}" not in result.stdout, "the stale value reached the child"
+
+
+@pytest.mark.parametrize("stamped", [False, True], ids=["main", "release"])
+def test_the_guard_is_unset_before_anything_else_runs(
+    machine: Machine, tmp_path: Path, stamped: bool
+) -> None:
+    """Whatever the run starts afterwards, asq, tmux and agents, never sees it.
+
+    The release's copy matters most: it is the script whose run ends in
+    `exec asq`, so it unsets the guard before its own stamp check returns.
+    """
+    script = SCRIPT
+    if stamped:
+        script = tmp_path / "release-install.sh"
+        script.write_text(stamped_copy(), encoding="utf-8")
+    result = subprocess.run(
+        [
+            SH,
+            "-c",
+            f'. "{script}"; NO_HANDOFF=1; hand_off; '
+            'echo "[${AISQUARE_INSTALL_HANDED_OFF-unset}]"',
+        ],
+        capture_output=True,
+        text=True,
+        env=machine.env({"AISQUARE_INSTALL_LIB": "1", "AISQUARE_INSTALL_HANDED_OFF": "/somewhere"}),
+        timeout=60,
+    )
+    assert result.stdout.strip() == "[unset]", result.stdout + result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +631,15 @@ def test_a_pinned_installer_must_carry_that_pin(machine: Machine) -> None:
 
     assert "using this installer (v7.7.7's installer is stamped 7.7.6, not 7.7.7)" in result.stdout
     assert "RELEASE RAN" not in result.stdout
+
+
+@pytest.mark.parametrize("pin", ["v0.9.0", "0.9.0;touch x", "../latest", "-1"])
+def test_a_pin_that_is_not_a_version_never_reaches_a_url(machine: Machine, pin: str) -> None:
+    """Only a release version goes into the URL; anything else is this script's to refuse."""
+    result = machine.run(*DRY, f"--version={pin}")
+
+    assert f"using this installer ({pin} is not a release version)" in result.stdout, result.stdout
+    assert machine.release_requests() == []
 
 
 def test_latest_is_the_latest_release(machine: Machine) -> None:
@@ -558,13 +700,13 @@ def test_help_documents_the_hand_off_and_its_opt_outs(machine: Machine) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("signum", "status"), [(signal.SIGINT, 130), (signal.SIGTERM, 143)], ids=["INT", "TERM"]
-)
-def test_an_interrupted_hand_off_removes_the_download(
-    machine: Machine, signum: signal.Signals, status: int
-) -> None:
-    """Ctrl-C reaches the whole process group; the parent's trap removes the file.
+def _interrupted(
+    machine: Machine, body: str, signum: signal.Signals, *, during_download: bool = False
+) -> tuple[int, str]:
+    """Run main's script into a release whose script runs ``body``, signal the
+    whole process group once that script has started (or, ``during_download``,
+    while its download hangs), as Ctrl-C at a terminal does, and return the
+    run's status and output.
 
     Started with SIGINT and SIGTERM at their defaults, as a terminal gives them.
     A suite started as a background job (`pytest &` in a script) runs with
@@ -574,15 +716,17 @@ def test_an_interrupted_hand_off_removes_the_download(
     than the script. Measured: it failed only when the suite ran under `&`.
     """
     started = machine.root / "release-started"
-    machine.serve_latest(reporting_release(body=f'touch "{started}"\nsleep 30\nexit 3'))
+    machine.serve_latest(reporting_release(body=f'touch "{started}"\n{body}'))
     machine.pypi(STAMP)
+    if during_download:
+        (machine.served / "HANG").touch()
+        started = machine.served / "HANG.started"
     as_from_a_terminal = (
         "import os, signal, sys\n"
         "for signum in (signal.SIGINT, signal.SIGTERM):\n"
         "    signal.signal(signum, signal.SIG_DFL)\n"
         "os.execv(sys.argv[1], sys.argv[1:])\n"
     )
-
     process = subprocess.Popen(
         [sys.executable, "-c", as_from_a_terminal, SH, str(SCRIPT), "--yes"],
         stdout=subprocess.PIPE,
@@ -591,6 +735,7 @@ def test_an_interrupted_hand_off_removes_the_download(
         env=machine.env(),
         cwd=machine.root,
         start_new_session=True,
+        text=True,
     )
     try:
         deadline = time.monotonic() + 60
@@ -600,14 +745,53 @@ def test_an_interrupted_hand_off_removes_the_download(
             time.sleep(0.05)
         assert len(machine.leftovers()) == 1, "the download should exist while it runs"
         os.killpg(process.pid, signum)
-        process.communicate(timeout=60)
+        output, _ = process.communicate(timeout=60)
     finally:
         if process.poll() is None:  # pragma: no cover - only on a failure above
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
+    return process.returncode, output
 
-    assert process.returncode == status
+
+@pytest.mark.parametrize(
+    ("signum", "status"), [(signal.SIGINT, 130), (signal.SIGTERM, 143)], ids=["INT", "TERM"]
+)
+def test_an_interrupted_hand_off_removes_the_download(
+    machine: Machine, signum: signal.Signals, status: int
+) -> None:
+    """Ctrl-C reaches the whole process group; the download is removed all the same."""
+    returncode, _ = _interrupted(machine, "sleep 30\nexit 3", signum)
+
+    assert returncode == status
     assert machine.leftovers() == [], "an interrupted hand-off left its download behind"
+
+
+@pytest.mark.parametrize(
+    ("signum", "status"), [(signal.SIGINT, 130), (signal.SIGTERM, 143)], ids=["INT", "TERM"]
+)
+def test_an_interrupted_download_removes_it_too(
+    machine: Machine, signum: signal.Signals, status: int
+) -> None:
+    """Before the release's script runs, the parent's own traps end the run, and
+    its EXIT trap removes the half-made download; a shell killed outright by the
+    signal would run no trap at all."""
+    returncode, output = _interrupted(machine, "exit 3", signum, during_download=True)
+
+    assert returncode == status, output
+    assert "RELEASE RAN" not in output
+    assert machine.leftovers() == [], "an interrupted download was left behind"
+
+
+def test_a_release_that_survives_the_signal_keeps_its_status(machine: Machine) -> None:
+    """The run's status is the release's: a script that handles Ctrl-C and ends
+    cleanly ends the run cleanly, rather than as the parent's 130."""
+    returncode, output = _interrupted(
+        machine, "trap 'echo SURVIVED; exit 0' INT\nsleep 30\nexit 3", signal.SIGINT
+    )
+
+    assert "SURVIVED" in output, output
+    assert returncode == 0, output
+    assert machine.leftovers() == []
 
 
 # ---------------------------------------------------------------------------
@@ -782,7 +966,8 @@ def current_machine(machine: Machine) -> Machine:
     _executable(
         machine.bin / "asq",
         '#!/bin/sh\nif [ -t 0 ]; then echo "UI-STARTED stdin=terminal"; '
-        'else echo "UI-STARTED stdin=NOT-a-terminal"; fi\n',
+        'else echo "UI-STARTED stdin=NOT-a-terminal"; fi\n'
+        'echo "UI-GUARD=${AISQUARE_INSTALL_HANDED_OFF-unset}"\n',
     )
     machine.serve_latest(stamped_copy())
     machine.pypi(STAMP)
@@ -812,70 +997,105 @@ def test_the_handed_off_ui_gets_the_terminal(current_machine: Machine) -> None:
 
     assert "using the v7.7.7 installer" in output, output
     assert "UI-STARTED stdin=terminal" in output, output
+    # The guard ends with the hand-off: the UI, its tmux server and every agent
+    # never see it.
+    assert "UI-GUARD=unset" in output, output
     assert left.endswith(_SENTINEL)
 
 
 # ---------------------------------------------------------------------------
-# install.ps1: the same hand-off, from Windows into WSL
+# install.ps1: main's install.sh does the hand-off, inside WSL
 # ---------------------------------------------------------------------------
 
-
-@pytest.fixture(scope="module")
-def ps1() -> str:
-    return (REPO / "install.ps1").read_text(encoding="ascii")
+PS1 = REPO / "install.ps1"
 
 
-def _ps1_handoff(ps1: str) -> str:
-    start = ps1.index("if (-not $StampedVersion) {")
-    return ps1[start : ps1.index("& wsl.exe -d $target -- bash -lc $inner", start)]
+def _expand(literal: str, values: dict[str, str]) -> str:
+    """A PowerShell double-quoted string's text: `` `x `` is x, `$Name` its value
+    (`X` for a name not in ``values``)."""
+    out, index = "", 0
+    while index < len(literal):
+        char = literal[index]
+        name = re.match(r"\$([A-Za-z_][A-Za-z0-9_]*)", literal[index:])
+        if char == "`" and index + 1 < len(literal):
+            out, index = out + literal[index + 1], index + 2
+        elif name:
+            out, index = out + values.get(name.group(1), "X"), index + len(name.group(0))
+        else:
+            out, index = out + char, index + 1
+    return out
 
 
-def test_mains_ps1_fetches_the_releases_install_sh_and_falls_back_to_mains(ps1: str) -> None:
-    """The latest release's install.sh, or V's for --version V; main's when that fails."""
-    block = _ps1_handoff(ps1)
-    assert '"https://github.com/$Repo/releases/latest/download/install.sh"' in block
-    assert '"https://github.com/$Repo/releases/download/v$Want/install.sh"' in block
-    # The fallback is main's script told not to try the same hand-off again.
-    assert (
-        "$Fallback = \"curl -fsSL '$InstallUrl' | AISQUARE_INSTALL_NO_HANDOFF=1 sh -s -- $Forward\""
-        in block
-    )
-    assert "else echo '  using this installer'; $Fallback; fi" in block
-    # A release's copy is stamped, fetches its own release's install.sh, and
-    # keeps the delegation it always had.
-    assert "$inner = \"set -e; curl -fsSL '$InstallUrl' | sh -s -- $Pin$Forward\"" in ps1
+def _ps1_commands(text: str, args: tuple[str, ...]) -> list[str]:
+    """Every command install.ps1 assigns to `$inner`, as PowerShell builds it.
 
-
-def test_the_ps1_checks_what_install_sh_checks(ps1: str) -> None:
-    """Shebang, parse, the wanted stamp, the options, the timeout, the opt-outs."""
-    block = _ps1_handoff(ps1)
-    for check in (
-        "grep -qx '#!/bin/sh'",
-        "sh -n `$f",
-        "grep -qx '$StampLine' `$f$Knows",
-        "grep -qF -e '$flag' `$f",
-        "--connect-timeout 5 --max-time 30",
-        "https://pypi.org/pypi/aisquare-cli/json",
-        "AISQUARE_INSTALL_HANDED_OFF=1 sh `$f $Forward",
-        "'--no-handoff'",
-        "'--offline'",
-        "$env:AISQUARE_INSTALL_NO_HANDOFF -eq '1'",
-    ):
-        assert check in block, f"install.ps1's hand-off lacks {check!r}"
-    assert "--connect-timeout 5 --max-time 30" in SCRIPT.read_text(encoding="utf-8")
-
-
-def test_no_double_quote_reaches_bash(ps1: str) -> None:
-    """Windows PowerShell 5.1 does not escape a `"` inside a native argument.
-
-    So the bash command is written with single quotes only; an escaped double
-    quote in one of its strings would arrive at bash split or mangled.
+    A statement runs on across lines that end in `+`. $Repo, $StampedVersion and
+    $InstallUrl are read from the file; $Pin and $Forward are built from
+    ``args`` as install.ps1 builds them.
     """
-    block = _ps1_handoff(ps1)
-    built = block[block.index("$Fallback = ") :]
-    assert '`"' not in built and '""' not in built, (
-        "a double quote is written into the bash command"
-    )
+    repo = re.search(r"^\$Repo = '([^']*)'$", text, re.MULTILINE)
+    stamp = re.search(r"^\$StampedVersion = '([^']*)'$", text, re.MULTILINE)
+    url = re.search(r'^\$InstallUrl = "([^"]*)"$', text, re.MULTILINE)
+    assert repo and stamp and url, "install.ps1 lost a line this test reads"
+    values = {"Repo": repo.group(1), "StampedVersion": stamp.group(1)}
+    values["InstallUrl"] = _expand(url.group(1), values)
+    values["Pin"] = f"--version {stamp.group(1)} " if stamp.group(1) else ""
+    values["Forward"] = " ".join(args)
+    commands, lines = [], text.splitlines()
+    for number, line in enumerate(lines):
+        if not re.match(r"\s*\$inner = ", line):
+            continue
+        statement = line
+        while statement.rstrip().endswith("+"):
+            number += 1
+            statement += "\n" + lines[number]
+        literals = re.findall(r'"((?:[^"`]|`.)*)"', statement)
+        commands.append("".join(_expand(literal, values) for literal in literals))
+    return commands
+
+
+@pytest.mark.parametrize("stamped", [False, True], ids=["main", "release"])
+def test_wsls_default_shell_passes_the_command_through_untouched(
+    machine: Machine, stamped: bool
+) -> None:
+    """wsl.exe gives `bash -lc <command>` to the distribution's DEFAULT SHELL,
+    which sees the command inside double quotes.
+
+    A `$`, a backtick, a `"` or a `\\` in it is expanded THERE, before bash
+    runs it. #402's first install.ps1 hand-off died of exactly that: the outer
+    shell ran its `$(mktemp)` and emptied every `$f`, so curl had no URL, every
+    run fell back, and each left a temporary file behind. Here the default shell
+    runs `printf` in bash's place and must print the command as it was sent.
+    """
+    text = PS1.read_text(encoding="ascii")
+    if stamped:
+        text = stamper.stamp_ps1(text, f"v{STAMP}")
+    for command in _ps1_commands(text, ("--yes", "--no-agent")):
+        seen = subprocess.run(
+            [SH, "-c", f'printf "%s\\n" "{command}"'],
+            capture_output=True,
+            text=True,
+            env=machine.env(),
+            cwd=machine.root,
+            timeout=60,
+        )
+        assert seen.stdout == command + "\n", (
+            f"WSL's default shell rewrote the command:\nsent: {command}\ngot:  {seen.stdout}"
+        )
+
+
+def test_install_ps1_leaves_the_hand_off_to_install_sh() -> None:
+    """One command, main's install.sh into `sh -s --`, so install.sh's own
+    `hand_off` runs inside WSL: no second implementation to drift from it."""
+    text = PS1.read_text(encoding="ascii")
+    main = f"{stamper.RAW_MAIN}/install.sh"
+    assert _ps1_commands(text, ("--yes",)) == [f"set -e; curl -fsSL '{main}' | sh -s -- --yes"]
+    release = stamper.release_url(f"v{STAMP}", "install.sh")
+    assert _ps1_commands(stamper.stamp_ps1(text, f"v{STAMP}"), ("--yes",)) == [
+        f"set -e; curl -fsSL '{release}' | sh -s -- --version {STAMP} --yes"
+    ]
+    for second in ("AISQUARE_INSTALL_NO_HANDOFF", "pypi.org", "releases/latest"):
+        assert second not in text, f"install.ps1 has a hand-off of its own again ({second})"
 
 
 # ---------------------------------------------------------------------------
@@ -891,10 +1111,13 @@ def test_the_install_page_says_main_runs_the_releases_installer() -> None:
     page = _page("docs/install.md")
     assert "The copy on `main` runs that release's own installer for you." in page
     assert "`--no-handoff`" in page
-    assert "falls back to main's `install.sh`" in page, "the Windows path is not described"
+    assert "It runs main's `install.sh` inside WSL, so the hand-off above happens there" in page, (
+        "the Windows path is not described"
+    )
 
 
 def test_the_runbook_says_main_hands_off_and_falls_back() -> None:
     page = _page("docs/runbooks/release.md")
     assert "hand off to the latest release's own installer once it is attached" in page
+    assert "main's `install.ps1` runs main's `install.sh` inside WSL" in page
     assert "the main one-liner falls back to main's own script" in page

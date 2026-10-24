@@ -270,6 +270,23 @@ fetch() {
     fi
 }
 
+# stdout <- URL within 30 seconds, over HTTPS only, or fail. For the small
+# answers wanted before anything is installed (a release's install.sh, PyPI's
+# latest version), never for an installer that can rightly take minutes.
+#
+# wget gets `-t 1` because GNU wget tries 20 times by default and -T limits
+# each read, not the whole download. It has no HTTPS-only switch to match
+# curl's `--proto`: GNU's --https-only covers recursive downloads alone, and
+# BusyBox has none. And no -q, so the HTTP status it reports stays on stderr
+# for `release_checked` to read.
+fetch_quick() {
+    if [ "$HAVE_CURL" = 1 ]; then
+        curl -fsSL --proto =https --proto-redir =https --connect-timeout 5 --max-time 30 "$1"
+    else
+        wget -t 1 -T 30 -O- "$1"
+    fi
+}
+
 # Download to a private temporary file, or fail. Echoes the path on success.
 #
 # `mktemp` and not `"$TMPDIR/name-$$"`: `$$` is a small guessable number and
@@ -459,9 +476,16 @@ HANDOFF_VERSION=""
 HANDOFF_WHY=""
 
 hand_off() {
+    # Read once and unset at once, so nothing this run starts inherits it: asq,
+    # the tmux server and every agent would carry it, and the one-liner run
+    # later from an agent's pane would never hand off. Its value is the path of
+    # the script a hand-off ran, so it stops that script ($0) and nothing that
+    # merely inherited it from a release that does not unset it (0.9.0).
+    _ho_from=${AISQUARE_INSTALL_HANDED_OFF:-}
+    unset AISQUARE_INSTALL_HANDED_OFF
     [ -z "$STAMPED_VERSION" ] || return 0
-    if [ "${AISQUARE_INSTALL_HANDED_OFF:-0}" = 1 ]; then
-        debug "hand-off: this run was handed off to already; not hopping again"
+    if [ -n "$_ho_from" ] && [ "$_ho_from" = "$0" ]; then
+        debug "hand-off: this script is the one handed off to; not hopping again"
         return 0
     fi
     if [ "$NO_HANDOFF" = 1 ] || [ "$OFFLINE" = 1 ] || [ "$INSTALL_TARGET" != "$PYPI_PACKAGE" ]; then
@@ -483,8 +507,12 @@ hand_off() {
     trap 'exit 143' TERM
     if release_checked "$@"; then
         note "using the v$HANDOFF_VERSION installer"
-        AISQUARE_INSTALL_HANDED_OFF=1
+        AISQUARE_INSTALL_HANDED_OFF=$HANDOFF_FILE
         export AISQUARE_INSTALL_HANDED_OFF
+        # From here a signal is the release's script's to handle, and the run
+        # ends with its status, whether it died of the signal or survived it.
+        # A no-op trap, not an ignore: an ignored signal would be inherited.
+        trap : HUP INT TERM
         _ho_rc=0
         sh "$HANDOFF_FILE" "$@" || _ho_rc=$?
         exit "$_ho_rc"
@@ -496,16 +524,17 @@ hand_off() {
 
 # Download the release's install.sh into HANDOFF_FILE and check it. True when it
 # can run, with HANDOFF_VERSION set; false with HANDOFF_WHY saying why not.
-#
-# Its own download rather than `fetch`, for the timeout: uv and Node can take
-# minutes, and nothing else here wants a limit, but a 100 KB script that has not
-# arrived in 30 seconds is not worth waiting for when this one is already here.
-# PyPI is asked through `latest_version`, as `resolve` asks it, and only once
-# the download has passed every other check.
 release_checked() {
     _rc_want=$PIN_VERSION
     [ "$_rc_want" = latest ] && _rc_want=""
     if [ -n "$_rc_want" ]; then
+        # A release version and nothing else goes into the URL.
+        case "$_rc_want" in
+            [!0-9]* | *[!0-9A-Za-z.]*)
+                HANDOFF_WHY="$_rc_want is not a release version"
+                return 1
+                ;;
+        esac
         _rc_url="$RELEASES_URL/download/v$_rc_want/install.sh"
         _rc_release="v$_rc_want"
     else
@@ -514,27 +543,23 @@ release_checked() {
     fi
     debug "hand-off: fetching $_rc_url"
     _rc_status=0
-    if [ "$HAVE_CURL" = 1 ]; then
-        curl -fsSL --connect-timeout 5 --max-time 30 -o "$HANDOFF_FILE" "$_rc_url" \
-            2>/dev/null || _rc_status=$?
-    else
-        wget -q -T 30 -O "$HANDOFF_FILE" "$_rc_url" 2>/dev/null || _rc_status=$?
+    _rc_said=$(fetch_quick "$_rc_url" 2>&1 >"$HANDOFF_FILE") || _rc_status=$?
+    if [ "$_rc_status" != 0 ]; then
+        # The downloader's own words carry the HTTP status: curl's "error: 404",
+        # GNU wget's "ERROR 404", BusyBox wget's "HTTP/1.1 404". Any other HTTP
+        # error is curl's 22 and GNU wget's 8; BusyBox says 1 for everything.
+        case "$_rc_said" in
+            *" 404"*) HANDOFF_WHY="$_rc_release has no installer attached" ;;
+            *)
+                case "$_rc_status" in
+                    22 | 8) HANDOFF_WHY="GitHub answered with an error for $_rc_release's installer" ;;
+                    28) HANDOFF_WHY="GitHub did not answer in time" ;;
+                    *) HANDOFF_WHY="could not download $_rc_release's installer" ;;
+                esac
+                ;;
+        esac
+        return 1
     fi
-    case "$_rc_status" in
-        0) ;;
-        22)
-            HANDOFF_WHY="$_rc_release has no installer attached"
-            return 1
-            ;;
-        28)
-            HANDOFF_WHY="GitHub did not answer in time"
-            return 1
-            ;;
-        *)
-            HANDOFF_WHY="could not download $_rc_release's installer"
-            return 1
-            ;;
-    esac
 
     # A POSIX sh script that parses, and not an error page or half a file.
     if [ "$(head -n 1 "$HANDOFF_FILE")" != "#!/bin/sh" ] || ! sh -n "$HANDOFF_FILE" 2>/dev/null; then
@@ -547,9 +572,12 @@ release_checked() {
         return 1
     fi
     # The release installs the version it was stamped with, so that is the one
-    # that has to be wanted: the pin, or else what PyPI calls the latest.
+    # that has to be wanted: the pin, or else what PyPI calls the latest. PyPI is
+    # asked only now, once the download has passed every other check, and
+    # `resolve` reuses the answer if this script carries on.
     if [ -z "$_rc_want" ]; then
-        _rc_want=$(latest_version 2>/dev/null || true)
+        ask_pypi
+        _rc_want=$PYPI_LATEST
         if [ -z "$_rc_want" ]; then
             HANDOFF_WHY="could not read the latest version from PyPI to check v$HANDOFF_VERSION against"
             return 1
@@ -560,15 +588,28 @@ release_checked() {
         return 1
     fi
     # An option only main's copy knows would make the release's exit 64, after
-    # the point where this one could still have carried on. Its text names
-    # every option it parses, so an option it does not mention is one it lacks.
+    # the point where this one could still have carried on. So each option
+    # given must be a branch of the release's parse_args, written as this file
+    # writes them (shfmt-indented with spaces): `--no-agent)`, `-y | --yes)`,
+    # and `--project=*)` for the `--project=DIR` spelling.
     for _rc_arg in "$@"; do
         case "$_rc_arg" in
             -*) ;;
             *) continue ;;
         esac
-        if ! grep -qF -e "${_rc_arg%%=*}" "$HANDOFF_FILE"; then
-            HANDOFF_WHY="the v$HANDOFF_VERSION installer has no ${_rc_arg%%=*} option"
+        _rc_flag=${_rc_arg%%=*}
+        _rc_branch=$_rc_flag
+        [ "$_rc_flag" = "$_rc_arg" ] || _rc_branch="$_rc_flag=[*]"
+        case "$_rc_flag" in
+            *[!A-Za-z0-9-]*) _rc_known=0 ;;
+            *)
+                _rc_known=0
+                grep -Eq -e "^ *([^)]*[|] *)?$_rc_branch( *[|][^)]*)?[)]" "$HANDOFF_FILE" &&
+                    _rc_known=1
+                ;;
+        esac
+        if [ "$_rc_known" = 0 ]; then
+            HANDOFF_WHY="the v$HANDOFF_VERSION installer has no $_rc_flag option"
             return 1
         fi
     done
@@ -804,19 +845,33 @@ _report() {
 # and its failure mode is handled — an empty answer means "could not determine",
 # which is reported and never treated as "behind".
 latest_version() {
+    # Downloaded once, within `fetch_quick`'s 30 seconds: a PyPI that does not
+    # answer in time is "could not determine", the same as one that is down.
+    _lv_json=$(fetch_quick "$PYPI_JSON_URL" 2>/dev/null) || return 0
     if have python3; then
         # Preferred when a Python exists: no parsing of JSON by regex at all.
-        fetch "$PYPI_JSON_URL" 2>/dev/null | python3 -c \
+        printf '%s' "$_lv_json" | python3 -c \
             'import json,sys
 try:
     sys.stdout.write(json.load(sys.stdin)["info"]["version"])
 except Exception:
     pass' 2>/dev/null && return 0
     fi
-    fetch "$PYPI_JSON_URL" 2>/dev/null |
+    printf '%s' "$_lv_json" |
         tr ',' '\n' |
         sed -n 's/^"version":"\([^"]*\)".*/\1/p' |
         head -1
+}
+
+# PyPI's latest aisquare-cli, asked at most once a run: `release_checked` asks
+# before `resolve` does, and a run that falls back must not ask twice.
+PYPI_LATEST=""
+PYPI_ASKED=0
+
+ask_pypi() {
+    [ "$PYPI_ASKED" = 0 ] || return 0
+    PYPI_ASKED=1
+    PYPI_LATEST=$(latest_version 2>/dev/null || true)
 }
 
 resolve() {
@@ -844,7 +899,8 @@ resolve() {
         LATEST_VERSION=""
         note "--offline: not asking PyPI what is current"
     else
-        LATEST_VERSION=$(latest_version 2>/dev/null || true)
+        ask_pypi
+        LATEST_VERSION=$PYPI_LATEST
         if [ -z "$LATEST_VERSION" ]; then
             # Reported, never fatal, and never silently read as "behind".
             warn "could not read the latest $PYPI_PACKAGE version from PyPI — proceeding without a comparison"

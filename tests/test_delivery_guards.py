@@ -47,6 +47,7 @@ clock = fleet_suite.clock
 claude_on_path = fleet_suite.claude_on_path
 repo = fleet_suite.repo
 project = fleet_suite.project
+typed_first_lines = fleet_suite.typed_first_lines
 
 
 def _box(composer: str = "", *, dim: str = "") -> list[str]:
@@ -294,7 +295,8 @@ def test_a_tell_never_types_into_a_draft_and_says_so(
     told = fleet_service.tell(project, coder.label, "rebase onto main first")
 
     assert told.typed == "no" and tmux.typed == []
-    assert "a draft is in its input box" in told.how and "note" in told.how
+    assert "a draft is in its input box, which nothing types over" in told.how
+    assert "note" in told.how
     with store_session() as store:
         notes = [e for e in store.events_since(project.id, 0, limit=200) if e.kind == "note"]
     assert [(n.text, n.to_role) for n in notes] == [("rebase onto main first", coder.label)]
@@ -306,7 +308,9 @@ def test_a_draft_typed_between_the_guard_and_the_paste_is_never_sent(
     """Review of #337: the guard read an empty box, a human typed before the paste landed, and
     the box read ``half a thought <our text>``. The render check never saw our text alone,
     ran out, and fell through to Enter, which sent the human's draft with ours. Now nothing
-    is pressed: the human's words stay in the box, and the tell is filed as a note."""
+    is pressed: the human's words stay in the box, and the tell is filed as a note. It says
+    so as it happened: ours was typed beside the draft, and nothing was sent — not the
+    guard's "which nothing types over", which is said before any paste."""
     coder = _waiting(tmux, project, role="coder")
     human = "half a thought"
     real_paste = tmux.paste
@@ -319,13 +323,56 @@ def test_a_draft_typed_between_the_guard_and_the_paste_is_never_sent(
     told = fleet_service.tell(project, coder.label, "rebase onto main first")
 
     assert told.typed == "no"
-    assert "a draft is in its input box" in told.how and "note" in told.how
+    assert told.how.startswith(
+        "a draft appeared in its input box while the text was being typed; ours is in the box "
+        "with it, unsent, and nothing was sent — "
+    )
+    assert "nothing types over" not in told.how and "note" in told.how
     assert tmux.typed == [(coder.pane_id, "paste", "rebase onto main first")], "no Enter"
     shown = claude_screen.composer_text(tmux.screens[coder.pane_id])
     assert shown == f"{human} rebase onto main first", "the human's draft is intact"
     with store_session() as store:
         notes = [e for e in store.events_since(project.id, 0, limit=200) if e.kind == "note"]
     assert [(n.text, n.to_role) for n in notes] == [("rebase onto main first", coder.label)]
+
+
+def test_a_first_prompt_a_draft_raced_says_it_was_not_sent_not_that_it_was_not_typed(
+    tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same race on a typed first message: no Enter, the human's words intact, and the
+    receipt's note says the prompt is in the box with the draft, NOT sent — never "NOT typed
+    … which nothing types over", which would have it typed in again beside the first."""
+    original = tmux.pane_facts
+
+    def up_at_once(pane_id: str) -> object:
+        tmux.set_command(pane_id, "claude")
+        return original(pane_id)
+
+    real_paste = tmux.paste
+
+    def paste_after_a_human(pane_id: str, text: str) -> None:
+        real_paste(pane_id, text)
+        tmux.screens[pane_id] = _box(f"half a thought {text}")
+
+    monkeypatch.setattr(tmux, "pane_facts", up_at_once)
+    monkeypatch.setattr(tmux, "paste", paste_after_a_human)
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="start on tsk_1")
+    pane = receipt.agent.pane_id
+
+    assert receipt.prompt_typed == "no"
+    assert tmux.typed == [(pane, "paste", "start on tsk_1")], "no Enter"
+    assert claude_screen.composer_text(tmux.screens[pane]) == "half a thought start on tsk_1"
+    (note,) = [n for n in receipt.notes if "draft" in n]
+    assert note.startswith(
+        "the prompt was NOT sent: a draft appeared in its input box while the prompt was being "
+        "typed; ours is in the box with it, unsent, and nothing was sent. Read its input box "
+        "before you send it again: "
+    )
+    assert "NOT typed" not in note and "nothing types over" not in note
 
 
 def test_a_tell_to_an_idle_agent_types_and_is_acknowledged(

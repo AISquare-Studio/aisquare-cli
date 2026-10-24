@@ -433,6 +433,38 @@ def test_a_login_due_puts_a_warning_on_the_line() -> None:
     assert "⚠" not in status_line_text(True, GOOD).plain
 
 
+def test_a_login_due_keeps_its_warning_in_the_cells_the_line_has() -> None:
+    """Review of #357: in the sidebar's 28 cells, ``2x claude 58% ⚠`` was painted
+    ``2x claude 58%…``: the warning, the one thing to do, went under the ellipsis. The
+    figure gives way where both do not fit; where they do, both show."""
+    due = {
+        left: HeadroomSummary(level="good", percent_left=left, usable=2, needs_login=1)
+        for left in (58.0, 3.0)
+    }
+
+    async def go(pilot: Pilot[None]) -> list[str]:
+        app = _app(pilot)
+        line = app.query_one(StatusLine)
+        painted: list[str] = []
+        for headroom in (
+            due[58.0],
+            due[3.0],
+            HeadroomSummary(level="good", percent_left=100.0, usable=9),
+        ):
+            app.sidebar.show_headroom(headroom)
+            await pilot.pause()
+            painted.append(composited(line).rstrip())
+        return painted
+
+    assert _drive(go) == [
+        f"● aisquare  ● 2{TIMES} claude ⚠",
+        f"● aisquare  ● 2{TIMES} claude 3% ⚠",
+        f"● aisquare  ● 9{TIMES} claude 100%",
+    ]
+    wide = status_line_text(True, due[58.0], width=40)
+    assert wide.plain == f"● aisquare  ● 2{TIMES} claude 58% ⚠", "with room, both"
+
+
 def test_the_line_paints_the_injected_headroom() -> None:
     critical = HeadroomSummary(level="critical", percent_left=3.0, usable=2, needs_login=1)
 
@@ -568,8 +600,11 @@ def test_a_signed_out_account_puts_a_warning_on_the_line(
     line, headroom = _drive(
         go, headroom=accounts_service.read_fleet_headroom, accounts=accounts_service.overview
     )
-    assert line.endswith(f"● 1{TIMES} claude 60% ⚠"), line  # slot 1 signed out, slot 2 good
+    # Slot 1 signed out, slot 2 good. In the sidebar's 28 cells the 60% gives way to the ⚠
+    # (review of #357); the summary still holds it.
+    assert line.endswith(f"● 1{TIMES} claude ⚠"), line
     assert headroom is not None and headroom.needs_login == 1 and headroom.usable == 1
+    assert headroom.percent_left == 60.0
     assert calls == [good.slot], "only the signed-in slot was asked"
 
 

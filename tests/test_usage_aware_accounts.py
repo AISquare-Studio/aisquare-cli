@@ -50,6 +50,7 @@ from aisquare.models import (
     ProjectInfo,
     TeamSession,
     TurnMetric,
+    WeekReset,
 )
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics, remote_needs
@@ -2215,7 +2216,7 @@ def test_the_summary_says_how_much_of_the_week_is_left_across_the_fleet() -> Non
     assert summary.week_left_by_slot == {2: 10.0, 3: 80.0}
     assert summary.week_percent_left == 45.0
     assert summary.weeks_left == pytest.approx(0.9)
-    assert summary.week_resets_soonest == (3, soon)
+    assert summary.week_resets_soonest == WeekReset(slot=3, resets_at=soon)
     # The now-figure is unchanged: the fuller window decides it.
     assert summary.percent_left == pytest.approx(((100 - 90) + (100 - 30)) / 2)
 
@@ -2277,4 +2278,6 @@ def test_accounts_usage_json_stays_a_list_and_summary_adds_the_aggregate(
     ]
     summary = HeadroomSummary.model_validate(both["summary"])
     assert summary.week_percent_left == 45.0 and summary.weeks_left == pytest.approx(0.9)
-    assert summary.week_resets_soonest is not None and summary.week_resets_soonest[0] == 3
+    assert summary.week_resets_soonest is not None and summary.week_resets_soonest.slot == 3
+    # An object in the JSON, its fields named (review of #357), not a bare [slot, time] pair.
+    assert set(both["summary"]["week_resets_soonest"]) == {"slot", "resets_at"}

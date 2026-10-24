@@ -215,9 +215,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     minutes (RFC 4226's throttle), audited on the home board. Each further lock
     with no correct code between doubles the last, up to 24 hours.
   - The window's id joins each gated call's `captain_action` event. Every audit
-    masks a code in the owner's words, joined to a word or trailed by a dash too
-    (`code-123456`), and `unlock`'s masks it in its arguments; a date, a longer
-    number and a dashed phone number are left as said.
+    masks a code in the owner's words, dash-joined to a word or trailed by a dash
+    too (`code-123456`), and `unlock`'s masks it in its arguments; a date, a longer
+    number, a dashed phone number and the digits inside an id (a task or session
+    id, a commit SHA) are left as said.
   - `aisquare captain gate enroll` writes the secret (mode 0600) and prints the QR.
     `gate status` says whether the gate applies and why not.
   - pyotp comes with the new `gate` extra (`pip install 'aisquare-cli[gate]'`),
@@ -524,9 +525,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the copy is checked and saved through the same writer as `persona edit`, and
   the list re-reads. A copy you didn't change writes nothing, so the provenance
   sidecar stays as it was. Text that does not parse is not saved: the dialog says
-  why, and *Reopen editor* opens the same copy again. Without tmux, or with no
-  editor to run, the text box editor opens as before. A bundled persona still
-  opens read-only there, with *Save as…*.
+  why, and *Reopen editor* opens the same copy again. Without tmux, with no
+  editor to run, or on Windows (even with a `tmux` on PATH), the text box editor
+  opens as before. A bundled persona still opens read-only there, with *Save as…*.
 
 - **`aisquare metrics tokens`: what each agent session spent in tokens.** It reads
   each session's Claude Code transcript and prints one row per session and a total:
@@ -942,6 +943,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   — at most 24; try 'coder-authentication-ref'`), so a manager that has already
   added the task retries in the same turn instead of leaving the task without an
   agent, and the manager's cycle now says "at most 24 characters".
+
+- **`aisquare fleet adopt` no longer sends Ctrl-C on Windows** (#290). Checking
+  whether a live `claude` still holds the conversation signalled the process
+  named in Claude Code's session registry, and Windows delivers that signal as
+  Ctrl-C to the process's whole console. It now asks Windows whether the process
+  is running. Elsewhere nothing changes.
+- **The captain's audit keeps ids whole** (#216). A task id, session id or commit
+  SHA with six digits in a row was masked like an authenticator code
+  (`tsk_01m5pcq******pmfre2mvs761d`). Digits touching a letter, a digit or an
+  underscore are part of an id and are kept. A code you say (`123 456`,
+  `code-123456`) is still masked.
 
 - **Session start tells an agent to read the skeleton first only when one Read
   holds it** (#282). Over the `[snapshot] max_tokens` budget, the directive still

@@ -285,6 +285,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the way: a private `_running` on a Textual screen shadows the message
   pump's own flag and silently leaves every button of the screen dead; the
   dialog's flag is `_spawning`.
+- **No role at all**: `aisquare fleet spawn agent` and `aisquare launch agent` start a
+  plain, general-purpose Claude Code session (labelled `agent-1` and on) that joins the
+  board and its fleet row like any agent but has no standing cycle, no mission and no
+  model ladder. It is the Spawn dialog's new first Role option, *(none) —
+  general-purpose Claude*; `coder` stays the one preselected.
 
 ### Changed
 
@@ -294,6 +299,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   briefing's ASSIGNED TO YOU line says, which decides per role and state whether
   to claim it (a tester on a todo task is told it is not its to claim). A spawn
   with neither is typed nothing, and reads `waiting`.
+- In `asq`, the Spawn dialog shows three fields — Role, Hand off from (with its How row
+  once a teammate is picked) and Account — and folds everything else into one
+  **Advanced** section: *Pick…* (moved there from beside Role, where it sat next to the
+  Account it duplicates), Binary, Persona with *Import…*, Label with 🎲, Task,
+  Worktree, Permission mode, Extra agent args and First prompt. Advanced opens with a
+  click or `Enter` on its title, by itself when the dialog opens with a binary or a
+  persona filled in (the Personas tab's flow), and whenever one of its fields is why
+  *Spawn* is disabled, so the reason is never folded out of sight. The box sizes to what
+  it shows instead of 92% of the terminal, and scrolls between its docked header and
+  buttons once Advanced is open on a short one. What a spawn sends is unchanged.
 - The store migrates to schema v34 on first open, from 0.8.2's v32, in two steps: v34
   adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,
   `died` otherwise; NULL on a row from before it, read by its exit status, #38). v33

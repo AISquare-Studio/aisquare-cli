@@ -292,6 +292,19 @@ def test_launch_rejects_an_unknown_role(
     assert not spy, "nothing should be exec'd for an invalid role"
 
 
+def test_launch_agent_is_a_plain_claude_session_on_the_board(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """``agent`` is no role (the Spawn dialog's *(none)*, card tsk_01m5mm2sz23b): launched
+    as one, so the session joins the board, with the plain agent and no role's flags."""
+    result = runner.invoke(app, ["launch", "agent"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"][0] == "claude" and spy["env"]["AISQUARE_ROLE"] == "agent"
+    with store_session() as store:
+        assert store.team_active(team_project(work_dir).id)
+
+
 @pytest.mark.needs_captain
 def test_launch_captain_outside_the_fleet_is_refused(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch

@@ -126,11 +126,17 @@ tmux can see and its row says so (`no hooks`).
    is shown if this view is still the one on screen. Both ignore a click in the
    second after they appear or move.
    **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
-   project, headed with its name and codename. It reads in two steps. First who
-   runs it: role (the fleet's roles plus any role bound with `team bind`;
-   `manager` is greyed out while one runs; *Pick…* beside it opens the target
-   picker — a bound teammate or an account fills these fields), account and
-   binary. Then as whom:
+   project, headed with its name and codename. It shows three fields: **role**
+   (`coder` preselected; first in the list *(none) — general-purpose Claude*, a
+   plain Claude Code session with no standing cycle or mission, `fleet spawn
+   agent` below; then the fleet's roles plus any role bound with `team bind`;
+   `manager` is greyed out while one runs), **hand off from** (a teammate to
+   fork or take over) and **account**. Everything else is folded into
+   **Advanced** — click its title, or `Tab` to it and press `Enter`. It opens
+   by itself when the dialog opens with a binary or persona already filled in,
+   and whenever one of its fields is why *Spawn* is disabled. In it, first who
+   runs it: *Pick…* opens the target picker (a bound teammate or an account
+   fills role, binary and account) and binary. Then as whom:
    **persona** — `(none)` or one of the project's personas, the role's
    `[fleet.roles.<role>].persona` preselected, its description shown under it,
    and *Import…* beside it to bring one in (`docs/personas.md`).
@@ -194,6 +200,12 @@ tier above the work it gates.
 | **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`. Launched without the tools that edit files (`--disallowedTools=Edit Write NotebookEdit`) and with its shell: Claude Code's `--restricted` removes the Bash that `gh pr diff`, `gh pr review` and its `aisquare` cycle need (0.6.0 and 0.7.0 launched it so, and it could do none of them). Its shell could still push or merge: its briefing forbids both and `auto` mode checks each action, but only the credentials it runs with can refuse them (see the table below) | its own worktree |
 | **validator** | `validator` | one final gate over the assembled deliverable before the manager says READY | the repo root |
 | **ui-tester** | new | verifies tasks titled `UI: …` in a **real browser** — Claude in Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever this window has — and measures (screenshots, computed sizes, console, network) instead of eyeballing; `task done` names the branch or commit and the URL it verified, or `task reopen` carries a screenshot. With no browser tool it runs the non-browser checks and reopens the task as "not browser-verified", never passes it. **Asked to be read-only, not made read-only** — its briefing says never edit and never push, and nothing enforces that (see the permission-mode table below: no allowed-tools list is written or passed, and `--restricted` would remove the Bash its own `task done`/`task reopen` need). Launched with `--chrome` by the role itself (`RoleProfile.default_args`), on any machine, unless `--no-chrome` is given | the repo root. Like the tester it gets no worktree and **nothing moves it into the coder's** — worse here, because it fails silently: it opens the URL, sees a working page and measures the PRE-change build honestly. So whoever spawns it names the branch or tree and the URL in its `--prompt` (the manager's loop does), and its verdict says which build it measured |
+
+No role at all is `agent`: `aisquare fleet spawn agent` (the Spawn dialog's
+*(none) — general-purpose Claude*) starts a plain Claude Code session, labelled
+`agent-1` and on, that joins the board like any agent but is briefed with no
+standing cycle and no mission, and runs on the session's own model rather than a
+role's ladder. `aisquare launch agent` is the same outside the fleet.
 
 The manager talks to its agents only through the board — tasks, notes, signals
 — and `fleet tell` nudges. When a sub-agent writes a result to the board, the

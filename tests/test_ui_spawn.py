@@ -1526,7 +1526,8 @@ def test_start_fresh_shows_beside_the_how_radios_and_a_click_checks_it(
         box = dialog.query_one("#spawn-box").region
         row = dialog.query_one("#spawn-how-row").region
         assert box.contains_region(fresh.region) and row.contains_region(fresh.region)
-        assert dialog.get_widget_at(*fresh.region.center)[0] is fresh
+        x, y = fresh.region.offset
+        assert dialog.get_widget_at(x + 1, y + 1)[0] is fresh
         assert await pilot.click("#spawn-fresh")
         await settle(pilot)
         assert fresh.value

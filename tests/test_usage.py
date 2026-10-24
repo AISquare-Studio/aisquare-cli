@@ -402,3 +402,80 @@ def test_scanning_a_five_megabyte_transcript_fits_the_stop_hooks_budget(tmp_path
     incremental = time.perf_counter() - began
     assert cold < budget(1.0)
     assert incremental < budget(0.05)
+
+
+# --- #46: the #45 review's n2, n4, n5 --------------------------------------------------
+
+
+def test_a_line_under_an_aisquare_path_is_not_parsed_for_its_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#45, n2: every transcript line carries its cwd, and a bare ``aisquare`` marker matched
+    it for any session under a path naming aisquare (every fleet worktree), so the bytes
+    pre-filter skipped nothing. A line with nothing to count is not parsed; one with the
+    context markers still is."""
+    transcript = tmp_path / "s.jsonl"
+    cwd = "/Users/me/aisquare-cli/.aisquare-worktrees/coder-1"
+    title = {"type": "summary", "summary": "a title", "cwd": cwd}
+    marked = {
+        "type": "user",
+        "cwd": cwd,
+        "message": {"role": "user", "content": "<aisquare-context>hi</aisquare-context>"},
+    }
+    _write(transcript, title, marked)
+    parsed: list[str] = []
+    real = usage.json.loads
+
+    def loads(raw: Any, *args: Any, **kwargs: Any) -> Any:
+        parsed.append(raw if isinstance(raw, str) else raw.decode())
+        return real(raw, *args, **kwargs)
+
+    monkeypatch.setattr(usage.json, "loads", loads)
+    found, _ = usage.scan(transcript)
+    monkeypatch.undo()
+    assert [json.loads(line)["type"] for line in parsed] == ["user"]
+    assert found.aisquare_traces == ["aisquare context in a user message"]
+
+
+def test_a_rewritten_transcript_longer_than_the_dedupe_counts_nothing_twice(
+    tmp_path: Path,
+) -> None:
+    """#45, n4: a file that shrank is read again from its start, and the dedupe by id
+    remembers only the last ``_RECENT_IDS``: a longer session counted its older requests a
+    second time. Read again, it counts only what is newer than it read before."""
+    transcript = tmp_path / "s.jsonl"
+    many = usage._RECENT_IDS + 88
+    stamps = [f"2026-10-23T10:{n // 60:02d}:{n % 60:02d}.000Z" for n in range(many)]
+    entries = [_assistant(f"msg_{n}", output=1, stamp=stamps[n]) for n in range(many)]
+    padding = {"type": "summary", "summary": "x" * 4000}
+    _write(transcript, padding, *entries)
+    first, state = usage.scan(transcript)
+    assert first.models[MODEL].requests == many
+
+    later = _assistant("msg_new", output=7, stamp="2026-10-23T11:00:00.000Z")
+    _write(transcript, *entries, later)  # rewritten without the padding: it shrank
+    second, state = usage.scan(transcript, state)
+    assert second.models[MODEL].requests == 1, "the new request alone"
+    assert second.models[MODEL].output == 7
+    third, _ = usage.scan(transcript, usage.ScanState.parse(state.to_json()))
+    assert third.models == {}
+
+
+def test_an_increase_is_priced_at_its_request_s_long_prompt_tier(tmp_path: Path) -> None:
+    """#45, n5: a later line raising a counted request's output was priced as a request of
+    its own, prompt ~0, so a long prompt's increase read at the short-prompt rate. It is
+    priced at the request's tier: the two lines cost what the final figures do."""
+    from aisquare.core import pricing
+
+    model = "claude-haiku-5-5"  # 0.10/0.50 per MTok, 0.50/2.50 over a 100k prompt
+    long_prompt = 150_000
+    transcript = tmp_path / "s.jsonl"
+    _write(
+        transcript,
+        _assistant("msg_1", model=model, input_tokens=long_prompt, output=10),
+        _assistant("msg_1", model=model, input_tokens=long_prompt, output=1_000),
+    )
+    found, _ = usage.scan(transcript)
+    whole = pricing.cost_usd(model, pricing.RequestTokens(input=long_prompt, output=1_000))
+    assert whole is not None
+    assert found.models[model].cost_usd == pytest.approx(whole)

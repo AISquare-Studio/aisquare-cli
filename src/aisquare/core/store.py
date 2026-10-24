@@ -2419,8 +2419,9 @@ class SqliteStore:
         """Delete the ``team_meta`` rows keyed by the project or by its sessions.
 
         Inside the caller's transaction, in statements of at most
-        :data:`_META_BATCH` sessions each (two terms per session): one statement
-        per purge was the shape SQLite refused at 500 sessions.
+        :data:`_META_BATCH` sessions each (three terms per session: its nudge, its
+        unbriefed mark and its continuations): one statement per purge was the shape
+        SQLite refused at 500 sessions.
         """
         removed = self._conn.execute(
             "DELETE FROM team_meta WHERE key = ? OR key GLOB ?",

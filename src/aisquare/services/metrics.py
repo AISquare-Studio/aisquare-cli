@@ -280,7 +280,10 @@ def _record_usage(
             cost_usd=session_totals.cost_usd,
             started_at=existing.started_at if existing else now,
             updated_at=now,
-            ended_at=now if ended else (existing.ended_at if existing else None),
+            # A turn recorded after the session ended is the session running again (a
+            # `claude --resume` of the same id): no longer ended (#45, n3). A record that is
+            # not an end and adds nothing returned above.
+            ended_at=now if ended else None,
         )
         turn = (
             None

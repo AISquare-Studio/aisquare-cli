@@ -136,12 +136,15 @@ class RequestTokens:
         return self.prompt + self.output
 
 
-def cost_usd(model: str, tokens: RequestTokens) -> float | None:
-    """The list price of one request in USD, or ``None`` for an unpriced model."""
+def cost_usd(model: str, tokens: RequestTokens, *, prompt: int | None = None) -> float | None:
+    """The list price of one request in USD, or ``None`` for an unpriced model.
+
+    ``prompt`` is the request's whole prompt where ``tokens`` are only part of it (an
+    increase a later line of the same request added): the tier is the request's."""
     price = price_for(model)
     if price is None:
         return None
-    input_rate, output_rate = price.rates(tokens.prompt)
+    input_rate, output_rate = price.rates(tokens.prompt if prompt is None else prompt)
     per_mtok = (
         tokens.input * input_rate
         + tokens.cache_write_5m * input_rate * CACHE_WRITE_5M
@@ -152,13 +155,16 @@ def cost_usd(model: str, tokens: RequestTokens) -> float | None:
     return per_mtok / 1_000_000
 
 
-def weighted_tokens(model: str, tokens: RequestTokens) -> float | None:
+def weighted_tokens(
+    model: str, tokens: RequestTokens, *, prompt: int | None = None
+) -> float | None:
     """Cost-weighted tokens of one request (see the module docstring), or ``None``
-    for an unpriced model — the output weight IS a price ratio."""
+    for an unpriced model — the output weight IS a price ratio. ``prompt`` as for
+    :func:`cost_usd`."""
     price = price_for(model)
     if price is None:
         return None
-    input_rate, output_rate = price.rates(tokens.prompt)
+    input_rate, output_rate = price.rates(tokens.prompt if prompt is None else prompt)
     return (
         tokens.input
         + WEIGHT_CACHE_WRITE * tokens.cache_write

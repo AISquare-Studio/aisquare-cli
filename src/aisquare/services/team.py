@@ -2911,6 +2911,9 @@ def prune_sessions(
             released = 0
             if not dry_run:
                 released_tasks = store.end_session(session.id, release_claims=orphan_claims)
+                # Ended here, it fires no SessionEnd: its unbriefed mark goes as that hook
+                # takes it, or it outlived the row (#45, n6).
+                store.delete_meta(_unbriefed(session.id))
                 # end_session reports what it FOUND claimed either way, so only
                 # count them as released when they actually were — otherwise
                 # the summary claims to have freed work that is still held.

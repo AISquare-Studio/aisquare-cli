@@ -86,7 +86,11 @@ _LOOKUP_COMMAND = re.compile(
     r"(?:^|[;&|(`]|\$\()\s*(?:\w+=\S*\s+)*(?:\S*/)?(?:aisquare|asq)(?:\.exe)?\s+repo\b"
 )
 
-_USAGE_MARKERS = (b'"assistant"', b'"tool_result"', b'"hook_', b"aisquare", b"_delta")
+#: A line this reader may count carries one of these. ``<aisquare-`` is the context markers
+#: (:data:`AISQUARE_MARKERS`) a user line may hold; a bare ``aisquare`` matched the cwd of
+#: every line of any session under a path naming it — every fleet agent's worktree — and
+#: the pre-filter skipped nothing for them (#45, n2). Hook lines match ``"hook_``.
+_USAGE_MARKERS = (b'"assistant"', b'"tool_result"', b'"hook_', b"<aisquare-", b"_delta")
 
 
 def is_aisquare_hook(command: str) -> bool:
@@ -274,6 +278,9 @@ class ScanState:
     before_edit_weighted: float = 0.0
     before_edit_tool_calls: int = 0
     """Tool calls made before that first edit call (the edit itself excluded)."""
+    newest: str = ""
+    """The latest timestamp among the entries read so far: a file read again from its start
+    (it shrank) counts only what is newer (#45, n4)."""
 
     def first_edit(self) -> dict[str, Any]:
         """The "before the first edit" figures, as a session's usage row reports them."""
@@ -294,6 +301,7 @@ class ScanState:
                 "before_edit_tokens": self.before_edit_tokens,
                 "before_edit_weighted": self.before_edit_weighted,
                 "before_edit_tool_calls": self.before_edit_tool_calls,
+                "newest": self.newest,
             },
             separators=(",", ":"),
         )
@@ -324,6 +332,7 @@ class ScanState:
             before_edit_tokens=int(data.get("before_edit_tokens", 0)),
             before_edit_weighted=float(data.get("before_edit_weighted", 0.0)),
             before_edit_tool_calls=int(data.get("before_edit_tool_calls", 0)),
+            newest=str(data.get("newest") or ""),
         )
 
 
@@ -347,12 +356,16 @@ def scan(transcript: Path, state: ScanState | None = None) -> tuple[Usage, ScanS
     for order, path in enumerate(transcript_files(transcript)):
         key = str(path)
         start = state.offsets.get(key, 0)
-        raw, consumed = _read_from(path, start)
+        raw, consumed, restarted = _read_from(path, start)
         if consumed:
-            state.offsets[key] = start + consumed
+            state.offsets[key] = (0 if restarted else start) + consumed
         for line_no, entry in enumerate(_entries(raw)):
             stamp = entry.get("timestamp")
-            stamped.append((stamp if isinstance(stamp, str) else "", order, line_no, entry))
+            stamp = stamp if isinstance(stamp, str) else ""
+            if restarted and stamp <= state.newest:
+                continue  # read before the file was rewritten: counted then, or never
+            stamped.append((stamp, order, line_no, entry))
+    state.newest = max([state.newest, *(item[0] for item in stamped)])
     # Timestamps are ISO-8601 UTC from one clock, so they sort as strings. An entry
     # without one sorts first within its file, where it was found.
     stamped.sort(key=lambda item: (item[0], item[1], item[2]))
@@ -363,27 +376,31 @@ def scan(transcript: Path, state: ScanState | None = None) -> tuple[Usage, ScanS
     return usage, state
 
 
-def _read_from(path: Path, start: int) -> tuple[list[bytes], int]:
-    """The complete lines of ``path`` from byte ``start``, and how many bytes they span.
+def _read_from(path: Path, start: int) -> tuple[list[bytes], int, bool]:
+    """The complete lines of ``path`` from byte ``start``, how many bytes they span, and
+    whether it was read from its beginning instead.
 
-    A file that shrank below ``start`` (rewritten, not appended to) is read again
-    from the beginning; the dedupe by message id keeps a request counted once.
+    A file that shrank below ``start`` (rewritten, not appended to) is read again from
+    the beginning, and :func:`scan` counts only its entries newer than the newest it
+    read before. The dedupe by message id remembers only :data:`_RECENT_IDS`, so a longer
+    session read again counted its older requests a second time (#45, n4).
     """
+    restarted = False
     try:
         with path.open("rb") as handle:
             handle.seek(0, 2)
             end = handle.tell()
             if end < start:
-                start = 0
+                start, restarted = 0, True
             handle.seek(start)
             data = handle.read(end - start)
     except OSError:
-        return [], 0
+        return [], 0, False
     cut = data.rfind(b"\n")
     if cut < 0:
-        return [], 0  # no complete line yet: a reply still being written
+        return [], 0, restarted  # no complete line yet: a reply still being written
     complete = data[: cut + 1]
-    return complete.split(b"\n"), len(complete)
+    return complete.split(b"\n"), len(complete), restarted
 
 
 def _entries(lines: Iterable[bytes]) -> Iterator[dict[str, Any]]:
@@ -470,6 +487,9 @@ def _count_request(
     if not new_request and not any(delta):
         return
     tokens = RequestTokens(*delta)
+    # Priced at the request's own tier: an increase is mostly output, its prompt ~0, and a
+    # long prompt's increase read at the short-prompt rate (#45, n5).
+    whole = RequestTokens(*state.counted[key]).prompt if key is not None else None
     bucket = usage.models.setdefault(pricing.canonical_model(model), ModelUsage())
     bucket.requests += 1 if new_request else 0
     bucket.input += tokens.input
@@ -477,8 +497,8 @@ def _count_request(
     bucket.cache_write_1h += tokens.cache_write_1h
     bucket.cache_read += tokens.cache_read
     bucket.output += tokens.output
-    cost = pricing.cost_usd(model, tokens)
-    weighted = pricing.weighted_tokens(model, tokens)
+    cost = pricing.cost_usd(model, tokens, prompt=whole)
+    weighted = pricing.weighted_tokens(model, tokens, prompt=whole)
     if cost is None or weighted is None:
         bucket.priced = False
     else:

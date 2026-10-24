@@ -119,6 +119,23 @@ def test_session_end_records_the_last_stretch_and_marks_the_session_ended(tmp_pa
     assert [turn.trigger for turn in turns] == ["stop", "session_end"]
 
 
+def test_a_resumed_session_is_no_longer_ended_at_its_next_stop(tmp_path: Path) -> None:
+    """#45, n3: ``claude --resume`` of an ended session runs the same id again, and every
+    later Stop carried the old ``ended_at`` forward: it read ended while it ran. A turn
+    recorded after the end clears it; the next end sets it again."""
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    _turn(tmp_path, transcript, _assistant("m1"))
+    hooks_service.session_ended(tmp_path, session_id=SESSION, transcript_path=str(transcript))
+    _turn(tmp_path, transcript, _assistant("m2"))  # resumed: a new turn, a Stop
+    with store_session() as store:
+        resumed = store.session_usage(SESSION)
+    assert resumed is not None and resumed.ended_at is None
+    hooks_service.session_ended(tmp_path, session_id=SESSION, transcript_path=str(transcript))
+    with store_session() as store:
+        ended = store.session_usage(SESSION)
+    assert ended is not None and ended.ended_at is not None
+
+
 def test_a_failed_turn_is_recorded_too(tmp_path: Path) -> None:
     transcript = tmp_path / f"{SESSION}.jsonl"
     hooks_service.prompt_submitted("do it", tmp_path, session_id=SESSION)
@@ -263,11 +280,11 @@ def test_a_stop_reads_only_the_bytes_appended_since_the_last(
     reads: list[tuple[int, int]] = []
     real_read_from = usage_core._read_from
 
-    def counting(path: Path, start: int) -> tuple[list[bytes], int]:
-        lines, consumed = real_read_from(path, start)
+    def counting(path: Path, start: int) -> tuple[list[bytes], int, bool]:
+        lines, consumed, restarted = real_read_from(path, start)
         if path == transcript:
             reads.append((start, consumed))
-        return lines, consumed
+        return lines, consumed, restarted
 
     monkeypatch.setattr(usage_core, "_read_from", counting)
     for n in range(3):

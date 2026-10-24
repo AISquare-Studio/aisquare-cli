@@ -344,3 +344,16 @@ def test_the_gate_asks_for_an_open_task_and_never_reads_the_board_s_tasks(
     with store_session() as store:
         assert not team_service._has_team(store, current_project().id, SOLO)
         assert store.has_team_task_in(current_project().id, {"done"})
+
+
+def test_a_pruned_solo_session_leaves_no_unbriefed_mark(runner: CliRunner, work_dir: Path) -> None:
+    """#45, n6: ``team prune`` ends a crashed or ghost session, which fires no SessionEnd, so
+    the mark that hook takes away outlived the row. The prune takes it too."""
+    _team_on(runner)
+    _start(runner, SOLO, work_dir)
+    with store_session() as store:
+        assert store.get_meta(team_service._unbriefed(SOLO)) is not None
+    report = team_service.prune_sessions(older_than_minutes=0)
+    assert [pruned.id for pruned in report.pruned] == [SOLO]
+    with store_session() as store:
+        assert store.get_meta(team_service._unbriefed(SOLO)) is None

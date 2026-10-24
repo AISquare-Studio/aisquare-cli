@@ -1115,11 +1115,20 @@ def test_the_hand_over_dismisses_a_dialog_with_the_fake_agents_own_key(
 
 
 def _moments(adapter: AgentAdapter) -> dict[str, Any]:
+    return _moment_sets(adapter)[0]
+
+
+def _moment_sets(adapter: AgentAdapter) -> list[dict[str, Any]]:
+    """The adapter's recorded moments, then those of each other release of the agent recorded
+    beside them (``beside``: Codex 0.164.0's rollout beside 0.162.1's)."""
     path = TRANSCRIPTS / f"{adapter.id}.json"
     assert path.is_file(), f"add {path.relative_to(TRANSCRIPTS.parents[1])} for {adapter.id}"
-    moments: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))["moments"]
-    assert set(moments) == {"permission", "question", "interrupted", "asked"}
-    return moments
+    recorded = json.loads(path.read_text(encoding="utf-8"))
+    sets: list[dict[str, Any]] = [recorded["moments"]]
+    sets += [release["moments"] for release in recorded.get("beside", [])]
+    for moments in sets:
+        assert set(moments) == {"permission", "question", "interrupted", "asked"}
+    return sets
 
 
 def _written(moment: dict[str, Any], path: Path) -> Path:
@@ -1150,19 +1159,20 @@ def test_the_transcript_reader_reads_each_recorded_moment(
     from aisquare.services import transcript
 
     reader = _reader(adapter)
-    recorded = _moments(adapter)[moment]
-    expect = recorded["expect"]
-    tail = transcript.read_transcript_tail(
-        _written(recorded, tmp_path / "session.jsonl"), agent=adapter.id
-    )
-    assert tail is not None and tail.cut_at is None
-    assert tail.newest == expect["newest"]
-    pending = [[tool.tool_use_id, tool.name, reader.call_asks(tool)] for tool in tail.pending]
-    assert pending == expect["pending"]
-    if "mark" in expect:
-        assert reader.call_mark(tail.pending[0]) == expect["mark"]
-    if "last_text_end" in expect:
-        assert tail.last_text is not None and tail.last_text.endswith(expect["last_text_end"])
+    for moments in _moment_sets(adapter):
+        recorded = moments[moment]
+        expect = recorded["expect"]
+        tail = transcript.read_transcript_tail(
+            _written(recorded, tmp_path / "session.jsonl"), agent=adapter.id
+        )
+        assert tail is not None and tail.cut_at is None
+        assert tail.newest == expect["newest"]
+        pending = [[tool.tool_use_id, tool.name, reader.call_asks(tool)] for tool in tail.pending]
+        assert pending == expect["pending"]
+        if "mark" in expect:
+            assert reader.call_mark(tail.pending[0]) == expect["mark"]
+        if "last_text_end" in expect:
+            assert tail.last_text is not None and tail.last_text.endswith(expect["last_text_end"])
 
 
 def test_a_card_is_made_from_the_readers_facts_and_answered_with_its_keys(

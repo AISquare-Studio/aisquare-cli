@@ -803,6 +803,8 @@ CODEX_PROMPTS = {
     "an approval view": ["chooser", "1", "Escape"],
     "an approval view in a 60x8 pane, its second option chosen": ["chooser", "1", "Escape"],
     "a question view (request_user_input, --no-alt-screen)": ["dialog", None, None],
+    "the update dialog, an npm-installed 0.164.0 at start with a newer release in its "
+    "version.json (no -c check_for_update_on_startup=false)": ["dialog", None, None],
 }
 
 

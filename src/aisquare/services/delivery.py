@@ -236,6 +236,10 @@ class Delivered:
     """Why nothing was sent: a human's draft in the input box, or a human typing in the pane
     (:func:`draft_guard`), and nothing was typed; or a draft that landed beside the paste,
     and no Enter was pressed. ``told`` then says it too, as ``no``."""
+    in_box: bool = False
+    """``refused`` came after the paste: a draft appeared beside it, so the text sits in the
+    input box with the human's, unsent, and ``refused`` says so. Nothing typed over a draft
+    then, but the text was typed, and a caller says that, not "nothing types over" (#337)."""
 
 
 def holds(composer: str | None, text: str) -> bool:
@@ -335,8 +339,11 @@ def deliver_typed(
                 if shown:
                     # A human typed between the guard and the paste: their keys sit beside
                     # ours, and Enter would send both (review of #337). Nothing is pressed.
-                    why = "a draft is in its input box"
-                    return Delivered(TellResult("no", why), None, 0, refused=why)
+                    why = (
+                        f"a draft appeared in its input box while {what} was being typed; ours "
+                        "is in the box with it, unsent, and nothing was sent"
+                    )
+                    return Delivered(TellResult("no", why), None, 0, refused=why, in_box=True)
                 break
             sleep(RENDER_POLL)
     sleep(ENTER_GAP)

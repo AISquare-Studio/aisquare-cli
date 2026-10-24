@@ -271,3 +271,59 @@ def test_its_daily_per_model_quotas_are_its_usage_and_the_info_line_shows_the_on
         assert f"{accounts_core.label(slot)} · 70%" in line.plain, line.plain
     finally:
         unregister(adapter.id)
+
+
+# --- telemetry: its reader, not Codex's ----------------------------------------------------
+
+
+def test_the_receiver_spools_its_records_as_its_own_reader_keeps_them() -> None:
+    """B7: the receiver started for a Gemini-shaped launch keeps its ``gen_ai.*`` attributes
+    (its ``telemetry_reader``), not Codex's, and its records name it."""
+    from aisquare.core import insights, outbox
+    from aisquare.core.config import load_config, save_config
+    from aisquare.services import native_telemetry
+
+    adapter = GeminiShapedAdapter()
+    register(adapter)
+    try:
+        config = load_config()
+        config.explainability.enabled = config.explainability.ship = True
+        save_config(config)
+        insights.reset_cache()
+        attributes = {
+            "gen_ai.request.model": "gemini-2.5-pro",
+            "gen_ai.usage.input_tokens": "19",
+            "model": "a key Codex's reader keeps",
+            "prompt": "DO_NOT_SPOOL",
+        }
+        payload = {
+            "resourceLogs": [
+                {
+                    "scopeLogs": [
+                        {
+                            "logRecords": [
+                                {
+                                    "eventName": "gemini_cli.api_response",
+                                    "timeUnixNano": "7",
+                                    "attributes": [
+                                        {"key": key, "value": {"stringValue": value}}
+                                        for key, value in attributes.items()
+                                    ],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+
+        assert native_telemetry.capture(payload, "gemini-launch", agent=adapter.id) == 1
+
+        record = json.loads(outbox.pending()[0].read_text())
+        assert record["agent"] == adapter.id
+        native = record["native"]
+        assert native["gen_ai.request.model"] == "gemini-2.5-pro"
+        assert native["event.name"] == "gemini_cli.api_response"
+        assert "model" not in native and "DO_NOT_SPOOL" not in json.dumps(record)
+    finally:
+        unregister(adapter.id)

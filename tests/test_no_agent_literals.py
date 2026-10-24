@@ -123,7 +123,6 @@ BASELINE: dict[str, dict[Shape, int]] = {
     "core/spawn.py": {"env": 1},
     "services/diagnostics.py": {"env": 1, "dir": 3},
     "services/explainability.py": {"env": 4, "flag": 4},
-    "services/native_telemetry.py": {"binary": 1, "dir": 2},
     "services/store_broker.py": {"flag": 1},
 }
 

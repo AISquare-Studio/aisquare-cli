@@ -566,9 +566,9 @@ def test_native_capture_recovers_after_config_permissions_are_repaired(
 
     monkeypatch.setattr(Path, "open", checked_open)
     payload = {"resourceLogs": [{"scopeLogs": [{"logRecords": [{"eventName": "codex.event"}]}]}]}
-    assert native_telemetry.capture(payload, "permissions") == 0
+    assert native_telemetry.capture(payload, "permissions", agent="codex") == 0
     target.chmod(0o600)
-    assert native_telemetry.capture(payload, "permissions") == 1
+    assert native_telemetry.capture(payload, "permissions", agent="codex") == 1
 
 
 def test_project_purge_removes_unjoined_native_launch_metadata_and_preserves_other_projects(

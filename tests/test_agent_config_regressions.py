@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents, claude_accounts, harness
+from aisquare.core.agent_adapters import codex_config
 from aisquare.core.config import FleetRoleSettings, RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.services import agent_launch, fleet, lifecycle, native_telemetry
@@ -324,7 +325,7 @@ def test_native_launch_does_not_disable_tracing_for_prompts_or_unusable_config_o
     config.explainability.ship = True
     save_config(config)
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
     start = Mock(return_value=(["-c", "fixture.receiver=true"], "fixture receiver started"))
     monkeypatch.setattr(native_telemetry, "start_receiver", start)
@@ -347,7 +348,7 @@ def test_unusable_native_config_layers_stand_down_with_the_exact_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     system = tmp_path / "system.toml"
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", system)
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", system)
     path = {
         "system": system,
         "user": tmp_path / "config.toml",
@@ -367,8 +368,8 @@ def test_unusable_native_config_layers_stand_down_with_the_exact_path(
         monkeypatch.setattr(Path, "open", open_path)
     else:
         path.write_bytes(b"not toml =" if damage == "malformed" else b"\xff")
-    with pytest.raises(native_telemetry.NativeConfigError) as error:
-        native_telemetry.operator_configured(tmp_path, ["--profile", "work"])
+    with pytest.raises(codex_config.NativeConfigError) as error:
+        codex_config.operator_configured(tmp_path, ["--profile", "work"])
     assert str(path) in str(error.value) and layer in str(error.value)
     config = load_config()
     config.explainability.enabled = config.explainability.ship = True
@@ -385,13 +386,13 @@ def test_non_directory_home_stands_down_and_table_profile_is_ignored(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     home_file = tmp_path / "home-file"
     home_file.touch()
-    with pytest.raises(native_telemetry.NativeConfigError, match="home-file"):
-        native_telemetry.operator_configured(home_file, [])
+    with pytest.raises(codex_config.NativeConfigError, match="home-file"):
+        codex_config.operator_configured(home_file, [])
     (tmp_path / "config.toml").write_text('[profile]\nname="work"\n')
-    assert not native_telemetry.operator_configured(tmp_path, [])
+    assert not codex_config.operator_configured(tmp_path, [])
 
 
 @pytest.mark.parametrize(
@@ -402,19 +403,17 @@ def test_profile_exporter_overrides_follow_the_selected_profile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     overrides = [
         "-c",
         'profiles.work.otel.exporter="none"',
         "--config",
         "profiles.work.model=fixture-model",
     ]
-    assert native_telemetry.operator_configured(tmp_path, [*overrides, *selection]) is bool(
-        selection
-    )
+    assert codex_config.operator_configured(tmp_path, [*overrides, *selection]) is bool(selection)
     (tmp_path / "config.toml").write_text('profile="work"\n')
-    assert native_telemetry.operator_configured(tmp_path, overrides)
-    assert not native_telemetry.operator_configured(tmp_path, [*overrides, "-p", "clean"])
+    assert codex_config.operator_configured(tmp_path, overrides)
+    assert not codex_config.operator_configured(tmp_path, [*overrides, "-p", "clean"])
 
 
 def test_sign_in_keeps_the_login_and_names_unreadable_instructions(
@@ -577,7 +576,7 @@ def test_actual_launch_preserves_attached_options_and_native_prompt_terminators(
     save_config(config)
     (tmp_path / "work.config.toml").write_text('[otel]\nexporter="none"\n')
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
     start = Mock(return_value=(["-c", "fixture.receiver=true"], "receiver started"))
     execute = Mock()
@@ -602,7 +601,7 @@ def test_an_exporter_in_the_home_of_the_account_the_launch_runs_on_is_kept(
     shell = tmp_path / "shell-codex"
     shell.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(shell))
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
     start = Mock(return_value=(["-c", "fixture.receiver=true"], "receiver started"))
     monkeypatch.setattr(native_telemetry, "start_receiver", start)
@@ -624,9 +623,9 @@ def test_nul_profile_from_native_file_does_not_break_telemetry_inspection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     (tmp_path / "config.toml").write_text('profile="work\\u0000"\n')
-    assert not native_telemetry.operator_configured(tmp_path, [])
+    assert not codex_config.operator_configured(tmp_path, [])
 
 
 @pytest.mark.parametrize("layer", ["system", "user", "profile"])
@@ -636,15 +635,15 @@ def test_readable_exporters_and_missing_layers_have_opposite_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     system = tmp_path / "system.toml"
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", system)
-    assert not native_telemetry.operator_configured(tmp_path, ["-pwork"])
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", system)
+    assert not codex_config.operator_configured(tmp_path, ["-pwork"])
     path = {
         "system": system,
         "user": tmp_path / "config.toml",
         "profile": tmp_path / "work.config.toml",
     }[layer]
     path.write_text('[otel]\nexporter="none"\n')
-    assert native_telemetry.operator_configured(tmp_path, ["-pwork"])
+    assert codex_config.operator_configured(tmp_path, ["-pwork"])
 
 
 def test_keychain_entitlement_changes_use_explicit_refresh(

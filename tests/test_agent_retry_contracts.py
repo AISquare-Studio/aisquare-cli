@@ -29,6 +29,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents, insights, outbox, paths
+from aisquare.core.agent_adapters import codex_config
 from aisquare.core.agent_adapters.types import model_overrides
 from aisquare.core.config import (
     FleetRoleSettings,
@@ -95,7 +96,7 @@ def receiver(tmp_path: Path, shipping: None) -> Iterator[Callable[[dict[str, Any
     thread = threading.Thread(
         target=native_telemetry.serve,
         args=(ready, os.getpid(), "http"),
-        kwargs={"owner_alive": lambda: not stop.is_set()},
+        kwargs={"agent": "codex", "owner_alive": lambda: not stop.is_set()},
         daemon=True,
     )
     thread.start()
@@ -439,7 +440,7 @@ def test_locked_board_does_not_duplicate_spooled_or_already_shipped_events(shipp
     with sqlite3.connect(paths.db_path()) as blocker:
         blocker.execute("BEGIN IMMEDIATE")
         with pytest.raises(sqlite3.OperationalError, match="locked"):
-            native_telemetry.capture(payload, "locked")
+            native_telemetry.capture(payload, "locked", agent="codex")
         assert len(outbox.pending()) == 5
         for path in outbox.pending():
             claimed = outbox.claim(path)
@@ -447,7 +448,7 @@ def test_locked_board_does_not_duplicate_spooled_or_already_shipped_events(shipp
             outbox.mark_sent(claimed)
         assert not outbox.pending()
         blocker.rollback()
-    assert native_telemetry.capture(payload, "locked") == 0
+    assert native_telemetry.capture(payload, "locked", agent="codex") == 0
     assert outbox.counts().sent == 5 and not outbox.pending()
 
 
@@ -463,7 +464,7 @@ def test_concurrent_receivers_publish_one_copy(
 
     def capture() -> int:
         barrier.wait(timeout=5)
-        return native_telemetry.capture(_payload(32), "concurrent")
+        return native_telemetry.capture(_payload(32), "concurrent", agent="codex")
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(capture), pool.submit(capture)]
@@ -569,7 +570,7 @@ def enqueue(record, **kwargs):
         time.sleep(30)
     return result
 outbox.enqueue_retryable = enqueue
-native_telemetry.capture(json.loads(Path(sys.argv[1]).read_text()), 'crashed')
+native_telemetry.capture(json.loads(Path(sys.argv[1]).read_text()), 'crashed', agent='codex')
 """,
             str(payload),
             str(checkpoint),
@@ -587,9 +588,9 @@ native_telemetry.capture(json.loads(Path(sys.argv[1]).read_text()), 'crashed')
                 claimed = outbox.claim(path)
                 assert claimed is not None
                 outbox.mark_sent(claimed)
-        assert native_telemetry.capture(_payload(6), "crashed") == 3
+        assert native_telemetry.capture(_payload(6), "crashed", agent="codex") == 3
         assert len(outbox.pending()) + outbox.counts().sent == 6
-        assert native_telemetry.capture(_payload(6), "crashed") == 0
+        assert native_telemetry.capture(_payload(6), "crashed", agent="codex") == 0
     finally:
         if process.poll() is None:
             process.kill()
@@ -608,7 +609,7 @@ def test_spool_failure_remains_primary_when_board_checkpoint_also_fails(
         SqliteStore, "set_meta", Mock(side_effect=sqlite3.OperationalError("disk I/O error"))
     )
     with pytest.raises(OSError) as raised:
-        native_telemetry.capture(_payload(), "io")
+        native_telemetry.capture(_payload(), "io", agent="codex")
     assert raised.value.errno == errno.ENOSPC
 
 
@@ -678,7 +679,7 @@ def test_null_otlp_fields_are_absent_not_batch_failures(
 ) -> None:
     payload = _payload(2)
     payload["resourceLogs"].insert(0, extra)
-    assert native_telemetry.capture(payload, "nulls") == 2
+    assert native_telemetry.capture(payload, "nulls", agent="codex") == 2
 
 
 @pytest.mark.parametrize("failure", [errno.EACCES, errno.EROFS])
@@ -736,7 +737,7 @@ def test_the_receivers_token_is_in_the_launch_environment_never_on_a_command_lin
 ) -> None:
     """t8 smoke: the token was Codex's `-c otel.exporter.otlp-http.headers.Authorization=`,
     which every local user reads in ps; a process's environment is its owner's alone."""
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     children: list[tuple[subprocess.Popen[bytes], list[str]]] = []
     popen = subprocess.Popen
 
@@ -794,7 +795,7 @@ def test_the_receivers_header_is_kept_out_of_the_tools_shells_with_the_operators
     in place of the app's own headers. It is excluded from the tools' shells, and since
     that ``-c`` replaces the operator's ``exclude`` (0.162.1, measured), theirs, from
     every layer, go in it too."""
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     (tmp_path / "system.toml").write_text(
         '[shell_environment_policy]\nexclude = ["SYSTEM_*"]\n', encoding="utf-8"
     )
@@ -845,16 +846,16 @@ def test_the_operators_own_tool_shell_exclude_or_header_leaves_native_tracing_of
     """An ``exclude`` the operator passes with ``-c`` comes after ours and replaces it, and
     a header variable of the operator's own the receiver's would replace for every tool:
     both keep tracing off rather than hand the token on, and the operator's value stays."""
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     started = Mock(side_effect=AssertionError("a receiver started"))
     monkeypatch.setattr(native_telemetry, "start_receiver", started)
     for args in (
         ["-c", 'shell_environment_policy.exclude=["MINE"]'],
         ["-c", 'shell_environment_policy={inherit="all"}'],
     ):
-        assert native_telemetry.tool_shell_excludes(tmp_path, args, tmp_path) is None
+        assert codex_config.tool_shell_excludes(tmp_path, args, tmp_path) is None
     assert (
-        native_telemetry.tool_shell_excludes(
+        codex_config.tool_shell_excludes(
             tmp_path, ["-c", 'shell_environment_policy.inherit="core"'], tmp_path
         )
         == []
@@ -881,16 +882,16 @@ def test_a_selected_profiles_tool_shell_exclude_joins_the_receivers(
     replaced ours had the profile come after ``-c``. Measured on 0.162.1, ``-c`` replaces
     the list every file sets, the profile's included (the live test pins it), so the
     profile's patterns join the receiver's, as the user config's do."""
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     policy = '[shell_environment_policy]\nexclude = ["{}"]\n'
     (tmp_path / "config.toml").write_text(policy.format("USER_SECRET"), encoding="utf-8")
     (tmp_path / "p.config.toml").write_text(policy.format("PROFILE_SECRET"), encoding="utf-8")
 
-    assert native_telemetry.tool_shell_excludes(tmp_path, ["-p", "p"], tmp_path) == [
+    assert codex_config.tool_shell_excludes(tmp_path, ["-p", "p"], tmp_path) == [
         "USER_SECRET",
         "PROFILE_SECRET",
     ]
-    assert native_telemetry.tool_shell_excludes(tmp_path, [], tmp_path) == ["USER_SECRET"]
+    assert codex_config.tool_shell_excludes(tmp_path, [], tmp_path) == ["USER_SECRET"]
 
 
 @pytest.mark.parametrize("inherited", ["ours", "the operator's"])

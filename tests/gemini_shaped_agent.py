@@ -59,6 +59,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionIntent,
     SandboxWrites,
     SkillDirs,
+    TelemetryReader,
     WriteScope,
     config_home,
     option_values,
@@ -251,6 +252,40 @@ def _pending(call: Mapping[str, Any], at: datetime | None) -> PendingTool:
     return PendingTool(str(call.get("id")), name, name, kept, at, input_dropped=dropped)
 
 
+class GeminiShapedTelemetry:
+    """Its OpenTelemetry (docs/cli/telemetry.md): an exporter its ``settings.json`` names
+    (``telemetry.otlpEndpoint``) is the operator's, and of each log record the receiver keeps
+    its ``gen_ai.*`` model and token attributes and its ``gemini_cli.*`` event's name, the
+    tool and the timing. It has no setting of its tools' shells' environment."""
+
+    tool_shell_policy = "settings of its tools' environment"
+    FIELDS = frozenset(
+        {
+            "event.name",
+            "session.id",
+            "gen_ai.request.model",
+            "gen_ai.usage.input_tokens",
+            "gen_ai.usage.output_tokens",
+            "function_name",
+            "duration_ms",
+        }
+    )
+
+    def operator_configured(self, home: Path, args: Sequence[str], cwd: Path) -> bool:
+        telemetry = agents.read_json(home / "settings.json").get("telemetry")
+        return isinstance(telemetry, dict) and bool(telemetry.get("otlpEndpoint"))
+
+    def tool_shell_excludes(self, home: Path, args: Sequence[str], cwd: Path) -> list[str] | None:
+        return []
+
+    def decode(
+        self, attributes: Mapping[str, object], event: str | None
+    ) -> dict[str, object] | None:
+        kept = {key: value for key, value in attributes.items() if key in self.FIELDS}
+        kept["event.name"] = kept.get("event.name") or event or "gemini_cli.event"
+        return kept
+
+
 class GeminiShapedTrust:
     """``trustedFolders.json`` in the config dir: ``{path: "TRUST_FOLDER" | "TRUST_PARENT" |
     "DO_NOT_TRUST"}`` (docs/cli/trusted-folders.md). A ``TRUST_PARENT`` entry covers the folders
@@ -401,6 +436,7 @@ class GeminiShapedAdapter:
     key_spellings: Mapping[str, str] = {}
     accounts = GeminiShapedAccounts()
     plugin = None
+    telemetry_reader: TelemetryReader | None = GeminiShapedTelemetry()
     transcript_reader: AgentTranscript | None = GeminiShapedTranscript()
     capabilities = AgentCapabilities(
         launch_inputs=(CONFIG, ".agents"),

@@ -14,13 +14,13 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agents, harness, paths
-from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.agent_adapters.types import config_home, store_dir
 from aisquare.core.config import FleetRoleSettings, RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.models import CheckStatus, TeamSession
-from aisquare.services import agent_launch, diagnostics, fleet, mcp_server, native_telemetry
+from aisquare.services import agent_launch, diagnostics, fleet, mcp_server
 from tests.test_fleet_service import FakeTmux
 
 
@@ -454,14 +454,14 @@ def test_empty_native_settings_can_be_connected(agent: str, tmp_path: Path) -> N
 def test_telemetry_recognizes_only_native_exporter_options(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], configured: bool
 ) -> None:
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
-    assert native_telemetry.operator_configured(tmp_path, args) is configured
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    assert codex_config.operator_configured(tmp_path, args) is configured
 
 
 def test_exporters_are_scoped_to_the_effective_home_and_selected_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(native_telemetry, "SYSTEM_CONFIG", tmp_path / "system.toml")
+    monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     ancestor = tmp_path / ".codex"
     ancestor.mkdir()
     (ancestor / "config.toml").write_text('[otel]\nexporter="none"\n')
@@ -473,15 +473,15 @@ def test_exporters_are_scoped_to_the_effective_home_and_selected_profile(
     home = tmp_path / "other-account"
     home.mkdir()
     (home / "unused.config.toml").write_text('[otel]\nexporter="none"\n')
-    assert not native_telemetry.operator_configured(home, [])
-    assert not native_telemetry.operator_configured(home, ["--", "--profile", "unused"])
-    assert native_telemetry.operator_configured(home, ["--profile", "unused"])
-    assert native_telemetry.operator_configured(home, ["--profile=unused"])
-    assert native_telemetry.operator_configured(home, ["-punused"])
-    assert native_telemetry.operator_configured(home, ["-p=unused"])
-    assert not native_telemetry.operator_configured(home, ["exec", "--", "-punused"])
+    assert not codex_config.operator_configured(home, [])
+    assert not codex_config.operator_configured(home, ["--", "--profile", "unused"])
+    assert codex_config.operator_configured(home, ["--profile", "unused"])
+    assert codex_config.operator_configured(home, ["--profile=unused"])
+    assert codex_config.operator_configured(home, ["-punused"])
+    assert codex_config.operator_configured(home, ["-p=unused"])
+    assert not codex_config.operator_configured(home, ["exec", "--", "-punused"])
     (home / "config.toml").write_text('profile="unused"\n')
-    assert native_telemetry.operator_configured(home, [])
-    assert not native_telemetry.operator_configured(home, ["--profile", "clean"])
+    assert codex_config.operator_configured(home, [])
+    assert not codex_config.operator_configured(home, ["--profile", "clean"])
     (home / "config.toml").write_text('[otel]\nexporter="none"\n')
-    assert native_telemetry.operator_configured(home, [])
+    assert codex_config.operator_configured(home, [])

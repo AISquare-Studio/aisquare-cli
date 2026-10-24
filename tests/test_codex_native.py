@@ -29,7 +29,7 @@ import httpx
 import pytest
 
 from aisquare.core import agents, launch_seal, outbox, selfcli
-from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters import codex_config, get_adapter
 from aisquare.core.agent_adapters.types import screen_ready, store_dir, store_read_only
 from aisquare.core.config import load_config, save_config
 from aisquare.core.entries import new_entry
@@ -239,7 +239,7 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
             '[shell_environment_policy]\nexclude = ["OPERATOR_SECRET"]\n', encoding="utf-8"
         )
         env["OPERATOR_SECRET"] = "kept-out"
-        excluded = native_telemetry.tool_shell_excludes(native_home, ["-p", "p"], workspace)
+        excluded = codex_config.tool_shell_excludes(native_home, ["-p", "p"], workspace)
         assert excluded == ["OPERATOR_SECRET"]
         telemetry_args, note = native_telemetry.start_receiver(env, codex, excluded)
         assert telemetry_args, note

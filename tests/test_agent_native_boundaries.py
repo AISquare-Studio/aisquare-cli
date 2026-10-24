@@ -292,12 +292,12 @@ def test_capture_retry_keeps_the_durable_prefix_and_does_not_lock_the_spool(
     monkeypatch.setattr(outbox, "enqueue_retryable", spool)
     monkeypatch.setattr(insights, "_outbound", sanitize)
     with pytest.raises((OSError, ValueError), match=r"fixture|could not be queued"):
-        native_telemetry.capture(_payload(), "batch")
+        native_telemetry.capture(_payload(), "batch", agent="codex")
     assert len(outbox.pending()) == 1
     monkeypatch.setattr(outbox, "enqueue_retryable", enqueue)
     monkeypatch.setattr(insights, "_outbound", outbound)
-    assert native_telemetry.capture(_payload(), "batch") == 2
-    assert native_telemetry.capture(_payload(), "batch") == 0
+    assert native_telemetry.capture(_payload(), "batch", agent="codex") == 2
+    assert native_telemetry.capture(_payload(), "batch", agent="codex") == 0
     assert len(outbox.pending()) == 3
     with store_session() as store:
         assert len(store.list_meta("native-event:batch:")) == 3
@@ -348,7 +348,7 @@ def test_receiver_requests_retry_for_partial_spool_failure(
     thread = threading.Thread(
         target=native_telemetry.serve,
         args=(ready, os.getpid(), "retry"),
-        kwargs={"owner_alive": lambda: not stop.is_set()},
+        kwargs={"agent": "codex", "owner_alive": lambda: not stop.is_set()},
         daemon=True,
     )
     thread.start()
@@ -905,7 +905,7 @@ def test_capture_batches_durable_metadata_and_provider_updates(
     with store_session():
         pass
     monkeypatch.setattr(SqliteStore, "__init__", connect)
-    assert native_telemetry.capture(payload, "batch") == 512
+    assert native_telemetry.capture(payload, "batch", agent="codex") == 512
     assert statements.count("COMMIT") == 1
     # SQLite traces trigger invocations too; count API writes to the provider separately.
     assert len(outbox.pending()) == 512
@@ -914,7 +914,7 @@ def test_capture_batches_durable_metadata_and_provider_updates(
             "native-provider:batch:thread": "local"
         }
     statements.clear()
-    assert native_telemetry.capture(payload, "batch") == 0
+    assert native_telemetry.capture(payload, "batch", agent="codex") == 0
     assert statements.count("COMMIT") == 1
     assert not any("INSERT" in sql and "native-provider:" in sql for sql in statements)
 
@@ -928,7 +928,7 @@ def test_capture_batches_durable_metadata_and_provider_updates(
 )
 def test_malformed_otlp_is_rejected_before_any_spool_write(bad: dict[str, object]) -> None:
     with pytest.raises(native_telemetry.InvalidPayload):
-        native_telemetry.capture(bad, "invalid")
+        native_telemetry.capture(bad, "invalid", agent="codex")
     assert outbox.pending() == []
 
 
@@ -956,7 +956,7 @@ def test_receiver_distinguishes_permanent_and_temporary_spool_failures(
     thread = threading.Thread(
         target=native_telemetry.serve,
         args=(ready, os.getpid(), "permanent"),
-        kwargs={"owner_alive": lambda: not stop.is_set()},
+        kwargs={"agent": "codex", "owner_alive": lambda: not stop.is_set()},
         daemon=True,
     )
     thread.start()

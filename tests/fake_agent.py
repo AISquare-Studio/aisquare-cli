@@ -54,6 +54,7 @@ from aisquare.core.agent_adapters.types import (
     SandboxWrites,
     ScreenPrompt,
     SkillDirs,
+    TelemetryReader,
     WriteScope,
     config_home,
     option_occurrences,
@@ -355,6 +356,7 @@ class FakeAgentAdapter:
     key_spellings: Mapping[str, str] = {"M-Enter": "C-o"}
     accounts = FakeAccounts()
     plugin = None
+    telemetry_reader: TelemetryReader | None = None
     transcript_reader: AgentTranscript | None = FakeTranscript()
     capabilities = AgentCapabilities(
         approves_for_me=True,

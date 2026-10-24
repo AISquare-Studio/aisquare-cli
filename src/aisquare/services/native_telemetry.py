@@ -1,9 +1,11 @@
-"""Per-launch, loopback OTLP/JSON receiver for Codex's native telemetry.
+"""Per-launch, loopback OTLP/JSON receiver for an agent's native telemetry.
 
 For an agent with ``capabilities.native_telemetry``: the exporter's launch arguments are
-its adapter's (``AgentAdapter.telemetry_args``); the config layers that may hold the
-operator's own exporter (:func:`operator_configured`) and the attributes the receiver
-keeps (``_FIELDS``) are Codex's, which another agent's telemetry would extend here.
+its adapter's (``AgentAdapter.telemetry_args``), and its ``telemetry_reader`` says whether
+the operator's own config exports already, what its tools' shells are kept from, and which
+attributes of each log record the receiver keeps (``TelemetryReader.decode``; Codex's,
+``core.agent_adapters.codex_config``). The receiver is started for one launch of one agent
+(``--agent``), and parses OTLP itself.
 
 The receiver has no provider credentials and never proxies model requests.
 It writes redacted metadata into the existing spool; the existing ship command
@@ -20,11 +22,9 @@ import json
 import os
 import re
 import sqlite3
-import stat
 import subprocess
 import tempfile
 import time
-import tomllib
 from collections.abc import Callable, Iterator, MutableMapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -33,13 +33,13 @@ from typing import Any
 from urllib.parse import quote
 
 from aisquare.core import insights, orchestrator, outbox, paths, selfcli, spawn
-from aisquare.core.agent_adapters.types import AgentAdapter, option_values
+from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters.types import AgentAdapter, TelemetryReader
 from aisquare.core.agent_sessions import METADATA_PRUNE_INTERVAL, prune_metadata
 from aisquare.core.agent_sessions import NATIVE_METADATA_TTL as NATIVE_METADATA_TTL
 from aisquare.core.store import store_session
 
 MAX_BYTES = 2_000_000
-SYSTEM_CONFIG = Path("/etc/codex/config.toml")
 HEADERS_ENV = "OTEL_EXPORTER_OTLP_LOGS_HEADERS"
 """OTLP's headers variable for the logs exporter, where the receiver's ``Authorization``
 rides: a process's environment is its owner's to read (``/proc/<pid>/environ``), its
@@ -48,194 +48,6 @@ the general ``OTEL_EXPORTER_OTLP_HEADERS`` (both measured)."""
 TOKEN_PREFIX = "aisquare-otlp-"
 _OWN_HEADERS = re.compile(rf"Authorization=Bearer%20{TOKEN_PREFIX}[A-Za-z0-9_-]+")
 _config_stamp: tuple[object, ...] | None = None
-
-
-class NativeConfigError(ValueError):
-    """A config layer could contain operator settings we cannot safely inspect."""
-
-
-def _read_config(path: Path, layer: str) -> dict[str, Any]:
-    problem: Exception
-    cause: BaseException
-    try:
-        if not stat.S_ISREG(path.stat().st_mode):
-            raise ValueError("not a regular file")
-        with path.open("rb") as handle:
-            return tomllib.load(handle)
-    except FileNotFoundError as exc:
-        # Windows says "not found" under a home that is a file, where POSIX says ENOTDIR.
-        if not os.path.lexists(path.parent) or os.path.isdir(path.parent):
-            return {}
-        problem, cause = NotADirectoryError(f"{path.parent} is not a directory"), exc
-    except (OSError, ValueError, RecursionError) as exc:
-        problem = cause = exc
-    raise NativeConfigError(
-        f"Cannot inspect Codex {layer} config {path}: {problem}. "
-        "Native telemetry configuration left unchanged."
-    ) from cause
-
-
-def _overrides(args: list[str]) -> list[tuple[str, dict[str, Any]]]:
-    """Each ``-c``/``--config`` override in ``args``: its key as written, and its value parsed
-    as Codex parses it; one that does not parse is Codex's to refuse, and skipped."""
-    overrides: list[tuple[str, dict[str, Any]]] = []
-    for value in option_values(args, "-c", "--config"):
-        key, separator, raw = value.partition("=")
-        if not separator:
-            continue
-        try:
-            try:
-                parsed = tomllib.loads(value)
-            except (tomllib.TOMLDecodeError, RecursionError):
-                # Codex accepts an unquoted string as a config override value.
-                parsed = tomllib.loads(f"{key}={json.dumps(raw)}")
-        except (tomllib.TOMLDecodeError, RecursionError):
-            continue  # Native argument validation belongs to Codex.
-        # Keep each dotted override: a shallow update would erase sibling keys
-        # under profiles when a later -c configures something else there.
-        overrides.append((key.strip(), parsed))
-    return overrides
-
-
-def _layers(
-    config_dir: Path, args: list[str], overrides: list[dict[str, Any]]
-) -> tuple[list[dict[str, Any]], str | None]:
-    """The config layers ``config_dir``'s launch may read (its system and user config,
-    ``overrides`` and the selected profile's file), with the profile that selects; a
-    reader asks them all, whatever their order. Measured on 0.162.1, only ``-p`` selects
-    a profile file: a ``profile`` key in config.toml loads none, ``-c profile=`` and a
-    legacy ``[profiles.<p>]`` table beside ``-p`` refuse the launch, so reading them
-    too only ever reads more."""
-    configs = [
-        _read_config(SYSTEM_CONFIG, "system"),
-        _read_config(config_dir / "config.toml", "user"),
-        *overrides,
-    ]
-    profile = next((config["profile"] for config in reversed(configs) if "profile" in config), None)
-    for value in option_values(args, "-p", "--profile"):
-        profile = value
-    if (
-        not isinstance(profile, str)
-        or "\x00" in profile
-        or Path(profile).name != profile
-        or profile in {".", ".."}
-    ):
-        profile = None
-    if profile:
-        configs.append(_read_config(config_dir / f"{profile}.config.toml", f"profile {profile!r}"))
-    return configs, profile
-
-
-def _selected(config: dict[str, Any], profile: str | None) -> list[dict[str, Any]]:
-    """``config``, and the legacy ``[profiles.<profile>]`` table in it when one is selected."""
-    legacy_profiles = config.get("profiles", {})
-    if profile and isinstance(legacy_profiles, dict):
-        selected = legacy_profiles.get(profile, {})
-        if isinstance(selected, dict):
-            return [config, selected]
-    return [config]
-
-
-def operator_configured(config_dir: Path, args: list[str]) -> bool:
-    """Preserve exporters in native user/system config and the selected profile.
-
-    Codex ignores `otel` in project-local config. Other account homes and
-    unselected profile files are not layers of this launch either.
-    """
-    overrides = [parsed for _, parsed in _overrides(args)]
-    if any("otel" in parsed for parsed in overrides):
-        return True
-    configs, profile = _layers(config_dir, args, overrides)
-    return any("otel" in table for config in configs for table in _selected(config, profile))
-
-
-def operator_sets(config_dir: Path, args: list[str], key: str) -> bool:
-    """Whether a config layer of this launch sets the dotted ``key``: an override in
-    ``args``, the system or user config, or the selected profile's file or legacy table
-    (:func:`_layers`), whatever the value. Raises :class:`NativeConfigError` for a layer
-    that cannot be read."""
-    path = key.split(".")
-
-    def sets(table: Any) -> bool:
-        for part in path:
-            if not isinstance(table, dict) or part not in table:
-                return False
-            table = table[part]
-        return True
-
-    overrides = [parsed for _, parsed in _overrides(args)]
-    configs, profile = _layers(config_dir, args, overrides)
-    return any(sets(table) for config in configs for table in _selected(config, profile))
-
-
-TOOL_SHELL_POLICY = "shell_environment_policy"
-"""Codex's setting for the environment the shells its tools run in inherit, whose
-``exclude`` keeps :data:`HEADERS_ENV` out of them (:func:`tool_shell_excludes`)."""
-
-
-def tool_shell_excludes(config_dir: Path, args: list[str], cwd: Path) -> list[str] | None:
-    """The patterns the operator's config keeps out of the shells Codex's tools run in
-    (``shell_environment_policy.exclude``), which the receiver's must join.
-
-    Ours goes in with ``-c``, which replaces the list every file layer sets (measured on
-    0.162.1: the user config's, the ``-p`` profile file's and the project's
-    ``.codex/config.toml``), so no file the operator keeps can drop the receiver's header
-    from it (review r3 of #113, finding 7). Without the operator's patterns in it, every
-    variable their config kept from the tools would reach them again, so every layer this
-    launch may read is asked, the project's from ``cwd`` up included, and the patterns are
-    their union: a superset of the list Codex applies, so a pattern a higher layer
-    dropped stays out, the safe side. ``None`` when an override of the operator's own
-    sets the list (or the whole table): it comes after ours on the command line and wins,
-    which would hand the receiver's header to every tool.
-    """
-    overrides = _overrides(args)
-    for key, parsed in overrides:
-        policy = parsed.get(TOOL_SHELL_POLICY)
-        if key == TOOL_SHELL_POLICY or (isinstance(policy, dict) and "exclude" in policy):
-            return None
-    configs, profile = _layers(config_dir, args, [parsed for _, parsed in overrides])
-    for value in option_values(args, "-C", "--cd"):
-        cwd = cwd / value
-    for directory in (cwd, *cwd.parents):
-        if (directory / ".codex").is_dir():
-            configs.append(_read_config(directory / ".codex" / "config.toml", "project"))
-    patterns: list[str] = []
-    for config in configs:
-        for table in _selected(config, profile):
-            policy = table.get(TOOL_SHELL_POLICY)
-            excluded = policy.get("exclude") if isinstance(policy, dict) else None
-            if isinstance(excluded, list):
-                patterns += [item for item in excluded if isinstance(item, str)]
-    return list(dict.fromkeys(patterns))
-
-
-_FIELDS = frozenset(
-    {
-        "event.name",
-        "event",
-        "model",
-        "model_name",
-        "provider_name",
-        "conversation.id",
-        "thread.id",
-        "turn.id",
-        "tool_name",
-        "tool.name",
-        "input_token_count",
-        "output_token_count",
-        "cached_token_count",
-        "cached_input_token_count",
-        "reasoning_output_token_count",
-        "duration_ms",
-        "success",
-        "gen_ai.request.model",
-        "gen_ai.usage.input_tokens",
-        "gen_ai.usage.output_tokens",
-        "tool.execution_time_ms",
-        "response_id",
-        "call_id",
-    }
-)
 
 
 class InvalidPayload(ValueError):
@@ -248,23 +60,26 @@ def _objects(value: Any) -> list[dict[str, Any]]:
 
 
 def _attributes(items: Any) -> dict[str, object]:
+    """Every scalar attribute of an OTLP attribute list, as given: what the agent's reader
+    keeps of them is its own (``TelemetryReader.decode``), before anything is written."""
     result: dict[str, object] = {}
     for item in _objects(items):
         key = item.get("key")
         value = item.get("value", {})
-        if not isinstance(key, str) or key not in _FIELDS or not isinstance(value, dict):
+        if not isinstance(key, str) or not isinstance(value, dict):
             continue
         for scalar in ("stringValue", "intValue", "doubleValue", "boolValue"):
             if scalar in value:
                 raw = value[scalar]
                 if isinstance(raw, (str, int, float, bool)):
-                    result[key] = insights.token_count(raw) if "token" in key else raw
+                    result[key] = raw
                 break
     return result
 
 
-def events(payload: dict[str, Any]) -> Iterator[dict[str, object]]:
-    """Documented Codex OTLP logs, the canonical model/tool event stream.
+def events(payload: dict[str, Any], reader: TelemetryReader) -> Iterator[dict[str, object]]:
+    """The agent's OTLP logs, the canonical model/tool event stream, each record as its
+    ``reader`` keeps it (``TelemetryReader.decode``), token counts normalised.
 
     Trace spans can describe the same usage again, so they are not replayed
     alongside the logs. Rust's logger can omit the event timestamp (zero)
@@ -281,10 +96,19 @@ def events(payload: dict[str, Any]) -> Iterator[dict[str, object]]:
         base = _attributes(attributes.get("attributes") if isinstance(attributes, dict) else None)
         for scope in _objects(resource.get("scopeLogs", [])):
             for log in _objects(scope.get("logRecords", [])):
-                record = {**base, **_attributes(log.get("attributes", []))}
-                record["event.name"] = (
-                    record.get("event.name") or log.get("eventName") or "codex.event"
+                named = log.get("eventName")
+                kept = reader.decode(
+                    {**base, **_attributes(log.get("attributes", []))},
+                    named if isinstance(named, str) and named else None,
                 )
+                if kept is None:
+                    continue
+                record = {
+                    key: insights.token_count(value)
+                    if "token" in key and isinstance(value, str | int | float)
+                    else value
+                    for key, value in kept.items()
+                }
                 timestamp = log.get("timeUnixNano")
                 if timestamp in (None, "", "0", 0):
                     timestamp = log.get("observedTimeUnixNano", "")
@@ -311,8 +135,17 @@ def _refresh_settings() -> None:
         _config_stamp = stamp
 
 
-def capture(payload: dict[str, Any], launch_id: str) -> int:
-    observations = list(events(payload))
+def _reader(agent: str) -> TelemetryReader | None:
+    try:
+        return get_adapter(agent).telemetry_reader
+    except ValueError:
+        return None
+
+
+def capture(payload: dict[str, Any], launch_id: str, *, agent: str) -> int:
+    """Spool what ``agent``'s launch ``launch_id`` exported, redacted; how many were queued."""
+    reader = _reader(agent)
+    observations = list(events(payload, reader)) if reader is not None else []
     _refresh_settings()
     if not observations or not insights.shipping_enabled() or not insights.settings().enabled:
         return 0
@@ -368,7 +201,7 @@ def capture(payload: dict[str, Any], launch_id: str) -> int:
                     record: dict[str, object] = {
                         "v": insights.RECORD_VERSION,
                         "kind": "native_event",
-                        "agent": "codex",
+                        "agent": agent,
                         "at": datetime.now(UTC).isoformat(),
                         "run_key": launch_id,
                         "session_id": session_id,
@@ -405,8 +238,11 @@ def serve(
     owner_pid: int,
     launch_id: str,
     *,
+    agent: str,
     owner_alive: Callable[[], bool] | None = None,
 ) -> None:
+    """Receive ``agent``'s OTLP logs for launch ``launch_id`` on a loopback port, until the
+    owner (``owner_pid``, else ``owner_alive``) is gone; ``ready`` says the port and token."""
     import secrets
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -431,7 +267,7 @@ def serve(
                 self.send_error(400)
                 return
             try:
-                capture(payload, launch_id)
+                capture(payload, launch_id, agent=agent)
             except InvalidPayload:
                 self.send_error(400)
                 return
@@ -505,7 +341,8 @@ def start_receiver(
 
     The receiver's header (:data:`HEADERS_ENV`) is kept out of the shells the agent's
     tools run in, beside ``keep_out``, the patterns the operator's config already keeps
-    out (:func:`tool_shell_excludes`): every OpenTelemetry SDK in a process a tool starts
+    out (``TelemetryReader.tool_shell_excludes``): every OpenTelemetry SDK in a process a
+    tool starts
     reads that variable, where it would send the token to the app's own collector in
     place of the app's headers (review r2 of #113, finding 5)."""
     if os.name != "posix":
@@ -526,6 +363,8 @@ def start_receiver(
                     str(os.getpid()),
                     "--launch-id",
                     env["AISQUARE_LAUNCH_ID"],
+                    "--agent",
+                    adapter.id,
                 ],
                 module="aisquare.services.native_telemetry",
             ),
@@ -567,5 +406,6 @@ if __name__ == "__main__":
     parser.add_argument("--ready", type=Path, required=True)
     parser.add_argument("--owner-pid", type=int, required=True)
     parser.add_argument("--launch-id", required=True)
+    parser.add_argument("--agent", required=True)
     options = parser.parse_args()
-    serve(options.ready, options.owner_pid, options.launch_id)
+    serve(options.ready, options.owner_pid, options.launch_id, agent=options.agent)

@@ -190,6 +190,8 @@ class ClaudeCodeAdapter:
         ),
     )
 
+    telemetry_reader = None  # no native telemetry: its traffic goes through the proxy
+
     @property
     def transcript_reader(self) -> AgentTranscript:
         # Read when Remote asks, never on a hook: the reader and rich's cell widths load then.

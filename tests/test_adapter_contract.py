@@ -1792,3 +1792,45 @@ def test_an_agent_without_a_reviewer_runs_auto_as_ask_and_the_receipt_says_so(
     receipt: list[str] = []
     fleet_service.permission_flags(adapter, "coder", "coder-1", FleetRoleSettings(), notes=receipt)
     assert bool(receipt) is not adapter.capabilities.approves_for_me, receipt
+
+
+def test_the_receiver_keeps_what_the_agents_own_telemetry_reader_keeps(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """B7: nothing in ``services.native_telemetry`` names Codex. An agent with native
+    telemetry has a ``telemetry_reader``; the receiver parses OTLP itself and keeps of each
+    log record what the reader decodes, an event name always, never a prompt or a header,
+    and a record says the agent's own id. Gemini-shaped's reader reads its own attributes."""
+    from aisquare.services import native_telemetry
+
+    reader = adapter.telemetry_reader
+    assert reader is not None or not adapter.capabilities.native_telemetry
+    if reader is None:
+        return
+    secret = {"prompt": "DO_NOT_SPOOL", "authorization": "DO_NOT_SPOOL"}
+    kept = reader.decode({**secret, "event.name": ""}, "an.event")
+    assert kept is not None and kept["event.name"] == "an.event"
+    assert not set(secret) & set(kept)
+    assert reader.operator_configured(tmp_path, [], tmp_path) is False, "an empty home"
+    assert reader.tool_shell_excludes(tmp_path, [], tmp_path) == []
+    payload = {
+        "resourceLogs": [
+            {
+                "scopeLogs": [
+                    {
+                        "logRecords": [
+                            {
+                                "eventName": "an.event",
+                                "attributes": [
+                                    {"key": key, "value": {"stringValue": value}}
+                                    for key, value in secret.items()
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+    [record] = native_telemetry.events(payload, reader)
+    assert "DO_NOT_SPOOL" not in json.dumps(record) and record["event.name"] == "an.event"

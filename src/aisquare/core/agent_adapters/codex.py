@@ -30,6 +30,7 @@ from aisquare.core.agent_adapters.types import (
     SandboxWrites,
     ScreenPrompt,
     SkillDirs,
+    TelemetryReader,
     WriteScope,
     block_reply,
     command_entry,
@@ -593,6 +594,12 @@ class CodexAdapter:
             }
         ),
     )
+
+    @property
+    def telemetry_reader(self) -> TelemetryReader:
+        from aisquare.core.agent_adapters.codex_config import CodexTelemetry
+
+        return CodexTelemetry()
 
     @property
     def transcript_reader(self) -> AgentTranscript:

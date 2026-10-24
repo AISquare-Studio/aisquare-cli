@@ -417,6 +417,8 @@ def test_stalled_receiver_recovers_and_exits_with_owner(tmp_path: Path) -> None:
             str(owner.pid),
             "--launch-id",
             "socket-test",
+            "--agent",
+            "codex",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

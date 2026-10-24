@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import agent_adapters, agents, harness, insights, outbox
+from aisquare.core.agent_adapters import codex_config
 from aisquare.core.agent_adapters import get_adapter as _get_adapter
 from aisquare.core.agent_adapters.codex import CodexAdapter
 from aisquare.core.agent_adapters.types import config_home
@@ -467,13 +468,13 @@ def test_native_telemetry_is_opt_in_redacted_and_replayable(tmp_path: Path) -> N
             }
         ]
     }
-    assert native_telemetry.capture(payload, "launch") == 0
+    assert native_telemetry.capture(payload, "launch", agent="codex") == 0
     config = load_config()
     config.explainability.enabled = config.explainability.ship = True
     save_config(config)
     insights.reset_cache()
-    assert native_telemetry.capture(payload, "launch") == 1
-    assert native_telemetry.capture(payload, "launch") == 0
+    assert native_telemetry.capture(payload, "launch", agent="codex") == 1
+    assert native_telemetry.capture(payload, "launch", agent="codex") == 0
     record = json.loads(outbox.pending()[0].read_text())
     assert "DO_NOT_SPOOL" not in json.dumps(record)
     assert record["native"]["model"] == "local-model"
@@ -481,15 +482,15 @@ def test_native_telemetry_is_opt_in_redacted_and_replayable(tmp_path: Path) -> N
     # Distinct requests with identical usage are not retries. Codex's native
     # logger supplies an observed timestamp when the event timestamp is zero.
     payload["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["observedTimeUnixNano"] = "2"
-    assert native_telemetry.capture(payload, "launch") == 1
-    assert native_telemetry.capture(payload, "launch") == 0
+    assert native_telemetry.capture(payload, "launch", agent="codex") == 1
+    assert native_telemetry.capture(payload, "launch", agent="codex") == 0
     assert len(outbox.pending()) == 2
     # The native span stream describes those calls again; only logs account
     # for model usage in the replay.
-    assert native_telemetry.capture({"resourceSpans": [{}]}, "launch") == 0
+    assert native_telemetry.capture({"resourceSpans": [{}]}, "launch", agent="codex") == 0
     config.explainability.enabled = False
     save_config(config)
-    assert native_telemetry.capture(payload, "second") == 0
+    assert native_telemetry.capture(payload, "second", agent="codex") == 0
 
 
 def test_project_purge_removes_native_bindings_and_callback_claims(
@@ -530,15 +531,13 @@ def test_project_purge_removes_native_bindings_and_callback_claims(
 
 def test_native_exporter_preserves_operator_configuration(tmp_path: Path) -> None:
     (tmp_path / "config.toml").write_text('[otel]\nexporter="none"\n')
-    assert native_telemetry.operator_configured(tmp_path, [])
-    assert native_telemetry.operator_configured(tmp_path / "other", ["-c", 'otel.exporter="none"'])
-    assert native_telemetry.operator_configured(
-        tmp_path / "other", ["-c", 'otel={exporter="none"}']
-    )
+    assert codex_config.operator_configured(tmp_path, [])
+    assert codex_config.operator_configured(tmp_path / "other", ["-c", 'otel.exporter="none"'])
+    assert codex_config.operator_configured(tmp_path / "other", ["-c", 'otel={exporter="none"}'])
     profile_home = tmp_path / "profiles"
     profile_home.mkdir()
     (profile_home / "work.config.toml").write_text('[otel]\nexporter="none"\n')
-    assert native_telemetry.operator_configured(profile_home, ["--profile", "work"])
+    assert codex_config.operator_configured(profile_home, ["--profile", "work"])
 
 
 def test_new_cli_selection_and_native_model_rendering(runner: CliRunner) -> None:

@@ -456,7 +456,7 @@ def fleet_settings_args(
     user config of this launch's home, its ``-p`` profile); none outside a fleet window
     (``AISQUARE_FLEET_AGENT``), where the human answers the agent's dialogs. A layer that
     cannot be read may set it, and is left to: nothing is added for it."""
-    from aisquare.services import native_telemetry
+    from aisquare.core.agent_adapters import codex_config
 
     settings = selected.adapter.capabilities.fleet_settings
     if not settings or not env.get(orchestrator.FLEET_AGENT_ENV_VAR, "").strip():
@@ -465,9 +465,9 @@ def fleet_settings_args(
     args: list[str] = []
     for setting in settings:
         try:
-            if native_telemetry.operator_sets(home, raw_args, setting.partition("=")[0]):
+            if codex_config.operator_sets(home, raw_args, setting.partition("=")[0]):
                 continue
-        except native_telemetry.NativeConfigError:
+        except codex_config.NativeConfigError:
             continue
         args += ["-c", setting]
     return args
@@ -482,9 +482,11 @@ def telemetry_args(
 
     native_telemetry.disown_headers(env)
     adapter = selected.adapter
-    if not adapter.capabilities.native_telemetry:
+    reader = adapter.telemetry_reader
+    if not adapter.capabilities.native_telemetry or reader is None:
         return [], ""
     home = _launch_home(selected, env)
+    cwd = Path.cwd()
     try:
         settings = load_config().explainability
         if not settings.enabled:
@@ -495,7 +497,7 @@ def telemetry_args(
                 f"{adapter.label} model tracing requires configured insight shipping; "
                 "native auth unchanged",
             )
-        if native_telemetry.operator_configured(home, raw_args or []):
+        if reader.operator_configured(home, raw_args or [], cwd):
             return (
                 [],
                 f"{adapter.label} keeps your configured exporter; AISquare native tracing is off",
@@ -508,11 +510,11 @@ def telemetry_args(
                 f"{adapter.label} keeps your {native_telemetry.HEADERS_ENV}; "
                 "AISquare native tracing is off",
             )
-        excluded = native_telemetry.tool_shell_excludes(home, raw_args or [], Path.cwd())
+        excluded = reader.tool_shell_excludes(home, raw_args or [], cwd)
         if excluded is None:
             return (
                 [],
-                f"{adapter.label} keeps your -c {native_telemetry.TOOL_SHELL_POLICY}, which "
+                f"{adapter.label} keeps your {reader.tool_shell_policy}, which "
                 "would hand AISquare's tracing token to every tool; native tracing is off",
             )
         return native_telemetry.start_receiver(env, adapter, excluded)

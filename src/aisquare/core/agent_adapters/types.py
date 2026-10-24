@@ -831,6 +831,40 @@ class AgentTranscript(Protocol):
         ...
 
 
+class TelemetryReader(Protocol):
+    """One agent's native OpenTelemetry, as AISquare's per-launch receiver reads it
+    (``services.native_telemetry``; :attr:`AgentAdapter.telemetry_reader`, with
+    ``capabilities.native_telemetry``): whether the operator's own config exports already,
+    what its tools' shells are kept from, and what of each log record is kept."""
+
+    tool_shell_policy: str
+    """How a note names the operator's setting of the environment its tools' shells
+    inherit (Codex's ``-c shell_environment_policy``)."""
+
+    def operator_configured(self, home: Path, args: Sequence[str], cwd: Path) -> bool:
+        """Whether a config layer of a launch from config dir ``home`` with ``args`` in
+        ``cwd`` exports the agent's telemetry already, which is kept (AISquare's tracing is
+        off). Raises ``ValueError`` for a layer that cannot be read safely."""
+        ...
+
+    def tool_shell_excludes(self, home: Path, args: Sequence[str], cwd: Path) -> list[str] | None:
+        """The variable patterns the operator's config keeps out of the shells the agent's
+        tools run in, which the receiver's header joins (:meth:`AgentAdapter.telemetry_args`'
+        ``keep_out``); ``None`` where an override of the operator's own would hand that
+        header to every tool, and tracing stays off. Raises ``ValueError`` as above."""
+        ...
+
+    def decode(
+        self, attributes: Mapping[str, object], event: str | None
+    ) -> dict[str, object] | None:
+        """What the receiver keeps of one OTLP log record, from its attributes (the
+        resource's under the record's own, every scalar) and its ``eventName``: what names
+        the model, the provider, the conversation, the tool, the tokens and the timings, and
+        ``event.name``; never a prompt, a tool's arguments or a header. ``None`` keeps
+        nothing of the record."""
+        ...
+
+
 class AgentAdapter(Protocol):
     """One terminal agent, in the terms the shared services ask in.
 
@@ -846,8 +880,9 @@ class AgentAdapter(Protocol):
     ``exit_command``, ``dismiss_key``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`tools_only_args`, :meth:`context_files`,
     :meth:`disable_native_teams`, :meth:`unattended_env`,
-    :meth:`telemetry_args`. Personas: :meth:`system_prompt_args`, :meth:`skill_dirs`,
-    :meth:`headless_call` with :meth:`headless_answer`. Accounts: ``accounts``.
+    :meth:`telemetry_args` with ``telemetry_reader``. Personas: :meth:`system_prompt_args`,
+    :meth:`skill_dirs`, :meth:`headless_call` with :meth:`headless_answer`. Accounts:
+    ``accounts``.
     Remote: ``transcript_reader``. ``capabilities`` says the rest.
     """
 
@@ -892,6 +927,12 @@ class AgentAdapter(Protocol):
     @property
     def plugin(self) -> AgentPlugin | None:
         """The aisquare plugin route for this agent; ``None`` when there is none."""
+        ...
+
+    @property
+    def telemetry_reader(self) -> TelemetryReader | None:
+        """How the receiver reads the agent's OpenTelemetry (:class:`TelemetryReader`), with
+        ``capabilities.native_telemetry``; ``None`` for an agent without."""
         ...
 
     @property
@@ -1124,8 +1165,8 @@ class AgentAdapter(Protocol):
         argv is every local user's to read, so the header rides in the launch environment
         (``services.native_telemetry.HEADERS_ENV``), and ``keep_out`` names the variables
         the shells the agent's tools run in must not inherit, that one among them. Whether
-        the operator configured an exporter of their own, which is kept, is
-        ``services.native_telemetry.operator_configured`` (Codex's config layers)."""
+        the operator configured an exporter of their own, which is kept, is its
+        :attr:`telemetry_reader`'s ``operator_configured``."""
         ...
 
     def system_prompt_args(

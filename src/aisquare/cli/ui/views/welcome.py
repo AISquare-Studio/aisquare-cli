@@ -64,8 +64,7 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui.sidebar import AccountsSelected, AgentSelected, short_path
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.onboard import render_verdict
-from aisquare.core import claude_accounts as accounts_core
-from aisquare.core.agent_adapters import adapters
+from aisquare.core.agent_adapters import adapters, get_adapter
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import first_run, onboarding
@@ -371,7 +370,7 @@ def claude_text(claude: ClaudeState | None, *, platform: str) -> Text:
         if claude.problem:
             text.append(f"\n{claude.problem}", style="dim")
         return text
-    if claude.agent != accounts_core.AGENT:
+    if not get_adapter(claude.agent).capabilities.own_doctor_check:
         return _other_agent_text(text, claude)
     text.append("✓ ", style="green")
     name = claude.label if claude.native else claude.wanted
@@ -1047,8 +1046,10 @@ class WelcomeView(VerticalScroll):
             self.look(full=True)
         elif button.id == "claude-sign-in":
             claude = self.claude
-            if claude is None or claude.agent == accounts_core.AGENT:
-                # Claude Code signs in on its first start too; Accounts has its row.
+            slots = get_adapter(claude.agent).accounts if claude is not None else None
+            if claude is None or (slots is not None and not slots.sign_in_args()):
+                # An agent that signs in from its TUI (Claude Code's) does so on its first
+                # start too; Accounts has its row.
                 self.post_message(AccountsSelected())
             else:
                 # The account the manager will use, with its sign-in open: a plain home
@@ -1553,7 +1554,7 @@ class WelcomeView(VerticalScroll):
 
     def _folder_question(self) -> str:
         """What step 3 asks the user to answer in the manager's pane, as the demo waits for it."""
-        if self.claude is None or self.claude.agent == accounts_core.AGENT:
+        if self.claude is None:  # the default agent's, as docs/demo.tape waits for it
             return "answer Claude Code's question about trusting this folder"
         return f"answer {self.claude.label}'s question about trusting this folder"
 

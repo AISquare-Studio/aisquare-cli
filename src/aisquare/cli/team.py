@@ -1035,9 +1035,8 @@ def bind(
                 # a Codex role bound to a Claude slot is refused now, naming both.
                 whose = _bound_agent(role_name, agent)
                 # Claude Code's bindings take any slot, as they did before Codex had slots.
-                claude_accounts_service.resolve(
-                    account, agent=None if whose == claude_accounts_core.AGENT else whose
-                )
+                any_slot = claude_accounts_core.kind(whose).legacy_slots
+                claude_accounts_service.resolve(account, agent=None if any_slot else whose)
             except claude_accounts_service.AccountsError as exc:
                 fail(str(exc), error="unknown_account", ref=account)
         try:

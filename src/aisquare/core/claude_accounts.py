@@ -1468,6 +1468,7 @@ class ClaudeCodeAccounts:
     network_usage = True
     legacy_slots = True
     noun = "Claude"
+    relogin = "/login"
     sign_out = "inside Claude Code (/logout)"
     shares_settings = True
 

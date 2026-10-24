@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from aisquare.core import agents, harness, orchestrator, paths, selfcli
-from aisquare.core.agent_adapters import DEFAULT_AGENT, adapter_for_binary, get_adapter
+from aisquare.core.agent_adapters import (
+    DEFAULT_AGENT,
+    adapter_for_binary,
+    default_adapter,
+    get_adapter,
+)
 from aisquare.core.agent_adapters.types import AgentAdapter, BadEffortError
 from aisquare.core.config import AppConfig, config_snapshot, load_config, save_config
 from aisquare.core.spawn import LAUNCH_AGENT_ENV as LAUNCH_AGENT_ENV
@@ -208,7 +213,7 @@ def resolve(
         inferred is None
         and source == "flag"
         and chosen_binary.source != "flag"
-        and adapter.id != DEFAULT_AGENT
+        and adapter.id != default_adapter().id
         and not (bound and bound.agent == adapter.id)
     ):
         # --agent declares the family of a --bin on the same command only; a binding's
@@ -218,7 +223,7 @@ def resolve(
         inferred is None
         and source not in {"flag", "role", "default"}
         # A user default of the default agent names what an unnamed binary always was.
-        and not (source == "user" and adapter.id == DEFAULT_AGENT)
+        and not (source == "user" and adapter.id == default_adapter().id)
     ):
         raise UnknownWrapperError(chosen_binary.binary, role)
     effective_env = {**os.environ, **profile.env}

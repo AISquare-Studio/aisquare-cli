@@ -466,7 +466,9 @@ def probe_fleet(
     """
     with config_core.one_load():
         choice = fleet_agent(cwd, which=which)
-        if choice.agent == accounts_core.AGENT:
+        if get_adapter(choice.agent).capabilities.own_doctor_check:
+            # The doctor's dedicated check (Claude Code's): its plugin route, its hooks'
+            # program, the coders' folder.
             state = _probe_claude(
                 sign_in=sign_in,
                 which=which,
@@ -685,7 +687,7 @@ def connect(*, run: Runner = selfcli.run, state: ClaudeState | None = None) -> F
     it when ``claude`` is on PATH, for every caller (``services.agents``), and makes
     a Codex home the same way, so this is the doctor's fix and nothing else.
     """
-    if state is None or state.agent == accounts_core.AGENT:
+    if state is None:
         return onboarding.apply_fix(connect_fix(), None, run=run)
     return onboarding.apply_fix(connect_fix(state.agent, state.home), None, run=run)
 

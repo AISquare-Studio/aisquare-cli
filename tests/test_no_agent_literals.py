@@ -112,13 +112,8 @@ OPTION_CALLS = frozenset({"Option", "Argument"})
 #: down (:func:`test_no_file_grows_an_agent_specific_shape`), and holds what the tree holds
 #: (:func:`test_the_baseline_is_what_the_tree_holds`): lower it in the change that removes one.
 BASELINE: dict[str, dict[Shape, int]] = {
-    "cli/accounts.py": {"decide_named": 15},
     "cli/fleet.py": {"flag": 1},
     "cli/hook.py": {"binary": 3},
-    "cli/install.py": {"decide_named": 2},
-    "cli/team.py": {"decide_named": 1},
-    "cli/ui/views/accounts.py": {"decide_named": 9},
-    "cli/ui/views/welcome.py": {"decide_named": 3},
     "core/agents.py": {"env": 2, "dir": 9},
     "core/claude_accounts.py": {"binary": 1, "env": 3, "dir": 4},
     "core/claude_sharing.py": {"env": 7},
@@ -126,12 +121,9 @@ BASELINE: dict[str, dict[Shape, int]] = {
     "core/config.py": {"flag": 3},
     "core/harness.py": {"env": 30, "flag": 5},
     "core/spawn.py": {"env": 1},
-    "services/agent_launch.py": {"decide_named": 2},
     "services/claude_accounts.py": {"decide_named": 2},
-    "services/diagnostics.py": {"decide_named": 5, "binary": 1, "env": 1, "dir": 3},
+    "services/diagnostics.py": {"env": 1, "dir": 3},
     "services/explainability.py": {"env": 4, "flag": 4},
-    "services/first_run.py": {"decide_named": 2},
-    "services/fleet.py": {"decide_named": 2},
     "services/native_telemetry.py": {"binary": 1, "dir": 2},
     "services/store_broker.py": {"flag": 1},
 }

@@ -289,6 +289,7 @@ class GeminiShapedAccounts:
     network_usage = False
     legacy_slots = False
     noun = "Gemini-shaped"
+    relogin = "/auth"
     sign_out = "inside Gemini (/auth)"
     shares_settings = False
     trust = GeminiShapedTrust()

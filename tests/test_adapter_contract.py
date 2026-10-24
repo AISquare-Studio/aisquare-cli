@@ -1703,3 +1703,26 @@ def test_an_agents_slots_are_arranged_launched_and_refused_by_its_own_answers(
     assert f"sign out of it {slot.sign_out} instead" in str(refused.value)
     with pytest.raises(accounts_service.NoSuchAccount, match=f"no {slot.noun} account in slot 99"):
         accounts_service.resolve("99", agent=adapter.id)
+
+
+def test_the_accounts_commands_name_an_agents_slots_in_its_own_words(
+    adapter: AgentAdapter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing in ``aisquare accounts`` names an agent by comparing it with Claude Code's id
+    (B9): its slots are said in its accounts slot's words (``noun``, its label, its binary),
+    and Claude Code's alone (``legacy_slots``) read bare, as they always did."""
+    slot = _accounts_or_skip(adapter, monkeypatch)
+    account = accounts_core.create_account(adapter.id)
+    _sign_in(adapter, account, "login")
+    runner = CliRunner()
+
+    chosen = runner.invoke(app, ["accounts", "default", str(account.slot)])
+    cleared = runner.invoke(app, ["accounts", "default", "--clear", "--agent", adapter.id])
+    missing = runner.invoke(app, ["accounts", "default", "99", "--agent", adapter.id])
+
+    assert chosen.exit_code == 0, chosen.output
+    named = f" · {adapter.label}" in chosen.output
+    assert named is not slot.legacy_slots, chosen.output
+    assert cleared.exit_code == 0, cleared.output
+    assert (f"cleared for {adapter.label}" in cleared.output) is not slot.legacy_slots
+    assert f"no {slot.noun} account in slot 99" in missing.output

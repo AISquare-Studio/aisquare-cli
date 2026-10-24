@@ -1272,7 +1272,7 @@ where an Enter answers it: Claude Code's `Enter to confirm`, which keeps a promp
 and stops the wait for its start), `resumes_across_homes`, `resume_keeps_system_prompt` (a
 resumed session keeps the system prompt `system_prompt_args` gave its first launch and
 ignores a new one, Codex's: a restart's receipt says a persona changed since reaches it
-through the briefing alone), `exports_home_env`, `own_doctor_check`, `model_ladders`,
+through the briefing alone), `exports_home_env`, `own_doctor_check` (the doctor has a dedicated check for it, Claude Code's, which Welcome's step 2 probes it with too; the per-adapter row and the generic probe skip it), `model_ladders`,
 `model_proxy` (its traffic goes through the explainability proxy, the lane the doctor and
 Remote's card judge it by; with `native_telemetry` instead, the card judges its own
 telemetry's lane, and with neither it reads untraced), `positional_prompt`, `first_context_file_only`, `sandbox_permissions`,

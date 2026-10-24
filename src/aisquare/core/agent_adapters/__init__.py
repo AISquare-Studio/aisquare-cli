@@ -35,9 +35,15 @@ def get_adapter(name: str) -> AgentAdapter:
         ) from None
 
 
+def default_adapter() -> AgentAdapter:
+    """:data:`DEFAULT_AGENT`'s adapter: what a launch runs when nothing chooses one, and what
+    an unnamed executable (a ``claude2`` binding) and a record from before adapters ran."""
+    return get_adapter(DEFAULT_AGENT)
+
+
 def default_binary() -> str:
     """The executable a launch runs when nothing names one: :data:`DEFAULT_AGENT`'s own."""
-    return get_adapter(DEFAULT_AGENT).binary
+    return default_adapter().binary
 
 
 def recorded_adapter(name: str | None) -> AgentAdapter | None:

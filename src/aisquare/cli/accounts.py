@@ -35,6 +35,7 @@ from aisquare.cli.common import expected_config_write_errors, fail, format_reset
 from aisquare.cli.fleet import not_interactive_reason
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import (
@@ -112,9 +113,11 @@ def _resolve(ref: str) -> ClaudeAccount:
 
 
 def _fail_not_installed(exc: Exception, agent: str = core.AGENT) -> NoReturn:
-    if agent != core.AGENT:
-        fail(str(exc), error="agent_not_installed", hint=core.kind(agent).install_command)
-    fail(str(exc), error="claude_not_installed", hint=core.INSTALL_COMMAND)
+    """Refused with the agent's install command; Claude Code's error says ``claude`` as it
+    always did (``AgentAccounts.legacy_slots``)."""
+    accounts = core.kind(agent)
+    error = "claude_not_installed" if accounts.legacy_slots else "agent_not_installed"
+    fail(str(exc), error=error, hint=accounts.install_command)
 
 
 def _agent(raw: str | None) -> str:
@@ -190,7 +193,7 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
     # Codex reads exactly as it did.
     agents = {status.account.agent for status in overview.accounts}
     for agent, found in overview.installs.items():
-        if agent == core.AGENT or not (found.installed or agent in agents):
+        if core.kind(agent).legacy_slots or not (found.installed or agent in agents):
             continue
         name = core.agent_label(agent)
         if found.installed:
@@ -235,7 +238,11 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         if with_usage:
             session, week = _usage_cells(status.usage)
             if status.usage is not None and status.usage.available:
-                week += _usage_age(status.usage) if status.account.agent != core.AGENT else ""
+                week += (
+                    ""
+                    if core.kind(status.account.agent).network_usage
+                    else _usage_age(status.usage)
+                )
             cells.extend((session, week))
         cells.append(Text(_short(status.account.config_dir), style="dim"))
         table.add_row(*cells)
@@ -244,7 +251,11 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
         if status.detail:
             console.print(f"{status.label}: {status.detail}", markup=False, style="yellow")
     default = next(
-        (s for s in overview.accounts if s.account.is_default and s.account.agent == core.AGENT),
+        (
+            s
+            for s in overview.accounts
+            if s.account.is_default and core.kind(s.account.agent).legacy_slots
+        ),
         None,
     )
     if default is None:
@@ -386,9 +397,14 @@ def usage_(
     for status, label in zip(statuses, labels, strict=True):
         who = Text(status.identity.email) if status.identity else Text("not signed in", style="dim")
         session, week = _usage_cells(status.usage)
-        if status.account.agent != core.AGENT and status.usage and status.usage.available:
-            week += _usage_age(status.usage)
-            label = Text.assemble(label, (" · codex", "dim"))
+        slots = core.kind(status.account.agent)
+        if status.usage and status.usage.available:
+            # A reading its sessions recorded says how old it is; another agent's row than
+            # Claude Code's says whose it is (Codex's "· codex").
+            week += "" if slots.network_usage else _usage_age(status.usage)
+            if not slots.legacy_slots:
+                binary = get_adapter(status.account.agent).binary
+                label = Text.assemble(label, (f" · {binary}", "dim"))
         table.add_row(str(status.account.slot), label, who, session, week)
     console.print(table)
     if (line := _refreshed_line(asked)) is not None:
@@ -415,7 +431,8 @@ def _account_json(account: ClaudeAccount | None) -> dict[str, Any] | None:
 def _who(account: ClaudeAccount) -> str:
     identity = core.identity(account)
     email = f" ({identity.email})" if identity else ""
-    agent = f" · {core.agent_label(account.agent)}" if account.agent != core.AGENT else ""
+    legacy = core.kind(account.agent).legacy_slots
+    agent = "" if legacy else f" · {core.agent_label(account.agent)}"
     return f"slot {account.slot} · {core.label(account)}{email}{agent}"
 
 
@@ -448,7 +465,7 @@ def _show_defaults(project: ProjectInfo | None) -> None:
             accounts_service.project_default(project, agent=agent) if project is not None else None,
         )
         for agent in core.account_agents()
-        if agent != core.AGENT
+        if not core.kind(agent).legacy_slots
     }
     try:
         bindings = settings_service.role_account_bindings()
@@ -566,7 +583,7 @@ def default(
     if get_state().json_output:
         typer.echo(json.dumps({"level": level, "default": _account_json(chosen)}))
         return
-    if chosen is None and whose not in (None, core.AGENT):
+    if chosen is None and whose is not None and not core.kind(whose).legacy_slots:
         stdout_console().print(
             f"✓ {level} default cleared for {core.agent_label(whose or core.AGENT)}", markup=False
         )
@@ -602,11 +619,10 @@ def _set_role_default(role: str, ref: str | None, *, clear: bool) -> None:
         try:
             # A bad name is a usage error, not a stored binding — and so is an account
             # of another agent than the one the role launches.
+            # Claude Code's roles take any slot, as they did before Codex had slots.
             role_agent = _role_agent(role)
-            if role_agent == core.AGENT:
-                accounts_service.resolve(ref)
-            else:
-                accounts_service.resolve(ref, agent=role_agent)
+            any_slot = core.kind(role_agent).legacy_slots
+            accounts_service.resolve(ref, agent=None if any_slot else role_agent)
         except accounts_service.AccountsError as exc:
             _arrangement_failed(exc)
     with expected_config_write_errors():
@@ -748,31 +764,25 @@ def add(agent: AgentOpt = None) -> None:
             detail=reason,
         )
     try:
-        account = (
-            accounts_service.begin_sign_in(None)
-            if whose == core.AGENT
-            else accounts_service.begin_sign_in(None, agent=whose)
-        )
+        account = accounts_service.begin_sign_in(None, agent=whose)
     except accounts_service.ClaudeNotInstalled as exc:
         _fail_not_installed(exc, whose)
     console = stderr_console()
-    if whose == core.AGENT:
+    adapter, sign_in = get_adapter(whose), core.kind(whose).sign_in_args()
+    if not sign_in:  # it signs in from its own TUI (``AgentAccounts.sign_in_args``)
         console.print(
-            f"Slot {account.slot} is ready. Claude Code opens now with its own login — sign in "
-            "there, then leave it (/exit) and this command records the account."
+            f"Slot {account.slot} is ready. {adapter.label} opens now with its own login — "
+            f"sign in there, then leave it ({adapter.exit_command}) and this command records "
+            "the account."
         )
     else:
         console.print(
-            f"Slot {account.slot} is ready. `{core.agent_label(whose).lower()} login` runs now "
+            f"Slot {account.slot} is ready. `{' '.join((adapter.binary, *sign_in))}` runs now "
             "in it — finish the sign-in in the browser it opens, and this command records "
             "the account."
         )
     try:
-        status = (
-            accounts_service.run_session(account)
-            if whose == core.AGENT
-            else accounts_service.run_session(account, core.kind(whose).sign_in_args())
-        )
+        status = accounts_service.run_session(account, sign_in)
     except accounts_service.ClaudeNotInstalled as exc:
         accounts_service.abandon_sign_in(account)
         _fail_not_installed(exc, whose)
@@ -792,7 +802,7 @@ def add(agent: AgentOpt = None) -> None:
             error="not_signed_in",
         )
     described = accounts_service.complete_sign_in(account)
-    name = "Claude" if whose == core.AGENT else core.agent_label(whose)
+    name = core.kind(whose).noun
     console.print(
         Text.assemble(("✓ ", "green"), f"Added {name} account {account.slot}: {landed.email}")
     )
@@ -804,7 +814,8 @@ def add(agent: AgentOpt = None) -> None:
             + agents_service.config_dir_command("connect", whose, account.config_dir),
             style="yellow",
         )
-    as_role = "coder" if whose == core.AGENT else f"coder --agent {whose}"
+    # The role's own agent needs no --agent (a coder runs Claude Code unless bound).
+    as_role = "coder" if _role_agent("coder") == whose else f"coder --agent {whose}"
     console.print(
         f"  open it: aisquare accounts run {account.slot} · "
         f"as a role: aisquare launch {as_role} --account {account.slot}",
@@ -1059,34 +1070,23 @@ def run(ctx: typer.Context, slot: SlotRef) -> None:
             error="no_json_form",
         )
     account = _resolve(slot)
-    if account.agent != core.AGENT:
-        found = accounts_service.install(account.agent)
-        if not found.installed or found.binary is None:
-            _fail_not_installed(accounts_service.not_installed(account.agent), account.agent)
-        identity = core.identity(account)
-        who = identity.email if identity else "not signed in yet — run it with `login`"
-        stderr_console().print(
-            Text.assemble(
-                f"Opening {Path(found.binary).name} as ",
-                (core.label(account), "bold"),
-                f" ({who})…",
-            ),
-        )
-        for note in accounts_service.share_for_launch(account=account):
-            stderr_console().print(f"accounts: {note}", style="dim")
-        _exec(found.binary, [found.binary, *ctx.args], accounts_service.session_env(account))
-        return
-    found = accounts_service.install()
+    found = accounts_service.install(account.agent)
     if not found.installed or found.binary is None:
-        _fail_not_installed(
-            accounts_service.ClaudeNotInstalled(
-                f"Claude Code is not installed — install it first: {core.INSTALL_COMMAND}"
-            )
-        )
+        _fail_not_installed(accounts_service.not_installed(account.agent), account.agent)
     identity = core.identity(account)
-    who = identity.email if identity else "not signed in yet — Claude Code will ask"
+    sign_in = core.kind(account.agent).sign_in_args()
+    unsigned = (
+        f"run it with `{' '.join(sign_in)}`"
+        if sign_in
+        else f"{core.agent_label(account.agent)} will ask"  # its TUI's own sign-in
+    )
+    who = identity.email if identity else f"not signed in yet — {unsigned}"
     stderr_console().print(
-        Text.assemble("Opening claude as ", (core.label(account), "bold"), f" ({who})…"),
+        Text.assemble(
+            f"Opening {get_adapter(account.agent).binary} as ",
+            (core.label(account), "bold"),
+            f" ({who})…",
+        ),
     )
     for note in accounts_service.share_for_launch(account=account):
         stderr_console().print(f"accounts: {note}", style="dim")

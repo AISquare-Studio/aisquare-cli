@@ -1577,7 +1577,7 @@ def _other_accounts_checks() -> list[DoctorCheck]:
     return [
         check
         for agent in claude_accounts_core.account_agents()
-        if agent != claude_accounts_core.AGENT
+        if not claude_accounts_core.kind(agent).legacy_slots
         for check in _agent_accounts_checks(agent)
     ]
 
@@ -2027,7 +2027,7 @@ def _account_limit_checks(agent: str) -> list[DoctorCheck]:
             else "reset time unknown"
         )
         parts.append(f"{labels[session.id]} ({project_name}, {when})")
-    if agent != claude_accounts_core.AGENT:
+    if not claude_accounts_core.kind(agent).legacy_slots:
         name = claude_accounts_core.agent_label(agent)
         return [
             _warn(
@@ -2077,7 +2077,7 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     accounts = [
         account
         for account in claude_accounts_service.list_accounts()
-        if account.agent == claude_accounts_core.AGENT
+        if claude_accounts_core.kind(account.agent).legacy_slots
         and not account.disabled
         and claude_accounts_core.signed_in(account)
     ]
@@ -2128,7 +2128,7 @@ def _other_accounts_headroom_checks() -> list[DoctorCheck]:
     return [
         check
         for agent in claude_accounts_core.account_agents()
-        if agent != claude_accounts_core.AGENT
+        if not claude_accounts_core.kind(agent).legacy_slots
         and (check := _agent_account_headroom_check(agent)) is not None
     ]
 
@@ -2327,8 +2327,10 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
     and a binding or project default naming a removed slot refuses every
     launch of that role or project with `unknown_account`.
     """
-    claude = agent == claude_accounts_core.AGENT
-    prefix = "claude" if claude else agent
+    # Claude Code's rows read as they did before other agents had slots: ``claude-*``,
+    # with no agent named in them (``AgentAccounts.legacy_slots``).
+    legacy = claude_accounts_core.kind(agent).legacy_slots
+    prefix = get_adapter(agent).binary if legacy else agent
     if not paths.db_path().exists():
         return []
     try:
@@ -2360,7 +2362,7 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
         return []
     checks: list[DoctorCheck] = []
     name = claude_accounts_core.agent_label(agent)
-    whose = "" if claude else f"{name} "
+    whose = "" if legacy else f"{name} "
     if default is not None:
         label = f"slot {default.slot} ({claude_accounts_core.label(default)})"
         if default.disabled:
@@ -2368,7 +2370,7 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
                 _warn(
                     f"{prefix}-account-default",
                     f"the {whose}machine default is {label} and it is disabled — launches skip it"
-                    if not claude
+                    if not legacy
                     else f"the machine default is {label} and it is disabled — launches skip it",
                     f"aisquare accounts enable {default.slot}, or pick another: "
                     "aisquare accounts default <slot>",
@@ -2381,13 +2383,13 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
                     f"{prefix}-account-default",
                     f"the machine default is {label} but it is not signed in — a launch "
                     "would open Claude Code's login instead of the account you meant"
-                    if claude
+                    if legacy
                     else f"the {whose}machine default is {label} but it is not signed in — "
                     f"a launch would start {name} with no login instead of the account you "
                     "meant",
                     f"aisquare accounts run {default.slot}{sign_in} and sign in, or pick "
                     "another: aisquare accounts default <slot>"
-                    if not claude
+                    if not legacy
                     else f"aisquare accounts run {default.slot} and sign in, or pick another: "
                     "aisquare accounts default <slot>",
                 )
@@ -2414,12 +2416,12 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
                 f"{prefix}-account-bindings",
                 "these name an account this machine does not have, so their launches are "
                 "refused: " + "; ".join(dangling)
-                if claude
+                if legacy
                 else f"these name no {name} account this machine has, so their launches are "
                 "refused: " + "; ".join(dangling),
                 "aisquare accounts default --clear --project <project>, or "
                 "aisquare team bind <role> --clear-account"
-                if claude
+                if legacy
                 else f"aisquare accounts default --clear --agent {agent} --project <project>, "
                 "or aisquare team bind <role> --clear-account",
             )

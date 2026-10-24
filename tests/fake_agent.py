@@ -276,6 +276,7 @@ class FakeAccounts:
     network_usage = False
     legacy_slots = False
     noun = "Fake Agent"
+    relogin = ""
     sign_out = "with `fakeagent logout`"
     shares_settings = False
     trust = FakeTrust()

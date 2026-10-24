@@ -9660,9 +9660,7 @@ def switch(
     stopped = handed_over.agent
     if handed_over.dismissed is not None:
         notes.append(f"it was stopped with {handed_over.dismissed}")
-    whose = (
-        "Claude" if kind == claude_accounts_core.AGENT else claude_accounts_core.agent_label(kind)
-    )
+    whose = claude_accounts_core.kind(kind).noun
     try:
         receipt, resumed, more = _respawn(
             project,
@@ -9696,11 +9694,7 @@ def switch(
     failures.extend(receipt.failures)
     labels = claude_accounts_service.slot_labels() if current is not None else {}
     if current is None:
-        from_name = (
-            "its shell's claude"
-            if kind == claude_accounts_core.AGENT
-            else f"its shell's {claude_accounts_core.agent_label(kind).lower()}"
-        )
+        from_name = f"its shell's {get_adapter(kind).binary}"
     else:  # by name, as the target is: an account renamed is that name here too
         from_name = (
             f"{labels[current]} (slot {current})" if current in labels else f"slot {current}"

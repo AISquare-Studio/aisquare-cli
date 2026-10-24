@@ -79,6 +79,7 @@ from aisquare.cli.ui.terminal import InPlaceField, TerminalPane
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core import browser, paths
 from aisquare.core import claude_accounts as core
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.config import FleetSettings
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
@@ -422,7 +423,8 @@ def account_cells(
     of a server; and a login it lacks is "incomplete", never a token to refresh.
     """
     account = status.account
-    claude = account.agent == core.AGENT
+    # Asked with its token (Claude Code's): a missing token, and no age to its reading.
+    tokened = core.kind(account.agent).network_usage
     cells = {column.key: Text() for column in COLUMNS}
     if account.is_default:
         cells["default"] = Text(DEFAULT_BADGE, style="bold green")
@@ -441,7 +443,7 @@ def account_cells(
             cells[window], cells[f"{window}-resets"] = _window_cells(reading, window, now=now)
         if not status.signed_in:
             notes.append(
-                Text("⚠ token missing" if claude else "⚠ login incomplete", style="yellow")
+                Text("⚠ token missing" if tokened else "⚠ login incomplete", style="yellow")
             )
         elif status.token_state == "expired":
             notes.append(Text("⚠ token expired", style="yellow"))
@@ -455,7 +457,7 @@ def account_cells(
             pace = accounts_service.describe_trend(trend)
             if pace:
                 notes.append(Text(pace, style="dim italic"))  # a projection, so dim
-            if not claude and (age := reading_age(usage, now=now).removeprefix(" · ")):
+            if not tokened and (age := reading_age(usage, now=now).removeprefix(" · ")):
                 notes.append(Text(age, style="dim"))
     if account.disabled:
         notes.append(Text("disabled", style="dim italic"))
@@ -471,9 +473,35 @@ def reading_age(usage: ClaudeUsage, *, now: datetime | None = None) -> str:
     return core.format_age(usage.fetched_at, now=now)
 
 
+def _sign_in_command(agent: str) -> str:
+    """The agent's own sign-in command line, as a hint shows it (``codex login``)."""
+    return " ".join((get_adapter(agent).binary, *core.kind(agent).sign_in_args()))
+
+
+def _sign_in_opens(agent: str) -> str:
+    """What a *Log in* window opens, for its tooltip: the agent's sign-in command, or the
+    agent itself where it signs in from its TUI, with what to type there if it does not
+    ask (``AgentAccounts.relogin``)."""
+    accounts = core.kind(agent)
+    if accounts.sign_in_args():
+        return f"`{_sign_in_command(agent)}` opens below"
+    asks = f"; type {accounts.relogin} if it does not ask" if accounts.relogin else ""
+    return f"{core.agent_label(agent)} opens below{asks}"
+
+
+def _sign_in_prompt(agent: str) -> str:
+    """The sign-in pane's header, after "Logging in to …"."""
+    accounts = core.kind(agent)
+    if accounts.sign_in_args():
+        return f" — finish `{_sign_in_command(agent)}` in this pane."
+    if accounts.relogin:
+        return f" — type {accounts.relogin} if {core.agent_label(agent)} does not prompt you."
+    return f" — sign in to {core.agent_label(agent)} in this pane."
+
+
 def agent_title_text(agent: str, overview: AccountsOverview) -> Text:
     """Another agent's section title: ``Codex 0.162.1 · /path``, or how to install it."""
-    if agent == core.AGENT:
+    if core.kind(agent).legacy_slots:
         return claude_title_text(overview)
     found = overview.installs.get(agent)
     name = core.agent_label(agent)
@@ -491,8 +519,9 @@ def agent_title_text(agent: str, overview: AccountsOverview) -> Text:
 
 
 def other_agents() -> tuple[str, ...]:
-    """The agents with account slots besides Claude Code, each a section of its own."""
-    return tuple(agent for agent in core.account_agents() if agent != core.AGENT)
+    """The agents with account slots besides Claude Code (whose slots are the page's first
+    section, ``AgentAccounts.legacy_slots``), each a section of its own."""
+    return tuple(agent for agent in core.account_agents() if not core.kind(agent).legacy_slots)
 
 
 def agent_section_shown(agent: str, overview: AccountsOverview) -> bool:
@@ -845,11 +874,7 @@ class AccountRow(Horizontal, can_focus=True):
                 # The whole value, for the cell that cut it short with an ellipsis.
                 cell.tooltip = self._cell_tooltip(column.key, cells[column.key])
         login = self.query_one(f"#account-login-{self.slot}", Button)
-        login.tooltip = (
-            "log in again: Claude Code opens below; type /login if it does not ask"
-            if account.agent == core.AGENT
-            else f"log in again: `{core.agent_label(account.agent).lower()} login` opens below"
-        )
+        login.tooltip = f"log in again: {_sign_in_opens(account.agent)}"
         self._offer(login, needs_login(self.status, self.usage))
         self._offer(self.query_one(f"#account-default-{self.slot}", Button), not account.is_default)
         self.query_one(f"#account-up-{self.slot}", Button).disabled = self.first
@@ -1150,7 +1175,11 @@ class AccountsView(Vertical):
         self.query_one("#claude-add", Button).disabled = not overview.claude.installed
         self._paint_rows(
             self.query_one("#claude-rows", Vertical),
-            [status for status in overview.accounts if status.account.agent == core.AGENT],
+            [
+                status
+                for status in overview.accounts
+                if core.kind(status.account.agent).legacy_slots
+            ],
         )
         for agent in other_agents():
             section = self.query_one(f"#{agent}-section", Vertical)
@@ -1511,7 +1540,7 @@ class AccountsView(Vertical):
             whose = self._agent_of(slot)
             what = (
                 "the machine default"
-                if whose == core.AGENT
+                if core.kind(whose).legacy_slots
                 else f"the {core.agent_label(whose)} machine default"
             )
             self.arrange_accounts(
@@ -1752,11 +1781,7 @@ class AccountsView(Vertical):
             self._notice(f"a sign-in for {self._name_of(opening)} is already open below", "warn")
             return
         try:
-            account = (
-                accounts_service.begin_sign_in(slot)
-                if slot is not None or agent == core.AGENT
-                else accounts_service.begin_sign_in(None, agent=agent)
-            )
+            account = accounts_service.begin_sign_in(slot, agent=agent)
         except accounts_service.AccountsError as exc:
             self._notice(f"✗ {exc}", "error")
             return
@@ -1808,11 +1833,7 @@ class AccountsView(Vertical):
         self.login = _ClaudeLogin(account, window.pane_id, server, fresh, since)
         header = Text()
         header.append(f"Logging in to {self._name_of(account)}", style="bold")
-        prompt = (
-            " — type /login if Claude Code does not prompt you."
-            if account.agent == core.AGENT
-            else f" — finish `{core.agent_label(account.agent).lower()} login` in this pane."
-        )
+        prompt = _sign_in_prompt(account.agent)
         header.append(
             f"{prompt} This pane closes by itself once the login is recorded; "
             f"{self.escape_key.upper()} hands focus back to the sidebar.",
@@ -1903,7 +1924,7 @@ class AccountsView(Vertical):
         if row is not None:
             row.show(row.status, None, trend=row.trend)
         if login.fresh:
-            name = "Claude" if account.agent == core.AGENT else core.agent_label(account.agent)
+            name = core.kind(account.agent).noun
             self._notice(
                 f"✓ Added {name} account {account.slot}: {email} — wiring its hooks…", "ok"
             )

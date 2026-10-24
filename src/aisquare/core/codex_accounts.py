@@ -605,6 +605,7 @@ class CodexAccounts:
     network_usage = False
     legacy_slots = False
     noun = "Codex"
+    relogin = ""
     sign_out = "with `codex logout`"
     shares_settings = False
 

@@ -20,6 +20,7 @@ import typer
 from aisquare.cli.common import fail
 from aisquare.core import agents as agent_core
 from aisquare.core import selfcli
+from aisquare.core.agent_adapters import default_adapter, get_adapter
 from aisquare.core.agent_adapters.types import LastingInstall
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
@@ -56,9 +57,9 @@ def _site_json(site: lifecycle_service.HookSite) -> dict[str, Any]:
 
 
 def _place(config_dir: Path, agent: str) -> str:
-    """A hook site as the plan and the report name it: Claude Code's directory as it is,
-    another agent's with that agent named (a Codex home)."""
-    if agent == lifecycle_service.HOOK_AGENT:
+    """A hook site as the plan and the report name it: the default agent's directory as it
+    is (Claude Code's), another agent's with that agent named (a Codex home)."""
+    if agent == default_adapter().id:
         return str(config_dir)
     return f"{config_dir} ({lifecycle_service.agent_label(agent)})"
 
@@ -276,12 +277,14 @@ def _emit_report(report: lifecycle_service.UpgradeReport) -> None:
         where = _place(hook.config_dir, hook.agent)
         if hook.ok and hook.hooks_off is not None:
             # Not ✓ "re-connected": `agents connect` and init say the same of such a site.
-            turn_on = (
-                f'remove "disableAllHooks" from {hook.hooks_off} to turn them on'
-                if hook.agent == lifecycle_service.HOOK_AGENT
-                else f"remove {agent_core.HOOKS_OFF_SETTINGS.get(hook.agent, 'the setting')} "
-                f"from {hook.hooks_off} to turn them on"
+            # As the doctor says it: its dedicated row names Claude Code's key alone.
+            dedicated = get_adapter(hook.agent).capabilities.own_doctor_check
+            setting = (
+                '"disableAllHooks"'
+                if dedicated
+                else agent_core.HOOKS_OFF_SETTINGS.get(hook.agent, "the setting")
             )
+            turn_on = f"remove {setting} from {hook.hooks_off} to turn them on"
             _say(f"· hooks rewritten in {where}, but switched off: {turn_on}")
         elif hook.ok and hook.review:
             # Codex runs a changed definition only once it is trusted again: not a ✓ alone.

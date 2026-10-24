@@ -264,7 +264,9 @@ class AgentCapabilities:
     by that lane, not the proxy's (``services.explainability_ops._check_lane``)."""
     own_doctor_check: bool = False
     """``services.diagnostics`` has a dedicated check for this agent (Claude Code's hook
-    timeouts, plugin route and config-dir siblings), so the per-adapter row skips it."""
+    timeouts, plugin route and config-dir siblings), so the per-adapter row skips it; Welcome's
+    step 2 probes it with the same check (``services.first_run.probe_claude``), and an
+    upgrade's report says its hooks switch as that row does."""
     model_proxy: bool = False
     """Its model traffic goes through AISquare's explainability proxy (Claude Code's, by
     ``ANTHROPIC_BASE_URL``): the lane the doctor's proxy check and Remote's explainability
@@ -1346,6 +1348,10 @@ class AgentAccounts(Protocol):
     ``agent_account``) and listed after. One adapter at most."""
     noun: str
     """What prose calls one of its accounts: ``a Claude account``, ``a Codex account``."""
+    relogin: str
+    """What the human types in the agent's TUI to sign in again where it does not ask by
+    itself, for an agent that signs in from its TUI (:meth:`sign_in_args` ``()``): Claude
+    Code's ``/login``. ``""`` for an agent whose sign-in command signs in (Codex's)."""
     sign_out: str
     """How the human signs its plain home out, as a refusal to remove that slot says it:
     Claude Code's ``inside Claude Code (/logout)``, Codex's ``with `codex logout```."""

@@ -631,6 +631,11 @@ class FleetSettings(BaseModel):
     ``fleet spawn``, ``restart`` and ``switch`` wait for the agent's
     ``UserPromptSubmit`` to say the first message started a turn, and how long a
     listing gives a first message before it reads the agent ``attention``.
+
+    ``busy_quiet_seconds`` is how long a pane may print nothing while its board row
+    says ``working`` before its screen is asked whether Claude Code sits idle at its
+    prompt (#123): a turn redraws its spinner every second, so a quiet pane with an
+    idle input box is an agent waiting, whatever the row says.
     """
 
     tmux_socket: str = "asq"
@@ -641,6 +646,7 @@ class FleetSettings(BaseModel):
     max_continuations_per_hour: int = 30
     first_prompt: Literal["argv", "type"] = "argv"
     prompt_ack_seconds: float = Field(default=45.0, ge=0)
+    busy_quiet_seconds: int = Field(default=30, ge=1)
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
 
 

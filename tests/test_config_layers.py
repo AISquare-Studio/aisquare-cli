@@ -245,8 +245,8 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "import": {"engine": "auto", "api_model": "claude-opus-5"},
         },
         "experimental": {"captain": False},
-        # The first message's two (P0-W1a, #122).
-        "fleet": {"first_prompt": "argv", "prompt_ack_seconds": 45.0},
+        # The first message's two (P0-W1a, #122), and the idle check's quiet window (P0-W1b, #123).
+        "fleet": {"first_prompt": "argv", "prompt_ack_seconds": 45.0, "busy_quiet_seconds": 30},
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

@@ -597,9 +597,19 @@ def install_statusline(config_dir: Path, *, wrap: bool = False) -> StatusLineEnt
     path.parent.mkdir(parents=True, exist_ok=True)
     kept = path.with_name(path.name + STATUSLINE_KEPT)
     if path.exists() and not kept.exists():
-        kept.write_bytes(path.read_bytes())
+        _keep_copy(path, kept)
     _write_settings(path, settings)
     return StatusLineEntry("ours" if kind == "none" else kind, theirs, path)
+
+
+def _keep_copy(source: Path, copy: Path) -> None:
+    """``source``'s bytes in ``copy``, made with ``source``'s permissions and never more
+    than the owner's (0600): a settings file can hold an API key, and a copy made with the
+    umask's 0644 was readable by every user (review of #362)."""
+    mode = stat.S_IMODE(source.stat().st_mode) & 0o600
+    descriptor = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    with os.fdopen(descriptor, "wb") as file:
+        file.write(source.read_bytes())
 
 
 def remove_statusline(config_dir: Path | None = None) -> bool:

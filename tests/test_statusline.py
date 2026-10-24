@@ -241,6 +241,21 @@ def test_uninstall_gives_back_the_file_byte_for_byte_and_no_file_where_there_was
     assert not list(tmp_path.rglob("*" + agent_core.STATUSLINE_KEPT)), "the copies go too"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+@pytest.mark.parametrize(("source", "copy"), [(0o600, 0o600), (0o644, 0o600), (0o640, 0o600)])
+def test_the_kept_copy_is_never_readable_by_more_than_its_owner(
+    tmp_path: Path, source: int, copy: int
+) -> None:
+    """Review of #362: the copy was made with the umask's mode, so a 0600 settings.json
+    holding a key got a world-readable 0644 copy. The file's own bits, at most the owner's."""
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"env": {"ANTHROPIC_API_KEY": "sk-dummy"}}')
+    settings.chmod(source)
+    agent_core.install_statusline(tmp_path)
+    kept = tmp_path / ("settings.json" + agent_core.STATUSLINE_KEPT)
+    assert kept.stat().st_mode & 0o777 == copy
+
+
 def test_a_file_changed_since_the_install_keeps_its_change(tmp_path: Path) -> None:
     (tmp_path / "settings.json").write_text('{"model": "opus"}')
     agent_core.install_statusline(tmp_path)

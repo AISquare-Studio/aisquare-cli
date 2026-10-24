@@ -11,12 +11,13 @@
 #
 # THREE RUNS, and the sequence is the test rather than an accident:
 #
-#   1. bare machine, --no-project. Nothing but a downloader is preinstalled, so
-#      this is the run that exercises the §5 package matrix — tmux, gh, git and
-#      Node all come from the platform's own manager.
-#   2. with a project. `snapshot` is amber after run 1 by construction (no
-#      project is registered), which is also what stops run 2 short-circuiting.
-#      THIS is the run the acceptance criterion is asserted against.
+#   1. bare machine, --no-project, --with node. Nothing but a downloader is
+#      preinstalled, so this is the run that exercises the §5 package matrix —
+#      tmux, gh, git and the optional Node all come from the platform's own
+#      manager (Node through NodeSource or fnm where that one is too old).
+#   2. with a project. A local wheel is always installed, never short-circuited,
+#      so this run registers the project. THIS is the run the acceptance
+#      criterion is asserted against.
 #   3. again, with every package manager replaced by a stub that records being
 #      called. Asserts §3.9.4 with teeth: a current machine must print its
 #      summary and exit 0 having installed NOTHING, and the stub is what turns
@@ -137,13 +138,13 @@ cd "$WORKDIR"
 
 set +e
 # shellcheck disable=SC2086  # AGENT_FLAG is deliberately word-split (or empty).
-sh "$INSTALLER" --yes --no-project $AGENT_FLAG
+sh "$INSTALLER" --yes --no-project --with node $AGENT_FLAG
 run1=$?
 set -e
 printf '\nrun 1 exit: %s\n' "$run1"
-# 0 or 2 are both legitimate here: `snapshot` is amber with no project
-# registered, and whether that is classed actionable (0) or unexpected (2) is
-# the thing run 2 pins. 1 means a FATAL step failed, which is never acceptable.
+# 0 or 2 are both legitimate here: 2 is a check amber for a reason the script
+# did not expect, which run 2's gate names, or a Node that did not install, which
+# the check below names. 1 means a FATAL step failed, which is never acceptable.
 [ "$run1" = 1 ] && fail "run 1 exited 1 — a fatal step (uv or aisquare-cli) failed"
 
 command -v aisquare >/dev/null 2>&1 || fail "aisquare is not on PATH after run 1"
@@ -154,18 +155,11 @@ head1 "installed: $(aisquare --version)"
 # names which one.
 aisquare --version >/dev/null || fail "aisquare --version does not run"
 
-# Node, which run 1 asked for: this cell never passes --no-system-deps. With no
-# Node at all `aisquare doctor` reads codebase snapshots as off, which is ok, and
-# so is the tiktoken row that only snapshots use. A failed Node install would
-# therefore pass the tiktoken guard below whatever `--with` did, and run 2's
-# "exactly [brain]" gate could not see it either. Checked first, by name.
+# Node, which run 1 chose with --with node. It is optional, so no doctor row goes
+# amber without it and run 2's "exactly [brain]" gate could not see a failed
+# install. Checked by name.
 command -v node >/dev/null 2>&1 ||
-    fail "node absent after run 1 — the installer's Node step failed (doctor reads no Node as snapshots off)"
-
-# tiktoken in the CLI's OWN environment (§1.2) — the whole reason for `--with`.
-case "$(amber_checks)" in
-    *tiktoken*) fail "tiktoken is amber: --with tiktoken did not take" ;;
-esac
+    fail "node absent after run 1 — the installer's Node extra failed (no doctor row names Node)"
 
 # The install shape the `install` doctor check wants (§3.1): a real binary on
 # PATH, outside any virtualenv.
@@ -198,7 +192,7 @@ git config user.email cell@example.invalid
 git config user.name "Matrix Cell"
 printf 'print("hello")\n' >main.py
 git add -A
-git commit -qm "one file, so Repomix has something to pack"
+git commit -qm "one file, so the project has a commit"
 
 set +e
 # shellcheck disable=SC2086
@@ -333,12 +327,6 @@ amber_again=$(amber_checks)
 # (tests/test_install_script_is_posix.py), but a guard on the TEXT cannot prove
 # the replacement works. This can.
 #
-# It also asserts `tiktoken` survives, because `--force` REPLACES the tool
-# environment: an upgrade that forgot to re-state `--with tiktoken` would move
-# the version, exit 0, and silently turn the `tiktoken` doctor line amber — a
-# regression that only ever appears after an upgrade, which is the hardest kind
-# to attribute.
-#
 # PyPI is the target here, not the local wheel: "did it move to latest" needs a
 # latest to move to. Skipped when the published version happens to BE 0.5.0,
 # which would make the assertion vacuous.
@@ -368,7 +356,7 @@ else
     echo "pinning to $pinned, expecting the installer to reach $latest"
     # An EXACT PIN, deliberately — that is the shape `uv tool upgrade` refuses
     # to move, and installing without the pin would test nothing.
-    uv tool install --force --python 3.13 --with tiktoken "aisquare-cli==$pinned" >/dev/null 2>&1 ||
+    uv tool install --force --python 3.13 "aisquare-cli==$pinned" >/dev/null 2>&1 ||
         fail "could not stage the $pinned install"
     hash -r 2>/dev/null || true
     staged=$(aisquare --version | cut -d' ' -f2)
@@ -388,16 +376,6 @@ else
     [ "$moved" != "$pinned" ] || fail "the version did NOT move off the $pinned pin — this is exactly the \`uv tool upgrade\` silent no-op of section 3.9.1"
     [ "$moved" = "$latest" ] || fail "expected $latest after the upgrade, got $moved"
     head1 "upgrade: $pinned -> $moved"
-
-    # tiktoken, in the CLI's OWN environment. `--force` replaces that
-    # environment, so this is the assertion that keeps `--with tiktoken` in the
-    # upgrade command.
-    case "$(amber_checks)" in
-        *tiktoken*)
-            fail "tiktoken is amber after the upgrade — --with tiktoken was not re-stated (section 3.9.1)"
-            ;;
-    esac
-    head1 "tiktoken survived the --force upgrade"
 fi
 
 head1 "CELL PASSED: $ID ${VERSION_ID:-}"

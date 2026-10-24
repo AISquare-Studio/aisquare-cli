@@ -73,14 +73,22 @@ RECOMMENDED_TMUX_MINOR=5
 # EXTENDED_MINIMUM); below it shift+enter travels as ctrl+J and the fleet works.
 
 MIN_NODE_MAJOR=22
-# THE SAME NUMBER AS `core/snapshot.py`'s MIN_NODE, which is the source of truth
-# — repomix@1.18.0 declares "engines": {"node": ">=22.0.0"}. It has to be
-# duplicated here because this script runs before any Python exists, which is
-# the whole premise of §3.1; tests/test_install_script_is_posix.py asserts the
-# two are equal so they cannot drift.
+MIN_NODE_MINOR=12
+# The optional Node extra's floor. chrome-devtools-mcp@1.12.0 declares "engines":
+# {"node": "^20.19.0 || ^22.12.0 || >=23"}, and 22 is the line NodeSource and fnm
+# are asked for, so 22.12. Debian 12 ships Node 18 and Ubuntu 22.04 ships 12,
+# which is why this is a real floor and not a formality (§1.4).
+
+# --- optional extras --------------------------------------------------------
 #
-# Debian 12 ships Node 18 and Ubuntu 22.04 ships 12, which is why this is a real
-# floor and not a formality (§1.4).
+#: What this script can add beside what aisquare needs, offered one by one with
+#: a prompt that defaults to no, and installed only when chosen there or named
+#: with `--with NAME`. `--yes`, a run with no terminal and `--no-system-deps`
+#: choose none unless named. To add one, add its name here and three functions
+#: beside `install_node`: `extra_<name>_line` (what the prompt and the plan call
+#: it), `extra_<name>_current` (true when there is nothing to do) and
+#: `install_<name>`.
+OPTIONAL_EXTRAS="node"
 
 # `brain` is always expected to be amber when this finishes — gbrain is out of
 # scope (§0.4). `expected_amber` adds to it when the run asked for no project.
@@ -123,11 +131,12 @@ NODE_VERSION=""
 LATEST_VERSION=""
 
 CLI_ACTION=""    # install | upgrade | current
-NODE_ACTION=""   # install | current
 TMUX_ACTION=""   # install | current
 GH_ACTION=""     # install | current
 GIT_ACTION=""    # install | current
 CLAUDE_ACTION="" # install | update
+
+CHOSEN_EXTRAS="" # named with --with, or said yes to at their prompt
 
 INSTALLED_LIST=""
 UPGRADED_LIST=""
@@ -173,7 +182,7 @@ warn() {
 die() {
     printf '%serror%s %s\n' "$C_RED" "$C_RESET" "$*" >&2
     printf '%s\n' "Nothing was left half-installed on purpose: rerun this script, or" >&2
-    printf '%s\n' "install by hand with: uv tool install --with tiktoken aisquare-cli" >&2
+    printf '%s\n' "install by hand with: uv tool install aisquare-cli" >&2
     exit 1
 }
 
@@ -714,7 +723,7 @@ resolve() {
     fi
 
     _resolve_system
-    debug "cli=$CLI_ACTION tmux=$TMUX_ACTION gh=$GH_ACTION git=$GIT_ACTION node=$NODE_ACTION claude=$CLAUDE_ACTION"
+    debug "cli=$CLI_ACTION tmux=$TMUX_ACTION gh=$GH_ACTION git=$GIT_ACTION claude=$CLAUDE_ACTION extras=${CHOSEN_EXTRAS:-none}"
 }
 
 # The System and Agent classes' decisions, which do not depend on how the CLI
@@ -739,15 +748,6 @@ _resolve_system() {
     # same `case`, warn-only like its neighbours. No doctor check measures it,
     # which is why the summary names it rather than leaving it to `doctor`.
     if [ -z "$GIT_VERSION" ]; then GIT_ACTION=install; else GIT_ACTION=current; fi
-
-    # --- Node: absent or below the Repomix floor ----------------------------
-    if [ -z "$NODE_VERSION" ]; then
-        NODE_ACTION=install
-    elif version_lt "$NODE_VERSION" "$MIN_NODE_MAJOR.0.0"; then
-        NODE_ACTION=install
-    else
-        NODE_ACTION=current
-    fi
 
     # --- Claude Code: never version-managed by us (§3.9.3) ------------------
     # It ships `claude update` and auto-updates by default, and the fleet needs
@@ -793,8 +793,12 @@ short_circuit() {
         [ "$TMUX_ACTION" = current ] || return 1
         [ "$GH_ACTION" = current ] || return 1
         [ "$GIT_ACTION" = current ] || return 1
-        [ "$NODE_ACTION" = current ] || return 1
     fi
+    # An extra is optional, so one nobody asked for never makes work; one named
+    # with --with does, until it is there.
+    for _sc_extra in $CHOSEN_EXTRAS; do
+        "extra_${_sc_extra}_current" || return 1
+    done
     # Only when we would have installed it: under --no-agent an absent Claude
     # Code IS the requested state, and demanding it here meant a second run
     # never short-circuited — measured in the container matrix, where every
@@ -823,7 +827,7 @@ short_circuit() {
 
     say ""
     say "${C_BOLD}aisquare $CLI_VERSION is already the latest.${C_RESET}"
-    note "uv $UV_VERSION · Claude Code ${CLAUDE_VERSION:-skipped} · tmux $TMUX_VERSION · gh $GH_VERSION · git $GIT_VERSION · Node $NODE_VERSION"
+    note "uv $UV_VERSION · Claude Code ${CLAUDE_VERSION:-skipped} · tmux $TMUX_VERSION · gh $GH_VERSION · git $GIT_VERSION${NODE_VERSION:+ · Node $NODE_VERSION}"
     if [ "$WANT_AGENT" = 1 ]; then
         note "$(aisquare_home_shown) configured · claude-code hooks installed"
     else
@@ -845,13 +849,7 @@ short_circuit() {
             ;;
     esac
     case " $_amber " in
-        *" snapshot "*)
-            [ -n "$_why" ] && _why="$_why; "
-            _why="${_why}no project registered"
-            ;;
-    esac
-    case " $_amber " in
-        *" tmux "* | *" gh "* | *" repomix "*)
+        *" tmux "* | *" gh "*)
             [ -n "$_why" ] && _why="$_why; "
             _why="${_why}system deps skipped"
             ;;
@@ -862,6 +860,10 @@ short_circuit() {
     else
         note "doctor: every check ok"
     fi
+    for _sc_offer in $OPTIONAL_EXTRAS; do
+        "extra_${_sc_offer}_current" ||
+            note "optional: $("extra_${_sc_offer}_line") — rerun with --with $_sc_offer"
+    done
     say ""
     say "Nothing to do. Open the fleet UI with: ${C_BOLD}asq${C_RESET}"
     return 0
@@ -886,7 +888,7 @@ banner() {
     _bn_nl='
 '
     _plan=""
-    [ "$CLI_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Python $PYTHON_VERSION + $PYPI_PACKAGE + tiktoken (via uv, into its own venv)"
+    [ "$CLI_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Python $PYTHON_VERSION + $PYPI_PACKAGE (via uv, into its own venv)"
     [ "$CLI_ACTION" = upgrade ] && _plan="$_plan$_bn_nl  upgrade  $PYPI_PACKAGE $CLI_VERSION -> ${LATEST_VERSION:-latest}"
     [ "$CLI_ACTION" = current ] && _plan="$_plan$_bn_nl  keep     $PYPI_PACKAGE $CLI_VERSION"
     [ -z "$UV_VERSION" ] && _plan="$_plan$_bn_nl  install  uv (the bootstrap: a static binary that brings its own Python)"
@@ -898,10 +900,17 @@ banner() {
         [ "$TMUX_ACTION" = install ] && _plan="$_plan$_bn_nl  install  tmux (the fleet's substrate)"
         [ "$GH_ACTION" = install ] && _plan="$_plan$_bn_nl  install  gh (the fleet's PR flow)"
         [ "$GIT_ACTION" = install ] && _plan="$_plan$_bn_nl  install  git (the fleet's per-agent worktrees)"
-        [ "$NODE_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Node $MIN_NODE_MAJOR+ (Repomix snapshots)"
     else
-        _plan="$_plan$_bn_nl  skip     tmux/gh/Node (--no-system-deps)"
+        _plan="$_plan$_bn_nl  skip     tmux/gh/git (--no-system-deps)"
     fi
+    for _bn_extra in $OPTIONAL_EXTRAS; do
+        "extra_${_bn_extra}_current" && continue
+        if extra_chosen "$_bn_extra"; then
+            _plan="$_plan$_bn_nl  install  $("extra_${_bn_extra}_line") (--with $_bn_extra)"
+        elif extras_are_asked; then
+            _plan="$_plan$_bn_nl  offer    $("extra_${_bn_extra}_line") (optional, asked below)"
+        fi
+    done
 
     if [ "$WANT_AGENT" = 1 ]; then
         [ "$CLAUDE_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Claude Code"
@@ -1008,7 +1017,7 @@ Open a new shell and rerun, or add it by hand:
 }
 
 # ---------------------------------------------------------------------------
-#  9  install_cli — Python + aisquare-cli + tiktoken (§3.9.1). FATAL.
+#  9  install_cli — Python + aisquare-cli (§3.9.1). FATAL.
 # ---------------------------------------------------------------------------
 
 install_cli() {
@@ -1023,11 +1032,11 @@ install_cli() {
             return 0
             ;;
         install)
-            step "Installing $PYPI_PACKAGE (Python $PYTHON_VERSION, with tiktoken)"
+            step "Installing $PYPI_PACKAGE (Python $PYTHON_VERSION)"
             # `uv tool install` with no version change is already a safe no-op —
             # measured: "`aisquare-cli` is already installed", exit 0 — so
             # --force is NOT used here. It is only for the upgrade path below.
-            if ! run uv tool install --python "$PYTHON_VERSION" --with tiktoken "$_target"; then
+            if ! run uv tool install --python "$PYTHON_VERSION" "$_target"; then
                 die "uv tool install $_target failed.
 Rerun with --verbose to see uv's own output."
             fi
@@ -1041,9 +1050,10 @@ Rerun with --verbose to see uv's own output."
             # exit code would report an upgrade that did not happen, which is
             # the precise failure this step exists to prevent.
             #
-            # `install --force … @latest` moves a pinned install, RE-STATES
-            # `--with tiktoken` so the extra cannot be silently dropped, and is
-            # deterministic regardless of how the existing install was made.
+            # `install --force … @latest` moves a pinned install and is
+            # deterministic regardless of how the existing install was made. It
+            # resolves from this command alone, so a `--with tiktoken` an older
+            # run of this script added goes: nothing counts pack tokens any more.
             if [ "$INSTALL_TARGET" != "$PYPI_PACKAGE" ]; then
                 # `@latest` is meaningless for a path, and appending it makes uv
                 # treat the whole thing as a package name.
@@ -1052,8 +1062,7 @@ Rerun with --verbose to see uv's own output."
                 _spec="$PYPI_PACKAGE@latest"
                 [ -n "$PIN_VERSION" ] && _spec="$PYPI_PACKAGE@$PIN_VERSION"
             fi
-            if ! run uv tool install --force --python "$PYTHON_VERSION" \
-                --with tiktoken "$_spec"; then
+            if ! run uv tool install --force --python "$PYTHON_VERSION" "$_spec"; then
                 die "uv tool install --force $_spec failed.
 The previous install is untouched. Rerun with --verbose for uv's output."
             fi
@@ -1114,7 +1123,7 @@ path_check() {
 }
 
 # ---------------------------------------------------------------------------
-# 11-13  the System class — tmux, gh, Node. WARN-ONLY (§3.2).
+# 11-13  the System class — tmux, gh, git, and the optional extras. WARN-ONLY (§3.2).
 # ---------------------------------------------------------------------------
 
 # True when we have a package manager we can actually install with. On macOS
@@ -1399,7 +1408,58 @@ install_git() {
     fi
 }
 
-# Node is the awkward one, and it gets stated rules rather than a guess.
+# The optional extras (OPTIONAL_EXTRAS): each one already there is reported,
+# and each one that is not is installed when chosen, by `--with` or at its own
+# prompt, which defaults to no. Asked only where a prompt can be answered and the
+# run did not skip system packages (`extras_are_asked`): `--yes` means "do not
+# stop to ask me", and an extra is never installed unasked.
+install_extras() {
+    for _ie_extra in $OPTIONAL_EXTRAS; do
+        if ! "extra_${_ie_extra}_current" && ! extra_chosen "$_ie_extra"; then
+            if ! extras_are_asked ||
+                ! confirm "Install $("extra_${_ie_extra}_line")?" n; then
+                note "not installing $("extra_${_ie_extra}_line") — optional; --with $_ie_extra adds it"
+                continue
+            fi
+            CHOSEN_EXTRAS="$CHOSEN_EXTRAS $_ie_extra"
+        fi
+        "install_$_ie_extra"
+    done
+}
+
+# True when this run will ask about the extras it was not told about.
+extras_are_asked() {
+    [ "$WANT_SYSTEM_DEPS" = 1 ] && [ "$ASSUME_YES" = 0 ] && tty_available
+}
+
+# True when extra $1 was chosen, by `--with` or at its prompt.
+extra_chosen() {
+    case " $CHOSEN_EXTRAS " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+# `--with $1`: choose that extra, refusing a name OPTIONAL_EXTRAS does not have.
+choose_extra() {
+    case " $OPTIONAL_EXTRAS " in
+        *" $1 "*) CHOSEN_EXTRAS="$CHOSEN_EXTRAS $1" ;;
+        *) die "--with $1: not an optional extra (there is: $OPTIONAL_EXTRAS)" ;;
+    esac
+}
+
+extra_node_line() {
+    printf 'Node %s.%s+, for browser tools like the Chrome DevTools MCP' \
+        "$MIN_NODE_MAJOR" "$MIN_NODE_MINOR"
+}
+
+extra_node_current() { _node_ok; }
+
+# Node is the optional extra for browser tools: the Chrome DevTools MCP is started
+# with `npx chrome-devtools-mcp`, which doctor's browser tools row names, and
+# aisquare itself never runs Node. Nothing registers the MCP; Claude Code's
+# `claude mcp add` does, as the user chooses. Node is the awkward install, and it
+# gets stated rules rather than a guess.
 #
 # THREE SOURCES, tried in order, each with a measured reason for its place:
 #
@@ -1423,23 +1483,24 @@ install_git() {
 # Never `sudo npm install -g` anywhere: the Claude Code docs call it out as a
 # security risk and it is how ~/.npm ends up root-owned.
 install_node() {
-    [ "$WANT_SYSTEM_DEPS" = 1 ] || return 0
-    if [ "$NODE_ACTION" = current ]; then
-        note "Node $NODE_VERSION — current (Repomix needs $MIN_NODE_MAJOR+)"
-        _ensure_npx || true
+    if _node_ok; then
+        note "Node $NODE_VERSION — current"
+        # Only for a run that chose it: npm is a package of its own, and an extra
+        # nobody asked for installs nothing.
+        if extra_chosen node; then _ensure_npx || true; fi
         SKIPPED_LIST="$SKIPPED_LIST node"
         return 0
     fi
 
     if [ -n "$NODE_VERSION" ]; then
-        step "Node $NODE_VERSION is below Repomix's $MIN_NODE_MAJOR floor"
+        step "Node $NODE_VERSION is below the $MIN_NODE_MAJOR.$MIN_NODE_MINOR browser tools need"
     else
-        step "Installing Node (Repomix needs $MIN_NODE_MAJOR+)"
+        step "Installing Node $MIN_NODE_MAJOR (browser tools need $MIN_NODE_MAJOR.$MIN_NODE_MINOR+)"
     fi
 
     if [ "$DRY_RUN" = 1 ]; then
-        printf '  %swould run:%s install Node %s+ (platform package, else NodeSource, else fnm)\n' \
-            "$C_DIM" "$C_RESET" "$MIN_NODE_MAJOR"
+        printf '  %swould run:%s install Node %s.%s+ (platform package, else NodeSource, else fnm)\n' \
+            "$C_DIM" "$C_RESET" "$MIN_NODE_MAJOR" "$MIN_NODE_MINOR"
         return 0
     fi
 
@@ -1455,7 +1516,7 @@ install_node() {
             INSTALLED_LIST="$INSTALLED_LIST node"
             return 0
         fi
-        note "this distribution's Node is ${NODE_VERSION:-unreadable} — too old for Repomix"
+        note "this distribution's Node is ${NODE_VERSION:-unreadable} — below $MIN_NODE_MAJOR.$MIN_NODE_MINOR"
 
         # --- 2. NodeSource, on the two platforms that need it -------------
         case "$PKG" in
@@ -1470,7 +1531,7 @@ install_node() {
                         return 0
                     fi
                 fi
-                note "NodeSource did not produce a Node $MIN_NODE_MAJOR+ — trying fnm"
+                note "NodeSource did not produce a Node $MIN_NODE_MAJOR.$MIN_NODE_MINOR+ — trying fnm"
                 ;;
         esac
     fi
@@ -1482,7 +1543,7 @@ install_node() {
 # True when the surveyed Node is at or above the floor.
 _node_ok() {
     [ -n "$NODE_VERSION" ] || return 1
-    ! version_lt "$NODE_VERSION" "$MIN_NODE_MAJOR.0.0"
+    ! version_lt "$NODE_VERSION" "$MIN_NODE_MAJOR.$MIN_NODE_MINOR"
 }
 
 # Re-read `node --version` after a package operation. `command -v` caches on some
@@ -1493,11 +1554,11 @@ _reread_node() {
     NODE_VERSION=$(version_of_node || true)
 }
 
-# Repomix is reached through `npx`, and on several distributions npm is a
-# SEPARATE package from nodejs (Arch, Alpine, Debian's own nodejs). A Node 22
-# with no npx leaves the `repomix` doctor check amber for a reason that reads
-# like a Node problem and is not one — so npx is checked, and npm installed
-# beside node when it is missing.
+# The Chrome DevTools MCP is started through `npx`, and on several distributions
+# npm is a SEPARATE package from nodejs (Arch, Alpine, Debian's own nodejs). A
+# Node 22 with no npx cannot start it, for a reason that reads like a Node
+# problem and is not one — so npx is checked, and npm installed beside node when
+# it is missing.
 _ensure_npx() {
     have npx && return 0
     [ -n "$PKG" ] || return 1
@@ -1536,8 +1597,8 @@ _install_node_via_fnm() {
     step "Installing Node $MIN_NODE_MAJOR via fnm"
     if ! have bash; then
         warn "fnm's installer needs bash, which is not on this machine.
-         Codebase snapshots (Repomix) need Node $MIN_NODE_MAJOR+; everything else works.
-         Install Node $MIN_NODE_MAJOR+ with: $(pkg_hint nodejs)"
+         Browser tools need Node $MIN_NODE_MAJOR.$MIN_NODE_MINOR+; everything else works.
+         Install Node $MIN_NODE_MAJOR.$MIN_NODE_MINOR+ with: $(pkg_hint nodejs)"
         return 0
     fi
     # Measured: fnm's installer checks for `unzip` and refuses without it, and a
@@ -1547,8 +1608,8 @@ _install_node_via_fnm() {
         hash -r 2>/dev/null || true
     fi
     if ! fetch_into_shell "$FNM_INSTALLER_URL" bash --skip-shell >/dev/null 2>&1; then
-        warn "the fnm installer failed. Codebase snapshots (Repomix) need Node $MIN_NODE_MAJOR+;
-         everything else works. Install Node $MIN_NODE_MAJOR+ yourself and rerun."
+        warn "the fnm installer failed. Browser tools need Node $MIN_NODE_MAJOR.$MIN_NODE_MINOR+;
+         everything else works. Install Node $MIN_NODE_MAJOR.$MIN_NODE_MINOR+ yourself and rerun."
         return 0
     fi
     for _dir in "$HOME/.local/share/fnm" "$HOME/.fnm"; do
@@ -1559,13 +1620,13 @@ _install_node_via_fnm() {
         fi
     done
     if ! have fnm; then
-        warn "fnm installed but is not on PATH — install Node $MIN_NODE_MAJOR+ yourself; snapshots need it."
+        warn "fnm installed but is not on PATH — install Node $MIN_NODE_MAJOR.$MIN_NODE_MINOR+ yourself; browser tools need it."
         return 0
     fi
     if run fnm install "$MIN_NODE_MAJOR" && run fnm default "$MIN_NODE_MAJOR"; then
         # fnm's shims live in a multishell dir that only a shell hook sets up, so
         # the alias directory is put on PATH for the rest of THIS run — that is
-        # what lets `aisquare project onboard` pack a snapshot in it.
+        # what lets the summary see the Node this step installed.
         for _alias in "$HOME/.local/share/fnm/aliases/default/bin" "$HOME/.fnm/aliases/default/bin"; do
             if [ -x "$_alias/node" ]; then
                 PATH="$_alias:$PATH"
@@ -1576,15 +1637,11 @@ _install_node_via_fnm() {
         _reread_node
         good "Node ${NODE_VERSION:-$MIN_NODE_MAJOR} via fnm"
         INSTALLED_LIST="$INSTALLED_LIST node(fnm)"
-        # Not "doctor reads snapshots as off": packing is opt-in (`project onboard`)
-        # and works on this PATH. What a shell with no node cannot do is pack or
-        # refresh one.
         warn "fnm's Node is only on PATH in shells that have run its hook. Add to your profile:
          eval \"\$(fnm env --use-on-cd)\"
-         Until then those shells have no node, so they cannot pack or refresh a codebase
-         snapshot (aisquare project onboard, opt-in)."
+         Until then those shells have no node, so \`npx chrome-devtools-mcp\` cannot start there."
     else
-        warn "fnm could not install Node $MIN_NODE_MAJOR — snapshots need it; everything else works."
+        warn "fnm could not install Node $MIN_NODE_MAJOR — browser tools need it; everything else works."
     fi
 }
 
@@ -1654,8 +1711,7 @@ init_home() {
 
     # --agent claude-code installs the six lifecycle hooks and ingests the
     # CLAUDE.md of the config dir sessions from this shell read; without
-    # --no-onboard it also registers the project. It packs no Repomix snapshot:
-    # that is opt-in (`aisquare project onboard`), and doctor reads none as ok (§4).
+    # --no-onboard it also registers the project and seeds its facts.
     #
     # NEVER --reinit. It is exactly the flag a script author reaches for to make
     # a step "clean", and here it resets config.toml and DISCARDS the role
@@ -1692,13 +1748,11 @@ DOCTOR_AMBER=""
 
 # The checks that SHOULD be amber when this run finishes, sorted.
 #
-# `brain` always. And `snapshot` whenever no project was registered — which is
-# not a defect but the state `--no-project` asks for, and the state a run from a
-# directory that is not a git repo lands in (§4). Measured: with the set
+# `brain` always. The others only for what the flags asked for. Until 0.9 a
+# `snapshot` row was amber whenever no project was registered, and with the set
 # hardcoded to `brain`, a `--no-project` machine could NEVER reach §3.9.4's
-# "nothing to do" however current it was, because `snapshot` was always there —
-# the short-circuit was unreachable in that whole mode, and the summary told the
-# user to run `project onboard` for a project that does not exist.
+# "nothing to do" however current it was; that row went with the codebase
+# snapshot.
 expected_amber() {
     # Alphabetical, to read the same way as doctor_amber's sorted output.
     _exp="$EXPECTED_AMBER"
@@ -1713,15 +1767,12 @@ expected_amber() {
     if [ "$WANT_SYSTEM_DEPS" = 0 ]; then
         # `--no-system-deps` ASKED for these to be missing, so their amber lines
         # are the requested state, not a surprise. Measured before this: a
-        # `--yes --no-system-deps` run classed `tmux` and `repomix` as
+        # `--yes --no-system-deps` run classed `tmux` and the packer's row as
         # UNEXPECTED, incremented UNEXPECTED twice and exited 2 — whose
         # documented meaning is "amber for a reason this script did not expect".
         # The script expected them exactly; the user typed the flag. So every
         # provisioning run with that flag failed its caller, always.
-        _exp="$_exp gh repomix"
-    fi
-    if [ "$WANT_PROJECT" = 0 ] || [ -z "$PROJECT_DIR" ]; then
-        _exp="$_exp snapshot"
+        _exp="$_exp gh"
     fi
     if [ "$WANT_SYSTEM_DEPS" = 0 ]; then
         _exp="$_exp tmux"
@@ -1756,7 +1807,7 @@ is_expected_amber() {
 # where no repository's plugin loads. Asked here, a run from such a repository
 # printed "claude-code hooks installed", wired nothing and exited 0, and a run
 # whose hooks could not be written listed nothing (review of #257). The other
-# rows stay this folder's: snapshot, brain and harness are about its project.
+# rows stay this folder's: brain and harness are about its project.
 # Under --no-agent the script wires nothing, so claude-code stays this folder's
 # too: the row `aisquare doctor` shows here.
 #
@@ -2038,8 +2089,6 @@ _actionable_fix() {
         # and `agents connect` makes a never-started ~/.claude itself. Every amber
         # claude-code row this script did not expect is unexpected, exits 2, and
         # `summary` prints the doctor's own detail and fix for it (review of #257).
-        # NO snapshot either: a project with none reads ok (the pack is opt-in), and
-        # one packed too large before 0.7.0 needs the doctor's re-pack (#82).
         *) printf '' ;;
     esac
 }
@@ -2074,30 +2123,22 @@ summary() {
             UNEXPECTED=$((UNEXPECTED + 1))
         fi
     done
-    # A Node this run was asked for and could not put on PATH. `aisquare doctor`
-    # reads no Node at all as codebase snapshots OFF -- optional, since the memory
-    # route never needs it -- so no row above can tell "chose the memory route"
-    # from "the Node install failed". That knowledge is this script's: with system
-    # deps on, a missing node is unexpected and exits 2, as it did while the
-    # repomix row went amber for it. A Node that is too old, or a packer without a
-    # Node, still turns the repomix row amber, which the loop above has counted.
-    if [ "$WANT_SYSTEM_DEPS" = 1 ] && ! have node; then
-        case " $_unexpected " in
-            *" repomix "*) ;;
-            *)
-                _unexpected="$_unexpected node"
-                UNEXPECTED=$((UNEXPECTED + 1))
-                ;;
-        esac
-    fi
+    # An extra this run was asked for (`--with`, or yes at its prompt) that is
+    # still not there. No doctor row can say so: an extra is optional, so no row
+    # goes amber without it. That knowledge is this script's, and it exits 2.
+    for _sm_extra in $CHOSEN_EXTRAS; do
+        "extra_${_sm_extra}_current" && continue
+        _unexpected="$_unexpected $_sm_extra"
+        UNEXPECTED=$((UNEXPECTED + 1))
+    done
 
     if [ -n "$_expected" ]; then
         say ""
         note "expected:$_expected"
         # Each line explained only if it is actually there. `brain` was printed
         # unconditionally, which is wrong on a machine that HAS gbrain: the
-        # macOS runner reported brain green with snapshot amber, and the summary
-        # would have explained a check that was fine.
+        # macOS runner reported brain green with another row amber, and the
+        # summary would have explained a check that was fine.
         case " $_expected " in
             *" brain "*)
                 note "  brain    — gbrain is out of scope for this installer; team"
@@ -2122,20 +2163,12 @@ summary() {
                 ;;
         esac
         case " $_expected " in
-            *" snapshot "*)
-                # NOT "run project onboard": there is no project to onboard.
-                # Advice that cannot work is worse than no advice.
-                note "  snapshot — no project is registered yet. From a git repo, run:"
-                note "             aisquare init"
-                ;;
-        esac
-        case " $_expected " in
-            *" tmux "* | *" gh "* | *" repomix "*)
+            *" tmux "* | *" gh "*)
                 # Named as a group, because --no-system-deps skipped them
-                # together and explaining each separately would read as three
+                # together and explaining each separately would read as two
                 # problems rather than one deliberate choice.
-                note "  tmux/gh/repomix — skipped by --no-system-deps. The CLI works;"
-                note "             the fleet UI needs tmux, PRs need gh, snapshots need Node."
+                note "  tmux/gh  — skipped by --no-system-deps. The CLI works;"
+                note "             the fleet UI needs tmux, and PRs need gh."
                 ;;
         esac
     fi
@@ -2152,8 +2185,8 @@ summary() {
         say ""
         say "${C_YELLOW}Not expected, and worth a look:${C_RESET}"
         # The doctor's checks first, and the pointer to the doctor only under them:
-        # for a Node that did not install, doctor's rows are all ok ("off", no fix),
-        # so pointing there for "the full detail and a fix" sent people nowhere.
+        # for an extra that did not install, doctor has no row at all, so pointing
+        # there for "the full detail and a fix" would send people nowhere.
         #
         # claude-code is not sent there either: it comes with its own detail and
         # fix, from the row this verdict read. That row is Claude Code's own config,
@@ -2163,8 +2196,10 @@ summary() {
         _from_doctor=""
         _cc_detail=""
         for _check in $_unexpected; do
+            case " $OPTIONAL_EXTRAS " in
+                *" $_check "*) continue ;;
+            esac
             case "$_check" in
-                node) ;;
                 claude-code)
                     _cc_detail=$(_json_text "$(_doctor_detail claude-code)")
                     [ -n "$_cc_detail" ] || _from_doctor="$_from_doctor $_check"
@@ -2185,11 +2220,12 @@ summary() {
                 printf '    → %s\n' "$_cc_fix"
             fi
         fi
-        case " $_unexpected " in
-            # Its own line, with its own remedy: doctor only says snapshots are
-            # off, which is true and names no failure.
-            *" node "*) printf '  node — Node %s+ did not install, so codebase snapshots are off (nodejs.org, or fnm)\n' "$MIN_NODE_MAJOR" ;;
-        esac
+        # Each its own line, since no doctor row names it.
+        for _sm_failed in $CHOSEN_EXTRAS; do
+            "extra_${_sm_failed}_current" ||
+                printf '  %s — you chose %s, and it did not install (see the warning above)\n' \
+                    "$_sm_failed" "$("extra_${_sm_failed}_line")"
+        done
     fi
 
     if [ -n "$PATH_HINT" ]; then
@@ -2207,7 +2243,7 @@ handoff() {
     _exit=0
     [ "$UNEXPECTED" -gt 0 ] && _exit=2
     # Exit 2, not 0: the install completed but an unexpected check is amber, or
-    # the Node this run was asked for did not install. A script that exits 0
+    # an extra this run was asked for did not install. A script that exits 0
     # onto a broken machine is worse than one that never ran.
 
     if [ "$DRY_RUN" = 1 ]; then
@@ -2267,7 +2303,11 @@ have to be handed to sh explicitly):
 Options
   -y, --yes            Never prompt, and do not launch the UI at the end.
       --no-agent       Skip Claude Code.
-      --no-system-deps Skip tmux, gh and Node.
+      --no-system-deps Skip tmux, gh and git, and ask about no optional extra.
+      --with EXTRA     Install an optional extra without asking. One for now:
+                       node (Node 22.12+, for browser tools like the Chrome
+                       DevTools MCP). Without it each extra is asked about,
+                       defaulting to no; --yes asks nothing.
       --project DIR    Register DIR as the project (default: $PWD if a git repo).
       --no-project     Machine setup only; register nothing.
       --version V      Pin aisquare-cli to V (default: latest).
@@ -2293,7 +2333,7 @@ Exit codes
   0  installed (or nothing to do), with nothing unexpected
   1  a fatal step failed — uv, or aisquare-cli itself
   2  installed, but a check is amber for a reason this script did not expect,
-     or Node did not install
+     or an optional extra you chose did not install
 
 Not installed, on purpose: gbrain (out of scope), explainability tracing (off
 unless asked for), and any credential — `claude` and `gh auth login` do their
@@ -2308,6 +2348,12 @@ parse_args() {
             --no-agent) WANT_AGENT=0 ;;
             --no-system-deps) WANT_SYSTEM_DEPS=0 ;;
             --no-project) WANT_PROJECT=0 ;;
+            --with)
+                [ $# -ge 2 ] || die "--with needs an extra (there is: $OPTIONAL_EXTRAS)"
+                choose_extra "$2"
+                shift
+                ;;
+            --with=*) choose_extra "${1#--with=}" ;;
             --project)
                 [ $# -ge 2 ] || die "--project needs a directory"
                 PROJECT_DIR=$2
@@ -2405,7 +2451,7 @@ main() {
     install_tmux
     install_gh
     install_git
-    install_node
+    install_extras
     install_claude
     init_home
     run_doctor

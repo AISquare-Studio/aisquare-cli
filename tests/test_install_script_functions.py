@@ -28,7 +28,6 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,10 +37,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import agents as agent_core
 from aisquare.core import paths
-from aisquare.core import snapshot as snapshot_core
 from aisquare.core.store import store_session
-from aisquare.core.workspace import project_id_for
-from aisquare.models import CheckStatus, ProjectInfo, Snapshot
 from aisquare.services import diagnostics
 
 # `install.sh` is a POSIX shell script and every test here drives it through
@@ -455,7 +451,7 @@ def test_sudo_is_not_used_when_already_root(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# the Node floor — §1.4/§6.3, the boundary that matters
+# the Node extra's floor — §1.4/§6.3, the boundary that matters
 # ---------------------------------------------------------------------------
 
 
@@ -464,24 +460,25 @@ def test_sudo_is_not_used_when_already_root(tmp_path: Path) -> None:
     [
         ("v12.22.9", "install"),  # Ubuntu 22.04
         ("v18.20.4", "install"),  # Debian 12
-        ("v21.7.3", "install"),  # one below the floor
-        ("v22.0.0", "current"),  # the floor itself — inclusive
+        ("v22.11.0", "install"),  # one minor below the floor
+        ("v22.12.0", "current"),  # the floor itself — inclusive
         ("v22.23.2", "current"),
         ("v26.7.0", "current"),
     ],
 )
-def test_the_node_decision_is_made_at_the_repomix_floor(
+def test_the_node_extra_is_current_from_the_browser_tools_floor(
     tmp_path: Path, node_version: str, expected: str
 ) -> None:
-    """Repomix declares `>=22.0.0`, so 21 installs and 22 does not.
+    """chrome-devtools-mcp declares `^20.19.0 || ^22.12.0 || >=23`, and the extra installs
+    the 22 line, so 22.11 is below its floor and 22.12 is not.
 
     An off-by-one here is invisible on every developer machine — they are all far
     above the floor — and would surface only on the one distribution shipping
-    exactly 22.
+    exactly 22.11.
     """
     stubs = stub_dir(tmp_path, "bin", "node", body=f'printf "{node_version}\\n"')
     result = sh(
-        'survey >/dev/null 2>&1; resolve >/dev/null 2>&1; printf "%s\\n" "$NODE_ACTION"',
+        "survey >/dev/null 2>&1; if extra_node_current; then echo current; else echo install; fi",
         path=f"{stubs}:{base_path(tmp_path)}",
     )
     assert result.stdout.strip() == expected, (
@@ -1041,14 +1038,6 @@ _HANDOFF_FLAGS = [
     "--force",
 ]
 
-#: The same, for a run that registered no project: `snapshot` is amber too, and
-#: that is the requested state rather than a defect.
-_DOCTOR_PAYLOAD_NO_PROJECT = (
-    '[{"name": "home", "status": "ok", "detail": "ok", "fix": null},'
-    '{"name": "snapshot", "status": "warn", "detail": "no snapshot", "fix": "onboard"},'
-    '{"name": "brain", "status": "warn", "detail": "gbrain not found", "fix": "optional"}]'
-)
-
 #: One doctor payload in the target state — `brain` the only non-ok check — so
 #: the stub machine reaches the happy summary and the closing prompt.
 _DOCTOR_PAYLOAD = (
@@ -1191,34 +1180,16 @@ def test_an_empty_answer_takes_the_default_and_opens_the_ui(
 # ---------------------------------------------------------------------------
 
 
-def test_snapshot_is_expected_amber_when_no_project_was_registered(tmp_path: Path) -> None:
-    """`--no-project` asks for a machine with no project. So `snapshot` is amber
-    by design, and calling that unexpected has two consequences that were both
-    measured before this was fixed:
-
-    * §3.9.4's "nothing to do" became UNREACHABLE in the whole `--no-project`
-      mode. However current the machine was, `snapshot` was in the amber set,
-      the set never equalled `brain`, and every re-run walked the full flow —
-      installing nothing, but printing a page of steps and never saying the one
-      thing the user wanted to hear.
-    * the summary told the reader to run `aisquare project onboard` for a
-      project that does not exist. Advice that cannot work is worse than no
-      advice.
-    """
-    for flag, expected in (("WANT_PROJECT=0", "brain snapshot"), ("", "brain")):
-        setup = flag or "PROJECT_DIR=/somewhere; WANT_PROJECT=1"
+def test_no_project_adds_nothing_to_the_expected_amber(tmp_path: Path) -> None:
+    """`--no-project`, and a run from a directory that is no git repo (§4), register no
+    project, and no doctor row is amber for that any more: the `snapshot` row that was
+    went with the codebase snapshot. Expecting it still would hide a real `snapshot`
+    row from an older doctor; there is none to hide, so the set is `brain` either way."""
+    for setup in ("WANT_PROJECT=0", 'WANT_PROJECT=1; PROJECT_DIR=""', "PROJECT_DIR=/p"):
         result = sh(f"{setup}; expected_amber; echo", path=base_path(tmp_path))
-        assert result.stdout.strip() == expected, (
-            f"with `{setup}` expected_amber said {result.stdout.strip()!r}, "
-            f"wanted {expected!r}\n{result.stderr}"
+        assert result.stdout.strip() == "brain", (
+            f"with `{setup}` expected_amber said {result.stdout.strip()!r}\n{result.stderr}"
         )
-
-
-def test_a_repoless_directory_also_expects_snapshot_amber(tmp_path: Path) -> None:
-    """Not just the flag: running from a directory that is no git repo lands in
-    the same state (§4), and the honest report is the same."""
-    result = sh('WANT_PROJECT=1; PROJECT_DIR=""; expected_amber; echo', path=base_path(tmp_path))
-    assert result.stdout.strip() == "brain snapshot", result.stderr
 
 
 def test_doctor_amber_is_sorted_so_the_comparison_is_about_the_set(tmp_path: Path) -> None:
@@ -1229,7 +1200,7 @@ def test_doctor_amber_is_sorted_so_the_comparison_is_about_the_set(tmp_path: Pat
     order would silently disable the whole no-op path.
     """
     payload = (
-        '[{"name": "snapshot", "status": "warn", "detail": "x", "fix": "y"},'
+        '[{"name": "gh", "status": "warn", "detail": "x", "fix": "y"},'
         '{"name": "home", "status": "ok", "detail": "x", "fix": null},'
         '{"name": "brain", "status": "warn", "detail": "x", "fix": "y"}]'
     )
@@ -1240,18 +1211,23 @@ def test_doctor_amber_is_sorted_so_the_comparison_is_about_the_set(tmp_path: Pat
         body=f"case \"$1\" in --json) printf '%s' '{payload}' ;; esac\nexit 0",
     )
     result = sh("doctor_amber; echo", path=f"{cli}:{base_path(tmp_path)}")
-    assert result.stdout.strip() == "brain snapshot", (
+    assert result.stdout.strip() == "brain gh", (
         f"doctor_amber returned {result.stdout.strip()!r} — it must sort, or the "
         f"short-circuit breaks on a reordering\n{result.stderr}"
     )
 
 
-def test_the_short_circuit_fires_for_a_current_no_project_machine(tmp_path: Path) -> None:
+@pytest.mark.parametrize("node", [True, False], ids=["with-node", "without-node"])
+def test_the_short_circuit_fires_for_a_current_no_project_machine(
+    tmp_path: Path, node: bool
+) -> None:
     """§3.9.4 end to end, in the mode where it was unreachable.
 
     A machine that has everything, with `--no-project`, must print its summary
     and exit 0 having installed nothing. The stubs record any call that is not a
-    version read, so "installed nothing" is observed rather than asserted.
+    version read, so "installed nothing" is observed rather than asserted. Node is
+    an optional extra, so a machine without one is current too, and is told how to
+    add it.
     """
     log = tmp_path / "calls.log"
     record = f'printf "%s %s\\n" "$(basename "$0")" "$*" >>"{log}"\nexit 1'
@@ -1263,7 +1239,7 @@ def test_the_short_circuit_fires_for_a_current_no_project_machine(tmp_path: Path
         ("tmux", "tmux 3.7c"),
         ("gh", "gh version 2.97.0 (2026-07-31)"),
         ("git", "git version 2.55.0"),
-        ("node", "v26.7.0"),
+        *([("node", "v26.7.0")] if node else []),
         ("curl", ""),
     ):
         script = versions / name
@@ -1276,7 +1252,7 @@ def test_the_short_circuit_fires_for_a_current_no_project_machine(tmp_path: Path
         body=(
             'case "$1" in\n'
             '  --version) printf "aisquare 0.6.0\\n"; exit 0 ;;\n'
-            f"  --json) printf '%s' '{_DOCTOR_PAYLOAD_NO_PROJECT}'; exit 0 ;;\n"
+            f"  --json) printf '%s' '{_DOCTOR_PAYLOAD}'; exit 0 ;;\n"
             "esac\n"
             f'printf "%s %s\\n" aisquare "$*" >>"{log}"\nexit 1'
         ),
@@ -1299,9 +1275,12 @@ def test_the_short_circuit_fires_for_a_current_no_project_machine(tmp_path: Path
     assert "Nothing to do" in result.stdout, (
         f"a fully current --no-project machine must short-circuit:\n{result.stdout}"
     )
-    assert "no project registered" in result.stdout, (
-        f"and it must say WHY snapshot is amber:\n{result.stdout}"
+    assert "except brain (gbrain is out of scope)" in result.stdout, result.stdout
+    offered = (
+        "optional: Node 22.12+, for browser tools like the Chrome DevTools MCP"
+        " — rerun with --with node"
     )
+    assert (offered in result.stdout) is not node, result.stdout
     calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
     assert not calls, f"the short-circuit still ran something: {calls}"
 
@@ -1478,7 +1457,7 @@ def test_no_system_deps_expects_the_checks_it_skipped(tmp_path: Path) -> None:
     """`--no-system-deps` asked for those tools to be absent.
 
     Their amber lines are the requested state, not a surprise. Before this,
-    `tmux` and `repomix` were classed UNEXPECTED, `UNEXPECTED` was incremented
+    `tmux` and the packer's row were classed UNEXPECTED, `UNEXPECTED` was incremented
     twice and `handoff` exited **2** — whose documented meaning is "amber for a
     reason this script did not expect". The script expected them exactly; the
     user typed the flag. So every `--yes --no-system-deps` provisioning run
@@ -1489,10 +1468,10 @@ def test_no_system_deps_expects_the_checks_it_skipped(tmp_path: Path) -> None:
         path=base_path(tmp_path),
     )
     expected = set(result.stdout.split())
-    assert {"tmux", "gh", "repomix"} <= expected, (
+    assert {"tmux", "gh"} <= expected, (
         f"--no-system-deps must expect the checks it skipped, got {sorted(expected)}"
     )
-    for name in ("tmux", "repomix", "gh"):
+    for name in ("tmux", "gh"):
         member = sh(
             f"WANT_SYSTEM_DEPS=0; WANT_PROJECT=0; "
             f"if is_expected_amber {name}; then echo yes; else echo no; fi",
@@ -1502,100 +1481,185 @@ def test_no_system_deps_expects_the_checks_it_skipped(tmp_path: Path) -> None:
 
 
 def _summary_then_handoff(
-    tmp_path: Path, assignments: str, *, node: bool, env: dict[str, str] | None = None
+    tmp_path: Path, assignments: str, *, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
-    """`summary` then `handoff` after a run with a project, `node` on PATH or not."""
-    path = base_path(tmp_path)
-    if node:
-        path = f"{stub_dir(tmp_path, 'nodebin', 'node')}:{path}"
+    """`summary` then `handoff` after a run with a project; ``assignments`` say the rest."""
     return sh(
         f"DRY_RUN=0; WANT_PROJECT=1; PROJECT_DIR=/p; UNEXPECTED=0; {assignments}; "
         'summary; echo "UNEXPECTED=$UNEXPECTED"; handoff',
         env=env,
-        path=path,
+        path=base_path(tmp_path),
         no_terminal=True,
     )
 
 
-def test_a_node_this_run_could_not_install_is_unexpected(tmp_path: Path) -> None:
-    """System deps on, and no `node` on PATH after the run: exit 2, and the summary names it.
+#: What the summary says of the Node extra when it was chosen and is not there.
+_NODE_FAILED = (
+    "node — you chose Node 22.12+, for browser tools like the Chrome DevTools MCP, "
+    "and it did not install"
+)
 
-    `aisquare doctor` reads no Node at all as codebase snapshots OFF, which is
-    optional, so every row is ok, and it cannot tell that from a Node install that
-    failed. Until it learned the difference, the amber `repomix` row was what
-    turned a failed Node install into exit 2 (review of #244, finding 1). The
-    installer knows it asked for Node, so it says so itself.
+
+def test_an_extra_this_run_chose_and_could_not_install_is_unexpected(tmp_path: Path) -> None:
+    """Node chosen, by `--with node` or at its prompt, and still missing after the run: exit
+    2, and the summary names it.
+
+    No doctor row can: Node is optional, so a machine without it is green (review of #244,
+    finding 1, when the packer's row was what turned a failed Node install into exit 2).
+    The installer knows it was asked for Node, so it says so itself.
     """
-    result = _summary_then_handoff(tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain", node=False)
+    result = _summary_then_handoff(
+        tmp_path, "CHOSEN_EXTRAS=node; NODE_VERSION=; DOCTOR_AMBER=brain"
+    )
 
     assert result.returncode == 2, result.stdout
     assert "UNEXPECTED=1" in result.stdout
-    assert "node — Node 22+ did not install" in result.stdout
+    assert _NODE_FAILED in result.stdout
 
 
 @pytest.mark.parametrize(
-    ("assignments", "node", "unexpected"),
+    ("assignments", "unexpected"),
     [
-        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain", True, 0),
-        # --no-system-deps asked for no Node.
-        ("WANT_SYSTEM_DEPS=0; DOCTOR_AMBER=brain", False, 0),
+        ("CHOSEN_EXTRAS=node; NODE_VERSION=22.12.0; DOCTOR_AMBER=brain", 0),
+        # Not chosen: a machine with no Node is what the opt-in leaves.
+        ("CHOSEN_EXTRAS=; NODE_VERSION=; DOCTOR_AMBER=brain", 0),
+        ("WANT_SYSTEM_DEPS=0; CHOSEN_EXTRAS=; NODE_VERSION=; DOCTOR_AMBER=brain", 0),
         # --dry-run installs nothing, so nothing failed to install.
-        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain; DRY_RUN=1", False, 0),
-        # A Node that is too old, and a packer with no Node, turn the repomix row
-        # amber: counted once, as repomix, never twice.
-        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain repomix'", True, 1),
-        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain repomix'", False, 1),
+        ("CHOSEN_EXTRAS=node; NODE_VERSION=; DOCTOR_AMBER=brain; DRY_RUN=1", 0),
+        # Chosen, and what the run left is below the floor: it did not install.
+        ("CHOSEN_EXTRAS=node; NODE_VERSION=22.11.0; DOCTOR_AMBER=brain", 1),
     ],
-    ids=["node-installed", "no-system-deps", "dry-run", "node-too-old", "packer-without-node"],
+    ids=["installed", "not-chosen", "no-system-deps", "dry-run", "too-old"],
 )
-def test_only_a_missing_node_that_was_asked_for_is_named(
-    tmp_path: Path, assignments: str, node: bool, unexpected: int
+def test_only_a_chosen_extra_that_is_missing_is_named(
+    tmp_path: Path, assignments: str, unexpected: int
 ) -> None:
-    result = _summary_then_handoff(tmp_path, assignments, node=node)
+    result = _summary_then_handoff(tmp_path, assignments)
 
     assert f"UNEXPECTED={unexpected}" in result.stdout, result.stdout
     assert result.returncode == (2 if unexpected else 0)
-    assert "did not install" not in result.stdout
+    assert ("did not install" in result.stdout) is bool(unexpected), result.stdout
 
 
-def test_a_missing_node_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None:
-    """For a Node that did not install, doctor's rows are all ok: "off", no fix (review of #257).
-
-    The summary still ended "the full detail and a fix for each: aisquare doctor". The
-    pointer now follows only checks the doctor explains, and the node line, which
-    carries its own remedy, comes after it.
+def test_a_missing_extra_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None:
+    """No doctor row is about an extra, so for one that did not install the summary's
+    "the full detail and a fix for each: aisquare doctor" sent people nowhere (review of
+    #257). The pointer follows only checks the doctor explains, and the extra's line,
+    which points at the warning its step printed, comes after it.
     """
-    alone = _summary_then_handoff(tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain", node=False)
+    alone = _summary_then_handoff(tmp_path, "CHOSEN_EXTRAS=node; NODE_VERSION=; DOCTOR_AMBER=brain")
     both = _summary_then_handoff(
-        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain python'", node=False
+        tmp_path, "CHOSEN_EXTRAS=node; NODE_VERSION=; DOCTOR_AMBER='brain python'"
     )
 
-    assert "node — Node 22+ did not install" in alone.stdout
+    assert _NODE_FAILED in alone.stdout
     assert "aisquare doctor" not in alone.stdout, alone.stdout
     assert alone.returncode == 2
     pointer = both.stdout.index("the full detail and a fix for each: aisquare doctor")
-    assert both.stdout.index("  python\n") < pointer < both.stdout.index("node — Node 22+")
+    assert both.stdout.index("  python\n") < pointer < both.stdout.index(_NODE_FAILED)
+    assert "  node\n" not in both.stdout, "an extra is not listed as a doctor check"
     assert both.returncode == 2
 
 
-def test_exit_2_is_documented_for_a_node_that_did_not_install(tmp_path: Path) -> None:
-    """The run exits 2 for a Node it could not install, with no check amber (review of #257)."""
+def test_exit_2_is_documented_for_an_extra_that_did_not_install(tmp_path: Path) -> None:
+    """The run exits 2 for an extra it was asked for and could not install, with no check
+    amber (review of #257)."""
     usage = sh("usage", path=base_path(tmp_path)).stdout
     exit_codes = " ".join(usage.split("Exit codes", 1)[1].split("\n\n", 1)[0].split())
     page = " ".join((REPO / "docs" / "install.md").read_text(encoding="utf-8").split())
 
     assert "a fatal step failed" in exit_codes, "control: this is the exit-code section"
-    assert "or Node did not install" in exit_codes, exit_codes
-    assert "unexpectedly amber, or Node did not install" in page
+    assert "or an optional extra you chose did not install" in exit_codes, exit_codes
+    assert "unexpectedly amber, or an optional extra you chose did not install" in page
+
+
+# ---------------------------------------------------------------------------
+# the optional extras — opt-in, one prompt each
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("assignments", "installed"),
+    [
+        ("ASSUME_YES=1", False),  # --yes asks nothing, so it chooses nothing
+        ("ASSUME_YES=0", False),  # no terminal to ask on: the default, no
+        ("ASSUME_YES=1; CHOSEN_EXTRAS=node", True),  # --with node needs no prompt
+        ("ASSUME_YES=1; WANT_SYSTEM_DEPS=0; CHOSEN_EXTRAS=node", True),  # named wins
+    ],
+    ids=["yes", "no-terminal", "with-node", "with-node-no-system-deps"],
+)
+def test_an_extra_is_installed_only_when_chosen(
+    tmp_path: Path, assignments: str, installed: bool
+) -> None:
+    result = sh(
+        f"{assignments}; NODE_VERSION=; install_node() {{ echo NODE-INSTALLED; }}; install_extras",
+        path=base_path(tmp_path),
+        no_terminal=True,
+    )
+
+    assert ("NODE-INSTALLED" in result.stdout) is installed, result.stdout + result.stderr
+    if not installed:
+        assert "optional; --with node adds it" in result.stdout + result.stderr
+
+
+def test_a_current_extra_is_reported_and_its_npm_left_alone_unless_chosen(
+    tmp_path: Path,
+) -> None:
+    """A machine that has the Node is told so whether or not it chose the extra; the npm
+    beside it is installed only for a run that chose it, since an extra nobody asked for
+    installs nothing."""
+    log = tmp_path / "calls.log"
+    pkg = stub_dir(tmp_path, "pkg", "apt-get", body=f'printf "%s\\n" "$*" >>"{log}"\nexit 0')
+
+    def run(chosen: str) -> str:
+        result = sh(
+            f"PKG=apt; PKG_SUDO=; NODE_VERSION=22.12.0; CHOSEN_EXTRAS={chosen}; install_extras",
+            path=f"{pkg}:{base_path(tmp_path)}",
+            no_terminal=True,
+        )
+        return result.stdout + result.stderr
+
+    assert "Node 22.12.0 — current" in run("")
+    assert not log.exists(), "npm was installed for a run that did not choose Node"
+    assert "Node 22.12.0 — current" in run("node")
+    assert "npm" in log.read_text(encoding="utf-8"), "a run that chose Node gets its npx"
+
+
+@pytest.mark.parametrize("flag", [["--with", "node"], ["--with=node"]])
+def test_with_chooses_an_extra_and_refuses_one_there_is_not(
+    tmp_path: Path, flag: list[str]
+) -> None:
+    quoted = " ".join(flag)
+    chosen = sh(f'parse_args {quoted}; printf "[%s]\\n" "$CHOSEN_EXTRAS"', path=base_path(tmp_path))
+    refused = sh("parse_args --with nope; echo PARSED", path=base_path(tmp_path))
+
+    assert chosen.stdout.strip() == "[ node]", chosen.stdout + chosen.stderr
+    assert refused.returncode != 0 and "PARSED" not in refused.stdout
+    assert "--with nope: not an optional extra (there is: node)" in refused.stderr
+
+
+def test_the_plan_names_an_extra_only_as_it_will_happen(tmp_path: Path) -> None:
+    """Chosen: the plan says it installs. Not chosen, with nothing to ask on: nothing is
+    promised. Already there: not named at all."""
+
+    def plan(assignments: str) -> str:
+        return sh(
+            f"CLI_ACTION=current; CLI_VERSION=0.9.0; UV_VERSION=0.12.3; WANT_AGENT=0; "
+            f"WANT_SYSTEM_DEPS=0; {assignments}; banner",
+            path=base_path(tmp_path),
+            no_terminal=True,
+        ).stdout
+
+    assert "install  Node 22.12+, for browser tools like the Chrome DevTools MCP (--with node)" in (
+        plan("NODE_VERSION=; CHOSEN_EXTRAS=node")
+    )
+    assert "Node" not in plan("NODE_VERSION=; CHOSEN_EXTRAS=")
+    assert "Node" not in plan("NODE_VERSION=26.7.0; CHOSEN_EXTRAS=node")
 
 
 def test_the_fnm_warning_says_what_a_shell_without_its_node_still_gets(tmp_path: Path) -> None:
-    """fnm's Node is on PATH for this run only (review of #257).
-
-    The warning said doctor "reads codebase snapshots as off" in the shells without it,
-    but this run packs the project it registers, and agents keep getting that pack
-    there. What those shells cannot do is pack or refresh one.
-    """
+    """fnm's Node is on PATH for this run only (review of #257). What a shell without
+    its hook cannot do is start the browser tool the extra is for."""
     home = tmp_path / "home"
     fnm_dir = home / ".local" / "share" / "fnm"
     alias = fnm_dir / "aliases" / "default" / "bin"
@@ -1614,9 +1678,8 @@ def test_the_fnm_warning_says_what_a_shell_without_its_node_still_gets(tmp_path:
     warning = " ".join(result.stderr.split())
     assert "Node 22.11.0 via fnm" in result.stdout, result.stdout + result.stderr
     assert "fnm env --use-on-cd" in warning, "control: this is the warning in question"
-    assert "reads codebase snapshots as off" not in warning
-    assert "cannot pack or refresh a codebase snapshot" in warning
-    assert "aisquare project onboard, opt-in" in warning
+    assert "`npx chrome-devtools-mcp` cannot start there" in warning
+    assert "snapshot" not in warning
 
 
 def test_a_version_pin_moves_a_machine_that_is_ahead_of_it(tmp_path: Path) -> None:
@@ -1730,11 +1793,12 @@ def test_the_short_circuit_reason_names_only_the_checks_that_are_amber(
     On a machine that HAS gbrain — reachable, since `brain` reports ok when
     gbrain is installed and also when `AISQUARE_BRAIN=0` — a `--no-project` run
     read "everything ok except snapshot (gbrain is out of scope)", blaming a
-    check that was perfectly fine.
+    check that was perfectly fine. The same shape today, with the `gh` a
+    `--no-system-deps` run skipped.
     """
     payload = (
         '[{"name": "home", "status": "ok", "detail": "x"},'
-        '{"name": "snapshot", "status": "warn", "detail": "y", "fix": "z"}]'
+        '{"name": "gh", "status": "warn", "detail": "y", "fix": "z"}]'
     )
     versions = tmp_path / "v"
     versions.mkdir()
@@ -1761,7 +1825,7 @@ def test_the_short_circuit_reason_names_only_the_checks_that_are_amber(
         ),
     )
     result = sh(
-        "WANT_AGENT=0; WANT_PROJECT=0; OFFLINE=1; "
+        "WANT_AGENT=0; WANT_PROJECT=0; WANT_SYSTEM_DEPS=0; OFFLINE=1; "
         "survey >/dev/null 2>&1; resolve >/dev/null 2>&1; short_circuit",
         env={"AISQUARE_INSTALL_VERSION": ""},
         path=f"{versions}:{cli}:{base_path(tmp_path)}",
@@ -1770,7 +1834,7 @@ def test_the_short_circuit_reason_names_only_the_checks_that_are_amber(
     assert "gbrain" not in result.stdout, (
         "the reason named gbrain while `brain` was green:\n" + result.stdout
     )
-    assert "no project registered" in result.stdout, result.stdout
+    assert "except gh (system deps skipped)" in result.stdout, result.stdout
 
 
 def test_no_claude_code_row_is_called_a_sign_in_to_finish(tmp_path: Path) -> None:
@@ -1937,7 +2001,6 @@ def test_an_amber_claude_code_row_is_unexpected_and_printed_in_the_doctors_words
     result = _summary_then_handoff(
         tmp_path,
         "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
-        node=False,
         env={"PAYLOAD": json.dumps([row])},
     )
 
@@ -2038,7 +2101,6 @@ def test_a_home_with_a_non_ascii_name_is_printed_exactly(
     result = _summary_then_handoff(
         tmp_path,
         "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
-        node=False,
         env={"PAYLOAD": json.dumps([row])},
     )
 
@@ -2084,7 +2146,6 @@ def test_a_no_agent_run_expects_claude_code_whatever_its_row_says(
     result = _summary_then_handoff(
         tmp_path,
         "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
-        node=False,
         env={"PAYLOAD": json.dumps([row])},
     )
 
@@ -2113,7 +2174,6 @@ def test_a_no_agent_row_whose_detail_cannot_be_read_says_where_to_read_it(
     result = _summary_then_handoff(
         tmp_path,
         "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
-        node=False,
         env={"PAYLOAD": json.dumps([row])},
     )
 
@@ -2183,54 +2243,6 @@ def test_the_banner_lists_only_what_the_run_writes(
     assert ("~/.claude/settings.json" in written) is hooks, written
     moves_uv = "  update   uv 0.12.3 (uv self update, --upgrade-all)\n"
     assert (moves_uv in result.stdout) is (machine == "upgrade-all"), result.stdout
-
-
-@pytest.mark.parametrize(
-    ("packed", "summary_says", "exit_code"),
-    [("too large", "Not expected, and worth a look:\n  snapshot\n", 2)],
-    ids=["packed-too-large"],
-)
-def test_the_snapshot_advice_is_only_for_a_project_with_no_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, packed: str, summary_says: str, exit_code: int
-) -> None:
-    """The other row this script answers with a fixed command, by the same rule. A
-    snapshot packed too large before 0.7.0 is reused by a plain `project onboard`, so
-    "snapshot — aisquare project onboard" never turned it green: the doctor's own fix
-    became a re-pack in #82 and this one did not (review of #257)."""
-    root = tmp_path / "repo"
-    root.mkdir()
-    project = ProjectInfo(id=project_id_for(root.resolve()), root=root.resolve(), linked_repos=[])
-    paths.ensure_home()
-    with store_session() as store:
-        store.ensure_project(project)
-    monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
-    if packed == "too large":
-        snapshot_core.snapshot_dir(project.id).mkdir(parents=True)
-        verdict = Snapshot(
-            project_id=project.id,
-            generated_at=datetime.now(tz=UTC),
-            pack_path=snapshot_core.pack_path(project.id),
-            skeleton_path=snapshot_core.skeleton_path(project.id),
-            index_path=snapshot_core.index_path(project.id),
-            token_count=203_991,
-            compressed=True,
-            status="too_large",
-            full_token_count=412_318,
-            max_tokens=150_000,
-        )
-        snapshot_core.meta_path(project.id).write_text(verdict.model_dump_json(), "utf-8")
-    check = diagnostics._check_snapshot(root)
-
-    result = _summary_then_handoff(
-        tmp_path,
-        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain snapshot'",
-        node=False,
-        env={"PAYLOAD": json.dumps([check.model_dump(mode="json")])},
-    )
-
-    assert check.status is CheckStatus.warn, check
-    assert summary_says in result.stdout, result.stdout
-    assert result.returncode == exit_code
 
 
 # A repository's own plugin answers for that repository only, and the installer wires

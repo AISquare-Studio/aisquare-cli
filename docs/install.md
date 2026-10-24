@@ -14,9 +14,11 @@ curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/i
 ```
 
 macOS, Linux and WSL2. It installs [uv](https://docs.astral.sh/uv/), a Python
-3.13 for the CLI alone, `aisquare-cli`, tmux, gh, git, Node and
+3.13 for the CLI alone, `aisquare-cli`, tmux, gh, git and
 [Claude Code](https://claude.com/claude-code), then registers the git repo you
-ran it from and wires Claude Code's hooks. Running it again is a no-op: it
+ran it from and wires Claude Code's hooks. It offers Node 22.12+ too, defaulting to
+no: aisquare does not need it, browser tools like the Chrome DevTools MCP
+(`npx chrome-devtools-mcp`) do. Running it again is a no-op: it
 reports what is current and installs nothing.
 
 On **Windows**, everything runs inside WSL2 — the UI gives each agent a real
@@ -41,7 +43,7 @@ sh install.sh --dry-run
 Or install by hand, which stays fully supported:
 
 ```sh
-UV_PYTHON_DOWNLOADS=automatic uv tool install --python 3.13 --with tiktoken aisquare-cli   # or: pipx install aisquare-cli
+UV_PYTHON_DOWNLOADS=automatic uv tool install --python 3.13 aisquare-cli   # or: pipx install aisquare-cli
 aisquare init --local --yes --agent claude-code
 ```
 
@@ -56,7 +58,8 @@ curl -fsSL .../install.sh | sh -s -- --yes --no-agent
 | `--yes` | Never prompt, and do not open the UI at the end. For CI and Dockerfiles. |
 | `--dry-run` | Print every command, run none. |
 | `--no-agent` | Skip Claude Code. |
-| `--no-system-deps` | Skip tmux, gh, git and Node. |
+| `--no-system-deps` | Skip tmux, gh and git, and ask about no optional extra. |
+| `--with node` | Install the optional Node 22.12+ without asking. `--yes` alone asks nothing and installs no extra. |
 | `--project DIR` | Register `DIR` instead of the current directory. |
 | `--no-project` | Set up the machine, register nothing. |
 | `--offline` | Do not ask PyPI what the latest version is. |
@@ -66,7 +69,7 @@ It refuses to run as root outside a container, uses `sudo` only for the system
 packages and one command at a time, and never edits your shell profile beyond
 what uv and the Claude Code installer do themselves. Exit codes: `0` installed,
 `1` a fatal step failed, `2` installed but a health check is unexpectedly amber,
-or Node did not install.
+or an optional extra you chose did not install.
 
 </details>
 

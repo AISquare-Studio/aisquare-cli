@@ -316,14 +316,11 @@ jobs:
             | sort | tr '\n' ' ')
           echo "not ok: [$amber]"
           # `install` amber would mean uv produced a shape doctor rejects — the
-          # §3.1 claim this whole bootstrap choice rests on. `tiktoken` amber
-          # would mean `--with tiktoken` did not take.
+          # §3.1 claim this whole bootstrap choice rests on.
           case "$amber" in
             *install*)  echo "::error::the install check is amber on macOS"; exit 1 ;;
-            *tiktoken*) echo "::error::tiktoken is amber — --with tiktoken did not take"; exit 1 ;;
           esac
-          # `snapshot` and `brain` are expected here: --no-project registers
-          # nothing, and gbrain is out of scope.
+          # `brain` is expected here: gbrain is out of scope.
 
       - name: Re-run — a current machine installs nothing
         env:

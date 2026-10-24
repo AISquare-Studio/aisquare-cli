@@ -1943,6 +1943,37 @@ error lists both with their codenames — use the codename.
 between. If tmux shows it right and the UI does not, that is a UI bug worth an
 issue with your terminal's name.
 
+**What did the fleet spend in tokens?** `aisquare metrics tokens` reads each
+session's Claude Code transcript (the path the board recorded at its start) and
+prints one row per session and a total. The columns are:
+
+- requests;
+- input summed over them: fresh plus cache write plus cache read, which is also the
+  context size at each request;
+- the baseline, the session's first request: system prompt, tool schemas, skills;
+- the peak context;
+- wakes, and how many of them took no action: a Stop-hook continuation whose turn
+  made no tool call but a board read (`board`, `team log|status|signals`, `task
+  list|show`, `task next` without `--claim`, `fleet ls|status`, alone or behind a `cd`
+  and piped through a filter; `aisquare log` is the prompt log, not the board);
+- the characters of the `<aisquare-team-delta>` blocks it was given;
+- compactions.
+
+`--json` adds the rest: output, the input split, mean and latest context, wake
+input, each delta's carried characters (its size times the requests after it, up
+to the next compaction), compaction triggers, and tool calls by name. It prints
+counts, never a prompt or a path.
+
+```sh
+aisquare metrics tokens                       # this project's sessions
+aisquare metrics tokens --role manager --since 2h
+aisquare --json metrics tokens --all          # every project, as JSON
+```
+
+A transcript is read a line at a time, so a large one costs no memory. The line
+Claude Code is still writing is skipped and counted. A session whose transcript
+was never recorded, or is gone, is a row of zeros marked `(no transcript)`.
+
 ---
 
 ## Later

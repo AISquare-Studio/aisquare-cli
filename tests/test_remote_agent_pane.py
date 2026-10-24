@@ -525,19 +525,57 @@ def test_a_wait_that_ran_out_says_what_was_not_done_only_when_it_is_told() -> No
     )
 
 
+class _RecordedLock:
+    """The agent's real action lock, recording each wait for it: the thread that waited,
+    when, and for how long it was willing to. Two waits of the same lock see one lock."""
+
+    def __init__(self, lock: threading.Lock, waits: list[tuple[str, float, float]]) -> None:
+        self._lock = lock
+        self._waits = waits
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        self._waits.append((threading.current_thread().name, time.monotonic(), timeout))
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+
+#: How long any of the bursts below may take at most: a sanity bound only, ten times the
+#: wait. What they pin is HOW the keys wait, asserted as such; the wall-clock bound they
+#: had (the wait + 1 s) went red under load on a fixed build (3.11, 3.15 and 3.28 s, #401).
+_BURST_SANITY_SECONDS = 10 * remote_server.SEND_KEYS_LOCK_WAIT_SECONDS
+
+
 def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The keys waited on the loop's default pool, which runs every read and every socket's
     board and fleet snapshot: more taps than it has threads, during a restart, and every
-    read and every socket stalled until their waits ran out (sweep of #243)."""
+    read and every socket stalled until their waits ran out (sweep of #243).
+
+    Asserted as the mechanism, not a duration: every key waits on the write pool's own
+    threads, never for longer than what is left of its wait since it was tapped, and a read
+    made while every key still waits is answered before any key is."""
     tmux = _serving(monkeypatch, Tmux(OLDER))
+    waits: list[tuple[str, float, float]] = []
+    real_lock = remote_server.remote_agent_lock
+    monkeypatch.setattr(
+        remote_server,
+        "remote_agent_lock",
+        lambda project_id, label: _RecordedLock(real_lock(project_id, label), waits),
+    )
     runtime = make_runtime()
     app = build_app(runtime, sources=_sources(), writes=live_writes(), dist_dir=tmp_path)
     taps = 36  # more than any default pool: min(32, CPUs + 4) threads
     answers: list[tuple[int, float]] = []
-    action = remote_agent_lock(project.id, "coder-1")
+    tapped: list[float] = []
+    action = real_lock(project.id, "coder-1")
     assert action.acquire(blocking=False)
+    began = time.monotonic()
     try:
         with make_client(app) as client:
             assert unlock(client, runtime).status_code == 200
@@ -546,6 +584,7 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
 
             def tap() -> None:
                 sent = time.monotonic()
+                tapped.append(sent)
                 response = client.post(url, json={"agent": "coder-1", "keys": ["Down"]})
                 answers.append((response.status_code, time.monotonic() - sent))
 
@@ -553,17 +592,32 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
             for tapper in tappers:
                 tapper.start()
             time.sleep(0.3)  # every tap is in, and waiting
-            asked = time.monotonic()
             read = client.get(f"{base(runtime)}/api/fleet")
-            took = time.monotonic() - asked
+            answered_before_the_read = len(answers)
             for tapper in tappers:
                 tapper.join(timeout=30)
     finally:
         action.release()
-    assert read.status_code == 200 and took < 1.0, f"the read waited {took:.2f} s"
     assert [status for status, _ in answers] == [409] * taps and tmux.sent == []
-    slowest = max(elapsed for _, elapsed in answers)
-    assert slowest < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.0, slowest
+    assert read.status_code == 200
+    assert answered_before_the_read == 0, (
+        f"the read waited behind the keys: {answered_before_the_read} answered first"
+    )
+    assert waits, "no key waited for the lock: the recorder went blind"
+    pools = {name.rsplit("_", 1)[0] for name, _, _ in waits}
+    assert pools == {"asq-remote-write"}, f"keys waited on {pools}, not the write pool"
+    # Counted from the tap, not from when a thread came free: no key is willing to wait
+    # past its wait after the LAST tap was sent. Half a second covers the request's trip
+    # to the server; a key that counted from its thread waits up to a whole wait more.
+    last_tap = max(tapped)
+    wait = remote_server.SEND_KEYS_LOCK_WAIT_SECONDS
+    late = [
+        round(at + timeout - last_tap, 2)
+        for _, at, timeout in waits
+        if at + timeout > last_tap + wait + 0.5
+    ]
+    assert not late, f"keys would still wait {late} s past their wait after the last tap"
+    assert time.monotonic() - began < _BURST_SANITY_SECONDS
 
 
 def test_keys_whose_wait_ran_out_are_refused_before_the_store_is_read(
@@ -573,11 +627,19 @@ def test_keys_whose_wait_ran_out_are_refused_before_the_store_is_read(
     Its taps leave the write pool in waves, and each tap whose wait had run out still read
     the store for its row before it was refused, so every wave after the first cost a row
     read. A slow store (here 0.3 s a read, a loaded CI runner's sqlite) put the last taps
-    past their wait by more than a second. Refused before the read, they answer at once."""
+    past their wait by more than a second. Refused before the read, they answer at once.
+
+    Asserted as the mechanism, not a duration: no row is read for a key whose wait has run
+    out, so the later waves read nothing."""
     tmux = _serving(monkeypatch, Tmux(OLDER))
     real = remote_server._remote_turn_pinned
+    wait = remote_server.SEND_KEYS_LOCK_WAIT_SECONDS
+    left_at_read: list[float] = []
 
     def slow_store(*args: Any, **kwargs: Any) -> FleetAgent:
+        arrived = remote_server._WRITE_ARRIVED.get()
+        assert arrived is not None, "a key's write runs with the time it arrived"
+        left_at_read.append(wait - (time.monotonic() - arrived))
         time.sleep(0.3)
         return real(*args, **kwargs)
 
@@ -588,6 +650,7 @@ def test_keys_whose_wait_ran_out_are_refused_before_the_store_is_read(
     answers: list[tuple[int, float]] = []
     action = remote_agent_lock(project.id, "coder-1")
     assert action.acquire(blocking=False)
+    began = time.monotonic()
     try:
         with make_client(app) as client:
             assert unlock(client, runtime).status_code == 200
@@ -607,8 +670,14 @@ def test_keys_whose_wait_ran_out_are_refused_before_the_store_is_read(
     finally:
         action.release()
     assert [status for status, _ in answers] == [409] * taps and tmux.sent == []
-    slowest = max(elapsed for _, elapsed in answers)
-    assert slowest < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.0, slowest
+    assert left_at_read, "no key read its row: the recorder went blind"
+    # A read is checked against the wait just before it, so it may start a scheduling
+    # hiccup after the wait ran out, never a store read (0.3 s) or more: that is a key
+    # read after its wait was gone, which each wave after the first did before the fix.
+    after_it_ran_out = sorted(round(left, 2) for left in left_at_read if left < -0.15)
+    assert not after_it_ran_out, f"rows read {after_it_ran_out} s into a wait that had run out"
+    assert len(left_at_read) < taps, "every key read its row: none was refused first"
+    assert time.monotonic() - began < _BURST_SANITY_SECONDS
 
 
 def test_keys_queued_behind_actions_holding_every_write_thread_are_not_typed_as_one_ends(

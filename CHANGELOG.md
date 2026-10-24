@@ -18,7 +18,9 @@ pane keeps up with your typing, and every release now carries its own installer.
 - **Versioned installers on every release**: from 0.9.0 on, each GitHub Release
   carries `install.sh` and `install.ps1` stamped to its own version, so
   `https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.sh`
-  installs exactly 0.9.0 and `…/releases/latest/download/install.sh` the latest.
+  installs exactly 0.9.0 and `…/releases/latest/download/install.sh` the latest
+  (which can answer 404 for a few minutes right after a release, before its
+  installers are attached).
   `publish.yml` stamps and checks them before the PyPI publish
   (`installers-check.yml`), and attaches them after it, once PyPI serves the
   version (`installers.yml`; the stamp is `scripts/stamp_installers.py`).

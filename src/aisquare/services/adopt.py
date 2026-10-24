@@ -112,7 +112,38 @@ def _read_head(path: Path) -> tuple[str | None, str | None]:
     return cwd, first
 
 
+_STILL_ACTIVE = 259
+"""``GetExitCodeProcess``'s answer for a process that has not exited."""
+
+
+def _alive_on_windows(pid: int) -> bool:
+    """Ask Windows whether ``pid`` runs: open it for a query and read its exit code. A
+    process this user may not open (``ERROR_ACCESS_DENIED``) is someone else's, alive."""
+    if sys.platform != "win32":  # the guard mypy reads: WinDLL exists on Windows only
+        return False
+    import ctypes  # Windows only, off every other platform's import
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return bool(ctypes.get_last_error() == 5)  # ERROR_ACCESS_DENIED
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == _STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _alive(pid: int) -> bool:
+    """Whether process ``pid`` runs. Never ``os.kill(pid, 0)`` on Windows: signal 0 is
+    ``CTRL_C_EVENT`` there, sent to the console group ``pid`` is in (rc/p3's Windows leg:
+    adopt, asked about the test runner's own pid, interrupted the whole suite)."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        return _alive_on_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

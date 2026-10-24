@@ -122,3 +122,64 @@ def test_sessions_from_several_accounts_share_one_board(
         str(tmp_path / ".claude-account1"),
         str(tmp_path / ".claude-account2"),
     }
+
+
+def _fleet_row_on(work: Path, slot: int) -> str:
+    """A live fleet row in ``work``'s project recorded as launched on account ``slot``."""
+    from datetime import UTC, datetime
+
+    from aisquare.core.ids import new_agent_id
+    from aisquare.models import FleetAgent
+
+    project = team_project(work)
+    with store_session() as store:
+        store.ensure_project(project)
+        agent = store.upsert_fleet_agent(
+            FleetAgent(
+                id=new_agent_id(),
+                project_id=project.id,
+                label="coder-1",
+                role="coder",
+                pane_id="%1",
+                cwd=work,
+                account_slot=slot,
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+    return agent.id
+
+
+def test_a_fleet_session_is_attributed_to_the_slot_its_row_launched_on(
+    runner: CliRunner,
+    work_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_home: Path,
+) -> None:
+    """P2-W7 (#198): with sharing, a transcript can sit under a shared root (the plain
+    claude's ``~/.claude``, which #198's workaround links every slot's ``projects/`` to).
+    Read from the path, a session launched on slot 3 was attributed to the plain claude.
+    The fleet row records the launch's account, so it is asked first."""
+    from aisquare.core import claude_accounts
+
+    for _ in range(2):
+        claude_accounts.create_account()  # slots 2 and 3
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", _fleet_row_on(work_dir, 3))
+    shared = fake_home / ".claude" / "projects" / "-some-repo" / "sess-9.jsonl"
+
+    _start(runner, "sess-9", work_dir, str(shared))
+
+    with store_session() as store:
+        session = store.get_session("sess-9")
+    assert session is not None
+    assert session.account == str(claude_accounts.find_account(3).config_dir)  # type: ignore[union-attr]
+
+
+def test_without_a_row_the_launchs_variable_comes_before_the_transcript_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The launch sets CLAUDE_CONFIG_DIR for the account it chose; a transcript under a
+    shared root names another directory."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/accounts/3")
+    assert session_account(_transcript(tmp_path, ".claude", "abc")) == "/accounts/3"

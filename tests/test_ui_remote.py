@@ -806,7 +806,10 @@ def test_the_panels_first_paint_never_waits_for_another_processs_lock_on_remote_
         return took, made_meanwhile
 
     took, made_meanwhile = drive(go, tunnel=missing_ngrok)
-    assert took < 1.5, f"the panel took {took:.1f} s to open"
+    # A paint that waited on the lock takes the patched wait, 10 s. Half of it tells the two
+    # apart on a loaded runner, where an unblocked first paint took 1.6 s against the old
+    # 1.5 s bound (main 09f48563, run 39969977041, py3.12 and ambient proxy-down).
+    assert took < remote_server.STATE_LOCK_WAIT_SECONDS / 2, f"the panel took {took:.1f} s"
     assert not made_meanwhile and state.exists() and remote_server.remote_state_loaded()
 
 

@@ -12,7 +12,6 @@ import contextlib
 import os
 import shlex
 import shutil
-import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator, Sequence
@@ -32,6 +31,7 @@ from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
 from aisquare.services import ci_client
 from aisquare.services import hooks as hooks_service
+from tests import private_fleets
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -104,6 +104,10 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     reason = _foreign_package_reason(aisquare.__file__, SRC)
     if reason is not None:
         pytest.exit(reason, returncode=4)
+    # Once per run, in the process that starts it: an xdist worker's siblings are alive,
+    # so a sweep there would find nothing more, only race the others for it.
+    if not hasattr(session.config, "workerinput"):
+        private_fleets.sweep_orphans()
 
 
 def _sdk_installed() -> bool:
@@ -138,6 +142,11 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     per-test failures are already loud, and this is the sentence that explains
     them.
     """
+    # An xdist worker notes what it saw outside every test's home in its own process,
+    # and only the controller prints the summary: hand it over (pytest_testnodedown).
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:
+        workeroutput["outside_a_test"] = dict(_OUTSIDE_A_TEST)
     if _sdk_installed() and not _SDK_AT_START:
         session.exitstatus = max(exitstatus, 1)
         print(
@@ -450,6 +459,14 @@ def pytest_runtest_logfinish(nodeid: str, location: tuple[str, int | None, str])
         _OUTSIDE_A_TEST.setdefault(str(path), nodeid)
 
 
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: object, error: object) -> None:
+    """Take in what an xdist worker saw outside every test's home (its sessionfinish)."""
+    seen = getattr(node, "workeroutput", {}).get("outside_a_test", {})
+    for path, nodeid in seen.items():
+        _OUTSIDE_A_TEST.setdefault(path, nodeid)
+
+
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
     """Say what a test left running wrote outside its own home, and after which test.
 
@@ -499,13 +516,7 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
-def _uid() -> int:
-    """This user's id — the ``tmux-<uid>`` folder. Windows has neither, nor tmux; a test
-    that removes ``os.getuid`` (to stand for Windows) reads as uid 0 here, never a crash."""
-    if sys.platform == "win32":
-        return 0
-    getuid = getattr(os, "getuid", None)
-    return getuid() if callable(getuid) else 0
+_uid = private_fleets.uid
 
 
 #: Where tmux keeps the OWNER's sockets — read once, at import, before any fixture
@@ -581,7 +592,7 @@ def _sweep_private_fleets() -> Iterator[None]:
     tmux = shutil.which("tmux")
     for folder in _PRIVATE_FLEETS:
         if folder.exists():
-            _kill_private_servers(folder, _uid(), tmux)
+            private_fleets.end_private_servers(folder, _uid(), tmux)
             shutil.rmtree(folder, ignore_errors=True)
 
 
@@ -617,7 +628,7 @@ def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     from aisquare.core import tmux as tmux_core
     from aisquare.core.tmux import Completed
 
-    private = Path(tempfile.mkdtemp(prefix="asqtx", dir="/tmp"))
+    private = private_fleets.private_folder()
     _PRIVATE_FLEETS.append(private)
     # Read once, now: a test may remove os.getuid, or patch sys.platform, to stand for
     # Windows (test_tmux.py, test_windows_contention.py) — and teardown runs under it.
@@ -656,25 +667,10 @@ def no_real_fleet(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
         # raised TypeError here and ERRORED the test. Whatever this pass cannot do, the
         # session's sweep does, with nothing patched.
         with contextlib.suppress(Exception):
-            _kill_private_servers(private, guard.uid, guard.tmux)
+            private_fleets.end_private_servers(private, guard.uid, guard.tmux)
             shutil.rmtree(private, ignore_errors=True)
     if verdict is not None:
         pytest.fail(verdict)
-
-
-def _kill_private_servers(private: Path, uid: int, tmux: str | None) -> None:
-    """End every tmux server a test left under its private ``TMUX_TMPDIR``, with its panes."""
-    folder = private / f"tmux-{uid}"
-    if tmux is None or not folder.is_dir():
-        return
-    for socket in folder.iterdir():
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            subprocess.run(
-                [tmux, "-S", str(socket), "kill-server"],
-                capture_output=True,
-                timeout=10,
-                check=False,
-            )
 
 
 @pytest.fixture
@@ -739,11 +735,7 @@ def private_ui_socket_root(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     def private() -> Path:
         if not made:
-            made.append(
-                Path(
-                    tempfile.mkdtemp(prefix="asq", dir=None if sys.platform == "win32" else "/tmp")
-                )
-            )
+            made.append(private_fleets.private_folder())
             _PRIVATE_UI_ROOTS.append(made[0])
         root = real()
         return made[0] / root.relative_to(root.anchor)
@@ -848,6 +840,21 @@ def no_detached_code_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
     hook would start one, in a session of its own that outlives the test.
     """
     monkeypatch.setattr(hooks_service, "_refresh_code_index", lambda _project: None)
+
+
+@pytest.fixture(autouse=True)
+def roomy_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every spawn in the suite sees plenty of memory, whatever the runner has (#283).
+
+    ``min_free_mb`` is on by default, so a CI runner short of 2 GB would otherwise refuse
+    the spawn a test is about. A test of admission sets its own headroom; the probes'
+    own tests call ``linux_headroom`` / ``darwin_headroom`` with their fixtures.
+    """
+    from aisquare.core import memory
+
+    monkeypatch.setattr(
+        memory, "headroom", lambda: memory.Headroom(65_536, 131_072, "normal", None, "test")
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -1013,6 +1020,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         f"{NEEDS_CAPTAIN}: needs the experimental captain on; skipped when "
         f"{SUITE_CAPTAIN_ENV}=off runs the suite with it off, as it ships",
+    )
+    config.addinivalue_line(
+        "markers",
+        "e2e: drives a real, signed-in Claude Code (and spends tokens); skipped unless the "
+        "test's own variables name what to drive",
     )
 
 

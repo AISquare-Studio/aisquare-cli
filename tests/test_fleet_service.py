@@ -47,7 +47,7 @@ from aisquare.core.config import (
     replacing_the_former_reviewer_default_first,
 )
 from aisquare.core.ids import new_agent_id, new_task_id
-from aisquare.core.orchestrator import team_project
+from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
 from aisquare.core.store import ContextStore, SqliteStore, store_session
 from aisquare.core.tmux import (
     _FACTS_FIELDS,
@@ -74,11 +74,12 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import auto_mode, install_route, lifecycle
+from aisquare.services import auto_mode, delivery, install_route, lifecycle
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
 from aisquare.services import team as team_service
+from aisquare.services.captain import screen as screen_reader
 from aisquare.services.explainability import PIPELINE_ID_ENV_VAR
 from aisquare.services.fleet import (
     ACTIVITY_WINDOW,
@@ -90,6 +91,7 @@ from aisquare.services.fleet import (
     NoSuchAgent,
 )
 from tests import bundled_personas, fakebin
+from tests.captain_screens import INPUT_BOX, MARK
 from tests.cycles import unscoped
 from tests.fsperms import can_deny_reads, can_symlink, remove_tree
 from tests.projects import add_project
@@ -212,6 +214,11 @@ class FakeTmux(TmuxServer):
         """What each pane shows — what ``capture`` answers; blank until a test draws one."""
         self.captured: list[str] = []
         """Every pane whose screen was asked for, in order."""
+        self.draws_box = False
+        """Opt in (:func:`typed_first_lines`): a pane running the agent draws Claude Code's idle
+        input box where a test drew nothing, a paste lands in that box, and an Enter sends
+        it, which the window's ``UserPromptSubmit`` reports (``store.mark_prompted``) — what
+        a typed first message meets in a real Claude Code (P0-W1a)."""
         self.killed: list[str] = []
         self.renamed: list[tuple[str, str]] = []
         self._counter = 0
@@ -385,6 +392,7 @@ class FakeTmux(TmuxServer):
                 "command": list(command),
                 "env": dict(env or {}),
                 "size": (width, height),
+                "pane_id": pane_id,
             }
         )
         return window
@@ -436,6 +444,9 @@ class FakeTmux(TmuxServer):
         if facts is None:
             raise TmuxError(f"can't find pane: {pane_id}")
         self.captured.append(pane_id)
+        if self.draws_box and pane_id not in self.screens:
+            agent_up = facts.current_command not in (PYTHON_LAUNCHER, "tmux")
+            return Capture(list(INPUT_BOX) if agent_up else [], facts, 0)
         return Capture(list(self.screens.get(pane_id, [])), facts, 0)
 
     # The strict twins the shutdown paths use: each is the lenient answer UNLESS
@@ -548,6 +559,20 @@ class FakeTmux(TmuxServer):
     # -- input --
     def send_keys(self, pane_id: str, *keys: str) -> None:
         self._input(pane_id, "key", " ".join(keys))
+        sending = self.draws_box and keys == ("Enter",) and pane_id in self.screens
+        if sending and screen_reader.composer_text(self.screens[pane_id]):
+            del self.screens[pane_id]  # sent: the box is empty again
+            self._submitted(pane_id)
+
+    def _submitted(self, pane_id: str) -> None:
+        """What the window's ``UserPromptSubmit`` hook reports: a prompt started a turn."""
+        for spawned in self.spawned:
+            if spawned.get("pane_id") == pane_id:
+                env = spawned["env"]
+                assert isinstance(env, dict)
+                agent_id = env.get(FLEET_AGENT_ENV_VAR)
+                with store_session() as store:
+                    store.mark_prompted("", datetime.now(tz=UTC), agent_id=agent_id)
 
     def send_literal(self, pane_id: str, text: str) -> None:
         self._input(pane_id, "literal", text)
@@ -556,6 +581,8 @@ class FakeTmux(TmuxServer):
 
     def paste(self, pane_id: str, text: str) -> None:
         self._input(pane_id, "paste", text)
+        if self.draws_box:  # in the input line, between the box's two rules
+            self.screens[pane_id] = [INPUT_BOX[0], f"{MARK} {text}", *INPUT_BOX[2:]]
 
     def _input(self, pane_id: str, kind: str, text: str) -> None:
         self.binary()
@@ -628,6 +655,38 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
     monkeypatch.setattr(fleet_service, "_sleep", fake.sleep)
     monkeypatch.setattr(fleet_service, "_monotonic", fake.monotonic)
     return fake
+
+
+@pytest.fixture
+def typed_first_lines(tmux: FakeTmux, monkeypatch: pytest.MonkeyPatch) -> FakeTmux:
+    """First messages TYPED (``[fleet] first_prompt = "type"``), into panes that draw Claude
+    Code's input box once the agent runs (:attr:`FakeTmux.draws_box`): the typed way's own
+    rules — the wait for the agent, the trust question, what tmux refused — which a Claude
+    Code agent meets on its command line otherwise (P0-W1a)."""
+    tmux.draws_box = True
+    _settings(monkeypatch, first_prompt="type")
+    return tmux
+
+
+def _first_lines(tmux: FakeTmux, pane_id: str | None = None) -> list[str]:
+    """The first message each window was given (``pane_id``'s alone, when named), whichever
+    way it went: the file its launch was named on Claude Code's command line
+    (``--first-prompt-file``), or pasted into its pane (the typed way)."""
+    lines: list[str] = []
+    for spawned in tmux.spawned:
+        if pane_id is not None and spawned.get("pane_id") != pane_id:
+            continue
+        command = spawned["command"]
+        assert isinstance(command, list)
+        path = _flag(command, delivery.FIRST_PROMPT_FLAG)
+        if path is not None:
+            lines.append(Path(path).read_text(encoding="utf-8"))
+    pasted = [
+        text
+        for pane, kind, text in tmux.typed
+        if kind == "paste" and (pane_id is None or pane == pane_id)
+    ]
+    return [*lines, *pasted]
 
 
 @pytest.fixture
@@ -1601,6 +1660,7 @@ def test_the_agent_is_not_running_behind_a_shell_the_launcher_or_a_pane_before_i
 
 def test_spawn_types_the_prompt_once_the_agent_is_up(
     tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
     clock: FakeClock,
     claude_on_path: Path,
     project: ProjectInfo,
@@ -1631,6 +1691,7 @@ def test_spawn_types_the_prompt_once_the_agent_is_up(
 
 def test_spawn_prompt_waits_out_the_pane_before_its_exec(
     tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
     clock: FakeClock,
     claude_on_path: Path,
     project: ProjectInfo,
@@ -1652,7 +1713,11 @@ def test_spawn_prompt_waits_out_the_pane_before_its_exec(
 
 
 def test_spawn_prompt_stops_waiting_at_the_timeout_and_types_anyway(
-    tmux: FakeTmux, clock: FakeClock, claude_on_path: Path, project: ProjectInfo
+    tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
 ) -> None:
     receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="hello")
     assert PROMPT_TIMEOUT <= clock.now < PROMPT_TIMEOUT + 5
@@ -1662,6 +1727,7 @@ def test_spawn_prompt_stops_waiting_at_the_timeout_and_types_anyway(
 
 def test_a_prompt_typed_past_the_timeout_is_not_typed_into_the_trust_question(
     tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
     clock: FakeClock,
     claude_on_path: Path,
     project: ProjectInfo,
@@ -1687,6 +1753,7 @@ def test_a_prompt_typed_past_the_timeout_is_not_typed_into_the_trust_question(
 
 def test_a_multi_line_prompt_is_not_typed_before_the_agent_is_up(
     tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
     clock: FakeClock,
     claude_on_path: Path,
     project: ProjectInfo,
@@ -1726,6 +1793,7 @@ def test_a_multi_line_prompt_is_not_typed_before_the_agent_is_up(
 )
 def test_spawn_prompt_that_tmux_did_not_take_says_how_far_it_got(
     tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
@@ -1778,6 +1846,7 @@ def test_spawn_prompt_that_tmux_did_not_take_says_how_far_it_got(
 )
 def test_a_replacement_whose_first_line_is_at_its_prompt_is_not_said_to_be_untyped(
     tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
@@ -1825,7 +1894,11 @@ def test_a_replacement_whose_first_line_is_at_its_prompt_is_not_said_to_be_untyp
 
 
 def test_spawn_prompt_is_not_typed_into_a_dead_pane(
-    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+    tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original = tmux.spawn_window
 
@@ -5231,7 +5304,7 @@ def _case_hand_off_entries(w: _Hubbed) -> str | None:
     _ready_windows(w)
     w.tmux.die(w.coder.pane_id, 0)
     fleet_service.restart(w.fleet, w.coder.label)
-    [prompt] = [text for _pane, kind, text in w.tmux.typed if kind == "paste"]
+    [prompt] = _first_lines(w.tmux)
     return _delivered() if "- note: halfway through the router" in prompt else None
 
 
@@ -13087,13 +13160,13 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
     # The resumed conversation opens at an idle prompt: ONE line tells it to go on
     # (review of #205, finding 5) — one line, so it is typed even past the wait.
     new_pane = receipt.started.pane_id
-    pasted = [text for pane, kind, text in tmux.typed if pane == new_pane and kind == "paste"]
+    pasted = _first_lines(tmux, new_pane)
     assert len(pasted) == 1 and "\n" not in pasted[0]
     assert pasted[0].startswith(
         f"You are {agent.label}, moved to another Claude account after session limit"
     )
     assert "continue exactly where you left off" in pasted[0]
-    assert (new_pane, "key", "Enter") in tmux.typed
+    assert (new_pane, "key", "Enter") not in tmux.typed, "on its command line: no Enter"
     live = fleet_service.list_agents(project)
     assert [status.agent.id for status in live] == [receipt.started.id]
     with store_session() as store:
@@ -13553,7 +13626,7 @@ def test_switch_starts_fresh_with_a_hand_off_prompt_when_asked_or_when_there_is_
     assert "--resume" not in command and _flag(command, "--account") == "3"
     assert _flag(command, "--task") is None  # the task travels on the row, as spawn records it
     assert receipt.started.task_id == task.id
-    pasted = [text for pane, kind, text in tmux.typed if kind == "paste"]
+    pasted = _first_lines(tmux, receipt.started.pane_id)
     assert len(pasted) == 1
     prompt = pasted[0]
     assert prompt.startswith(f"You are {agent.label}, taking over")
@@ -13922,6 +13995,7 @@ def test_fleet_switch_command_reports_the_move_and_its_json(
 def test_restart_and_switch_say_in_their_headline_that_the_first_line_was_not_typed(
     command: str,
     tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
@@ -14267,7 +14341,7 @@ def test_restart_stops_a_running_agent_first_and_starts_fresh_when_asked_or_with
     assert receipt.started.task_id == task.id and receipt.started.label == agent.label
     assert receipt.started.session_id != agent.session_id  # fresh: a new session
     assert "--resume" not in _command(tmux)
-    [prompt] = [text for _pane, kind, text in tmux.typed if kind == "paste"]
+    [prompt] = _first_lines(tmux, receipt.started.pane_id)
     assert prompt.startswith(
         f"You are {agent.label}, taking over from a previous session of this agent (restarted)."
     )
@@ -14621,7 +14695,7 @@ def test_a_fresh_switch_still_tells_the_replacement_it_moved_to_another_account(
 
     fleet_service.switch(project, agent.label, reason="5h limit")
 
-    [prompt] = [text for _pane, kind, text in tmux.typed if kind == "paste"]
+    [prompt] = _first_lines(tmux)
     assert prompt.startswith(
         f"You are {agent.label}, taking over from a previous session of this agent "
         "(it stopped on 5h limit under another Claude account)."
@@ -15080,7 +15154,7 @@ def test_restart_hands_off_the_session_s_own_entries_on_a_busy_board(
     receipt = fleet_service.restart(project, agent.label)
 
     assert receipt.resumed is False
-    [prompt] = [text for _pane, kind, text in tmux.typed if kind == "paste"]
+    [prompt] = _first_lines(tmux, receipt.started.pane_id)
     assert "- note: halfway through the router" in prompt
     assert "chatter" not in prompt
 
@@ -15199,9 +15273,10 @@ def test_restarting_a_running_agent_hands_its_claims_to_the_replacement_and_anno
     assert held.status == "doing" and held.claimed_by == new
     assert nudges == []
     assert _events(project, "agent_exited") == [] and _events(project, "task_released") == []
-    # The replacement never came up in the fake, so its hand-off prompt was not typed.
+    # Its hand-off prompt rides its command line (P0-W1a): handed over with the launch,
+    # whether or not the replacement has come up yet.
     assert _events(project, "restarted") == [
-        f"{agent.label} restarted — started fresh, but its hand-off prompt was NOT typed"
+        f"{agent.label} restarted — started fresh with a hand-off prompt"
     ]
 
     # The replacement runs and holds the task. Restarted again, its spawn is refused
@@ -15849,9 +15924,7 @@ def test_a_resumed_restart_is_told_in_one_line_to_carry_on(
 
     assert receipt.resumed is True and receipt.started.session_id == first
     assert _task_now(mine.id).claimed_by == first  # the same session carries the claim on
-    [line] = [
-        text for pane, kind, text in tmux.typed if pane == receipt.started.pane_id and kind != "key"
-    ]
+    [line] = _first_lines(tmux, receipt.started.pane_id)
     assert "\n" not in line and line.startswith(f"You are {agent.label}, restarted")
     assert "aisquare board" in line and "continue" in line
 
@@ -17300,7 +17373,7 @@ def test_a_switch_whose_task_closes_during_the_stop_starts_the_replacement_witho
     receipt = fleet_service.switch(project, agent.label)
 
     assert receipt.stopped.task_id is None and receipt.started.task_id is None
-    [prompt] = [text for _pane, kind, text in tmux.typed if kind == "paste"]
+    [prompt] = _first_lines(tmux, receipt.started.pane_id)
     assert "Ship auth" not in prompt and task.id not in prompt
     live = fleet_service.list_agents(project)
     assert [status.agent.id for status in live] == [receipt.started.id]
@@ -17389,6 +17462,7 @@ def test_a_restart_or_a_switch_is_refused_a_freed_socket_before_it_stops_the_age
 @pytest.mark.parametrize("verb", ["switch", "restart"])
 def test_a_replacement_whose_prompt_poll_tmux_will_not_answer_keeps_the_claims(
     tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
@@ -17437,6 +17511,7 @@ def test_a_replacement_whose_prompt_poll_tmux_will_not_answer_keeps_the_claims(
 
 def test_the_automatic_hand_over_puts_what_its_switch_did_not_do_on_the_board(
     tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
     claude_on_path: Path,
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
@@ -17592,7 +17667,7 @@ def test_a_fork_resumes_the_sources_session_as_a_new_one_and_shares_nothing(
     assert kept is not None and kept.ended_at is None and kept.session_id == old
     held = _task_now(task.id)
     assert (held.status, held.claimed_by) == ("doing", old), "the source's claim never moved"
-    [line] = _pasted(tmux, fork.pane_id)
+    [line] = _first_lines(tmux, fork.pane_id)
     assert "\n" not in line and f"a fork of {source.label}" in line
     [event] = _events(project, "forked")
     assert event.startswith(f"{fork.label} forked from {source.label}")
@@ -17651,7 +17726,7 @@ def test_a_fork_starts_fresh_when_asked_or_without_a_transcript(
     assert "--resume" not in command and "--fork-session" not in command
     assert fork.session_id is not None and fork.session_id != source.session_id
     assert _flag(command, "--session-id") == fork.session_id
-    [message] = _pasted(tmux, fork.pane_id)
+    [message] = _first_lines(tmux, fork.pane_id)
     assert f"a fork of {source.label}" in message and task.id in message
     assert any("no transcript" in note for note in receipt.notes) is (why == "no transcript")
 
@@ -18137,6 +18212,7 @@ def test_an_agent_whose_hooks_run_on_a_hubs_board_is_never_asked_for_its_screen(
 
 def test_spawn_never_types_its_prompt_into_the_trust_question(
     tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
     clock: FakeClock,
     claude_on_path: Path,
     project: ProjectInfo,
@@ -18162,6 +18238,7 @@ def test_spawn_never_types_its_prompt_into_the_trust_question(
 
 def test_spawn_types_its_prompt_once_the_trust_question_is_answered(
     tmux: FakeTmux,
+    typed_first_lines: FakeTmux,
     clock: FakeClock,
     claude_on_path: Path,
     project: ProjectInfo,
@@ -18177,7 +18254,10 @@ def test_spawn_types_its_prompt_once_the_trust_question_is_answered(
     def answered_on_the_third_look(pane_id: str, **kwargs: Any) -> Capture:
         nonlocal asked
         asked += 1
-        tmux.screens[pane_id] = TRUST_SCREEN if asked < 3 else ["\u276f "]
+        if asked < 3:
+            tmux.screens[pane_id] = TRUST_SCREEN
+        elif asked == 3:
+            tmux.screens.pop(pane_id, None)  # answered: Claude Code draws its input box
         return original_capture(pane_id, **kwargs)
 
     monkeypatch.setattr(tmux, "pane_facts", up_at_the_question)
@@ -18187,3 +18267,417 @@ def test_spawn_types_its_prompt_once_the_trust_question_is_answered(
     assert tmux.typed == [(pane, "paste", "start on tsk_1"), (pane, "key", "Enter")]
     assert receipt.notes == [] and clock.now < PROMPT_TIMEOUT
     assert claude_sharing.shows_trust_prompt(TRUST_SCREEN)  # the fixture is the question
+
+
+# --- admission: memory and the fleet-wide budget (#283, P2-W1a) -----------------------
+
+
+def _memory(monkeypatch: pytest.MonkeyPatch, available_mb: int, pressure: str = "normal") -> None:
+    from aisquare.core import memory
+
+    monkeypatch.setattr(
+        memory,
+        "headroom",
+        lambda: memory.Headroom(available_mb, 16_384, pressure, None, "test"),  # type: ignore[arg-type]
+    )
+
+
+def _second_project(tmp_path: Path) -> ProjectInfo:
+    path = tmp_path / "repo-b"
+    path.mkdir()
+    _git("init", "-q", "-b", "main", cwd=path)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=path)
+    info = team_project(path)
+    with store_session() as store:
+        store.onboard_project(info)
+    return info
+
+
+def test_spawn_refuses_below_the_memory_floor_before_any_window_opens(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failing-first case: on the base a spawn at 1,500 MB available started."""
+    _settings(monkeypatch, min_free_mb=2048)
+    _memory(monkeypatch, 1500)
+    with pytest.raises(fleet_service.CapacityRefused) as refused:
+        _coder(project)
+    assert refused.value.code == "capacity_memory"
+    assert "1500 MB available" in str(refused.value) and "2048 MB" in str(refused.value)
+    assert "aisquare fleet capacity" in str(refused.value)
+    assert tmux.spawned == [], "refused before any window"
+    # Negative control: the floor off admits the same spawn.
+    _settings(monkeypatch, min_free_mb=0)
+    assert _coder(project).label == "coder-1"
+
+
+def test_critical_pressure_refuses_and_warn_pressure_admits_with_a_note(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings(monkeypatch, min_free_mb=2048)
+    _memory(monkeypatch, 9000, "critical")
+    with pytest.raises(fleet_service.CapacityRefused, match="pressure is critical"):
+        _coder(project)
+    _memory(monkeypatch, 9000, "warn")
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+    assert any("memory pressure is warn" in note for note in receipt.notes), receipt.notes
+
+
+def test_unknown_headroom_admits_and_says_so(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aisquare.core import memory
+
+    _settings(monkeypatch, min_free_mb=2048)
+    monkeypatch.setattr(memory, "headroom", lambda: memory.UNKNOWN)
+    receipt = fleet_service.spawn(project, "coder", worktree=False)
+    assert any("could not read this machine's memory" in note for note in receipt.notes)
+
+
+def test_after_a_memory_refusal_admission_wants_more_for_five_minutes(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GNU parallel's lesson: a floor with no margin flaps. 2,100 MB clears 2,048 but not
+    the 2,560 required for five minutes after a refusal."""
+    now = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(fleet_service, "_now", lambda: now)
+    _settings(monkeypatch, min_free_mb=2048)
+    _memory(monkeypatch, 1500)
+    with pytest.raises(fleet_service.CapacityRefused):
+        _coder(project)
+    _memory(monkeypatch, 2100)
+    with pytest.raises(fleet_service.CapacityRefused, match="2560 MB"):
+        _coder(project)
+    now = now + timedelta(minutes=6)
+    assert _coder(project).label == "coder-1"
+
+
+def test_the_fleet_wide_budget_spans_projects_and_names_each_count(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings(monkeypatch, max_agents_total=3)
+    other = _second_project(tmp_path)
+    _coder(project)
+    _coder(project)
+    assert _coder(other).label == "coder-1", "one spawn in B fits the budget"
+    with pytest.raises(fleet_service.CapacityRefused) as refused:
+        _coder(other)
+    assert refused.value.code == "capacity_fleet"
+    message = str(refused.value)
+    assert "3 live agents across the fleet (max_agents_total = 3)" in message
+    shown = project_service.display_name
+    assert f"{shown(project)} 2, {shown(other)} 1" in message, (
+        "each project's count, as lists name it"
+    )
+    assert len(tmux.spawned) == 3
+
+
+def test_the_per_project_cap_is_a_capacity_refusal_too(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings(monkeypatch, max_agents_per_project=1)
+    _coder(project)
+    with pytest.raises(fleet_service.CapacityRefused) as refused:
+        _coder(project)
+    assert refused.value.code == "capacity_project"
+
+
+def test_a_spawn_that_races_past_the_fleet_budget_backs_its_row_out(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N parallel spawns at budget - 1 settle to exactly the budget, as the project cap does."""
+    _settings(monkeypatch, max_agents_total=2)
+    other = _second_project(tmp_path)
+    _coder(project)
+    original = tmux.spawn_window
+
+    def spawn_then_fill(*args: object, **kwargs: object) -> WindowInfo:
+        window = original(*args, **kwargs)  # type: ignore[arg-type]
+        with store_session() as store:  # a parallel spawn in B takes the last seat
+            store.upsert_fleet_agent(
+                FleetAgent(
+                    id=new_agent_id(),
+                    project_id=other.id,
+                    label="coder-racer",
+                    role="coder",
+                    pane_id="%99",
+                    cwd=other.root,
+                    created_at=datetime.now(tz=UTC) - timedelta(seconds=1),
+                )
+            )
+        return window
+
+    monkeypatch.setattr(tmux, "spawn_window", spawn_then_fill)
+    with pytest.raises(fleet_service.CapacityRefused, match="max_agents_total = 2"):
+        _coder(project)
+    assert tmux.killed == ["%2"]
+    with store_session() as store:
+        live = [a for a in store.live_fleet_agents() if a.role != "captain"]
+    assert len(live) == 2, "the budget holds"
+
+
+def test_admissions_at_the_budget_and_refusals_are_logged(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings(monkeypatch, max_agents_total=1, min_free_mb=2048)
+    _memory(monkeypatch, 4000)
+    _coder(project)
+    with pytest.raises(fleet_service.CapacityRefused):
+        _coder(project)
+    log = paths.aisquare_home() / "fleet" / "admission.jsonl"
+    lines = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert [line["outcome"] for line in lines] == ["admitted-at-budget", "capacity_fleet"]
+    assert lines[1]["live_total"] == 1 and lines[1]["available_mb"] == 4000
+
+
+def test_the_doctor_capacity_row_warns_when_a_spawn_would_be_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aisquare.services import diagnostics
+
+    paths.ensure_home()
+    _settings(monkeypatch, min_free_mb=2048)
+    _memory(monkeypatch, 1500)
+    row = diagnostics._check_fleet_capacity()
+    assert row.status.value == "warn"
+    assert "1500 MB available" in row.detail and "aisquare fleet capacity" in (row.fix or "")
+    _memory(monkeypatch, 8000)
+    row = diagnostics._check_fleet_capacity()
+    assert row.status.value == "ok" and "8000 MB available, pressure normal" in row.detail
+    _memory(monkeypatch, 8000, "warn")
+    assert diagnostics._check_fleet_capacity().status.value == "warn"
+
+
+def test_a_restart_of_a_running_agent_at_low_memory_replaces_it_rather_than_losing_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #323 (major): the replacement was admitted AFTER the stop, so below
+    min_free_mb the agent was stopped and its replacement refused. A live 1:1
+    replacement frees its own seat and memory as it starts: it is not a new spawn."""
+    _settings(monkeypatch, min_free_mb=2048)
+    agent = _coder(project)
+    _memory(monkeypatch, 1500)
+    receipt = fleet_service.restart(project, agent.label)
+    assert receipt.was_running is True
+    assert receipt.started.label == agent.label and receipt.started.ended_at is None
+    with store_session() as store:
+        assert [a.label for a in store.fleet_agents(project.id, live_only=True)] == ["coder-1"]
+
+
+def test_a_restart_of_an_exited_agent_is_a_spawn_and_is_admitted_as_one(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: nothing is stopped, so nothing is lost, and the floor applies."""
+    _settings(monkeypatch, min_free_mb=2048)
+    agent = _coder(project)
+    tmux.die(agent.pane_id, 130)
+    _memory(monkeypatch, 1500)
+    with pytest.raises(fleet_service.CapacityRefused, match="1500 MB available"):
+        fleet_service.restart(project, agent.label)
+
+
+def test_a_switch_at_low_memory_moves_the_agent_rather_than_losing_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings(monkeypatch, min_free_mb=2048)
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _memory(monkeypatch, 1500)
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+    assert receipt.to_slot == 3
+    with store_session() as store:
+        live = store.fleet_agents(project.id, live_only=True)
+    assert [(a.label, a.account_slot) for a in live] == [("coder-1", 3)]
+
+
+def test_two_projects_that_share_a_name_are_counted_apart(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #323 (minor): two checkouts named `repo` were one entry, `repo 2 of 1`."""
+    _settings(monkeypatch, max_agents_per_project=1, max_agents_total=5)
+    path = tmp_path / "elsewhere" / "repo"
+    path.mkdir(parents=True)
+    _git("init", "-q", "-b", "main", cwd=path)
+    _git("commit", "-q", "--allow-empty", "-m", "init", cwd=path)
+    twin = team_project(path)
+    with store_session() as store:
+        store.onboard_project(twin)
+    _coder(project)
+    _coder(twin)
+    live = fleet_service.capacity().live
+    assert live == {f"repo ({project.root})": 1, f"repo ({twin.root})": 1}
+
+
+def test_a_switch_after_a_cross_account_resume_resumes_the_real_transcript(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """P0-W3b: the resumed session's SessionStart reports a transcript under the NEW account
+    that Claude Code never creates (measured by P0-W0 on 2.1.309 and 2.1.223). Stored, it left
+    the row naming no file, and the agent's next switch started fresh, its session lost."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    real = tmp_path / "accounts" / "2" / "projects" / "-repo" / f"{agent.session_id}.jsonl"
+    real.parent.mkdir(parents=True)
+    real.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, real)
+    missing = tmp_path / "accounts" / "3" / "projects" / "-repo" / f"{agent.session_id}.jsonl"
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_session_start(
+        agent.session_id or "", project.root, "resume", transcript_path=str(missing)
+    )
+
+    receipt = fleet_service.switch(project, agent.label, reason="session limit")
+
+    assert receipt.resumed
+    assert _flag(_command(tmux), "--resume") == str(real)
+
+
+# --- one switch per limit (P0-W3, #277) -------------------------------------------------------
+
+
+def _limit_handed_over_inline(
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    nudges: list[str] | None = None,
+    message: str = "You've hit your session limit",
+) -> tuple[FleetAgent, list[str]]:
+    """An agent on slot 2 hits a limit with ``on_limit = "switch"`` (the default); the hook's
+    detached worker is run inline. Returns the agent and every manager nudge (also collected
+    into ``nudges`` when given, for a caller whose worker raises)."""
+    from aisquare.services import hooks as hooks_service
+
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    nudges = [] if nudges is None else nudges
+    monkeypatch.setattr(
+        team_service, "_nudge_manager", lambda project_id, *, reason, board: nudges.append(reason)
+    )
+
+    def worker(argv: list[str]) -> None:
+        session_id = argv[argv.index("hand-over") + 1]
+        hooks_service.hand_over(session_id, reason=argv[argv.index("--reason") + 1])
+
+    monkeypatch.setattr(hooks_service, "_detach", worker)
+    hooks_service.turn_failed(
+        session_id=agent.session_id,
+        error="rate_limit",
+        message=message,
+    )
+    return agent, nudges
+
+
+def test_a_limit_with_on_limit_switch_moves_the_agent_once_and_wakes_no_manager(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+
+    agent, nudges = _limit_handed_over_inline(project, monkeypatch, tmp_path)
+
+    assert _events(project, "limited") == []  # its own kind, which wakes nobody
+    [limited] = _events(project, team_service.LIMITED_HANDING_OVER)
+    assert "moving it to another account automatically" in limited
+    assert "fleet switch" not in limited  # the manager is not asked to do it too
+    assert len(_events(project, "switched")) == 1
+    assert nudges == []
+    with store_session() as store:
+        events = store.recent_events(project.id, limit=50)
+    assert not any(team_service._wakes_manager(event) for event in events)
+
+    # The manager's cycle used to switch the replacement again once the hand-over was done.
+    with pytest.raises(fleet_service.FleetError, match="usage-limit hand-over; `--force`"):
+        fleet_service.switch(project, agent.label)
+    assert len(_events(project, "switched")) == 1
+
+
+def test_force_moves_a_fresh_replacement_again(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _third_slot_with_usage(monkeypatch, work=95, personal=10, third=20)
+    agent, _nudges = _limit_handed_over_inline(project, monkeypatch, tmp_path)
+    [moved] = fleet_service.list_agents(project)
+    assert moved.agent.account_slot == 3
+
+    receipt = fleet_service.switch(project, agent.label, force=True)
+
+    assert (receipt.from_slot, receipt.to_slot) == (3, 4)
+    assert len(_events(project, "switched")) == 2
+
+
+def test_a_refused_hand_over_is_handover_failed_and_wakes_the_manager(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _two_slots_with_usage(monkeypatch, work=95, personal=99)  # nowhere under the line
+
+    _agent, nudges = _limit_handed_over_inline(
+        project,
+        monkeypatch,
+        tmp_path,
+        message="You've hit your weekly limit · resets Mon 12:00am (America/Toronto)",
+    )
+
+    assert _events(project, "switched") == []
+    [failed] = _events(project, "handover_failed")
+    assert "fleet switch" in failed
+    assert "its own limit resets in " in failed  # the other answer: wait (reviewer-a)
+    assert len(nudges) == 1
+
+
+def test_a_hand_over_worker_that_crashes_posts_handover_failed_and_wakes_the_manager(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Review of #304, finding 1: with the hand-over coming, the `limited` line wakes nobody,
+    so the worker is the only one left to say it could not move the agent. It said so for a
+    `FleetError` alone; anything else (a locked store, a tmux error, a bug) went to the
+    worker's DEVNULL stderr and the agent sat parked until the reset, days for a week."""
+    _two_slots_with_usage(monkeypatch, work=95, personal=10)
+
+    def crash(*args: Any, **kwargs: Any) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(fleet_service, "switch", crash)
+
+    nudges: list[str] = []
+    with pytest.raises(sqlite3.OperationalError):  # still the worker's to report as it did
+        _limit_handed_over_inline(project, monkeypatch, tmp_path, nudges)
+
+    [failed] = _events(project, "handover_failed")
+    assert "hand-over worker failed (OperationalError: database is locked)" in failed
+    assert "fleet switch" in failed
+    assert len(nudges) == 1

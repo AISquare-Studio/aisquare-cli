@@ -185,6 +185,10 @@ dev = [
   "tree-sitter>=0.25",
   "tree-sitter-typescript>=0.23",
   "tree-sitter-javascript>=0.25",
+  # `make test` runs the suite on every core (#129 d). Each test already has a home,
+  # a tmux folder and a `claude` stand-in of its own (tests/conftest.py), so workers
+  # share nothing a test writes.
+  "pytest-xdist>=3.6",
   "mypy>=1.10",
   "ruff>=0.5",
   # Both bounds are load-bearing, not caution. mcp 2.0.0 renamed FastMCP to

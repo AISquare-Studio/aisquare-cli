@@ -239,17 +239,20 @@ follows as a `⚠` line.
 | --- | --- | --- |
 | `<role>` | `manager`, `coder`, `tester`, `ui-tester`, `reviewer`, `validator`, or any role you have bound with `team bind` | — |
 | `--label L` / `-l L` | the agent's label (see [Naming](#naming)) | `<role>-<task short id>` with `--task`, else `<role>-<n>` |
-| `--task ID` | the board task this agent is for (id or prefix) | none |
+| `--task ID` | the board task this agent is for (id or prefix); with no `--prompt`, its first message is a kickoff that names the task as its ASSIGNED TO YOU block does | none |
 | `--worktree` / `--no-worktree` | run in its own git worktree | the role's setting: on for coder and reviewer |
 | `--permission-mode M` | Claude Code permission mode | the role's setting: `auto` |
 | `--bin B` | the agent executable | the role's binding, else `claude` |
-| `--prompt TEXT` | first message typed once the agent is up | none |
+| `--prompt TEXT` | the agent's first message: on Claude Code's command line, typed for any other binary ([the first message](#the-first-message)); after the kickoff with `--task` | none |
 | `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
 
 Refused, with the reason in the message: a second `manager`, more agents than
-`max_agents_per_project`, `--worktree` in a project that is not a git
+`max_agents_per_project`, more live agents across every project than
+`max_agents_total`, less available memory than `min_free_mb` or memory pressure
+at critical (see [Capacity](#capacity); `--json` errors `capacity_project`,
+`capacity_fleet`, `capacity_memory`), `--worktree` in a project that is not a git
 repository, an unknown role, a `--task` that is already done or dropped, a
 persona the project does not have (the known names are listed; a stale
 `[fleet.roles.<role>].persona` default names its key). All of these are checked
@@ -294,6 +297,42 @@ was parked for. A nested `claude -p` started from the agent's shell inherits
 task and never takes its row, whatever start it reports. A binary that exports
 no `CLAUDE_PID` binds its row on first arrival and keeps that session; a
 `/clear` there releases its claims, as any session end does.
+
+### The first message
+
+Every first message the fleet gives an agent — `--prompt`, the kickoff of a
+`--task` spawn, the line `fleet restart` and `fleet switch` start a replacement
+with, a fresh hand-off, the usage-limit hand-over's — either starts a turn, or
+`fleet ls` says it did not.
+
+- **A Claude Code agent gets it on its command line**, as Claude Code's own
+  first turn (`claude -- "<message>"`, and `claude --resume <transcript> --
+  "<message>"` for a replacement). Nothing is typed, so there is no Enter to
+  lose: an Enter that reaches Claude Code before it draws its input box is
+  dropped while the text stays in the box, which left agents idle with their
+  first message unsent. The message waits behind Claude Code's folder-trust
+  question too, and runs once the folder is trusted. It travels in a file only
+  you can read (`$AISQUARE_HOME/run/prompts/<agent>.txt`), named to `aisquare
+  launch` with `--first-prompt-file` and deleted as the launch reads it, so the
+  row's recorded launch never holds it and a restart replays no old message.
+- **Any other binary has it typed**, and so does every agent with `[fleet]
+  first_prompt = "type"`. For Claude Code that means once its input box is
+  drawn: the text is pasted, checked in the box, sent with Enter, and Enter is
+  pressed again only while the text is provably still waiting there — never into
+  a box that is empty, holds anything else, or has a dialog over it.
+- **The board tracks it.** The agent's row reads `pending` until its
+  `UserPromptSubmit` says a turn started (`acked`). `fleet spawn`, `restart` and
+  `switch` wait up to `[fleet] prompt_ack_seconds` (45) for that and print it
+  (`✓ first message taken`); their `--json` adds `prompt_delivery` (`argv` or
+  `typed`) and `prompt_acked`. A message still pending past that wait, with the
+  agent at an idle input box, is not going to be taken: the agent reads
+  `attention` — "first prompt not taken", with the `fleet tell` and `fleet
+  restart` commands that take it on, each naming the project — and the board
+  gets one `prompt_unsent`, which wakes the manager.
+  `aisquare doctor`'s `fleet-delivery` row counts the last week's: acknowledged N
+  of M, and how long the agents took to start their first turn.
+
+Both keys are in [the configuration keys](reference.md#configuration-keys).
 
 ### `fleet ls` / `fleet status`
 
@@ -852,21 +891,56 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   --live` ask the endpoint now. The first account in priority order under `switch_at`
   (85 % by default) is taken — or, when all are over it, the one with the most
   left. An account counts as full as the fuller of its two windows, so one
-  that has spent its week is not taken for an empty five hours. Usage is the
+  that has spent its week is not taken for an empty five hours. The endpoint's
+  per-family weeks count too, for an agent of that family: Claude Code's Opus
+  and Sonnet limits apply only to requests to that model family, so an account
+  whose Opus week is spent is no room for an Opus agent and still is for a
+  Sonnet one (the family is the session's model, or for a spawn its `--model`
+  or the role's ladder). A window the endpoint marks locked reads 100 % used.
+  `[accounts] prefer = "reset-soonest"` (*under the line, prefer* in App
+  settings) takes, of the accounts under `switch_at`, the one whose week resets
+  first, so an allowance is spent before it lapses; `priority`, the default,
+  takes the first in order (every `[accounts]` key:
+  [Configuration keys](reference.md#configuration-keys)). `accounts usage` shows
+  each week's reset and each family week beside it. Usage is the
   same best-effort endpoint as the bars, so an
   account that does not answer is skipped with a note and, when none answers,
   the machine default decides as before. Each reading is kept: the row's bar
   gains *≈ 40 min to the limit* once two readings of the same window exist.
+- **Limits are remembered.** Every usage limit an agent hits leaves a mark on
+  the account it was on until the reset the message named (*weekly limit ·
+  resets Mon 12:00am*), and every pick by headroom — a spawn with `pick =
+  "headroom"`, the automatic hand-over, a `fleet switch` without `--to` —
+  skips that account until then, saying so: *account 3 skipped — weekly
+  limit until Mon 00:00 (in 2d 4h), refused 10:42*. A hand-over or a `fleet
+  switch` without `--to` never takes a marked account, its fallback rungs (the
+  binding, the project default, the machine default) included: with nowhere
+  else to go it refuses, and `handover_failed` says when the agent's own limit
+  resets. A launch's choices are not second-guessed: `--account`, a role
+  binding, a project default and `pick = "default"` still name the account, and
+  when every account carries a mark a spawn falls to the machine default as it
+  does when no usage can be read. `--to` always names the account. A session or weekly limit
+  closes the account to every agent; an Opus or Sonnet limit to that family's.
+  The endpoint may read an account under the line while it refuses, so the
+  refusal is believed over the reading. A live reading that shows a family
+  week spent leaves the same mark (*read* instead of *refused*), because the
+  cache a spawn picks from keeps only the two shared windows.
 - **A usage limit.** When an agent's turn ends on one (Claude Code's
   `StopFailure` hook, `You've hit your session limit · resets 12:30am`), its
-  row turns **⏳ limited** with the reset time, a `limited` line goes on the
-  board naming `aisquare fleet switch <label>`, and the manager is woken. Claude
+  row turns **⏳ limited** with the reset time and a `limited` line goes on the
+  board. When the automatic hand-over (below) will move it, the line is a
+  `limited_handing_over` event that says *moving it to another account
+  automatically* and wakes nobody; otherwise it
+  names `aisquare fleet switch <label>` and the manager is woken. Claude
   Code's own wait-and-continue at the reset is left running. `fleet switch`
   stops the agent as `fleet stop` would and starts it again under the same
   label and task, in its worktree as it stands (the branch it was on, any
   uncommitted work), on the account with the most headroom (`--to` names
   one), **resuming its session** from its transcript (`claude --resume
-  <path>`) when that file is on disk — the resumed agent keeps its task claims
+  <path>`) when that file is on disk (a session resumed under another account
+  keeps writing its original transcript while Claude Code reports a path under
+  the new account that is never created, so the board keeps the file on disk,
+  and the next restart or switch resumes it too) — the resumed agent keeps its task claims
   and is told in one line to continue, and no exit is announced for it —
   `--fresh` (or a transcript that is not on disk) starts new with a hand-off
   prompt built from the board instead; that agent takes the claims over too,
@@ -884,7 +958,12 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   is there to take it (with one account, `switch` is `wait`), in a worker
   detached from the agent's
   own hook; a hand-over that finds no headroom leaves the agent parked, its
-  own wait intact, and says so on the board. One that goes ahead says on the
+  own wait intact, and says so with a `handover_failed` event naming `fleet
+  switch` or the reset — that event, not `limited`, wakes the manager. One
+  limit moves an agent once: `fleet switch` refuses a replacement the hand-over
+  started within the last ten minutes (*moved 3 min ago by the usage-limit
+  hand-over; `--force` moves it again*), and a successful `switched` is news on
+  the next delta, not a wake-up. One that goes ahead says on the
   board what it could not do (a first line it could not type, claims it could
   not move) in a note beside `switched`, and `switched` itself says whether
   the replacement's first line reached it. `doctor` lists parked agents; `doctor --live` warns when every account
@@ -922,11 +1001,37 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   shared nor replaced — the command says which setting stopped it. `aisquare
   accounts settings --sync` links them now, `--unshare` gives each its own copy
   back.
+- **Memory, skills, agents, commands, CLAUDE.md.** Opt-in, `[accounts] share`
+  (empty by default), turned on and off with `aisquare accounts share`:
+  - `memory`: every launch, the plain claude's included, gets
+    `--settings '{"autoMemoryDirectory": "~/.aisquare/claude-shared/memory/<project>"}'`,
+    so a memory saved on one account is read on every other. The first
+    `--enable memory` merges what each account already remembered there: nothing
+    overwritten, a file that differs kept as `<name>.slot<N>.md`, `MEMORY.md`
+    merged by line. The directory is outside every `.claude` path on purpose:
+    since Claude Code 2.1.280 every auto-memory write into a linked `.claude`
+    directory asks for approval nothing can give.
+  - `skills`, `agents`, `commands`, `claude_md`: each managed account's entry
+    becomes a link to the plain claude's (a junction on Windows, and a copy of
+    `CLAUDE.md`), its own kept beside it as `<entry>.own-<stamp>`;
+    `--disable` puts it back exactly. An entry already linked somewhere else is
+    yours and is left alone. A launch on an account added since links it.
+  - `plugins`: experimental. MCP logins and the plugin store are per account.
+  - Transcripts are never shared. A linked `projects/` makes every auto-memory
+    write prompt, and the shortest `cleanupPeriodDays` would sweep them all. A
+    session moved to another account resumes by its transcript's path instead
+    (verified on Claude Code 2.1.309:
+    [cross-account resume](runbooks/cross-account-resume.md)).
+
+  `aisquare doctor`'s `claude-accounts sharing` line says what is shared and
+  warns about an account that does not share a part that is on, a link it
+  did not make, or a `projects/` that is a symlink. A session is attributed to
+  the account its fleet row launched it on, whatever its transcript's path says.
 
 Nothing on this page writes into Claude Code's login: the email and plan
 are read from what Claude Code recorded, and a token is never refreshed by the
-CLI. Claude Code refreshes it on the account's next session. The two things the
-accounts share (above) are the only writes into an account's directory.
+CLI. Claude Code refreshes it on the account's next session. What the
+accounts share (above) is the only thing written into an account's directory.
 
 Everything the page does is a command, and every reporting one takes `--json`:
 
@@ -950,6 +1055,7 @@ aisquare accounts move 3 top           # up · down · top · bottom
 aisquare accounts disable 3            # out of automatic selection; enable puts it back
 aisquare config set accounts.pick default      # spawns stay on the machine default (headroom is the default)
 aisquare config set accounts.on_limit wait     # an agent that hits its limit stays parked (switch is the default)
+aisquare config set accounts.prefer reset-soonest # under the line, the week that ends first (priority is the default)
 aisquare accounts trust                # trust this folder on every account (its repository, in a checkout)
 aisquare accounts trust --sync         # every folder any account trusts, trusted on all of them
 aisquare config set accounts.share_trust false # launches stop copying a folder's trust (on by default)
@@ -957,12 +1063,16 @@ aisquare accounts settings             # what each account's settings.json is: s
 aisquare accounts settings --sync      # link every managed account's settings.json to the plain claude's
 aisquare accounts settings --unshare   # each linked account gets its own copy back
 aisquare config set accounts.share_settings true # keep them linked at every launch (off by default)
+aisquare accounts share --status       # what every account shares: memory, skills, agents, commands, CLAUDE.md
+aisquare accounts share --enable memory,skills   # one memory per project and one skills/ for every account
+aisquare accounts share --disable skills         # each account gets its own skills/ back, as it was
 aisquare fleet switch coder-auth       # move one now: resumes its session on the account with room
 aisquare fleet restart manager         # an exited (or stuck) agent, back under its label, session resumed
                                        # …launched as it was first launched: the row records the
                                        # binary, permission mode, arguments and account (#144)
 aisquare fleet restart coder-auth --permission-mode acceptEdits   # …another mode; later restarts keep it
 aisquare fleet switch coder-auth --to personal --fresh   # a named account; a new session + hand-off
+aisquare fleet switch coder-auth --force # again, minutes after the usage-limit hand-over moved it
 ```
 
 `add` and `run` hand the terminal to Claude Code, so they have no `--json`
@@ -1070,6 +1180,9 @@ aisquare config list --overrides   # what you changed, and nothing else
 aisquare config reset              # every setting back to its default; asks first, --yes off a terminal
 ```
 
+The keys that need more than their name are listed in
+[reference: configuration keys](reference.md#configuration-keys).
+
 `config reset` moves the file aside to `config.toml.bak-<stamp>` beside it, so
 moving it back undoes the reset; through a symlink, the file it points at is
 copied there and emptied, and the link stays. With no file, or one that holds
@@ -1086,6 +1199,10 @@ max_agents_per_project = 4                # the manager (and you) cannot exceed 
 worktree_dir = ".aisquare-worktrees"      # relative to the repo root; kept out of git via .git/info/exclude
 disable_native_agent_teams = true         # exports CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0 into fleet launches
 max_continuations_per_hour = 30           # cap on the manager's Stop-hook continuations
+max_agents_total = 0                      # live agents across every project, captain excluded; 0 = no budget
+min_free_mb = 2048                        # refuse a spawn below this much available memory; 0 = off
+test_gate_mb = 0                          # `fleet gate`'s floor; 0 = min_free_mb
+test_gate_wait_minutes = 15               # how long `fleet gate` waits for it
 pane_clipboard = "off"                    # "on": a program in a pane may set your clipboard (OSC 52)
 
 [fleet.roles.manager]
@@ -1130,6 +1247,51 @@ persona = "minimalist"                    # checked at spawn: a name the project
 A role or a key your file leaves out takes its default above; a role the table
 above does not name gets `auto`, no worktree and no extra args. A config file that will not parse costs you the customisation and
 never the fleet: the defaults apply and nothing refuses.
+
+### Capacity
+
+A spawn is admitted against three limits, in this order, each checked before any
+window opens:
+
+1. **`max_agents_per_project`** (4): the project's live agents.
+2. **`max_agents_total`** (0, no budget): live agents across every project, the
+   captain excluded and managers counted. The refusal names each project's count.
+3. **`min_free_mb`** (2048): available memory. Below it, or with the kernel's
+   memory pressure at critical, the spawn is refused with both numbers; at warn
+   pressure it is admitted with a note on the receipt. After a memory refusal
+   the floor is `min_free_mb + 512` for five minutes, so admission does not flap
+   on a machine hovering at the line. `0` turns the floor off.
+
+Available memory is `MemAvailable` from `/proc/meminfo` on Linux, with PSI
+(`/proc/pressure/memory`, `some avg10`: warn at 10, critical at 40) when the
+kernel has it; on macOS it is `vm_stat`'s free + inactive + speculative pages,
+and the pressure is `kern.memorystatus_vm_pressure_level`, which wins because
+that figure ignores the compressor. Under WSL2 these are the VM's numbers,
+capped by `.wslconfig`. Where neither can be read, admission admits and says so.
+
+```text
+aisquare fleet capacity [--json]
+```
+
+shows the headroom, the pressure, the floor in force, and the live agents
+against each limit, and whether the next spawn would be admitted; `aisquare
+doctor` has the same as its `fleet capacity` row. Every refusal, and every
+admission that fills the budget, is a line in `~/.aisquare/fleet/admission.jsonl`
+(rotated at 1 MB).
+
+**The test-run gate.** A heavy run (the full suite, a build) can wait for memory
+instead of pushing the machine into swap:
+
+```text
+aisquare fleet gate [--min-free-mb N] [--wait 15m] [--json] [-- CMD …]
+```
+
+It polls every 5 s. With the headroom it runs `CMD` and exits with its code
+(with no `CMD`, exits 0); at the deadline it runs nothing and exits **75**,
+`not run: <available> MB available, <N> MB needed for <wait>`. The floor is
+`--min-free-mb`, else `test_gate_mb`, else `min_free_mb`; the wait is
+`test_gate_wait_minutes`. Once `test_gate_mb` is set, the tester's and the
+validator's cycles tell them to run heavy checks through it.
 
 **Model, effort and binary per role stay where they already live** — one home
 per concept: `aisquare team harness` (the ladder and the effort offsets),
@@ -1795,6 +1957,14 @@ are done with, or start a session with only the ones you work in:
 **A drag in `fleet attach` selects in tmux, not in my terminal.** The fleet's
 server has the mouse on so the wheel reaches Claude Code. Hold Shift (Option in
 macOS Terminal and iTerm2) while you drag to select in your terminal.
+
+**An agent reads `attention`: "first prompt not taken".** Its first message
+never started a turn: nothing acknowledged it within `[fleet] prompt_ack_seconds`
+and its input box is idle. Look at its window (`aisquare fleet attach`): text
+still in the box goes with an Enter there; an empty box takes the message again
+with `aisquare fleet tell <label> "…"`, or `aisquare fleet restart <label>`
+starts it over. Either one clears the `attention`. See [the first
+message](#the-first-message).
 
 **`asq` prints usage instead of opening the UI.** It is not at an interactive
 terminal: stdin or stdout is a pipe, or `TERM` is empty or `dumb`. That is

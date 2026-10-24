@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections.abc import Mapping
 from typing import Annotated, NoReturn
@@ -79,9 +80,10 @@ _STATE_CHIP = {
 def _fail_fleet(exc: Exception) -> NoReturn:
     """The service's reason, on stderr for a human and as ``detail`` under ``--json``.
 
-    Four codes, most specific first — every subclass is also a ``FleetError``,
-    so the order here IS the mapping: ``fleet_unavailable`` (no usable tmux),
-    ``not_found`` (the project reference), ``no_such_agent`` (the label), and
+    Most specific first — every subclass is also a ``FleetError``, so the order
+    here IS the mapping: ``fleet_unavailable`` (no usable tmux), ``not_found``
+    (the project reference), ``no_such_agent`` (the label), a capacity refusal's
+    own code (``capacity_project``, ``capacity_fleet``, ``capacity_memory``), and
     ``fleet_error`` for everything else the service refused with a reason.
     """
     if isinstance(exc, fleet_service.FleetUnavailable):
@@ -90,6 +92,8 @@ def _fail_fleet(exc: Exception) -> NoReturn:
         fail(str(exc), error="not_found", detail=str(exc))
     if isinstance(exc, fleet_service.NoSuchAgent):
         fail(str(exc), error="no_such_agent", detail=str(exc))
+    if isinstance(exc, fleet_service.CapacityRefused):
+        fail(str(exc), error=exc.code, detail=str(exc))
     fail(str(exc), error="fleet_error", detail=str(exc))
 
 
@@ -201,7 +205,12 @@ def spawn(
         str | None, typer.Option("--bin", help="Agent executable (default: the role's binding).")
     ] = None,
     prompt: Annotated[
-        str | None, typer.Option("--prompt", help="First message to type once the agent is up.")
+        str | None,
+        typer.Option(
+            "--prompt",
+            help="First message for the agent: on Claude Code's command line, typed for any "
+            "other binary. With --task it follows the task's kickoff.",
+        ),
     ] = None,
     account: Annotated[
         str | None,
@@ -246,6 +255,7 @@ def spawn(
             spawned_by=as_session or "user",
             account=account,
             persona=persona,
+            ack_wait=fleet_service.settings().prompt_ack_seconds,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -257,6 +267,7 @@ def spawn(
                     "asked_label": receipt.asked_label,
                     "tmux_session": receipt.tmux_session,
                     "notes": receipt.notes,
+                    **_first_prompt_json(receipt),
                 }
             )
         )
@@ -274,6 +285,8 @@ def spawn(
         f"✓ spawned {receipt.agent.label}{asked} ({receipt.agent.id}) → "
         f"{receipt.tmux_session} {receipt.agent.pane_id}{persona}"
     )
+    if receipt.prompt_acked:
+        console.print(f"  ✓ {_first_prompt_line(receipt.prompt_delivery)}")
     for note in receipt.notes:
         console.print(f"  {'✓' if note in receipt.shared else '⚠'} {note}")
 
@@ -369,6 +382,7 @@ def restart(
             fresh=fresh,
             spawned_by=as_session or "user",
             permission_mode=permission_mode,
+            ack_wait=fleet_service.settings().prompt_ack_seconds,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -410,6 +424,14 @@ def switch(
         str | None,
         typer.Option("--reason", help="Why (recorded on the board), e.g. 'session limit'."),
     ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Move an agent the usage-limit hand-over moved minutes ago (refused "
+            "without it: one switch per limit).",
+        ),
+    ] = False,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -419,7 +441,9 @@ def switch(
     target account. With its transcript on disk the replacement resumes the
     same session (`claude --resume <transcript>`); otherwise, or with --fresh,
     it starts new with a hand-off prompt from the board. The manager runs this
-    with `--as <its session>` when an agent shows `⏳ limited`.
+    with `--as <its session>` when the usage-limit hand-over could not
+    (`handover_failed`). An agent that hand-over moved minutes ago is refused
+    without --force: one switch per limit.
     """
     target = _project(project)
     try:
@@ -430,6 +454,8 @@ def switch(
             fresh=fresh,
             reason=reason,
             spawned_by=as_session or "user",
+            ack_wait=fleet_service.settings().prompt_ack_seconds,
+            force=force,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -443,6 +469,8 @@ def switch(
                     "to_slot": receipt.to_slot,
                     "resumed": receipt.resumed,
                     "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
+                    "prompt_delivery": receipt.prompt_delivery,
+                    "prompt_acked": receipt.prompt_acked,
                     "how": receipt.how,
                     "failures": receipt.failures,
                     "tmux_session": receipt.tmux_session,
@@ -725,12 +753,31 @@ def _restart_json(receipt: fleet_service.RestartReceipt) -> dict[str, object]:
         "started": receipt.started.model_dump(mode="json"),
         "resumed": receipt.resumed,
         "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
+        "prompt_delivery": receipt.prompt_delivery,
+        "prompt_acked": receipt.prompt_acked,
         "how": receipt.how,
         "failures": receipt.failures,
         "was_running": receipt.was_running,
         "tmux_session": receipt.tmux_session,
         "notes": receipt.notes,
     }
+
+
+def _first_prompt_json(receipt: fleet_service.SpawnReceipt) -> dict[str, object]:
+    """How a spawn's first message went, as ``fleet spawn --json`` prints it: ``prompt_typed``
+    as restart and switch say it, ``prompt_delivery`` (``argv`` | ``typed`` | null) and
+    ``prompt_acked`` (a turn started on it within ``[fleet] prompt_ack_seconds``)."""
+    return {
+        "prompt_typed": fleet_service.prompt_typed_json(receipt.prompt_typed),
+        "prompt_delivery": receipt.prompt_delivery,
+        "prompt_acked": receipt.prompt_acked,
+    }
+
+
+def _first_prompt_line(way: str | None) -> str:
+    """The receipt's line for a first message a turn started on."""
+    how = "on its command line" if way == "argv" else "typed into its pane"
+    return f"first message taken ({how})"
 
 
 def _stop_json(receipt: fleet_service.StopReceipt) -> dict[str, object]:
@@ -1231,6 +1278,135 @@ def rename(
     # than leave the operator to discover it at the escape hatch.
     for note in notes:
         stdout_console().print(f"  ⚠ {note}")
+
+
+@app.command("capacity")
+def capacity() -> None:
+    """Memory headroom and live agents against every admission limit (#283)."""
+    report = fleet_service.capacity()
+    if get_state().json_output:
+        typer.echo(json.dumps(report.as_json()))
+        return
+    head = report.headroom
+    out = stdout_console()
+    if head.available_mb is not None:
+        total = f" of {head.total_mb} MB" if head.total_mb is not None else ""
+        out.print(f"memory:   {head.available_mb} MB available{total}", markup=False)
+    else:
+        out.print("memory:   cannot be read on this machine", markup=False)
+    psi = f" (PSI some avg10 {head.psi_some_avg10:g})" if head.psi_some_avg10 is not None else ""
+    out.print(f"pressure: {head.pressure}{psi}", markup=False)
+    floor = f"{report.min_free_mb} MB" if report.min_free_mb else "off"
+    out.print(f"floor:    {floor} (min_free_mb)", markup=False)
+    budget = str(report.max_agents_total) if report.max_agents_total else "no budget"
+    out.print(f"agents:   {report.live_total} live ({budget}; max_agents_total)", markup=False)
+    for name, count in report.live.items():
+        out.print(f"  {name}: {count} of {report.max_agents_per_project}", markup=False)
+    mark = "✓" if report.admits else "✗"
+    out.print(f"{mark} {report.reason}", markup=False)
+
+
+_DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*$")
+
+
+def _seconds(text: str) -> float:
+    """``90``, ``90s``, ``15m``, ``1h`` as seconds; a usage error for anything else."""
+    found = _DURATION.match(text)
+    if found is None:
+        raise typer.BadParameter("a duration like 90s, 15m or 1h", param_hint="--wait")
+    return float(found.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[found.group(2)]
+
+
+@app.command(
+    "gate",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def gate(
+    ctx: typer.Context,
+    min_free_mb: Annotated[
+        int | None,
+        typer.Option(
+            "--min-free-mb",
+            help="Memory to wait for, in MB (default: \\[fleet] test_gate_mb, else min_free_mb).",
+        ),
+    ] = None,
+    wait: Annotated[
+        str | None,
+        typer.Option(
+            "--wait",
+            help="How long to wait for it, e.g. 90s or 15m (default: test_gate_wait_minutes).",
+        ),
+    ] = None,
+) -> None:
+    """Wait for memory headroom, then run a heavy command: `aisquare fleet gate -- pytest`.
+
+    Polls every 5 s. With enough memory it runs the command after `--` and exits with
+    its code (with no command, exits 0). At the deadline it runs nothing and exits 75.
+    With --json the command's output goes to stderr and stdout is one JSON object.
+    """
+    needed = fleet_service.gate_floor(min_free_mb)
+    seconds = (
+        _seconds(wait)
+        if wait is not None
+        else fleet_service.settings().test_gate_wait_minutes * 60.0
+    )
+    result = fleet_service.wait_for_memory(needed, seconds)
+    command = list(ctx.args)
+    if command and command[0] == "--":
+        command = command[1:]
+    as_json = get_state().json_output
+    if not result.passed:
+        available = f"{result.available_mb} MB" if result.available_mb is not None else "unknown"
+        message = (
+            f"not run: {available} available, {needed} MB needed for {wait or f'{seconds / 60:g}m'}"
+        )
+        if result.pressure == "critical":
+            message += " (memory pressure critical)"
+        if as_json:
+            typer.echo(
+                json.dumps(
+                    {
+                        "passed": False,
+                        "ran": None,
+                        "available_mb": result.available_mb,
+                        "needed_mb": needed,
+                        "waited_seconds": round(result.waited_seconds, 1),
+                        "pressure": result.pressure,
+                    }
+                )
+            )
+        else:
+            typer.echo(f"✗ {message}", err=True)
+        raise typer.Exit(fleet_service.GATE_EXIT)
+    code = 0
+    if command:
+        import subprocess  # lazy: only a gated run needs it
+
+        try:
+            # Under --json the one object is stdout's: the command's own output goes to
+            # stderr, where a human still sees it (review of #323).
+            code = subprocess.run(
+                command,
+                check=False,
+                stdout=2 if as_json else None,  # fd 2: stderr
+            ).returncode
+        except OSError as exc:
+            fail(f"could not run {command[0]}: {exc}", error="not_run")
+    if as_json:
+        typer.echo(
+            json.dumps(
+                {
+                    "passed": True,
+                    "ran": command or None,
+                    "exit_code": code,
+                    "available_mb": result.available_mb,
+                    "needed_mb": needed,
+                    "waited_seconds": round(result.waited_seconds, 1),
+                    "pressure": result.pressure,
+                }
+            )
+        )
+    raise typer.Exit(code)
 
 
 @app.command("pause")

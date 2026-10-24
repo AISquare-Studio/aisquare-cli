@@ -50,8 +50,8 @@ from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.core.workspace import git_common_root
 from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as claude_accounts_service
+from aisquare.services import delivery, explainability_ops
 from aisquare.services import explainability as explainability_service
-from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
@@ -169,6 +169,24 @@ SYSTEM_PROMPT_FLAG = "--append-system-prompt-file"
 """Claude Code's seam for appending to its default system prompt — a FILE, so the body
 never sits in argv, which ``ps`` shows (the name travels as ``AISQUARE_PERSONA``)."""
 _SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
+
+
+def _shared_memory(binary: str, args: Sequence[str]) -> list[str]:
+    """``[accounts] share = ["memory"]``: the shared auto-memory directory for this folder,
+    as ``--settings`` (P2-W7, #198). Claude Code only, and not over a ``--settings`` the
+    operator's line already carries, which wins; either is said in one dim line."""
+    wanted = claude_accounts_service.memory_settings_args(Path.cwd())
+    if not wanted:
+        return []
+    if any(arg == "--settings" or arg.startswith("--settings=") for arg in args):
+        stderr_console().print(
+            "accounts: memory is not shared into this launch — its own --settings wins",
+            style="dim",
+        )
+        return []
+    if not harness.is_default_agent(binary):
+        return []
+    return wanted
 
 
 def _persona_system_prompt(
@@ -360,6 +378,16 @@ def launch(
             help="Persona this session runs as (see `aisquare persona list`): exported as "
             "AISQUARE_PERSONA and briefed once, at session start.",
             metavar="NAME",
+        ),
+    ] = None,
+    first_prompt_file: Annotated[
+        Path | None,
+        typer.Option(
+            delivery.FIRST_PROMPT_FLAG,
+            help="A file holding the agent's first message: read, deleted, and passed to the "
+            "agent as its prompt, after `--` (what `fleet spawn` gives a Claude Code agent).",
+            metavar="PATH",
+            hidden=True,
         ),
     ] = None,
 ) -> None:
@@ -618,7 +646,38 @@ def launch(
         if persona is not None
         else []
     )
-    argv = [resolution.binary, *profile.args, *role_args, *persona_args, *ctx.args, *pinned_id]
+    memory_args = _shared_memory(resolution.binary, [*profile.args, *role_args, *ctx.args])
+    argv = [
+        resolution.binary,
+        *profile.args,
+        *role_args,
+        *persona_args,
+        *memory_args,
+        *ctx.args,
+        *pinned_id,
+    ]
+    # The first message (P0-W1a, #122), last: Claude Code's positional prompt, after `--`.
+    # Read from a file and the file deleted, so the window's command, which tmux carries and
+    # the row records, never holds the text, and a replay of that command finds no file and
+    # starts without one: a restart is given a line of its own.
+    if first_prompt_file is not None:
+        try:
+            first = delivery.take_prompt_file(first_prompt_file)
+        except delivery.NotAPromptFile as exc:
+            stderr_console().print(
+                f"first prompt: {exc} — not read, not deleted; starting without one",
+                style="dim",
+                markup=False,
+            )
+            first = ""
+        if first is None:
+            stderr_console().print(
+                f"first prompt: {first_prompt_file} is not there (read by an earlier launch) "
+                "— starting without one",
+                style="dim",
+            )
+        elif first:
+            argv += delivery.argv_tail(first)
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

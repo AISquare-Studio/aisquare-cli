@@ -51,7 +51,8 @@ from typing import Any, Literal
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
 from aisquare.core import paths
-from aisquare.core.config import AccountsSettings, FleetSettings, load_config
+from aisquare.core.config import AccountsSettings, FleetSettings, load_config, save_config
+from aisquare.core.harness import MODEL_FAMILIES
 from aisquare.core.names import name_key
 from aisquare.core.spawn import untraced_env
 from aisquare.core.store import ContextStore, store_session
@@ -418,6 +419,7 @@ def choose(
     exclude: Iterable[int] = (),
     spread: bool | None = None,
     fetch: Fetch | None = None,
+    family: str | None = None,
 ) -> AccountChoice:
     """THE account resolver: which Claude account a launch runs under, and why.
 
@@ -449,6 +451,9 @@ def choose(
     can be read, the machine default decides exactly as before. A launch reads
     usage through the cache, a minute deep (:data:`PICK_MAX_AGE_SECONDS`); a
     hand-over (``spread=True``) reads it live.
+
+    ``family`` is the launch's model family (``core.harness.launch_family``), for the
+    headroom rung's per-family weeks and limit marks (#277).
 
     ``exclude`` is honoured on EVERY rung: a binding or a project default that
     names the account being left is skipped with a note and the ladder goes on,
@@ -521,6 +526,8 @@ def choose(
             exclude=skip,
             fetch=fetch,
             max_age=PICK_MAX_AGE_SECONDS if spread is None else None,
+            family=family,
+            prefer=settings.prefer,
         )
         if spread is None:
             # The default rung since 0.8.1, so every machine walks it: one with no account
@@ -744,6 +751,8 @@ def _http_get(url: str, headers: Mapping[str, str], timeout: float) -> tuple[int
 
 
 def _window(raw: Any) -> tuple[float | None, datetime | None]:
+    """One window's percent USED and its reset; a non-null ``locked_reason`` reads 100 %: the
+    endpoint says the window refuses requests, whatever its figure (#277)."""
     if not isinstance(raw, dict):
         return None, None
     percent = raw.get("utilization")
@@ -755,13 +764,73 @@ def _window(raw: Any) -> tuple[float | None, datetime | None]:
         except ValueError:
             when = None
     value = float(percent) if isinstance(percent, int | float) else None
+    if raw.get("locked_reason") is not None:
+        value = 100.0
     return value, when
+
+
+_FAMILY_WEEK = "seven_day_"
+"""The prefix of a per-family weekly window in the usage payload: ``seven_day_opus``…"""
+_FAMILIES = frozenset(MODEL_FAMILIES.values())
+"""The model families a per-family window or limit can name (``opus``, ``sonnet``…)."""
+_SESSION_KINDS = frozenset({"session", "five_hour"})
+_WEEK_KINDS = frozenset({"weekly", "week", "seven_day"})
+
+
+def _fuller(a: float | None, b: float | None) -> float | None:
+    return b if a is None else a if b is None else max(a, b)
+
+
+def _family_weeks(payload: Mapping[str, Any]) -> tuple[dict[str, float], dict[str, datetime]]:
+    """Every per-family week in ``payload``: each top-level ``seven_day_<family>`` that holds
+    a window, keyed by ``<family>``, with a ``limits[]`` entry of that family's kind folded in
+    (the fuller figure wins). A family week the endpoint sends as null is no reading."""
+    percents: dict[str, float] = {}
+    resets: dict[str, datetime] = {}
+    for key, raw in payload.items():
+        if not key.startswith(_FAMILY_WEEK) or not isinstance(raw, dict):
+            continue
+        family = key.removeprefix(_FAMILY_WEEK)
+        percent, when = _window(raw)
+        if percent is not None:
+            percents[family] = percent
+        if when is not None:
+            resets[family] = when
+    for kind, percent in _limits(payload):
+        family = kind.removeprefix(_FAMILY_WEEK)
+        if family in _FAMILIES:
+            percents[family] = max(percents.get(family, percent), percent)
+    return percents, resets
+
+
+def _limits(payload: Mapping[str, Any]) -> list[tuple[str, float]]:
+    """``limits[]`` as ``(kind, percent)``: an entry without a string kind or a number is
+    skipped — the field is undocumented, and an unknown shape costs it, never the reading."""
+    raw = payload.get("limits")
+    found: list[tuple[str, float]] = []
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        kind, percent = entry.get("kind"), entry.get("percent", entry.get("utilization"))
+        if isinstance(kind, str) and isinstance(percent, int | float):
+            found.append((kind.lower(), float(percent)))
+    return found
+
+
+def _limit_of(payload: Mapping[str, Any], kinds: frozenset[str]) -> float | None:
+    return max((percent for kind, percent in _limits(payload) if kind in kinds), default=None)
 
 
 def usage(
     account: ClaudeAccount, *, now: datetime | None = None, fetch: Fetch | None = None
 ) -> ClaudeUsage:
     """The account's five-hour and seven-day windows, or why they cannot be read.
+
+    Every window the endpoint sends is read (#277): the per-family weeks
+    (``seven_day_opus``, ``seven_day_sonnet``: :attr:`ClaudeUsage.family_week_percent`),
+    the ``limits[]`` entries, folded into the window of their kind as the fuller figure,
+    and a ``locked_reason``, which reads that window 100 % used. Keys it does not know
+    are ignored.
 
     Reads the token where Claude Code keeps it (``core.stored_login``: the
     credentials file, or on macOS the login Keychain) and sends it to
@@ -820,12 +889,15 @@ def usage(
         return ClaudeUsage(
             available=False, reason="the usage endpoint answered without the two windows"
         )
+    family_percent, family_resets = _family_weeks(payload)
     return ClaudeUsage(
         available=True,
-        session_percent=session_percent,
+        session_percent=_fuller(session_percent, _limit_of(payload, _SESSION_KINDS)),
         session_resets_at=session_resets,
-        week_percent=week_percent,
+        week_percent=_fuller(week_percent, _limit_of(payload, _WEEK_KINDS)),
         week_resets_at=week_resets,
+        family_week_percent=family_percent,
+        family_week_resets_at=family_resets,
         fetched_at=now or _now(),
     )
 
@@ -940,6 +1012,13 @@ def sample_usage(
 def _record_sample(
     store: ContextStore, account: ClaudeAccount, result: ClaudeUsage, now: datetime | None
 ) -> None:
+    """The reading's row — and a limit mark for each family week it reads spent, which the
+    row has no column for: a launch picks from the cache, and without the mark it would put
+    an Opus agent on an account whose Opus week a live reading saw spent (#277)."""
+    for family, percent in result.family_week_percent.items():
+        resets = result.family_week_resets_at.get(family)
+        if percent >= 100 and resets is not None:
+            _write_limit(store, account.slot, family, resets, how="read", now=now)
     store.add_usage_sample(
         UsageSample(
             slot=account.slot,
@@ -1381,8 +1460,12 @@ def describe_age(fetched_at: datetime, *, now: datetime | None = None) -> str:
     return f"{minutes // 60}h ago"
 
 
-def headroom_percent(reading: ClaudeUsage) -> float | None:
+def headroom_percent(reading: ClaudeUsage, family: str | None = None) -> float | None:
     """How full an account reads for a pick: the FULLER of its two windows, or ``None``.
+
+    Given the agent's model ``family`` (``core.harness.model_family``), that family's
+    week counts too (#277): an Opus limit refuses an Opus agent exactly as a weekly one
+    does, and refuses no other family's.
 
     A weekly limit refuses requests exactly as a five-hour one does, and an
     account that has spent its week builds no five-hour usage, so its
@@ -1397,12 +1480,16 @@ def headroom_percent(reading: ClaudeUsage) -> float | None:
     """
     if not reading.available or reading.session_percent is None:
         return None
-    if reading.week_percent is None:
-        return reading.session_percent
-    return max(reading.session_percent, reading.week_percent)
+    used = reading.session_percent
+    if reading.week_percent is not None:
+        used = max(used, reading.week_percent)
+    own = reading.family_week_percent.get(family) if family is not None else None
+    return used if own is None else max(used, own)
 
 
-def describe_headroom(account: ClaudeAccount, reading: ClaudeUsage) -> str:
+def describe_headroom(
+    account: ClaudeAccount, reading: ClaudeUsage, family: str | None = None
+) -> str:
     """``account 2 40% used (60% left)`` — ``account 2 5% used (week 100% used, 0% left)`` when
     the week is the fuller window.
 
@@ -1416,9 +1503,13 @@ def describe_headroom(account: ClaudeAccount, reading: ClaudeUsage) -> str:
     session = reading.session_percent
     if session is None:
         return name
-    left = percent_left(reading)
+    left = percent_left(reading, family)
     spare = "" if left is None else f"{left:.0f}% left"
     week = reading.week_percent
+    own = reading.family_week_percent.get(family) if family is not None else None
+    if own is not None and own > session and (week is None or own > week):
+        detail = f"{family} week {own:.0f}% used" + (f", {spare}" if spare else "")
+        return f"{name} {session:.0f}% used ({detail})"
     if week is not None and week > session:
         detail = f"week {week:.0f}% used" + (f", {spare}" if spare else "")
         return f"{name} {session:.0f}% used ({detail})"
@@ -1433,9 +1524,10 @@ HEADROOM_LOW_FROM = 5.0
 """From this share left up to :data:`HEADROOM_FAIR_FROM`, ``low``; over 0 below it, ``critical``."""
 
 
-def percent_left(reading: ClaudeUsage) -> float | None:
-    """The share of an account LEFT for a pick: ``100 - max(session used, week used)``, 0-100."""
-    used = headroom_percent(reading)
+def percent_left(reading: ClaudeUsage, family: str | None = None) -> float | None:
+    """The share of an account LEFT for a pick: ``100 - max(session used, week used)``, 0-100
+    (and the ``family`` week's, given one: :func:`headroom_percent`)."""
+    used = headroom_percent(reading, family)
     return None if used is None else min(100.0, max(0.0, 100.0 - used))
 
 
@@ -1532,6 +1624,107 @@ def read_fleet_headroom(
     return fleet_headroom(candidates, readings)
 
 
+# --- the refusal memory (#277) -------------------------------------------------------------------
+#
+# A 429 is an answer the usage endpoint may not give: a family week it does not send, a
+# window it reads under the line while the account refuses. So every ``rate_limit``
+# StopFailure leaves a mark in ``team_meta`` — ``account_limit:<slot>:<window>`` = the reset
+# the message named — and :func:`headroom_choice` skips an account whose mark is still in
+# the future: always for the windows every model shares (``session``, ``weekly``), and for a
+# family's (``opus``, ``sonnet``) when the agent is of that family. No migration: a mark is
+# a ``team_meta`` row, and one whose reset has passed is simply not read.
+
+LIMIT_MARK_PREFIX = "account_limit:"
+"""``team_meta`` key prefix of a limit mark: ``account_limit:<slot>:<window>``."""
+
+
+@dataclass(frozen=True)
+class LimitMark:
+    """One remembered limit: the account refused (``how = "refused"``) or a live reading saw
+    a family week spent (``"read"``) at ``at``, until ``until``."""
+
+    slot: int
+    window: str
+    until: datetime
+    at: datetime
+    how: str = "refused"
+
+    def blocks(self, family: str | None) -> bool:
+        """Whether it shuts the account to an agent of ``family``: a window every model
+        shares blocks everyone; a family's only that family (an unknown word is shared)."""
+        return self.window not in _FAMILIES or self.window == family
+
+    def describe(self, *, now: datetime) -> str:
+        """``weekly limit until Mon 00:00 (in 2d 4h), refused 10:42``."""
+        until = self.until.astimezone()
+        at = self.at.astimezone().strftime("%H:%M")
+        distance = core.format_reset(self.until, now=now, clock=False)
+        return (
+            f"{self.window} limit until {until.strftime('%a %H:%M')} ({distance}), {self.how} {at}"
+        )
+
+
+def _write_limit(
+    store: ContextStore,
+    slot: int,
+    window: str,
+    until: datetime,
+    *,
+    how: str,
+    now: datetime | None = None,
+) -> None:
+    value = {"until": until.isoformat(), "at": (now or _now()).isoformat(), "how": how}
+    store.set_meta(f"{LIMIT_MARK_PREFIX}{slot}:{window.lower()}", json.dumps(value))
+
+
+def remember_limit(
+    slot: int | None,
+    window: str | None,
+    until: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Remember that account ``slot`` refused with a ``window`` limit lifting at ``until``.
+
+    Called on every ``rate_limit`` StopFailure (``services.hooks.turn_failed``). Nothing
+    to remember without all three: a 429 that names no reset (an API key's throttle)
+    leaves no mark, as it leaves no reset on the row. Best effort: a store that cannot be
+    written costs the memory, never the hook.
+    """
+    if slot is None or not window or until is None:
+        return
+    with contextlib.suppress(sqlite3.Error), store_session() as store:
+        _write_limit(store, slot, window, until, how="refused", now=now)
+
+
+def limit_marks(*, now: datetime | None = None) -> dict[int, list[LimitMark]]:
+    """Every limit mark still in force at ``now``, by slot; ``{}`` when the store cannot be
+    read (a pick then reads usage as it did before #277)."""
+    moment = now or _now()
+    try:
+        with store_session() as store:
+            rows = store.list_meta(LIMIT_MARK_PREFIX)
+    except sqlite3.Error:
+        return {}
+    marks: dict[int, list[LimitMark]] = {}
+    for key, raw in rows.items():
+        slot_text, _, window = key.removeprefix(LIMIT_MARK_PREFIX).partition(":")
+        try:
+            data = json.loads(raw)
+            mark = LimitMark(
+                slot=int(slot_text),
+                window=window,
+                until=datetime.fromisoformat(data["until"]),
+                at=datetime.fromisoformat(data["at"]),
+                how=str(data.get("how", "refused")),
+            )
+        except (ValueError, KeyError, TypeError):
+            continue
+        if mark.until > moment:
+            marks.setdefault(mark.slot, []).append(mark)
+    return marks
+
+
 _NOTHING_TO_PICK = "headroom: no enabled, signed-in account to pick from"
 
 PICK_MAX_AGE_SECONDS = 60.0
@@ -1556,8 +1749,16 @@ def headroom_choice(
     now: datetime | None = None,
     least_bad: bool = True,
     max_age: float | None = None,
+    family: str | None = None,
+    prefer: str = "priority",
 ) -> tuple[ClaudeAccount | None, list[str]]:
     """The account with headroom, and the notes that say how it was picked.
+
+    ``family`` is the agent's model family, when known: that family's week counts
+    (:func:`headroom_percent`), and so does its limit mark. An account with a limit
+    mark still in force (:func:`limit_marks`) is skipped with a note and never read.
+    ``prefer = "reset-soonest"`` takes, among the accounts under ``switch_at``, the one
+    whose week resets first, priority breaking ties (#277).
 
     ``least_bad=False`` withholds the "every account is over the line, take
     the one with the most room" answer: right for a spawn, it is what made two
@@ -1588,17 +1789,30 @@ def headroom_choice(
     ]
     if not candidates:
         return None, [_NOTHING_TO_PICK]
+    moment = now or _now()
+    marks = limit_marks(now=moment)
+    notes: list[str] = []
+    open_ones: list[ClaudeAccount] = []
+    for account in candidates:
+        mark = next((m for m in marks.get(account.slot, []) if m.blocks(family)), None)
+        if mark is None:
+            open_ones.append(account)
+        else:
+            notes.append(f"headroom: {core.label(account)} skipped — {mark.describe(now=moment)}")
+    if not open_ones:
+        notes.append("headroom: every account is at a limit it named — the default decides")
+        return None, notes
+    candidates = open_ones
     if max_age is None:
         readings = read_usage(candidates, now=now, fetch=fetch)
     elif len(candidates) == 1 and least_bad:
-        return candidates[0], _over_the_line(candidates[0], switch_at, now=now)
+        return candidates[0], [*notes, *_over_the_line(candidates[0], switch_at, now=now)]
     else:
         readings = cached_usage(candidates, max_age=max_age, now=now, fetch=fetch)
     measured: list[tuple[ClaudeAccount, float]] = []
-    notes: list[str] = []
     for account in candidates:
         reading = readings[account.slot]
-        percent = headroom_percent(reading)
+        percent = headroom_percent(reading, family)
         if percent is not None:
             measured.append((account, percent))
         else:
@@ -1608,8 +1822,18 @@ def headroom_choice(
     if not measured:
         notes.append("headroom: no account's usage could be read — the default decides")
         return None, notes
-    summary = " · ".join(describe_headroom(a, readings[a.slot]) for a, _pct in measured)
-    under = next((a for a, pct in measured if pct < switch_at), None)
+    summary = " · ".join(describe_headroom(a, readings[a.slot], family) for a, _pct in measured)
+    under_line = [a for a, pct in measured if pct < switch_at]
+    if prefer == "reset-soonest" and len(under_line) > 1:
+        never = datetime.max.replace(tzinfo=UTC)
+        soonest = min(under_line, key=lambda a: readings[a.slot].week_resets_at or never)
+        if soonest is not under_line[0]:
+            notes.append(
+                f"headroom: {summary} — {core.label(soonest)}'s week resets first of those "
+                f"under the {switch_at}%-used line (prefer = reset-soonest)"
+            )
+            return soonest, notes
+    under = under_line[0] if under_line else None
     if under is not None:
         notes.append(
             f"headroom: {summary} — {core.label(under)} is first under the {switch_at}%-used line"
@@ -1660,8 +1884,13 @@ def choose_for_handover(
     exclude: Iterable[int],
     automatic: bool = False,
     fetch: Fetch | None = None,
+    family: str | None = None,
 ) -> AccountChoice:
     """The target of a hand-over: HEADROOM FIRST; the ladder only when nothing can be measured.
+
+    ``family`` is the agent's model family (its session's model), so an account whose
+    week for that family is spent, or that refused it with that family's limit, is no
+    target (#277).
 
     A switch exists to move an agent to the account with room, so the binding
     and project-default rungs — explicit choices for a *launch* — do not get to
@@ -1672,8 +1901,9 @@ def choose_for_handover(
     (no least-bad answer, see :func:`headroom_choice`) and otherwise refuses,
     which leaves the agent parked with Claude Code's own wait intact; a manual
     switch keeps the least-bad answer and, when no usage can be read at all,
-    falls back to the ladder minus the account being left. Either reads every
-    candidate's usage live, never from the cache a launch uses: it is moving an
+    falls back to the ladder minus the account being left — and minus an account
+    with a limit mark still in force for the agent (#277): only ``--to`` names one.
+    Either reads every candidate's usage live, never from the cache a launch uses: it is moving an
     agent off an account that just filled, and a figure even a minute old could
     send it to another that has filled since.
 
@@ -1698,13 +1928,32 @@ def choose_for_handover(
         exclude=skip,
         fetch=fetch,
         least_bad=not automatic,
+        family=family,
+        prefer=settings.prefer,
     )
     notes.extend(more)
     if picked is not None:
         return AccountChoice(picked, "headroom", notes)
     if automatic:
         return AccountChoice(None, None, notes)
-    fallback = choose(None, role=role, project=project, exclude=skip, spread=False, fetch=fetch)
+    fallback = choose(
+        None, role=role, project=project, exclude=skip, spread=False, fetch=fetch, family=family
+    )
+    # The ladder's rungs read no marks: on a hand-over they are not a choice someone made for
+    # THIS move, and with every other account marked the machine default moved the agent
+    # back onto the account that had just refused it (review of #304, reviewer-a, major 2).
+    # Only `--to` (``explicit``, above) may name a marked account.
+    if fallback.account is not None:
+        moment = _now()
+        mark = next(
+            (m for m in limit_marks(now=moment).get(fallback.account.slot, []) if m.blocks(family)),
+            None,
+        )
+        if mark is not None:
+            said = f"{core.label(fallback.account)} ({fallback.source}) skipped — "
+            return AccountChoice(
+                None, None, [*notes, *fallback.notes, said + mark.describe(now=moment)]
+            )
     return AccountChoice(fallback.account, fallback.source, [*notes, *fallback.notes])
 
 
@@ -2136,7 +2385,7 @@ def share_for_launch(
     """
     try:
         knobs = accounts_settings()
-        if not (knobs.share_trust or knobs.share_settings):
+        if not (knobs.share_trust or knobs.share_settings or knobs.share):
             return []
         accounts = list_accounts()
         if len(accounts) < 2:
@@ -2158,6 +2407,7 @@ def share_for_launch(
             notes += _share_trust_into(target, scope, accounts)
         if knobs.share_settings and target.managed:
             notes += _share_settings_into(target)
+        notes += _share_parts_into(target)
         return notes
     except Exception as exc:  # an observer of the launch: it costs the sharing, never the launch
         return [f"nothing was shared into this launch's account ({exc})"]
@@ -2389,3 +2639,197 @@ def unshare_settings() -> tuple[Path, list[SettingsChange]]:
         state = sharing.settings_state(account, source)
         changes.append(SettingsChange(account, "unshared" if unlinked else state))
     return source, changes
+
+
+# --- [accounts] share: memory, skills, agents, commands, CLAUDE.md, plugins (P2-W7) -------
+
+
+@dataclass(frozen=True)
+class PartChange:
+    """What ``accounts share`` did to one part on one account, or what it holds there."""
+
+    account: ClaudeAccount
+    part: sharing.SharePart
+    outcome: Literal[
+        "linked",
+        "already",
+        "unlinked",
+        "restored",
+        "refused",
+        "failed",
+        "shared",
+        "own",
+        "none",
+        "elsewhere",
+        "merged",
+    ]
+    detail: str | None = None
+    """The kept copy's name, the reason a part was refused, or what a memory merge noted."""
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "slot": self.account.slot,
+            "account": core.label(self.account),
+            "part": self.part,
+            "outcome": self.outcome,
+            "detail": self.detail,
+        }
+
+
+def shared_memory_root() -> Path:
+    """Where ``memory`` keeps each project's auto memory: under the aisquare home, outside
+    every ``.claude`` path on purpose (anthropics/claude-code#98044: since 2.1.280 every
+    auto-memory write prompts when it lands under a linked ``.claude`` directory)."""
+    return paths.aisquare_home() / "claude-shared" / "memory"
+
+
+def memory_settings_args(cwd: Path) -> list[str]:
+    """``--settings`` pointing Claude Code's auto memory at the shared directory for the
+    project in ``cwd``, when ``[accounts] share`` names ``memory``; else nothing.
+
+    ``autoMemoryDirectory`` is read from any settings scope, ``--settings`` included
+    (Claude Code, Memory). Every launch gets it, the plain claude's too, so all of them
+    read and write one directory per project."""
+    try:
+        if "memory" not in accounts_settings().share:
+            return []
+    except Exception:  # an unreadable config shares nothing
+        return []
+    directory = shared_memory_root() / sharing.memory_key(cwd)
+    return ["--settings", json.dumps({"autoMemoryDirectory": str(directory)})]
+
+
+def share_status() -> list[PartChange]:
+    """What every account holds for every part: the linked parts per managed slot, and
+    ``memory`` as on (``shared``) or off (``none``) for the machine."""
+    knobs = accounts_settings()
+    source = core.default_account().config_dir
+    held: list[PartChange] = []
+    for account in list_accounts():
+        for part in sharing.SHARE_PARTS:
+            if part == "memory":
+                held.append(
+                    PartChange(account, part, "shared" if "memory" in knobs.share else "none")
+                )
+            elif account.managed:
+                held.append(
+                    PartChange(account, part, sharing.part_state(account.config_dir, part, source))
+                )
+    return held
+
+
+def enable_share(
+    parts: Sequence[sharing.SharePart], *, now: datetime | None = None
+) -> list[PartChange]:
+    """Turn ``parts`` on: write them into ``[accounts] share`` and apply them now.
+
+    Linked parts link every managed slot's entry (its own kept beside it); one linked
+    anywhere else is refused and left as it is. ``memory`` merges every account's
+    ``projects/<key>/memory/`` into the shared directory the first time it is turned on
+    (nothing overwritten; a file that differs is kept as ``<name>.slot<N>.md``).
+    Idempotent: a part already on changes nothing.
+    """
+    config = load_config()
+    first_memory = "memory" in parts and "memory" not in config.accounts.share
+    config.accounts.share = list(dict.fromkeys([*config.accounts.share, *parts]))
+    save_config(config)
+    moment = now or _now()
+    source = core.default_account().config_dir
+    changes: list[PartChange] = []
+    for part in parts:
+        if part == "memory":
+            changes += _merge_memory() if first_memory else []
+            continue
+        for account in list_accounts():
+            if account.managed:
+                changes.append(_link_part(account, part, source, moment))
+    return changes
+
+
+def disable_share(parts: Sequence[sharing.SharePart]) -> list[PartChange]:
+    """Turn ``parts`` off: out of ``[accounts] share``, and every linked entry back to the
+    slot's own copy (the one :func:`enable_share` kept), exactly as it was. ``memory``
+    stops being passed to launches; the shared directory stays where it is."""
+    config = load_config()
+    config.accounts.share = [part for part in config.accounts.share if part not in parts]
+    save_config(config)
+    source = core.default_account().config_dir
+    changes: list[PartChange] = []
+    for part in parts:
+        if part == "memory":
+            continue
+        for account in list_accounts():
+            if not account.managed:
+                continue
+            was = sharing.part_state(account.config_dir, part, source)
+            if was != "shared":  # nothing of ours to undo: say what it holds
+                changes.append(PartChange(account, part, was))
+                continue
+            try:
+                restored = sharing.unlink_part(account.config_dir, part, source)
+            except OSError as exc:
+                changes.append(PartChange(account, part, "failed", exc.strerror or str(exc)))
+                continue
+            if restored is not None:
+                changes.append(PartChange(account, part, "restored", restored.name))
+            else:
+                changes.append(PartChange(account, part, "unlinked"))
+    return changes
+
+
+def _link_part(
+    account: ClaudeAccount, part: sharing.SharePart, source: Path, now: datetime
+) -> PartChange:
+    if sharing.part_state(account.config_dir, part, source) == "shared":
+        return PartChange(account, part, "already")
+    try:
+        kept = sharing.link_part(account.config_dir, part, source, now=now)
+    except sharing.SharingError as exc:
+        return PartChange(account, part, "refused", str(exc))
+    except OSError as exc:
+        return PartChange(account, part, "failed", exc.strerror or str(exc))
+    return PartChange(account, part, "linked", kept.name if kept is not None else None)
+
+
+def _merge_memory() -> list[PartChange]:
+    """Every account's per-project memory into the shared root, once (:func:`enable_share`)."""
+    root = shared_memory_root()
+    changes: list[PartChange] = []
+    accounts = list_accounts()
+    keys = sorted(
+        {
+            memory.parent.name
+            for account in accounts
+            for memory in (account.config_dir / "projects").glob("*/memory")
+            if memory.is_dir()
+        }
+    )
+    for key in keys:
+        sources = [
+            (f"slot{account.slot}", account.config_dir / "projects" / key / "memory")
+            for account in accounts
+        ]
+        by_label = {f"slot{account.slot}": account for account in accounts}
+        for label, note in sharing.merge_memory(sources, root / key):
+            changes.append(PartChange(by_label[label], "memory", "merged", f"{key}: {note}"))
+    return changes
+
+
+def _share_parts_into(target: ClaudeAccount) -> list[str]:
+    """``[accounts] share`` at a launch: link the parts ``target`` does not have yet (a slot
+    made after they were turned on), saying what changed or why it could not."""
+    knobs = accounts_settings()
+    linked = [part for part in knobs.share if part in sharing.LINKED_PARTS]
+    if not linked or not target.managed:
+        return []
+    source = core.default_account().config_dir
+    notes: list[str] = []
+    for part in linked:
+        change = _link_part(target, part, source, _now())
+        name = core.label(target)
+        if change.outcome == "linked":
+            kept = f" (its own kept as {change.detail})" if change.detail else ""
+            notes.append(SharedNote(f"{name} now shares the plain claude's {part}{kept}"))
+        elif change.outcome in ("refused", "failed"):
+            notes.append(f"{part} is not shared into {name}: {change.detail}")
+    return notes

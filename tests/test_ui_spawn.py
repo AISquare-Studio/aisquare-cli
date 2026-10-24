@@ -1459,8 +1459,11 @@ def test_take_over_locks_the_label_and_task_to_the_teammates_and_asks_first(
         await pilot.click("#take-over-no")
         await settle(pilot)
         assert isinstance(host.screen, SpawnDialog) and hand_offs.calls == []
-        await pilot.click("#spawn-submit")
-        await settle(pilot)
+        # Pressed, not clicked, and the question awaited: a click right after the question
+        # closed opened nothing on windows-latest (`NoMatches: '#take-over-yes' on
+        # SpawnDialog()`, rc/p0 run 39985702872), the dialog not yet hit-testable again.
+        submit(dialog).press()
+        await wait_for_screen(pilot, spawn_module.ConfirmTakeOverScreen)
         await pilot.click("#take-over-yes")
         await settle(pilot)
         return list(host.results)

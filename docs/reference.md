@@ -9,11 +9,11 @@ removes exactly them):
 | Hook | What it does |
 | --- | --- |
 | `SessionStart` | inject orientation: snapshot pointers, context, team briefing |
-| `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on); deliver the teammate delta; heartbeat |
+| `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on), unless `capture.enabled` is off; deliver the teammate delta; heartbeat, which stamps the session's last prompt and marks its fleet agent's first message taken ([fleet](fleet.md#the-first-message)) |
 | `Stop` | mark the session waiting; renew its task leases |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |
-| `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and wakes the manager, and with `[accounts] on_limit = "switch"` a fleet agent is handed to another account ([accounts](orchestration.md#several-accounts-one-team)); any other error marks it `waiting`, with a feed line naming the error |
+| `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and remembers the limit on the account until that reset, so no pick by headroom sends an agent back to it before then; with `[accounts] on_limit = "switch"` a fleet agent is handed to another account, the line is a `limited_handing_over` event that wakes nobody, and a hand-over that cannot go ahead posts `handover_failed`, which wakes the manager; without a hand-over coming, `limited` wakes it ([accounts](orchestration.md#several-accounts-one-team)); any other error marks it `waiting`, with a feed line naming the error |
 
 `SessionStart` and `UserPromptSubmit` get `"timeout": 120` (seconds): Claude
 Code stops a hook after 60 seconds by default, and these two can wait that
@@ -96,6 +96,7 @@ aisquare
 │                   shutdown [--all] [--yes] [--force] [--forget] · attach
 │                   reap [--all] [--server-down]
 │                   rename <codename> · pause · resume
+│                   capacity · gate [--min-free-mb N] [--wait 15m] [-- CMD …]
 │                   (all with [--project P]; spawn · tell · restart · switch · pause · resume
 │                   take [--as SESSION])
 ├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami
@@ -124,6 +125,26 @@ so the listed surface is only what actually works, but they still run and
 still say plainly that they are not implemented (exit code 70) rather than
 half-working. Follow along in
 [issues](https://github.com/AISquare-Studio/aisquare-cli/issues).
+
+## Configuration keys
+
+Set with `aisquare config set <key> <value>`, read with `config get`; `config
+list` prints every key. The ones that need more than their name:
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `accounts.pick` | `headroom` | how a launch picks an account when nothing names one: `headroom` (the first under `switch_at`) or `default` (the machine default) |
+| `accounts.switch_at` | `85` | percent USED of the fuller window (and, for an agent of that family, its family week) at which an account counts as full |
+| `accounts.prefer` | `priority` | of the accounts under `switch_at`, `priority` takes the first in order; `reset-soonest` takes the one whose week resets first |
+| `accounts.on_limit` | `switch` | on a usage limit, `switch` hands a fleet agent to another account; `wait` leaves it parked |
+| `accounts.wait_if_reset_within_minutes` | `15` | with `switch`, wait instead when the limit lifts this soon |
+| `accounts.share_trust` | `true` | copy a folder's trust into the account a launch runs on |
+| `accounts.share_settings` | `false` | keep every managed account's `settings.json` a link to the plain claude's |
+| `capture.enabled` | `true` | `false`: the `UserPromptSubmit` hook stores no prompt (`aisquare log` stays empty) and spools none for Explainability. The turn's metrics row (no text), the teammate delta and the CI experiment, if you turned it on, carry on. A config that cannot be read records no prompt either, with one line on stderr. |
+| `fleet.first_prompt` | `argv` | how an agent's first message reaches it: `argv` gives a Claude Code agent its message on its command line and types it for any other binary; `type` types it for every agent ([fleet](fleet.md#the-first-message)). |
+| `fleet.prompt_ack_seconds` | `45` | how long `fleet spawn`, `restart` and `switch` wait for the agent's first turn to start, and how long a listing gives it before the agent reads `attention`: "first prompt not taken". |
+| `projects.capture` | `false` | `true`: every directory a hooked session runs in gets a row, as 0.8.0 did; off, only a project you added records anything ([fleet](fleet.md#naming)). |
+| `redaction.level` | `standard` | how much is scrubbed from what leaves the machine: `off`, `standard` or `strict` ([Explainability](connecting-your-agents-to-explainability.md)). |
 
 ## Architecture
 

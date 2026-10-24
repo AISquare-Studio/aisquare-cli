@@ -236,6 +236,8 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "on_limit": "switch",
             "share_trust": True,
             "share_settings": False,
+            "prefer": "priority",  # added by P0-W3 (#277)
+            "share": [],  # what every account has in common (P2-W7, #198)
         },
         "projects": {"capture": False},
         # The persona train and the captain's switch, added since (#201, #240).
@@ -246,8 +248,17 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
         "experimental": {"captain": False},
         # The symbol index (#285).
         "code": {"enabled": True, "max_file_kb": 1024},
-        # Whether a pane's program may set the clipboard (P2-W3, #101).
-        "fleet": {"pane_clipboard": "off"},
+        # The fleet's admission (#283), the first message's two (P0-W1a, #122), and whether a
+        # pane's program may set the clipboard (P2-W3, #101).
+        "fleet": {
+            "max_agents_total": 0,
+            "min_free_mb": 2048,
+            "test_gate_mb": 0,
+            "test_gate_wait_minutes": 15,
+            "first_prompt": "argv",
+            "prompt_ack_seconds": 45.0,
+            "pane_clipboard": "off",
+        },
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

@@ -682,7 +682,13 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
         }
         await pilot.resize_terminal(140, 30)
         await settle(app)
+        # Until the header has followed the resize: one settle read the 90-column layout
+        # on windows-latest (`37 > 60`, run 40013597204), the reflow still to come.
         seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
+        deadline = time.monotonic() + FLEET_HOLD_S
+        while seen["wide"][0] <= 60 and time.monotonic() < deadline:
+            await pilot.pause(0.05)
+            seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
         return seen
 
     seen = drive(

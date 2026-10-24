@@ -140,11 +140,28 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
         "question",
         "agent_exited",
         # #146: an agent parked on a usage limit needs a decision (switch it, or
-        # wait), and the hand-over that moved one is news the manager acts on.
+        # wait) — unless the automatic hand-over is moving it, which is its own kind,
+        # `LIMITED_HANDING_OVER`, and no wake (#277). A hand-over that moved one is
+        # news, not a decision: `switched` arrives with the next delta. One that could
+        # not is the manager's to act on: `handover_failed`.
         "limited",
-        "switched",
+        "handover_failed",
+        # P0-W1a (#122): an agent whose first message never started a turn sits idle
+        # until someone tells it again or restarts it.
+        "prompt_unsent",
     }
 )
+
+#: The kind of the usage-limit line when the automatic hand-over is about to move the agent
+#: (``on_limit = "switch"``): the manager has nothing to do, so it is no wake kind. Woken by
+#: a ``limited`` line, a manager following its cycle switched the agent too — once the
+#: hand-over had finished, it moved the replacement again (#277). Its own KIND, not a
+#: phrase in the text: a reworded line must not change who is woken (review of #304).
+LIMITED_HANDING_OVER = "limited_handing_over"
+#: Every kind a usage-limit line is written as, for the readers that show one.
+LIMITED_KINDS: frozenset[str] = frozenset({"limited", LIMITED_HANDING_OVER})
+#: What that line says of the hand-over.
+HANDING_OVER_SAID = "moving it to another account automatically"
 
 #: Event kinds written for the HUMAN board only: the 🔔 transition and a Claude
 #: Code notification's feed line (#153). They never reach a teammate's prompt
@@ -555,22 +572,34 @@ def _record_delivery(event: TeamEvent, board: _Board) -> TeamEvent:
     return stored
 
 
-def session_account(transcript_path: str | None) -> str | None:
+def session_account(transcript_path: str | None, row: FleetAgent | None = None) -> str | None:
     """Which agent config dir (account) a session runs under, or ``None``.
 
-    Derived from the transcript path in the hook payload
-    (``<config-dir>/projects/<slug>/<session>.jsonl``) rather than from
-    ``CLAUDE_CONFIG_DIR``: the variable only reaches us if the agent happens to
-    export it to hook subprocesses, whereas the transcript path is always in
-    the payload and names the directory unambiguously. Falls back to the
-    variable when the path has an unexpected shape.
+    Asked in the order that cannot be fooled by a shared directory (P2-W7, #198):
+
+    1. the fleet ``row``'s ``account_slot``: the account the launch chose, recorded;
+    2. ``CLAUDE_CONFIG_DIR`` in the hook's environment, which the launch sets for that
+       account;
+    3. the transcript path in the payload (``<config-dir>/projects/<slug>/<id>.jsonl``),
+       for a session nothing launched: under a shared root (a slot's ``projects/``
+       linked to the plain claude's, #198's workaround) it names the shared directory,
+       not the account.
     """
+    if row is not None and row.account_slot is not None:
+        from aisquare.core import claude_accounts as accounts_core  # lazy: no import cycle
+
+        account = accounts_core.find_account(row.account_slot)
+        if account is not None:
+            return str(account.config_dir)
+    env = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if env:
+        return env
     if transcript_path:
         path = Path(transcript_path)
         # …/<config-dir>/projects/<project-slug>/<session-id>.jsonl
         if len(path.parents) >= 3 and path.parents[1].name == "projects":
             return str(path.parents[2])
-    return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or None
+    return None
 
 
 def slot_labels_via(store: ContextStore) -> Mapping[int, str]:
@@ -1879,6 +1908,34 @@ def _shared_row_banner(
     )
 
 
+def _transcript_to_keep(known: TeamSession | None, transcript_path: str | None) -> str | None:
+    """The transcript a session start records: the one reported, unless the row already names
+    a transcript ON DISK and the reported one is not (P0-W3b).
+
+    Measured by P0-W0 on Claude Code 2.1.309 and 2.1.223: ``claude --resume <path>`` under
+    another ``CLAUDE_CONFIG_DIR`` — every resumed ``fleet switch`` and usage-limit hand-over —
+    hands ``SessionStart`` a path under the NEW account's ``projects/`` that is never created;
+    the records keep going to the original file, and ``UserPromptSubmit`` hands that one.
+    Recorded, the missing path raised :func:`_shared_row_banner` at every prompt, and the next
+    restart or switch found no file to resume and started fresh. Two paths that both exist
+    are two transcripts, and recorded as before: the banner is for them.
+    """
+    if known is None or not known.transcript_path or not transcript_path:
+        return transcript_path
+    if transcript_path == known.transcript_path or Path(transcript_path).is_file():
+        return transcript_path
+    return known.transcript_path if Path(known.transcript_path).is_file() else transcript_path
+
+
+def _heals(session: TeamSession, transcript_path: str | None) -> bool:
+    """Whether a prompt's ``transcript_path`` should replace the row's: the row's is not on
+    disk and the prompt's is (:func:`_transcript_to_keep`'s other half)."""
+    recorded = session.transcript_path
+    if not transcript_path or not recorded or transcript_path == recorded:
+        return False
+    return not Path(recorded).is_file() and Path(transcript_path).is_file()
+
+
 def _briefing_events(store: ContextStore, project_id: str) -> list[TeamEvent]:
     """The recent updates an agent is briefed with: the board's last :data:`_BOARD_EVENTS`
     that are an agent's to read, :data:`HUMAN_BOARD_KINDS` left out in the query.
@@ -1921,13 +1978,17 @@ def hook_session_start(
         project_service.capture(store, project)
         known = store.get_session(session_id)
         now = _now()
+        asked_persona, persona_note, named = _asked_persona(store, project.id)
+        # The account the session runs on: its fleet row's first (P2-W7), else the reported
+        # path's, even where the transcript recorded is the original file (`_transcript_to_keep`).
+        account = session_account(transcript_path, named)
+        transcript_path = _transcript_to_keep(known, transcript_path)
         # Computed before upsert_session(), which overwrites transcript_path.
         collision = _shared_row_banner(known, transcript_path, now)
         # Self-reported by the payload — validated before it can reach any
         # other session's injected context.
         model = harness.clean_model_id(model)
         effort = harness.clean_effort(effort)
-        asked_persona, persona_note, named = _asked_persona(store, project.id)
         session = store.upsert_session(
             TeamSession(
                 id=session_id,
@@ -1937,7 +1998,7 @@ def hook_session_start(
                 last_seen_at=now,
                 cursor=store.latest_seq(project.id),
                 transcript_path=transcript_path,
-                account=session_account(transcript_path),
+                account=account,
                 model=model,
                 effort=effort,
                 # Recorded as ASKED, loadable or not (§3.7): this pane's fleet row
@@ -2005,6 +2066,12 @@ def hook_prompt_heartbeat(
     A session unknown to the orchestrator but prompting inside an *active* project
     joins right here (the orchestrator may have been activated after it started) and
     receives the full board + protocol instead of a delta.
+
+    Every prompt stamps the session's ``prompted_at`` and takes its fleet row's first
+    message (``store.mark_prompted``, P0-W1a): the acknowledgement ``fleet spawn``,
+    ``restart`` and ``switch`` wait for, and a typed delivery asks before it presses Enter
+    again. The row is the window's own (``AISQUARE_FLEET_AGENT``), else the one bound to the
+    session. One indexed update, no tmux call.
     """
     if not orchestrator.team_enabled():
         return ""
@@ -2022,6 +2089,8 @@ def hook_prompt_heartbeat(
             # `capture_prompt` had captured already (review of #259, round 19).
             project_service.capture(store, project)
             now = _now()
+            # Read before the row is written, for its account (P2-W7) as for the binding.
+            named = _hook_named_row(store)
             session = store.upsert_session(
                 TeamSession(
                     id=session_id,
@@ -2031,16 +2100,17 @@ def hook_prompt_heartbeat(
                     last_seen_at=now,
                     cursor=store.latest_seq(project.id),
                     transcript_path=transcript_path,
-                    account=session_account(transcript_path),
+                    account=session_account(transcript_path, named),
                     model=harness.clean_model_id(model),
                     effort=harness.clean_effort(effort),
+                    prompted_at=now,
                 )
             )
+            store.mark_prompted(session.id, now, agent_id=orchestrator.env_fleet_agent())
             # This door binds a fleet row too (an agent that started before the
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
-            # under its old holder on this very board (review of #135).
-            named = _hook_named_row(store)
+            # under its old holder on this very board (review of #135). Read above.
             assigned = _assignment(store, session.id, project.id, named=named)
             return _render_board(
                 project,
@@ -2057,6 +2127,13 @@ def hook_prompt_heartbeat(
         # that only rides along with unrelated teammate traffic would go unseen for
         # exactly as long as the two agents were quiet, which is when the
         # interleaved claims do their damage.
+        if _heals(session, transcript_path):
+            # A row that recorded a transcript which never appeared, this prompt's being
+            # the one on disk (P0-W3b, a row written before `_transcript_to_keep`): pointed
+            # at it, so the next restart resumes it and no banner reads it as a second agent.
+            assert transcript_path is not None  # `_heals` says so
+            store.set_transcript_path(session.id, transcript_path)
+            session = session.model_copy(update={"transcript_path": transcript_path})
         collision = _shared_row_banner(session, transcript_path, _now())
         # The fleet-row bind the start hook could not make is tried again here,
         # and the briefing it was owed comes with it (rule 2, second half).
@@ -2066,6 +2143,7 @@ def hook_prompt_heartbeat(
         briefing += _owed_persona_briefing(store, session)
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         store.renew_leases(session.id, lease)
+        store.mark_prompted(session.id, _now(), agent_id=orchestrator.env_fleet_agent())
         # The board's newest seq, read BEFORE the delta: with nothing to deliver the
         # cursor moves there, past the rows the query left out. Read first, it cannot
         # pass an event the delta did not see — whatever is written after has a later seq.
@@ -2165,6 +2243,11 @@ def hook_stop(
         # of an agent `fleet switch` is exiting, whose SessionEnd must still park
         # the claims (review of the #205 fold, round 1).
         store.touch_session(session.id, state="waiting")
+        # A turn ended, and only a prompt starts one: the first message was taken even if its
+        # UserPromptSubmit could not record it (P0-W1a; review of #330, round 1).
+        store.take_first_prompt(
+            _now(), session_id=session.id, agent_id=orchestrator.env_fleet_agent()
+        )
     if deferred is not None and manager is not None:
         # After the row says waiting, never before: nudge_manager refuses every
         # other state. Outside the `with` too — it opens its own connection.
@@ -2420,6 +2503,7 @@ def hook_stop_failure(
     error: str | None,
     message: str | None,
     details: str | None,
+    handing_over: bool = False,
 ) -> TurnFailure | None:
     """The turn ended on an API error — Claude Code's ``StopFailure`` (#146).
 
@@ -2438,6 +2522,12 @@ def hook_stop_failure(
     ``waiting``, unless ``fleet switch`` has marked it :data:`HANDOVER_STATE` —
     with a ``turn_failed`` feed line naming it, so the board does not show a
     session as mid-turn for thirty minutes because its turn died.
+
+    ``handing_over`` is the hook's decision (``services.hooks.turn_failed``) that the
+    automatic hand-over will move this agent: the ``limited`` line then says so
+    (:data:`HANDING_OVER_SAID`) instead of naming ``fleet switch``, and no manager is
+    nudged — one limit, one switch (#277). A hand-over that then fails says so with
+    ``handover_failed`` (:func:`hook_handover_failed`), which does wake it.
     """
     if not orchestrator.team_enabled():
         return None
@@ -2478,24 +2568,27 @@ def hook_stop_failure(
             # The row just read names the manager's project (`_nudge_target`'s rule); asked
             # again there, the same row was read twice (review of #259, round 25, 8/10).
             manager = (
-                agent.project_id
+                None
+                if handing_over
+                else agent.project_id
                 if agent is not None
                 else _nudge_target(store, None, session.project_id)
             )
             _emit(
                 store,
                 session.project_id,
-                "limited",
+                LIMITED_HANDING_OVER if handing_over else "limited",
                 _limited_text(
                     label,
                     text,
                     notice,
                     project=store.get_project(agent.project_id) if agent is not None else None,
+                    handing_over=handing_over,
                 ),
                 session_id=session.id,
             )
         refreshed = store.get_session(session.id) or session
-    if manager is not None:  # not already limited
+    if manager is not None:  # not already limited, and no hand-over coming
         # After the row says limited, never before, and outside the `with`
         # (it opens its own connection): path 2 types into a WAITING manager;
         # a working one reads the event on its next delta or its own Stop. The manager of
@@ -2547,9 +2640,11 @@ def _limited_text(
     notice: claude_accounts_core.LimitNotice | None,
     *,
     project: ProjectInfo | None,
+    handing_over: bool = False,
 ) -> str:
     """The feed line: what stopped, when it lifts, and the one command that moves it — for a
-    fleet agent, whose ``project`` the command names (review of #259, round 21)."""
+    fleet agent, whose ``project`` the command names (review of #259, round 21). With the
+    automatic hand-over coming (``handing_over``), no command: the fleet moves it (#277)."""
     if notice is None:
         head = f"{label} is rate limited: {message}"
     else:
@@ -2557,12 +2652,36 @@ def _limited_text(
         if notice.resets_at is not None:
             # The one formatter (#152; review of #205, finding 9).
             head += f" · resets {claude_accounts_core.format_reset(notice.resets_at, now=_now())}"
-    if project is not None:
+    if handing_over:
+        head += f' — {HANDING_OVER_SAID} (`on_limit = "switch"`)'
+    elif project is not None:
         head += (
             f" — `{project_service.fleet_command('switch', project, label)}` moves it to the "
             "account with the most headroom (or wait for the reset)"
         )
     return head
+
+
+def hook_handover_failed(
+    project_id: str, text: str, *, session_id: str | None = None, label: str | None = None
+) -> None:
+    """The automatic hand-over could not move a limited agent: a ``handover_failed`` event
+    (a wake kind) naming ``fleet switch`` or the reset, and a waiting manager nudged, as a
+    ``limited`` line nudged it before the hand-over took that over (#277)."""
+    if not orchestrator.team_enabled():
+        return
+    with store_session() as store:
+        _emit(store, project_id, "handover_failed", text, session_id=session_id)
+        session = store.get_session(session_id) if session_id is not None else None
+        agent = store.fleet_agent_for_session(session_id) if session_id is not None else None
+        manager = (
+            agent.project_id
+            if agent is not None
+            else _nudge_target(store, None, session.project_id if session else project_id)
+        )
+    if manager is not None:
+        who = label or (short_id(session_id) if session_id else "an agent")
+        _nudge_manager(manager, reason=f"{who}: usage-limit hand-over failed", board=project_id)
 
 
 def hook_note(project_id: str, text: str, *, session_id: str | None = None) -> None:
@@ -3488,6 +3607,34 @@ def _assignment_lines(assignment: Assignment, me: TeamSession) -> list[str]:
         f"It is already {task.status}{holder}. Do not take another task on your own:",
         f'ask the manager — `aisquare note "…" --kind question --to manager --as {sid}`.',
     ]
+
+
+def kickoff_prompt(
+    task: TeamTask,
+    *,
+    role: str,
+    label: str,
+    session_id: str | None,
+    statuses: Mapping[str, str],
+) -> str:
+    """The first message of an agent spawned for ``task`` (P0-W1a, #122): ``You are
+    <label>.``, then the lines its ASSIGNED TO YOU block carries (:func:`_assignment_lines`),
+    worked out as the block works them out at its session start (:func:`_resolve_assignment`),
+    so the kickoff and the block never disagree. A context block starts no turn; this does.
+    ``statuses`` are the board's task statuses, for what a ``todo`` task still waits on."""
+    now = _now()
+    me = TeamSession(
+        id=session_id or label,
+        project_id=task.project_id,
+        role=role,
+        started_at=now,
+        last_seen_at=now,
+    )
+    mine = task.claimed_by is not None and task.claimed_by == session_id
+    waiting_on = unmet_needs(task, statuses) if task.status == "todo" else []
+    expired = task.claim_expires_at is not None and task.claim_expires_at < now
+    assignment = Assignment(task, mine, waiting_on, task.status == "doing" and not mine and expired)
+    return "\n".join([f"You are {label}.", *_assignment_lines(assignment, me)])
 
 
 def _role_cycle(me: TeamSession, project: ProjectInfo | None) -> list[str]:

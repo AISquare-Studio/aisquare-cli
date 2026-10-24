@@ -84,7 +84,9 @@ from __future__ import annotations
 import dataclasses
 import random
 import shlex
+import time
 from collections.abc import Callable, Iterable
+from functools import partial
 from typing import Any, ClassVar
 
 from rich.text import Text
@@ -107,7 +109,7 @@ from textual.widgets import (
     Switch,
     TextArea,
 )
-from textual.worker import Worker, WorkerState
+from textual.worker import Worker, WorkerState, get_current_worker
 
 from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, Target
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
@@ -142,6 +144,13 @@ tab's, and a worker's state change bubbles up to the app past both."""
 
 ACCOUNTS_WORKER = "spawn-accounts"
 """The worker that reads every agent's accounts, so the dialog opens before they are read."""
+
+ROLE_AGENT_WORKER = "spawn-role-agent"
+"""The worker that asks which agent the role launches on for the Binary typed, off the UI
+thread: the answer reads the config and the store (:meth:`SpawnDialog._role_agent`)."""
+
+BINARY_SETTLE_S = 0.3
+"""How long the Binary field rests before its agent is asked: once per pause, not per key."""
 
 ROLE_AGENT = ""
 """The Agent field's ``(role's: …)``: no ``--agent``, the role's agent."""
@@ -510,15 +519,21 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         binary that runs another agent than the role's: the spawn says why).
 
         Asked once per role and binary while the dialog is open: the answer reads the config
-        and the project's choice in the store, and the Binary field asks on every key."""
+        and the project's choice in the store, which the Binary field asks in a worker
+        (:meth:`_binary_changed`)."""
         key = (role, binary)
         if key not in self._role_agents:
-            try:
-                resolved = agent_launch.resolve(role, binary=binary or None, cwd=self.project.root)
-                self._role_agents[key] = resolved.adapter.id
-            except Exception:  # a hint, never a reason to fail
-                self._role_agents[key] = DEFAULT_AGENT
+            self._role_agents[key] = self._resolve_role_agent(role, binary)
         return self._role_agents[key]
+
+    def _resolve_role_agent(self, role: str, binary: str) -> str:
+        """:meth:`_role_agent`'s answer, asked of ``agent_launch.resolve`` (any thread)."""
+        try:
+            return agent_launch.resolve(
+                role, binary=binary or None, cwd=self.project.root
+            ).adapter.id
+        except Exception:  # a hint, never a reason to fail
+            return DEFAULT_AGENT
 
     def _agent_options(self, role: str, binary: str) -> list[tuple[str, str]]:
         """``(role's: <its agent>)``, then every agent this version knows."""
@@ -957,9 +972,44 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     @on(Select.Changed, "#spawn-permission")
     @on(Select.Changed, "#spawn-sandbox")
     @on(Select.Changed, "#spawn-approval")
-    @on(Input.Changed, "#spawn-binary")
     def _agent_changed(self) -> None:
         self._follow_agent()
+
+    @on(Input.Changed, "#spawn-binary")
+    def _binary_changed(self) -> None:
+        """Follow the agent the Binary typed launches on: at once when it is known, else
+        asked in a worker once the field rests (:data:`BINARY_SETTLE_S`). Asked here at every
+        key, each new prefix read the config and the store on the UI thread, and a locked
+        store stalled typing (review r17 of #113, finding 11)."""
+        role, binary = self._role, self.query_one("#spawn-binary", Input).value.strip()
+        if (role, binary) in self._role_agents:
+            self.workers.cancel_group(self, ROLE_AGENT_WORKER)
+            self._follow_agent()
+            return
+        self.run_worker(
+            partial(self._ask_role_agent, role, binary),
+            name=ROLE_AGENT_WORKER,
+            group=ROLE_AGENT_WORKER,
+            thread=True,
+            exclusive=True,  # a newer key's ask replaces this one
+            exit_on_error=False,
+        )
+
+    def _ask_role_agent(self, role: str, binary: str) -> tuple[str, str, str] | None:
+        """In the worker: ``(role, binary, agent)`` once the field has rested, ``None`` for an
+        ask a newer key replaced meanwhile."""
+        time.sleep(BINARY_SETTLE_S)
+        if get_current_worker().is_cancelled:
+            return None
+        return role, binary, self._resolve_role_agent(role, binary)
+
+    def _role_agent_asked(self, worker: Worker[Any], state: WorkerState) -> None:
+        if state is not WorkerState.SUCCESS or not isinstance(worker.result, tuple):
+            return
+        role, binary, agent = worker.result
+        self._role_agents[(role, binary)] = agent
+        if (role, binary) == (self._role, self.query_one("#spawn-binary", Input).value.strip()):
+            self._follow_agent()
 
     @on(Select.Changed, "#spawn-persona")
     def _persona_changed(self, event: Select.Changed) -> None:
@@ -1441,6 +1491,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name == ACCOUNTS_WORKER:
             self._accounts_changed(event.worker, event.state)
+        elif event.worker.name == ROLE_AGENT_WORKER:
+            self._role_agent_asked(event.worker, event.state)
         elif event.worker.name == SPAWN_WORKER:
             self._spawn_changed(event.worker, event.state)
 

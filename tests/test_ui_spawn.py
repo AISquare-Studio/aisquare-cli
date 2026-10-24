@@ -77,6 +77,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
+from aisquare.services import agent_launch
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
@@ -1720,6 +1721,36 @@ def test_the_roles_own_agent_is_named_and_followed_and_sent_as_none(
     seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
     assert seen == ["", "(role's: Codex)", ["", "5"], True]
     assert spawns.calls == [(git_project.id, "coder", UNTOUCHED)]  # the role decides
+
+
+def test_typing_a_binary_never_asks_its_agent_on_the_ui_thread(
+    git_project: ProjectInfo, spawns: SpawnRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r17 of #113, finding 11: the Binary field asked ``agent_launch.resolve`` (the
+    config and the store) on the UI thread for each new prefix, so a locked store stalled
+    every key. It is asked in a worker once the field rests, and the Agent field follows."""
+    real = agent_launch.resolve
+    asked: list[tuple[str, bool]] = []
+
+    def locked_store(role: str = "coder", **kwargs: Any) -> Any:
+        if kwargs.get("binary"):
+            asked.append((kwargs["binary"], threading.current_thread() is threading.main_thread()))
+            time.sleep(0.5)  # the store's lock
+        return real(role, **kwargs)
+
+    monkeypatch.setattr(agent_launch, "resolve", locked_store)
+    typed = "/opt/bin/codex"
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str:
+        dialog.query_one("#spawn-binary", Input).focus()
+        await pilot.press(*typed)
+        await settle(pilot)
+        return str(select(dialog, "agent")._options[0][0])
+
+    assert drive(git_project, scenario) == "(role's: Codex)"
+    assert asked and not any(on_ui for _, on_ui in asked), asked
+    assert len(asked) < len(typed), "once per pause, not per key"
+    assert asked[-1][0] == typed
 
 
 def test_a_preset_agent_is_honoured_and_a_preset_account_brings_its_agent(

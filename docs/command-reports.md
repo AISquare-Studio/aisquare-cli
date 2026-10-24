@@ -118,7 +118,8 @@ check the report without re-running anything. Its fields: `returncode`, `signal`
 `interrupted_by`, `launch_error`,
 the `stdout` and `stderr` byte counts with `truncated`, `output_pipes_held_open`, `cwd`,
 `source_root`, `source_fingerprint_before`, `source_fingerprint_after`,
-`source_capture_error`, and the `project_id`, `task_id` and `session_id` you gave.
+`source_capture_error`, the `project_id` and `session_id` you gave, and the `task_id`
+your `--task` resolved to.
 
 ## Source identity: `--project`
 

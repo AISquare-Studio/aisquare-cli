@@ -320,9 +320,9 @@ def _source_stale(evidence: BriefEvidence, sources: _Sources) -> str | None:
     """Why a recorded pass no longer describes the source in its checkout; None when it
     still does.
 
-    Report evidence is judged against the REPORT's own source root, file by file: a file
-    the check wrote that did not exist before it (``--junitxml``) is new output and is
-    ignored, while a file that existed and changed or went makes the pass stale. Manual
+    Report evidence is judged against the REPORT's own source root, file by file: a path
+    that is check output now (:meth:`_Sources.outputs`) is ignored, and any other change
+    makes the pass stale: a recorded file that changed or went, or a new one. Manual
     evidence keeps the whole-tree fingerprint of the checkout it was recorded in, so any
     change there does. ``sources.override`` replaces both roots.
     """
@@ -416,19 +416,21 @@ def _pass_refusals(
         why.append(f"the source in {report.source_root} cannot be read now ({exc})")
         return why
     made = (sources or _Sources()).outputs(report.source_root, current)
-    if saved is not None and saved.after is not None:
-        during = changed_paths(saved.before, saved.after, ignore=made)
-        if during:
-            why.append(_changed("the source changed while it ran", during))
-    elif report.source_fingerprint_before != report.source_fingerprint_after:
-        why.append("the source changed while it ran")
+    during: list[str] = []
+    paths: list[str] = []
     if saved is not None:
+        if saved.after is not None:
+            during = changed_paths(saved.before, saved.after, ignore=made)
         paths = changed_paths(saved.before, current, output=made, ignore=made)
-        if paths:
-            why.append(
-                _changed(f"the source in {report.source_root} has changed since it ran", paths)
-            )
-    elif fingerprint_of(current) != report.source_fingerprint_before:
+    if during:
+        # Once, on the last changed-path reason: both firing said it twice (re-gate, n11).
+        why.append(_changed("the source changed while it ran", during, remedy=not paths))
+    elif saved is None and report.source_fingerprint_before != report.source_fingerprint_after:
+        why.append("the source changed while it ran")
+    if paths:
+        since = f"the source in {report.source_root} has changed since it ran"
+        why.append(_changed(since, paths))
+    elif saved is None and fingerprint_of(current) != report.source_fingerprint_before:
         why.append(
             f"the source in {report.source_root} has changed since it ran; its files were "
             "not saved, so which one cannot be said. If a check's own output is in the "
@@ -437,15 +439,19 @@ def _pass_refusals(
     return why
 
 
-def _changed(what: str, paths: Sequence[str]) -> str:
+_REMEDY = (
+    "If that is a check's own output, delete it, gitignore it, or have the check write it "
+    "outside the checkout; if it is source, record a check of the source as it is now"
+)
+
+
+def _changed(what: str, paths: Sequence[str], *, remedy: bool = True) -> str:
     """A changed-path reason that says what to do about it. Never only "run it again": a
     file a check writes into the checkout and that already existed changes on every
-    run, and running again changes it again (the tester's finding on #12)."""
-    return (
-        f"{what}: {_listed(paths)}. If that is a check's own output, delete it, gitignore "
-        "it, or have the check write it outside the checkout; if it is source, record a "
-        "check of the source as it is now"
-    )
+    run, and running again changes it again (the tester's finding on #12). ``remedy``
+    is left off a reason the same refusal ends with another one that carries it."""
+    said = f"{what}: {_listed(paths)}"
+    return f"{said}. {_REMEDY}" if remedy else said
 
 
 def _written_in(root: str) -> tuple[dict[str, set[str]], set[str]]:
@@ -612,7 +618,11 @@ def status_of(
                 reason="no check recorded",
             )
             if latest is not None:
-                proof.evidence_id, proof.kind = latest.id, latest.kind
+                proof.evidence_id = latest.id
+                # What backs it: a finding no artifact shows is backed by nothing, so it
+                # is not called manual evidence (re-gate, n7).
+                manual_without = latest.kind == "manual" and latest.artifact is None
+                proof.kind = None if manual_without else latest.kind
                 if latest.requirement_revision != requirement.revision:
                     proof.state = "stale"
                     proof.reason = (
@@ -839,14 +849,17 @@ _CLOSE = "\n</aisquare-requirements>"
 _MORE = "More are linked: `asq brief show` has them all."
 
 
-def record_hint(project_id: str, task_id: str, brief: str) -> str:
+def record_hint(project_id: str, task_id: str, brief: str, requirement: str = "R1") -> str:
     """How to record a check, with the real ids: what the session start and the
     ``task done`` refusal both say. Written with placeholders, an agent copied
     ``--task TASK`` and its own number, and the report named no task the evidence
-    could match (validator round on #136, M1)."""
+    could match (validator round on #136, M1). ``requirement`` is the first one not
+    proven: always R1, copied as given, it named a requirement the task was not linked
+    to (re-gate, m7)."""
     return (
         f"Record a check: `asq exec --project {project_id} --task {task_id} -- CMD`, then "
-        f"`asq brief evidence {brief} R1 --task {task_id} --verdict pass --summary … "
+        f"`asq brief evidence {brief} {requirement} --task {task_id} --verdict pass "
+        "--summary … "
         f"--report ID`. `asq brief check {brief}` re-checks each pass against the source."
     )
 
@@ -878,12 +891,13 @@ def session_requirements(
     lines: list[str] = []
     linked_to: dict[str, str] = {}  # brief label → the first task of this session it links
     linked_ids: dict[str, str] = {}  # brief label → that task's id
+    unproven: dict[str, str] = {}  # brief label → its first requirement not yet a pass
     omitted = False
     # Room for the lines themselves: the frame (tags, the "more" and "record" lines,
     # their separators) is always reserved, so it can always be added. The record line
     # names the first linked brief, known only below: reserved at its longest label.
     longest = max(len(t.id) for t in wanted)
-    reserved = len(record_hint(session.project_id, "t" * longest, "B" + "9" * 6))
+    reserved = len(record_hint(session.project_id, "t" * longest, "B" + "9" * 6, "R99"))
     room = budget - len(_OPEN) - len(_CLOSE) - len(_MORE) - reserved - 2
 
     def size() -> int:
@@ -926,6 +940,8 @@ def session_requirements(
             shown = 0
             for requirement in linked:
                 status = states[requirement.id]
+                if status.state != "pass":
+                    unproven.setdefault(brief.label, requirement.id)
                 state = "pass, as recorded" if status.state == "pass" else status.state
                 line = f"  {requirement.id} [{state}] {_clip(requirement.text)}"
                 if requirement.check:
@@ -954,7 +970,9 @@ def session_requirements(
     if omitted:
         lines.append(_MORE)
     first = next(iter(linked_to))
-    lines.append(record_hint(session.project_id, linked_ids[first], first))
+    lines.append(
+        record_hint(session.project_id, linked_ids[first], first, unproven.get(first, "R1"))
+    )
     return _OPEN + "\n".join(lines) + _CLOSE
 
 

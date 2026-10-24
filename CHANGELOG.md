@@ -9,7 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **Command reports: `asq exec` and `asq reports`** (`docs/command-reports.md`).
-  `asq exec [--project ID] [--task ID] [--session ID] [--raw] [--max-output-bytes N]
+  `asq exec [--project ID] [--task REF] [--session ID] [--raw] [--max-output-bytes N]
   -- CMD …` runs a command once, with no shell and its arguments unchanged, and
   saves a report of how it ended: the exit status (a death by signal is reproduced
   after the report is saved; a command that cannot start is a saved 126 or 127),

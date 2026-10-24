@@ -98,7 +98,10 @@ task.
 
 A recorded pass goes `stale` when a file it covered changes, or when its report changes
 or is gone. Reports that recorded evidence cites are never pruned
-([retention](command-reports.md)).
+([retention](command-reports.md)). Pruning another report can still stale a pass: a
+check's output file holds what the run that last rewrote it wrote, and once that run's
+report is pruned, nothing saved wrote it any more, so it reads as a change. Run the
+check through `asq exec` again, or keep its output outside the checkout.
 
 ## Manual evidence
 
@@ -216,8 +219,9 @@ aisquare brief check B1 --source-root ../wt-assembled
 `brief check` prints every requirement's standing, each pass checked against the
 source now, and exits 1 while anything is `missing`, `failed`, `blocked`, `stale` or
 `unlinked` (no live task is linked to it: its tasks were all dropped, or it was never
-linked); 0 means the brief is proven. By default each pass is compared with the checkout it was
-recorded in. `--source-root` compares every pass with that one checkout instead,
+linked); 0 means the brief is proven. By default each pass is compared with the
+checkout it was recorded in. `--source-root` compares every pass with that one
+checkout instead,
 which is the check a validator runs on the assembled work. It must be this project's
 directory or one of its worktrees (the same repository), or a checkout one of its
 checks was recorded in. Anything else, an unrelated repository included even under

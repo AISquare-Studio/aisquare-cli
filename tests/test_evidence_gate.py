@@ -357,9 +357,9 @@ def test_a_source_file_the_check_changes_is_named_with_the_three_remedies(repo: 
     with pytest.raises(ValueError) as refused:
         _record(brief, task, report)
     said = str(refused.value)
-    assert "the source changed while it ran: snapshot.txt." in said
+    assert "the source changed while it ran: snapshot.txt" in said
     for remedy in ("delete it", "gitignore it", "write it outside the checkout"):
-        assert remedy in said, said
+        assert said.count(remedy) == 1, said  # said once, when both reasons fire (n11)
     assert "run it again" not in said
 
 
@@ -499,6 +499,50 @@ def test_manual_is_said_only_of_a_pass(runner: CliRunner, tmp_path: Path) -> Non
     checked = runner.invoke(app, ["brief", "check", "B1"]).stdout
     assert "R1 r1 [missing] " in shown and "(manual)" not in shown
     assert "R1 [missing]" in checked and "(manual)" not in checked
+
+
+def test_the_record_hint_names_the_first_requirement_not_proven(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, repo: Path
+) -> None:
+    """Re-gate, m7: the hint always said R1. A task linked to R2 only was told
+    `brief evidence B1 R1`, which, copied as given, asked to link the wrong one."""
+    brief = briefs.create("Answer", ["R one", "R two"])
+    task, _ = team.add_task("The second part", role="coder")
+    briefs.link(brief.id, task.id, ["R2"])
+    refused = runner.invoke(app, ["task", "done", task.id])
+    assert refused.exit_code == 1
+    assert f"asq brief evidence B1 R2 --task {task.id}" in refused.output
+    assert "B1 R1 " not in refused.output
+    _start(monkeypatch, repo)
+    team.claim_task(task.id, session_ref=CODER)
+    started = _start(monkeypatch, repo)
+    assert f"asq brief evidence B1 R2 --task {task.id}" in started
+
+
+def test_a_finding_without_an_artifact_is_not_called_manual_in_show(
+    runner: CliRunner,
+) -> None:
+    """Re-gate, n7: brief show's per-task line still said "fail [manual]" for a finding
+    no artifact shows; nothing backs it, so nothing is manual about it."""
+    _, task = _linked()
+    briefs.finding("B1", "R1", task_ref=task.id, summary="broken on empty input")
+    shown = runner.invoke(app, ["brief", "show", "B1"]).stdout
+    line = next(row for row in shown.splitlines() if "broken on empty input" in row and "(" in row)
+    assert "fail: broken on empty input" in line and "[manual]" not in line, line
+
+
+def test_brief_check_lists_every_linked_task_under_a_requirement(
+    runner: CliRunner,
+) -> None:
+    """Re-gate, n3: under a [missing] requirement, brief check listed only the task that
+    passed, never the one still missing."""
+    brief, task = _linked()
+    other, _ = team.add_task("Another part", role="coder")
+    briefs.link(brief.id, other.id, ["R1"])
+    _record(brief, task, _run(_py("print('ok')"), task=task))
+    checked = runner.invoke(app, ["brief", "check", "B1"]).stdout
+    assert "R1 [missing]" in checked
+    assert f"#{task.number} pass" in checked and f"#{other.number} missing" in checked
 
 
 def test_a_report_from_another_board_cannot_back_a_check(tmp_path: Path) -> None:

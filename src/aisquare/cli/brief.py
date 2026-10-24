@@ -360,11 +360,11 @@ def evidence(
 ) -> None:
     """Record a check by a linked task, backed by --report or --artifact.
 
-    A --report pass needs the run to have exited 0, uninterrupted,
-    with its output kept whole,
-    and its source unchanged before the run, after it and now.
-    Artifact-backed evidence is MANUAL: recorded and labelled as such everywhere,
-    because only the validator can judge it.
+    A --report pass needs an uninterrupted run that exited 0.
+    Its output must be kept whole.
+    Its source must be unchanged before the run, after it and now.
+    Artifact-backed evidence is MANUAL, and labelled so everywhere.
+    Only the validator can judge it.
     A fail has `brief finding`'s effect."""
     narrowed: EvidenceVerdict = "pass" if verdict is Verdict.PASS else "fail"
     brief, recorded, changed = _call(
@@ -397,8 +397,8 @@ def check(
 ) -> None:
     """Check every requirement against the source now.
 
-    Exits 1 while any is missing, failed, blocked, stale or unlinked (no live task),
-    and 2 for a --source-root that is not a checkout of the project."""
+    Exits 1 while any is missing, failed, blocked, stale or unlinked (no live task).
+    Exits 2 for a --source-root that is not a checkout of the project."""
     result = _call(
         as_session, lambda: service.check(ref, source_root=source_root, session_ref=as_session)
     )
@@ -412,8 +412,10 @@ def check(
         for status in result.requirements:
             label = status.state + (" (manual)" if status.manual and status.state == "pass" else "")
             _out(f"  {status.id} [{label}] {status.reason}")
+            # Every linked task when there are several: a [missing] requirement listed
+            # only the task that passed, never the one still missing (re-gate, n3).
             for proof in status.tasks:
-                if proof.state != status.state:
+                if len(status.tasks) > 1 or proof.state != status.state:
                     _out(
                         f"      {_task_ref(proof.task_id, proof.task_number)} {proof.state}: "
                         f"{proof.reason}"

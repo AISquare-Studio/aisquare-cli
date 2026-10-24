@@ -167,6 +167,11 @@ list` prints every key. The ones that need more than their name:
 | `fleet.quiet_compact_state_max_age` | `20` | minutes: a manager whose state file is older is not compacted. |
 | `fleet.quiet_compact_resume` | `false` | `true`: after a quiet compaction, type a one-line resume prompt into the manager. |
 | `projects.capture` | `false` | `true`: every directory a hooked session runs in gets a row, as 0.8.0 did; off, only a project you added records anything ([fleet](fleet.md#naming)). |
+| `watch.interval_seconds` | `60` | how often `aisquare watch` looks ([fleet](fleet.md#watching-the-fleet)). |
+| `watch.github` | `false` | `true`: `aisquare watch` and the captain's queue read each project's GitHub pull requests through `gh api`, with ETags. |
+| `watch.github_every_seconds` | `120` | how often the watcher asks GitHub. |
+| `watch.auto_stop` | `true` | each look also stops the workers that have finished ([fleet](fleet.md#capacity)). |
+| `watch.sources` | `{}` | the operator's own commands, `[watch.sources.<name>] command = [...]`, `every_seconds = 300`, each printing JSON lines `{"id", "project", "kind", "summary"}`. |
 | `redaction.level` | `standard` | how much is scrubbed from what leaves the machine: `off`, `standard` or `strict` ([Explainability](connecting-your-agents-to-explainability.md)). |
 | `team.brief_blocks` | `["objective", "acceptance", "boundaries"]` | the blocks a task contract must carry as `<label>:`; `task add` warns about a missing one ([orchestration](orchestration.md#tasks-idempotent-atomic-dependency-aware)). |
 | `team.brief_strict` | `false` | `true`: `task add` refuses a contract that is missing a block (exit 2). |

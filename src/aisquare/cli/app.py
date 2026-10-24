@@ -34,6 +34,7 @@ from aisquare.cli import (
     serve,
     task,
     team,
+    watcher,
 )
 from aisquare.cli import config as config_cli
 from aisquare.cli import metrics as metrics_cli
@@ -158,6 +159,7 @@ launch.register(app)  # needs context_settings to forward agent args
 app.command("serve")(serve.serve)
 app.add_typer(remote.app, name="remote")
 app.add_typer(fleet.app, name="fleet")
+app.add_typer(watcher.app, name="watch")
 app.add_typer(persona.app, name="persona")
 app.add_typer(captain.app, name="captain")
 app.command("ui")(fleet.ui)

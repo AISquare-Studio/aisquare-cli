@@ -2810,6 +2810,11 @@ def _unaskable_root(project: ProjectInfo, exc: OSError) -> FleetError:
     )
 
 
+def board_of_row(agent: FleetAgent) -> str:
+    """The board ``agent``'s row reads, which its manager is woken on (:func:`_board_of_row`)."""
+    return _board_of_row(agent)
+
+
 def _board_of_row(agent: FleetAgent) -> str:
     """The board ``agent``'s sessions read, as its spawn recorded it (``FleetAgent.board``).
 

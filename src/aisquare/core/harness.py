@@ -1320,6 +1320,8 @@ def _role_cycle_core(
             f'`aisquare note "READY: <PRs + evidence>" --kind result --as {sid}` and stop.',
             *_auto_stop_line(),
             *_state_rule(state_file),
+            "Never watch panes, CI or pull requests with Monitor or sleep loops: `aisquare",
+            "watch --detach` runs one watcher for the fleet, and its `watch:` lines wake you.",
             "Never write code. Never merge. Blocked twice on one task? Ask the human:",
             f'`aisquare note "…" --kind question --as {sid}`. Labels are unique and descriptive',
             "(coder-auth, not coder-2).",

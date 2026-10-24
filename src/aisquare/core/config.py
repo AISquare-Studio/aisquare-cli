@@ -787,6 +787,31 @@ class FleetSettings(BaseModel):
     to a server started after the change."""
 
 
+class WatchSource(BaseModel):
+    """One operator command ``aisquare watch`` runs (``[watch.sources.<name>]``): it prints
+    JSON lines ``{"id", "project", "kind", "summary"}``, every ``every_seconds``."""
+
+    command: list[str] = Field(default_factory=list)
+    every_seconds: int = Field(default=300, ge=1)
+
+
+class WatchSettings(BaseModel):
+    """``aisquare watch``, the fleet's one non-AI watcher (P2-W2, #284): what a manager
+    would otherwise watch with its own turns.
+
+    ``interval_seconds`` is one tick. ``github`` (off by default: it leaves the machine)
+    asks GitHub for each project's open pull requests every ``github_every_seconds``,
+    with ETags, so an unchanged answer costs no rate limit. ``auto_stop`` runs P2-W1b's
+    ``reap --finished`` each tick. ``sources`` are the operator's own commands.
+    """
+
+    interval_seconds: int = Field(default=60, ge=1)
+    github: bool = False
+    github_every_seconds: int = Field(default=120, ge=1)
+    auto_stop: bool = True
+    sources: dict[str, WatchSource] = Field(default_factory=dict)
+
+
 class SnapshotSettings(BaseModel):
     """The codebase snapshot ``aisquare project onboard`` packs with Repomix.
 
@@ -936,6 +961,7 @@ class AppConfig(BaseModel):
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
     experimental: ExperimentalSettings = Field(default_factory=ExperimentalSettings)
     persona: PersonaSettings = Field(default_factory=PersonaSettings)
+    watch: WatchSettings = Field(default_factory=WatchSettings)
 
 
 def _dumped(model: BaseModel) -> dict[str, Any]:

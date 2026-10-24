@@ -2276,6 +2276,54 @@ launch with tools this one denies, with the `config set` that keeps them denied 
 `~/.aisquare` without going through `aisquare upgrade` (a second tool install, a synced
 home) is not warned.
 
+### Watching the fleet
+
+A manager that watches panes, CI or pull requests with its own turns (a Monitor, a
+`sleep` loop, a `gh` poll) pays for its whole context on every look, and most looks
+find nothing; a Monitor also expires after 30 minutes at most. `aisquare watch` is
+one plain process that looks instead, and wakes a manager only for something new:
+
+```text
+aisquare watch [--interval 60] [--once] [--json]
+aisquare watch --detach | --stop | --status
+aisquare watch show [<path> | --last] [--json]
+```
+
+Every `[watch] interval_seconds` (60) it looks at:
+
+- **what needs you**: the same scan as the phone's *Needs you* cards, the phone's
+  dismissals honoured. That covers a permission or question dialog, an agent asking,
+  a usage limit, a crashed, lost or failed agent, and a manager or fleet down;
+- **stale agents**: the captain queue's rule for an agent that shows no sign of life;
+- **pull requests**, with `[watch] github = true` (off by default, since it leaves the
+  machine): each project's GitHub repository (its `origin`) through `gh api`, every
+  `github_every_seconds` (120). Each request carries the last ETag, so an unchanged
+  answer is a 304 that costs no rate limit and makes no further call. It reports
+  `pr_approved`, `pr_changes_requested` and `pr_checks_done`;
+- **your own sources**: `[watch.sources.<name>]` with `command = [...]` and
+  `every_seconds = 300`. A command prints JSON lines `{"id", "project", "kind",
+  "summary"}`; `project` is a codename or an id. aisquare ships no integration with any
+  outside service: a source for an inbox is your own script. One that fails is said
+  once per streak while the others carry on.
+
+**What it delivers.** Each item has a stable id, kept in `~/.aisquare/watch/state.json`,
+so the same news is never new twice and a new prompt is a new item. For each project
+with something new, the full items go to `~/.aisquare/watch/<project>/<UTC stamp>.json`
+(mode 600: pane excerpts stay on this machine). Then one board line of kind `watch`,
+addressed to the manager, carries the counts and that path and never an excerpt:
+`watch: 3 new (2 permission, 1 pr_approved): aisquare watch show <path>`. The manager
+then gets one nudge. A working manager is handed the line when its turn ends, because a
+line addressed to it wakes it. With `[watch] auto_stop` (on), each look also stops the
+workers that have finished (see *Auto-stop* under [Capacity](#capacity)).
+
+**One watcher per home.** `--detach` starts it in the `asq-watch` session of the fleet's
+own tmux server and returns; a second refuses and names the first. `--status` says
+whether one runs and how long ago it last looked, and `aisquare doctor`'s `fleet watcher`
+row says the same, and warns when a running watcher has not looked for three intervals.
+`--stop` ends it, and so does a `fleet shutdown` that leaves no agent live on the
+machine: it watches every project, so one project's shutdown leaves it running.
+`--once` looks once, delivers and exits, which suits a cron line.
+
 ## Troubleshooting
 
 **`asq` lags with many projects listed.** Each tick reads only the projects

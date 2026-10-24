@@ -1118,11 +1118,30 @@ def shutdown(
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     _emit_shutdown(report, target)
+    _stop_the_watcher_with_the_fleet()
     if _not_down(report) or report.release_failures:
         # The fleet is not down — or it is, with claims stuck on ended sessions.
         # Said in the report AND in the exit code, so a script that only reads
         # the code cannot mistake either for a clean run.
         raise typer.Exit(code=1)
+
+
+def _stop_the_watcher_with_the_fleet() -> None:
+    """A shutdown that leaves no fleet agent live anywhere stops ``aisquare watch`` too
+    (P2-W2, #284): it watches every project, so one project's shutdown leaves it running."""
+    from aisquare.core.store import store_session
+    from aisquare.services import watch as watch_service
+
+    try:
+        with store_session() as store:
+            live = [a for a in store.live_fleet_agents() if a.role != fleet_service.CAPTAIN_ROLE]
+        if live or watch_service.running_pid() is None:
+            return
+        pid = watch_service.stop_detached()
+    except Exception:  # the fleet is down either way; the watcher has its own --stop
+        return
+    if not get_state().json_output:
+        stdout_console().print(f"stopped the watcher too (pid {pid})", markup=False)
 
 
 def _not_down(report: fleet_service.ShutdownReport) -> bool:

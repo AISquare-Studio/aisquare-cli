@@ -295,6 +295,14 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             },
         },
         "team": {"brief_blocks": ["objective", "acceptance", "boundaries"], "brief_strict": False},
+        # `aisquare watch`, the fleet's one non-AI watcher (P2-W2, #284).
+        "watch": {
+            "interval_seconds": 60,
+            "github": False,
+            "github_every_seconds": 120,
+            "auto_stop": True,
+            "sources": {},
+        },
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

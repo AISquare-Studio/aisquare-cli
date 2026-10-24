@@ -177,6 +177,7 @@ def doctor(
         *_check_manager_board_context(),
         # Can warn (memory below the floor, pressure at warn), so it waits with the late rows.
         _check_fleet_capacity(),
+        _check_watcher(),
         *_experiment_checks(),
         # Only while the experimental captain is off: one ok row saying how to turn it
         # on. On, doctor is as it was before the switch.
@@ -2384,6 +2385,34 @@ def _check_fleet_capacity() -> DoctorCheck:
             "change max_agents_total / min_free_mb in [fleet]",
         )
     return _ok(name, detail)
+
+
+def _check_watcher() -> DoctorCheck:
+    """``fleet watcher``: whether ``aisquare watch`` runs for this home, and how old its
+    last look is (P2-W2, #284). Warn when it runs but has not looked for three intervals: a
+    manager told to wait for ``watch:`` lines would wait for nothing. Read-only."""
+    name = "fleet watcher"
+    try:
+        if (uncreated := _uncreated_home(name)) is not None:
+            return uncreated
+        from aisquare.core.config import load_config
+        from aisquare.services import watch as watch_service
+
+        found = watch_service.status()
+        every = load_config().watch.interval_seconds
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    age = found.age()
+    looked = f"last look {int(age.total_seconds())} s ago" if age is not None else "no look yet"
+    if found.pid is None:
+        return _ok(name, f"not running ({looked}); `aisquare watch --detach` starts it")
+    if age is None or age.total_seconds() > 3 * every:
+        return _warn(
+            name,
+            f"running (pid {found.pid}), {looked}",
+            "aisquare watch --stop, then aisquare watch --detach",
+        )
+    return _ok(name, f"running (pid {found.pid}), {looked}")
 
 
 def _check_anthropic_routing(server: explainability_ops.FleetServer | None = None) -> DoctorCheck:

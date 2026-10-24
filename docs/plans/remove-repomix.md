@@ -152,8 +152,9 @@ own any more.
 
 ## How to verify
 
-- `git grep -i repomix` finds the CHANGELOG (the removal entry, and released entries as
-  history), this file's History section, and the two historical plans.
+- A case-insensitive `git grep` for the packer's name (see History) finds the CHANGELOG
+  (the removal entry, and the released and 0.9.0-bound entries as history), this file's
+  History section, and the two historical plans.
 - `git grep -n 'core.snapshot\|snapshot_core\|SnapshotSettings' -- src tests` finds
   nothing.
 - `make check`, with `AISQUARE_SUITE_CAPTAIN=on` and `off`, in a throwaway `HOME`,

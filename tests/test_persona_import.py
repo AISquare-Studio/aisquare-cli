@@ -389,7 +389,7 @@ def test_a_config_that_will_not_load_refuses_the_llm_path_unless_an_engine_is_na
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        '[persona.import]\nengine = "off"\n\n[snapshot]\nignore = "node_modules"\n',
+        '[persona.import]\nengine = "off"\n\n[explainability]\nroles = "node_modules"\n',
         encoding="utf-8",
     )
     runs = _runs(monkeypatch, _envelope())

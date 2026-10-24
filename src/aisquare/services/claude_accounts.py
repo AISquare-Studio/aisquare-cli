@@ -71,6 +71,7 @@ from aisquare.models import (
     ProjectInfo,
     UsageSample,
     UsageTrend,
+    WeekReset,
 )
 from aisquare.services import agents as agents_service
 from aisquare.services import install_route
@@ -1563,7 +1564,12 @@ def fleet_headroom(
       USED, as read — what the agent rows show beside an agent's account;
     - the **level**: ``good`` over 50 % left, ``fair`` 25-50 %, ``low`` 5-25 %,
       ``critical`` under 5 % (but above 0), ``empty`` at 0 % or with no usable
-      account, ``unknown`` while no enabled account has been read yet.
+      account, ``unknown`` while no enabled account has been read yet;
+    - the **week** (#287), over the usable accounts whose weekly window was read:
+      ``week left by slot`` is ``100 - week % used``; ``week percent left`` their mean;
+      ``weeks left`` the sum of ``(100 - week % used) / 100``, account-weeks (two
+      accounts at 90 % and 20 % used have 0.9 of 2 left); ``week resets soonest`` the
+      account whose week resets first, and when.
 
     ``accounts`` are the accounts to summarise (disabled ones are skipped);
     ``readings`` is slot → reading, and an account without one has not been
@@ -1578,6 +1584,8 @@ def fleet_headroom(
         return HeadroomSummary(level="unknown")
     left_by_slot: dict[int, float] = {}
     session_by_slot: dict[int, float] = {}
+    week_left: dict[int, float] = {}
+    resets: list[tuple[datetime, int]] = []
     taken: list[datetime] = []
     for account in enabled:
         reading = readings.get(account.slot)
@@ -1586,11 +1594,16 @@ def fleet_headroom(
             continue
         left_by_slot[account.slot] = left
         session_by_slot[account.slot] = reading.session_percent
+        if reading.week_percent is not None:
+            week_left[account.slot] = max(0.0, 100.0 - reading.week_percent)
+            if reading.week_resets_at is not None:
+                resets.append((reading.week_resets_at, account.slot))
         if reading.fetched_at is not None:
             taken.append(reading.fetched_at)
     if not left_by_slot:
         return HeadroomSummary(level="empty", needs_login=needs_login)
     mean = sum(left_by_slot.values()) / len(left_by_slot)
+    soonest = min(resets, default=None)
     return HeadroomSummary(
         level=headroom_level(mean),
         percent_left=mean,
@@ -1599,7 +1612,41 @@ def fleet_headroom(
         left_by_slot=left_by_slot,
         session_by_slot=session_by_slot,
         fetched_at=min(taken, default=None),
+        week_left_by_slot=week_left,
+        week_percent_left=sum(week_left.values()) / len(week_left) if week_left else None,
+        weeks_left=sum(week_left.values()) / 100 if week_left else None,
+        week_resets_soonest=(
+            WeekReset(slot=soonest[1], resets_at=soonest[0]) if soonest is not None else None
+        ),
     )
+
+
+def summary_sentence(
+    summary: HeadroomSummary, labels: Mapping[int, str], *, now: datetime | None = None
+) -> str | None:
+    """The fleet in one line (#287): ``Fleet: 58% left now · week: 1.8 of 3 accounts left ·
+    next weekly reset in 2d 4h (Thu 14:00) (account 3)``; ``None`` with no reading.
+
+    The Accounts page's header and ``accounts usage``'s last line. "Now" is the fuller
+    window's share left (:attr:`HeadroomSummary.percent_left`), the week part is
+    account-weeks over the accounts whose week was read, the reset is the soonest
+    (:func:`core.format_reset`, the one reset formatter). ``labels`` is slot → alias;
+    ``now`` is this module's clock unless given.
+    """
+    if summary.percent_left is None:
+        return None
+    now = now or _now()
+    parts = [f"Fleet: {round(summary.percent_left)}% left now"]
+    if summary.weeks_left is not None:
+        parts.append(
+            f"week: {summary.weeks_left:.1f} of {len(summary.week_left_by_slot)} accounts left"
+        )
+    if summary.week_resets_soonest is not None:
+        soonest = summary.week_resets_soonest
+        name = labels.get(soonest.slot) or core.default_label(soonest.slot)
+        reset = core.format_reset(soonest.resets_at, now=now)
+        parts.append(f"next weekly reset {reset} ({name})")
+    return " · ".join(parts)
 
 
 def read_fleet_headroom(

@@ -948,6 +948,7 @@ class AccountsView(Vertical):
                 refresh.tooltip = "ask every account now — otherwise at most once every 5 minutes"
                 yield refresh
                 yield Static(Text("last refreshed never", style="dim"), id="usage-age")
+            yield Static("", id="fleet-summary")
             with AccountsTable(id="claude-table"):
                 yield AccountsHeader(id="claude-header")
                 yield Vertical(id="claude-rows")
@@ -1143,6 +1144,20 @@ class AccountsView(Vertical):
             self.trends.pop(stale.slot, None)  # a re-used slot must not inherit a projection
             self._read_at.pop(stale.slot, None)
             stale.remove()
+        self._paint_fleet_summary(overview)
+
+    def _paint_fleet_summary(self, overview: AccountsOverview | None = None) -> None:
+        """The fleet in one line under the usage bar (#287), from the readings this page holds:
+        ``Fleet: 58% left now · week: 1.8 of 3 accounts left · next weekly reset …``. Pure
+        arithmetic on what was already read (``fleet_headroom``); empty with no reading."""
+        frame = overview if overview is not None else self.overview
+        statuses = frame.accounts if frame is not None else []
+        summary = accounts_service.fleet_headroom(
+            [status.account for status in statuses], self.usage
+        )
+        labels = {status.account.slot: status.label for status in statuses}
+        sentence = accounts_service.summary_sentence(summary, labels)
+        self.query_one("#fleet-summary", Static).update(Text(sentence or "", style="bold"))
 
     def _name_of(self, account: ClaudeAccount) -> str:
         """What the page calls ``account``: its row's name (the alias, which a plain
@@ -1333,6 +1348,7 @@ class AccountsView(Vertical):
             if row.slot in fetched:
                 usage, trend = fetched[row.slot]
                 row.show(row.status, usage, trend=trend)
+        self._paint_fleet_summary()
 
     # --- AISquare: the device flow as a card ------------------------------------------------------
 

@@ -348,12 +348,51 @@ def test_the_press_reads_each_agent_again_and_keeps_only_the_live(
     )
 
 
-def test_a_record_that_cannot_be_read_is_no_press() -> None:
+@pytest.mark.parametrize(
+    "raw", ["{not json", '{"previous": "0.9.0", "agents": []}'], ids=["not-json", "no-time"]
+)
+def test_a_record_that_cannot_be_read_is_no_press(raw: str) -> None:
     with store_session() as store:
-        store.set_ui_state(updates.PRESSED_KEY, "{not json")
+        store.set_ui_state(updates.PRESSED_KEY, raw)
 
     assert updates.take_press() is None
     assert _state(updates.PRESSED_KEY) is None
+
+
+@pytest.mark.parametrize(
+    ("age", "kept"),
+    [(timedelta(minutes=9), True), (timedelta(minutes=11), False), (timedelta(days=3), False)],
+    ids=["9m", "11m", "3d"],
+)
+def test_a_press_older_than_ten_minutes_is_no_press_and_is_forgotten(
+    project: ProjectInfo, age: timedelta, kept: bool
+) -> None:
+    """The record is for the reopen that follows the install: one older than
+    ``PRESS_KEEPS`` is one no reopen took, and is dropped unread (tester's review of #301)."""
+    recorded = updates.record_press([_agent(project, "coder-1", "%3")], NOW - age)
+
+    taken = updates.take_press(NOW)
+
+    assert (taken == recorded) is kept
+    assert _state(updates.PRESSED_KEY) is None, "forgotten either way"
+
+
+def test_a_reopen_long_after_the_press_restarts_nothing(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A press whose reopen failed, and then ``upgrade --one-click`` typed by hand days later:
+    coder-1's pane is gone by then, and the click long ago restarts nothing."""
+    agents = [_agent(project, "coder-1", "%3")]
+    fleet = _Fleet(monkeypatch, {"coder-1": ("lost", "pane gone")})
+    updates.record_press(agents, datetime.now(UTC) - timedelta(days=2))
+
+    assert updates.reattach_after_update() is None
+    assert fleet.restarted == []
+
+    updates.record_press(agents)  # control: a press just now
+
+    assert updates.reattach_after_update() is not None
+    assert fleet.restarted == [("coder-1", "agt_coder-1")]
 
 
 class _Fleet:

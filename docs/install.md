@@ -123,7 +123,9 @@ not inside asq, and a reinstall does not touch them. asq writes down the agents
 running when you press the button; after the reopen, any whose pane is gone is
 restarted on its session, as `aisquare fleet restart` does, and the toast says
 what it found: `✓ aisquare 0.8.3 — 2 agents reattached`, plus each restart and
-its reason. If the install fails, its output stays on screen until you press
+its reason. That record is for this reopen only: if asq cannot open again, or
+you stay in the shell, it is dropped, and one older than ten minutes is never
+acted on. If the install fails, its output stays on screen until you press
 Enter, and the version you had reopens.
 
 On Homebrew, pip or pipx the row still shows, and the dialog gives the command

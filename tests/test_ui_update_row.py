@@ -19,6 +19,7 @@ from typing import Any, ClassVar, TypeVar
 
 import pytest
 from textual.pilot import Pilot
+from textual.timer import Timer
 from textual.widgets import Button, Static
 from textual.worker import Worker
 from typer.testing import CliRunner
@@ -52,6 +53,7 @@ from aisquare.services.lifecycle import UpgradePlan
 from tests.installer_seams import no_real_installer  # noqa: F401 — autouse, applied by import
 from tests.rendered import plain
 from tests.test_lifecycle_upgrade import Machine, Tool, machine, tool  # noqa: F401
+from tests.test_release_check import _state
 from tests.test_ui_doctor_handoff import Terminal, terminal  # noqa: F401
 from tests.test_ui_shell import Script, no_real_tmux, script, seed, shown, status  # noqa: F401
 from tests.ui_workers import settle_page, settle_until
@@ -719,16 +721,22 @@ def test_the_release_check_adds_no_timer_of_its_own(monkeypatch: pytest.MonkeyPa
     a thread of asyncio's default executor while it sleeps (``textual._win_sleep``), and a
     runner has eight: the check's own hourly interval took one for the app's whole life, and
     seven UI tests whose thread workers queued behind the timers failed on Windows CI, the same
-    seven twice (runs 39991862850, 40013337378), reproduced with that sleep emulated."""
-    real = FleetApp.set_interval
-    timers: dict[bool, list[str]] = {True: [], False: []}
+    seven twice (runs 39991862850, 40013337378), reproduced with that sleep emulated.
+
+    Every Textual timer is counted, whoever sets it and however (``set_interval``,
+    ``set_timer``, a ``Timer`` built directly): a guard on ``FleetApp.set_interval`` alone
+    passed a check that re-armed itself with ``set_timer`` (tester's review of #301)."""
+    real = Timer.__init__
+    timers: dict[bool, list[tuple[str, float, str]]] = {True: [], False: []}
     current: list[bool] = []
 
-    def recording(self: FleetApp, interval: float, callback: Any = None, *a: Any, **k: Any) -> Any:
-        timers[current[-1]].append(getattr(callback, "__name__", repr(callback)))
-        return real(self, interval, callback, *a, **k)
+    def recording(self: Timer, event_target: Any, interval: float, *a: Any, **k: Any) -> None:
+        callback = k.get("callback")
+        what = getattr(callback, "__qualname__", type(callback).__name__)
+        timers[current[-1]].append((type(event_target).__name__, interval, what))
+        real(self, event_target, interval, *a, **k)
 
-    monkeypatch.setattr(FleetApp, "set_interval", recording)
+    monkeypatch.setattr(Timer, "__init__", recording)
 
     async def run(with_check: bool) -> None:
         current.append(with_check)
@@ -740,8 +748,10 @@ def test_the_release_check_adds_no_timer_of_its_own(monkeypatch: pytest.MonkeyPa
     asyncio.run(run(True))
     asyncio.run(run(False))
 
-    assert timers[True], "control: the app's own timers were seen"
-    assert timers[True] == timers[False], "the check set a timer of its own"
+    assert ("FleetApp", ui_app.HOUSEKEEPING_SECONDS, "FleetApp._housekeeping") in timers[True], (
+        "control: the app's own timers were seen"
+    )
+    assert sorted(timers[True]) == sorted(timers[False]), "the check set a timer of its own"
 
 
 def _ticks(monkeypatch: pytest.MonkeyPatch) -> list[int]:
@@ -883,6 +893,7 @@ def test_one_click_upgrades_without_asking_and_reopens_at_once_to_reattach(
         raise AssertionError("--one-click asks nothing")
 
     monkeypatch.setattr("aisquare.cli.install.typer.confirm", no_question)
+    updates.record_press([])
 
     result = runner.invoke(cli_app, ["upgrade", "--one-click"])
 
@@ -890,6 +901,7 @@ def test_one_click_upgrades_without_asking_and_reopens_at_once_to_reattach(
     assert len(machine.installs) == 1
     assert terminal.prompts == [], "no Press Enter on success"
     assert terminal.reopened == [["ui", "--after-update"]]
+    assert updates.take_press() is not None, "the record is left for the asq that reopens"
 
 
 def test_one_click_installs_unpinned_and_leaves_the_receipt_free_to_move(
@@ -981,8 +993,10 @@ def test_a_reopen_that_cannot_start_says_what_the_run_did(
     """Only the exec into asq failed: said as that, with how to open asq, never as an upgrade
     error, and never a second attempt behind Enter. After an install the update is done;
     with nothing newer, nothing was installed, which "the update is done" told otherwise
-    (review of #301, N2)."""
+    (review of #301, N2). The press's record goes with it: no asq took it, and a
+    ``ui --after-update`` typed later restarted agents from it (tester's review of #301)."""
     machine.latest = LatestRelease(latest)
+    updates.record_press([])
 
     def cannot(args: list[str]) -> None:
         terminal.reopened.append(list(args))
@@ -999,6 +1013,7 @@ def test_a_reopen_that_cannot_start_says_what_the_run_did(
     )
     assert "stopped on an error" not in result.stderr
     assert terminal.prompts == [] and terminal.reopened == [["ui", "--after-update"]]
+    assert _state(updates.PRESSED_KEY) is None, "no record left behind"
 
 
 def test_one_click_with_nothing_newer_reopens_at_once(
@@ -1037,13 +1052,16 @@ def test_a_ctrl_c_at_a_failed_one_clicks_prompt_stays_in_the_shell(
     machine: Machine,  # noqa: F811
     terminal: Terminal,  # noqa: F811
 ) -> None:
+    """Staying in the shell, nothing reopens to take the press's record: it goes too."""
     machine.installer_exit = 1
     terminal.answer = KeyboardInterrupt()
+    updates.record_press([])
 
     result = runner.invoke(cli_app, ["upgrade", "--one-click"])
 
     assert result.exit_code == 1
     assert terminal.prompts == [_ENTER] and terminal.reopened == []
+    assert _state(updates.PRESSED_KEY) is None, "no record left behind"
 
 
 @pytest.mark.parametrize(

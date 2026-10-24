@@ -24,6 +24,7 @@ from aisquare.core.state import get_state
 from aisquare.core.version import __version__
 from aisquare.services import install_route
 from aisquare.services import lifecycle as lifecycle_service
+from aisquare.services import updates as updates_service
 
 
 def _stdin_is_a_terminal() -> bool:
@@ -327,7 +328,8 @@ def _reopen(
     :data:`ONE_CLICK_REOPEN`, its toast the account of the run. Only a run that ``failed``
     waits for Enter, so the failure is read first, and it opens asq all the same: the
     version that was installed, whose agents were never touched. ``installed`` is a run that
-    installed the new release, which a reopen that cannot start then says.
+    installed the new release, which a reopen that cannot start then says. A one-click run
+    that stays in the shell drops the press's record (:func:`_drop_press`).
     """
     if not reopen or get_state().json_output or not _stdin_is_a_terminal():
         return
@@ -335,6 +337,8 @@ def _reopen(
         try:
             input("Press Enter to go back to asq ")
         except (EOFError, KeyboardInterrupt):
+            if one_click:
+                _drop_press()
             return
     if one_click:
         _reopen_after_one_click(failed=failed, installed=installed)
@@ -350,6 +354,7 @@ def _reopen_after_one_click(*, failed: bool, installed: bool) -> None:
     try:
         selfcli.exec_self(list(ONE_CLICK_REOPEN))
     except OSError as exc:
+        _drop_press()
         if installed:
             said = "the update is done, but asq could not be opened again"
         elif failed:
@@ -360,6 +365,17 @@ def _reopen_after_one_click(*, failed: bool, installed: bool) -> None:
             f"✗ {said} ({exc}). Type `asq` to open it.",
             markup=False,
         )
+
+
+def _drop_press() -> None:
+    """Forget the record *Restart & update* wrote (``updates.forget_press``): the asq it was
+    for did not open, and a ``ui --after-update`` typed later must restart nothing from it
+    (tester's review of #301). A store that will not take it leaves a record that
+    :data:`~aisquare.services.updates.PRESS_KEEPS` ages out."""
+    try:
+        updates_service.forget_press()
+    except Exception:
+        return
 
 
 def _fallback(plan: lifecycle_service.UpgradePlan) -> str:

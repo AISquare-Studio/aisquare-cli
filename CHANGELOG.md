@@ -274,7 +274,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and their sessions keep running; the agents alive at the press are recorded,
   and any whose pane is gone after the reopen is restarted on its session
   (`fleet restart`). The toast says `✓ aisquare 0.8.3 — 2 agents reattached`,
-  and names each restart and its reason. A failed install stays on screen with
+  and names each restart and its reason. The record is that reopen's alone: a
+  reopen that cannot start drops it, and one older than ten minutes is never
+  acted on. A failed install stays on screen with
   "Press Enter to go back to asq", and the old version reopens. Homebrew, pip
   and pipx installs get the row and a dialog with the command that updates
   them; a checkout or an editable install is never checked. A failed lookup

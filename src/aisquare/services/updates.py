@@ -18,10 +18,11 @@ newer (the plan's ``up_to_date``: a version ahead of PyPI's is offered nothing).
 The update is ``aisquare upgrade``'s, handed the terminal as Doctor's Update hands it. At the
 press, :func:`agents_alive_now` reads every agent's row and pane again, and
 :func:`record_press` writes down the ones alive then; the asq that reopens takes that record
-once (:func:`take_press`), and :func:`reattach_agents` restarts each one whose pane is gone
-through ``fleet.restart``, which resumes its session when the transcript is on disk. Agents
-outlive asq on the fleet's tmux server, so normally every one is still there. Nothing else is
-ever restarted: an ordinary start reads no record.
+once (:func:`take_press`), within :data:`PRESS_KEEPS` of the press, and
+:func:`reattach_agents` restarts each one whose pane is gone through ``fleet.restart``, which
+resumes its session when the transcript is on disk. Agents outlive asq on the fleet's tmux
+server, so normally every one is still there. Nothing else is ever restarted: an ordinary
+start reads no record.
 """
 
 from __future__ import annotations
@@ -53,6 +54,11 @@ CHECK_EVERY = timedelta(hours=24)
 ASK_EVERY_SECONDS = 3600.0
 """How often asq asks :func:`check_for_release` while it runs: a failed lookup's retry, at
 most hourly."""
+PRESS_KEEPS = timedelta(minutes=10)
+"""How long the press's record holds. The reopen it is for follows within the install's run;
+one older is a record no reopen took (an exec into asq that failed, say), and a
+``ui --after-update`` typed long after must not restart agents for a click long ago
+(tester's review of #301)."""
 
 _CHECKOUTS = frozenset({install_route.EDITABLE, install_route.LOCAL_SOURCE})
 
@@ -215,14 +221,15 @@ def agents_alive_now(
     ]
 
 
-def record_press(agents: Iterable[FleetAgent]) -> Press:
-    """Write down ``agents``, the ones alive at the press, for the asq that reopens."""
+def record_press(agents: Iterable[FleetAgent], now: datetime | None = None) -> Press:
+    """Write down ``agents``, the ones alive at the press, and when, for the asq that reopens."""
     press = Press(
         previous=__version__,
         agents=tuple(Kept(agent.id, agent.pane_id, agent.label) for agent in agents),
     )
     payload = {
         "previous": press.previous,
+        "at": (now or datetime.now(UTC)).isoformat(),
         "agents": [
             {"id": kept.agent_id, "pane": kept.pane_id, "label": kept.label}
             for kept in press.agents
@@ -239,10 +246,11 @@ def forget_press() -> None:
         store.set_ui_state(PRESSED_KEY, None)
 
 
-def take_press() -> Press | None:
+def take_press(now: datetime | None = None) -> Press | None:
     """The press :func:`record_press` wrote, forgotten as it is read: one reopen acts on it.
 
-    ``None`` when there is none, or when what is there cannot be read as one.
+    ``None`` when there is none, when what is there cannot be read as one, and when it is older
+    than :data:`PRESS_KEEPS` or says no time: forgotten all the same.
     """
     with store_session() as store:
         raw = store.ui_state(PRESSED_KEY)
@@ -252,7 +260,8 @@ def take_press() -> Press | None:
         return None
     try:
         payload = json.loads(raw)
-        return Press(
+        at = datetime.fromisoformat(str(payload["at"]))
+        press = Press(
             previous=str(payload["previous"]),
             agents=tuple(
                 Kept(str(row["id"]), str(row["pane"]), str(row["label"]))
@@ -261,6 +270,9 @@ def take_press() -> Press | None:
         )
     except (ValueError, KeyError, TypeError):
         return None
+    if at.tzinfo is None or (now or datetime.now(UTC)) - at > PRESS_KEEPS:
+        return None
+    return press
 
 
 @dataclass(frozen=True)

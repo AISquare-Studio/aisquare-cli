@@ -894,24 +894,221 @@ Keychain (#263), and sign-in works in practice on macOS. No work remains in this
 
 - [ ] **Version.** All P3 work lands under `[Unreleased]` beside #201, #240 and #267. `pyproject.toml` reads
   `0.8.2` on `b26dd140`; the next release's number is the owner's call (`origin` carries `*0.9-*` branches).
-- [ ] **CHANGELOG.** One entry per workstream, in the file's voice: bold lead, then what changed, then the
+  **Owner's call:** `pyproject.toml` still reads 0.8.2; the number is set at release.
+- [x] **CHANGELOG.** One entry per workstream, in the file's voice: bold lead, then what changed, then the
   measured figure where there is one.
-- [ ] **Migration notes.** Store: none (W5 uses marker files, W2c uses cache files plus existing
+  **Done (P3-REL):** one entry per workstream; the seven body-only entries (#349, #352, #357, #359, #362, #370, #378) folded in.
+- [x] **Migration notes.** Store: none (W5 uses marker files, W2c uses cache files plus existing
   `claude_usage` rows, the W8 `host` column is postponed). **#270 changes task keys** for titles with
   non-ASCII words; the legacy lookup keeps re-adds idempotent; say so under "Upgrading". **#271** stops
   writing pins; a pin an earlier build wrote stays until the next forget of that project or a `project unpin`.
-- [ ] **New config keys** with defaults, documented in `docs/reference.md`: `[fleet.roles.<role>]
+  **Done (P3-REL):** `docs/fleet.md` "Upgrading": no store migration, the #270 keys, the #271 pins, moving back.
+- [x] **New config keys** with defaults, documented in `docs/reference.md`: `[fleet.roles.<role>]
   remote_control = false` (W4); `[captain] gate = true`, effective only with the captain on (#216, if built
   this train). No `config_version` step expected; confirm against `core/config.py`'s `_keep_unknown` rules.
-- [ ] **New commands** in `tests/test_stubs.py` `IMPLEMENTED`: `accounts statusline`, `accounts sessions`,
+  **Done:** `fleet.roles.<role>.remote_control` in `docs/reference.md`'s one Configuration keys table; `[captain] gate` in `docs/captain.md` and "Upgrading", set in `config.toml` (it is read raw from `[captain]`, no `config set` key, #339's owner call 8). No `config_version` step.
+- [x] **New commands** in `tests/test_stubs.py` `IMPLEMENTED`: `accounts statusline`, `accounts sessions`,
   `accounts adopt` (if decided), `fleet adopt`; and the console script `asq-statusline` in `pyproject.toml`
   `[project.scripts]`.
-- [ ] **Uninstall.** `aisquare uninstall` removes the `statusLine` entries aisquare wrote (W2c).
-- [ ] **Rollout defaults.** Remote Control is off. The statusline is opt-in (`--install`). The board strip and
+  **Done:** `accounts statusline`, `accounts sessions`, `fleet adopt` in `IMPLEMENTED`; `asq-statusline` in `[project.scripts]`. `accounts adopt` is out (owner, 2026-10-23).
+- [x] **Uninstall.** `aisquare uninstall` removes the `statusLine` entries aisquare wrote (W2c).
+  **Done (#362):** removes only ours, restoring a wrapped one byte for byte.
+- [x] **Rollout defaults.** Remote Control is off. The statusline is opt-in (`--install`). The board strip and
   the Accounts "Next:" line are on. Phase A of adopt is behind the owner's decision.
-- [ ] **README** stays under 250 lines; add only a link to `docs/instructions.md`.
+  **Done:** Remote Control off, the status line opt-in, the strip and "Next:" on, phase A out.
+- [x] **README** stays under 250 lines; add only a link to `docs/instructions.md`.
+  **Done:** 150 lines; one link to `docs/instructions.md`.
 - [ ] **A real-Claude pass on the RC head** covers W1's round trip, W3's matrix, W4 on one Pro/Max account and
   W2c on two slots. Paste the outputs into the RC PR.
+  **Deferred** to the owner's single post-main live run (manager, seq after 1135). Reduced-scale evidence so far: W2c's one live session (#362).
+
+## Results (2026-10-24)
+
+Every workstream, its PR, and what was measured. Reduced scale throughout (the owner's rule: at most 5 agents and 30 minutes, the account with most headroom, a scratch home and tmux socket); the one live Claude run is W2c's. Local runs were targeted, serial or `-n 2`; CI's full matrix is the release evidence.
+
+- **P3-W6a** (#310, squash ba63863e): `next_label` and `_fork_label` trim the role or label stem so a generated label never exceeds 24 characters. An over-long `--label` is now refused with a suggested label that fits, and the manager cycle states the 24-character limit (#291). Scale/measurement: none (unit/pilot tests only). The body says "No numbers before and after". Not done here: only targeted tests were run locally; the full suite was left to CI. The Spawn dialog's offline fallback `_label_for` is untouched.
+- **P3-W6b** (#312, squash 89dc2cb5): `_fts_match` quotes every word, so `AND`/`OR`/`NOT`/`NEAR` are searched as words instead of crashing with exit 1. Words are now `[^\W_]+`, so Cyrillic, Japanese and Devanagari terms match (#269). Scale/measurement: none (unit/pilot tests only). Not done here: precise Indic search needs a different FTS5 tokenizer and an index rebuild, which is outside W6b.
+- **P3-W6c** (#314, squash 6ad5002c): `task_key` keys titles in any script (NFKC, casefold, L/N/M categories). Emoji-only titles get `t-<sha256[:12]>`. ASCII titles key exactly as before, and `add_task` finds a pre-upgrade task by its legacy key (#270). Scale/measurement: none (unit/pilot tests only). ASCII parity is pinned against 3,000 random titles. Not done here: a pre-upgrade non-ASCII task stored under the key `task` is not found again (Upgrading note).
+- **P3-W7** (#316, squash aa4c9f38): adds `docs/instructions.md`, which documents the five instruction channels and their order, how to resolve a `CLAUDE.md` conflict, subagents, `/doctor prompt-audit` and the 10,000-character hook cap (#292). Docs only. Scale/measurement: none (unit/pilot tests only). Not done here: W7b (trimming the persona near the hook cap) was skipped. `/doctor prompt-audit` and the hook cap were quoted from docs and not re-measured.
+- **P3-W6d** (#317, squash 79f85451): `project forget` and `prune` read the pin itself. They clear a pin only when it named the dropped project, and never move or write one. `--json` gains `unpinned`, and `active` is now always `null` (#271). Scale/measurement: none (unit/pilot tests only). Not done here: the link to the manager's ~17:15Z pin switch is "likely, not confirmed".
+- **P3-W8** (#318, squash a78a3ba6): docs only. Adds the multi-machine SSH runbook (`docs/runbooks/multi-machine-ssh.md`), a dedicated-user plus forced-command recipe, and a postponed design sketch (`docs/plans/multi-machine-fleet.md`) (#293). Scale/measurement: the forced-command script was exercised with a stub `aisquare` (refusals for `rm -rf`, `--bin`, a wrong `cd`; `$(id)` stayed literal); there are no numbers. Not done here: the two-machine walk was waived by the manager and joins the post-main live run. Issue #293's title and body were not edited.
+- **P3-W1** (#324, squash 0de2fa19): after a sign-in, asq returns to where the user started (Welcome, the persona picker, or the Spawn dialog with its form kept). The Accounts page gets a "Next:" line, the board gets a "needs you" strip and an empty-state row, and `board_help` gets "what to do here" (#286, #215). Scale/measurement: key presses from a landed sign-in to the manager's pane went from **no path** before to **2** after (headless Welcome round trip). Not done here: the handoff's novice first-run measurement on the RC build, from an empty `AISQUARE_HOME`, is still owed. It needs a person.
+- **P3-W9a** (#326, squash c4c2ad3d): a cancelled persona import (dialog Cancel or Ctrl-C) stops its engine's process group, writes nothing and exits 130. `persona import` accepts several sources and `--from-dir`, with one receipt table or a JSON list. Adds the dated superseded note for #210 in the plan doc (#211, #294, #210, #213). Scale/measurement: cancel-to-engine-return over 5 runs on macOS went from up to **180 s** (the child kept running) to median **0.19 s**, max **0.20 s** (nothing left running). Tests assert ≤ 2.0 s. Not done here: the #210 and #213 close comments are drafted for the owner to post; the issues were not closed.
+- **P3-W10** (#334, squash 43a12d05): App settings gains a "role bindings" section: show, Edit (masked env values), Unset key, Clear and New bind. Each writes byte-for-byte what `team bind` writes. Doctor gains a `role bindings` row that checks `CLAUDE_CONFIG_DIR` hooks and `CLAUDE_CODE_TMPDIR` writability (#98, #262). Scale/measurement: none (unit/pilot tests only). Walked by reviewer-b at 80x30 and 160x40 (UI evidence on task #38). The author did not comment on #98.
+- **P3-W4** (#335, squash bd926daa): adds an opt-in `[fleet.roles.<role>] remote_control` setting and the `--remote-control/--no-remote-control` flag on `launch` and `fleet spawn`, plus a Spawn dialog switch. Claude Code's Remote Control is added with a `<project> · <label>` title. Blockers (non-Claude binary, foreign `ANTHROPIC_BASE_URL`, OAuth token, tracing) are skipped with a note. Adds `fleet ls --json` `remote_control` and a doctor row (#289). Scale/measurement: none (unit/pilot tests only). Not done here: the time from spawn until the session appears in claude.ai/code is owed. It needs a real login and is to be measured by hand on the RC.
+- **P3-W9b (gate)** (#339, squash 5a6e04ef): adds the captain owner gate. Eight privileged tools refuse outside a 15-minute act-as-owner window opened by an RFC 6238 TOTP code. Codes cannot be reused. Throttling locks entry for 5 minutes after every third wrong code, doubling up to 24 hours. The audit carries the window id and redacts codes. Adds `captain gate enroll/unlock/lock/status`, `unlock`/`lock` tools (26 total) and a `gate` extra (pyotp, segno). It fails closed (#216). Scale/measurement: none. The body says "No live measurement… no real Claude ran". Not done here: only TOTP ships; the verifier protocol leaves room for Touch ID or Windows Hello later.
+- **P3-W3** (#340, squash 62ae9e0f): a paste or file drop that the focused widget did not take goes to the one live `TerminalPane` on screen. With no live pane there is a toast. Under WSL a lone Windows file path is rewritten with `wslpath -u`. `AISQUARE_PASTE_LOG` records each paste (#288). Scale/measurement: none (unit/pilot tests only). Not done here: item 1 (the terminal reproduction matrix across six terminals) is owed. Item 3 (empty bracketed paste) waits on that matrix.
+- **P3-W9b (editor)** (#342, squash 63bc1d72): Personas Edit opens `$VISUAL`/`$EDITOR`/`vi` in a tmux-backed pane (session `asq-persona-edit`) on a cache draft. On exit the draft is checked and saved through `services.personas`; unchanged edits write nothing, a refused draft can be reopened, and a non-zero exit saves nothing. It falls back to the TextArea editor without tmux or an editor, or when the window cannot open (#212). Scale/measurement: none (unit/pilot tests; one test runs on a real tmux server). Walked by reviewer-a, all 10 steps (UI evidence on task #39).
+- **P3-W1x** (#349, squash ea753719): 80-column fixes from the UI walks. Welcome's Sign in is reachable by keyboard, the Spawn dialog's Remote control note wraps, the persona editor's buttons stay on an 80x30 screen, and the Personas tab's Import and New buttons are visible. Also from #335's review: `docs/remote.md` covers who can drive an agent, the doctor's `remote control` row reads the fleet server's environment, and the fix line says tracing is turned off machine-wide (board task #50). Scale/measurement: none (unit/pilot tests only); the body gives layout figures (49 columns available against about 86 needed, and dialog row counts 37/32 at 80x30). Not done here: `docs/remote.md` was not walked. Item 5 moved to P3-FU2.
+- **P3-FU2** (#352, squash cd6c909e): `persona import --from-dir` skips non-skill and repository files (README, LICENSE, …) as `skipped` rather than spending an engine on them, and `-` may appear only once in a batch. A paste with several live panes now tells the user to click one, and `wslpath` runs off the UI thread. The captain audit masks dash-joined codes, and the Images paragraph links Remote Control again (board task #53). Scale/measurement: engine calls for a sample `--from-dir` library went from **4** before to **1** after. Token counts were not measured (no live engine was run). Not done here: two live panes and the WSL conversion could not be walked (asq shows one view; the author was on macOS).
+- **P3-W2a** (#357, squash 87cf98f6): `HeadroomSummary` gains fleet week figures. The sidebar status line shows the fleet's share left (`● 3× claude 58%`). One `summary_sentence` appears on the Accounts page and after `accounts usage`, which also gains an `all` row. `--json accounts usage --summary` returns `{accounts, summary}` (#287). Scale/measurement: none (unit/pilot tests only). The handoff's acceptance case is pinned: `week_percent_left` 45.0 and `weeks_left` 0.9. Not done here: #49's `weekly_scoped` parsing has not landed.
+- **P3-W2b** (#359, squash 5188caa9): a `TeamStrip` under the Manager tab's info line counts live non-manager agents per role and state, using the sidebar's icons. It adds no reads, is hidden when only the manager runs, and opens the Board tab on click (#287). Scale/measurement: none (unit/pilot tests only). Not done here:
+- **P3-W2c** (#362, squash 467fa675): `asq-statusline` (standard library only) records each Claude Code session's rate limits and prints a one-line status. `accounts statusline --install/--wrap/--uninstall` and `aisquare uninstall` manage it. The usage cache ingests these readings, so the endpoint is asked less. `accounts sessions` and the Accounts page's "Sessions on this machine" list the device's sessions (#287). Scale/measurement: import cost **20.3 ms** (median of 9, range 19.2 to 22.4; target ≤ 30 ms) against 173 ms for the full CLI. A whole run took **50 ms** wall (49 to 52). Live run at reduced scale: Claude Code 2.1.310, one session on slot 4, one prompt; the status line read `acct 4 · 5h 9% · wk 7% · ctx 4%` against the endpoint's 10%/7%. Not done here: the one-hour endpoint-request baseline (4 agents on 3 accounts) was not measured.
+- **P3-W5** (#370, squash 40f3b4f0): `fleet adopt <session-id|transcript>` resumes a hand-started conversation as a fleet agent, on its own account and in its own directory, keeping its session id. Refusal codes are `held`, `owned_by_the_fleet`, `not_onboarded`, `no_such_conversation` and `not_on_a_known_account`. `fleet adopt --list` is the picker, and the manager cycle gains one sentence. Adds the phase C docs (#290). Scale/measurement: none (unit/pilot tests only). Not done here: phase A (`accounts adopt <dir>`) is out of scope by owner decision. asq's *Adopt a conversation…* is #378.
+- **P3-W5 (asq)** (#378, squash 00831dbd): the Accounts page's *Adopt a conversation…* under *Sessions on this machine* opens `fleet adopt --list` as a picker, read in a worker; a conversation a `claude` still holds, or whose directory is no onboarded project, says why and cannot be picked, and Enter on another adopts it in a worker (a writer in the hand-over table) (#290). Scale/measurement: none (a pilot test). Walked by reviewer-a at 80x30 and 200x50 (UI evidence on task #45).
+
+## Owner calls taken
+
+Built as each handoff section proposed, for the owner to confirm. One row per call in each PR body.
+
+### Calls that need the owner
+
+The consequential ones (security, a default a user notices, privacy, cost, or hard to reverse). The full table follows.
+
+| # | Call (PR) | What was chosen | How to flip it |
+| --- | --- | --- | --- |
+| 1 | **The captain's owner gate** (#339) | On while the captain is on, and **fails closed** until `aisquare captain gate enroll` with the `gate` extra. Eight owner tools are gated; `tell`, the manager ask, reads, notes, tasks and `bt` never are. A 15-minute window; three wrong codes lock entry for 5 minutes, doubling to 24 h. | `[captain] gate = false` in `config.toml`; the gated set is `gate.PRIVILEGED` |
+| 2 | **A spoken code can be overheard** (#339) | Documented in `docs/captain.md`, not engineered around. Only TOTP ships; the verifier is a protocol for Touch ID or Windows Hello later. | docs / a later verifier |
+| 3 | **Remote Control** (#335, #349) | **Off for every role.** Carried on the row's spec and `launch --remote-control`, not an agent argument, so the blockers (another binary, a foreign `ANTHROPIC_BASE_URL`, an OAuth token, tracing) can stand aside. The docs say an agent keeps its role's permission mode and **anyone signed in to that Claude account can drive it**. | `fleet.roles.<role>.remote_control = true`, or `fleet spawn --remote-control` |
+| 4 | **The status line's install** (#362) | **Opt-in.** `--install` sets ours only where no `statusLine` is set, on every account unless `--slot`. A status line of yours is never replaced (`--wrap` keeps it and runs it first). | `--slot S` for one account; `--install --wrap` |
+| 5 | **The status line's uninstall** (#362) | `--uninstall` and `aisquare uninstall` remove only ours. A wrapped one goes back byte for byte (from a side copy made with at most the file's own 0600 bits), and a file ours created is removed. A failed removal keeps the package. | code change |
+| 6 | **The status line's records** (#362) | One file per session under `~/.aisquare/cache/statusline/`: ids, cwd, model and the usage figures, **never a prompt**, deleted after a day. `capture.enabled = false` does **not** stop them. The usage cache takes a reading only with both windows. | code change (gate records on `capture.enabled`) |
+| 7 | **Adopt's scope** (#370, #378; owner decision 2026-10-23) | **Phase A is out**: no directory the CLI did not create is adopted. `fleet adopt` searches only the CLI's own accounts, refuses a conversation a live `claude` holds, one the fleet owns and one in no onboarded project, and resumes it in its own directory without a worktree. | owner decision to reopen phase A |
+| 8 | **The manager's adopt sentence** (#370) | One sentence in the manager's cycle ("on request only…"). It costs tokens on every prompt. | move it to an on-request skill |
+| 9 | **`persona import --from-dir`** (#352) | Reads skill directories, `SKILL.md`, and non-repository `.md`/`.markdown`/`.txt`. A README, LICENSE or CHANGELOG is listed `skipped` (never a refusal) and spends no engine: 4 engine calls became 1 on the sample library. | name the file on the command line to import it anyway |
+| 10 | **Task keys for non-ASCII titles** (#314) | No store migration. A legacy-key lookup keeps re-adds idempotent, but a pre-upgrade task keyed `task` is not found again (CHANGELOG *Upgrading*). Emoji-only titles key `t-<hash>`. | code change; hard to reverse once keys are stored |
+
+### Every call
+
+| Workstream | PR | Call | Default taken | How to flip |
+| --- | --- | --- | --- | --- |
+| P3-W6a | #310 | 1. What to trim | Trim the stem; keep `-N`/task short id whole | code change |
+| P3-W6a | #310 | 2. Validating generated bases | Length-only (fits 24), not full `is_label`; differs from handoff wording | ~6-line `valid()` in `next_label` plus a change to the pinned #240 test |
+| P3-W6a | #310 | 3. Suggestion form | `slugify(wanted, limit=24)`, offered only if it passes `is_label` | code change |
+| P3-W6a | #310 | 4. `_fork_label` in scope | Yes (manager's call); shares the `_fitted` trim | code change |
+| P3-W6b | #312 | 1. Tokenizer | `[^\W_]+`; Indic split mirrors the index's `unicode61` | different FTS5 tokenizer plus an index rebuild (outside W6b) |
+| P3-W6b | #312 | 2. Word joining | ` OR ` (any word), ranked; no phrase/AND semantics | code change |
+| P3-W6c | #314 | 1. Migration | No store migration; legacy-key lookup in `add_task` | code change |
+| P3-W6c | #314 | 2. Legacy key `task` | Excluded from lookup | `legacy not in (derived, "task")` → `legacy != derived`, plus a test |
+| P3-W6c | #314 | 3. ASCII title with no letters/digits | Still keys `task` | code change |
+| P3-W6c | #314 | 4. Clip | 64 code points after strip, no re-strip | code change |
+| P3-W6c | #314 | 5. Emoji in keys | Excluded; emoji-only → `t-<hash>` | keep `So` in keys (loses emoji→hash rule) |
+| P3-W7 | #316 | 1. W7b persona trim | Skipped; overlaps P1 WS-1 | code change (separate workstream) |
+| P3-W7 | #316 | 2. Naming pool entries | By tag `claude-code`; commands in a checked `sh` fence | docs change |
+| P3-W7 | #316 | 3. `/doctor prompt-audit` and hook cap | Quoted from Claude Code docs, not re-measured | docs change |
+| P3-W6d | #317 | 1. Pin after forget/prune | Clear, never move; active follows cwd | code change |
+| P3-W6d | #317 | 2. `--json` shape | Add `unpinned`; `active` always `null`; `active_changed` = pin cleared | code change |
+| P3-W6d | #317 | 3. Pin read | Strictly at start; unreadable `state.json` refuses the forget | code change |
+| P3-W8 | #318 | 1. Forced command | Recommended as hygiene, not confinement; dedicated user is the boundary | docs change |
+| P3-W8 | #318 | 2. Watching B | `ssh -t` with the human's own key (`restrict` gives no tty) | docs change |
+| P3-W8 | #318 | 3. Not done here | Two-machine walk waived to post-main live run; #293 not edited | n/a (deferred) |
+| P3-W1 | #324 | 1. Clearing the intent | Single-use; leaving Accounts drops it | code change |
+| P3-W1 | #324 | 2. Cancel after landing / failed hooks | Both count as abandoned; nothing reopens | code change |
+| P3-W1 | #324 | 3. Next step's project | First listed project if no manager live; else "spawn under a project" | code change |
+| P3-W1 | #324 | 4. `stale` in strip | Not counted | code change |
+| P3-W1 | #324 | 5. When a question counts | While it is the asker's last event and the asker is live | code change |
+| P3-W1 | #324 | 6. 🔔 source | Sessions in `attention` from the tick | code change |
+| P3-W1 | #324 | 7. Review gating | Reads board's cached feed (≤ 2,000 events) | code change |
+| P3-W1 | #324 | 8. `form_state()` contents | Role, binary, account, persona, label, task, prompt; not worktree/permissions/args/hand-off | code change |
+| P3-W1 | #324 | 9. Empty state | A row in the table body (`EMPTY_ROW`) | code change |
+| P3-W1 | #324 | 10. Where picker/dialog reopen | Over the Accounts page; no navigation back | code change |
+| P3-W1 | #324 | 11. Test layout | New `test_ui_sign_in_returns.py`, `test_board_needs_you.py` | code change |
+| P3-W9a | #326 | 1. Ctrl-C path | Engine's own stop path (`KeyboardInterrupt`), exit 130 | code change |
+| P3-W9a | #326 | 2. Child session | Own POSIX session; whole group ended; Windows kills direct child only | code change |
+| P3-W9a | #326 | 3. Single-source output | Unchanged; table/JSON list only for 2+ sources or `--from-dir` | code change |
+| P3-W9a | #326 | 4. `--from-dir` entries | Every non-hidden entry (narrowed later by #352) | code change |
+| P3-W9a | #326 | 5. Ctrl-C in a batch | Keep imported; current marked `cancelled`; exit 130 | code change |
+| P3-W10 | #334 | Model/effort per role | Stay out of Settings (`team harness` / `AISQUARE_MODEL_<ROLE>`) | code change |
+| P3-W10 | #334 | `team bind --import` | Dropped (moot since 0.8.1 capture-off) | code change |
+| P3-W10 | #334 | Other env values | Shown by name only | code change |
+| P3-W10 | #334 | Doctor with no dir bindings | No row (silent) | code change |
+| P3-W10 | #334 | Edit masking | Masks every env value, including the two dirs | code change |
+| P3-W10 | #334 | Bind form account statuses | Not loaded from App settings | code change |
+| P3-W4 | #335 | 1. How the choice travels | `LaunchSpec.remote_control` + `launch --remote-control`, not agent arg (departs from handoff) | code change |
+| P3-W4 | #335 | 2. Window commands | Unchanged unless on, or turning a role default off | code change |
+| P3-W4 | #335 | 3. Tracing | A blocker; fix offers `aisquare explainability disable`; nothing automatic | code change |
+| P3-W4 | #335 | 4. Doctor row | Only while some role has it on | code change |
+| P3-W4 | #335 | 5. Title | `<project dir> · <label>`; role for hand launch; `no board` | code change |
+| P3-W4 | #335 | 6. Hand launch | Honours the role setting | `--no-remote-control` / `[fleet.roles.<role>] remote_control = false` |
+| P3-W4 | #335 | 7. Older specs | `remote_control = False` | code change |
+| P3-W4 | #335 | 8. Dialog label | "Remote control", disambiguated by caption | code change |
+| P3-W9b | #339 | 1. Gate default | On while captain is on; fails closed until enrolled | `[captain] gate = false` |
+| P3-W9b | #339 | 2. Ungated tools | `tell`, `ask_manager`, reads, `note`, `task`, `resolve`, `snooze`, `ui`, `speak`, `thinking`, `bt` | code change (`gate.PRIVILEGED`) |
+| P3-W9b | #339 | 3. Window and throttle | 15 min; lock every 3rd wrong code, 5 min doubling to 24 h | code change (`gate.lockout`, `LOCKOUT_MAX`) |
+| P3-W9b | #339 | 4. `unlock`/`lock` tools; enrolment | Captain tools (26 total); enrolment CLI-only | code change |
+| P3-W9b | #339 | 5. Overheard code | Documented risk in `docs/captain.md` | docs change |
+| P3-W9b | #339 | 6. Extra | Own `gate` extra (pyotp, segno), not `voice` | code change (`pyproject.toml`) |
+| P3-W9b | #339 | 7. Lockfile | Relocked with uv 0.13.0 on #333's lock; adds pyotp 2.10.0 | code change |
+| P3-W9b | #339 | 8. Where `[captain] gate` is documented | `docs/captain.md`, not `reference.md`; no `AppConfig` field | docs change |
+| P3-W9b | #339 | 9. Verifier | Protocol (`gate.Verifier`); only TOTP ships | code change |
+| P3-W3 | #340 | 1. WSL rewrite | Lone existing Windows path only, under WSL; failure leaves paste | code change |
+| P3-W3 | #340 | 2. "One live pane" | Any attached on-screen `TerminalPane`; >1 treated as none | code change |
+| P3-W3 | #340 | 3. Paste log | Env var `AISQUARE_PASTE_LOG`, off by default, not a config key | unset/set `AISQUARE_PASTE_LOG` |
+| P3-W3 | #340 | 4. Item 3 (empty bracketed paste) | Waits for the matrix | code change |
+| P3-W9b | #342 | 1. Draft vs file | Editor edits a cache draft; `services.personas` sole writer | code change |
+| P3-W9b | #342 | 2. "No `$EDITOR`" | `$VISUAL` → `$EDITOR` → `vi`; text box only if none or no tmux | code change |
+| P3-W9b | #342 | 3. Unchanged draft | Still checked; CLI `persona edit` unchanged | code change |
+| P3-W9b | #342 | 4. + New | Keeps the text box | code change |
+| P3-W9b | #342 | 5. Window location | Fleet server, own session `asq-persona-edit`; no store row | code change |
+| P3-W9b | #342 | 6. Window-open failure | Fallback to text box with warning toast | code change |
+| P3-W1x | #349 | 1. Persona editor height | 94% of screen; text box takes rest | code change |
+| P3-W1x | #349 | 2. Layer filters row | Own row (costs 3 table rows); action row overflow left as is | code change |
+| P3-W1x | #349 | 3. Doctor with no fleet server | Judges env the fleet would start with (`tmux_client_env`) | code change |
+| P3-FU2 | #352 | 1. What `--from-dir` reads | Skill dirs, `SKILL.md`, non-repo `.md/.markdown/.txt`; rest skipped | name the source on the command line |
+| P3-FU2 | #352 | 2. Skip vs refusal | A skip never makes exit 1 | code change |
+| P3-FU2 | #352 | 3. Keys typed during `wslpath` | Reach agent before converted path; awaits WSL user report | code change |
+| P3-W2a | #357 | 1. Sidebar figure | "Left now" (`percent_left`), not weekly | code change |
+| P3-W2a | #357 | 2. `all` row | Percent USED, mean over usable accounts | code change |
+| P3-W2a | #357 | 3. "of N accounts" | Counts accounts whose week was read | code change |
+| P3-W2a | #357 | 4. Reset format | Via `format_reset`: `in 2d 4h (Thu 14:00)` | code change |
+| P3-W2a | #357 | 5. #49 `weekly_scoped` | Not landed; uses shared 7-day window | lands with #49 |
+| P3-W2a | #357 | 6. Narrow line | Figure gives way to the ⚠ | code change |
+| P3-W2a | #357 | 7. `week_resets_soonest` | Object `{slot, resets_at}`, not tuple | code change |
+| P3-W2b | #359 | 1. Manager counted? | No | code change |
+| P3-W2b | #359 | 2. Strip vs manager liveness | Shows whenever another agent runs | code change |
+| P3-W2b | #359 | 3. States | Sidebar chips, in sidebar order | code change |
+| P3-W2b | #359 | 4. Unknown role | `🤖 <role>` | code change |
+| P3-W2b | #359 | 5. Click | Opens Board tab | code change |
+| P3-W2c | #362 | 1. Default target | Every account (no `--slot` = `--all`) | `--slot S` |
+| P3-W2c | #362 | 2. Where ingestion runs | Inside `cached_usage`; skipped on forced refresh | code change |
+| P3-W2c | #362 | 3. `capture.enabled = false` | Does not stop records | code change |
+| P3-W2c | #362 | 4. Wrapped command | Lives in ours (`asq-statusline --wrap '<theirs>'`) | `--uninstall` restores |
+| P3-W2c | #362 | 5. `fleet.json` | Written only where the status line is in use | code change |
+| P3-W2c | #362 | 6. Failed removal in uninstall | Keeps the package | code change |
+| P3-W2c | #362 | 7. Page section | Text lines, not `DataTable` | code change |
+| P3-W2c | #362 | 8. One-hour endpoint baseline | Deferred; needs owner's go for a larger live run | owner approves a larger live run |
+| P3-W2c | #362 | 9. Ingestion requirement | Only records with both windows | code change |
+| P3-W2c | #362 | 10. Uninstall file restore | Side copy `settings.json.aisquare-statusline`; bytes restored where unchanged | code change |
+| P3-W5 | #370 | 1. "Held" detection | Claude Code session registry, then process argv | code change |
+| P3-W5 | #370 | 2. Where adopted agent runs | Conversation's cwd, `worktree=False` | code change |
+| P3-W5 | #370 | 3. Ended fleet row | Counts as owned (`fleet restart` instead) | code change |
+| P3-W5 | #370 | 4. Picker source | Transcripts, not W2c's status-line registry | code change |
+| P3-W5 | #370 | 5. asq "Adopt into fleet…" | Follow-up PR after #362 | shipped as #378 |
+| P3-W5 | #370 | 6. Defaults | Role `coder`, label `<role>-<n>` | `--role R` / `--label L` |
+| P3-W5 | #370 | 7. Cycle sentence | Kept despite per-prompt token cost | move to an on-request skill |
+| P3-W5 | #378 | 1. Picker vs a button per session | A picker over `fleet adopt --list` (the sessions view lists mostly live sessions, which adopt refuses) | code change |
+| P3-W5 | #378 | 2. Rows that cannot be adopted | Listed, disabled, with the reason | code change |
+| P3-W5 | #378 | 3. Role | `coder`, the CLI's default; no role picker | code change |
+
+Note: #334's owner calls are an unnumbered bullet list; each bullet is one row above.
+
+## Deferred
+
+To the owner's single post-main live run (manager, seq after 1135), or a follow-up:
+
+- W1's real-Claude round trip and novice first-run measurement (#324), W3's real-terminal paste/drag matrix (#340, `AISQUARE_PASTE_LOG`), W4's Remote Control on a Pro/Max account and its appearance time in claude.ai/code (#335), W8's two-machine SSH walk (#318), and W2c's one-hour usage-endpoint baseline (#362).
+- All PRs: locally only targeted tests were run (manager's CPU rule). The full suite is CI's gate for every PR.
+- #312: precise Indic search (FTS5 `categories 'L* N* Co M*'` tokenizer plus an index rebuild) is outside W6b.
+- #316: W7b (trimming the persona from session-start output near the 10,000-character cap) was skipped and left to P1 WS-1's lean role context work.
+- #316: `/doctor prompt-audit` and the hook cap were not re-measured.
+- #318: the two-machine (or VM) acceptance walk was waived by the manager and joins the post-main live run.
+- #318: issue #293's title and body were not edited; whoever owns the issue sets "postponed" and links the sketch.
+- #324: the novice first-run measurement on the RC build (empty `AISQUARE_HOME`, recorded on the issue) is owed. It needs a person.
+- #326: the #210 close comment is drafted for the owner to post (the issue was not closed). The #213 won't-do close text is also provided.
+- #326: `persona new <name> --from <parent>` is suggested as a possible new issue (#213 direction).
+- #334: no comment was made on #98 about model and effort per role; no decision exists yet.
+- #335: the time from spawn until the session appears in claude.ai/code is owed, measured by hand once on the RC build.
+- #340: item 1, the reproduction matrix (iTerm2, Terminal.app, kitty, WezTerm, GNOME Terminal, Windows Terminal on WSL), is owed. It needs a person.
+- #340: item 3, the empty bracketed paste, waits on the matrix.
+- #349: `docs/remote.md` was not walked.
+- #349: the Personas tab action row's overflow at 49 columns is left as is.
+- #352: two live panes on screen and the WSL conversion could not be walked (test-only).
+- #352: keys typed during `wslpath` are left for a report from a WSL user.
+- #352: per-call token counts were not measured (no live engine).
+- #357: #49's `weekly_scoped` per-family parsing landed in P0 (#350) and reaches this train at the next rc/p0 sync; until then the week figures use the shared 7-day window.
+- #362: the one-hour usage-endpoint baseline (4 agents, 3 accounts, before and after) is deferred and needs the owner's go for a larger or longer live run.
+- #370: phase A (`accounts adopt <dir>`) is out by owner scope.
+- #370: the manager cycle sentence could move to an on-request skill if its per-prompt cost matters.
 
 ## Out of scope
 

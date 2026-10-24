@@ -2159,7 +2159,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         file over as a paste, so a file dropped while the sidebar had the keyboard reached
         no agent. Here, on the main screen, it goes to the one live ``TerminalPane`` on
         screen (an agent, the manager, a sign-in), which takes the keyboard too; with none,
-        or more than one, it goes nowhere and one toast says so. An input or a dialog
+        or more than one, it goes nowhere and one toast says which. An input or a dialog
         keeps its own paste: it stops the event, or is a screen of its own; a text area
         takes it without stopping it, so it is named here.
         """
@@ -2173,8 +2173,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             for pane in self.screen.query(TerminalPane)
             if pane.pane_id is not None and pane.is_on_screen
         ]
-        if len(live) != 1:
+        if not live:
             self.notify("nothing to paste into — open an agent first", timeout=4)
+            return
+        if len(live) > 1:  # which one is the user's to say, not the router's to guess
+            self.notify(
+                f"{len(live)} panes on screen — click the one to paste into, then paste again",
+                timeout=4,
+            )
             return
         (pane,) = live
         pane.focus()
@@ -2713,7 +2719,7 @@ def _waited_reads() -> dict[str, str]:
     ``shell-accounts``, ``welcome-validate`` (round 24 of #257). tests/test_ui_writing_workers.py
     checks that every read the UI starts is here.
     """
-    from aisquare.cli.ui import attach, board, persona_dialogs, spawn
+    from aisquare.cli.ui import attach, board, persona_dialogs, spawn, terminal
     from aisquare.cli.ui.views import (
         accounts,
         agent,
@@ -2749,6 +2755,7 @@ def _waited_reads() -> dict[str, str]:
         persona_dialogs.SKILLS_WORKER: "the Import dialog's skill list",
         captain.BAR_WORKER: "the captain's bar",
         captain.MIC_WORKER: "the captain's microphone check",
+        terminal.WSLPATH_WORKER: "a pasted Windows path's conversion",
     }
 
 

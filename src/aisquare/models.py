@@ -387,6 +387,13 @@ HeadroomLevel = Literal["good", "fair", "low", "critical", "empty", "unknown"]
 """How much room the fleet's accounts have left, in one word (see ``HeadroomSummary``)."""
 
 
+class WeekReset(BaseModel):
+    """The account whose weekly window resets first, and when (#287)."""
+
+    slot: int
+    resets_at: datetime
+
+
 class HeadroomSummary(BaseModel):
     """What is LEFT across the fleet's accounts, in one figure and one word.
 
@@ -414,7 +421,7 @@ class HeadroomSummary(BaseModel):
     """The mean of :attr:`week_left_by_slot` (0-100); ``None`` with no week read."""
     weeks_left: float | None = None
     """The sum of ``(100 - week used) / 100``: account-weeks left, read as "1.8 of 3"."""
-    week_resets_soonest: tuple[int, datetime] | None = None
+    week_resets_soonest: WeekReset | None = None
     """The usable account whose weekly window resets first, and when."""
 
 

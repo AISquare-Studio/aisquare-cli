@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core import personas as core
+from aisquare.core.personas import PersonaError
 from tests import bundled_personas
 
 
@@ -240,6 +241,65 @@ def test_from_dir_imports_each_entry_and_exits_0_when_all_were_imported(
     assert code == 0, payload
     assert [row["name"] for row in payload] == ["alpha-skill", "beta-skill"], "by name, no .hidden"
     assert all(row["outcome"] == "imported" for row in payload)
+
+
+def test_from_dir_skips_what_is_no_persona_and_spends_no_engine_on_it(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#326's review: --from-dir sent every entry through the import ladder, and a README or
+    a LICENSE is text no skill parser recognises, so each went to an engine and spent its
+    tokens. Only a skill directory, a SKILL.md, or a Markdown or text file that is not a
+    repository file reaches the ladder now; the rest are listed as skipped."""
+    from aisquare.services import personas as persona_service
+
+    engine_calls: list[str] = []
+
+    def engine(src: Any, text: str, **kwargs: Any) -> Any:
+        engine_calls.append(str(kwargs["where"]))
+        raise PersonaError("the engine stands in for tests", code="no_import_engine")
+
+    monkeypatch.setattr(persona_service, "_import_with_llm", engine)
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "SKILL.md").write_text(
+        "---\nname: lone-skill\ndescription: A skill for tests.\n---\nWork carefully.\n",
+        encoding="utf-8",
+    )
+    (library / "README.md").write_text("# My skills\n\nInstall them.\n", encoding="utf-8")
+    (library / "LICENSE").write_text("MIT License\n\nPermission is hereby granted\n")
+    (library / "scripts").mkdir()
+    (library / "scripts" / "build.sh").write_text("echo hi\n", encoding="utf-8")
+    (library / "reviewer.md").write_text("Review every change twice.\n", encoding="utf-8")
+
+    code, payload = _json(runner, "import", "--from-dir", str(library))
+    human = runner.invoke(app, ["persona", "import", "--from-dir", str(library), "--force"])
+
+    outcomes = {Path(row["source"]).name: row["outcome"] for row in payload}
+    assert outcomes == {
+        "LICENSE": "skipped",
+        "README.md": "skipped",
+        "SKILL.md": "imported",
+        "reviewer.md": "refused",
+        "scripts": "skipped",
+    }, payload
+    assert engine_calls == [str(library / "reviewer.md")] * 2, "a persona text, and nothing else"
+    assert code == 1, "reviewer.md was refused (the stand-in engine); a skip is no refusal"
+    skipped = [row for row in payload if row["outcome"] == "skipped"]
+    assert all(row["error"] is None and row["message"] for row in skipped)
+    assert "README.md" in human.stdout and "skipped: " in human.stdout
+    assert "1 imported, 1 not, 3 skipped" in human.stderr
+
+
+def test_stdin_can_be_named_once_in_a_batch(runner: CliRunner, tmp_path: Path) -> None:
+    """'-' reads stdin, which can be read once: a second '-' found it empty."""
+    first, _notes, _second = _three_sources(tmp_path)
+
+    code, payload = _json(runner, "import", "-", str(first), "-", input="be kind\n")
+    human = runner.invoke(app, ["persona", "import", "-", "-"], input="be kind\n")
+
+    assert (code, payload["error"]) == (1, "usage")
+    assert not (_user_layer() / "first-skill").exists(), "refused before anything ran"
+    assert human.exit_code == 1 and "can be read once" in human.stderr
 
 
 def test_name_is_refused_for_more_than_one_source_and_one_source_reads_as_before(

@@ -1717,9 +1717,13 @@ def test_the_remote_control_row_lists_the_roles_and_is_ok_with_nothing_in_the_wa
     assert "remote control" in {row.name for row in diagnostics.doctor()}
 
 
-def test_the_remote_control_row_names_each_blocker_without_its_value() -> None:
-    """What `launch` would step aside for, said before a launch: a base URL on another
-    host, an OAuth token, tracing's proxy — the variable and the host, never a secret."""
+def test_the_remote_control_row_names_each_blocker_without_its_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What `launch` would step aside for, said before a launch: an OAuth token, tracing's
+    proxy — the variable and where it is, never a secret. With no fleet server running,
+    the agents get what the fleet would start one with: this shell's, less the base URL
+    (`tmux_client_env` strips the tracing identity), so the shell's base URL is no blocker."""
     from aisquare.services import diagnostics
 
     _roles_with_remote_control("coder", tracing=True)
@@ -1728,11 +1732,48 @@ def test_the_remote_control_row_names_each_blocker_without_its_value() -> None:
         "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-example",
     }
 
+    monkeypatch.setattr(diagnostics, "_fleet_server", lambda socket: FakeServer(absent=True))
+
     check = diagnostics._check_remote_control(environ=environ)
 
     assert check is not None and check.status.value == "warn"
-    assert "coder: ANTHROPIC_BASE_URL in this shell points at gateway.example" in check.detail
+    assert "ANTHROPIC_BASE_URL" not in check.detail, "the fleet never hands the shell's on"
     assert "coder: CLAUDE_CODE_OAUTH_TOKEN is set in this shell" in check.detail
     assert "explainability tracing sends every traced launch through its proxy" in check.detail
     assert "secret" not in check.detail and "sk-ant" not in check.detail
     assert check.fix is not None and "aisquare explainability disable" in check.fix
+    assert "every launch on this machine, not for these roles alone" in check.fix
+
+
+def test_the_remote_control_row_reads_the_running_fleet_servers_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agents inherit the fleet server's environment, copied from whatever started it,
+    not the doctor's shell: a base URL and a token held there block every agent it starts,
+    though this shell has neither (#335's review)."""
+    from aisquare.services import diagnostics
+
+    _roles_with_remote_control("coder")
+    server = FakeServer(absent=False)
+    server.scripted = {
+        ("show-environment", "-g"): (
+            "ANTHROPIC_BASE_URL=https://user:secret@gateway.example/v1\n"
+            "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-example\n"
+        )
+    }
+
+    monkeypatch.setattr(diagnostics, "_fleet_server", lambda socket: server)
+
+    check = diagnostics._check_remote_control(environ={})
+
+    assert check is not None and check.status.value == "warn"
+    assert "coder: ANTHROPIC_BASE_URL on the fleet server points at gateway.example" in (
+        check.detail
+    )
+    assert "coder: CLAUDE_CODE_OAUTH_TOKEN is set on the fleet server" in check.detail
+    assert "secret" not in check.detail and "sk-ant" not in check.detail
+    assert check.fix is not None and "kill-server" in check.fix
+    # This shell's own pair, with an empty server: nothing in the way.
+    server.scripted = {("show-environment", "-g"): ""}
+    clear = diagnostics._check_remote_control(environ={"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-x"})
+    assert clear is not None and clear.status.value == "ok"

@@ -74,6 +74,7 @@ from aisquare.models import (
     StatuslineSite,
     UsageSample,
     UsageTrend,
+    WeekReset,
 )
 from aisquare.services import agents as agents_service
 from aisquare.services import install_route
@@ -1621,7 +1622,9 @@ def fleet_headroom(
         week_left_by_slot=week_left,
         week_percent_left=sum(week_left.values()) / len(week_left) if week_left else None,
         weeks_left=sum(week_left.values()) / 100 if week_left else None,
-        week_resets_soonest=(soonest[1], soonest[0]) if soonest is not None else None,
+        week_resets_soonest=(
+            WeekReset(slot=soonest[1], resets_at=soonest[0]) if soonest is not None else None
+        ),
     )
 
 
@@ -1634,19 +1637,22 @@ def summary_sentence(
     The Accounts page's header and ``accounts usage``'s last line. "Now" is the fuller
     window's share left (:attr:`HeadroomSummary.percent_left`), the week part is
     account-weeks over the accounts whose week was read, the reset is the soonest
-    (:func:`core.format_reset`, the one reset formatter). ``labels`` is slot → alias.
+    (:func:`core.format_reset`, the one reset formatter). ``labels`` is slot → alias;
+    ``now`` is this module's clock unless given.
     """
     if summary.percent_left is None:
         return None
+    now = now or _now()
     parts = [f"Fleet: {round(summary.percent_left)}% left now"]
     if summary.weeks_left is not None:
         parts.append(
             f"week: {summary.weeks_left:.1f} of {len(summary.week_left_by_slot)} accounts left"
         )
     if summary.week_resets_soonest is not None:
-        slot, when = summary.week_resets_soonest
-        name = labels.get(slot) or core.default_label(slot)
-        parts.append(f"next weekly reset {core.format_reset(when, now=now)} ({name})")
+        soonest = summary.week_resets_soonest
+        name = labels.get(soonest.slot) or core.default_label(soonest.slot)
+        reset = core.format_reset(soonest.resets_at, now=now)
+        parts.append(f"next weekly reset {reset} ({name})")
     return " · ".join(parts)
 
 

@@ -348,7 +348,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     SpawnDialog #spawn-import { min-width: 12; width: 12; }
     SpawnDialog .spawn-note { height: auto; padding-left: 18; color: $text-muted; }
     SpawnDialog #spawn-worktree-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
-    SpawnDialog #spawn-remote-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
+    SpawnDialog #spawn-remote-note { padding: 1 0 0 1; width: 1fr; height: auto;
+                                     color: $text-muted; }
     SpawnDialog #spawn-prompt { height: 6; width: 1fr; }
     SpawnDialog #spawn-how { width: auto; height: auto; }
     SpawnDialog #spawn-fresh { margin-left: 2; }

@@ -181,8 +181,9 @@ class PersonasTab(Vertical):
     PersonasTab { height: 1fr; padding: 0 1; }
     PersonasTab #personas-top { height: auto; }
     PersonasTab #persona-search { width: 1fr; }
-    PersonasTab #personas-top Checkbox { width: auto; }
     PersonasTab #personas-top Button { margin-left: 1; }
+    PersonasTab #personas-layers { height: auto; }
+    PersonasTab #personas-layers Checkbox { width: auto; }
     PersonasTab #personas-body { height: 1fr; }
     PersonasTab #persona-table { width: 3fr; height: 1fr; }
     PersonasTab #persona-preview { width: 2fr; height: 1fr; border-left: tall $panel;
@@ -212,12 +213,15 @@ class PersonasTab(Vertical):
         self.unavailable: str | None = None
 
     def compose(self) -> ComposeResult:
+        # Two rows: one would need ~86 columns, and beside the sidebar an 80-column
+        # terminal gives this tab 49, which left + Import… and + New off its edge.
         with Horizontal(id="personas-top"):
             yield Input(placeholder="search name, description or tag", id="persona-search")
-            for layer in LAYERS:
-                yield Checkbox(layer, True, id=f"layer-{layer}")
             yield Button("+ Import…", id="persona-import")
             yield Button("+ New", id="persona-new")
+        with Horizontal(id="personas-layers"):
+            for layer in LAYERS:
+                yield Checkbox(layer, True, id=f"layer-{layer}")
         with Horizontal(id="personas-body"):
             yield DataTable(id="persona-table", cursor_type="row", zebra_stripes=True)
             with VerticalScroll(id="persona-preview"):

@@ -1193,7 +1193,7 @@ class AccountsView(Vertical):
             [status.account for status in statuses], self.usage
         )
         labels = {status.account.slot: status.label for status in statuses}
-        sentence = accounts_service.summary_sentence(summary, labels, now=accounts_service._now())
+        sentence = accounts_service.summary_sentence(summary, labels)
         self.query_one("#fleet-summary", Static).update(Text(sentence or "", style="bold"))
 
     def _name_of(self, account: ClaudeAccount) -> str:

@@ -371,9 +371,11 @@ def import_(
     if list_skills:
         _emit_skills(persona_service.importable_skills(root))
         return
-    batch = list(sources or [])
+    batch: list[tuple[str, str | None]] = [(source, None) for source in sources or []]
     if from_dir is not None:
         batch.extend(_dir_sources(from_dir))
+    if [source for source, _ in batch].count("-") > 1:
+        fail("'-' reads stdin, which can be read once: name it once", error="usage")
     if not batch:
         fail(
             "name a source: a skill directory, a SKILL.md or Markdown file, - for stdin, or a "
@@ -395,7 +397,7 @@ def import_(
         return
     with _reported():
         try:
-            result = one.run(batch[0])
+            result = one.run(batch[0][0])
         except persona_service.DraftKept as exc:
             code = one.code_of(exc)
             fail(str(exc), error=code, ref=str(exc.draft_path), detail=str(exc))
@@ -463,22 +465,70 @@ class _Import:
         return kept.code
 
 
-def _dir_sources(directory: Path) -> list[str]:
-    """``--from-dir``: each skill directory and file in ``directory``, hidden ones aside, by
-    name; each goes through the import's own ladder, which refuses what is no persona."""
+_REPOSITORY_FILES = frozenset(
+    {
+        "authors",
+        "changelog",
+        "changes",
+        "code_of_conduct",
+        "codeowners",
+        "contributing",
+        "copying",
+        "history",
+        "licence",
+        "license",
+        "notice",
+        "readme",
+        "security",
+    }
+)
+"""File stems a skill library carries that are no persona: README, LICENSE and friends."""
+PERSONA_TEXT_SUFFIXES = (".md", ".markdown", ".txt")
+"""What a persona written as a file is: Markdown or text (an agent file, a prompt)."""
+
+
+def _dir_sources(directory: Path) -> list[tuple[str, str | None]]:
+    """``--from-dir``: each entry in ``directory`` by name, hidden ones aside, with why it is
+    skipped, or ``None`` for one the import's ladder reads.
+
+    The ladder sends text no skill parser recognises to an engine, which spends tokens
+    (#326's review): a README or a LICENSE beside the skills was converted like a persona.
+    So only a skill directory (one holding SKILL.md), a SKILL.md, or a Markdown or text
+    file that is not a repository file reaches it. A source named on the command line is
+    read whatever it is: naming it is the ask."""
     try:
         entries = sorted(directory.expanduser().iterdir(), key=lambda entry: entry.name)
     except OSError as exc:
         fail(f"--from-dir {directory}: {exc.strerror or exc}", error="io_error")
-    return [str(entry) for entry in entries if not entry.name.startswith(".")]
+    return [(str(entry), _not_a_source(entry)) for entry in entries if entry.name[:1] != "."]
 
 
-def _import_batch(batch: list[str], one: _Import) -> None:
+def _not_a_source(entry: Path) -> str | None:
+    """Why ``--from-dir`` leaves ``entry`` out, or ``None`` when it is a persona source."""
+    if entry.is_dir():
+        if (entry / core.SKILL_FILE).is_file():
+            return None
+        return f"a directory with no {core.SKILL_FILE}"
+    if entry.name == core.SKILL_FILE:
+        return None
+    stem = entry.name.split(".", 1)[0].lower()
+    if stem in _REPOSITORY_FILES or stem.startswith(("license-", "licence-")):
+        return "a repository file, not a persona"
+    if entry.suffix.lower() not in PERSONA_TEXT_SUFFIXES:
+        return f"not Markdown or text ({', '.join(PERSONA_TEXT_SUFFIXES)})"
+    return None
+
+
+def _import_batch(batch: list[tuple[str, str | None]], one: _Import) -> None:
     """#294: each source in turn, one refusal never stopping the rest; one table (``--json``:
-    one list), and exit 1 when any was refused. Ctrl-C stops at the source it was on."""
+    one list), and exit 1 when any was refused. Ctrl-C stops at the source it was on. A
+    source ``--from-dir`` skipped is listed with its reason, and no engine runs on it."""
     rows: list[dict[str, Any]] = []
     cancelled = False
-    for source in batch:
+    for source, skipped in batch:
+        if skipped is not None:
+            rows.append({"source": source, "outcome": "skipped", "error": None, "message": skipped})
+            continue
         _progress(f"→ {source}")
         row: dict[str, Any] = {"source": source, "outcome": "refused", "error": None}
         try:
@@ -515,7 +565,7 @@ def _import_batch(batch: list[str], one: _Import) -> None:
         _receipt_table(rows)
     if cancelled:
         raise typer.Exit(130)
-    if any(row["outcome"] != "imported" for row in rows):
+    if any(row["outcome"] == "refused" for row in rows):
         raise typer.Exit(1)
 
 
@@ -527,6 +577,9 @@ def _receipt_table(rows: list[dict[str, Any]]) -> None:
             outcome = "replaced" if row["replaced"] else "imported"
             how = f"{row['engine']}, {row['model']}" if row.get("model") else row["engine"]
             table.append((row["source"], row["name"], how, outcome))
+        elif row["outcome"] == "skipped":
+            reason = f"skipped: {row['message']}, so no engine was run"
+            table.append((row["source"], "—", "—", reason))
         else:
             reason = _flattened(str(row.get("message") or ""))
             table.append((row["source"], "—", "—", f"{row['outcome']} ({row['error']}): {reason}"))
@@ -539,8 +592,10 @@ def _receipt_table(rows: list[dict[str, Any]]) -> None:
             _warn_links(row["skipped_links"])
             _warn([f"{row['name']}: {warning}" for warning in row["warnings"]])
     imported = sum(row["outcome"] == "imported" for row in rows)
-    refused = len(rows) - imported
-    typer.echo(f"{imported} imported, {refused} not", err=True)
+    skipped = sum(row["outcome"] == "skipped" for row in rows)
+    refused = len(rows) - imported - skipped
+    tail = f", {skipped} skipped" if skipped else ""
+    typer.echo(f"{imported} imported, {refused} not{tail}", err=True)
 
 
 def _emit_skills(skills: list[persona_service.SkillRef]) -> None:

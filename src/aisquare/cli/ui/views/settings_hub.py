@@ -49,7 +49,7 @@ LINKS: tuple[tuple[str, str, str], ...] = (
     (
         "app-settings",
         "App settings",
-        "the machine-wide settings: roles, the fleet, accounts' rules",
+        "agent settings (roles, the fleet, accounts' rules) and your preferences",
     ),
     ("accounts", "Accounts", "the AISquare sign-in and the Claude Code accounts"),
     ("doctor", "Doctor", "the checks — they run when the page opens"),

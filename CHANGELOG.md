@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **App settings has two tabs**: *Agent settings* (shown first: roles, the fleet,
+  accounts — the same fields, ids and save rules as the single page before, under
+  bold section headers, with the pointers to `team harness`/`team bind` as its last
+  line) and *User preferences*. Save, Reload and *Reset all settings to default* sit
+  under the tabs on one compact line, beside a one-line "Saved to …" note, and act on
+  both; at 80x24 the tabs keep the four whole role rows the single page showed. The first
+  preference is **Always show project directory** (`[ui] always_show_project_path`,
+  off by default; `aisquare config get/set ui.always_show_project_path`): on, every
+  card in the sidebar shows its directory under its name, not only two projects that
+  share a name. `asq` reads it at start and takes the new value from App settings
+  when it saves, reloads or resets, so it shows at once and the two-second refresh
+  never reads `config.toml` for it. A `config set` from a shell while `asq` runs
+  shows after App settings' *Reload* or at `asq`'s next start, not live.
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in

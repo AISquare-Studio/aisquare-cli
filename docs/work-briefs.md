@@ -68,6 +68,11 @@ and holds **exactly what a saved run wrote** there: its content is what some sav
 `asq exec --project` run in that checkout left it as, when that run created or rewrote
 it, recorded as evidence or not. A run that only read the file, such as `asq exec
 --project P -- git status`, wrote nothing to it, so it never makes a hand edit output.
+
+**A known limit:** an untracked source file edited *through* `asq exec --project` (a
+codemod, `sed -i`) is that run's output by this rule, so a pass can stay PROVEN after
+it. Edit untracked source by hand, not through `asq exec`, or commit it first: a
+tracked file is never check output.
 (In a checkout that is not a git repository, "untracked" means a saved run created it.)
 So R1's `--junitxml=a.xml` and R2's `--junitxml=b.xml` never stale each other, and
 running a check again through `asq exec`, which rewrites its own report file, is not a

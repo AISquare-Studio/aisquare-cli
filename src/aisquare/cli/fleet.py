@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections.abc import Mapping
 from typing import Annotated, NoReturn
@@ -79,9 +80,10 @@ _STATE_CHIP = {
 def _fail_fleet(exc: Exception) -> NoReturn:
     """The service's reason, on stderr for a human and as ``detail`` under ``--json``.
 
-    Four codes, most specific first — every subclass is also a ``FleetError``,
-    so the order here IS the mapping: ``fleet_unavailable`` (no usable tmux),
-    ``not_found`` (the project reference), ``no_such_agent`` (the label), and
+    Most specific first — every subclass is also a ``FleetError``, so the order
+    here IS the mapping: ``fleet_unavailable`` (no usable tmux), ``not_found``
+    (the project reference), ``no_such_agent`` (the label), a capacity refusal's
+    own code (``capacity_project``, ``capacity_fleet``, ``capacity_memory``), and
     ``fleet_error`` for everything else the service refused with a reason.
     """
     if isinstance(exc, fleet_service.FleetUnavailable):
@@ -90,6 +92,8 @@ def _fail_fleet(exc: Exception) -> NoReturn:
         fail(str(exc), error="not_found", detail=str(exc))
     if isinstance(exc, fleet_service.NoSuchAgent):
         fail(str(exc), error="no_such_agent", detail=str(exc))
+    if isinstance(exc, fleet_service.CapacityRefused):
+        fail(str(exc), error=exc.code, detail=str(exc))
     fail(str(exc), error="fleet_error", detail=str(exc))
 
 
@@ -1296,6 +1300,135 @@ def rename(
         stdout_console().print(f"  ⚠ {note}")
 
 
+@app.command("capacity")
+def capacity() -> None:
+    """Memory headroom and live agents against every admission limit (#283)."""
+    report = fleet_service.capacity()
+    if get_state().json_output:
+        typer.echo(json.dumps(report.as_json()))
+        return
+    head = report.headroom
+    out = stdout_console()
+    if head.available_mb is not None:
+        total = f" of {head.total_mb} MB" if head.total_mb is not None else ""
+        out.print(f"memory:   {head.available_mb} MB available{total}", markup=False)
+    else:
+        out.print("memory:   cannot be read on this machine", markup=False)
+    psi = f" (PSI some avg10 {head.psi_some_avg10:g})" if head.psi_some_avg10 is not None else ""
+    out.print(f"pressure: {head.pressure}{psi}", markup=False)
+    floor = f"{report.min_free_mb} MB" if report.min_free_mb else "off"
+    out.print(f"floor:    {floor} (min_free_mb)", markup=False)
+    budget = str(report.max_agents_total) if report.max_agents_total else "no budget"
+    out.print(f"agents:   {report.live_total} live ({budget}; max_agents_total)", markup=False)
+    for name, count in report.live.items():
+        out.print(f"  {name}: {count} of {report.max_agents_per_project}", markup=False)
+    mark = "✓" if report.admits else "✗"
+    out.print(f"{mark} {report.reason}", markup=False)
+
+
+_DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*$")
+
+
+def _seconds(text: str) -> float:
+    """``90``, ``90s``, ``15m``, ``1h`` as seconds; a usage error for anything else."""
+    found = _DURATION.match(text)
+    if found is None:
+        raise typer.BadParameter("a duration like 90s, 15m or 1h", param_hint="--wait")
+    return float(found.group(1)) * {"": 1, "s": 1, "m": 60, "h": 3600}[found.group(2)]
+
+
+@app.command(
+    "gate",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def gate(
+    ctx: typer.Context,
+    min_free_mb: Annotated[
+        int | None,
+        typer.Option(
+            "--min-free-mb",
+            help="Memory to wait for, in MB (default: \\[fleet] test_gate_mb, else min_free_mb).",
+        ),
+    ] = None,
+    wait: Annotated[
+        str | None,
+        typer.Option(
+            "--wait",
+            help="How long to wait for it, e.g. 90s or 15m (default: test_gate_wait_minutes).",
+        ),
+    ] = None,
+) -> None:
+    """Wait for memory headroom, then run a heavy command: `aisquare fleet gate -- pytest`.
+
+    Polls every 5 s. With enough memory it runs the command after `--` and exits with
+    its code (with no command, exits 0). At the deadline it runs nothing and exits 75.
+    With --json the command's output goes to stderr and stdout is one JSON object.
+    """
+    needed = fleet_service.gate_floor(min_free_mb)
+    seconds = (
+        _seconds(wait)
+        if wait is not None
+        else fleet_service.settings().test_gate_wait_minutes * 60.0
+    )
+    result = fleet_service.wait_for_memory(needed, seconds)
+    command = list(ctx.args)
+    if command and command[0] == "--":
+        command = command[1:]
+    as_json = get_state().json_output
+    if not result.passed:
+        available = f"{result.available_mb} MB" if result.available_mb is not None else "unknown"
+        message = (
+            f"not run: {available} available, {needed} MB needed for {wait or f'{seconds / 60:g}m'}"
+        )
+        if result.pressure == "critical":
+            message += " (memory pressure critical)"
+        if as_json:
+            typer.echo(
+                json.dumps(
+                    {
+                        "passed": False,
+                        "ran": None,
+                        "available_mb": result.available_mb,
+                        "needed_mb": needed,
+                        "waited_seconds": round(result.waited_seconds, 1),
+                        "pressure": result.pressure,
+                    }
+                )
+            )
+        else:
+            typer.echo(f"✗ {message}", err=True)
+        raise typer.Exit(fleet_service.GATE_EXIT)
+    code = 0
+    if command:
+        import subprocess  # lazy: only a gated run needs it
+
+        try:
+            # Under --json the one object is stdout's: the command's own output goes to
+            # stderr, where a human still sees it (review of #323).
+            code = subprocess.run(
+                command,
+                check=False,
+                stdout=2 if as_json else None,  # fd 2: stderr
+            ).returncode
+        except OSError as exc:
+            fail(f"could not run {command[0]}: {exc}", error="not_run")
+    if as_json:
+        typer.echo(
+            json.dumps(
+                {
+                    "passed": True,
+                    "ran": command or None,
+                    "exit_code": code,
+                    "available_mb": result.available_mb,
+                    "needed_mb": needed,
+                    "waited_seconds": round(result.waited_seconds, 1),
+                    "pressure": result.pressure,
+                }
+            )
+        )
+    raise typer.Exit(code)
+
+
 @app.command("pause")
 def pause(project: ProjectRef = None, as_session: SessionRef = None) -> None:
     """Pause the fleet: the manager spawns nothing until `resume`."""
@@ -1351,7 +1484,23 @@ def interactive_terminal() -> bool:
     return not_interactive_reason() is None
 
 
-def ui() -> None:
+def ui(
+    project: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Show only this project (repeatable): codename, name or id prefix.",
+            metavar="PROJECT",
+        ),
+    ] = None,
+    group: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--group", help="Show only this group's projects (repeatable).", metavar="GROUP"
+        ),
+    ] = None,
+) -> None:
     """Open the fleet UI — every project, agent and session in one view."""
     if get_state().json_output:
         fail(
@@ -1368,6 +1517,10 @@ def ui() -> None:
             error="not_a_tty",
             detail=reason,
         )
+    try:
+        scope = fleet_service.ui_scope(project or (), group or ())
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
     from aisquare.cli.ui.app import run_ui  # lazy: textual is heavy and only the UI needs it
 
-    run_ui()
+    run_ui(scope=scope)

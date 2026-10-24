@@ -149,7 +149,11 @@ def doctor(
     ] = False,
     target: Annotated[
         str | None,
-        typer.Option("--target", help="Explainability deployment to check, e.g. stg or prod."),
+        typer.Option(
+            "--target",
+            help="Explainability deployment to check, e.g. stg or prod; with --fix, the "
+            "one tracing is turned on for (without it, --fix leaves tracing off).",
+        ),
     ] = None,
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Answer yes to every --fix prompt.")

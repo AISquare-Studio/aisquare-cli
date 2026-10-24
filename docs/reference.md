@@ -80,7 +80,8 @@ aisquare
 │                   tester, reviewer, ui-tester), a numbered seat (coder1), or any role you
 │                   have bound; env merges over `team bind`
 ├── serve [--stdio | --port N --bind H] [--show-token]
-├── ui              the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
+├── ui              [--project P]… [--group G]…
+│                   the fleet UI — what bare `asq` opens at a terminal (docs/fleet.md)
 ├── remote          serve · needs · status · allow-write on|off · revoke · regenerate-password
 │                   install-page <dist>   — the fleet on your phone (docs/remote.md)
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
@@ -92,6 +93,7 @@ aisquare
 │                   shutdown [--all] [--yes] [--force] [--forget] · attach
 │                   reap [--all] [--server-down]
 │                   rename <codename> · pause · resume
+│                   capacity · gate [--min-free-mb N] [--wait 15m] [-- CMD …]
 │                   (all with [--project P]; spawn · tell · restart · switch · pause · resume
 │                   take [--as SESSION])
 ├── login [--no-browser] [--with-token] [--api-url URL] · logout · whoami

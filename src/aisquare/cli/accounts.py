@@ -885,6 +885,105 @@ def settings(
         raise typer.Exit(1)
 
 
+def _parts(value: str | None, flag: str) -> list[claude_sharing.SharePart]:
+    """``memory,skills`` as parts, or a usage error naming the ones that exist."""
+    if value is None:
+        return []
+    asked = [part.strip() for part in value.split(",") if part.strip()]
+    unknown = [part for part in asked if part not in claude_sharing.SHARE_PARTS]
+    if unknown or not asked:
+        raise typer.BadParameter(
+            f"{', '.join(unknown) or '(none)'} — parts are {', '.join(claude_sharing.SHARE_PARTS)}",
+            param_hint=flag,
+        )
+    return [part for part in claude_sharing.SHARE_PARTS if part in asked]
+
+
+_PART_WORDS = {
+    "linked": "linked to the plain claude's",
+    "already": "already shared",
+    "unlinked": "unlinked",
+    "restored": "its own restored",
+    "refused": "left as it is",
+    "failed": "failed",
+    "shared": "shared",
+    "own": "its own",
+    "none": "none",
+    "elsewhere": "linked elsewhere (not ours)",
+    "merged": "merged",
+}
+
+
+@app.command("share")
+def share(
+    enable: Annotated[
+        str | None,
+        typer.Option(
+            "--enable",
+            help=f"Parts to share, comma-separated: {', '.join(claude_sharing.SHARE_PARTS)}.",
+            metavar="PARTS",
+        ),
+    ] = None,
+    disable: Annotated[
+        str | None,
+        typer.Option(
+            "--disable", help="Parts to stop sharing; each slot's own comes back.", metavar="PARTS"
+        ),
+    ] = None,
+    status: Annotated[
+        bool, typer.Option("--status", help="What every account holds; change nothing.")
+    ] = False,
+) -> None:
+    """What every Claude account has in common: memory, skills, agents, commands, CLAUDE.md.
+
+    `memory` gives every launch one auto-memory directory per project, under
+    ~/.aisquare/claude-shared/memory (merged from every account the first time). The
+    others make each managed account's entry a link to the plain claude's, its own kept
+    beside it as <entry>.own-<stamp> until --disable puts it back. `plugins` is
+    experimental: MCP logins and the plugin store are per account. Transcripts are
+    never shared: a session moved to another account resumes by its path.
+    """
+    on = _parts(enable, "--enable")
+    off = _parts(disable, "--disable")
+    if set(on) & set(off):
+        fail("a part can be enabled or disabled, not both", error="usage")
+    changes: list[accounts_service.PartChange] = []
+    with expected_config_write_errors():
+        if on:
+            changes += accounts_service.enable_share(on)
+        if off:
+            changes += accounts_service.disable_share(off)
+    held = accounts_service.share_status() if status or not (on or off) else []
+    knobs = accounts_service.accounts_settings()
+    failed = any(change.outcome == "failed" for change in changes)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "share": list(knobs.share),
+                    "memory_dir": str(accounts_service.shared_memory_root()),
+                    "changes": [change.as_json() for change in changes],
+                    "status": [change.as_json() for change in held],
+                }
+            )
+        )
+    else:
+        console = stdout_console()
+        console.print(f"shared: {', '.join(knobs.share) or 'nothing'}", markup=False)
+        for change in [*changes, *held]:
+            line = f"  · {core.label(change.account)} {change.part}: {_PART_WORDS[change.outcome]}"
+            if change.detail:
+                line += f" ({change.detail})"
+            style = (
+                "red"
+                if change.outcome == "failed"
+                else ("yellow" if change.outcome in ("refused", "elsewhere") else None)
+            )
+            console.print(line, markup=False, style=style)
+    if failed:
+        raise typer.Exit(1)
+
+
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     """Replace this process with Claude Code (indirection so tests can intercept)."""
     os.execve(binary, argv, env)

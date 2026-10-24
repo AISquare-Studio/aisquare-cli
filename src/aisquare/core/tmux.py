@@ -90,6 +90,7 @@ from pathlib import Path
 from typing import Literal
 
 from aisquare.core import paths
+from aisquare.core.memory import _sysctl
 from aisquare.core.spawn import tmux_client_env
 
 DEFAULT_SOCKET = "asq"
@@ -117,6 +118,7 @@ both halves: the fix, and the old behaviour as the control on the mechanism.
 #: overwrites, so a leftover from a crashed paste cannot be delivered.
 _PASTE_SEQUENCE = itertools.count()
 CONF_NAME = "fleet-tmux.conf"
+_CLIPBOARD_OFF = "set -g set-clipboard off\n"
 CHECK_SOCKET_SUFFIX = "-check"
 """Where :meth:`TmuxServer.check_conf` starts its throwaway server: ``<socket>-check``."""
 _COMMAND_TIMEOUT = 30.0
@@ -142,7 +144,12 @@ set -g history-limit 50000
 # `resize-window` (TmuxServer.resize) pins THAT window to manual sizing itself,
 # and -x/-y at session creation set the detached default size.
 set -g remain-on-exit on
-set -g mouse off
+# mouse on: in `fleet attach` the wheel reaches tmux, so it scrolls Claude Code (which
+# asks for the mouse) or tmux's history. asq is unaffected: it sends mouse reports as
+# `send-keys -H` over its control client (#272), which this option does not touch.
+# A plain drag in `fleet attach` is tmux's selection; Shift (Option on macOS) selects
+# in your own terminal.
+set -g mouse on
 set -g default-terminal tmux-256color
 set -ga terminal-overrides ',*:Tc'
 set -s extended-keys on
@@ -171,6 +178,30 @@ set -ga update-environment DBUS_SESSION_BUS_ADDRESS
 set -ga update-environment COLORTERM
 set -ga update-environment TERM_PROGRAM
 """
+
+
+def bundled_conf(pane_clipboard: bool = False) -> str:
+    """:data:`BUNDLED_CONF`, with ``set-clipboard on`` when ``[fleet] pane_clipboard`` is.
+
+    On, a program in a pane sets the clipboard with OSC 52 (#101): tmux keeps it as a paste
+    buffer and passes it to an attached terminal that takes it. Off, the default, it is
+    dropped, which is what keeps any program a pane runs from writing your clipboard.
+    Claude Code's own copies reach tmux's paste buffer either way.
+    """
+    if not pane_clipboard:
+        return BUNDLED_CONF
+    return BUNDLED_CONF.replace(_CLIPBOARD_OFF, "set -g set-clipboard on\n")
+
+
+def _pane_clipboard_on() -> bool:
+    """``[fleet] pane_clipboard``; off when the config cannot be read (the safe side)."""
+    from aisquare.core.config import load_config  # lazy: the config pulls in pydantic
+
+    try:
+        return load_config().fleet.pane_clipboard == "on"
+    except Exception:
+        return False
+
 
 #: What a re-login changes and a window inherits stale from the server it was
 #: spawned on (#147): the display (image paste, notifications, `xdg-open`), the
@@ -238,6 +269,9 @@ _WINDOW_FIELDS = (
     "start_time",
 )
 _WINDOW_FORMAT = _SEP.join(f"#{{{name}}}" for name in _WINDOW_FIELDS)
+#: :meth:`TmuxServer.every_window`'s line: the session, a window as above, and when the
+#: window last produced output (``services.fleet._activity_times``'s field).
+_EVERY_FORMAT = _SEP.join(("#{session_name}", _WINDOW_FORMAT, "#{window_activity}"))
 _VERSION = re.compile(r"(\d+)\.(\d+)")
 #: The first tmux whose ``capture-pane`` takes ``-F`` (a flags column before each
 #: line: ``-`` none, ``W`` wrapped into the next, ``X`` extended cells, …).
@@ -360,8 +394,6 @@ def _tmux(argv: Sequence[str], stdin: bytes | None, *, timeout: float | None = N
 
 #: Where Linux names this boot: a random UUID the kernel draws as it boots.
 _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
-#: Where macOS keeps ``sysctl``, for a PATH without ``/usr/sbin`` (launchd, cron).
-_SYSCTL = ("/usr/sbin/sysctl", "/sbin/sysctl")
 #: Where Linux says when it booted (``btime``, seconds since the epoch).
 _PROC_STAT = Path("/proc/stat")
 
@@ -404,23 +436,6 @@ def _ask_boot_id() -> str | None:
         return None
     asked = _sysctl("kern.bootsessionuuid")
     return asked or None
-
-
-def _sysctl(name: str) -> str | None:
-    """What ``sysctl -n <name>`` says, from ``sysctl`` on PATH or where macOS keeps it;
-    ``None`` when it cannot be asked or does not answer."""
-    sysctl = shutil.which("sysctl") or next(
-        (place for place in _SYSCTL if os.access(place, os.X_OK)), None
-    )
-    if sysctl is None:
-        return None
-    try:
-        completed = subprocess.run(
-            [sysctl, "-n", name], capture_output=True, text=True, timeout=5, check=False
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return completed.stdout.strip() if completed.returncode == 0 else None
 
 
 #: When this boot started once :func:`boot_started` has found it; ``None`` until then.
@@ -1071,7 +1086,11 @@ class TmuxServer:
         return path
 
     def _ensure_conf(self) -> tuple[Path, str | None]:
-        """``(the conf to hand tmux, what failing open cost)`` — ``None`` when nothing did."""
+        """``(the conf to hand tmux, what failing open cost)`` — ``None`` when nothing did.
+
+        :func:`bundled_conf` as ``[fleet] pane_clipboard`` says now: a server reads it once,
+        when it starts."""
+        wanted = bundled_conf(_pane_clipboard_on())
         try:
             path = paths.ensure_home() / CONF_NAME
         except OSError as exc:
@@ -1087,10 +1106,10 @@ class TmuxServer:
             current, absent = "", True
         except OSError:
             current, readable = "", False
-        if current == BUNDLED_CONF:
+        if current == wanted:
             return path, None
         try:
-            path.write_text(BUNDLED_CONF, encoding="utf-8")
+            path.write_text(wanted, encoding="utf-8")
         except OSError as exc:
             why = f"could not write {path} ({exc.strerror or exc})"
             if absent:
@@ -1494,6 +1513,34 @@ class TmuxServer:
         if completed.returncode != 0:
             return []
         return self._parse_windows(session, completed.stdout)
+
+    def every_window(self) -> tuple[dict[str, list[WindowInfo]], dict[str, datetime]]:
+        """Every session's windows (:meth:`list_windows`'s answer, by session name), and when
+        each pane's window last produced output, by pane id, in ONE ``list-panes -a``.
+
+        For a reader of many sessions on one server (``asq``'s tick over every listed
+        project, #83): a ``list-panes -s`` per session and a ``list-panes -a`` for the
+        output times cost a tmux process each, per project, per tick. Lenient as both
+        were: a server that answers nothing reads as no windows and no times.
+        """
+        completed = self._runner(self.argv("list-panes", "-a", "-F", _EVERY_FORMAT), None)
+        if completed.returncode != 0:
+            return {}, {}
+        lines: dict[str, list[str]] = {}
+        output_at: dict[str, datetime] = {}
+        for line in completed.stdout.splitlines():
+            session, _, rest = line.partition(_SEP)
+            window, _, activity = rest.rpartition(_SEP)
+            pane_id = window.split(_SEP)[2] if window.count(_SEP) >= 2 else ""
+            at = _epoch(activity)
+            if pane_id and at is not None:
+                output_at[pane_id] = at
+            lines.setdefault(session, []).append(window)
+        windows = {
+            session: self._parse_windows(session, "\n".join(found))
+            for session, found in lines.items()
+        }
+        return windows, output_at
 
     def windows_or_raise(self, session: str) -> list[WindowInfo]:
         """:meth:`list_windows`, except a server that could not be ASKED raises.

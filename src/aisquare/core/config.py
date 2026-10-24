@@ -630,6 +630,12 @@ class FleetSettings(BaseModel):
     cannot spawn help the sidebar cannot see; ``max_continuations_per_hour`` caps
     how often the manager's Stop hook may keep it going on new board events.
 
+    Admission (#283): ``max_agents_total`` caps the live agents across every project,
+    the captain excluded (``0``: no budget); ``min_free_mb`` refuses a spawn below that
+    much available memory, or at critical memory pressure (``0``: off);
+    ``test_gate_mb`` is ``fleet gate``'s floor (``0``: ``min_free_mb``) and
+    ``test_gate_wait_minutes`` how long the gate waits for it.
+
     ``first_prompt`` is how an agent's first message reaches it (P0-W1a, #122):
     ``argv``, Claude Code's own command line (``claude -- "<prompt>"``), for a Claude
     Code agent, and typed into its input box for any other binary; ``type`` types it
@@ -663,6 +669,14 @@ class FleetSettings(BaseModel):
     draft_quiet_seconds: float = Field(default=10.0, ge=0)
     deliver_notes_at_turn_end: bool = True
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
+    max_agents_total: int = 0
+    min_free_mb: int = 2048
+    test_gate_mb: int = 0
+    test_gate_wait_minutes: int = 15
+    pane_clipboard: Literal["off", "on"] = "off"
+    """Whether a program in an agent's pane may set your clipboard (OSC 52, tmux's
+    ``set-clipboard``). Off by default: on, any program a pane runs can write it. Applies
+    to a server started after the change."""
 
 
 class SnapshotSettings(BaseModel):
@@ -774,6 +788,13 @@ class AccountsSettings(BaseModel):
     ``share_settings``, off by default, keeps every managed account's ``settings.json``
     a link to the plain claude's. Both: ``core.claude_sharing``.
 
+    ``share`` (P2-W7, #198), empty by default, names what every account has in common:
+    ``memory`` (one auto-memory directory per project under
+    ``~/.aisquare/claude-shared/memory``, passed to each launch as ``--settings``),
+    ``skills``, ``agents``, ``commands`` and ``claude_md`` (each managed slot's entry a
+    link to the plain claude's, its own kept beside it), and ``plugins`` (experimental).
+    ``aisquare accounts share`` turns parts on and off; a launch links a slot made since.
+
     Read from the config file alone, like ``[fleet]``: there is no
     ``AISQUARE_ACCOUNTS_*`` variable, for the same reason that section gives.
     """
@@ -785,6 +806,9 @@ class AccountsSettings(BaseModel):
     prefer: Literal["priority", "reset-soonest"] = "priority"
     share_trust: bool = True
     share_settings: bool = False
+    share: list[Literal["memory", "skills", "agents", "commands", "claude_md", "plugins"]] = Field(
+        default_factory=list
+    )
 
 
 class AppConfig(BaseModel):

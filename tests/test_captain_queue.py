@@ -37,7 +37,6 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import queue as captain_queue
 from aisquare.services.captain.queue import (
     EVENT_LIMIT,
@@ -63,6 +62,7 @@ from aisquare.services.captain.queue import (
     normalise,
     plain,
 )
+from tests.fleet_fakes import list_agents_as
 
 T0 = datetime(2026, 9, 25, 9, 0, tzinfo=UTC)
 
@@ -1405,7 +1405,7 @@ def test_store_sources_read_projects_tasks_and_questions_from_the_store(
         listed.append(project.id)
         return []
 
-    monkeypatch.setattr(fleet_service, "list_agents", fake_list_agents)
+    list_agents_as(monkeypatch, fake_list_agents)
     queue = AttentionQueue(tmp_path / "queue.json", sources=StoreSources())
     queue.refresh()
     rows = queue.attention()

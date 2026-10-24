@@ -227,6 +227,24 @@ def _named(args: Sequence[str]) -> str | None:
     return None
 
 
+def _shared_memory(binary: str, args: Sequence[str]) -> list[str]:
+    """``[accounts] share = ["memory"]``: the shared auto-memory directory for this folder,
+    as ``--settings`` (P2-W7, #198). Claude Code only, and not over a ``--settings`` the
+    operator's line already carries, which wins; either is said in one dim line."""
+    wanted = claude_accounts_service.memory_settings_args(Path.cwd())
+    if not wanted:
+        return []
+    if any(arg == "--settings" or arg.startswith("--settings=") for arg in args):
+        stderr_console().print(
+            "accounts: memory is not shared into this launch — its own --settings wins",
+            style="dim",
+        )
+        return []
+    if not harness.is_default_agent(binary):
+        return []
+    return wanted
+
+
 def _persona_system_prompt(
     name: str, project: ProjectInfo | None, binary: str, args: Sequence[str]
 ) -> list[str]:
@@ -718,12 +736,14 @@ def launch(
         if wanted
         else []
     )
+    memory_args = _shared_memory(resolution.binary, [*profile.args, *role_args, *ctx.args])
     argv = [
         resolution.binary,
         *profile.args,
         *role_args,
         *persona_args,
         *remote_args,
+        *memory_args,
         *ctx.args,
         *pinned_id,
     ]

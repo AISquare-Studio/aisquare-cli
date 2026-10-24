@@ -1874,7 +1874,7 @@ class Sidebar(Vertical):
     def _ring_on_attention(self, statuses: Iterable[FleetAgentStatus]) -> None:
         """Terminal bell when an agent newly flips to needing the user.
 
-        Mirrors ``watch._ring_on_attention``: one bell per frame, only on a
+        Mirrors ``cli.watch._ring_on_attention``: one bell per frame, only on a
         transition INTO attention from a known other state — never on the first
         frame (nothing changed; the user just opened the UI) and never while it
         stays there.

@@ -56,7 +56,7 @@ from aisquare.services.fleet import (
     TellResult,
     Typed,
 )
-from tests.cli_tree import NEEDED_UNLESS, root_command
+from tests.cli_tree import NEEDED_UNLESS, _placeholder, root_command
 from tests.rendered import ANSI
 from tests.rendered import plain as _plain
 
@@ -343,6 +343,7 @@ def test_spawn_consumes_its_own_options_and_forwards_nothing_else(
         "persona": None,
         "remote_control": None,
         "ack_wait": 45.0,  # [fleet] prompt_ack_seconds: the CLI waits for the first turn
+        "board_context": None,
     }
 
 
@@ -829,11 +830,11 @@ def test_stop_confirms_and_passes_force_through(
     gentle = runner.invoke(app, ["fleet", "stop", "coder-auth"])
     assert gentle.exit_code == 0, gentle.output
     assert "✓ stopped coder-auth (agt_coderauth)" in _plain(gentle.stdout)
-    assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": False})
+    assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": False, "actor": "user"})
 
     forced = runner.invoke(app, ["fleet", "stop", "coder-auth", "--force"])
     assert forced.exit_code == 0, forced.output
-    assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": True})
+    assert stop.calls[-1] == ((PROJECT, "coder-auth"), {"force": True, "actor": "user"})
 
 
 @pytest.mark.parametrize("worktree", [True, False], ids=["worktree", "no-worktree"])
@@ -1307,11 +1308,19 @@ def test_an_argument_needed_unless_a_flag_stands_in_is_refused_without_either(
     code; an entry the command no longer needs would fill a word it reads as something
     else."""
     argument, flag = NEEDED_UNLESS[path]
-    command = root_command().commands[path[0]].commands[path[1]]  # type: ignore[attr-defined]
+    command: Any = root_command()
+    for word in path:  # a path of any depth (`project group parent`)
+        command = command.commands[word]
     param = next(p for p in command.params if p.name == argument)
     assert not param.required and any(flag in p.opts for p in command.params)
 
-    result = runner.invoke(app, ["--json", *path])
+    # Every other required argument given (`project group parent <group>`), this one not.
+    others = [
+        _placeholder(p)
+        for p in command.params
+        if p.required and p.param_type_name == "argument" and p.name != argument
+    ]
+    result = runner.invoke(app, ["--json", *path, *others])
 
     assert result.exit_code == 2
     assert json.loads(result.stdout)["message"] == f"Missing argument '{argument}'."
@@ -1340,7 +1349,7 @@ def test_restart_and_stop_of_one_label_are_as_they_were(
             {"fresh": False, "spawned_by": "user", "permission_mode": None, "ack_wait": 45.0},
         )
     ]
-    assert stop.calls == [((PROJECT, "coder-auth"), {"force": False})]
+    assert stop.calls == [((PROJECT, "coder-auth"), {"force": False, "actor": "user"})]
     assert bulk.calls == []
 
 
@@ -1415,7 +1424,10 @@ def test_shutdown_asks_at_a_terminal_and_stops_nothing_when_the_answer_is_no(
     agreed = runner.invoke(app, ["fleet", "shutdown"])
 
     assert agreed.exit_code == 0, agreed.output
-    assert shutdown.calls[-1] == ((PROJECT,), {"force": False, "forget": False})
+    assert shutdown.calls[-1] == (
+        (PROJECT,),
+        {"force": False, "forget": False, "actor": "user"},
+    )
 
 
 def test_shutdown_asks_about_the_sessions_when_no_agent_is_live(
@@ -1518,7 +1530,7 @@ def test_shutdown_reports_each_row_with_the_reason_the_service_gave(
     assert "fleet-paused signal on api was cleared" in out
     assert "were NOT ended" in out, "the operator is told which rows they still own"
     assert "was not running" not in out, "the CLI never asserts a cause the service did not give"
-    assert shutdown.calls[-1] == ((PROJECT,), {"force": True, "forget": False})
+    assert shutdown.calls[-1] == ((PROJECT,), {"force": True, "forget": False, "actor": "user"})
 
 
 def test_shutdown_all_never_resolves_a_project_and_a_clean_run_exits_zero(
@@ -1689,7 +1701,7 @@ def test_shutdown_forget_shows_every_row_ended_unchecked_and_passes_the_word_on(
     assert plan.calls[0] == ((PROJECT,), {"forget": True})
     assert json.loads(as_json.stdout)["tmux_unusable"] == "tmux is not installed"
     assert ran.exit_code == 0, ran.output
-    assert shutdown.calls == [((PROJECT,), {"force": False, "forget": True})]
+    assert shutdown.calls == [((PROJECT,), {"force": False, "forget": True, "actor": "user"})]
 
 
 def test_shutdown_maps_a_refusal_onto_the_fail_contract(

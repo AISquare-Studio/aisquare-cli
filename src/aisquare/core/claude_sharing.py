@@ -536,6 +536,15 @@ def part_state(config_dir: Path, part: SharePart, source_dir: Path) -> PartState
     return "own" if os.path.lexists(entry) else "none"
 
 
+def _written_target(link: Path) -> str:
+    """Where ``link`` points, as written: Windows reads a link back with the extended-length
+    ``\\\\?\\`` prefix (``\\\\?\\C:\\Users\\...``), which no operator typed."""
+    target = os.readlink(link)
+    if target.startswith("\\\\?\\UNC\\"):  # a share reads back as \\?\UNC\server\...
+        return "\\\\" + target.removeprefix("\\\\?\\UNC\\")
+    return target.removeprefix("\\\\?\\")
+
+
 def _is_link(path: Path) -> bool:
     """A symlink, or on Windows a junction (which ``islink`` does not see)."""
     if os.path.islink(path):
@@ -562,10 +571,17 @@ def link_part(config_dir: Path, part: SharePart, source_dir: Path, *, now: datet
     if state == "shared":
         return None
     if state == "elsewhere":
-        raise SharingError(f"its {entry.name} links to {os.readlink(entry)} — not ours to replace")
+        raise SharingError(
+            f"its {entry.name} links to {_written_target(entry)} — not ours to replace"
+        )
     is_dir = LINKED_PARTS[part][1]
     if is_dir:
         source.mkdir(parents=True, exist_ok=True)
+        if state == "own" and entry.is_dir():
+            # What the slot has and the plain claude lacks goes there first, never over an
+            # entry it has: linked to an empty directory, a slot's own skills vanished from
+            # it (review of #360). Its own stays kept beside it as well.
+            _seed(entry, source)
     elif not source.is_file():
         raise SharingError(f"the plain claude has no {source.name} to share")
     kept: Path | None = None
@@ -579,6 +595,18 @@ def link_part(config_dir: Path, part: SharePart, source_dir: Path, *, now: datet
             os.replace(kept, entry)
         raise
     return kept
+
+
+def _seed(own: Path, shared: Path) -> None:
+    """Copy each entry of ``own`` that ``shared`` has no entry of that name for."""
+    for item in sorted(own.iterdir()):
+        target = shared / item.name
+        if target.exists() or target.is_symlink():
+            continue
+        if item.is_dir() and not item.is_symlink():
+            shutil.copytree(item, target, symlinks=True)
+        else:
+            shutil.copy2(item, target, follow_symlinks=False)
 
 
 def unlink_part(config_dir: Path, part: SharePart, source_dir: Path) -> Path | None:
@@ -673,17 +701,44 @@ def merge_memory(sources: Iterable[tuple[str, Path]], target: Path) -> list[tupl
             if not dest.exists():
                 shutil.copy2(item, dest)
             elif dest.read_bytes() != item.read_bytes():
-                other = dest.with_name(f"{dest.stem}.{label}{dest.suffix}")
-                if not other.exists() or other.read_bytes() != item.read_bytes():
-                    shutil.copy2(item, _free_beside(other, other.name))
-                    notes.append((label, f"{relative} differed: kept as {other.name}"))
+                kept = _kept_name(dest, label, item.read_bytes())
+                if kept is not None:
+                    shutil.copy2(item, kept)
+                    notes.append((label, f"{relative} differed: kept as {kept.name}"))
     return notes
 
 
+def _kept_name(dest: Path, label: str, body: bytes) -> Path | None:
+    """Where a differing ``dest`` from ``label`` is kept: ``<stem>.<label><suffix>``, then
+    ``<stem>.<label>-2<suffix>`` and on, so a note stays a ``.md`` Claude Code reads (review
+    of #360: ``note.slotb.md-2``); ``None`` when one of them already holds these bytes."""
+    counter = 1
+    while True:
+        tag = label if counter == 1 else f"{label}-{counter}"
+        candidate = dest.with_name(f"{dest.stem}.{tag}{dest.suffix}")
+        if not candidate.exists():
+            return candidate
+        if candidate.read_bytes() == body:
+            return None
+        counter += 1
+
+
 def _merge_lines(source: Path, dest: Path) -> None:
+    """``source``'s lines ``dest`` lacks, after it, each once; blank lines are the index's
+    layout and are kept, not deduplicated away (review of #360)."""
     have = dest.read_text(encoding="utf-8").splitlines() if dest.exists() else []
-    seen = set(have)
-    added = [line for line in source.read_text(encoding="utf-8").splitlines() if line not in seen]
+    seen = {line for line in have if line.strip()}
+    added: list[str] = []
+    for line in source.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            if line in seen:
+                continue
+            seen.add(line)
+        added.append(line)
+    while added and not added[0].strip():
+        added.pop(0)
+    while added and not added[-1].strip():
+        added.pop()
     if added or not dest.exists():
-        lines = have + [line for line in dict.fromkeys(added)]
+        lines = have + added
         dest.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")

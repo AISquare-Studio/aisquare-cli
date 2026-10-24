@@ -735,7 +735,7 @@ class BoardPanel(Vertical):
     def _refresh_labels(self, sessions: list[TeamSession]) -> None:
         """Ask the registry for the slot labels OFF the UI thread, at most every LABELS_TTL s.
 
-        ``watch._session_lines`` used to read them itself — a ``context.db``
+        ``cli.watch._session_lines`` used to read them itself — a ``context.db``
         open with a busy timeout of seconds, a scan of the account directories
         and, on a registry not yet reconciled, its writes — on the event loop,
         at every tick of every open board (review of #205, fourth round). The

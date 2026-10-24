@@ -33,9 +33,9 @@ from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import adopt as adopt_service
+from aisquare.services import autostop, install_route
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
-from aisquare.services import install_route
 from aisquare.services import project as project_service
 
 app = typer.Typer(
@@ -253,6 +253,16 @@ def spawn(
             show_default=False,
         ),
     ] = None,
+    board_context: Annotated[
+        str | None,
+        typer.Option(
+            "--board-context",
+            help="What of the board it reads: all, relevant (its tasks, what is addressed "
+            "to it, decisions) or none; default: the role's "
+            "fleet.roles.<role>.board_context (reviewer: none). Kept by restart and switch.",
+            metavar="all|relevant|none",
+        ),
+    ] = None,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -279,6 +289,7 @@ def spawn(
             persona=persona,
             remote_control=remote_control,
             ack_wait=fleet_service.settings().prompt_ack_seconds,
+            board_context=board_context,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -553,11 +564,15 @@ def stop(
     force: Annotated[bool, typer.Option("--force", help="Kill without a graceful /exit.")] = False,
     every: EveryAgent = False,
     managers: ManagersOnly = False,
+    as_session: SessionRef = None,
 ) -> None:
     """Stop an agent: /exit, a grace period, then the window is killed.
 
     On an agent that already exited (💤) it removes the dead window that
     `remain-on-exit` kept, which is what takes the row off the live listing.
+
+    The board's `agent_exited` names who stopped it: --as SESSION, else the session of
+    the fleet window you run it in, else `user`. A manager's own stop wakes no one.
 
     With --all, every running agent in every project is stopped so, one line
     each by project, then a count; --managers stops the managers alone. It exits
@@ -566,11 +581,13 @@ def stop(
     """
     label = _one_or_every(ctx, label, every, managers, project, {"--force": force})
     if label is None:
-        _bulk("stop", managers_only=managers, acting_session=None)
+        _bulk("stop", managers_only=managers, acting_session=as_session)
         return
     target = _project(project)
     try:
-        receipt = fleet_service.stop(target, label, force=force)
+        receipt = fleet_service.stop(
+            target, label, force=force, actor=fleet_service.acting_as(as_session)
+        )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     agent = receipt.agent
@@ -1112,7 +1129,9 @@ def shutdown(
             stdout_console().print("nothing stopped")
             return
     try:
-        report = fleet_service.shutdown(target, force=force, forget=forget)
+        report = fleet_service.shutdown(
+            target, force=force, forget=forget, actor=fleet_service.acting_as()
+        )
     except fleet_service.FleetInterrupted as exc:
         # The operator's Ctrl-C: rows before it are down and their claims
         # released, committed as they went, so they are told how far it got —
@@ -1122,11 +1141,30 @@ def shutdown(
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     _emit_shutdown(report, target)
+    _stop_the_watcher_with_the_fleet()
     if _not_down(report) or report.release_failures:
         # The fleet is not down — or it is, with claims stuck on ended sessions.
         # Said in the report AND in the exit code, so a script that only reads
         # the code cannot mistake either for a clean run.
         raise typer.Exit(code=1)
+
+
+def _stop_the_watcher_with_the_fleet() -> None:
+    """A shutdown that leaves no fleet agent live anywhere stops ``aisquare watch`` too
+    (P2-W2, #284): it watches every project, so one project's shutdown leaves it running."""
+    from aisquare.core.store import store_session
+    from aisquare.services import watch as watch_service
+
+    try:
+        with store_session() as store:
+            live = [a for a in store.live_fleet_agents() if a.role != fleet_service.CAPTAIN_ROLE]
+        if live or watch_service.running_pid() is None:
+            return
+        pid = watch_service.stop_detached()
+    except Exception:  # the fleet is down either way; the watcher has its own --stop
+        return
+    if not get_state().json_output:
+        stdout_console().print(f"stopped the watcher too (pid {pid})", markup=False)
 
 
 def _not_down(report: fleet_service.ShutdownReport) -> bool:
@@ -1170,6 +1208,44 @@ def attach(project: ProjectRef = None) -> None:
         )
 
 
+def _reap_finished(target: ProjectInfo | None, *, dry_run: bool) -> None:
+    """``fleet reap --finished``: every auto-stoppable worker, stopped when it has finished
+    (P2-W1b, #283)."""
+    projects = [target] if target is not None else autostop.every_project()
+    try:
+        looked = autostop.reap_finished(projects, dry_run=dry_run)
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "label": item.verdict.agent.label,
+                        "project_id": item.verdict.agent.project_id,
+                        "finished": item.verdict.finished,
+                        "reason": item.verdict.reason,
+                        "kept_because": item.verdict.blocked,
+                        "stopped": item.stopped,
+                    }
+                    for item in looked
+                ]
+            )
+        )
+        return
+    console = stdout_console()
+    if not looked:
+        console.print("no worker of an auto_stop_roles role is live", markup=False)
+    for item in looked:
+        v = item.verdict
+        if item.stopped:
+            console.print(f"✓ stopped {v.agent.label}: {v.reason}", markup=False)
+        elif v.finished:
+            console.print(f"  would stop {v.agent.label}: {v.reason}", markup=False)
+        else:
+            console.print(f"  kept {v.agent.label}: {v.blocked}", markup=False)
+
+
 @app.command("reap")
 def reap(
     project: ProjectRef = None,
@@ -1191,6 +1267,19 @@ def reap(
             "is left live and named with or without this flag.",
         ),
     ] = False,
+    finished: Annotated[
+        bool,
+        typer.Option(
+            "--finished",
+            help="Stop the workers that have finished instead (\\[fleet] auto_stop_roles): "
+            "a task closed or a result posted, nothing claimed, queued or unread, idle "
+            "auto_stop_idle_minutes, an empty input box. The exit says actor auto-stop.",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="With --finished: list the candidates, stop none."),
+    ] = False,
 ) -> None:
     """Record exited agents, mark vanished panes lost, remove finished worktrees.
 
@@ -1203,7 +1292,12 @@ def reap(
     back to the board.
     """
     refuse_conflicting_scope(every, project)
+    if dry_run and not finished:
+        raise typer.BadParameter("--dry-run goes with --finished")
     target = None if every else _project(project)
+    if finished:
+        _reap_finished(target, dry_run=dry_run)
+        return
     try:
         report = fleet_service.reap(target, server_down=server_down)
     except fleet_service.FleetError as exc:
@@ -1519,32 +1613,65 @@ def gate(
     raise typer.Exit(code)
 
 
-@app.command("pause")
-def pause(project: ProjectRef = None, as_session: SessionRef = None) -> None:
-    """Pause the fleet: the manager spawns nothing until `resume`."""
-    target = _project(project)
+GroupRef = Annotated[
+    str | None,
+    typer.Option(
+        "--group",
+        help="Every project of this group and its parent (a project group with a parent).",
+    ),
+]
+
+
+def _group_targets(group: str) -> list[ProjectInfo]:
+    """The projects ``--group`` names: the group's members and its parent (P2-W6, #199)."""
+    from aisquare.core.store import store_session
+    from aisquare.services import parent as parent_service
+    from aisquare.services import project_groups as groups_service
+
+    with store_session() as store:
+        try:
+            found = groups_service.resolve_group(store, group)
+        except KeyError:
+            fail(f"no group matches '{group}'", error="not_found", ref=group)
+        return parent_service.group_projects(store, found.id)
+
+
+def _pause_or_resume(
+    project: str | None, group: str | None, as_session: str | None, *, on: bool
+) -> None:
+    if project is not None and group is not None:
+        fail("give a project or --group, not both", error="usage", exit_code=2)
+    targets = _group_targets(group) if group is not None else [_project(project)]
+    verb = fleet_service.pause if on else fleet_service.resume
     try:
-        fleet_service.pause(target, session_ref=as_session)
+        for target in targets:
+            verb(target, session_ref=as_session)
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     if get_state().json_output:
-        typer.echo(json.dumps({"paused": True, **_project_json(target)}))
+        payload = [{"paused": on, **_project_json(t)} for t in targets]
+        typer.echo(json.dumps(payload[0] if group is None else payload))
         return
-    stdout_console().print(f"⏸ fleet paused for {_display_name(target)}", markup=False)
+    for target in targets:
+        mark, said = ("⏸", "paused") if on else ("▶", "resumed")
+        stdout_console().print(f"{mark} fleet {said} for {_display_name(target)}", markup=False)
+
+
+@app.command("pause")
+def pause(
+    project: ProjectRef = None, group: GroupRef = None, as_session: SessionRef = None
+) -> None:
+    """Pause the fleet: the manager spawns nothing until `resume`. `--group` pauses a group's
+    members and its parent at once, and an agent may not spawn on any of them."""
+    _pause_or_resume(project, group, as_session, on=True)
 
 
 @app.command("resume")
-def resume(project: ProjectRef = None, as_session: SessionRef = None) -> None:
-    """Resume a paused fleet."""
-    target = _project(project)
-    try:
-        fleet_service.resume(target, session_ref=as_session)
-    except fleet_service.FleetError as exc:
-        _fail_fleet(exc)
-    if get_state().json_output:
-        typer.echo(json.dumps({"paused": False, **_project_json(target)}))
-        return
-    stdout_console().print(f"▶ fleet resumed for {_display_name(target)}", markup=False)
+def resume(
+    project: ProjectRef = None, group: GroupRef = None, as_session: SessionRef = None
+) -> None:
+    """Resume a paused fleet (`--group`: a group's members and its parent)."""
+    _pause_or_resume(project, group, as_session, on=False)
 
 
 def not_interactive_reason() -> str | None:

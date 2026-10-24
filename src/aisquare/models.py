@@ -835,6 +835,13 @@ class TeamEvent(BaseModel):
     task_id: str | None = None
     to_role: str | None = None
     created_at: datetime
+    actor: str | None = None
+    """Who caused it, when not the author (P1 WS-2, #279): a session id, ``user`` (asq or
+    a shell with no session), ``usage-limit`` or ``auto-stop``. ``None``: the author's own
+    act, or unknown."""
+    meta: dict[str, object] | None = None
+    """Its details, by kind: ``agent_exited`` carries ``status``, ``force``, ``released``
+    and ``why``."""
 
     def as_envelope(self) -> DataEnvelope:
         """This event as a capture-pipe envelope (``kind`` namespaced ``team.*``).
@@ -852,6 +859,8 @@ class TeamEvent(BaseModel):
             "text": self.text,
             "task_id": self.task_id,
             "to_role": self.to_role,
+            "actor": self.actor,
+            "meta": self.meta,
         }
         if self.kind == "signal":
             decoded = _SIGNAL_TEXT.match(self.text)
@@ -906,6 +915,9 @@ class OnboardReport(BaseModel):
     pack failed and why. ``None`` when a pack was made or reused. Set beside a
     ``snapshot``, it is a ``--refresh`` that failed: that is the last pack, kept,
     and agents still get it."""
+    code_index: str | None = None
+    """The symbol index's line (#285): what this onboard built or refreshed, or why not.
+    ``None`` with ``[code] enabled = false``."""
 
 
 class ProjectForgetReport(BaseModel):
@@ -1177,6 +1189,15 @@ class LaunchSpec(BaseModel):
     spawn's ``--remote-control``/``--no-remote-control``, else the role's
     ``[fleet.roles.<role>] remote_control``. A restart and a switch replay it; ``False`` on a
     spec recorded before it existed."""
+    model: str | None = None
+    """The ``--model`` the spawn resolved down the role's ladder (#129 b), ``None`` when it
+    passed none: another binary, a model already in the arguments, or an untiered role."""
+    effort: str | None = None
+    """The ``--effort`` passed beside ``model``."""
+    board_context: str | None = None
+    """What of the board the agent reads (``all``, ``relevant``, ``none``; P1 WS-2, #279),
+    as its spawn resolved it, so a restart or switch keeps it. ``None`` on a spec recorded
+    before it: the role's setting applies."""
 
 
 class FleetAgent(BaseModel):

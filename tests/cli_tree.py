@@ -46,12 +46,24 @@ def _placeholder(parameter: Any) -> str:
     if choices:
         first = choices[0]
         return first.value if isinstance(first, Enum) else str(first)
+    # A number for a number: "sample" is a usage error, and the command's body never ran
+    # (`hook compact-check --cursor`, the sweep's USAGE_ONLY ratchet).
+    if getattr(parameter.type, "name", None) in (
+        "int",
+        "integer",
+        "float",
+        "int range",
+        "float range",
+    ):
+        return "0"
     return "sample"
 
 
 NEEDED_UNLESS: dict[tuple[str, ...], tuple[str, str]] = {
     ("fleet", "restart"): ("label", "--all"),
     ("fleet", "stop"): ("label", "--all"),
+    ("project", "group", "parent"): ("project", "--clear"),
+    ("workspace", "group", "parent"): ("project", "--clear"),
 }
 """Arguments a command still needs unless a flag stands in for them: ``(argument, flag)``.
 

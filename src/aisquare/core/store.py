@@ -1029,6 +1029,21 @@ _SCHEMA_V33 = ""
 # a message that was not taken. The columns are the whole step, so the script is empty:
 # they are in :data:`_PRODUCTS`, added only where absent.
 _SCHEMA_V34 = ""
+
+# P1 WS-2 (#279): who caused a board event (``team_event.actor``) and its details as JSON
+# (``team_event.meta``), so a manager's own stop wakes nobody and an exit says its status.
+# Step 35, after P0-W1a's 34 (the numbers are reserved per train). Both columns are
+# nullable and in :data:`_PRODUCTS`, added only where absent, so a store another line
+# stamped v34 still gains them; a row from before them reads NULL: no actor (the agent's
+# own act, or unknown) and no details.
+_SCHEMA_V35_WS2 = ""
+# v36 (P2-W6, #199): a parent manager over a project group. ``project_group`` gains its
+# parent project, its routing rules (JSON) and its agent cap; ``team_task`` gains the task
+# it was delegated from (its origin and that origin's project). All nullable and in
+# :data:`_PRODUCTS`, added only where absent, so a store another line carried past v35
+# converges too; a row from before them reads NULL: no parent, no rules, no cap, no origin.
+# #140's "nothing else references a group" is amended by exactly these linkage columns.
+_SCHEMA_V36_W6 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1065,6 +1080,8 @@ _MIGRATIONS = (
     _SCHEMA_V32,
     _SCHEMA_V33,
     _SCHEMA_V34,
+    _SCHEMA_V35_WS2,
+    _SCHEMA_V36_W6,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1127,6 +1144,16 @@ _PRODUCTS: dict[int, _Products] = {
             ("team_session", "prompted_at", "TEXT"),
             ("fleet_agent", "first_prompt", "TEXT"),
             ("fleet_agent", "first_prompt_at", "TEXT"),
+        )
+    ),
+    34: _Products(columns=(("team_event", "actor", "TEXT"), ("team_event", "meta", "TEXT"))),
+    35: _Products(
+        columns=(
+            ("project_group", "parent_project_id", "TEXT"),
+            ("project_group", "route", "TEXT"),
+            ("project_group", "max_agents", "INTEGER"),
+            ("team_task", "origin_task_id", "TEXT"),
+            ("team_task", "origin_project_id", "TEXT"),
         )
     ),
 }
@@ -1205,7 +1232,9 @@ _TASK_COLUMNS = (
     "id, project_id, number, key, title, detail, status, role, needs, "
     "claimed_by, claim_expires_at, created_by, created_at, updated_at"
 )
-_EVENT_COLUMNS = "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at"
+_EVENT_COLUMNS = (
+    "seq, id, project_id, session_id, kind, text, task_id, to_role, created_at, actor, meta"
+)
 _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
@@ -1350,6 +1379,7 @@ class ContextStore(Protocol):
         role: str | None = None,
         status: TaskStatus = "todo",
         prefer: str | None = None,
+        only: str | None = None,
     ) -> TeamTask | None: ...
     def task_statuses(self, project_id: str) -> dict[str, str]: ...
     def adopt_fleet_agent_session(
@@ -1378,10 +1408,17 @@ class ContextStore(Protocol):
         *,
         exclude_session: str | None = None,
         exclude_kinds: Collection[str] = (),
+        exclude_actor: str | None = None,
+        relevant: Relevance | None = None,
         limit: int = 50,
     ) -> list[TeamEvent]: ...
     def recent_events(
-        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+        self,
+        project_id: str,
+        *,
+        exclude_kinds: Collection[str] = (),
+        relevant: Relevance | None = None,
+        limit: int = 10,
     ) -> list[TeamEvent]: ...
     def filtered_events(
         self,
@@ -1449,6 +1486,21 @@ class ContextStore(Protocol):
         collapsed: bool | None = None,
     ) -> ProjectGroup: ...
     def delete_project_group(self, group_id: str) -> list[str]: ...
+    def group_settings(self, group_id: str) -> GroupSettings: ...
+    def set_group_settings(
+        self,
+        group_id: str,
+        *,
+        parent_project_id: str | EllipsisType | None = ...,
+        route: Mapping[str, object] | EllipsisType | None = ...,
+        max_agents: int | EllipsisType = ...,
+    ) -> GroupSettings: ...
+    def set_task_origin(
+        self, task_id: str, origin_task_id: str, origin_project_id: str
+    ) -> None: ...
+    def task_origins(self, project_id: str) -> dict[str, tuple[str, str]]: ...
+    def linked_tasks(self, origin_task_id: str) -> list[TeamTask]: ...
+    def linked_counts(self, origin_project_id: str) -> dict[str, tuple[int, int]]: ...
     def layout_change(self) -> contextlib.AbstractContextManager[None]: ...
     def update_project_layout(
         self,
@@ -1765,6 +1817,8 @@ def _row_to_event(row: sqlite3.Row) -> TeamEvent:
         task_id=row["task_id"],
         to_role=row["to_role"],
         created_at=datetime.fromisoformat(row["created_at"]),
+        actor=row["actor"],
+        meta=json.loads(row["meta"]) if row["meta"] else None,
     )
 
 
@@ -2295,7 +2349,7 @@ class SqliteStore:
         """Delete the ``team_meta`` rows keyed by the project or by its sessions.
 
         Inside the caller's transaction, in statements of at most
-        :data:`_META_BATCH` sessions each (two terms per session): one statement
+        :data:`_META_BATCH` sessions each (five terms per session): one statement
         per purge was the shape SQLite refused at 500 sessions.
         """
         removed = self._conn.execute(
@@ -2304,7 +2358,7 @@ class SqliteStore:
         ).rowcount
         for start in range(0, len(sessions), _META_BATCH):
             batch = sessions[start : start + _META_BATCH]
-            keys = [f"nudge:{sid}" for sid in batch]
+            keys = [f"{kind}:{sid}" for sid in batch for kind in _SESSION_META_KINDS]
             globs = [f"continuations:{_glob_escape(sid)}:*" for sid in batch]
             clauses = ["key = ?"] * len(keys) + ["key GLOB ?"] * len(globs)
             removed += self._conn.execute(
@@ -2975,8 +3029,12 @@ class SqliteStore:
         role: str | None = None,
         status: TaskStatus = "todo",
         prefer: str | None = None,
+        only: str | None = None,
     ) -> TeamTask | None:
         """The oldest *ready* task in ``status`` a session of ``role`` could pick up.
+
+        ``only`` narrows the pool to that one task id, under the same rules (``task next
+        --task``: a tester spawned for one task takes it and nothing else, #129 a).
 
         Tasks without a role hint are available to every role; tasks with one
         only match sessions of that role (or an unfiltered query). A ``todo``
@@ -2992,6 +3050,9 @@ class SqliteStore:
         if role is not None:
             clauses.append("(role IS NULL OR role = ?)")
             params.append(role)
+        if only is not None:
+            clauses.append("id = ?")
+            params.append(only)
         order = "ORDER BY id"
         if prefer is not None:
             order = "ORDER BY (id = ?) DESC, id"
@@ -3178,17 +3239,9 @@ class SqliteStore:
             for event, meta_key, meta_value in writes:
                 cursor = self._conn.execute(
                     "INSERT INTO team_event (id, project_id, session_id, kind, text, "
-                    "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        event.id,
-                        event.project_id,
-                        event.session_id,
-                        event.kind,
-                        event.text,
-                        event.task_id,
-                        event.to_role,
-                        event.created_at.isoformat(),
-                    ),
+                    "task_id, to_role, created_at, actor, meta) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    _event_values(event),
                 )
                 stamped = {**meta_value, "seq": cursor.lastrowid}
                 self._conn.execute(
@@ -3202,17 +3255,8 @@ class SqliteStore:
     def add_team_event(self, event: TeamEvent) -> TeamEvent:
         cursor = self._conn.execute(
             "INSERT INTO team_event (id, project_id, session_id, kind, text, "
-            "task_id, to_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                event.id,
-                event.project_id,
-                event.session_id,
-                event.kind,
-                event.text,
-                event.task_id,
-                event.to_role,
-                event.created_at.isoformat(),
-            ),
+            "task_id, to_role, created_at, actor, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            _event_values(event),
         )
         self._conn.commit()
         return event.model_copy(update={"seq": cursor.lastrowid})
@@ -3309,34 +3353,58 @@ class SqliteStore:
         *,
         exclude_session: str | None = None,
         exclude_kinds: Collection[str] = (),
+        exclude_actor: str | None = None,
+        relevant: Relevance | None = None,
         limit: int = 50,
     ) -> list[TeamEvent]:
         """A cursor page: the OLDEST ``limit`` events past ``seq``, oldest first.
+
+        ``exclude_actor`` leaves out what that session caused, as ``exclude_session`` leaves
+        out what it wrote: a manager's own ``fleet stop`` is written under the stopped
+        agent's session, with the manager as its actor. ``relevant`` keeps only what a
+        ``relevant`` board context reads (:class:`Relevance`).
 
         ``exclude_kinds`` leaves those kinds out INSIDE the query, as
         :meth:`filtered_events` does, so ``limit`` counts rows the caller can use.
         Dropped after the LIMIT, a run of the captain's audit lines filled the whole
         page, and the event behind it was not read at all (review of #240, finding 11).
         """
+        keep, kept = _relevant_clause(relevant)
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
             "WHERE project_id = ? AND seq > ? "
             "AND (session_id IS NULL OR session_id != ?) "
-            f"{_and_not_kinds(exclude_kinds)}ORDER BY seq LIMIT ?",
-            (project_id, seq, exclude_session or "", *exclude_kinds, limit),
+            "AND (actor IS NULL OR actor != ?) "
+            f"{_and_not_kinds(exclude_kinds)}{keep}ORDER BY seq LIMIT ?",
+            (
+                project_id,
+                seq,
+                exclude_session or "",
+                exclude_actor or "",
+                *exclude_kinds,
+                *kept,
+                limit,
+            ),
         ).fetchall()
         return [_row_to_event(row) for row in rows]
 
     def recent_events(
-        self, project_id: str, *, exclude_kinds: Collection[str] = (), limit: int = 10
+        self,
+        project_id: str,
+        *,
+        exclude_kinds: Collection[str] = (),
+        relevant: Relevance | None = None,
+        limit: int = 10,
     ) -> list[TeamEvent]:
         """A window: the NEWEST ``limit`` events, oldest first. ``exclude_kinds`` is left
         out inside the query, as in :meth:`events_since`: the window stays ``limit`` long
-        however many of those kinds are newer than the events it shows."""
+        however many of those kinds are newer than the events it shows. ``relevant`` as
+        there."""
+        keep, kept = _relevant_clause(relevant)
         rows = self._conn.execute(
             f"SELECT {_EVENT_COLUMNS} FROM team_event "
-            f"WHERE project_id = ? {_and_not_kinds(exclude_kinds)}ORDER BY seq DESC LIMIT ?",
-            (project_id, *exclude_kinds, limit),
+            f"WHERE project_id = ? {_and_not_kinds(exclude_kinds)}{keep}ORDER BY seq DESC LIMIT ?",
+            (project_id, *exclude_kinds, *kept, limit),
         ).fetchall()
         return [_row_to_event(row) for row in reversed(rows)]
 
@@ -3711,6 +3779,94 @@ class SqliteStore:
         if cursor.rowcount != 1:
             raise KeyError(group_id)
         return members
+
+    def group_settings(self, group_id: str) -> GroupSettings:
+        """A group's parent, routing rules and cap (P2-W6, #199); none of them set when the
+        group is gone."""
+        row = self._conn.execute(
+            "SELECT parent_project_id, route, max_agents FROM project_group WHERE id = ?",
+            (group_id,),
+        ).fetchone()
+        if row is None:
+            return GroupSettings(group_id=group_id)
+        try:
+            route = json.loads(row["route"]) if row["route"] else None
+        except ValueError:
+            route = None
+        return GroupSettings(
+            group_id=group_id,
+            parent_project_id=row["parent_project_id"],
+            route=route if isinstance(route, dict) else None,
+            max_agents=int(row["max_agents"] or 0),
+        )
+
+    def set_group_settings(
+        self,
+        group_id: str,
+        *,
+        parent_project_id: str | EllipsisType | None = ...,
+        route: Mapping[str, object] | EllipsisType | None = ...,
+        max_agents: int | EllipsisType = ...,
+    ) -> GroupSettings:
+        """Change the given settings (``...`` leaves one as it is; ``None`` clears it). Raises
+        ``KeyError`` for a group that is gone."""
+        sets: list[str] = []
+        params: list[object] = []
+        if parent_project_id is not ...:
+            sets.append("parent_project_id = ?")
+            params.append(parent_project_id)
+        if route is not ...:
+            sets.append("route = ?")
+            params.append(json.dumps(dict(route)) if route is not None else None)
+        if max_agents is not ...:
+            sets.append("max_agents = ?")
+            params.append(int(max_agents))
+        if sets:
+            cursor = self._conn.execute(
+                f"UPDATE project_group SET {', '.join(sets)} WHERE id = ?", (*params, group_id)
+            )
+            self._conn.commit()
+            if cursor.rowcount != 1:
+                raise KeyError(group_id)
+        return self.group_settings(group_id)
+
+    def set_task_origin(self, task_id: str, origin_task_id: str, origin_project_id: str) -> None:
+        """Record the task ``task_id`` was delegated from (P2-W6): on another board, usually
+        the group's parent."""
+        self._conn.execute(
+            "UPDATE team_task SET origin_task_id = ?, origin_project_id = ? WHERE id = ?",
+            (origin_task_id, origin_project_id, task_id),
+        )
+        self._conn.commit()
+
+    def task_origins(self, project_id: str) -> dict[str, tuple[str, str]]:
+        """Of a board's tasks, the ones delegated from another: task id → (origin task id,
+        origin project id)."""
+        rows = self._conn.execute(
+            "SELECT id, origin_task_id, origin_project_id FROM team_task "
+            "WHERE project_id = ? AND origin_task_id IS NOT NULL",
+            (project_id,),
+        ).fetchall()
+        return {str(r["id"]): (str(r["origin_task_id"]), str(r["origin_project_id"])) for r in rows}
+
+    def linked_counts(self, origin_project_id: str) -> dict[str, tuple[int, int]]:
+        """Of a board's tasks that others were delegated from: origin task id → (how many
+        were delegated, how many of those are done). One query for the whole board."""
+        rows = self._conn.execute(
+            "SELECT origin_task_id, COUNT(*) AS n, SUM(status = 'done') AS d FROM team_task "
+            "WHERE origin_project_id = ? AND origin_task_id IS NOT NULL GROUP BY origin_task_id",
+            (origin_project_id,),
+        ).fetchall()
+        return {str(r["origin_task_id"]): (int(r["n"]), int(r["d"] or 0)) for r in rows}
+
+    def linked_tasks(self, origin_task_id: str) -> list[TeamTask]:
+        """Every task delegated from ``origin_task_id``, on any board."""
+        rows = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM team_task WHERE origin_task_id = ? "
+            "ORDER BY created_at, id",
+            (origin_task_id,),
+        ).fetchall()
+        return [_row_to_task(row) for row in rows]
 
     def update_project_layout(
         self,
@@ -4688,6 +4844,68 @@ def _glob_prefix(ref: str) -> str:
     """
     stripped = _ref_stripped(ref)
     return f"{stripped}*" if stripped else ""
+
+
+def _event_values(event: TeamEvent) -> tuple[object, ...]:
+    """``event``'s values for an ``INSERT INTO team_event`` of every written column."""
+    return (
+        event.id,
+        event.project_id,
+        event.session_id,
+        event.kind,
+        event.text,
+        event.task_id,
+        event.to_role,
+        event.created_at.isoformat(),
+        event.actor,
+        None if event.meta is None else json.dumps(event.meta, sort_keys=True),
+    )
+
+
+_SESSION_META_KINDS: tuple[str, ...] = ("nudge", "compact", "compact-refused", "compact-armed")
+"""The ``team_meta`` keys kept per session as ``<kind>:<session id>``: the manager's nudge
+debounce, and the quiet compaction's mark, its newest refusal and its latest arm (P1 WS-4)."""
+
+
+class GroupSettings(NamedTuple):
+    """A project group's parent manager settings (P2-W6, #199)."""
+
+    group_id: str
+    parent_project_id: str | None = None
+    route: dict[str, object] | None = None
+    """``{"kinds": [...], "pattern": str | None, "off": bool}``; ``None``: the defaults."""
+    max_agents: int = 0
+    """Live agents across the group's members and parent; ``0`` is no cap."""
+
+
+class Relevance(NamedTuple):
+    """What a ``relevant`` board context keeps (P1 WS-2, #279): events on these tasks,
+    events addressed to these names (a role or a label, any case), and decisions unless
+    ``decisions`` is off: what a ``none`` agent's turn end asks for, the notes addressed to
+    it and nothing else (sync #365)."""
+
+    task_ids: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()
+    decisions: bool = True
+
+
+def _relevant_clause(relevant: Relevance | None) -> tuple[str, list[str]]:
+    """``AND (…) `` keeping only what ``relevant`` keeps, with its parameters; nothing for
+    ``None``. In the query, before the LIMIT: forty irrelevant events must not fill a page
+    the relevant one is behind (review of #240, finding 11's rule)."""
+    if relevant is None:
+        return "", []
+    terms = ["kind = 'decision'"] if relevant.decisions else []
+    params: list[str] = []
+    if relevant.task_ids:
+        terms.append(f"task_id IN ({', '.join('?' * len(relevant.task_ids))})")
+        params += relevant.task_ids
+    if relevant.names:
+        terms.append(f"lower(to_role) IN ({', '.join('?' * len(relevant.names))})")
+        params += [name.strip().lower() for name in relevant.names]
+    if not terms:
+        return "AND 0 ", []  # keeps nothing: no task, no name, no decisions
+    return f"AND ({' OR '.join(terms)}) ", params
 
 
 def _and_not_kinds(kinds: Collection[str]) -> str:

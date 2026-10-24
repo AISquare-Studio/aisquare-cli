@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import claude_sharing, experimental, harness, orchestrator, paths
+from aisquare.core import claude_sharing, code_index, experimental, harness, orchestrator, paths
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
@@ -154,6 +154,8 @@ def doctor(
         _check_tmux(),
         _check_gh(),
         _check_snapshot(cwd),
+        # Never warns, so it moves no actionable row out of the sidebar's first three.
+        _check_code_index(cwd),
         _check_brain(cwd),
         _check_harness(cwd),
         _check_self_invocation(cwd),
@@ -170,6 +172,7 @@ def doctor(
         # fleet terminal row (#147) can warn too, about a running server's kept
         # prefix, so it waits here with them rather than beside tmux.
         _check_browser_tools(cwd),
+        *_check_role_tools(),
         _check_fleet_terminal(),
         # Beside the fleet terminal row, which reads the same running server (fix 4 of the
         # fleet-board card): it can warn, so it waits with the other late rows.
@@ -177,8 +180,10 @@ def doctor(
         # Only while a role asks for Claude Code's Remote Control (#289): which roles, and
         # what in their launch would make Claude Code refuse it.
         *_optional(_check_remote_control()),
+        *_check_manager_board_context(),
         # Can warn (memory below the floor, pressure at warn), so it waits with the late rows.
         _check_fleet_capacity(),
+        _check_watcher(),
         *_experiment_checks(),
         # Only while the experimental captain is off: one ok row saying how to turn it
         # on. On, doctor is as it was before the switch.
@@ -2272,6 +2277,28 @@ def _check_tmux(server: tmux_core.TmuxServer | None = None) -> DoctorCheck:
         return _ok(name, f"not evaluated ({exc}) — the fleet checks again on its first spawn")
 
 
+def _check_manager_board_context() -> list[DoctorCheck]:
+    """A warn row when ``[fleet.roles.manager] board_context`` is not ``all``, else none.
+
+    The board is the manager's job: a spawn gives it ``all`` whatever the key says, and
+    says so in its notes (P1 WS-2, #279). This is where the key's own reader hears it.
+    """
+    try:
+        manager = load_config().fleet.roles.get("manager")
+    except Exception:  # an unreadable config has its own row
+        return []
+    if manager is None or manager.board_context == "all":
+        return []
+    return [
+        _warn(
+            "manager board context",
+            f"fleet.roles.manager.board_context = {manager.board_context!r} is ignored: "
+            "a manager reads the whole board",
+            "aisquare config set fleet.roles.manager.board_context all",
+        )
+    ]
+
+
 def _check_fleet_terminal(
     server: tmux_core.TmuxServer | None = None, environ: Mapping[str, str] | None = None
 ) -> DoctorCheck:
@@ -2426,6 +2453,34 @@ def _check_fleet_capacity() -> DoctorCheck:
             "change max_agents_total / min_free_mb in [fleet]",
         )
     return _ok(name, detail)
+
+
+def _check_watcher() -> DoctorCheck:
+    """``fleet watcher``: whether ``aisquare watch`` runs for this home, and how old its
+    last look is (P2-W2, #284). Warn when it runs but has not looked for three intervals: a
+    manager told to wait for ``watch:`` lines would wait for nothing. Read-only."""
+    name = "fleet watcher"
+    try:
+        if (uncreated := _uncreated_home(name)) is not None:
+            return uncreated
+        from aisquare.core.config import load_config
+        from aisquare.services import watch as watch_service
+
+        found = watch_service.watch_status()
+        every = load_config().watch.interval_seconds
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    age = found.age()
+    looked = f"last look {int(age.total_seconds())} s ago" if age is not None else "no look yet"
+    if found.pid is None:
+        return _ok(name, f"not running ({looked}); `aisquare watch --detach` starts it")
+    if age is None or age.total_seconds() > 3 * every:
+        return _warn(
+            name,
+            f"running (pid {found.pid}), {looked}",
+            "aisquare watch --stop, then aisquare watch --detach",
+        )
+    return _ok(name, f"running (pid {found.pid}), {looked}")
 
 
 def _check_anthropic_routing(server: explainability_ops.FleetServer | None = None) -> DoctorCheck:
@@ -2910,6 +2965,34 @@ def _check_browser_tools(cwd: Path | None = None) -> DoctorCheck:
     )
 
 
+def _check_role_tools() -> list[DoctorCheck]:
+    """``<role> tools``: one row per fleet role, the tools it launches without and its skill
+    listing, as ``harness.tool_policy`` gives them to a launch that asks nothing itself (#280).
+
+    Ok, always: the rows say what each role's prefix carries, and nothing in them is a
+    defect. Not a warning for a name Claude Code does not have either, because Claude Code
+    does not say: 2.1.309 starts with ``--disallowedTools=NoSuchTool`` silently, so a
+    typo in ``deny_tools`` denies nothing, which is what the row shows. A role bound to
+    another agent gets no deny token, and its row says why.
+    """
+    try:
+        fleet = load_config().fleet
+    except Exception:  # `_check_config` reports the config; this row is about roles
+        return []
+    rows: list[DoctorCheck] = []
+    for role in fleet.roles:
+        binary = harness.resolve_binary(role).binary
+        policy = harness.tool_policy(role, binary=binary, args=[], fleet=fleet)
+        listing = f"skill listing {policy.skill_listing}"
+        if not policy.applied:
+            reason = f"{os.path.basename(binary)!r} is not {harness.DEFAULT_AGENT_BINARY}"
+            rows.append(_ok(f"{role} tools", f"no deny token: {reason}; {listing}"))
+            continue
+        denied = ", ".join(policy.denied) if policy.denied else "nothing"
+        rows.append(_ok(f"{role} tools", f"denies {denied}; {listing}"))
+    return rows
+
+
 def _short_path(path: PurePath, home: PurePath | None = None) -> str:
     """``path`` with the user's home as ``~`` — a detail line is read, not parsed.
 
@@ -2996,6 +3079,41 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         "no codebase snapshot for the active project",
         "Pack one: aisquare project onboard",
     )
+
+
+def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
+    """``code index``: the active project's symbol index (#285) — symbols, files, age, parsers.
+
+    Ok whatever it finds, deliberately: an index is optional (agents grep without one),
+    and one a commit behind still answers for most of the tree. The line says how to
+    build or refresh it, and which languages no installed parser reads.
+    """
+    name = "code index"
+    absent = _uncreated_home(name)
+    if absent is not None:
+        return absent
+    try:
+        with store_session() as store:
+            project = active_project(store, cwd)
+        found = code_index.status(project.id, current_head=snapshot_core.head_sha(project.root))
+        building = code_index.building(project.id)
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    unfinished = not found.exists or found.built_at is None  # a first build not yet committed
+    if unfinished and building:
+        return _ok(name, "building in the background (agents grep until it is ready)")
+    if unfinished:
+        return _ok(name, "none yet — `aisquare code index` builds one (agents grep without it)")
+    parsers = ", ".join(f"{parser} {count}" for parser, count in sorted(found.parsers.items()))
+    detail = f"{found.symbols} symbols in {found.files} files ({parsers}), built {found.built_at}"
+    if found.stale:
+        detail += " — a commit behind the checkout; `aisquare code index` refreshes it"
+    if found.not_indexed:
+        missing = ", ".join(f"{lang} {n}" for lang, n in sorted(found.not_indexed.items()))
+        detail += f"; not indexed: {missing}"
+    if building:
+        detail += "; a refresh is running"
+    return _ok(name, detail)
 
 
 def _check_brain(cwd: Path | None = None) -> DoctorCheck:

@@ -24,12 +24,13 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import insights, orchestrator, paths, selfcli
+from aisquare.core import code_index, insights, orchestrator, paths, selfcli
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import spawn as spawn_core
 from aisquare.core.config import load_config
@@ -38,8 +39,9 @@ from aisquare.core.store import store_session
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project
 from aisquare.models import FleetAgent, ProjectInfo, TeamSession
-from aisquare.services import auto_mode, ci_augment, install_route
+from aisquare.services import auto_mode, ci_augment, install_route, quiet_compact
 from aisquare.services import claude_accounts as claude_accounts_service
+from aisquare.services import code as code_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import metrics as metrics_service
 from aisquare.services import project as project_service
@@ -97,6 +99,7 @@ def session_start_context(
         recorded = project_service.tracked(store, project)
         stored = store.get_project(project.id) is not None
     directive = _directive(project.id, has_prompts=has_prompts)
+    _refresh_code_index(project)
     block = build_block(entries, project) if entries else ""
     team_block = (
         team_service.hook_session_start(
@@ -197,13 +200,22 @@ def session_ended(
 
 
 def turn_stopped(
-    cwd: Path | None, *, session_id: str | None = None, stop_hook_active: bool = False
+    cwd: Path | None,
+    *,
+    session_id: str | None = None,
+    stop_hook_active: bool = False,
+    last_message: str | None = None,
+    permission_mode: str | None = None,
 ) -> team_service.StopDecision | None:
     """Mark the session as waiting for input, and close this turn's metrics row.
 
     A manager with fresh board decisions gets a :class:`~aisquare.services.team.StopDecision`
     back instead, which the hook prints so Claude Code keeps its turn going
     (docs/plans/fleet-tui.md §7.3). Everyone else: ``None``, as before.
+
+    A manager left waiting arms the quiet compaction (P1 WS-4, #281) with its turn's last
+    message and permission mode: :func:`quiet_compact.arm` refuses a question or plan mode
+    itself, and otherwise starts its worker. Off by default; never costs the turn its row.
     """
     if session_id is None:
         return None
@@ -219,7 +231,40 @@ def turn_stopped(
     # Last, and it swallows its own errors too: auto-mode refusals in the
     # transcript's tail put the row in attention with one board line (#150).
     auto_mode.record_refusals(session_id)
+    if decision is None:
+        _arm_auto_stop(session_id)
+        with contextlib.suppress(Exception):  # an optimisation may never cost a Stop
+            quiet_compact.arm(
+                session_id,
+                last_message=last_message,
+                permission_mode=permission_mode,
+                detach=_detach,
+            )
     return decision
+
+
+def _arm_auto_stop(session_id: str) -> None:
+    """A fleet worker's Stop arms its auto-stop (P2-W1b, #283): ``autostop.arm`` writes the
+    turn's token and starts the worker when the agent may have finished. Never costs a
+    Stop: it swallows its own errors. Imported here, not at the top: a Stop of any agent
+    imports this module, and the auto-stop is only a fleet worker's."""
+    with contextlib.suppress(Exception):
+        from aisquare.services import autostop
+
+        autostop.arm(session_id, detach=_detach)
+
+
+def auto_stop(session_id: str, *, after: float, token: str) -> str:
+    """The auto-stop's worker (``aisquare hook auto-stop``): see :func:`autostop.check`."""
+    from aisquare.services import autostop
+
+    return autostop.check(session_id, after=after, token=token)
+
+
+def compact_check(session_id: str, *, cursor: int, token: str) -> str:
+    """The quiet compaction's worker (``aisquare hook compact-check``): see
+    :func:`quiet_compact.check`."""
+    return quiet_compact.check(session_id, cursor, token)
 
 
 def needs_attention(
@@ -380,7 +425,49 @@ def _hand_over_if_configured(failure: team_service.TurnFailure, plan: _HandOverP
         )
 
 
-def _detach(argv: list[str]) -> None:
+CODE_REFRESH_EVERY_SECONDS = 60.0
+"""A session start refreshes a project's symbol index at most this often (#285)."""
+
+
+def _refresh_code_index(project: ProjectInfo) -> None:
+    """Start a detached incremental ``aisquare code index`` in ``project``'s root (#285).
+
+    Never inline: the refresh reads only files whose size or time moved, but it lists
+    the checkout with git, and this is the session-start path. Only where an index
+    exists (building one is ``onboard``'s or the operator's) and ``[code] enabled``,
+    and at most once a minute per project, by the mtime of a stamp beside the index:
+    a fleet starting ten agents starts one refresh. Silent on any failure.
+    """
+    try:
+        if not code_index.exists(project.id) or not code_service.settings().enabled:
+            return
+        stamp = code_index.code_dir(project.id) / "refreshed"
+        try:
+            if time.time() - stamp.stat().st_mtime < CODE_REFRESH_EVERY_SECONDS:
+                return
+        except FileNotFoundError:
+            pass
+        start_code_index(project)
+    except Exception:  # an index is optional; a session start never fails for it
+        return
+
+
+def start_code_index(project: ProjectInfo, *, full: bool = False) -> None:
+    """Start ``aisquare code index`` (``--full``: from nothing) detached in ``project``'s root.
+
+    How ``onboard`` and ``init`` build the index too, never inline: a first index of a
+    large checkout takes minutes, and the onboard returns at once (``doctor`` says while it
+    builds). Touches the refresh stamp, so a session start right after starts no second
+    build. Raises ``OSError`` when the worker cannot be started.
+    """
+    stamp = code_index.code_dir(project.id) / "refreshed"
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.touch()
+    argv = ["--quiet", "code", "index", *(["--full"] if full else [])]
+    _detach(selfcli.argv_for(argv), cwd=project.root)
+
+
+def _detach(argv: list[str], *, cwd: Path | None = None) -> None:
     """Start ``argv`` in its own session, no terminal, without this agent's own identity.
 
     Run inline, the hand-over died with its caller: the hook is a child of the
@@ -403,6 +490,7 @@ def _detach(argv: list[str]) -> None:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
         env=env,
+        cwd=cwd,
     )
 
 
@@ -686,6 +774,13 @@ def _directive(project_id: str, *, has_prompts: bool) -> str:
             f"- Per-file index into the skeleton (char offsets + token counts): {snap.index_path}",
             f"- Skeleton (structure + signatures): {snap.skeleton_path}",
             "Open source files directly for implementation detail.",
+        ]
+    if code_index.exists(project_id):
+        # The symbol index (#285): two lines at most, and only where there is one to ask.
+        lines += [
+            "Before grepping, ask the symbol index: `aisquare code find <name>`, "
+            "`aisquare code refs <name>`;",
+            "before writing a helper, run `aisquare code similar <name>` for one that exists.",
         ]
     if has_prompts:
         lines.append(

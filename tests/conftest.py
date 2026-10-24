@@ -29,7 +29,10 @@ from aisquare.core import agents as agent_core
 from aisquare.core import experimental
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
+from aisquare.models import ProjectInfo
 from aisquare.services import ci_client
+from aisquare.services import hooks as hooks_service
+from aisquare.services import project as project_service
 from tests import private_fleets
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -211,6 +214,9 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_ROLE",
     # Exported by `launch --persona`; a fleet agent running the suite has one.
     "AISQUARE_PERSONA",
+    # Exported on every fleet window since P1 WS-2 (#279): a reviewer running the suite
+    # reads the board as `none`, and every delta test read nothing.
+    "AISQUARE_BOARD_CONTEXT",
     # Read off the ambient env by `services/mcp_server.py` to attribute remote
     # calls — same family as the two above, and missed for the same reason.
     "AISQUARE_SERVE_CLIENT",
@@ -824,6 +830,57 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(core, "_now", lambda: CLAUDE_ACCOUNTS_NOW)
     monkeypatch.setattr(service, "_now", lambda: CLAUDE_ACCOUNTS_NOW)
     return home
+
+
+#: The detached start of an index build (#285), as written, for the tests of it:
+#: ``no_detached_code_index_build`` replaces it for every other test.
+REAL_START_CODE_INDEX = hooks_service.start_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_detached_code_index_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No ``init`` or ``project onboard`` in the suite starts a detached ``aisquare code
+    index``: it would run in a session of its own that outlives the test. A test that wants
+    an index builds one (``code_service.build_index``)."""
+    monkeypatch.setattr(hooks_service, "start_code_index", lambda _project, *, full=False: None)
+
+
+#: The session-start refresh of the symbol index (#285), as written, for the tests of it:
+#: ``no_detached_code_refresh`` replaces it for every other test.
+REAL_REFRESH_CODE_INDEX = hooks_service._refresh_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_detached_code_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No session start in the suite starts a detached ``aisquare code index`` (#285).
+
+    ``init`` and ``project onboard`` build an index now, so every later session-start
+    hook would start one, in a session of its own that outlives the test.
+    """
+    monkeypatch.setattr(hooks_service, "_refresh_code_index", lambda _project: None)
+
+
+REAL_ENSURE_CODE_INDEX = project_service._ensure_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_index_of_this_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """``init`` and ``project onboard`` build a symbol index only under pytest's temp dirs.
+
+    A test that runs either where it stands onboards this repository, and a full index of
+    it per test (a fresh home each time, so never incremental) took rc/p2's CI from ~20 to
+    60-90 minutes. Elsewhere the onboard reports no index, as with ``[code] enabled`` off.
+    """
+    base = tmp_path_factory.getbasetemp().resolve()
+
+    def ensure(project: ProjectInfo, *, refresh: bool) -> str | None:
+        if not project.root.resolve().is_relative_to(base):
+            return None
+        return REAL_ENSURE_CODE_INDEX(project, refresh=refresh)
+
+    monkeypatch.setattr(project_service, "_ensure_code_index", ensure)
 
 
 @pytest.fixture(autouse=True)

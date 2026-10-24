@@ -20,15 +20,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Usage at a glance: one number for the fleet** (#287, slice 2a). The status
-  line under *⚙ Settings* shows the share of the accounts' allowance left now
-  beside the count, `● 3× claude 58%`, in the colour its dot already meant. The
-  Accounts page and `aisquare accounts usage` end with the fleet in one line,
-  `Fleet: 58% left now · week: 1.8 of 3 accounts left · next weekly reset in 2d
-  4h (Thu 14:00) (account 3)`, and the command with an `all` row.
-  `aisquare --json accounts usage --summary` gives `{"accounts": [...],
-  "summary": {...}}`; plain `--json` is still the list.
-
 - **A fleet across two machines, the interim way**
   (`docs/runbooks/multi-machine-ssh.md`). A multi-machine fleet is postponed (#293;
   the design is in `docs/plans/multi-machine-fleet.md`). Until it ships, a manager

@@ -311,7 +311,9 @@ def _one_click_lines(plan: lifecycle_service.UpgradePlan) -> None:
         )
 
 
-def _reopen(reopen: bool, *, one_click: bool = False, failed: bool = False) -> None:
+def _reopen(
+    reopen: bool, *, one_click: bool = False, failed: bool = False, installed: bool = False
+) -> None:
     """Hand the terminal back to asq (``--reopen``: what asq's Update and Uninstall run).
 
     Only at a terminal, never under ``--json``, and only where the caller says
@@ -324,7 +326,8 @@ def _reopen(reopen: bool, *, one_click: bool = False, failed: bool = False) -> N
     ``one_click`` is asq's ⬆ *Restart & update* (``--one-click``): asq opens at once, as
     :data:`ONE_CLICK_REOPEN`, its toast the account of the run. Only a run that ``failed``
     waits for Enter, so the failure is read first, and it opens asq all the same: the
-    version that was installed, whose agents were never touched.
+    version that was installed, whose agents were never touched. ``installed`` is a run that
+    installed the new release, which a reopen that cannot start then says.
     """
     if not reopen or get_state().json_output or not _stdin_is_a_terminal():
         return
@@ -334,21 +337,27 @@ def _reopen(reopen: bool, *, one_click: bool = False, failed: bool = False) -> N
         except (EOFError, KeyboardInterrupt):
             return
     if one_click:
-        _reopen_after_one_click(failed=failed)
+        _reopen_after_one_click(failed=failed, installed=installed)
     else:
         selfcli.exec_self(["ui"])
 
 
-def _reopen_after_one_click(*, failed: bool) -> None:
+def _reopen_after_one_click(*, failed: bool, installed: bool) -> None:
     """Open asq again as :data:`ONE_CLICK_REOPEN`. A reopen that cannot start says so as itself:
-    after a run that worked the update is done and only the reopen failed, which an error
-    raised from here reported as the upgrade's own (review of #301)."""
+    after a run that installed the update is done and only the reopen failed, which an error
+    raised from here reported as the upgrade's own; after one with nothing newer to install,
+    nothing was (review of #301)."""
     try:
         selfcli.exec_self(list(ONE_CLICK_REOPEN))
     except OSError as exc:
-        done = "the update is done, but " if not failed else ""
+        if installed:
+            said = "the update is done, but asq could not be opened again"
+        elif failed:
+            said = "asq could not be opened again"
+        else:
+            said = "nothing was installed, and asq could not be opened again"
         stderr_console().print(
-            f"✗ {done}asq could not be opened again ({exc}). Type `asq` to open it.",
+            f"✗ {said} ({exc}). Type `asq` to open it.",
             markup=False,
         )
 
@@ -562,7 +571,7 @@ def _upgrade(
     _emit_report(report)
     if any(not hook.ok for hook in report.hooks):
         raise typer.Exit(1)
-    _reopen(reopen, one_click=one_click)
+    _reopen(reopen, one_click=one_click, installed=True)
 
 
 # --- uninstall ---------------------------------------------------------------------------

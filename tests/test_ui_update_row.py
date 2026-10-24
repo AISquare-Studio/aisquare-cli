@@ -36,7 +36,13 @@ from aisquare.cli.ui.sidebar import (
     StatusLine,
     UpdateRow,
 )
-from aisquare.cli.ui.update import CHECK_WORKER, PLAN_WORKER, PRESS_WORKER, UpdateScreen
+from aisquare.cli.ui.update import (
+    CHECK_WORKER,
+    PLAN_WORKER,
+    PRESS_WORKER,
+    REFRESH_WORKER,
+    UpdateScreen,
+)
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.core import selfcli
 from aisquare.models import FleetAgent
@@ -504,31 +510,21 @@ def test_the_row_says_what_the_dialogs_plan_says(
     assert runnable is False
 
 
-@pytest.mark.parametrize(
-    ("answer", "title", "says", "restart"),
-    [
-        (
-            "0.9.2",
-            "Update aisquare 0.9.0 → 0.9.2",
-            "asq closes, installs 0.9.2 and reopens here.",
-            True,
-        ),
-        (
-            None,
-            "Update aisquare 0.9.0 → 0.9.1",
-            "not confirmed: PyPI could not be asked just now",
-            True,
-        ),
-        (
-            "0.9.0",
-            "Update aisquare 0.9.0 → 0.9.0",
-            "aisquare 0.9.0 is the newest release now: nothing to install.",
-            False,
-        ),
-    ],
-    ids=["newer-since", "no-answer", "nothing-newer"],
+_LAST_CHECKED = (
+    "asq closes, installs the newest release (0.9.1 when last checked) and reopens here."
 )
-def test_the_dialog_asks_pypi_as_it_opens_and_shows_the_answer(
+
+
+@pytest.mark.parametrize(
+    ("answer", "title", "says"),
+    [
+        ("0.9.2", "Update aisquare 0.9.0 → 0.9.2", "asq closes, installs 0.9.2 and reopens here."),
+        ("0.9.1", "Update aisquare 0.9.0 → 0.9.1", "asq closes, installs 0.9.1 and reopens here."),
+        (None, "Update aisquare 0.9.0", f"{_LAST_CHECKED}\n"),
+    ],
+    ids=["newer-since", "as-checked", "no-answer"],
+)
+def test_the_dialog_asks_pypi_as_it_opens_and_restart_waits_for_the_answer(
     tmp_path: Path,
     script: Script,  # noqa: F811
     planned: list[dict[str, Any]],
@@ -536,18 +532,18 @@ def test_the_dialog_asks_pypi_as_it_opens_and_shows_the_answer(
     answer: str | None,
     title: str,
     says: str,
-    restart: bool,
 ) -> None:
-    """The dialog opens on the last check's number (a day old, maybe), says it is checking,
-    and shows PyPI's answer once it lands: the update installs uv's newest, unpinned, so the
-    number shown is the one asked for at the press (review of #301). A newer release found
-    moves the row too; no answer leaves the number, said as unconfirmed; nothing newer leaves
-    nothing to install."""
+    """The dialog opens on the last check's number (a day old, maybe) and asks PyPI. Until the
+    answer lands, *Restart & update* is off and no number is named as the one installed: the
+    update installs uv's newest, unpinned, and a probe pressed while the dialog named 0.9.1
+    installed 0.9.2 (review of #301, m1). PyPI's answer is then named, and moves the row; no
+    answer turns the button on, worded as the newest release, the last check's number as that.
+    """
     _two_alive(tmp_path, script)
     fresh.answer = answer
     fresh.gate.clear()
 
-    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[str, str, str, str, bool, str]:
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[Any, ...]:
         app.sidebar.focus()
         app.query_one(UpdateRow).activate()
         # The ask is held: settle the plan's read alone, until the dialog it opens is up.
@@ -556,24 +552,80 @@ def test_the_dialog_asks_pypi_as_it_opens_and_shows_the_answer(
         assert isinstance(screen, UpdateScreen)
         waiting = shown(screen.query_one("#update-text", Static))
         before = str(screen.query_one("#update-box").border_title)
+        held = screen.query_one("#update-confirm", Button).disabled
+        await pilot.click("#update-confirm")
+        await settle_page(app, group=PRESS_WORKER)
+        pressed = (app.hand_off, isinstance(app.screen, UpdateScreen))
         fresh.gate.set()
         await settle_page(app)
         after = str(screen.query_one("#update-box").border_title)
         said = shown(screen.query_one("#update-text", Static))
         enabled = not screen.query_one("#update-confirm", Button).disabled
-        return waiting, before, after, said, enabled, shown(app.query_one(UpdateRow))
+        return waiting, before, held, pressed, after, said, enabled, shown(app.query_one(UpdateRow))
 
-    waiting, before, after, said, enabled, row = _drive(body)
+    waiting, before, held, pressed, after, said, enabled, row = _drive(body)
 
-    assert "asq closes, installs 0.9.1 and reopens here." in waiting
+    assert waiting.startswith(_LAST_CHECKED), waiting
     assert waiting.endswith("checking PyPI for the newest release…")
-    assert before == "Update aisquare 0.9.0 → 0.9.1", "the last check's number, at once"
+    assert before == "Update aisquare 0.9.0", "no number named before PyPI answers"
+    assert held is True and pressed == (None, True), "Restart waits for PyPI's answer"
     assert fresh.asked == 1
     assert after == title
     assert says in said and "checking" not in said
-    assert enabled is restart
+    if answer is None:
+        assert said.endswith("not confirmed: PyPI could not be asked just now")
+    assert enabled is True
     if answer == "0.9.2":
         assert row == "⬆︎ 0.9.2 · restart to update", "the row follows PyPI's answer"
+
+
+@pytest.mark.parametrize("lands", ["dialog-open", "before-the-plan"])
+def test_pypi_saying_nothing_is_newer_closes_the_dialog_and_says_so(
+    tmp_path: Path,
+    script: Script,  # noqa: F811
+    fresh: Fresh,
+    monkeypatch: pytest.MonkeyPatch,
+    lands: str,
+) -> None:
+    """PyPI answers that 0.9.0, the version that runs, is the newest (the check's 0.9.1 was
+    yanked, say). Whether the answer lands with the dialog up or before the plan's read, the
+    row goes, no dialog stays, and a toast says why: landing first, the click opened nothing
+    and the row went in silence (review of #301, m2)."""
+    _two_alive(tmp_path, script)
+    fresh.answer = "0.9.0"
+    gate = fresh.gate if lands == "dialog-open" else threading.Event()
+    gate.clear()
+    asked: list[int] = []
+
+    def plan(*_a: Any, **_k: Any) -> UpgradePlan:
+        asked.append(1)
+        if lands == "before-the-plan":
+            gate.wait(30)
+        return _plan()
+
+    monkeypatch.setattr(lifecycle, "upgrade_plan", plan)
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[bool, list[str], bool, Any]:
+        app.sidebar.focus()
+        app.query_one(UpdateRow).activate()
+        if lands == "dialog-open":
+            await settle_until(app, lambda: isinstance(app.screen, UpdateScreen), group=PLAN_WORKER)
+        else:
+            await settle_until(app, lambda: app._refreshed is not None, group=REFRESH_WORKER)
+        opened = isinstance(app.screen, UpdateScreen)
+        gate.set()
+        await settle_page(app)
+        stacked = any(isinstance(screen, UpdateScreen) for screen in app.screen_stack)
+        return opened, await _toasts(app), stacked, (app.release, app.query_one(UpdateRow).display)
+
+    opened, toasts, stacked, (release, row) = _drive(body)
+
+    assert asked == [1], "control: the plan was read"
+    assert opened is (lands == "dialog-open"), "control: the answer landed where the test says"
+    assert "aisquare 0.9.0 is the newest release — nothing to update" in toasts, toasts
+    assert stacked is False, "no dialog, open or opening"
+    assert release is None and row is False, "the row goes"
+    assert updates.take_press() is None
 
 
 def test_a_row_pressed_while_the_dialog_or_a_press_is_open_opens_no_second_one(
@@ -690,6 +742,97 @@ def test_the_release_check_adds_no_timer_of_its_own(monkeypatch: pytest.MonkeyPa
 
     assert timers[True], "control: the app's own timers were seen"
     assert timers[True] == timers[False], "the check set a timer of its own"
+
+
+def _ticks(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The housekeeping tick at 50 ms, each of its runs counted."""
+    monkeypatch.setattr(ui_app, "HOUSEKEEPING_SECONDS", 0.05)
+    ran: list[int] = []
+    real = FleetApp._housekeeping
+
+    def counted(self: FleetApp) -> None:
+        ran.append(1)
+        real(self)
+
+    monkeypatch.setattr(FleetApp, "_housekeeping", counted)
+    return ran
+
+
+async def _until(pilot: Pilot[None], done: Callable[[], bool]) -> None:
+    """Pause in 50 ms steps until ``done()`` holds, for up to 5 s."""
+    for _ in range(100):
+        if done():
+            return
+        await pilot.pause(0.05)
+
+
+def test_the_housekeeping_tick_asks_for_a_release_only_once_the_hour_has_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The release check's ask rides the tick, gated on ``ASK_EVERY_SECONDS`` since the last:
+    the start's ask, none on the ticks within the hour, one once it has passed. With the gate
+    gone, an ask every 30 s passed every test (review of #301, m3)."""
+    ticks = _ticks(monkeypatch)
+    asked: list[int] = []
+
+    def check() -> updates.Offer | None:
+        asked.append(1)
+        return OFFER
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[int, int, int]:
+        await _until(pilot, lambda: len(ticks) >= 8)
+        await settle_page(app)
+        within = len(asked)
+        app._release_asked_at -= updates.ASK_EVERY_SECONDS  # the hour has passed
+        await _until(pilot, lambda: len(asked) >= 2)
+        await settle_page(app)
+        passed = len(asked)
+        seen = len(ticks)
+        await _until(pilot, lambda: len(ticks) >= seen + 8)
+        await settle_page(app)
+        return within, passed, len(asked)
+
+    within, passed, after = _drive(body, release_check=check)
+
+    assert len(ticks) >= 16, "control: the tick ran"
+    assert within == 1, "only the start's ask within the hour"
+    assert passed == 2, "the hour's ask"
+    assert after == 2, "then none again until the next hour"
+
+
+@pytest.mark.parametrize("with_check", [True, False], ids=["with-check", "no-check"])
+def test_the_housekeeping_tick_runs_remotes_auto_off_without_waiting(
+    monkeypatch: pytest.MonkeyPatch, with_check: bool
+) -> None:
+    """Remote's auto-off rides the same tick, with or without a release check, and never waits
+    for a Remote to stop: the fleet UI froze for seconds while uvicorn and ngrok stopped. With
+    the auto-off gone from the tick, a Remote whose timer ran out stayed on, and every test
+    passed (review of #301, m3)."""
+    ticks = _ticks(monkeypatch)
+    waits: list[bool] = []
+
+    def enforce(self: RemoteController, *, wait: bool = True) -> bool:
+        waits.append(wait)
+        return False
+
+    monkeypatch.setattr(RemoteController, "enforce_auto_off", enforce)
+
+    async def run() -> tuple[int, list[bool]]:
+        app = FleetApp(
+            refresh_seconds=3600,
+            doctor=lambda: [],
+            release_check=(lambda: None) if with_check else None,
+        )
+        async with app.run_test(size=(140, 40)) as pilot:
+            await settle_page(app)
+            await _until(pilot, lambda: len(ticks) >= 4)
+            return len(ticks), list(waits)  # before the exit's own call
+
+    ran, asked = asyncio.run(run())
+
+    assert ran >= 4, "control: the tick ran"
+    assert len(asked) >= ran - 1 and asked, "the auto-off is checked on every tick"
+    assert not any(asked), "never waiting for a Remote to stop"
 
 
 def test_a_ctrl_c_in_the_quit_names_the_command_without_asqs_own_flag() -> None:
@@ -817,16 +960,29 @@ def test_one_click_says_facts_and_advises_no_stop_whatever_it_finds(
     assert advice in plain_yes.stdout
 
 
-def test_a_reopen_that_cannot_start_after_an_upgrade_that_worked_says_so(
+@pytest.mark.parametrize(
+    ("latest", "said", "installs"),
+    [
+        ("0.9.1", "✗ the update is done, but asq could not be opened again", 1),
+        ("0.9.0", "✗ nothing was installed, and asq could not be opened again", 0),
+    ],
+    ids=["installed", "nothing-newer"],
+)
+def test_a_reopen_that_cannot_start_says_what_the_run_did(
     runner: CliRunner,
     tool: Tool,  # noqa: F811
     machine: Machine,  # noqa: F811
     terminal: Terminal,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
+    latest: str,
+    said: str,
+    installs: int,
 ) -> None:
-    """The upgrade worked and only the exec into asq failed: said as that, with how to open
-    asq, never as an upgrade error, and never a second attempt behind Enter (review of
-    #301)."""
+    """Only the exec into asq failed: said as that, with how to open asq, never as an upgrade
+    error, and never a second attempt behind Enter. After an install the update is done;
+    with nothing newer, nothing was installed, which "the update is done" told otherwise
+    (review of #301, N2)."""
+    machine.latest = LatestRelease(latest)
 
     def cannot(args: list[str]) -> None:
         terminal.reopened.append(list(args))
@@ -837,10 +993,10 @@ def test_a_reopen_that_cannot_start_after_an_upgrade_that_worked_says_so(
     result = runner.invoke(cli_app, ["upgrade", "--one-click"])
 
     assert result.exit_code == 0, result.output
-    assert (
-        "✗ the update is done, but asq could not be opened again ([Errno 8] Exec format error). "
-        "Type `asq` to open it." in result.stderr
-    ), result.stderr
+    assert len(machine.installs) == installs, "control: the run installed or did not"
+    assert f"{said} ([Errno 8] Exec format error). Type `asq` to open it." in result.stderr, (
+        result.stderr
+    )
     assert "stopped on an error" not in result.stderr
     assert terminal.prompts == [] and terminal.reopened == [["ui", "--after-update"]]
 

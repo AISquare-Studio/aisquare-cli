@@ -2381,7 +2381,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
 
     def _update_refreshed(self, event: Worker.StateChanged) -> None:
         """PyPI's answer to the dialog's ask: the number the dialog and the row show. An ask
-        that failed leaves the last check's number, said as unconfirmed."""
+        that failed leaves the last check's number, said as unconfirmed.
+
+        An answer that nothing is newer than the version that runs takes the row away and
+        says so, and closes the dialog, or keeps it from opening (:meth:`_update_planned`
+        opens none without an offer): before the plan was read, the click opened nothing and
+        the row went in silence (review of #301, m2)."""
         if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR):
             return
         found = event.worker.result if event.state is WorkerState.SUCCESS else None
@@ -2389,12 +2394,25 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         self._refreshed = (found,)
         offer = self.release
-        if found is not None and offer is not None and found != offer.version:
-            newer = lifecycle_service.newer_release(found, offer.current) is True
-            self.release = replace(offer, version=found) if newer else None
-            self.sidebar.show_update(found if newer else None, runnable=offer.runnable)
-        if isinstance(self.screen, UpdateScreen):
-            self.screen.show_latest(found)
+        screen = self.screen if isinstance(self.screen, UpdateScreen) else None
+        current = offer.current if offer is not None else screen.plan.current if screen else None
+        if found is not None and current is not None:
+            if lifecycle_service.newer_release(found, current) is not True:
+                self.release = None
+                self.sidebar.show_update(None)
+                if screen is not None:
+                    screen.dismiss(False)
+                self.notify(
+                    f"aisquare {current} is the newest release — nothing to update",
+                    timeout=8,
+                    markup=False,
+                )
+                return
+            if offer is not None and found != offer.version:
+                self.release = replace(offer, version=found)
+                self.sidebar.show_update(found, runnable=offer.runnable)
+        if screen is not None:
+            screen.show_latest(found)
 
     def _live_agents(self) -> list[FleetAgent]:
         """Every agent alive in the frame on screen (``ALIVE_STATES``): the ones an update keeps."""

@@ -104,12 +104,19 @@ out, a row shows under *⚙ Settings*, and a toast says so once per release:
 ```
 
 Click the row, or move to it with ↓ and press Enter. The dialog says what
-happens and how many agents are running, and asks PyPI again as it opens, so
-the release it names is the newest one now. *Restart & update* closes asq, runs
-`aisquare upgrade` without asking again, and reopens asq on the new version in
-the view you had open. It installs exactly as `aisquare upgrade` does, unpinned,
-so a later `uv tool upgrade aisquare-cli` still moves the install. Cancel or Esc
-changes nothing.
+happens and how many agents are running, and asks PyPI again as it opens.
+*Restart & update* stays off until PyPI answers (the lookup gives up after 5
+seconds), and the dialog then names the release PyPI answered. If PyPI could
+not be asked, the button comes on all the same and the dialog says it installs
+the newest release, with the last check's number given as that. If PyPI says
+you already run the newest, the dialog closes and a toast says so.
+
+*Restart & update* closes asq, runs `aisquare upgrade` without asking again,
+and reopens asq on the new version in the view you had open. It installs
+exactly as `aisquare upgrade` does, unpinned: the newest release at the moment
+you press, so one that comes out while the dialog stays open is the one
+installed, and a later `uv tool upgrade aisquare-cli` still moves the install.
+Cancel or Esc changes nothing.
 
 Your agents keep running through it: they live on the fleet's own tmux server,
 not inside asq, and a reinstall does not touch them. asq writes down the agents

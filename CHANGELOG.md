@@ -265,8 +265,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs, off the UI thread). A newer release shows as `⬆ 0.8.3 · restart to
   update` under *⚙ Settings*, until asq runs that version or a newer one, with
   one toast the first time each release is found. The row opens a confirm
-  dialog with the live agent count, which asks PyPI again as it opens so the
-  release it names is current; *Restart & update* hands the terminal to
+  dialog with the live agent count, which asks PyPI again as it opens and keeps
+  its button off until PyPI answers (or the lookup's 5 s timeout passes, after
+  which it says "the newest release", the last check's number as that; nothing
+  newer closes it with a toast); *Restart & update* hands the terminal to
   `aisquare upgrade` the way Doctor's Update does, with no y/N and unpinned, and
   asq reopens by itself on the new version, in the view it had open. The fleet's tmux panes
   and their sessions keep running; the agents alive at the press are recorded,

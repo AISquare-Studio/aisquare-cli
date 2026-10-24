@@ -1,11 +1,15 @@
 """The ⬆ row's dialog: update aisquare to the newest release, or say how.
 
 It opens on the release the last check found, which can be a day old, says it is checking,
-and shows what PyPI answers now once it lands (``services.updates.refresh_latest``, asked
-off the UI thread as the dialog opens): the update installs uv's newest, unpinned, exactly as
-``aisquare upgrade`` does, so the number shown is the one asked for at the press. Unpinned on
-purpose: a pinned receipt (``aisquare-cli==0.8.3``) would hold every later ``uv tool
-upgrade`` back, a lasting change to the install nobody asked for (review of #301).
+and asks PyPI again (``services.updates.refresh_latest``, off the UI thread as the dialog
+opens). *Restart & update* waits for that answer, which the lookup's own 5 s timeout bounds:
+the update installs uv's newest, unpinned, exactly as ``aisquare upgrade`` does, so a number
+named before PyPI answered could be one the update does not install (a probe named 0.9.1 and
+installed 0.9.2). An ask that found no answer leaves the button on, worded as "the newest
+release" with the last check's number as that, never as the one installed. An answer that
+nothing is newer closes the dialog (``FleetApp._update_refreshed``). Unpinned on purpose: a
+pinned receipt (``aisquare-cli==0.8.3``) would hold every later ``uv tool upgrade`` back, a
+lasting change to the install nobody asked for (review of #301).
 
 It opens only when the row is clicked or activated, never on its own: a dialog that rose
 by itself would take the keys the owner is typing into a pane. *Restart & update* answers
@@ -33,7 +37,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
-from aisquare.services.lifecycle import UpgradePlan, newer_release
+from aisquare.services.lifecycle import UpgradePlan
 
 PLAN_WORKER = "update-plan"
 """The read the row starts before the dialog opens: how this install upgrades, and whether
@@ -107,13 +111,14 @@ class UpdateScreen(ModalScreen[bool]):
         nothing once PyPI has answered."""
 
     @property
-    def newer(self) -> bool:
-        """Whether :attr:`version` is newer than the version that runs: else nothing to install."""
-        return newer_release(self.version, self.plan.current) is not False
+    def confirmed(self) -> bool:
+        """Whether :attr:`version` is PyPI's answer to the dialog's own ask: else the last
+        check's, said as that."""
+        return self.status is None
 
     def show_latest(self, found: str | None) -> None:
         """PyPI's answer to the dialog's ask: ``found`` replaces the number shown, and ``None``
-        (no answer) leaves the last check's, saying so."""
+        (no answer) leaves the last check's, saying so. Either way *Restart & update* is on."""
         if found is None:
             self.status = UNCONFIRMED
         else:
@@ -123,7 +128,7 @@ class UpdateScreen(ModalScreen[bool]):
         self.query_one("#update-box", Vertical).border_title = self.heading()
         self.query_one("#update-text", Static).update(self.body())
         for button in self.query("#update-confirm").results(Button):
-            button.disabled = not self.newer
+            button.disabled = False
 
     def body(self) -> Text:
         """What the dialog says, above its buttons."""
@@ -138,11 +143,12 @@ class UpdateScreen(ModalScreen[bool]):
                 text.append("\n")
                 text.append(self.status, style="dim")
             return text
-        if self.newer:
+        if self.confirmed:
             text.append(f"asq closes, installs {self.version} and reopens here.\n")
         else:
             text.append(
-                f"aisquare {self.plan.current} is the newest release now: nothing to install.\n"
+                f"asq closes, installs the newest release ({self.version} when last checked) "
+                "and reopens here.\n"
             )
         text.append(agents_line(self.live))
         remote = remote_line(self.plan)
@@ -155,11 +161,13 @@ class UpdateScreen(ModalScreen[bool]):
         return text
 
     def heading(self) -> Text:
-        """``Update aisquare 0.8.2 → 0.8.3``: the versions are data, never markup."""
+        """``Update aisquare 0.8.2 → 0.8.3`` once PyPI has answered, ``Update aisquare 0.8.2``
+        until then: the versions are data, never markup."""
         text = Text("Update aisquare ")
         text.append(self.plan.current)
-        text.append(" → ")
-        text.append(self.version)
+        if self.confirmed:
+            text.append(" → ")
+            text.append(self.version)
         return text
 
     def compose(self) -> ComposeResult:
@@ -173,7 +181,7 @@ class UpdateScreen(ModalScreen[bool]):
                         "Restart & update",
                         id="update-confirm",
                         variant="primary",
-                        disabled=not self.newer,
+                        disabled=self.status == CHECKING,
                     )
                     yield Button("Cancel", id="update-cancel")
                 else:

@@ -8,7 +8,7 @@ removes exactly them):
 
 | Hook | What it does |
 | --- | --- |
-| `SessionStart` | inject orientation: snapshot pointers, context, team briefing |
+| `SessionStart` | inject orientation: snapshot pointers, context, team briefing; mark the session `waiting` (it sits at its prompt until one is typed), except after a compaction, which keeps what the turn said |
 | `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on), unless `capture.enabled` is off; deliver the teammate delta; heartbeat, which stamps the session's last prompt and marks its fleet agent's first message taken ([fleet](fleet.md#the-first-message)) |
 | `Stop` | mark the session waiting; renew its task leases |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
@@ -35,6 +35,18 @@ concurrency-tested against racing parallel sessions):
 ├── cache/        # disposable (e.g. last_injection.json)
 └── log/          # capture and diagnostic logs
 ```
+
+Every `[fleet]` key, with its default, is in
+[fleet.md](fleet.md#permission-modes-and-every-default-you-can-change). The keys that
+decide which Claude Code tools and how much of the skill listing a role launches with,
+wherever it starts ([Tools and skills per role](fleet.md#tools-and-skills-per-role)):
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `fleet.deny_tools` | the eight tools no role uses | denied for every role |
+| `fleet.roles.<role>.deny_tools` | `[]` | denied for this role too |
+| `fleet.roles.<role>.allow_tools` | `[]` | taken back out, safety list included; never a `--disallowedTools` on the line |
+| `fleet.roles.<role>.skill_listing` | `full` for manager, `names` for the rest | `full`, `names` (descriptions cut) or `off` (`Skill` denied) |
 
 Ids everywhere are time-sortable and prefix-addressable (git-style: any
 unambiguous prefix works). Every command takes a global `--json` flag for
@@ -69,7 +81,8 @@ aisquare
 │                                 [--effort LEVEL] · harness
 │                   bind <role> [--bin CMD] [--env KEY=VALUE]… [--arg A]…
 │                               [--unset KEY] [--account A] [--clear-account] [--clear]
-├── task            add · list · show · next [--role R] [--status S] [--claim]
+│                   show <seq>   — one board event in full (author, actor, task, details)
+├── task            add · list · show · next [--role R] [--status S] [--claim] [--task T]
 │                   claim · review [--note] · reopen --reason · done [--note]
 │                   block --reason · drop · release        (all with [--as SESSION])
 │                   a task is its id, or 12 / #12 — its number on the caller's board
@@ -86,8 +99,9 @@ aisquare
 │                   install-page <dist>   — the fleet on your phone (docs/remote.md)
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
 │                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]
-│                             [-- agent args]
-│                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
+│                             [--board-context all|relevant|none] [-- agent args]
+│                   ls [--all] · status · tell <label> <text>
+│                   stop <label> [--force] [--as SESSION]
 │                   restart <label> [--fresh] [--permission-mode M]
 │                   switch <label> [--to A] [--fresh] [--reason R]
 │                   shutdown [--all] [--yes] [--force] [--forget] · attach
@@ -101,6 +115,7 @@ aisquare
 ├── config          list [--overrides] · get <key> · set <key> <value> · reset [--yes]
 │                   redaction <off|standard|strict>
 └── metrics         show · list  [-n N] [--session S] [--project P | --all]   (CI test bed; hidden)
+                    tokens [--session S] [--since 2h] [--role R] [--project P | --all]   (tokens per session, from transcripts)
 ```
 
 Everything `aisquare --help` lists is implemented. Roadmap commands are
@@ -138,6 +153,7 @@ list` prints every key. The ones that need more than their name:
 | `accounts.share_trust` | `true` | copy a folder's trust into the account a launch runs on |
 | `accounts.share_settings` | `false` | keep every managed account's `settings.json` a link to the plain claude's |
 | `capture.enabled` | `true` | `false`: the `UserPromptSubmit` hook stores no prompt (`aisquare log` stays empty) and spools none for Explainability. The turn's metrics row (no text), the teammate delta and the CI experiment, if you turned it on, carry on. A config that cannot be read records no prompt either, with one line on stderr. |
+| `fleet.busy_quiet_seconds` | `30` | how long an agent's pane may print nothing while the board says `working` before its screen is checked once: Claude Code idle at its prompt reads `waiting` (*idle (the board said working)*), as after a turn ended with Esc, which fires no hook. A pane that is busy is never captured. |
 | `fleet.first_prompt` | `argv` | how an agent's first message reaches it: `argv` gives a Claude Code agent its message on its command line and types it for any other binary; `type` types it for every agent ([fleet](fleet.md#the-first-message)). |
 | `fleet.prompt_ack_seconds` | `45` | how long `fleet spawn`, `restart` and `switch` wait for the agent's first turn to start, and how long a listing gives it before the agent reads `attention`: "first prompt not taken". |
 | `projects.capture` | `false` | `true`: every directory a hooked session runs in gets a row, as 0.8.0 did; off, only a project you added records anything ([fleet](fleet.md#naming)). |

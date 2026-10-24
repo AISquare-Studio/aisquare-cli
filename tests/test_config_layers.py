@@ -12,6 +12,7 @@ every file a save had touched.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tomllib
 from pathlib import Path
@@ -25,7 +26,7 @@ from aisquare.cli.app import app
 from aisquare.core.config import (
     _V1_DEFAULTS,
     CONFIG_VERSION,
-    REVIEWER_ARGS,
+    FLEET_DENY_TOOLS,
     AccountsSettings,
     AppConfig,
     FleetRoleSettings,
@@ -147,7 +148,15 @@ def test_an_entry_the_user_added_to_a_mapping_is_written_with_only_what_it_sets(
     save_config(config, target)
     written = _file(target)
     assert written["team"] == {"profiles": {"coder": {"account": "2"}}}
-    designer = {"permission_mode": "auto", "worktree": False, "extra_args": []}
+    designer = {
+        "permission_mode": "auto",
+        "worktree": False,
+        "extra_args": [],
+        "deny_tools": [],
+        "allow_tools": [],
+        "skill_listing": "names",
+        "board_context": "all",
+    }
     assert written["fleet"] == {"roles": {**_ROLES, "designer": designer}}
     loaded = load_config(target)
     assert loaded.team.profiles == {"coder": RoleLaunchProfile(account="2")}
@@ -202,7 +211,8 @@ def test_the_user_file_wins_and_whatever_it_leaves_out_is_the_default(tmp_path: 
     assert loaded.fleet.roles["coder"] == FleetRoleSettings(
         permission_mode="acceptEdits", worktree=True
     )
-    assert loaded.fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
+    # The reviewer's own defaults: no extra_args (WS-1, #280), and it reads no board (WS-2).
+    assert loaded.fleet.roles["reviewer"] == FleetRoleSettings(worktree=True, board_context="none")
     assert set(loaded.fleet.roles) == set(AppConfig().fleet.roles)
 
 
@@ -246,16 +256,30 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "import": {"engine": "auto", "api_model": "claude-opus-5"},
         },
         "experimental": {"captain": False},
-        # The fleet's admission (#283), the first message's two (P0-W1a, #122), and whether a
-        # pane's program may set the clipboard (P2-W3, #101).
+        # The fleet's admission (#283), the role tool policy (#280: the reviewer's deny is its
+        # own, not its extra_args), the first message's two (P0-W1a, #122), the idle check's
+        # quiet window (P0-W1b, #123), whether a pane's program may set the clipboard (P2-W3,
+        # #101), and what of the board each role reads (P1 WS-2, #279): the reviewer judges cold.
         "fleet": {
             "max_agents_total": 0,
             "min_free_mb": 2048,
             "test_gate_mb": 0,
             "test_gate_wait_minutes": 15,
+            "deny_tools": list(FLEET_DENY_TOOLS),
             "first_prompt": "argv",
             "prompt_ack_seconds": 45.0,
+            "busy_quiet_seconds": 30,
             "pane_clipboard": "off",
+            "roles": {
+                role: {
+                    "deny_tools": [],
+                    "allow_tools": [],
+                    "skill_listing": "full" if role == "manager" else "names",
+                    "board_context": "none" if role == "reviewer" else "all",
+                    **({"extra_args": []} if role == "reviewer" else {}),
+                }
+                for role in _V1_DEFAULTS["fleet"]["roles"]
+            },
         },
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
@@ -311,16 +335,16 @@ def test_the_v1_step_runs_once_and_what_is_chosen_afterwards_is_kept(tmp_path: P
     assert load_config(target).accounts.pick == "default"
 
 
-def test_a_v0_file_takes_both_steps(tmp_path: Path) -> None:
-    """0.7.0 wrote no version: its reviewer default is replaced by today's, which is then a
-    default like any other and leaves the file."""
+def test_a_v0_file_takes_every_step(tmp_path: Path) -> None:
+    """0.7.0 wrote no version: its reviewer default is replaced by 0.8's, which is then a
+    default like any other and leaves the file; from version 3 the deny is the role's own."""
     target = tmp_path / "config.toml"
     v0 = _overlay(
         _V1_DEFAULTS, {"fleet": {"roles": {"reviewer": {"extra_args": ["--restricted"]}}}}
     )
     target.write_text(tomli_w.dumps(v0), encoding="utf-8")
     loaded = load_config(target)
-    assert loaded.fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
+    assert loaded.fleet.roles["reviewer"].extra_args == []
     save_config(loaded, target)
     assert _file(target) == {"config_version": CONFIG_VERSION, "fleet": {"roles": _ROLES}}
 
@@ -444,7 +468,9 @@ def test_a_file_this_build_writes_reads_the_same_without_the_defaults_under_it(
 
     older = _as_a_whole_file_reader_reads(target)
     assert older.fleet.roles == load_config(target).fleet.roles == config.fleet.roles
-    assert older.fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
+    # The same table, but an older build denies a role only what its extra_args say, so
+    # its reviewer can edit: `upgrade --version` says so (lifecycle's tools_regained).
+    assert older.fleet.roles["reviewer"].extra_args == []
     assert older.fleet.roles["coder"] == FleetRoleSettings(
         permission_mode="acceptEdits", worktree=True
     )
@@ -565,3 +591,36 @@ def test_config_reset_prints_a_path_with_a_bracket_whole(
     done = runner.invoke(app, ["config", "reset", "--yes"])
     assert done.exit_code == 0, done.output
     assert f"{home}{os.sep}config.toml.bak-" in done.output.replace("\n", "")
+
+
+# --- a role's tool policy over the layers (#280) ---------------------------------------
+
+
+def _launched(runner: CliRunner, monkeypatch: pytest.MonkeyPatch, *args: str) -> list[str]:
+    """The argv ``aisquare launch <args>`` would exec Claude Code with."""
+    from aisquare.cli import launch as launch_cli
+
+    captured: dict[str, list[str]] = {}
+    monkeypatch.setattr(launch_cli, "_exec", lambda _binary, argv, _env: captured.update(argv=argv))
+    monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/local/bin/{cmd}")
+    result = runner.invoke(app, ["launch", *args])
+    assert result.exit_code == 0, result.output
+    return captured["argv"]
+
+
+def test_a_layer_setting_the_reviewers_extra_args_keeps_its_safety_deny(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A reviewer's ``extra_args`` set to trim tools replaced its deny list whole (a list is
+    one value to the overlay), and the reviewer launched with Edit, Write and NotebookEdit
+    (#280). A fleet window runs ``launch reviewer <extra_args>``."""
+    monkeypatch.chdir(tmp_path)
+    settings_service.set_value("fleet.roles.reviewer.extra_args", "--disallowedTools=Artifact")
+    extra_args = load_config().fleet.roles["reviewer"].extra_args
+    assert extra_args == ["--disallowedTools=Artifact"]
+
+    argv = _launched(runner, monkeypatch, "reviewer", *extra_args)
+    tokens = [arg for arg in argv if arg.startswith("--disallowedTools")]
+    assert len(tokens) == 1  # ONE token, whatever it was merged from
+    denied = set(tokens[0].partition("=")[2].split())
+    assert {"Artifact", "Edit", "Write", "NotebookEdit"} <= denied

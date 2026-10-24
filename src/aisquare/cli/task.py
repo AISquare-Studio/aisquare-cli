@@ -56,7 +56,9 @@ def _emit_task(task: TeamTask, *, verb: str, contract: bool = False, peek: bool 
         typer.echo(json.dumps(payload))
     else:
         console = stdout_console()
-        ref = f"#{task.number}" if task.number is not None else task.id
+        # A bare number, never `#N`: in a shell `#` starts a comment, so a copied
+        # `aisquare task show #2` ran `task show` with no ref (P0-FU, #51).
+        ref = str(task.number) if task.number is not None else task.id
         console.print(
             f"✓ {verb}: {team_service.task_label(task)} [{task.status}] {task.title}"
             f"{receipt_suffix(delivery)}",
@@ -233,6 +235,14 @@ def next_(
     claim: Annotated[
         bool, typer.Option("--claim", help="Atomically claim the task (todo only).")
     ] = False,
+    only: Annotated[
+        str | None,
+        typer.Option(
+            "--task",
+            help="Only this task (#n or id), when it is in --status and ready; else nothing.",
+            metavar="TASK",
+        ),
+    ] = None,
     as_session: SessionRef = None,
 ) -> None:
     """Pick up the next available task — built for looped sessions."""
@@ -241,7 +251,7 @@ def next_(
     narrowed: TaskStatus = status  # type: ignore[assignment]
     try:
         task = team_service.next_task(
-            role=role, status=narrowed, claim=claim, session_ref=as_session
+            role=role, status=narrowed, claim=claim, session_ref=as_session, task_ref=only
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc

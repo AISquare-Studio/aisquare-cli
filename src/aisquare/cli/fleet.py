@@ -231,6 +231,16 @@ def spawn(
             metavar="NAME",
         ),
     ] = None,
+    board_context: Annotated[
+        str | None,
+        typer.Option(
+            "--board-context",
+            help="What of the board it reads: all, relevant (its tasks, what is addressed "
+            "to it, decisions) or none; default: the role's "
+            "fleet.roles.<role>.board_context (reviewer: none). Kept by restart and switch.",
+            metavar="all|relevant|none",
+        ),
+    ] = None,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -256,6 +266,7 @@ def spawn(
             account=account,
             persona=persona,
             ack_wait=fleet_service.settings().prompt_ack_seconds,
+            board_context=board_context,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
@@ -530,11 +541,15 @@ def stop(
     force: Annotated[bool, typer.Option("--force", help="Kill without a graceful /exit.")] = False,
     every: EveryAgent = False,
     managers: ManagersOnly = False,
+    as_session: SessionRef = None,
 ) -> None:
     """Stop an agent: /exit, a grace period, then the window is killed.
 
     On an agent that already exited (💤) it removes the dead window that
     `remain-on-exit` kept, which is what takes the row off the live listing.
+
+    The board's `agent_exited` names who stopped it: --as SESSION, else the session of
+    the fleet window you run it in, else `user`. A manager's own stop wakes no one.
 
     With --all, every running agent in every project is stopped so, one line
     each by project, then a count; --managers stops the managers alone. It exits
@@ -543,11 +558,13 @@ def stop(
     """
     label = _one_or_every(ctx, label, every, managers, project, {"--force": force})
     if label is None:
-        _bulk("stop", managers_only=managers, acting_session=None)
+        _bulk("stop", managers_only=managers, acting_session=as_session)
         return
     target = _project(project)
     try:
-        receipt = fleet_service.stop(target, label, force=force)
+        receipt = fleet_service.stop(
+            target, label, force=force, actor=fleet_service.acting_as(as_session)
+        )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     agent = receipt.agent
@@ -1089,7 +1106,9 @@ def shutdown(
             stdout_console().print("nothing stopped")
             return
     try:
-        report = fleet_service.shutdown(target, force=force, forget=forget)
+        report = fleet_service.shutdown(
+            target, force=force, forget=forget, actor=fleet_service.acting_as()
+        )
     except fleet_service.FleetInterrupted as exc:
         # The operator's Ctrl-C: rows before it are down and their claims
         # released, committed as they went, so they are told how far it got —

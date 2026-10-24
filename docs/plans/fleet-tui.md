@@ -794,6 +794,17 @@ sequenceDiagram
 
 ### 7.3 Wake-ups without a daemon
 
+> **Amended by P1 WS-2 (#279, 2026-10-23).** One classifier, `team.wake_class(event,
+> me)` → `own` / `wake` / `info`, decides every Stop, deferral and exit nudge.
+> `MANAGER_WAKE_KINDS` is `task_review`, `task_done`, `task_blocked`, `task_reopened`,
+> `result`, `question` and `limited`; `agent_exited` wakes only for a non-zero or missing
+> status, a released claim, or a reason (a failed hand-over), and `switched` and
+> `restarted` are info that rides along with the next wake. An event the manager caused
+> (its `actor`, e.g. its own `fleet stop --as`) is `own`: never shown to it. Each event
+> is rendered as one short line (`#<seq> <who> <kind>[ #n]: <first line>` + `aisquare
+> team show <seq>`), with the board in the block's header. The list below is the
+> original design.
+
 Two moments that already exist carry the wake-up.
 
 1. **The manager's own `Stop` hook.** Today `hook stop` marks the session

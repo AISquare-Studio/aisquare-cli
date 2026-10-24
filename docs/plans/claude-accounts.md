@@ -129,11 +129,16 @@ The UI fetches once a minute while the page is on screen and never elsewhere;
 reaches the endpoint (`tests/test_no_network_on_the_primary_path.py` still
 holds).
 
-Read since #277 (2026-10-23): every top-level `seven_day_<family>` that holds a
-window (`seven_day_opus`, `seven_day_sonnet`; the recorded payload's is null) goes
-into `ClaudeUsage.family_week_percent` / `family_week_resets_at`, keyed by family;
-each `limits[]` entry (`kind`, `percent`) is folded into the window of its kind
-(`session`/`five_hour`, `weekly`/`seven_day`, a family) as the fuller figure; a
+Read since #277 (2026-10-23): the per-family weeks go into
+`ClaudeUsage.family_week_percent` / `family_week_resets_at`, keyed by family. Where
+the endpoint really sends them (P0-W0, Claude Code 2.1.309) is `limits[]`: an entry
+of kind `weekly_scoped` whose `scope.model.display_name` names the model ("Fable",
+"Opus"), mapped to its family by `core.harness.model_family` (P0-W3c). A top-level
+`seven_day_<family>` window is read too, for a known family only: in W0's payloads
+every one was null, and `seven_day_breakdown`-style keys are `seven_day_*` dicts
+that are no window. Each other `limits[]` entry (`kind`, `percent`) is folded into
+the window of its kind (`session`/`five_hour`, `weekly_all`/`weekly`/`seven_day`)
+as the fuller figure; a
 window with a non-null `locked_reason` reads 100 % used. Unknown keys and entries
 of an unknown shape are ignored. The usage cache (`claude_usage`) keeps the two
 shared windows only, so a live reading that shows a family week spent leaves a

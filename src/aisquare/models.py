@@ -749,6 +749,13 @@ class TeamEvent(BaseModel):
     task_id: str | None = None
     to_role: str | None = None
     created_at: datetime
+    actor: str | None = None
+    """Who caused it, when not the author (P1 WS-2, #279): a session id, ``user`` (asq or
+    a shell with no session), ``usage-limit`` or ``auto-stop``. ``None``: the author's own
+    act, or unknown."""
+    meta: dict[str, object] | None = None
+    """Its details, by kind: ``agent_exited`` carries ``status``, ``force``, ``released``
+    and ``why``."""
 
     def as_envelope(self) -> DataEnvelope:
         """This event as a capture-pipe envelope (``kind`` namespaced ``team.*``).
@@ -766,6 +773,8 @@ class TeamEvent(BaseModel):
             "text": self.text,
             "task_id": self.task_id,
             "to_role": self.to_role,
+            "actor": self.actor,
+            "meta": self.meta,
         }
         if self.kind == "signal":
             decoded = _SIGNAL_TEXT.match(self.text)
@@ -1078,6 +1087,15 @@ class LaunchSpec(BaseModel):
     (``core.orchestrator.window_team_hub``). A restart or switch gives the replacement's
     window the same, whoever runs it (``services.fleet._board_and_hub``). ``None`` on a spec
     recorded before 0.8.1 kept it."""
+    model: str | None = None
+    """The ``--model`` the spawn resolved down the role's ladder (#129 b), ``None`` when it
+    passed none: another binary, a model already in the arguments, or an untiered role."""
+    effort: str | None = None
+    """The ``--effort`` passed beside ``model``."""
+    board_context: str | None = None
+    """What of the board the agent reads (``all``, ``relevant``, ``none``; P1 WS-2, #279),
+    as its spawn resolved it, so a restart or switch keeps it. ``None`` on a spec recorded
+    before it: the role's setting applies."""
 
 
 class FleetAgent(BaseModel):

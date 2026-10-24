@@ -918,14 +918,24 @@ def test_memory_on_every_launch_carries_the_shared_directory_for_its_project(
         result = runner.invoke(app, ["launch", "coder", "--account", slot])
         assert result.exit_code == 0, result.output
         argv = launched["argv"]
+        assert argv.count("--settings") == 1, "one --settings for every key aisquare sets"
         settings = json.loads(argv[argv.index("--settings") + 1])
         want = service.shared_memory_root() / sharing.memory_key(Path.cwd())
-        assert settings == {"autoMemoryDirectory": str(want)}
+        # The coder's skill listing (P1 WS-1) and the shared memory (P2-W7), both: the
+        # memory stood down on the role's own --settings, so no coder shared any (sync #367).
+        assert settings == {"skillListingMaxDescChars": 1, "autoMemoryDirectory": str(want)}
         assert sharing.memory_key(Path.cwd()).endswith("-work-repo")
-    # The operator's own --settings wins, and the launch says why memory is not shared.
+    # The operator's own --settings wins over both, and the launch says why.
     result = runner.invoke(app, ["launch", "coder", "--account", "3", "--settings", "{}"])
     assert launched["argv"].count("--settings") == 1
+    assert launched["argv"][launched["argv"].index("--settings") + 1] == "{}"
     assert "its own --settings wins" in result.stderr
+    # A manager keeps the full skill listing: its --settings is the memory's alone.
+    result = runner.invoke(app, ["launch", "manager", "--account", "3"])
+    assert result.exit_code == 0, result.output
+    argv = launched["argv"]
+    assert argv.count("--settings") == 1
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"autoMemoryDirectory": str(want)}
 
 
 def test_memory_off_adds_nothing_to_a_launch(
@@ -937,6 +947,11 @@ def test_memory_off_adds_nothing_to_a_launch(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     runner.invoke(app, ["launch", "coder", "--account", "3"])
+    argv = launched["argv"]
+    # The coder's own skill listing (P1 WS-1) and nothing of the memory's.
+    assert argv.count("--settings") == 1
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"skillListingMaxDescChars": 1}
+    runner.invoke(app, ["launch", "manager", "--account", "3"])
     assert "--settings" not in launched["argv"]
 
 

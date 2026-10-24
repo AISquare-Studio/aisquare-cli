@@ -1382,6 +1382,35 @@ def test_the_keyboard_alone_gets_from_a_new_folder_to_a_fleet(
     assert focus == ["claude-connect", "fleet-manager", "fleet-open", "fleet-open"]
 
 
+def test_signed_out_choosing_the_folder_hands_the_keyboard_to_start_manager_not_sign_in(
+    captain: str | None,
+    fleet_rows: dict[str, list[FleetAgentStatus]],
+    scripted: Callable[[Machine], None],
+    tmp_path: Path,
+) -> None:
+    """#349's walk: with step 2 ✓ and signed out, *Sign in* is in the Tab order, and when
+    step 1's button went away Textual moved the keyboard onto it, the next widget, so
+    Enter opened Accounts instead of starting the manager. Step 3 is the next thing to do."""
+    folder = tmp_path / "demo-app"
+    folder.mkdir()
+    signed_out = dataclasses.replace(READY, signed_in=False)
+    machine = Machine(claude=[signed_out], found=Candidates(items=(here(folder),)))
+    scripted(machine)
+
+    async def go(pilot: Pilot[None], app: FleetApp, page: WelcomeView) -> list[str | None]:
+        focus: list[str | None] = []
+        for keys in (("tab", "enter"), ("enter",)):
+            await pilot.press(*keys)
+            await settle_page(app)
+            focus.append(app.focused.id if app.focused is not None else None)
+        return focus
+
+    focus = in_shell(machine, go)
+    assert machine.onboarded == [folder]
+    assert focus == ["fleet-manager", "fleet-open"], "Enter started the manager"
+    assert machine.starts == [(project_id_for(folder), True, 0)]
+
+
 def test_a_typed_folder_hands_the_keyboard_to_the_next_step(
     captain: str | None,
     fleet_rows: dict[str, list[FleetAgentStatus]],

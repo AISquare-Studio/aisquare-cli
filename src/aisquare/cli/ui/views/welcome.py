@@ -1063,16 +1063,17 @@ class WelcomeView(VerticalScroll):
     def next_button(self) -> Widget | None:
         """The first widget Tab reaches on this page: the next thing to do.
 
-        Step 2's *Sign in* on a done card is a stop Tab keeps, not the next thing to do,
-        so it is passed over while anything else is left.
+        Step 2's *Sign in* on a done card is a stop Tab keeps, never the next thing to do:
+        while step 3 waits (its look at the chosen folder in flight), it was the only
+        widget left and took the keyboard, and Enter opened Accounts (#349's walk). With
+        nothing else, there is no next button yet, and the next paint hands on.
         """
-        mine = [widget for widget in self.screen.focus_chain if self in widget.ancestors]
         claude = self.claude
         aside = claude is not None and claude.ready
-        return next(
-            (widget for widget in mine if not (aside and widget.id == "claude-sign-in")),
-            mine[0] if mine else None,
-        )
+        for widget in self.screen.focus_chain:
+            if self in widget.ancestors and not (aside and widget.id == "claude-sign-in"):
+                return widget
+        return None
 
     def _card(self, card_id: str, *, done: bool, waiting: bool, keep_keys: bool = False) -> None:
         card = self.query_one(f"#{card_id}", Vertical)

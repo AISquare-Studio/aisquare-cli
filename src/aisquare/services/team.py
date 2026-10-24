@@ -2053,8 +2053,9 @@ def _has_team(store: ContextStore, project_id: str, session_id: str | None) -> b
     Every live ``mcp:`` row counts, a session's own MCP server's too: a remote teammate
     over ``aisquare serve`` writes one, and no row tells the two apart for sure (owner
     decision, 2026-10-24, option A). So a solo session that calls a board tool reads as a
-    team until that row goes stale (#45 m1, a known limitation; docs/orchestration.md,
-    docs/plans/mcp-own-row.md).
+    team until that row goes stale (#45 m1, a known limitation; docs/orchestration.md).
+    Precise detection is option B, planned in draft PR #397
+    (https://github.com/AISquare-Studio/aisquare-cli/pull/397).
     """
     if store.has_team_task_in(project_id, _OPEN_TASKS):
         return True
@@ -2847,26 +2848,6 @@ class PruneReport:
         return bool(self.pruned)
 
 
-def _forget_dead_marks(
-    store: ContextStore, sessions: list[TeamSession], pruned: set[str], now: datetime
-) -> None:
-    """Delete the unbriefed marks of the sessions that ended (before this prune or in it) and
-    have been silent past :data:`_CLAIM_ORPHAN_AFTER`, the clock a prune takes a session
-    for dead by. A prune keeps a session's mark, since its next turn may revive the row
-    (final delta review, m2), and a crashed session never ends, so its mark stayed until a
-    ``forget`` or a purge (last delta review, n7). One read of every mark, whatever the
-    number of sessions."""
-    marks = store.list_meta(_unbriefed(""))
-    for session in sessions:
-        ended = session.ended_at is not None or session.id in pruned
-        if (
-            ended
-            and _unbriefed(session.id) in marks
-            and now - session.last_seen_at > _CLAIM_ORPHAN_AFTER
-        ):
-            store.delete_meta(_unbriefed(session.id))
-
-
 def prune_sessions(
     older_than_minutes: int | None = None,
     *,
@@ -2914,8 +2895,7 @@ def prune_sessions(
         project = _project(store, cwd)
         spare = _resolve_session(store, keep) if keep else None
         spare_id = spare.id if spare else None
-        sessions = store.team_sessions(project.id)
-        for session in sessions:
+        for session in store.team_sessions(project.id):
             if session.ended_at is not None or session.id == spare_id:
                 continue
             idle = now - session.last_seen_at
@@ -2928,7 +2908,9 @@ def prune_sessions(
                 # Its unbriefed mark is KEPT: a prune ends by idleness, so the session may be
                 # alive, and its next turn revives the row (a Stop as much as a prompt). With
                 # the mark gone it was never briefed once a team formed (final delta review,
-                # m2). One silent past the claim clock is taken for dead, below.
+                # m2), at any idle age: a session idle overnight may still be alive (the
+                # closing review's m2 undid #50 n7's 4-hour bound). The accepted cost: a
+                # crashed session's mark stays until `forget` or a purge (_purge_team_meta).
                 # end_session reports what it FOUND claimed either way, so only
                 # count them as released when they actually were — otherwise
                 # the summary claims to have freed work that is still held.
@@ -2954,8 +2936,6 @@ def prune_sessions(
                 )
             )
             released_total += released
-        if not dry_run:
-            _forget_dead_marks(store, sessions, {row.id for row in pruned}, now)
         summary = None
         if pruned and not dry_run:
             summary = _emit(

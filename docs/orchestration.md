@@ -300,7 +300,8 @@ calls one of aisquare's board tools, such as `team_board`, reads as a team from 
 and gets the board, the full MCP instructions and the team block on new starts, until
 that row goes stale 30 minutes after its last call. This is a known limitation: it costs
 tokens, and never hides a teammate. Precise detection of a session's own server is a
-planned follow-up (docs/plans/mcp-own-row.md).
+planned follow-up: the plan is in draft
+[PR #397](https://github.com/AISquare-Studio/aisquare-cli/pull/397).
 
 ### Phone control (`aisquare remote`)
 

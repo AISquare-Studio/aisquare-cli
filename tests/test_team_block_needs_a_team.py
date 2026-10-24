@@ -312,8 +312,10 @@ def test_known_limitation_a_solo_sessions_own_board_tool_reads_as_a_team_until_i
     real teammate as solo (#46's blanket skip, #47 MAJOR-1; #48's ``CLAUDE_CODE_SESSION_ID``,
     which Claude Code exports to every shell, #49 MAJOR-1). So the session reads as a team,
     and gets the board, until that row goes stale (``_STALE_AFTER``): tokens, never a
-    hidden teammate. Precise detection is option B, docs/plans/mcp-own-row.md (#53). If this
-    test fails because the session stays solo, that is option B landing: update it there."""
+    hidden teammate. Precise detection is option B, planned in draft PR #397
+    (https://github.com/AISquare-Studio/aisquare-cli/pull/397, docs/plans/mcp-own-row.md
+    there). If this test fails because the session stays solo, that is option B landing:
+    update it there."""
     _team_on(runner)
     assert "<aisquare-team>" not in _start(runner, SOLO, work_dir)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SOLO)  # as Claude Code starts its server
@@ -374,38 +376,35 @@ def test_a_solo_session_pruned_while_alive_is_still_briefed_when_a_team_forms(
     assert "<aisquare-team>" not in _prompt(runner, SOLO, work_dir), "once"
 
 
-@pytest.mark.parametrize("ended", ["pruned earlier", "crashed"])
-def test_a_dead_sessions_unbriefed_mark_goes_once_it_is_silent_past_the_claim_clock(
-    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, ended: str
+def test_a_solo_session_idle_overnight_and_pruned_is_still_briefed_when_a_team_forms(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Last delta review, n7: m2 keeps a pruned session's mark, as it may be alive. A
-    crashed one never ends, so its mark stayed until a ``forget`` or a purge: #45 n6's leak.
-    A prune takes a session silent past the claim clock (four hours) for dead, as it does
-    its claims, and its mark goes; a younger one's stays (m2)."""
-    from datetime import timedelta
-
+    """The closing review's m2, its repro: #50 n7 deleted the unbriefed mark of a session
+    pruned once it was silent past the claim clock (four hours). A pruned session may be
+    alive at any idle age (#48 m2): a solo session idle overnight, pruned, then a team
+    forms, and its next prompt got a one-line delta, never the board. The mark is kept,
+    whatever the age; a crashed session's mark stays until a forget or a purge (accepted)."""
     _team_on(runner)
     _start(runner, SOLO, work_dir)
-    if ended == "pruned earlier":
-        team_service.prune_sessions(older_than_minutes=0)
-    with store_session() as store:
-        assert store.get_meta(team_service._unbriefed(SOLO)) is not None, "m2: kept"
-
-    now = team_service._now()
-    later = now + team_service._CLAIM_ORPHAN_AFTER + timedelta(minutes=1)
+    now = team_service._now
+    later = now() + timedelta(hours=5)
     monkeypatch.setattr(team_service, "_now", lambda: later)
-    team_service.prune_sessions(older_than_minutes=0)
-
+    report = team_service.prune_sessions(older_than_minutes=0)
+    monkeypatch.setattr(team_service, "_now", now)
+    assert [pruned.id for pruned in report.pruned] == [SOLO]
     with store_session() as store:
-        assert store.get_meta(team_service._unbriefed(SOLO)) is None
-        assert store.get_session(SOLO).ended_at is not None  # type: ignore[union-attr]
+        assert store.get_meta(team_service._unbriefed(SOLO)) is not None
+
+    _start(runner, OTHER, work_dir)  # a team forms; SOLO was alive all along
+    first = _prompt(runner, SOLO, work_dir)
+    assert "<aisquare-team>" in first and "You are team session cccc3333" in first
 
 
 def test_a_prune_keeps_the_mark_of_a_session_silent_under_the_claim_clock(
     runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """n7's bound, not m2 undone: an ended session silent for less than the claim clock
-    keeps its mark through every prune, so it is briefed once a team forms."""
+    """#48 m2: an ended session keeps its mark through every later prune, so it is briefed
+    once a team forms."""
     from datetime import timedelta
 
     _team_on(runner)

@@ -27,7 +27,10 @@ from aisquare.services.captain import queue
 from tests.ui_workers import settle_page
 
 T = TypeVar("T")
-NOW = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
+#: The panel asks ``needs_you`` with the real clock, and a question counts for
+#: ``queue.QUESTION_HORIZON`` (a day): a fixed date here stopped counting the panel's
+#: question a day after it was written.
+NOW = datetime.now(UTC).replace(microsecond=0)
 PROJECT = ProjectInfo(id="prj_board", root=Path("/tmp/board-project"))
 
 

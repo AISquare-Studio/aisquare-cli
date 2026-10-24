@@ -118,15 +118,6 @@ registered but hidden until they do something real.
 | `--no-color` | disable coloured output |
 | `--profile NAME` | configuration profile |
 
-### Configuration keys
-
-Set with `aisquare config set <section>.<key> <value>`, or in *⚙ Settings ▸ App
-settings*. Every key is a default you can change.
-
-| Key | Default | What it does |
-| --- | --- | --- |
-| `fleet.roles.<role>.remote_control` | `false` | start the role's Claude Code sessions with Claude Code's own Remote Control, titled `<project> · <label>`, so claude.ai/code and the Claude app can continue them ([remote](remote.md#claude-codes-own-remote-control)); `fleet spawn --remote-control` / `--no-remote-control` overrides it per spawn, and a restart keeps the choice |
-
 ### Roadmap commands
 
 `sync`, `connectors`, `capture`, `policy` / `enforce` and `open` are the cloud
@@ -150,11 +141,13 @@ list` prints every key. The ones that need more than their name:
 | `accounts.wait_if_reset_within_minutes` | `15` | with `switch`, wait instead when the limit lifts this soon |
 | `accounts.share_trust` | `true` | copy a folder's trust into the account a launch runs on |
 | `accounts.share_settings` | `false` | keep every managed account's `settings.json` a link to the plain claude's |
+| `captain.gate` | `true` | with the captain on, the tools that act as the owner (`press`, `paste`, `stop`, `spawn`, `restart`, `wololo`, `attach_persona`, `act`) need a code from the owner's authenticator app, which opens a 15-minute window; shut until `aisquare captain gate enroll` and the `gate` extra ([captain](captain.md)). `false` turns the gate off. |
 | `capture.enabled` | `true` | `false`: the `UserPromptSubmit` hook stores no prompt (`aisquare log` stays empty) and spools none for Explainability. The turn's metrics row (no text), the teammate delta and the CI experiment, if you turned it on, carry on. A config that cannot be read records no prompt either, with one line on stderr. |
 | `fleet.busy_quiet_seconds` | `30` | how long an agent's pane may print nothing while the board says `working` before its screen is checked once: Claude Code idle at its prompt reads `waiting` (*idle (the board said working)*), as after a turn ended with Esc, which fires no hook. A pane that is busy is never captured. |
 | `fleet.first_prompt` | `argv` | how an agent's first message reaches it: `argv` gives a Claude Code agent its message on its command line and types it for any other binary; `type` types it for every agent ([fleet](fleet.md#the-first-message)). |
 | `fleet.prompt_ack_seconds` | `45` | how long `fleet spawn`, `restart` and `switch` wait for the agent's first turn to start, and how long a listing gives it before the agent reads `attention`: "first prompt not taken". |
 | `fleet.draft_quiet_seconds` | `10` | how long a key typed into an agent's pane in `asq` keeps every fleet write — a nudge, a tell, a typed first message, the Remote's paste — out of that pane. A draft in its input box holds them off for as long as it stays. |
+| `fleet.roles.<role>.remote_control` | `false` | start the role's Claude Code sessions with Claude Code's own Remote Control, titled `<project> · <label>`, so claude.ai/code and the Claude app can continue them ([remote](remote.md#claude-codes-own-remote-control)); `fleet spawn --remote-control` / `--no-remote-control` overrides it per spawn, and a restart keeps the choice |
 | `fleet.deliver_notes_at_turn_end` | `true` | an agent other than the manager is handed the notes addressed to its label or role when its turn ends, instead of at its next prompt ([fleet](fleet.md#fleet-tell)). |
 | `projects.capture` | `false` | `true`: every directory a hooked session runs in gets a row, as 0.8.0 did; off, only a project you added records anything ([fleet](fleet.md#naming)). |
 | `redaction.level` | `standard` | how much is scrubbed from what leaves the machine: `off`, `standard` or `strict` ([Explainability](connecting-your-agents-to-explainability.md)). |

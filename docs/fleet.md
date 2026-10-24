@@ -2166,6 +2166,49 @@ typing the letter.
 
 ---
 
+## Upgrading
+
+### To the release with usage at a glance, adopt and the captain's gate (no store migration)
+
+**No store migration.** The status line's records and `fleet.json` are cache files
+under `~/.aisquare/cache/statusline/`, and its readings go into the `claude_usage`
+rows the usage cache already keeps. `fleet adopt` reads Claude Code's own transcripts
+and session registry and writes nothing beside them.
+
+**Two things change for what you already have.**
+
+- **Task keys** (#270): a title with words outside ASCII gets a new key (`Fix вход` is
+  `fix-вход`, was `fix`). Re-adding a title as the board has it still answers "already
+  tracked"; the CHANGELOG's *Upgrading* note has the edge cases.
+- **Pins** (#271): `project forget` and `project prune` no longer write a pin. A pin an
+  earlier build wrote stays until the next forget of that project or a `project unpin`.
+
+**New config keys**, each with a default ([reference](reference.md#configuration-keys)):
+
+| Key | Default | What it changes |
+| --- | --- | --- |
+| `[fleet.roles.<role>] remote_control` | `false` | The role's Claude Code sessions start with Claude Code's own Remote Control. |
+| `[captain] gate` | `true` | With the captain on, the tools that act as you need a code from your authenticator app. |
+
+**What you will notice.**
+
+- The sidebar's status line carries a number (`● 3× claude 58%`), the Accounts page
+  and `accounts usage` end with the fleet's line, and the Manager tab counts the team
+  under the manager's info line.
+- **With the captain on**, its owner tools are shut until you run `aisquare captain gate
+  enroll` (and install the `gate` extra); `aisquare config set captain.gate false` turns
+  the gate off.
+- `persona import --from-dir` skips a README or LICENSE (listed `skipped`) instead of
+  sending it to an engine.
+- No new agent label is longer than 24 characters.
+- New commands: `aisquare accounts statusline`, `accounts sessions`, `fleet adopt`,
+  and the `asq-statusline` program the status line runs. The status line is opt-in.
+
+**Moving back** to 0.8.2 or earlier is safe for the store and the config: an older build
+ignores the new keys and the cache files. If you installed the status line, run
+`aisquare accounts statusline --uninstall` first: an older build has no
+`asq-statusline`, so a status line left pointing at it fails in every session.
+
 ## Troubleshooting
 
 **`asq` lags with many projects listed.** Each tick reads only the projects

@@ -41,7 +41,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Each goes through the same import in turn, and one refusal does not stop the
   rest. The receipt is one table (SOURCE · NAME · ENGINE · OUTCOME), `--json` a
   list of results, and the exit is 1 when any source was refused. One source
-  alone reads as before; `--name` is refused with more than one.
+  alone reads as before; `--name` is refused with more than one, and `-` (stdin)
+  can be named once. `--from-dir` reads skill directories, `SKILL.md` files, and
+  Markdown or text files that are not repository files: a README, LICENSE or
+  CHANGELOG beside your skills is listed `skipped` (no refusal) and spends no
+  engine.
 
 - **The fleet admits a spawn against the machine, not only the project** (#283).
   `[fleet] max_agents_total` (0, no budget) caps the live agents across every
@@ -151,7 +155,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     minutes (RFC 4226's throttle), audited on the home board. Each further lock
     with no correct code between doubles the last, up to 24 hours.
   - The window's id joins each gated call's `captain_action` event. Every audit
-    masks a code in the owner's words, and `unlock`'s masks it in its arguments.
+    masks a code in the owner's words, joined to a word or trailed by a dash too
+    (`code-123456`), and `unlock`'s masks it in its arguments; a date, a longer
+    number and a dashed phone number are left as said.
   - `aisquare captain gate enroll` writes the secret (mode 0600) and prints the QR.
     `gate status` says whether the gate applies and why not.
   - pyotp comes with the new `gate` extra (`pip install 'aisquare-cli[gate]'`),
@@ -187,8 +193,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   line carries `--remote-control` or `--rc`, when `ANTHROPIC_BASE_URL` names another
   host (the explainability proxy does), or when `CLAUDE_CODE_OAUTH_TOKEN` is set. A
   doctor row, `remote control`, names the roles that have it on and what Claude Code
-  would refuse; it appears only while a role has it on. Off for every role by
-  default. `docs/remote.md` compares it with `aisquare remote`.
+  would refuse; it appears only while a role has it on, and reads what the agents
+  get: the running fleet server's environment, or the one the fleet would start it
+  with, saying where each blocker is (its fix says `aisquare explainability
+  disable` turns tracing off for every launch on the machine). The Spawn dialog's
+  note wraps at 80 columns. Off for every role by default. `docs/remote.md`
+  compares it with `aisquare remote`, and says a remote-controlled agent keeps its
+  role's permission mode and that anyone signed in to its Claude account can drive
+  it.
 - **Stop an agent from `asq`.** The agent view's header gains a compact **Stop**
   button, and `x` with the sidebar focused stops the selected agent — both open
   one dialog (*Stop* · *Force* · *Cancel*) over `services.fleet.stop`, the same
@@ -209,8 +221,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so a screenshot dropped while the sidebar had it reached no agent. A paste no
   focused widget takes now goes to the one live pane on screen, which takes the
   keyboard too; with none, one toast says "nothing to paste into — open an agent
-  first", and a text field or a dialog keeps its own pastes. Under WSL, a paste that is
-  one Windows path of an existing file becomes its Linux path (`wslpath -u`).
+  first", and a text field or a dialog keeps its own pastes; with two panes on screen
+  it says how many and to click the one you mean. Under WSL, a paste that is one
+  Windows path of an existing file becomes its Linux path (`wslpath -u`, off the UI
+  thread).
   `AISQUARE_PASTE_LOG=<file>` records each paste's length, first 80 characters and
   focused widget, for checking what a terminal sends. `docs/fleet.md` has an
   "Images" paragraph on the three ways an image reaches Claude Code.
@@ -391,7 +405,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what it counts, or "nothing needs you"; it counts by the captain's attention
   queue's own rules over what the board's tick already read, so it adds no tmux
   call and no store read. With no open task the table says where tasks come
-  from, and `?` lists what a human does on the board.
+  from, and `?` lists what a human does on the board. Signed out with step 2 ✓,
+  Welcome's *Sign in* stays on the keyboard, a Shift+Tab back from step 3, which
+  still gets the keyboard.
+- **Usage at a glance: one number for the fleet** (#287). The status line under
+  *⚙ Settings* shows the share of the accounts' allowance left now beside the
+  count, `● 3× claude 58%`, in the colour its dot already meant; in the sidebar's 28
+  cells the figure gives way to a needs-login `⚠` rather than cut it off. The
+  Accounts page and `aisquare accounts usage` end with the fleet in one line,
+  `Fleet: 58% left now · week: 1.8 of 3 accounts left · next weekly reset in 2d
+  4h (Thu 14:00) (account 3)`, and the command with an `all` row.
+  `aisquare --json accounts usage --summary` gives `{"accounts": [...],
+  "summary": {...}}`; plain `--json` is still the list.
+- **The Manager tab shows the team** (#287). A line under the manager's info line
+  counts the agents it runs, per role and state, in the sidebar's icons:
+  `🔨 2▶  🧪 1⏸  👀 1🔔  · board for detail`, cut with `…` where it does not fit.
+  It comes from the same refresh as the sidebar, so it adds no reads; a click
+  opens the Board tab. With only the manager running, there is no line.
+- **Claude Code's status line, and the sessions on this machine** (#287; opt-in).
+  `aisquare accounts statusline --install` sets `asq-statusline` as each account's
+  status line where none is set (`--wrap` keeps yours and prints it first;
+  `--uninstall` and `aisquare uninstall` take out only ours and give the file back
+  as it was). In every session it shows `acct 3 · 5h 42% · wk 61% · fleet 58% left
+  (3×) · ctx 34%`, importing the standard library only. Each session it runs in
+  keeps a record (ids, cwd, model and those figures, never a prompt; kept a day):
+  `aisquare accounts sessions [--since 15m] [--json]` and the Accounts page list
+  every session that reported, hand-launched ones too, and the usage cache takes
+  their readings (both windows, never one alone), so the usage endpoint is asked
+  less often.
+- **A conversation started by hand can join the fleet** (#290). `aisquare fleet
+  adopt <session-id|transcript>` resumes it as a fleet agent on the account its
+  transcript lives in and in the directory it ran in, keeping its session id, so
+  the board row is its own. It is refused while a `claude` still runs it, when the
+  fleet already owns it, and when its directory is no onboarded project. `aisquare
+  fleet adopt --list` shows the recent conversations no fleet agent owns (account,
+  directory, age, the first thing you typed), and an id's first characters are
+  enough; the manager offers it only when you ask. In `asq`, the Accounts page's
+  *Adopt a conversation…* shows the same list; one a `claude` still runs, or whose
+  directory is no onboarded project, says why and cannot be picked. Only the CLI's
+  own accounts are searched: a Claude directory it did not create is still never
+  adopted. `docs/fleet.md` adds a "fresh start without losing accounts" recipe.
 
 - **Role bindings in App settings, and a doctor line for each** (#98). *⚙ Settings ▸
   App settings* lists every role `aisquare team bind` bound: its binary, its args,
@@ -719,6 +772,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads in the background and only repaints on the UI thread: with four projects
   of three agents each, a tick holds the UI for about 2 ms, where it held it for
   about 117 ms.
+- **The persona editor and the Personas tab fit an 80-column terminal.** At 80x30
+  the editor's 20-row text box pushed *Save* (or *Save as…*) and *Cancel* below the
+  dialog's edge; the text box now takes what the rest leaves. The tab's *+ Import…*
+  and *+ New* were off the right edge beside the sidebar; the layer filters have a
+  row of their own.
 - **`aisquare context search AND` no longer crashes, and a word in any script
   is found** (#269). The query passed each word to SQLite FTS5 as a bareword,
   so an upper-case `AND`, `OR` or `NOT` was read as an operator and the search

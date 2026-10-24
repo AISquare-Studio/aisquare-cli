@@ -187,7 +187,18 @@ manager's loop. Model ladders and effort come from the existing harness
 (`aisquare team harness` shows the matrix): the manager rides the planner's
 ladder (`fable → opus → sonnet`); coder, tester, ui-tester and reviewer start on `sonnet`
 with `opus` as the fallback rung; the validator runs `fable → opus`, one effort
-tier above the work it gates.
+tier above the work it gates. `fleet spawn` passes the role's rung and effort to the
+agent (`--model`, `--effort`) from the cached probe only — never a probe at spawn — and
+records both, so a restart or switch starts the same model; arguments that already name
+a model or an effort (the binding's `--arg`, the role's `extra_args`, yours) are left as
+they are, and another binary gets neither. `fleet ls --json` shows them in each agent's
+`launch_spec`.
+
+**One tester per task.** The manager spawns a tester for each task that reaches review:
+`fleet spawn tester --task <id>` (a ui-tester for a task titled "UI: …"). Its cycle takes
+that task alone (`aisquare task next --status review --task <id>`), and after its verdict
+it stops rather than draining the rest of the review pool. The validator stays the one
+final gate over the assembled deliverable.
 
 | Fleet role | Repo role | Job in the loop | Runs in |
 | --- | --- | --- | --- |

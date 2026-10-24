@@ -954,9 +954,18 @@ def pause_signal(project_id: str, board: str) -> str:
 
 
 def role_cycle(
-    role: str, session_short_id: str, *, fleet: FleetCommand, paused: str = PAUSE_SIGNAL
+    role: str,
+    session_short_id: str,
+    *,
+    fleet: FleetCommand,
+    paused: str = PAUSE_SIGNAL,
+    task: str | None = None,
 ) -> list[str]:
     """The standing work cycle injected for ``role`` (empty for unknown roles).
+
+    ``task`` is the task the agent was spawned for (``12`` or its id, never ``#12``, which a
+    shell reads as a comment), when it was: a
+    tester or ui-tester then verifies that one task and stops after its verdict (#129 a).
 
     Keyed on :func:`base_role`, so a numbered seat (``coder1``) is briefed as
     the role it is a seat of — the number is an identity, not a new role. Every
@@ -966,7 +975,7 @@ def role_cycle(
     (:func:`pause_signal`), which a manager obeys.
     """
     role = base_role(role)
-    core = _role_cycle_core(role, session_short_id, fleet=fleet, paused=paused)
+    core = _role_cycle_core(role, session_short_id, fleet=fleet, paused=paused, task=task)
     if not core:
         return []
     if role in ("runner", "tester", "validator") and _test_gate_on():
@@ -995,8 +1004,52 @@ def _test_gate_on() -> bool:
         return False
 
 
+def _verify_start(role: str, sid: str, task: str | None) -> list[str]:
+    """A tester's first step: the review pool, or the one task it was spawned for (#129 a)."""
+    if task is None:
+        return [
+            f"Your standing cycle ({role}): `aisquare task next --status review --as {sid}`;",
+            "if nothing,",
+        ]
+    return [
+        f"Your standing cycle ({role}): `aisquare task next --status review --task {task} "
+        f"--as {sid}` — the one task you were spawned for; if nothing,",
+    ]
+
+
+def _ui_start(sid: str, task: str | None) -> list[str]:
+    """The ui-tester's first step: its ``UI: …`` tasks from the review pool, or the one task
+    it was spawned for (#129 a)."""
+    if task is not None:
+        return [
+            f"Your standing cycle (ui-tester): `aisquare task next --status review --task {task}",
+            f"--as {sid}` — the one task you were spawned for; if nothing, tell the user and",
+            "stop. Verify in a REAL browser with whatever this window has, in this",
+        ]
+    return [
+        f"Your standing cycle (ui-tester): `aisquare task next --status review --as {sid}`;",
+        'take tasks titled "UI: …" (leave the rest to the runner). That returns only the',
+        "HEAD of the review pool, so if it hands you a non-UI task, find your `UI:` tasks",
+        "on the board (`aisquare board`) and act on them by id; if there are none, tell the",
+        "user and stop. Verify in a REAL browser with whatever this window has, in this",
+    ]
+
+
+def _verify_end(task: str | None) -> str:
+    """How a tester's cycle ends: it repeats over the pool, or, spawned for one task, it
+    stops after that task's verdict and takes no other (#129 a)."""
+    if task is None:
+        return "Repeat."
+    return "After that one verdict, tell the user and stop: take no other task."
+
+
 def _role_cycle_core(
-    role: str, session_short_id: str, *, fleet: FleetCommand, paused: str = PAUSE_SIGNAL
+    role: str,
+    session_short_id: str,
+    *,
+    fleet: FleetCommand,
+    paused: str = PAUSE_SIGNAL,
+    task: str | None = None,
 ) -> list[str]:
     """The role-specific half of the cycle for an already-normalised ``role``;
     see :func:`role_cycle`."""
@@ -1045,8 +1098,7 @@ def _role_cycle_core(
         # session it can join to its fleet row; without it two testers spawned
         # for two review tasks were both handed the older one (review of #135).
         return [
-            f"Your standing cycle ({role}): `aisquare task next --status review --as {sid}`;",
-            "if nothing,",
+            *_verify_start(role, sid, task),
             "tell the user and stop. You are the adversarial verifier: run the FULL check the",
             "acceptance criteria name — not a smoke test — and try to make the change fail",
             "(edge inputs, a counterexample) before you trust it. Verdicts cite evidence you",
@@ -1058,7 +1110,7 @@ def _role_cycle_core(
             "NOT marked (stale) — a stale row is a crashed or hung tester, not an available one;",
             "otherwise run its non-browser checks and reopen it —",
             f'`aisquare task reopen <id> --reason "UI not browser-verified" --as {sid}` —',
-            "never done. Repeat.",
+            f"never done. {_verify_end(task)}",
         ]
     if role == "validator":
         return [
@@ -1085,12 +1137,14 @@ def _role_cycle_core(
             "contract, so put it in `--detail`, not the prompt. Help comes only from",
             f"`{spawn} coder --label coder-<purpose> --task <id> --as {sid}` —",
             "`--task` delivers the task; add `--prompt` only for extra instructions —",
-            f"one per parallelisable task, within the agent cap; `{spawn} tester` once work",
-            f'reaches review — `{spawn} ui-tester --prompt "<branch or worktree to check +',
-            'the URL to open>"` for tasks titled "UI: …", which it verifies in a real browser',
-            "and cannot otherwise place, since nothing moves it into the coder's tree —",
-            f"`{spawn} reviewer` once a PR exists, `{spawn} validator`",
-            "once every task is done. Board updates reach you every turn: reopen with reasons,",
+            "one per parallelisable task, within the agent cap. Spawn one tester per task at",
+            f"its task_review: `{spawn} tester --task <id> --as {sid}`, which verifies that",
+            f'task and stops — `{spawn} ui-tester --task <id> --prompt "<branch or worktree to',
+            'check + the URL to open>"` for tasks titled "UI: …", which it verifies in a real',
+            "browser and cannot otherwise place, since nothing moves it into the coder's tree —",
+            f"`{spawn} reviewer` once a PR exists; the validator stays the single final gate:",
+            f"`{spawn} validator` once every task is done.",
+            "Board updates reach you every turn: reopen with reasons,",
             f'`{fleet("tell")} <label> "…"` to steer, re-spec or split what bounces. Spawn',
             f"nothing while the `{paused}` signal is set. An agent that hits its Claude usage",
             'limit shows `limited` on the board. With `on_limit = "switch"` (the default) the',
@@ -1109,12 +1163,9 @@ def _role_cycle_core(
             "(coder-auth, not coder-2).",
         ]
     if role == "ui-tester":
+        start = _ui_start(sid, task)
         return [
-            f"Your standing cycle (ui-tester): `aisquare task next --status review --as {sid}`;",
-            'take tasks titled "UI: …" (leave the rest to the runner). That returns only the',
-            "HEAD of the review pool, so if it hands you a non-UI task, find your `UI:` tasks",
-            "on the board (`aisquare board`) and act on them by id; if there are none, tell the",
-            "user and stop. Verify in a REAL browser with whatever this window has, in this",
+            *start,
             "order: Claude in Chrome (present when the window was started with `--chrome` and",
             "the extension is connected), the Chrome DevTools MCP, Playwright MCP. Check which",
             "of them answer BEFORE you start. Do the acceptance steps as written — URL, login,",
@@ -1128,7 +1179,8 @@ def _role_cycle_core(
             f"<screenshot path>\" --as {sid}`. No browser tool answers? Run the task's",
             'non-browser checks, then reopen it with "UI not browser-verified in this window" —',
             "never done. You are ASKED to be read-only and nothing here enforces it (no",
-            "allowed-tools list is written or passed): never edit, never push. Repeat.",
+            "allowed-tools list is written or passed): never edit, never push.",
+            _verify_end(task),
         ]
     if role == "reviewer":
         # §3.3 — reads the PR as the stranger who will maintain it; findings on the

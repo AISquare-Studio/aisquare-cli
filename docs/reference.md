@@ -70,7 +70,7 @@ aisquare
 │                   bind <role> [--bin CMD] [--env KEY=VALUE]… [--arg A]…
 │                               [--unset KEY] [--account A] [--clear-account] [--clear]
 │                   show <seq>   — one board event in full (author, actor, task, details)
-├── task            add · list · show · next [--role R] [--status S] [--claim]
+├── task            add · list · show · next [--role R] [--status S] [--claim] [--task T]
 │                   claim · review [--note] · reopen --reason · done [--note]
 │                   block --reason · drop · release        (all with [--as SESSION])
 │                   a task is its id, or 12 / #12 — its number on the caller's board

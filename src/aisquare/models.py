@@ -24,6 +24,12 @@ Pool = Literal["user", "project"]
 """Where context lives: the global user pool or the current project pool."""
 
 
+def _default_binary() -> str:
+    from aisquare.core.agent_adapters import default_binary  # lazy: the adapters import us
+
+    return default_binary()
+
+
 class ExportFormat(StrEnum):
     """Supported ``context export`` output formats."""
 
@@ -1108,7 +1114,9 @@ class FleetAgent(BaseModel):
     label: str
     """Unique among the project's LIVE agents; an ended agent frees its label."""
     role: str
-    binary: str = "claude"
+    binary: str = Field(default_factory=lambda: _default_binary())
+    """The executable its window runs; the default agent's (``agent_adapters.
+    default_binary``) on a row that names none."""
     agent: str | None = None
     tmux_socket: str = "asq"
     pane_id: str

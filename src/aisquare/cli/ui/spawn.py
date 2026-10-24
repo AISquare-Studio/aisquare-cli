@@ -511,7 +511,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         try:
             return get_adapter(agent).binary if agent else harness.resolve_binary(role).binary
         except Exception:  # a hint, never a reason to fail
-            return harness.DEFAULT_AGENT_BINARY
+            return harness.default_binary()
 
     def _role_agent(self, role: str, binary: str = "") -> str:
         """The agent ``role`` launches on here with no ``--agent``: ``agent_launch.resolve``'s

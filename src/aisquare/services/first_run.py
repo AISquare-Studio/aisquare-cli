@@ -315,7 +315,7 @@ def _probe_claude(
         resolution = harness.resolve_binary(FLEET_ROLE)
     except Exception as exc:  # a config that will not parse costs the override, not the step
         problems.append(f"could not read the agent binding: {_why(exc)}")
-        resolution = harness.BinaryResolution(binary=harness.DEFAULT_AGENT_BINARY, source="default")
+        resolution = harness.BinaryResolution(binary=harness.default_binary(), source="default")
     try:
         binary = which(resolution.binary)
     except Exception as exc:

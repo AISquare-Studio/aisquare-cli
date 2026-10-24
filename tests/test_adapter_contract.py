@@ -1558,3 +1558,36 @@ def test_an_agent_that_declares_no_modal_screen_names_its_dialogs_by_their_words
     assert screen_modal(prompts, asking) == "Allow shell: make deploy", "its prompt's question"
     assert screen_modal(prompts, ["fake> "]) is None
     assert screen_modal(replace(prompts, screen_prompt=None), asking) is None
+
+
+def test_the_default_binary_is_the_default_agents_own(
+    monkeypatch: pytest.MonkeyPatch, fake_agent: FakeAgentAdapter
+) -> None:
+    """Nothing shared spells the binary a launch runs when none is named: it is the default
+    agent's (``agent_adapters.default_binary``), so the fake made the default gives its own
+    to a role's resolution, to a fleet row recorded without one and to the status line."""
+    from datetime import UTC, datetime
+
+    from aisquare.cli.ui.sidebar import status_line_text
+    from aisquare.core import agent_adapters
+    from aisquare.models import FleetAgent
+
+    monkeypatch.setattr(agent_adapters, "DEFAULT_AGENT", fake_agent.id)
+    for name in (harness._BIN_ENV_GLOBAL, harness._bin_env_var("coder")):
+        monkeypatch.delenv(name, raising=False)
+
+    assert agent_adapters.default_binary() == harness.default_binary() == fake_agent.binary
+    assert harness.resolve_binary("coder") == harness.BinaryResolution(
+        binary=fake_agent.binary, source="default"
+    )
+    row = FleetAgent(
+        id="a1",
+        project_id="p",
+        label="coder-1",
+        role="coder",
+        pane_id="%1",
+        cwd=Path("/w"),
+        created_at=datetime.now(UTC),
+    )
+    assert row.binary == fake_agent.binary
+    assert status_line_text(True, None).plain.endswith(fake_agent.binary)

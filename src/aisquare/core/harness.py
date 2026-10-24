@@ -247,7 +247,7 @@ def role_defaults(role: str, *, binary: str, args: Sequence[str]) -> RoleDefault
         return RoleDefaults(
             notes=[
                 f"{', '.join(profile.default_args)} withheld: "
-                f"{os.path.basename(binary)!r} is not {DEFAULT_AGENT_BINARY}"
+                f"{os.path.basename(binary)!r} is not {default_binary()}"
             ]
         )
     return RoleDefaults(
@@ -674,7 +674,7 @@ def probe_model(alias: str) -> ProbeResult:
         home.mkdir(parents=True, exist_ok=True)
     context = _PROBE_CONTEXT.get()
     argv = [
-        context.binary if context is not None else "claude",
+        context.binary if context is not None else default_binary(),
         "-p",
         "reply with exactly: ok",
         "--model",
@@ -1331,8 +1331,13 @@ def _role_cycle_core(
 # — `claude`, `claude2`, a wrapper script — and want a role pinned to one
 # without retyping a flag on every spawn (#52).
 
-#: The executable used when nothing else says otherwise.
-DEFAULT_AGENT_BINARY = "claude"
+
+def default_binary() -> str:
+    """The executable used when nothing else says otherwise: the default agent's
+    (``agent_adapters.default_binary``)."""
+    from aisquare.core.agent_adapters import default_binary  # lazy: the adapters import us
+
+    return default_binary()
 
 
 def is_default_agent(binary: str) -> bool:
@@ -1356,7 +1361,7 @@ def is_default_agent(binary: str) -> bool:
     """
     from aisquare.core.agent_adapters.types import executable_name
 
-    return executable_name(binary) == DEFAULT_AGENT_BINARY
+    return executable_name(binary) == default_binary()
 
 
 #: Per-role override, e.g. AISQUARE_BIN_CODER=claude2. Role names are upper-cased
@@ -1431,7 +1436,7 @@ def resolve_binary(role: str, *, override: str | None = None) -> BinaryResolutio
     profile = team.profiles.get(role) if team is not None else None
     if profile is not None and profile.bin:
         return BinaryResolution(binary=profile.bin, source="config")
-    return BinaryResolution(binary=DEFAULT_AGENT_BINARY, source="default")
+    return BinaryResolution(binary=default_binary(), source="default")
 
 
 # ─── The LAUNCH PROFILE: env and args a role runs with ───────────────────────

@@ -60,6 +60,7 @@ from aisquare.cli.ui.groups import (
     UndoLayout,
 )
 from aisquare.cli.ui.terminal import InPlaceField
+from aisquare.core.agent_adapters import default_binary
 from aisquare.models import FleetAgentStatus, HeadroomSummary, ProjectGroup, ProjectInfo
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
@@ -425,7 +426,7 @@ def status_line_text(
     headroom: HeadroomSummary | None,
     *,
     every_needs_login: bool = False,
-    name: str = "claude",
+    name: str | None = None,
     more: Sequence[AgentHeadroom] = (),
 ) -> Text:
     """``● aisquare  ● 3x claude`` (the x a multiplication sign) — the line under *⚙ Settings*.
@@ -433,15 +434,16 @@ def status_line_text(
     The AISquare dot is green signed in, red signed out, grey while unknown. The
     Claude dot is :func:`headroom_dot`; the count is how many accounts are usable,
     and a ``⚠`` follows when an account needs a login. ``headroom`` is ``None`` until
-    the first summary lands. Each agent in ``more`` (Codex's accounts) has a line of its
-    own under it, read the same way: ``● 1x codex``.
+    the first summary lands. ``name`` is what the first dot names its accounts by, the
+    default agent's binary unless given. Each agent in ``more`` (Codex's accounts) has a
+    line of its own under it, read the same way: ``● 1x codex``.
     """
     text = Text(no_wrap=True, overflow="ellipsis")
     colour = "grey50" if aisquare is None else GREEN if aisquare else RED
     text.append("● ", style=colour)
     text.append("aisquare", style="dim")
     text.append("  ")
-    _append_agent(text, name, headroom, every_needs_login)
+    _append_agent(text, name or default_binary(), headroom, every_needs_login)
     for other in more:
         text.append("\n" + STATUS_INDENT)
         _append_agent(text, other.name, other.headroom, other.every_needs_login)
@@ -1363,7 +1365,7 @@ class Sidebar(Vertical):
         """The Claude accounts' headroom the status line shows; ``None`` until the first."""
         self.every_needs_login = False
         """Whether every enabled account needs a login: the one case the dot is red for it."""
-        self.headroom_name = "claude"
+        self.headroom_name = default_binary()
         """The word the first dot names its accounts by (``status_line_text``'s ``name``)."""
         self.more_headroom: tuple[AgentHeadroom, ...] = ()
         """Every other agent's accounts the status line shows, each on its own line."""
@@ -1800,7 +1802,7 @@ class Sidebar(Vertical):
         headroom: HeadroomSummary,
         *,
         every_needs_login: bool = False,
-        name: str = "claude",
+        name: str | None = None,
         more: Sequence[AgentHeadroom] = (),
     ) -> None:
         """The status line's Claude dot, and one for each other agent's accounts (``more``),
@@ -1808,7 +1810,7 @@ class Sidebar(Vertical):
         from the same read, every agent's slots — never from the two-second tick."""
         self.headroom = headroom
         self.every_needs_login = every_needs_login
-        self.headroom_name = name
+        self.headroom_name = name or default_binary()
         self.more_headroom = tuple(more)
         self._paint_status()
         usage = accounts_service.session_by_slot([headroom, *(m.headroom for m in more)])

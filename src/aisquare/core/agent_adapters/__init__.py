@@ -35,6 +35,11 @@ def get_adapter(name: str) -> AgentAdapter:
         ) from None
 
 
+def default_binary() -> str:
+    """The executable a launch runs when nothing names one: :data:`DEFAULT_AGENT`'s own."""
+    return get_adapter(DEFAULT_AGENT).binary
+
+
 def recorded_adapter(name: str | None) -> AgentAdapter | None:
     """The adapter a recorded ``agent`` names: :data:`DEFAULT_AGENT`'s for ``None`` (a
     record from before adapters), ``None`` for one this install does not know."""

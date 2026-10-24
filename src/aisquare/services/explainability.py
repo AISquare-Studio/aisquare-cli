@@ -119,15 +119,15 @@ _SAFE_ROLE = re.compile(r"^[A-Za-z0-9._-]+$")
 _PROBE_TIMEOUT_SECONDS = 1.5
 
 #: The ONE program verified to accept ``--session-id <uuid>`` (Claude Code
-#: 2.1.233) — the name, for the note a refused pin prints. WHETHER a binary is
-#: that program is ``harness.is_default_agent``, the single predicate this and
-#: the role's own ``default_args`` now share: the two gates ran 55 lines apart
-#: in the same launch, each with its own ``"claude"`` literal, and each missed
-#: ``claude.cmd`` and a binding typed with a trailing slash. Since #57 a role
-#: can be bound to any executable, and an unknown flag kills the launch; every
-#: other binary joins through the hook seam instead, which needs no flag at
-#: all, so the narrow match costs nothing but a nicety.
-_SESSION_ID_AGENT = harness.DEFAULT_AGENT_BINARY
+#: 2.1.233) is the default agent's binary, which the note a refused pin names
+#: (``harness.default_binary``). WHETHER a binary is that program is
+#: ``harness.is_default_agent``, the single predicate this and the role's own
+#: ``default_args`` now share: the two gates ran 55 lines apart in the same
+#: launch, each with its own ``"claude"`` literal, and each missed ``claude.cmd``
+#: and a binding typed with a trailing slash. Since #57 a role can be bound to
+#: any executable, and an unknown flag kills the launch; every other binary
+#: joins through the hook seam instead, which needs no flag at all, so the
+#: narrow match costs nothing but a nicety.
 
 #: Flags whose presence means the caller (or the human) already owns the
 #: session id, so we must read it rather than choose one.
@@ -449,7 +449,7 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
             return SessionIdentity(None, note=f"{flag} resumes a session chosen at run time")
     if not accepts_session_id(binary):
         return SessionIdentity(
-            None, note=f"{os.path.basename(binary)!r} is not {_SESSION_ID_AGENT}"
+            None, note=f"{os.path.basename(binary)!r} is not {harness.default_binary()}"
         )
     session_id = str(uuid.uuid4())
     return SessionIdentity(session_id, inject_args=(_SESSION_ID_FLAG, session_id))

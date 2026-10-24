@@ -80,8 +80,6 @@ ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manag
 #: with no standing cycle and off every ladder.
 _SEAT = re.compile(rf"^({'|'.join(ROLES)})\d+$")
 
-DEFAULT_AGENT = "claude"
-
 #: launch's own short options, which an agent may spell with a value of its own (Codex's
 #: ``-a`` is its approval policy): one the agent's ``capabilities.value_options`` names too
 #: is told apart in the refusal of a value that is none of launch's.

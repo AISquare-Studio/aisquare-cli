@@ -57,7 +57,7 @@ aisquare
 │                   prune [--missing] [--worktrees] [--purge] [--yes]
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
-├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot]
+├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot] [--summary]
 │                   (--usage and usage read a five-minute cache; --refresh reads now)
 │                   remove <slot>            — Claude Code accounts the CLI owns (docs/fleet.md)
 │                   default [<slot|alias|email>] [--project P] [--role R] [--clear]

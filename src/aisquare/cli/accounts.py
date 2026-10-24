@@ -284,11 +284,21 @@ def usage_(
         ),
     ] = None,
     refresh: Annotated[bool, typer.Option("--refresh", help=_REFRESH_HELP)] = False,
+    summary: Annotated[
+        bool,
+        typer.Option(
+            "--summary",
+            help="With --json: an object, {accounts, summary}, the fleet's aggregate beside "
+            "the list (plain --json stays the list).",
+        ),
+    ] = False,
 ) -> None:
     """Session (5-hour) and weekly usage per signed-in account — percent USED, as /usage shows it.
 
     40% used is 60% left. A reading is shared for five minutes between this
-    command, `list --usage` and asq's Accounts page; `--refresh` fetches now.
+    command, `list --usage` and asq's Accounts page; `--refresh` fetches now. The
+    last row, `all`, and the line under the table are the fleet's: what is LEFT now
+    and of the week, and the soonest weekly reset.
     """
     # The arranged list, like every other account surface: priority order, the
     # alias as the label, disabled marked — and one concurrent read for all of
@@ -299,8 +309,13 @@ def usage_(
     readings = accounts_service.cached_usage([status.account for status in asked], force=refresh)
     for status in asked:
         status.usage = readings.get(status.account.slot)
+    fleet = accounts_service.fleet_headroom([status.account for status in asked], readings)
     if get_state().json_output:
-        typer.echo(json.dumps([status.model_dump(mode="json") for status in statuses]))
+        listed = [status.model_dump(mode="json") for status in statuses]
+        if summary:
+            typer.echo(json.dumps({"accounts": listed, "summary": fleet.model_dump(mode="json")}))
+        else:
+            typer.echo(json.dumps(listed))
         return
     console = stdout_console()
     labels: list[Text] = []
@@ -320,9 +335,32 @@ def usage_(
         who = Text(status.identity.email) if status.identity else Text("not signed in", style="dim")
         session, week = _usage_cells(status.usage)
         table.add_row(str(status.account.slot), label, who, session, week)
+    if fleet.session_by_slot:
+        # The fleet's row (#287): the mean of the usable accounts, percent USED like the
+        # rows above it, so the columns keep one meaning.
+        used_now = sum(fleet.session_by_slot.values()) / len(fleet.session_by_slot)
+        used_week = (
+            f"{round(100 - fleet.week_percent_left)}%"
+            if fleet.week_percent_left is not None
+            else _DASH
+        )
+        table.add_row(
+            "all",
+            Text(f"{fleet.usable} usable", style="dim"),
+            Text(""),
+            f"{round(used_now)}%",
+            used_week,
+            style="bold",
+        )
     console.print(table)
+    if (sentence := accounts_service.summary_sentence(fleet, _labels(statuses))) is not None:
+        console.print(sentence, markup=False)
     if (line := _refreshed_line(asked)) is not None:
         console.print(line)
+
+
+def _labels(statuses: list[ClaudeAccountStatus]) -> dict[int, str]:
+    return {status.account.slot: status.label for status in statuses}
 
 
 # --- arranging: default, alias, order, disable (#145) -----------------------------------------

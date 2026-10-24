@@ -913,6 +913,19 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   distance and a clock time — `resets in 3h 10m (18:00)`, `resets in 2d 4h (Tue
   02:00)` — the same string on the page and in `aisquare accounts usage`, so a
   weekly window six days out never looks like tonight.
+- **The fleet at a glance** (#287). Under the usage bar, one line for every
+  account at once: `Fleet: 58% left now · week: 1.8 of 3 accounts left · next
+  weekly reset in 2d 4h (Thu 14:00) (account 3)`. *Left now* is the mean, over
+  the usable accounts, of each one's fuller window (the share a spawn has to
+  work with). *Week* is account-weeks: the sum of each account's weekly window
+  left, out of the accounts whose week was read. The reset is the soonest
+  weekly one. The status line under *⚙ Settings* carries the same *left now*
+  figure beside the count, `● 3× claude 58%`, in the colour of its dot.
+  `aisquare accounts usage` ends with an `all` row (the mean of each column,
+  percent USED like the rows above it) and the same line; `aisquare --json
+  accounts usage --summary` prints `{"accounts": [...], "summary": {...}}`, the
+  summary with `percent_left`, `week_percent_left`, `weeks_left`,
+  `week_left_by_slot` and `week_resets_soonest`. Plain `--json` stays the list.
 - **Default**, **↑**/**↓** and **Disable** arrange the accounts. The row with
   the ★ is the **machine default**: what a launch runs on when nothing more
   specific says. The arrows set the **priority order** — the order the rows are
@@ -1099,7 +1112,8 @@ aisquare accounts list --usage         # …plus the two windows, percent USED (
 aisquare accounts add                  # a fresh slot; Claude Code opens for the sign-in, then exits
 aisquare accounts run 2                # a plain Claude Code session on account 2
 aisquare accounts run 2 --model opus   # arguments after the slot go to claude
-aisquare accounts usage                # the windows, per signed-in account; --refresh reads now
+aisquare accounts usage                # the windows, per signed-in account, then the fleet's; --refresh reads now
+aisquare --json accounts usage --summary # {accounts, summary}: the list beside the fleet's aggregate
 aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
 aisquare launch coder --account 2      # a board role on account 2
 aisquare fleet spawn coder --account 2 # a fleet agent on account 2

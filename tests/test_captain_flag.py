@@ -440,3 +440,21 @@ def test_the_docs_say_it_is_experimental_and_how_to_turn_it_on(page: str) -> Non
     assert "experimental" in text
     assert "aisquare config set experimental.captain true" in text
     assert ENV in text
+
+
+def test_the_switch_reads_the_kept_config_never_a_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #240, R2-m4: asked on every non-manager spawn's label and up to five times a
+    captain spawn, each call deep-copied the whole config for one bool."""
+    from aisquare.core import config, experimental
+
+    asked: list[dict[str, object]] = []
+    real = config.load_config
+
+    def spy(*args: object, **kwargs: object) -> object:
+        asked.append(dict(kwargs))
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.delenv(experimental.CAPTAIN_ENV, raising=False)
+    monkeypatch.setattr(experimental, "load_config", spy)
+    experimental.captain_enabled()
+    assert asked == [{"copy": False}]

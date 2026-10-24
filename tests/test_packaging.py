@@ -62,8 +62,50 @@ def test_the_base_install_gains_no_dependencies() -> None:
     # as `foo` rather than failing with a confusing diff.
     required = {re.split(r"[<>=!~\[; ]", dep)[0].strip() for dep in data["project"]["dependencies"]}
     assert required == {
-        "typer", "rich", "pydantic", "tomli-w", "textual", "pyyaml", "tzdata", "segno"
+        "typer", "rich", "pydantic", "tomli-w", "textual", "pyyaml", "tzdata", "segno",
+        "starlette", "uvicorn", "websockets", "cryptography", "ngrok",
     }  # fmt: skip
+
+
+REMOTE_NEEDS = ("starlette", "uvicorn", "websockets", "cryptography", "ngrok")
+"""What Remote runs on, core since #34: the server's three, Web Push's crypto, ngrok's SDK."""
+
+
+def test_the_built_wheel_requires_what_remote_runs_on_with_no_extra(tmp_path: Path) -> None:
+    """#34: Remote's dependencies were the ``remote`` extra, which ``install.sh`` never
+    installs, so a fresh machine answered Remote with "not installed". Read off the BUILT
+    wheel's ``Requires-Dist``, so a requirement left under an extra fails here; ``remote``
+    stays a real extra, adding nothing, for one release."""
+    import zipfile
+    from email.parser import Parser
+
+    from hatchling.builders.wheel import WheelBuilder
+    from packaging.requirements import Requirement
+
+    root = Path(__file__).resolve().parents[1]
+    (wheel,) = WheelBuilder(str(root)).build(directory=str(tmp_path), versions=["standard"])
+    with zipfile.ZipFile(wheel) as archive:
+        name = next(n for n in archive.namelist() if n.endswith(".dist-info/METADATA"))
+        metadata = Parser().parsestr(archive.read(name).decode("utf-8"))
+    requirements = [Requirement(line) for line in metadata.get_all("Requires-Dist") or []]
+    core = {
+        requirement.name: requirement
+        for requirement in requirements
+        if requirement.marker is None or "extra" not in str(requirement.marker)
+    }
+    assert set(REMOTE_NEEDS) <= set(core), sorted(core)
+    for platform, machine, python in [
+        ("darwin", "arm64", "3.11"),
+        ("darwin", "x86_64", "3.13"),
+        ("linux", "x86_64", "3.11"),
+        ("linux", "aarch64", "3.12"),
+        ("win32", "AMD64", "3.11"),
+    ]:  # every platform the CLI supports gets the bundled ngrok
+        marker = core["ngrok"].marker
+        environment = {"sys_platform": platform, "platform_machine": machine}
+        assert marker is None or marker.evaluate({**environment, "python_version": python})
+    assert "remote" in (metadata.get_all("Provides-Extra") or [])
+    assert not [r for r in requirements if 'extra == "remote"' in str(r.marker)], "a no-op alias"
 
 
 def test_windows_installs_a_time_zone_database_and_nothing_else_does() -> None:

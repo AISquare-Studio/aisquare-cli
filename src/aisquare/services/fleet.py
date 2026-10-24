@@ -66,7 +66,12 @@ from aisquare.core.agent_adapters import (
     get_adapter,
     recorded_adapter,
 )
-from aisquare.core.agent_adapters.types import AgentAdapter, ForkArgs, PermissionIntent
+from aisquare.core.agent_adapters.types import (
+    AgentAdapter,
+    ForkArgs,
+    PermissionIntent,
+    option_values,
+)
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
     FleetRoleSettings,
@@ -128,6 +133,7 @@ from aisquare.services import (
 )
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
+from aisquare.services import personas as personas_service
 from aisquare.services import project as project_service
 
 FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "validator", "ui-tester")
@@ -9738,6 +9744,12 @@ def _respawn(
     replay = role is None or role == record.role
     spec = record.spec if replay else None
     chosen = _persona_for_replay(project, agent, notes, role=role) if persona is None else persona
+    if resume is not None and (chosen or None) != _launched_persona(record):
+        # A thread that keeps its first system prompt across a resume (Codex's) is not given
+        # the persona this launch passes, which reaches it through the briefing alone.
+        seam = personas_service.resume_seam_note(record.agent, chosen or None)
+        if seam is not None:
+            notes.append(seam)
     if resume is not None and session is not None and (session.persona or "") != chosen:
         # The replacement RESUMES this session, and its start hook asks the row: a row with no
         # persona asks for nothing, so the session kept the persona it recorded, and the next
@@ -9796,6 +9808,12 @@ def _respawn(
         )
     notes.extend(receipt.notes)
     return receipt, resume is not None, notes
+
+
+def _launched_persona(record: launch_seal.LaunchRecord) -> str | None:
+    """The persona ``record``'s launch passed (``launch --persona`` in its window's argv,
+    ``LaunchSpec.command``), or ``None`` for none."""
+    return next(reversed(option_values(record.spec.command, "--persona")), None) or None
 
 
 def _same_home(record: launch_seal.LaunchRecord, target: ClaudeAccount) -> bool:

@@ -175,6 +175,40 @@ def test_restart_all_managers_resumes_a_real_codex_manager_and_leaves_its_coder(
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_a_restart_of_a_real_codex_row_given_a_persona_since_says_its_seam_kept_the_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M4 (``codex resume`` keeps the ``developer_instructions`` its thread began with, L1's
+    and L2's measurement): a coder spawned with no persona and given one since is restarted,
+    resuming its thread, and the receipt says the persona reaches it through the briefing
+    alone."""
+    with _codex_fleet(tmp_path, monkeypatch, "seam") as live:
+        coder = fleet.spawn(
+            live.project, "coder", agent="codex", worktree=False, prompt="hello seam",
+            agent_args=NATIVE,
+        ).agent  # fmt: skip
+        live.until(lambda: fleet.status_of(coder).state == "waiting", 60, "its turn", coder.pane_id)
+        fleet.attach_persona(live.project, coder.label, "skeptic")
+        before = len(live.requests)
+
+        receipt = fleet.restart(live.project, coder.label)
+
+        assert receipt.resumed is True, receipt.notes
+        assert any(
+            note.startswith("persona skeptic: Codex resumes the thread with the system prompt")
+            for note in receipt.notes
+        ), receipt.notes
+        restarted = fleet._restart_prompt(receipt.started)
+
+        def resumed_turn() -> dict[str, Any] | None:
+            requests = live.requests[before:]
+            return next((r for r in requests if restarted in _user_texts(r)), None)
+
+        turn = live.until(resumed_turn, 60, "the resumed turn", receipt.started.pane_id)
+        assert "hello seam" in _user_texts(turn), "its own thread, resumed"
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
 def test_a_hand_off_fork_of_a_real_codex_coder_is_a_new_thread_with_its_turns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

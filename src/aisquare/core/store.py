@@ -1479,6 +1479,9 @@ class ContextStore(Protocol):
     def set_project_nickname(self, project_id: str, nickname: str | None) -> ProjectInfo: ...
     def codenames_in_use(self) -> set[str]: ...
     def upsert_fleet_agent(self, agent: FleetAgent) -> FleetAgent: ...
+    def upsert_fleet_agent_unless_stopped(
+        self, agent: FleetAgent, replaces: str
+    ) -> FleetAgent | None: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
@@ -3708,9 +3711,31 @@ class SqliteStore:
         partial unique index and raises ``sqlite3.IntegrityError`` — the service
         layer picks the suffixed label and retries; the store never guesses.
         """
-        self._conn.execute(
+        stored = self._upsert_fleet_agent(agent, None)
+        assert stored is not None  # nothing guards it
+        return stored
+
+    def upsert_fleet_agent_unless_stopped(
+        self, agent: FleetAgent, replaces: str
+    ) -> FleetAgent | None:
+        """:meth:`upsert_fleet_agent` for the row that brings ``replaces`` back: nothing is
+        written, and ``None`` returned, when that row is recorded stopped by then. One
+        statement, so an owner's ``fleet stop`` that lands at any point before the new row
+        exists wins (last delta review of #274, m3)."""
+        return self._upsert_fleet_agent(agent, replaces)
+
+    def _upsert_fleet_agent(
+        self, agent: FleetAgent, unless_stopped: str | None
+    ) -> FleetAgent | None:
+        guard = (
+            "WHERE NOT EXISTS (SELECT 1 FROM fleet_agent WHERE id = ? AND ended_by = 'stopped') "
+            if unless_stopped is not None
+            else "WHERE true "  # INSERT … SELECT … ON CONFLICT needs a WHERE to parse
+        )
+        cursor = self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+            f"{guard}"
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
             "cwd = excluded.cwd, worktree = excluded.worktree, task_id = excluded.task_id, "
@@ -3743,9 +3768,12 @@ class SqliteStore:
                 agent.board if agent.board is not None else agent.project_id,
                 agent.persona,
                 agent.ended_by,
+                *((unless_stopped,) if unless_stopped is not None else ()),
             ),
         )
         self._conn.commit()
+        if cursor.rowcount == 0:
+            return None
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored

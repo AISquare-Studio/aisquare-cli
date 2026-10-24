@@ -22,7 +22,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core.store import store_session
-from aisquare.core.tmux import WindowInfo
+from aisquare.core.tmux import TmuxError, WindowInfo
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
@@ -638,7 +638,7 @@ def test_a_stop_of_a_dead_agent_on_a_silent_tmux_marks_nothing(
     fleet_service.list_agents(fleet.alpha)  # recorded as died; its dead window stands
     tmux.socket_denied = True
 
-    with pytest.raises(fleet_service.NoSuchAgent, match="tmux did not answer"):
+    with pytest.raises(fleet_service.FleetUnavailable, match="tmux did not answer"):
         fleet_service.stop(fleet.alpha, coder.label, agent_id=coder.id)
 
     assert _row(coder.id).ended_by == "died"
@@ -668,3 +668,140 @@ def test_a_projects_label_heads_are_read_for_that_project_alone(
     assert asked == [fleet.alpha.id]
     assert {row.project_id for row in heads.values()} == {fleet.alpha.id}
     assert set(heads) == {"manager", "coder-1"}
+
+
+# --- last delta review of #274 (#49), in #50 ------------------------------------------
+
+
+@pytest.mark.parametrize("pane", ["vanished", "dead"])
+def test_a_fleet_stop_that_lands_while_the_replacement_starts_is_never_undone(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    monkeypatch: pytest.MonkeyPatch,
+    pane: str,
+) -> None:
+    """m3: #48's m1 guard read the row once, before ``_respawn``. The owner's ``fleet stop``
+    of the 💤 row while the replacement's window was starting was still undone by the
+    spawn's insert. The insert is refused, the new window killed; a later ``fleet restart``
+    of the stopped row, asked for, brings it back."""
+    coder = fleet.agents["alpha/coder-1"]
+    original = tmux.spawn_window
+    opened: list[str] = []
+
+    def the_owner_stops_it(*args: Any, **kwargs: Any) -> WindowInfo:
+        window = original(*args, **kwargs)
+        if not opened:
+            opened.append(window.pane_id)
+            with store_session() as store:
+                assert store.get_fleet_agent(coder.id).ended_by == "died"  # type: ignore[union-attr]
+                store.mark_fleet_agent_stopped(coder.id)
+        return window
+
+    if pane == "vanished":
+        tmux.vanish(coder.pane_id)
+    else:
+        _kill(tmux, coder)
+    monkeypatch.setattr(fleet_service, "_pane_alive", lambda agent: False)
+    monkeypatch.setattr(tmux, "spawn_window", the_owner_stops_it)
+
+    with pytest.raises(fleet_service.NoSuchAgent, match="stopped meanwhile"):
+        fleet_service.restart(fleet.alpha, coder.label, agent_id=coder.id)
+
+    assert opened and opened[0] in tmux.killed, "the replacement's window does not stay up"
+    assert _row(coder.id).ended_by == "stopped"
+    assert not [a for a in _live_rows(fleet.alpha) if a.label == coder.label]
+
+    fleet_service.restart(fleet.alpha, coder.label, agent_id=coder.id)
+    assert [a.label for a in _live_rows(fleet.alpha) if a.label == coder.label] == [coder.label]
+
+
+def test_a_stop_tmux_did_not_answer_is_one_to_try_again_not_a_gone_agent(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    runner: CliRunner,
+) -> None:
+    """n1: "tmux did not answer … run the stop again" was a ``NoSuchAgent``: ``--json`` said
+    ``no_such_agent``, and the Remote stop of a pinned row mapped it to 409 ``stale``. It
+    is ``fleet_unavailable``, a refusal to retry."""
+    from aisquare.services import remote_actions
+    from aisquare.services.remote_server import RequestError
+
+    coder = fleet.agents["alpha/coder-1"]
+    _kill(tmux, coder)
+    fleet_service.list_agents(fleet.alpha)
+    tmux.socket_denied = True
+
+    result = runner.invoke(app, ["--json", "fleet", "stop", "--project", "alpha", coder.label])
+    assert result.exit_code != 0
+    assert '"fleet_unavailable"' in result.output, result.output
+
+    with pytest.raises(RequestError) as refused:
+        remote_actions.action_pinned_call(
+            fleet.alpha,
+            coder.label,
+            coder.id,
+            lambda: fleet_service.stop(fleet.alpha, coder.label, agent_id=coder.id),
+        )
+    assert (refused.value.status, refused.value.error) == (503, "fleet_unavailable")
+    assert _row(coder.id).ended_by == "died"
+
+
+@pytest.mark.parametrize("how", ["kill refused", "view unread"])
+def test_a_stop_that_could_not_remove_a_standing_dead_window_marks_nothing(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    monkeypatch: pytest.MonkeyPatch,
+    how: str,
+) -> None:
+    """n2: the server answered, so the stop vouched that no window was left. But the
+    lingering-window kill also came back empty-handed when tmux refused the kill, or when
+    the project's view could not be read: the dead window stood, and the row was marked
+    stopped "with no window left". Only tmux's own word that none stands marks it."""
+    coder = fleet.agents["alpha/coder-1"]
+    _kill(tmux, coder)
+    fleet_service.list_agents(fleet.alpha)  # recorded as died; its dead window stands
+    if how == "kill refused":
+
+        def refused(pane_id: str) -> None:
+            raise TmuxError("server busy")
+
+        monkeypatch.setattr(tmux, "kill_window", refused)
+    else:
+        observe = fleet_service._observe_sockets
+        monkeypatch.setattr(
+            fleet_service,
+            "_observe_sockets",
+            lambda *args, **kwargs: dict.fromkeys(observe(*args, **kwargs)),
+        )
+
+    with pytest.raises(fleet_service.FleetUnavailable, match="nothing was changed"):
+        fleet_service.stop(fleet.alpha, coder.label, agent_id=coder.id)
+
+    assert _row(coder.id).ended_by == "died"
+    assert tmux.facts[coder.pane_id].dead, "the premise: its dead window still stands"
+
+
+def test_a_restart_plan_reads_the_label_heads_once_for_every_project(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """n6: the plan read every project's label heads once, then each project's again: 1 + N
+    reads of the store. The one read serves every project, and the plan is the same."""
+    from aisquare.core.store import SqliteStore
+
+    _kill(tmux, fleet.agents["alpha/coder-1"])
+    _kill(tmux, fleet.agents["beta/coder-1"])
+    real = SqliteStore.fleet_label_heads
+    asked: list[str | None] = []
+
+    def spied(self: SqliteStore, project_id: str | None = None) -> list[FleetAgent]:
+        asked.append(project_id)
+        return real(self, project_id)
+
+    monkeypatch.setattr(SqliteStore, "fleet_label_heads", spied)
+    plan = fleet_service.bulk_plan("restart")
+
+    assert asked == [None]
+    targets = {row.agent.id for row in plan.targets}
+    assert {fleet.agents["alpha/coder-1"].id, fleet.agents["beta/coder-1"].id} <= targets

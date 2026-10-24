@@ -198,7 +198,8 @@ class FleetError(RuntimeError):
 
 
 class FleetUnavailable(FleetError):
-    """tmux is missing or too old for the fleet (§8.2)."""
+    """tmux is missing or too old for the fleet (§8.2), or would not answer what a command
+    has to know before it acts; the command is to be tried again."""
 
 
 class NoSuchProject(FleetError):
@@ -3048,6 +3049,7 @@ def spawn(
     start_point: str | None = None,
     fork: bool = False,
     hub: str | None = None,
+    replaces: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -3114,7 +3116,12 @@ def spawn(
     window, waits for the row ``AISQUARE_FLEET_AGENT`` names before it execs
     the agent (:func:`aisquare.cli.launch._await_fleet_row`), so a slow or
     locked store, a relabel or the cap check can delay the agent's start, never
-    strip its briefing (review of #135, second round, cut item).
+    strip its briefing (review of #135, second round, cut item). ``replaces`` is a
+    restart's, of an agent that ended: the row it brings back. Recorded stopped by the
+    time the new row is written — the owner's ``fleet stop`` of its 💤 row during the
+    start's seconds — the new row is not written and its window is killed
+    (:class:`NoSuchAgent`): a stop that lands before the replacement exists wins (last
+    delta review of #274, m3).
 
     A spawn is a deliberate add (#139): the project is onboarded with the row,
     once the window exists, and not before a refusal could still come (review
@@ -3608,6 +3615,7 @@ def spawn(
             cap=config.max_agents_per_project,
             onboard=onboard,
             codename=codename,
+            replaces=replaces,
         )
     # The auto-mode note (#150), from the evidence read before the window: on the
     # receipt when this machine's transcripts say so, a warning, never a reason
@@ -4271,6 +4279,7 @@ def _record(
     cap: int,
     onboard: bool,
     codename: str,
+    replaces: str | None = None,
 ) -> FleetAgent:
     """Write the row; on a live-label collision re-pick the label and retry.
 
@@ -4296,7 +4305,14 @@ def _record(
     """
     try:
         return _write_row(
-            agent, project, wanted=wanted, notes=notes, cap=cap, onboard=onboard, codename=codename
+            agent,
+            project,
+            wanted=wanted,
+            notes=notes,
+            cap=cap,
+            onboard=onboard,
+            codename=codename,
+            replaces=replaces,
         )
     except FleetError:
         _kill_unrecorded(srv, agent.pane_id)
@@ -4324,17 +4340,29 @@ def _write_row(
     cap: int,
     onboard: bool,
     codename: str,
+    replaces: str | None = None,
 ) -> FleetAgent:
-    """The store half of :func:`_record`: onboard, insert, relabelling past a live collision."""
+    """The store half of :func:`_record`: onboard, insert, relabelling past a live collision.
+    ``replaces`` is :func:`spawn`'s: recorded stopped meanwhile, nothing is inserted."""
     with store_session() as store:
         if onboard:
             _add_named(store, project, codename)
         for _ in range(_LABEL_RETRIES):
             try:
-                stored = store.upsert_fleet_agent(agent)
+                written = (
+                    store.upsert_fleet_agent(agent)
+                    if replaces is None
+                    else store.upsert_fleet_agent_unless_stopped(agent, replaces)
+                )
             except sqlite3.IntegrityError:
                 agent = _relabel(agent, project, store, wanted=wanted, notes=notes)
                 continue
+            if written is None:
+                raise NoSuchAgent(
+                    f"{agent.label} ({replaces}) was stopped meanwhile — its replacement's "
+                    "window was killed"
+                )
+            stored = written
             _verify_cap(store, stored, cap)
             return stored
     raise FleetError(f"could not record {agent.label!r}: every label tried was taken")
@@ -5018,14 +5046,22 @@ def _with_lingering_windows(
     return [agent for agent in agents if agent.ended_at is None or agent.id in shown]
 
 
-def _kill_lingering_window(store: ContextStore, project: ProjectInfo, agent: FleetAgent) -> bool:
-    """Kill an ENDED row's window if it still stands; ``False`` when it does not.
+def _kill_lingering_window(
+    store: ContextStore, project: ProjectInfo, agent: FleetAgent
+) -> bool | None:
+    """Kill an ENDED row's window if it still stands: ``True`` when it did, ``False`` when tmux
+    vouches that no window of the row's stands, ``None`` when it cannot be told.
 
     Whether it stands is decided as the listing decides it — the project's
     rows observed together, :func:`_lingering_windows` — never by asking tmux
     about the id alone: after the server restarted, a dead pane under that id
     is another agent's last screen. Never raises: a server that will not
-    answer costs the tidy-up.
+    answer costs the tidy-up, and answers ``None``.
+
+    ``False`` is the row's own server's word that none stands (its view answered, or the
+    pane went before the kill), or no server behind its socket at all. Neither a view that
+    could not be read nor a kill tmux refused vouches for anything: either may leave a dead
+    window standing (last delta review of #274, n2).
     """
     current = store.get_project(project.id) or project
     rows = store.fleet_agents(project.id, live_only=False)
@@ -5033,39 +5069,36 @@ def _kill_lingering_window(store: ContextStore, project: ProjectInfo, agent: Fle
     config = settings()
     views = _observe_sockets(rows, tmux_session, config)
     address = _address(agent, config)
+    srv = _server_at(address, config)
     owner = _lingering_windows(rows, views, config).get((address, agent.pane_id))
     if owner is None or owner.id != agent.id:
-        return False
-    return _kill_dead(_server_at(address, config), agent.pane_id)
+        if _own_view(agent, views.get(address)) is not None:
+            return False
+        try:
+            return False if srv.server_absent() else None
+        except TmuxError:
+            return None
+    return _kill_dead(srv, agent.pane_id)
 
 
-def _window_known_gone(agent: FleetAgent) -> bool:
-    """Whether tmux itself vouches that ``agent``'s window is not there: no server behind
-    its socket, or a server that answers (and :func:`_kill_lingering_window` found no
-    window of the row's on it). A server that will not answer vouches for nothing; never
-    raises."""
-    config = settings()
-    srv = _server_at(_address(agent, config), config)
-    try:
-        return srv.server_absent() or _server_answers(srv)
-    except TmuxError:
-        return False
-
-
-def _kill_dead(srv: TmuxServer, pane_id: str) -> bool:
+def _kill_dead(srv: TmuxServer, pane_id: str) -> bool | None:
     """Kill the window of ``pane_id`` only if that pane is DEAD now; never raises.
 
     Asked again at the kill because what decided it was an earlier look: a
     window gone meanwhile — and with it perhaps the server, whose next pane may
     carry the same id — is left alone, and a live pane is never killed from here.
+    ``True`` when it killed it, ``False`` when no pane has that id now, ``None`` when one
+    stands that it did not kill: live, or tmux refused.
     """
     try:
         facts = srv.pane_facts(pane_id)
-        if facts is None or not facts.dead:
+        if facts is None:
             return False
+        if not facts.dead:
+            return None
         srv.kill_window(pane_id)
     except TmuxError:
-        return False
+        return None
     return True
 
 
@@ -5431,7 +5464,8 @@ def stop(
                 if ended.ended_by == "stopped":
                     raise NoSuchAgent(f"{label} ({ended.id}) was stopped meanwhile") from None
                 return StopReceipt(ended, [])
-            if _kill_lingering_window(store, project, ended):
+            removed = _kill_lingering_window(store, project, ended)
+            if removed:
                 return StopReceipt(store.mark_fleet_agent_stopped(ended.id), [])
             head = store.fleet_agent_by_label(project.id, ended.label, live_only=False)
             if ended.ended_by != "died" or head is None or head.id != ended.id:
@@ -5444,9 +5478,11 @@ def stop(
             # owner's word that it stays down is recorded all the same. Refused, nothing
             # could keep one dead agent down, and Restart all brought it back (m3). Only
             # when tmux said so: a server that will not answer reads as "no window" too,
-            # and its dead window may stand (final delta review, n3).
-            if not _window_known_gone(ended):
-                raise NoSuchAgent(
+            # and its dead window may stand (final delta review, n3), and so may one whose kill
+            # tmux refused (last delta review, n2). A refusal to try again, not "no such
+            # agent": `--json` and the Remote stop said the row was gone or stale (n1).
+            if removed is None:
+                raise FleetUnavailable(
                     f"{label} ({ended.id}) ended, and tmux did not answer whether its window "
                     "is left — nothing was changed; run the stop again"
                 ) from None
@@ -7396,6 +7432,7 @@ def _respawn(
     persona: str | None = None,
     board_and_hub: tuple[str, str],
     team_line: str | None = None,
+    replaces: str | None = None,
 ) -> tuple[SpawnReceipt, bool, list[str]]:
     """Start ``agent`` again — same label, role, task and worktree — resuming when it can.
 
@@ -7423,7 +7460,7 @@ def _respawn(
     agent's replacement works in the same tree, as it stands: its branch is
     the one the agent was on, whatever its task or the codename says now
     (``spawn(own_worktree=…)``). ``board_and_hub`` is the board it reads and its window's
-    hub, asked before the stop (:func:`_board_and_hub`).
+    hub, asked before the stop (:func:`_board_and_hub`). ``replaces`` is :func:`spawn`'s.
     """
     notes: list[str] = []
     if task is not None and agent.task_id != task.id:
@@ -7493,6 +7530,7 @@ def _respawn(
         own_worktree=agent.cwd if agent.worktree else None,
         own_branch=agent.branch,
         board_and_hub=board_and_hub,
+        replaces=replaces,
     )
     if agent.launch_spec is not None and replay:
         # Said once the replacement is up, for what it really took from the row: a
@@ -7995,6 +8033,11 @@ def restart(
             role=role,
             persona=persona,
             board_and_hub=board_and_hub,
+            # An agent that ended on its own: the owner's `fleet stop` of its 💤 row while
+            # the replacement starts wins at the insert, as the guard above has it before
+            # (last delta review, m3). Not a hand-over, whose own stop writes `stopped`, nor
+            # a row stopped already, which this restart was asked to bring back.
+            replaces=agent.id if handed_over is None and agent.ended_by != "stopped" else None,
         )
     except Exception:
         if handed_over is not None and handed_over.withheld:
@@ -8783,13 +8826,18 @@ def bulk_plan(
             if project.id in with_rows and (project.id not in forgotten or project.id in live)
         ]
         own, own_session = _own_rows(store, acting_session)
+    # Each project's label heads, from the one read above (`_label_heads` for one project):
+    # read again per project, a plan asked the store 1 + N times (last delta review, n6).
+    heads_of: dict[str, dict[str, FleetAgent]] = {}
+    for agent in heads:  # oldest first, so the last of a label is its newest
+        heads_of.setdefault(agent.project_id, {})[agent.label] = agent
     rows: list[BulkRow] = []
     unread: list[tuple[ProjectInfo, str]] = []
     dead_teams: dict[str, tuple[FleetAgentStatus, ...]] = {}
     for project in projects:
         try:
             statuses = list_agents(project)
-            label_heads = _label_heads(project) if action == "restart" else {}
+            label_heads = heads_of.get(project.id, {}) if action == "restart" else {}
             if action == "restart":
                 statuses = [*statuses, *_dead_heads(statuses, label_heads)]
                 dead_teams[project.id] = tuple(_dead_of(statuses, label_heads))
@@ -8834,8 +8882,10 @@ def _label_heads(project: ProjectInfo) -> dict[str, FleetAgent]:
     """Each label's newest row in ``project``: the one a restart of that label acts on.
 
     Picked in SQL (:meth:`~aisquare.core.store.ContextStore.fleet_label_heads`, oldest first,
-    so the last of a label is its newest), not from every row the project ever had, read
-    once per plan and again per row (#274 delta review 2, n4)."""
+    so the last of a label is its newest), not from every row the project ever had (#274
+    delta review 2, n4). :func:`bulk_plan` takes every project's from its one read; a row's
+    turn (:func:`_still_to_restart`) asks again, as it asks the row's status again: what it
+    judges is the label as it stands at the turn, after the runs before it."""
     with store_session() as store:
         rows = store.fleet_label_heads(project.id)
     return {row.label: row for row in rows}

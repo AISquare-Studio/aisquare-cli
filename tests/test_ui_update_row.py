@@ -795,6 +795,51 @@ def test_an_ask_unanswered_after_five_seconds_counts_as_unanswered(
     assert row == "⬆︎ 0.9.1 · restart to update"
 
 
+def test_the_deadline_is_no_textual_timer(
+    tmp_path: Path,
+    script: Script,  # noqa: F811
+    planned: list[dict[str, Any]],
+    fresh: Fresh,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deadline is the event loop's own timer. On Windows a pending Textual timer holds a
+    thread of asyncio's default executor while it sleeps, and stopping it takes another
+    (``textual._win_sleep``): the deadline's took the runner's last, the dialog closing on
+    "nothing newer" waited on it, and the toast saying so never showed (windows-latest, run
+    40104926701, reproduced with that sleep emulated). Every Textual timer set from the click
+    until the dialog shows is counted, as ``test_the_release_check_adds_no_timer_of_its_own``
+    counts them."""
+    deadline = 47.0  # no timer of the app's own has this length
+    monkeypatch.setattr(ui_app, "REFRESH_DEADLINE_SECONDS", deadline)
+    _two_alive(tmp_path, script)
+    fresh.gate.clear()
+    real = Timer.__init__
+    timers: list[tuple[str, float]] = []
+    counting = [False]
+
+    def recording(self: Timer, event_target: Any, interval: float, *a: Any, **k: Any) -> None:
+        if counting[0]:
+            timers.append((type(event_target).__name__, interval))
+        real(self, event_target, interval, *a, **k)
+
+    monkeypatch.setattr(Timer, "__init__", recording)
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[str, bool, str]:
+        counting[0] = True
+        screen = await _open(app)
+        counting[0] = False
+        looks = _looks(screen)
+        fresh.gate.set()
+        await settle_page(app)
+        return looks
+
+    looks = _drive(body)
+
+    assert looks[:2] == ("Update aisquare 0.9.0", True), "control: the ask was out"
+    assert any(target == "UpdateScreen" for target, _ in timers), "control: timers were seen"
+    assert not [t for t in timers if t[0] == "FleetApp" or t[1] == deadline], timers
+
+
 def test_a_row_pressed_while_the_dialog_or_a_press_is_open_opens_no_second_one(
     tmp_path: Path,
     script: Script,  # noqa: F811

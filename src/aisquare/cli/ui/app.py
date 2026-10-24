@@ -861,8 +861,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """That ask, while its answer still counts: only its answer reaches the dialog and the
         row. Let go when the dialog closes and at the deadline, so a late answer, or one for a
         dialog closed since, changes nothing (review of #301, m4, m5)."""
-        self._refresh_deadline: Timer | None = None
-        """The ask's deadline (``REFRESH_DEADLINE_SECONDS``), stopped once it is let go."""
+        self._refresh_deadline: asyncio.TimerHandle | None = None
+        """The ask's deadline (``REFRESH_DEADLINE_SECONDS``), cancelled once it is let go."""
         self._press_worker: Worker[updates_service.Press] | None = None
         """*Restart & update*'s read and record of the agents alive at the press: only its
         answer hands over (:meth:`_update_pressed`)."""
@@ -2388,15 +2388,20 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             thread=True,
             exit_on_error=False,
         )
-        self._refresh_deadline = self.set_timer(
-            REFRESH_DEADLINE_SECONDS, lambda: self._refresh_overdue(ask)
+        # The loop's own timer, not a Textual one: on Windows a pending Textual timer holds a
+        # thread of asyncio's default executor (``_housekeeping`` has the story), and stopping
+        # it takes another. The deadline's took the runner's last; the dialog closing on
+        # "nothing newer" waited on it, and its toast never showed (windows-latest, run
+        # 40104926701). Posted to the app, it runs after an answer already queued.
+        self._refresh_deadline = asyncio.get_running_loop().call_later(
+            REFRESH_DEADLINE_SECONDS, self.call_later, self._refresh_overdue, ask
         )
 
     def _let_go_of_refresh(self) -> None:
-        """Count no answer of the dialog's ask from here on, and stop its deadline."""
+        """Count no answer of the dialog's ask from here on, and cancel its deadline."""
         self._refresh_worker = None
         if self._refresh_deadline is not None:
-            self._refresh_deadline.stop()
+            self._refresh_deadline.cancel()
             self._refresh_deadline = None
 
     def _refresh_overdue(self, ask: Worker[str | None]) -> None:

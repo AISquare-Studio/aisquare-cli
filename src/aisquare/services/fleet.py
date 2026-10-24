@@ -10499,8 +10499,13 @@ def restart(
         replays is not None
         and not replays.capabilities.resumes_across_homes
         and not fresh
-        and choice.account is not None
-        and not _same_home(record, choice.account)
+        and (
+            not _same_home(record, choice.account)
+            if choice.account is not None
+            # None chosen runs under the plain home, which a record on a slot did not run
+            # under: `_forkable`'s rule (review r17 of #113, finding 2).
+            else record.account_slot is not None
+        )
     ):
         # A take-over onto another account (the Spawn dialog's): its thread lives under the
         # old home (a Codex rollout under its CODEX_HOME), as `switch` says of it.

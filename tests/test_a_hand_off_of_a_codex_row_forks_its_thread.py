@@ -149,3 +149,36 @@ def test_a_fork_of_a_codex_row_with_no_thread_recorded_starts_fresh_and_says_why
     assert receipt.resumed is False
     assert any("no session is recorded for it" in note for note in receipt.notes), receipt.notes
     assert "fork" not in _native(_command(tmux))
+
+
+def test_a_take_over_of_a_slot_run_codex_row_onto_this_shells_home_starts_fresh(
+    tmux: FakeTmux,
+    codex_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """*(this shell's)* with no account on the ladder runs under the plain ``CODEX_HOME``,
+    where a thread its slot ran has no rollout: ``codex resume <id>`` there exited the
+    window (review r17 of #113, finding 2). It starts fresh with a hand-off prompt, as
+    ``_forkable`` already does."""
+    slot = accounts_core.create_account("codex")
+    agent = fleet_service.spawn(
+        project, "coder", agent="codex", worktree=False, account=str(slot.slot)
+    ).agent
+    plain = tmp_path / "plain-codex-home"
+    plain.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(plain))
+    codex = Codex(agent, project, slot.config_dir, tmux, monkeypatch)
+    _started(codex)
+
+    receipt = fleet_service.hand_off(
+        project, agent.label, mode="take_over", account=fleet_service.THIS_SHELL_ACCOUNT
+    )
+
+    assert receipt.started.agent.account_slot is None, "never the row's own slot"
+    assert receipt.resumed is False
+    assert any(
+        "cannot resume a thread under another account's home" in note for note in receipt.notes
+    ), receipt.notes
+    assert "resume" not in _native(_command(tmux))

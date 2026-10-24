@@ -2011,6 +2011,47 @@ def test_fleet_stop_acts_for_its_as_else_its_own_window_else_the_user(
     assert fleet_service.acting_as("ses_manager_1") == "ses_manager_1"
 
 
+def test_a_spawn_runs_the_roles_model_ladder_and_its_restart_keeps_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#129 (b): the fleet path never asked `harness.resolve_model`, so every agent ran on
+    the account's default model. A spawn now passes the ladder's model and effort, cached
+    probe only, and records both; arguments that already choose one are the caller's."""
+    ladder = harness.resolve_model("coder", probe=False)
+    assert ladder is not None
+    agent = _coder(project)
+    command = _command(tmux)
+    assert _flag(command, "--model") == ladder.model and _flag(command, "--effort") == ladder.effort
+    spec = agent.launch_spec
+    assert spec is not None and (spec.model, spec.effort) == (ladder.model, ladder.effort)
+    assert command.count("--model") == 1
+    assert "--model" not in spec.extra_args, "the spec's arguments stay the role's and yours"
+
+    # The ladder moves (a probe verdict, an entitlement); a restart starts what it recorded.
+    moved = ladder.model_copy(update={"model": "elsewhere", "effort": "low"})
+    monkeypatch.setattr(harness, "resolve_model", lambda *a, **k: moved)
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    replayed = _command(tmux)
+    assert (
+        _flag(replayed, "--model") == ladder.model and _flag(replayed, "--effort") == ladder.effort
+    )
+
+    _coder(project, label="coder-pinned", agent_args=["--model", "sonnet"])
+    pinned = _command(tmux)
+    assert pinned.count("--model") == 1 and _flag(pinned, "--model") == "sonnet"
+    assert "--effort" not in pinned, "a caller who chose the model chose the effort too"
+
+
+def test_another_binary_gets_no_model_flag(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(harness, "is_default_agent", lambda binary: False)
+    agent = _coder(project)
+    assert "--model" not in _command(tmux)
+    assert agent.launch_spec is not None and agent.launch_spec.model is None
+
+
 def test_spawn_without_tmux_is_fleet_unavailable(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
 ) -> None:

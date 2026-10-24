@@ -90,6 +90,56 @@ other install is shown the exact command that updates it. Releases before 0.8.0
 have no `upgrade` yet: re-run the one-liner instead. It warns first, naming them,
 while fleet agents run or while Remote is on in another shell or another asq.
 
+### Updating from asq
+
+asq checks for a new release itself, at most once a day: at start when its
+last answer is a day old, and again each day while it runs. It asks PyPI what
+`aisquare upgrade --check` asks, and nothing else; a lookup that fails
+(offline) is silent and tried again within the hour. When a newer release is
+out, a row shows under *⚙ Settings*, and a toast says so once per release:
+
+```text
+ ⚙ Settings
+ ⬆ 0.8.3 · restart to update
+```
+
+Click the row, or move to it with ↓ and press Enter. The dialog says what
+happens and how many agents are running, and asks PyPI again as it opens.
+*Restart & update* stays off until PyPI answers, for 5 seconds at most, and the
+dialog then names the release PyPI answered. If PyPI does not answer by then,
+the button comes on all the same and the dialog says it installs the newest
+release, with the last check's number given as that; an answer that comes later
+is ignored, as is one for a dialog already closed. If PyPI says you already run
+the newest, the dialog closes and a toast says so.
+
+*Restart & update* closes asq, runs `aisquare upgrade` without asking again,
+and reopens asq on the new version in the view you had open. It installs
+exactly as `aisquare upgrade` does, unpinned: the newest release at the moment
+you press, so one that comes out while the dialog stays open is the one
+installed, and a later `uv tool upgrade aisquare-cli` still moves the install.
+Cancel or Esc changes nothing.
+
+Your agents keep running through it: they live on the fleet's own tmux server,
+not inside asq, and a reinstall does not touch them. asq writes down the agents
+running when you press the button; after the reopen, any whose pane is gone is
+restarted on its session, as `aisquare fleet restart` does, and the toast says
+what it found: `✓ aisquare 0.8.3 — 2 agents reattached`, plus each restart and
+its reason. That record is for this reopen only: if asq cannot open again, or
+you stay in the shell, it is dropped, and one the reopen does not take within
+ten minutes of the update handing back to asq is never acted on. If the install
+fails, its output stays on screen until you press Enter, and the version you
+had reopens.
+
+On Homebrew, pip or pipx the row still shows, and the dialog gives the command
+that updates that install instead of a restart button. A source checkout or an
+editable install is never checked. To turn the check off:
+
+```sh
+aisquare config set updates.check false
+```
+
+or switch off *check daily* under App settings ▸ updates.
+
 Remove it with `aisquare uninstall`. It takes aisquare's hooks out of Claude
 Code, then removes the package of a uv tool install, whatever it was installed
 from; any other install, and any install on native Windows, is shown the

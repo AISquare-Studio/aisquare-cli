@@ -461,11 +461,7 @@ class UpgradePlan:
     @property
     def update_available(self) -> bool | None:
         """Whether PyPI has something newer; ``None`` when PyPI could not say."""
-        latest = self.latest_version
-        if latest is None:
-            return None
-        newer = install_route.is_newer(latest, self.current)
-        return (latest.strip() != self.current.strip()) if newer is None else newer
+        return newer_release(self.latest_version, self.current)
 
     @property
     def up_to_date(self) -> bool:
@@ -515,13 +511,41 @@ class UpgradeReport:
         return self.installed and self.problem is None and self.version is not None
 
 
-def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePlan:
+def newer_release(latest: str | None, current: str) -> bool | None:
+    """Whether ``latest`` is something newer than ``current``; ``None`` when there is no
+    ``latest``. Two versions this cannot order are told apart by their text, so a release
+    named in a way it does not read is still offered. The one rule
+    :attr:`UpgradePlan.update_available` and asq's release check (``services.updates``) ask.
+    """
+    if latest is None:
+        return None
+    newer = install_route.is_newer(latest, current)
+    return (latest.strip() != current.strip()) if newer is None else newer
+
+
+def latest_release() -> install_route.LatestRelease:
+    """PyPI's newest release for THIS install, asked as ``aisquare upgrade --check`` asks it
+    (:func:`_latest_for`): asq's daily release check, which must not be a second lookup with
+    rules of its own (``services.updates``)."""
+    return _latest_for(install_route.detect())
+
+
+def upgrade_plan(
+    target: str | None = None,
+    *,
+    check: bool = False,
+    known_latest: install_route.LatestRelease | None = None,
+) -> UpgradePlan:
     """Decide what ``aisquare upgrade`` would do. Reads only; starts nothing.
 
     PyPI is asked only when its answer is used: by ``--check``, and by a run
     that targets the latest release on a route that runs. A refused route is
     refused offline, and a pin needs no lookup; ``--check`` with one also says
     whether the reinstall's Python can take it.
+
+    ``known_latest`` is an answer already in hand (asq's release check, which asked
+    :func:`latest_release`), taken where a run for the latest release would ask PyPI: asq's
+    update dialog builds its plan with it, offline, and asks nothing twice.
     """
     if target is not None:
         pinned = install_route.version_argument(target)
@@ -540,7 +564,8 @@ def upgrade_plan(target: str | None = None, *, check: bool = False) -> UpgradePl
     latest: install_route.LatestRelease | None = None
     pin_unmet: str | None = None
     if check or (reason is None and target is None):
-        latest = _latest_for(route, target)
+        known = known_latest if target is None else None
+        latest = known if known is not None else _latest_for(route, target)
         if target is not None:
             pin_unmet = _pin_unmet(route, target, latest)
         # uv refuses a pin its Python or its cutoff excludes, and the run named it again

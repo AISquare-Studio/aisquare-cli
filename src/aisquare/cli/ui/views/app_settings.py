@@ -108,6 +108,8 @@ _ACCOUNT_SWITCHES = {
 }
 """``[accounts]``'s two switches, by id → field: what the accounts share
 (``core.claude_sharing``)."""
+UPDATES_CHECK = "updates-check"
+"""``[updates] check``'s switch: asq's daily release check (``services.updates``)."""
 
 
 def role_order(fleet: FleetSettings) -> list[str]:
@@ -271,12 +273,14 @@ class AppSettingsView(VerticalScroll):
     ACCOUNTS_SECTION: ClassVar[str] = (
         "accounts — how launches pick one; what a usage limit does; what they share"
     )
+    UPDATES_SECTION: ClassVar[str] = "updates — whether asq asks PyPI once a day for a release"
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
         config = self._read_config()
         self.fleet = config.fleet
         self.accounts = config.accounts
+        self.updates = config.updates
         self._roles: list[str] = role_order(self.fleet)
         self._account_bindings: dict[str, str] = settings_service.role_account_bindings(config)
         self._accounts: list[ClaudeAccount] = []
@@ -475,6 +479,10 @@ class AppSettingsView(VerticalScroll):
         with Horizontal(classes="row"):
             yield Label("share settings.json")
             yield Switch(self.accounts.share_settings, id="accounts-share-settings")
+        yield Static(self.UPDATES_SECTION, classes="section")
+        with Horizontal(classes="row"):
+            yield Label("check daily")
+            yield Switch(self.updates.check, id=UPDATES_CHECK)
         with Horizontal(id="settings-buttons", classes="row"):
             yield Button("Save", id="save-settings", variant="primary")
             yield Button("Reload", id="reload-settings")
@@ -514,6 +522,7 @@ class AppSettingsView(VerticalScroll):
         values["native-teams"] = self.query_one("#native-teams", Switch).value
         for wid in _ACCOUNT_SWITCHES:
             values[wid] = self.query_one(f"#{wid}", Switch).value
+        values[UPDATES_CHECK] = self.query_one(f"#{UPDATES_CHECK}", Switch).value
         return values
 
     def _changed(self) -> set[str]:
@@ -552,6 +561,8 @@ class AppSettingsView(VerticalScroll):
         )
         for wid, key in _ACCOUNT_SWITCHES.items():
             self.query_one(f"#{wid}", Switch).value = getattr(self.accounts, key)
+        self.updates = config.updates
+        self.query_one(f"#{UPDATES_CHECK}", Switch).value = self.updates.check
         for role in self._roles:
             row = self._role_row(role)
             if row is None:
@@ -703,6 +714,9 @@ class AppSettingsView(VerticalScroll):
             self.notify(accounts, severity="error", timeout=6, markup=False)
             return
         config.accounts = accounts
+        if UPDATES_CHECK in changed:
+            check = self.query_one(f"#{UPDATES_CHECK}", Switch).value
+            config.updates = config.updates.model_copy(update={"check": check})
         try:
             written = save_config(config)
         except OSError as exc:  # the operator's filesystem saying no — the foreseeable failure

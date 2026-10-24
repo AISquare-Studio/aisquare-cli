@@ -30,9 +30,9 @@ from aisquare.cli.common import USAGE_ERROR, fail, refuse_conflicting_scope
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.models import FleetAgentStatus, ProjectInfo
+from aisquare.services import autostop, install_route
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
-from aisquare.services import install_route
 from aisquare.services import project as project_service
 
 app = typer.Typer(
@@ -1166,6 +1166,44 @@ def attach(project: ProjectRef = None) -> None:
         )
 
 
+def _reap_finished(target: ProjectInfo | None, *, dry_run: bool) -> None:
+    """``fleet reap --finished``: every auto-stoppable worker, stopped when it has finished
+    (P2-W1b, #283)."""
+    projects = [target] if target is not None else autostop.every_project()
+    try:
+        looked = autostop.reap_finished(projects, dry_run=dry_run)
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "label": item.verdict.agent.label,
+                        "project_id": item.verdict.agent.project_id,
+                        "finished": item.verdict.finished,
+                        "reason": item.verdict.reason,
+                        "kept_because": item.verdict.blocked,
+                        "stopped": item.stopped,
+                    }
+                    for item in looked
+                ]
+            )
+        )
+        return
+    console = stdout_console()
+    if not looked:
+        console.print("no worker of an auto_stop_roles role is live", markup=False)
+    for item in looked:
+        v = item.verdict
+        if item.stopped:
+            console.print(f"✓ stopped {v.agent.label}: {v.reason}", markup=False)
+        elif v.finished:
+            console.print(f"  would stop {v.agent.label}: {v.reason}", markup=False)
+        else:
+            console.print(f"  kept {v.agent.label}: {v.blocked}", markup=False)
+
+
 @app.command("reap")
 def reap(
     project: ProjectRef = None,
@@ -1187,6 +1225,19 @@ def reap(
             "is left live and named with or without this flag.",
         ),
     ] = False,
+    finished: Annotated[
+        bool,
+        typer.Option(
+            "--finished",
+            help="Stop the workers that have finished instead (\\[fleet] auto_stop_roles): "
+            "a task closed or a result posted, nothing claimed, queued or unread, idle "
+            "auto_stop_idle_minutes, an empty input box. The exit says actor auto-stop.",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="With --finished: list the candidates, stop none."),
+    ] = False,
 ) -> None:
     """Record exited agents, mark vanished panes lost, remove finished worktrees.
 
@@ -1199,7 +1250,12 @@ def reap(
     back to the board.
     """
     refuse_conflicting_scope(every, project)
+    if dry_run and not finished:
+        raise typer.BadParameter("--dry-run goes with --finished")
     target = None if every else _project(project)
+    if finished:
+        _reap_finished(target, dry_run=dry_run)
+        return
     try:
         report = fleet_service.reap(target, server_down=server_down)
     except fleet_service.FleetError as exc:

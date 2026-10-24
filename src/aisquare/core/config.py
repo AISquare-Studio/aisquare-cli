@@ -712,6 +712,12 @@ class FleetSettings(BaseModel):
     ``test_gate_mb`` is ``fleet gate``'s floor (``0``: ``min_free_mb``) and
     ``test_gate_wait_minutes`` how long the gate waits for it.
 
+    Auto-stop (P2-W1b, #283): with ``auto_stop_finished`` a worker of a role in
+    ``auto_stop_roles`` that has finished — its task closed (or a ``result`` posted),
+    nothing claimed, nothing addressed to it unread, nothing queued for it, an empty input
+    box — and has sat idle ``auto_stop_idle_minutes`` is stopped, ``actor=auto-stop``.
+    Coders are not in the default list: a coder in review may be reopened.
+
     ``first_prompt`` is how an agent's first message reaches it (P0-W1a, #122):
     ``argv``, Claude Code's own command line (``claude -- "<prompt>"``), for a Claude
     Code agent, and typed into its input box for any other binary; ``type`` types it
@@ -741,6 +747,11 @@ class FleetSettings(BaseModel):
     min_free_mb: int = 2048
     test_gate_mb: int = 0
     test_gate_wait_minutes: int = 15
+    auto_stop_finished: bool = True
+    auto_stop_idle_minutes: float = Field(default=5.0, ge=0)
+    auto_stop_roles: list[str] = Field(
+        default_factory=lambda: ["tester", "reviewer", "validator", "ui-tester"]
+    )
     pane_clipboard: Literal["off", "on"] = "off"
     """Whether a program in an agent's pane may set your clipboard (OSC 52, tmux's
     ``set-clipboard``). Off by default: on, any program a pane runs can write it. Applies

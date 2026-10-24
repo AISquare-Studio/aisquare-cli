@@ -695,6 +695,7 @@ else is killed on an interrupt.
 aisquare fleet reap
 aisquare fleet reap --all
 aisquare fleet reap --all --server-down
+aisquare fleet reap --finished [--dry-run] [--json]
 ```
 
 Records agents whose panes have died as ended (with their exit code), marks
@@ -727,6 +728,13 @@ the main checkout's HEAD without them. A restart of an agent whose tree was
 removed makes the tree again on the branch its row recorded: *One rule for a
 worktree and its branch* under [Naming](#naming).
 `--all` walks every project's fleet, not just this one.
+
+`--finished` does something else: it stops the workers that have finished (see
+*Auto-stop* under [Capacity](#capacity)), each `agent_exited` saying `stopped by
+auto-stop` and why. `--dry-run` lists every candidate with the reason it would be
+stopped, or the condition that keeps it, and stops none. With `--json` it prints one
+object per worker: `label`, `project_id`, `finished`, `reason`, `kept_because`,
+`stopped`.
 
 Each row is asked of its own server, at the socket its spawn recorded, so a
 shell under another `TMUX_TMPDIR` reaps exactly what the spawning shell would,
@@ -1245,6 +1253,9 @@ max_agents_total = 0                      # live agents across every project, ca
 min_free_mb = 2048                        # refuse a spawn below this much available memory; 0 = off
 test_gate_mb = 0                          # `fleet gate`'s floor; 0 = min_free_mb
 test_gate_wait_minutes = 15               # how long `fleet gate` waits for it
+auto_stop_finished = true                 # stop finished workers of these roles by themselves
+auto_stop_idle_minutes = 5                # … once idle this long
+auto_stop_roles = ["tester", "reviewer", "validator", "ui-tester"]  # coders opt in
 pane_clipboard = "off"                    # "on": a program in a pane may set your clipboard (OSC 52)
 busy_quiet_seconds = 30                   # a "working" row whose pane printed nothing this long is
                                           # checked once: an idle Claude Code prompt reads waiting
@@ -1346,6 +1357,32 @@ It polls every 5 s. With the headroom it runs `CMD` and exits with its code
 `--min-free-mb`, else `test_gate_mb`, else `min_free_mb`; the wait is
 `test_gate_wait_minutes`. Once `test_gate_mb` is set, the tester's and the
 validator's cycles tell them to run heavy checks through it.
+
+**Auto-stop of finished workers.** A tester that posted its verdict or a reviewer
+whose review is in keeps a seat, its memory and a slot of `max_agents_total` until
+something stops it. With `auto_stop_finished` (on by default) the fleet stops a
+worker of a role in `auto_stop_roles` once it has finished. All of these must hold:
+
+- it reads `waiting`, not `working`, `attention` or `limited`;
+- it has been idle `auto_stop_idle_minutes`, by its board row and by its pane's
+  output;
+- it holds no claim;
+- the task it was spawned for is closed, or, spawned for none, it wrote a `result`;
+- nothing addressed to its label or role waits unread;
+- nothing is queued that its cycle would take (the review pool for a checking
+  role);
+- its input box is idle and empty, so your half-typed draft is never killed with it.
+
+Three things act on it, with no daemon. A worker's own Stop starts a short-lived
+background check that waits out the idle window, asks again and stops it; a later
+turn supersedes that check. `aisquare fleet reap --finished` does the same on demand
+(`--dry-run` lists without stopping). And a spawn that `max_agents_total` or the
+memory floor refuses stops the finished workers first and tries once more, saying
+which it stopped on the receipt. The exit is an `agent_exited` with actor
+`auto-stop` and the reason (`reviewer-1 exited (0) — stopped by auto-stop (it
+posted its result)`). It wakes nobody: the manager reads it with its next update.
+Coders are not in the default list, because a coder in review may be reopened; add
+`"coder"` to opt in. A manager or the captain is never stopped.
 
 ### Tools and skills per role
 

@@ -236,6 +236,7 @@ dev = [
 [project.scripts]
 aisquare = "aisquare.cli.app:main"
 asq = "aisquare.cli.app:main"
+asq-statusline = "aisquare.statusline:main"
 
 [project.urls]
 Homepage = "https://aisquare.studio"

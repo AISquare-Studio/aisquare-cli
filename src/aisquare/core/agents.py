@@ -8,6 +8,7 @@ known context file) exists. The set of connected agents is persisted in
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import functools
 import importlib.metadata
@@ -497,6 +498,125 @@ def remove_hooks(name: str, config_dir: Path | None = None) -> bool:
     if removed:
         _write_settings(spec.settings_path, settings)
     return removed
+
+
+# --- the Claude Code status line (#287, 2c) ---------------------------------------------------
+#
+# `statusLine` in a config directory's settings.json, set to `asq-statusline` only where none
+# is set; with `wrap`, a command the user set runs first, inside ours (`--wrap '<theirs>'`),
+# its other keys kept, so removing ours puts theirs back as it was. An entry is ours when
+# its program is `asq-statusline`; nothing else is ever changed or removed.
+
+STATUSLINE_PROGRAM = "asq-statusline"
+STATUSLINE_WRAP = "--wrap"  # aisquare.statusline.WRAP_FLAG, not imported: it is the lean module
+
+
+@dataclass(frozen=True)
+class StatusLineEntry:
+    """What a config directory's ``statusLine`` is: ``none``, ``ours``, ``wrapped`` (ours,
+    running ``theirs`` first) or ``foreign`` (``theirs``, a command we did not write);
+    ``unreadable`` for a settings file the writers leave alone."""
+
+    kind: str
+    theirs: str | None = None
+    settings_path: Path | None = None
+
+
+def _statusline_program_command() -> str:
+    """``asq-statusline`` by absolute path where it can be found beside this aisquare, so a
+    Claude Code whose PATH lacks it still runs it; else the bare name."""
+    candidates = [Path(sys.argv[0]).parent / STATUSLINE_PROGRAM]
+    with contextlib.suppress(Exception):
+        candidates.append(current_install().parent / STATUSLINE_PROGRAM)
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return _quote(str(candidate.resolve()))
+    found = shutil.which(STATUSLINE_PROGRAM)
+    return _quote(found) if found else STATUSLINE_PROGRAM
+
+
+def _read_statusline(entry: Any) -> tuple[str, str | None]:
+    """``(kind, theirs)`` for one ``statusLine`` value (see :class:`StatusLineEntry`)."""
+    if entry is None:
+        return "none", None
+    command = entry.get("command") if isinstance(entry, dict) else None
+    if not isinstance(command, str):
+        return "foreign", None
+    try:
+        words = _split_command(command)
+    except ValueError:
+        return "foreign", command
+    program = words[0] if words else ""
+    if Path(program).name != STATUSLINE_PROGRAM and PureWindowsPath(program).stem != (
+        STATUSLINE_PROGRAM
+    ):
+        return "foreign", command
+    if len(words) >= 3 and words[1] == STATUSLINE_WRAP:
+        return "wrapped", words[2]
+    return "ours", None
+
+
+def _statusline_settings(config_dir: Path | None) -> Path:
+    return _claude_home(config_dir) / "settings.json"
+
+
+def statusline_entry(config_dir: Path) -> StatusLineEntry:
+    """What ``config_dir``'s ``statusLine`` is, read-only."""
+    path = _statusline_settings(config_dir)
+    try:
+        settings = read_settings(path)
+    except (OSError, SettingsNotAnObjectError, UnicodeDecodeError):
+        return StatusLineEntry("unreadable", settings_path=path)
+    kind, theirs = _read_statusline(settings.get("statusLine"))
+    return StatusLineEntry(kind, theirs, path)
+
+
+def install_statusline(config_dir: Path, *, wrap: bool = False) -> StatusLineEntry:
+    """Set ``asq-statusline`` as ``config_dir``'s status line where none is set, or, with
+    ``wrap``, around the user's own command. Returns what it is now: ``ours``/``wrapped``
+    when ours (installed now or before), ``foreign`` when another is set and ``wrap`` was
+    not asked (nothing is written). Raises as :func:`read_settings` does for a file that
+    must not be rewritten."""
+    path = _statusline_settings(config_dir)
+    settings = read_settings(path)
+    entry = settings.get("statusLine")
+    kind, theirs = _read_statusline(entry)
+    if kind in {"ours", "wrapped"}:
+        return StatusLineEntry(kind, theirs, path)
+    ours = _statusline_program_command()
+    if kind == "none":
+        settings["statusLine"] = {"type": "command", "command": ours}
+    elif wrap and isinstance(entry, dict) and theirs is not None:
+        settings["statusLine"] = {**entry, "command": f"{ours} {STATUSLINE_WRAP} {_quote(theirs)}"}
+        kind = "wrapped"
+    else:
+        return StatusLineEntry("foreign", theirs, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_settings(path, settings)
+    return StatusLineEntry("ours" if kind == "none" else kind, theirs, path)
+
+
+def remove_statusline(config_dir: Path | None = None) -> bool:
+    """Take out the status line aisquare wrote in ``config_dir``: ours goes, and a wrapped
+    one becomes the user's own command again, its other keys as they were. A status line
+    we did not write is left alone. True when something changed."""
+    path = _statusline_settings(config_dir)
+    if not path.exists():
+        return False
+    try:
+        settings = read_settings(path)
+    except (SettingsNotAnObjectError, UnicodeDecodeError):
+        return False
+    entry = settings.get("statusLine")
+    kind, theirs = _read_statusline(entry)
+    if kind == "ours":
+        settings.pop("statusLine")
+    elif kind == "wrapped" and isinstance(entry, dict):
+        settings["statusLine"] = {**entry, "command": theirs}
+    else:
+        return False
+    _write_settings(path, settings)
+    return True
 
 
 def ambient_hook_dir(name: str) -> Path | None:

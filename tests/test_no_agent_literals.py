@@ -18,6 +18,15 @@ into shapes (:data:`SHAPES`):
   (``claude``), a variable of its own (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME=…``), a file or
   folder of its own (``.claude``, ``hooks.json``) or one of its flags (``--fork-session``).
 
+What an agent's words are is read off its adapter (:data:`AGENTS`: every registered one and
+the synthetic ones the suites register), never listed here: its ``id``, its ``binary`` and
+its Windows shims, its variables (its home's, whose first word is a prefix of its own, its
+accounts', its capabilities', those its launch slots set), its files (``home_name``,
+``settings_name``, ``launch_inputs``, ``context_files``, its accounts' ``dir_name``) and the
+rest it declares in ``capabilities.vocabulary`` (its model provider's variables, its
+credential files, its flags). So a new agent's words in a shared module fail with their file
+and line, and this guard is not edited for it (review r18 of #113, finding 6).
+
 The last six are a ratchet: :data:`BASELINE` holds, per file and shape, how many lines carry
 it today, and the count may only go down. A new one fails with its file and line; one taken
 out (made a capability or an adapter method) lowers the baseline, which a later lane then
@@ -34,13 +43,53 @@ import ast
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 
+from aisquare.core.agent_adapters import adapters
+from aisquare.core.agent_adapters.types import AgentAdapter
+from tests.test_adapter_contract import SYNTHETIC
+
 SRC = Path(__file__).resolve().parents[1] / "src" / "aisquare"
 PACKAGE = Path("core") / "agent_adapters"
-LITERALS = frozenset({"codex", "claude-code"})
+#: Every agent whose words the guard reads: the registered ones, and the synthetic ones the
+#: suites register (``tests.test_adapter_contract.SYNTHETIC``).
+AGENTS: tuple[AgentAdapter, ...] = (*adapters(), *(cls() for cls in SYNTHETIC))
+
+
+def _home_variables(adapter: AgentAdapter) -> set[str]:
+    """The variables of the agent's own home and process: its home's, its accounts', its
+    pid's and its tools' shells'. The first word of each is a prefix of its own."""
+    accounts, capabilities = adapter.accounts, adapter.capabilities
+    named = {adapter.home_env, capabilities.pid_env, capabilities.tool_shell_env}
+    named |= set(capabilities.tool_shell_vars)
+    if accounts is not None:
+        named |= {accounts.home_env, *accounts.extra_env, *accounts.plain_vars}
+    return {name for name in named if name}
+
+
+def _slot_variables(adapter: AgentAdapter) -> set[str]:
+    """The variables its launch slots set: its label's, its unattended session's, its
+    telemetry's."""
+    return {
+        *adapter.label_args("label").env,
+        *adapter.unattended_env(),
+        *adapter.telemetry_args("http://127.0.0.1:9/v1/logs").env,
+    }
+
+
+def _files(adapter: AgentAdapter) -> set[str]:
+    accounts, capabilities = adapter.accounts, adapter.capabilities
+    named = {adapter.home_name, adapter.settings_name, *capabilities.launch_inputs}
+    named |= {path.name for path in adapter.context_files(Path())}
+    named |= set(capabilities.vocabulary.files)
+    if accounts is not None:
+        named.add(accounts.dir_name)
+    return named
+
+
+LITERALS = frozenset(adapter.id for adapter in AGENTS)
 
 Shape = Literal["decide_literal", "decide_named", "decide_binary", "binary", "env", "dir", "flag"]
 SHAPES: tuple[Shape, ...] = (
@@ -56,73 +105,57 @@ SHAPES: tuple[Shape, ...] = (
 #: Constants that name an agent wherever they are defined; every module constant assigned an
 #: agent's id or binary (or one of these) joins them (:func:`agent_constants`).
 NAMED = frozenset({"AGENT", "CODEX", "DEFAULT_AGENT", "DEFAULT_AGENT_BINARY"})
-BINARIES = frozenset({"claude", "codex", "claude.exe", "codex.exe", "claude.cmd", "codex.cmd"})
-#: A variable of an agent's own: the whole constant, or the name of an assignment it starts.
-ENV = re.compile(r"(CLAUDE|CLAUDECODE|ANTHROPIC|CODEX|OPENAI)[A-Z0-9_]*")
+BINARIES = frozenset(
+    f"{adapter.binary}{shim}" for adapter in AGENTS for shim in ("", ".exe", ".cmd")
+)
+#: A variable of an agent's own: the whole constant, or the name of an assignment it starts,
+#: under a prefix of its own (its home's first word, its provider's) or one its slots set.
+ENV = re.compile(
+    "("
+    + "|".join(
+        sorted(
+            {name.split("_")[0] for adapter in AGENTS for name in _home_variables(adapter)}
+            | {
+                prefix
+                for adapter in AGENTS
+                for prefix in adapter.capabilities.vocabulary.env_prefixes
+            }
+        )
+    )
+    + ")[A-Z0-9_]*"
+)
+ENV_NAMES = frozenset(name for adapter in AGENTS for name in _slot_variables(adapter))
 #: A model provider's key, which no agent owns (the import engine's, the brain's).
 PROVIDER_KEYS = frozenset({"ANTHROPIC_API_KEY", "OPENAI_API_KEY"})
 DIRS = re.compile(
-    r"(^|[/\\])(\.claude|\.codex|\.claude\.json|\.mcp\.json|CLAUDE\.md|AGENTS(\.override)?\.md"
-    r"|claude-accounts|codex-accounts|hooks\.json|auth\.json|\.credentials\.json)([/\\]|$)"
+    r"(^|[/\\])("
+    + "|".join(re.escape(name) for name in sorted({n for a in AGENTS for n in _files(a)}))
+    + r")([/\\]|$)"
 )
-FLAGS = frozenset(
-    {
-        "--append-system-prompt",
-        "--append-system-prompt-file",
-        "--permission-mode",
-        "--resume",
-        "--fork-session",
-        "--session-id",
-        "--continue",
-        "--mcp-config",
-        "--strict-mcp-config",
-        "--allowedTools",
-        "--allowed-tools",
-        "--disallowedTools",
-        "--disallowed-tools",
-        "--tools",
-        "--dangerously-skip-permissions",
-        "--chrome",
-        "--name",
-        "--settings",
-        "--setting-sources",
-        "--json-schema",
-        "--output-format",
-        "--max-turns",
-        "--no-session-persistence",
-        "--effort",
-        "--print",
-        "--bare",
-        "--sandbox",
-        "--ask-for-approval",
-        "--approve-for-me",
-        "--add-dir",
-        "--output-schema",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--dangerously-bypass-hook-trust",
-        "--skip-git-repo-check",
-        "--ephemeral",
-        "-r",
-    }
-)
+FLAGS = frozenset(flag for adapter in AGENTS for flag in adapter.capabilities.vocabulary.flags)
+#: Flags read in the ``--flag=value`` shape too: the long ones (``-r=…`` is no flag of theirs).
+LONG_FLAGS = frozenset(flag for flag in FLAGS if flag.startswith("--"))
 #: Calls whose string arguments declare aisquare's own options (``typer.Option("--name")``).
 OPTION_CALLS = frozenset({"Option", "Argument"})
 
 #: Per file (under ``src/aisquare``), per shape: the lines that carry it today. May only go
 #: down (:func:`test_no_file_grows_an_agent_specific_shape`), and holds what the tree holds
 #: (:func:`test_the_baseline_is_what_the_tree_holds`): lower it in the change that removes one.
+#: Read off the adapters, the words now include Claude Code's ``settings.json`` (its
+#: ``settings_name``), which six of these lines already spelled (review r18 of #113, 6).
 BASELINE: dict[str, dict[Shape, int]] = {
     "cli/fleet.py": {"flag": 1},
     "cli/hook.py": {"binary": 3},
-    "core/agents.py": {"env": 2, "dir": 9},
+    "core/agents.py": {"env": 2, "dir": 12},
     "core/claude_accounts.py": {"binary": 1, "env": 3, "dir": 4},
-    "core/claude_sharing.py": {"env": 7},
+    "core/claude_sharing.py": {"env": 7, "dir": 1},
     "core/codex_accounts.py": {"binary": 1, "env": 1, "dir": 3},
     "core/config.py": {"flag": 3},
-    "core/harness.py": {"env": 30, "flag": 5},
+    "core/harness.py": {"env": 30, "dir": 1, "flag": 5},
     "core/spawn.py": {"env": 1},
-    "services/diagnostics.py": {"env": 1, "dir": 3},
+    "services/diagnostics.py": {"env": 1, "dir": 4},
     "services/explainability.py": {"env": 4},
+    "services/first_run.py": {"dir": 1},
     "services/store_broker.py": {"flag": 1},
 }
 
@@ -183,14 +216,14 @@ def _named(node: ast.AST, named: frozenset[str]) -> bool:
 
 
 def _docstrings(tree: ast.AST) -> set[int]:
-    kinds = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    """Every string that is a statement of its own: a module's, a class's or a function's
+    docstring, and the one under an attribute or a constant that documents it."""
     return {
-        id(node.body[0].value)
+        id(node.value)
         for node in ast.walk(tree)
-        if isinstance(node, kinds)
-        and node.body
-        and isinstance(node.body[0], ast.Expr)
-        and isinstance(node.body[0].value, ast.Constant)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
     }
 
 
@@ -207,7 +240,8 @@ def _option_words(tree: ast.AST) -> set[int]:
 
 def _env(value: str) -> bool:
     name, assigns, _ = value.partition("=")
-    return bool(ENV.fullmatch(name)) and (assigns or name == value) and name not in PROVIDER_KEYS
+    own = bool(ENV.fullmatch(name)) or name in ENV_NAMES
+    return own and bool(assigns or name == value) and name not in PROVIDER_KEYS
 
 
 def shapes(tree: ast.AST, named: frozenset[str], *, harness: bool = False) -> dict[Shape, set[int]]:
@@ -244,7 +278,7 @@ def shapes(tree: ast.AST, named: frozenset[str], *, harness: bool = False) -> di
                 found["env"].add(line)
             if DIRS.search(value):
                 found["dir"].add(line)
-            if value in FLAGS or value.split("=", 1)[0] in FLAGS - {"-r"}:
+            if value in FLAGS or value.split("=", 1)[0] in LONG_FLAGS:
                 found["flag"].add(line)
     return found
 
@@ -414,3 +448,32 @@ def test_a_planted_branch_in_a_shared_module_fails_with_its_file_and_line(
 
     line = 2
     assert over == [f"{shape} 1 > 0: services/planted.py:{line}"], over
+
+
+@pytest.mark.parametrize("synthetic", SYNTHETIC, ids=lambda cls: cls.id)
+@pytest.mark.parametrize(
+    ("plant", "shape"),
+    [
+        (lambda a: f"def pick(agent):\n    return agent == {a.id!r}\n", "decide_literal"),
+        (lambda a: f"def find(which):\n    return which({a.binary!r})\n", "binary"),
+        (lambda a: f"def home(env):\n    return env.pop({a.home_env!r})\n", "env"),
+        (lambda a: f"def home(root):\n    return root / {a.home_name!r}\n", "dir"),
+    ],
+    ids=["id", "binary", "home_env", "home_dir"],
+)
+def test_a_third_agents_words_planted_in_a_shared_module_fail_with_no_edit_here(
+    tmp_path: Path, synthetic: type[AgentAdapter], plant: Any, shape: Shape
+) -> None:
+    """Review r18 of #113, finding 6: the words were Claude Code's and Codex's, written out
+    here, so a third agent's ``== "<its id>"``, its binary, its home variable or its folder
+    in a shared module passed. Read off its adapter, each fails naming its file and line."""
+    adapter = synthetic()
+    src = tmp_path / "aisquare"
+    (src / "services").mkdir(parents=True)
+    (src / "core" / "agent_adapters").mkdir(parents=True)
+    (src / "services" / "planted.py").write_text(plant(adapter), encoding="utf-8")
+    (src / "core" / "agent_adapters" / "mine.py").write_text(plant(adapter), encoding="utf-8")
+
+    over = grown(scan(src), BASELINE)
+
+    assert over == [f"{shape} 1 > 0: services/planted.py:2"], over

@@ -1125,14 +1125,22 @@ spool access and reports the most recent receiver failure.
 `src/aisquare/core/agent_adapters/` is the one place a terminal agent (Gemini CLI,
 Grok, ...) is implemented. The shared services (hooks, board, launch, fleet, doctor,
 Welcome, upgrade and uninstall) ask its adapter and never compare its name:
-`tests/test_no_agent_literals.py` fails on `== "codex"`, `in (..., "claude-code")` or a
-`match` case on either name anywhere outside that package, and holds a ratchet on the
+`tests/test_no_agent_literals.py` fails on an agent's id (`== "codex"`, `in (...,
+"claude-code")`, a `match` case) anywhere outside that package, and holds a ratchet on the
 rest of the agent-specific shapes there: a comparison with a constant naming an agent
 (`AGENT`, `CODEX`, `DEFAULT_AGENT`, `DEFAULT_AGENT_BINARY` and any module constant set to
 an agent's id or binary), a call of an `is_default_agent` (the binary-name predicate, gone:
 a binary is the agent its name runs, `agent_adapters.adapter_for_binary`, and that agent's
 adapter answers), and a string constant that is an agent's binary, one of its variables,
-files or folders, or one of its flags. The first three are none outside the package. Its
+files or folders, or one of its flags. Those words are read off every registered adapter,
+and the synthetic ones the suites register, never listed in the test: its `id`, `binary`
+and Windows shims, its variables (`home_env`, whose first word is a prefix of its own, its
+accounts' and capabilities', those its launch slots set), its files (`home_name`,
+`settings_name`, `launch_inputs`, `context_files`, its accounts' `dir_name`), and what it
+declares in `capabilities.vocabulary`, a `Vocabulary` of the rest: `env_prefixes` (its model
+provider's, Claude Code's `ANTHROPIC`), `files` (Claude Code's `.claude.json`, Codex's
+`auth.json`) and `flags`. So a new agent's words in a shared module fail with no edit to the
+test. The first three are none outside the package. Its
 `BASELINE` counts the rest per file; a new one fails with its
 `file:line`, and a change that removes one lowers the count (aisquare's own options, prose
 naming a variable and a provider's API key are not counted). Keep unsupported capabilities

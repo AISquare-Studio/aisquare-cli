@@ -35,6 +35,7 @@ from aisquare.core.agent_adapters.types import (
     ScreenPrompt,
     SkillDirs,
     TelemetryReader,
+    Vocabulary,
     WriteScope,
     block_reply,
     command_entry,
@@ -503,6 +504,21 @@ class CodexAdapter:
     capabilities = AgentCapabilities(
         approves_for_me=True,
         launch_inputs=(".codex", ".agents"),
+        vocabulary=Vocabulary(
+            env_prefixes=("OPENAI",),
+            files=("auth.json",),
+            flags=(
+                "--sandbox",
+                "--ask-for-approval",
+                "--approve-for-me",
+                "--add-dir",
+                "--output-schema",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--dangerously-bypass-hook-trust",
+                "--skip-git-repo-check",
+                "--ephemeral",
+            ),
+        ),
         hooks=(
             HookSpec("SessionStart", "codex", 120),
             HookSpec("UserPromptSubmit", "codex", 120),

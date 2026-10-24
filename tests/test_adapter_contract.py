@@ -83,7 +83,9 @@ FIXTURES = Path(__file__).parent / "fixtures" / "agent_events"
 TRANSCRIPTS = Path(__file__).parent / "fixtures" / "agent_transcripts"
 SCREENS = Path(__file__).parent / "fixtures" / "agent_screens"
 REGISTERED = tuple(adapter.id for adapter in adapters())
-ALL = (*REGISTERED, FakeAgentAdapter.id, GeminiShapedAdapter.id)
+#: The synthetic agents the suites register (tests/test_no_agent_literals.py reads their words).
+SYNTHETIC: tuple[type[AgentAdapter], ...] = (FakeAgentAdapter, GeminiShapedAdapter)
+ALL = (*REGISTERED, *(cls.id for cls in SYNTHETIC))
 
 #: Stands, in :data:`EXPECTED_PERMISSIONS`, for the adapter's own ``store_access`` for the
 #: intent's write scope, the aisquare home it is given being the test's.
@@ -1965,6 +1967,7 @@ def test_the_guide_names_every_member_of_the_protocol() -> None:
         "LaunchPart",
         "PermissionArgs",
         "SessionFlags",
+        "Vocabulary",
     }
     missing = []
     for node in tree.body:

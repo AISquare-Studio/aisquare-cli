@@ -206,6 +206,27 @@ class SessionFlags:
 
 
 @dataclass(frozen=True)
+class Vocabulary:
+    """The agent's own words that none of its other declarations names, which a module outside
+    ``core/agent_adapters`` must not spell any more than those: tests/test_no_agent_literals.py
+    reads them with its ``id``, ``binary``, its variables (``home_env``, its accounts' and its
+    capabilities', and those its launch slots set), its files (``home_name``,
+    ``settings_name``, ``launch_inputs``, ``context_files``, its accounts' ``dir_name``), so a
+    new agent's words in a shared module fail with their file and line and nothing of that
+    guard is edited for it."""
+
+    env_prefixes: tuple[str, ...] = ()
+    """The prefixes of the variables it reads beyond its home's (whose first word counts
+    already): its model provider's, Claude Code's ``ANTHROPIC``, Codex's ``OPENAI``."""
+    files: tuple[str, ...] = ()
+    """Its own files and folders beyond those: Claude Code's ``.claude.json`` and
+    ``.credentials.json``, Codex's ``auth.json``."""
+    flags: tuple[str, ...] = ()
+    """The flags of its own that a shared module would spell to drive it (Claude Code's
+    ``--permission-mode``, Codex's ``--ask-for-approval``)."""
+
+
+@dataclass(frozen=True)
 class AgentCapabilities:
     """What one agent does differently, as flags the shared services read instead of its id.
 
@@ -220,6 +241,9 @@ class AgentCapabilities:
     dir and the native id (``services.agent_events.session_key``) and every hook binds
     it to the launch (``core.agent_sessions.bind_launch_session``). Its flags are
     :attr:`session_flags`."""
+    vocabulary: Vocabulary = Vocabulary()
+    """Its own words no other declaration of its names (:class:`Vocabulary`), which no shared
+    module spells: what the guard on agent-specific code reads beside them."""
     session_flags: SessionFlags | None = None
     """The agent's flags that name or pick a launch's session (:class:`SessionFlags`), which
     an agent with :attr:`assigns_session_id` declares: the session it is handed is named in

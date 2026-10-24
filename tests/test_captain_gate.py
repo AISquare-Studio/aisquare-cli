@@ -265,7 +265,15 @@ def test_a_code_said_alongside_another_command_is_masked_in_that_tools_audit() -
         ("unlock 123-456-", "unlock ******-"),
         ("call +1-555-123-4567", "call +1-555-123-4567"),
         ("build 2026-10-23-1", "build 2026-10-23-1"),
+        # An identifier whose random part has six digits in a row is no code (rc/p3 run
+        # 40073709259: a task id in wololo's audit came out masked).
+        ("wololo alpha coder-1 tsk_01m5pcq423948pmfre2mvs761d", None),
+        ("claim tsk_01m5pcq423948", None),
+        ("session 123456ab-cdef", None),
+        ("at a1b2c3d123456 now", None),
     ],
 )
-def test_redact_masks_a_code_but_not_a_date_or_a_longer_number(words: str, kept: str) -> None:
-    assert gate.redact(words) == kept
+def test_redact_masks_a_code_but_not_a_date_or_a_longer_number(
+    words: str, kept: str | None
+) -> None:
+    assert gate.redact(words) == (words if kept is None else kept)

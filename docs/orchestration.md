@@ -153,6 +153,7 @@ aisquare task add "ship it" --needs 1             # held until #1 is done
 aisquare task next --role coder --claim --as <id> # atomic claim — exactly one winner; a
                                                   # fleet agent's own assigned task comes first;
                                                   # prints the contract and any reopen reason
+aisquare task next --status review --task 12      # only #12, when it is in review; else nothing
 aisquare task review 1 --note "how to verify" --as <id>
 aisquare task reopen '#1' --reason "fails on py3.11" --as <id>
 aisquare note "JWT it is" --kind decision --as <id>

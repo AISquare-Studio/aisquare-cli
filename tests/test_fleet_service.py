@@ -69,6 +69,7 @@ from aisquare.models import (
     CheckStatus,
     FleetAgent,
     FleetAgentStatus,
+    LaunchSpec,
     ProjectInfo,
     TeamEvent,
     TeamSession,
@@ -1370,7 +1371,11 @@ def test_the_built_in_reviewer_is_launched_with_a_shell(
     fleet_service.spawn(project, "reviewer", worktree=False)
     command = _command(tmux)
     assert "--restricted" not in command
-    assert "--disallowedTools=Edit Write NotebookEdit" in command, "and no editing tools"
+    # No editing tools either: the deny is the role's own, which the window's `launch`
+    # adds (`harness.tool_policy`), so the command it is handed need not carry it.
+    tail = command[command.index("reviewer") + 1 :]
+    policy = harness.tool_policy("reviewer", binary="claude", args=tail, fleet=FleetSettings())
+    assert {"Edit", "Write", "NotebookEdit"} <= set(policy.denied), "and no editing tools"
 
 
 def test_spawn_respects_a_caller_supplied_session_id(
@@ -2009,6 +2014,47 @@ def test_fleet_stop_acts_for_its_as_else_its_own_window_else_the_user(
     monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_mgr")
     assert fleet_service.acting_as() == "ses_manager_1"
     assert fleet_service.acting_as("ses_manager_1") == "ses_manager_1"
+
+
+def test_a_spawn_runs_the_roles_model_ladder_and_its_restart_keeps_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#129 (b): the fleet path never asked `harness.resolve_model`, so every agent ran on
+    the account's default model. A spawn now passes the ladder's model and effort, cached
+    probe only, and records both; arguments that already choose one are the caller's."""
+    ladder = harness.resolve_model("coder", probe=False)
+    assert ladder is not None
+    agent = _coder(project)
+    command = _command(tmux)
+    assert _flag(command, "--model") == ladder.model and _flag(command, "--effort") == ladder.effort
+    spec = agent.launch_spec
+    assert spec is not None and (spec.model, spec.effort) == (ladder.model, ladder.effort)
+    assert command.count("--model") == 1
+    assert "--model" not in spec.extra_args, "the spec's arguments stay the role's and yours"
+
+    # The ladder moves (a probe verdict, an entitlement); a restart starts what it recorded.
+    moved = ladder.model_copy(update={"model": "elsewhere", "effort": "low"})
+    monkeypatch.setattr(harness, "resolve_model", lambda *a, **k: moved)
+    tmux.die(agent.pane_id, 0)
+    fleet_service.restart(project, agent.label)
+    replayed = _command(tmux)
+    assert (
+        _flag(replayed, "--model") == ladder.model and _flag(replayed, "--effort") == ladder.effort
+    )
+
+    _coder(project, label="coder-pinned", agent_args=["--model", "sonnet"])
+    pinned = _command(tmux)
+    assert pinned.count("--model") == 1 and _flag(pinned, "--model") == "sonnet"
+    assert "--effort" not in pinned, "a caller who chose the model chose the effort too"
+
+
+def test_another_binary_gets_no_model_flag(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(harness, "is_default_agent", lambda binary: False)
+    agent = _coder(project)
+    assert "--model" not in _command(tmux)
+    assert agent.launch_spec is not None and agent.launch_spec.model is None
 
 
 def test_spawn_without_tmux_is_fleet_unavailable(
@@ -13039,8 +13085,10 @@ def test_spawn_and_stop_on_a_real_tmux_server(
         assert "fake claude:" in screen, screen
         # The control behind the "gone" hunts: this server must keep dead panes.
         assert real.run("show-options", "-gv", "remain-on-exit").strip() == "on"
-        assert f"--session-id {receipt.agent.session_id}" in screen, screen
-        assert "--name coder-1" in screen and "--permission-mode auto" in screen, screen
+        # The argv wraps at the pane's width: read it with the wrapped rows joined.
+        said = "".join(real.capture(pane).lines)
+        assert f"--session-id {receipt.agent.session_id}" in said, screen
+        assert "--name coder-1" in said and "--permission-mode auto" in said, screen
         # ``#{window_activity}`` must be the time of the last OUTPUT, not the
         # window's creation time: it is the whole working/waiting distinction for
         # an agent with no hooks (ACTIVITY_WINDOW), and a creation-only stamp —
@@ -16783,6 +16831,33 @@ def test_a_reviewer_restarted_from_a_spec_0_7_0_recorded_gets_its_shell_back(
     fleet_service.restart(project, chosen.label)
 
     assert "--restricted" in _command(tmux)
+
+
+@pytest.mark.parametrize(
+    ("recorded_by", "replayed"),
+    [
+        ("0.8.2", ["--model", "opus"]),
+        ("0.8.0", ["--model", "opus"]),
+        ("0.8.3", [*REVIEWER_ARGS, "--model", "opus"]),
+    ],
+    ids=["0.8.2", "0.8.0", "since"],
+)
+def test_a_reviewer_spec_0_8_recorded_replays_without_its_default_deny(
+    recorded_by: str, replayed: list[str]
+) -> None:
+    """Review of #311: 0.8.0 to 0.8.2 recorded the reviewer's default deny first in its
+    spec. Replayed as typed, `allow_tools = ["Edit"]` could never hand Edit back; the deny
+    is the role's own now, so `launch` still denies the editing tools without it."""
+    spec = LaunchSpec(
+        binary="claude", extra_args=[*REVIEWER_ARGS, "--model", "opus"], recorded_by=recorded_by
+    )
+    assert fleet_service._replayed_args("reviewer", spec, FleetSettings()) == replayed
+    assert fleet_service._replayed_args("coder", spec, FleetSettings()) == spec.extra_args
+    fleet = FleetSettings()
+    fleet.roles["reviewer"] = fleet.roles["reviewer"].model_copy(update={"allow_tools": ["Edit"]})
+    policy = harness.tool_policy("reviewer", binary="claude", args=replayed, fleet=fleet)
+    assert ("Edit" in policy.denied) is (recorded_by == "0.8.3")
+    assert {"Write", "NotebookEdit"} <= set(policy.denied)
 
 
 @pytest.mark.parametrize(

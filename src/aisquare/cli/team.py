@@ -19,7 +19,12 @@ import typer
 
 from aisquare.cli.common import expected_config_write_errors, fail, local_time, parse_since
 from aisquare.core import harness, orchestrator
-from aisquare.core.config import ExplainabilitySettings, RoleLaunchProfile, load_config
+from aisquare.core.config import (
+    ExplainabilitySettings,
+    FleetSettings,
+    RoleLaunchProfile,
+    load_config,
+)
 from aisquare.core.console import stdout_console
 from aisquare.core.spawn import IDENTITY_ENV_VARS
 from aisquare.core.state import get_state
@@ -462,13 +467,30 @@ def spawn(
     # `launch_profile.args`, so the role's flags come last here and in the
     # middle in `launch`, under the same rule.
     defaults = harness.role_defaults(role_name, binary=binary.binary, args=launch_profile.args)
-    role_args = defaults.args
-    for note in defaults.notes:
+    # The role's tools and skill listing, as `launch` applies them (`harness.tool_policy`):
+    # the reviewer spawned here denied nothing, its deny living in fleet `extra_args` alone.
+    try:
+        fleet = load_config().fleet
+    except Exception as exc:  # the safety list is code: it holds without the config
+        fleet = FleetSettings()
+        typer.echo(f"tool policy: config unreadable ({exc}) — the built-in deny list", err=True)
+    policy = harness.tool_policy(
+        role_name,
+        binary=binary.binary,
+        args=launch_profile.args,
+        fleet=fleet,
+        effort=resolution.effort if resolution is not None else None,
+    )
+    role_args = [*defaults.args, *policy.args]
+    spawn_args = policy.strip(launch_profile.args)
+    notes = [*defaults.notes, *policy.notes]
+    for note in [] if get_state().json_output else notes:
         # The banner is meant to be pasted; a flag this role would normally
-        # carry and does not is part of what the paste will do.
+        # carry and does not is part of what the paste will do. Under --json,
+        # `notes` in the object says it.
         typer.echo(f"{role_name}: {note}", err=True)
     if resolution is None:
-        argv = [binary.binary, *launch_profile.args, *role_args]
+        argv = [binary.binary, *spawn_args, *role_args]
         banner = f"{role_name}: untiered role — launching on the session default model"
     else:
         argv = [
@@ -477,7 +499,7 @@ def spawn(
             resolution.model,
             "--effort",
             resolution.effort,
-            *launch_profile.args,
+            *spawn_args,
             *role_args,
         ]
         skipped = f" (skipped: {', '.join(resolution.skipped)})" if resolution.skipped else ""
@@ -553,8 +575,10 @@ def spawn(
                     "env_files": launch_profile.env_files,
                     "env_sources": launch_profile.env_sources,
                     "extra_args": launch_profile.args,
+                    "denied_tools": policy.denied,
                     "command": command,
                     "not_added": unjoined,
+                    "notes": notes,
                 }
             )
         )
@@ -621,9 +645,7 @@ def spawn(
                     "this one takes its own identity",
                     err=True,
                 )
-            identity = explainability_service.plan_session_identity(
-                binary.binary, launch_profile.args
-            )
+            identity = explainability_service.plan_session_identity(binary.binary, spawn_args)
             # Same fail-open bar as `launch`: an unreadable target costs the
             # overrides and the key — so the trace — and never the spawn.
             # `resolve_target` is effectively total today; the guard is here so

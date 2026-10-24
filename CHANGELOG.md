@@ -17,6 +17,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which is otherwise refused. New event **`handover_failed`**: the automatic
   hand-over could not move a limited agent, with the reason and the `fleet
   switch` that would; it wakes the manager. (#277)
+- **`aisquare task next --task <ref>`** returns that task when it is in `--status` and
+  ready, and nothing else. A tester or ui-tester spawned for a task (`fleet spawn tester
+  --task <id>`) verifies that one task and stops after its verdict; the manager spawns one
+  per task at its review, and the validator stays the single final gate (#129).
+- **`fleet spawn` runs the role's model ladder**, as `team spawn` does: `--model` and
+  `--effort` from the cached probe (never a probe at spawn), recorded so a restart or
+  switch starts the same model, and shown in `fleet ls --json`'s `launch_spec`. Arguments
+  that already name a model or an effort are yours, and another binary gets neither
+  (#129).
+
 - **`aisquare team show <seq>`** prints one board event in full: who wrote it and who
   caused it, the task, the addressee, its details and the whole text. Every update an
   agent reads is now one line that ends in this command when there is more (#279).
@@ -361,6 +371,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tmux as before. Polling is quicker too: typing no longer holds frames back
   until you stop, and an echo that takes longer than 50 ms no longer waits half a
   second to show.
+- **Fleet roles launch without eight tools no role uses** (#280). Every tool
+  schema and the skill listing ride every request of every agent, so each role now
+  launches with only what it uses, wherever it starts: `fleet spawn`, `team spawn`
+  and `aisquare launch <role>`. `[fleet] deny_tools` denies Artifact,
+  ArtifactComments, Workflow, ReportFindings, ShareOnboardingGuide,
+  PushNotification, ScheduleWakeup and SendFeedback by default. Each
+  `[fleet.roles.<role>]` table takes `deny_tools`, `allow_tools` (the one way to
+  hand a tool back) and `skill_listing`: `full` for the manager, and `names` for
+  every other role, which keeps every skill name with its description cut. Every
+  `--disallowedTools` on the line is merged into one sorted token. On Claude Code
+  2.1.309, `/context` in a fresh coder read 9.9k tokens where it read 26.9k (tools
+  21.6k → 7.4k, skills 2.5k → 100), and every request of the session carries that.
+  A launch at `ultracode` effort keeps Workflow, which ultracode orchestrates with.
+  `aisquare doctor` has a `<role> tools` row for each role. The config file moves
+  to version 3, once: a reviewer whose `extra_args` are exactly 0.8.2's default
+  loses them, since the deny is the role's own now. Moving back with `aisquare
+  upgrade --version` to 0.8.2 or earlier names each role that release would launch
+  with tools denied here, with the `config set` that keeps them denied there.
 - The P0 reliability plan (`docs/plans/handoff-p0-reliability.md`, "W0 results") now
   records what was measured on a live box before its prompt-delivery work starts. On
   Claude Code 2.1.309 and 2.1.223, a typed prompt's first Enter is taken as soon as the
@@ -543,6 +571,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-file index for the slices it needs. A skeleton left on disk by an earlier,
   smaller pack is no longer named, and a pack is no longer called the skeleton
   or "every file's contents" when it is not.
+- **A reviewer's own `extra_args` no longer drops its Edit/Write deny list** (#280,
+  #129). The deny was the reviewer's default `extra_args`, and a list replaces
+  whole, so setting `[fleet.roles.reviewer] extra_args` to trim a tool launched the
+  reviewer with Edit, Write and NotebookEdit. `aisquare launch reviewer` and
+  `aisquare team spawn reviewer` denied it nothing at all. The deny is the role's
+  own now, and every launch of a reviewer has it, merged with whatever else is
+  denied.
 
 ## [0.8.2] - 2026-10-19
 

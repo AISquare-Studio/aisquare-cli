@@ -46,7 +46,7 @@ from aisquare.cli.common import fail
 from aisquare.cli.native_args import NativeForwardingCommand as LaunchCommand
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, orchestrator, paths, personas
-from aisquare.core.agent_adapters.types import BadEffortError
+from aisquare.core.agent_adapters.types import BadEffortError, LaunchPart
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
@@ -651,9 +651,7 @@ def launch(
             # the join for EVERY binary, wrapper or not — which is why nothing
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
-    native_trace_args, native_trace_note = agent_launch.telemetry_args(
-        selected, env, arguments.argv
-    )
+    native_trace, native_trace_note = agent_launch.telemetry_args(selected, env, arguments.argv)
     if native_trace_note:
         stderr_console().print(native_trace_note, markup=False)
     # The persona's system-prompt seam, before the role's and the operator's line:
@@ -669,14 +667,23 @@ def launch(
     # aisquare server `[agents] mcp` adds to every other launch would sit beside it, a
     # second --mcp-config its --strict-mcp-config loads, a Codex server its off-list
     # never names (review r17 of #113, finding 3).
-    aisquare_server = [] if experimental.captain_role(role) else agent_launch.mcp_args(selected)
+    aisquare_server = (
+        LaunchPart() if experimental.captain_role(role) else agent_launch.mcp_args(selected)
+    )
+    # The launch slots (``LaunchPart``): their arguments here, in this order, their environment
+    # into the agent's, and their settings, with the spawn's, as its one settings layer.
+    launched = agent_launch.compose(
+        selected,
+        env,
+        native_trace,
+        agent_launch.fleet_settings(selected, env, arguments.argv),
+        aisquare_server,
+    )
     argv = [
         resolution.binary,
         *model_args,
         *pinned_id,
-        *native_trace_args,
-        *agent_launch.fleet_settings_args(selected, env, arguments.argv),
-        *aisquare_server,
+        *launched,
         *persona_args,
         *arguments.argv,
     ]

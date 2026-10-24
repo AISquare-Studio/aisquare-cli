@@ -13,7 +13,7 @@ import re
 import tomllib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
@@ -43,6 +43,38 @@ class HookSpec:
     command: str
     timeout: int | None = None
     matcher: str | None = None
+
+
+@dataclass(frozen=True)
+class LaunchPart:
+    """What one launch slot adds to a launch (:meth:`AgentAdapter.mcp_args`, ``label_args``,
+    ``telemetry_args``, ``fleet_settings``, ``disable_native_teams``): ``args`` for the
+    agent's command line, ``env`` for its process, and ``settings`` for its per-launch
+    settings layer (:meth:`AgentAdapter.settings_layer`), each where the agent takes it.
+    Claude Code's and Codex's slots answer arguments (``--mcp-config``, ``-c``); an agent
+    whose only seams are its environment and its settings files (Gemini CLI's
+    ``mcpServers``, ``experimental.enableAgents``, ``CLI_TITLE``) answers those."""
+
+    args: tuple[str, ...] = ()
+    env: Mapping[str, str] = field(default_factory=dict)
+    settings: Mapping[str, Any] = field(default_factory=dict)
+
+    def __bool__(self) -> bool:
+        return bool(self.args or self.env or self.settings)
+
+
+def merged_settings(*layers: Mapping[str, Any]) -> dict[str, Any]:
+    """``layers`` as one settings document, table by table, a later value winning: what one
+    launch's :class:`LaunchPart` settings make of its settings layer."""
+    result: dict[str, Any] = {}
+    for layer in layers:
+        for key, value in layer.items():
+            mine = result.get(key)
+            if isinstance(mine, Mapping) and isinstance(value, Mapping):
+                result[key] = merged_settings(mine, value)
+            else:
+                result[key] = dict(value) if isinstance(value, Mapping) else value
+    return result
 
 
 ScreenShape = Literal["trust", "chooser", "yn", "dialog"]
@@ -205,17 +237,6 @@ class AgentCapabilities:
     stop``'s ``/exit``: Codex opens dialogs of its own after a turn's ``Stop`` (``Switch
     to gpt-6-luna for lower credit usage?``, past a turn near its limit), where an Enter
     picks for the human."""
-    fleet_settings: tuple[str, ...] = ()
-    """``-c`` settings (``key=value``, Codex's config overrides) the agent of a fleet window
-    launches with, each unless a config layer of the operator's sets its key
-    (``services.agent_launch.fleet_settings_args``): Codex's
-    ``notice.hide_rate_limit_model_nudge=true``, which keeps its ``Switch to gpt-6-luna
-    for lower credit usage?`` dialog, opened past a turn near the five-hour limit while
-    its hooks say waiting, out of a pane the fleet types into (measured on 0.162.1), and
-    ``check_for_update_on_startup=false``, which keeps its ``Update available`` dialog
-    out of a starting pane: an npm-installed 0.162.1 opened it once 0.163.0 was out
-    (CI on 72a88fc0), its first choice, which an Enter picks, running ``npm install
-    -g @openai/codex``."""
     start_dialog_mark: str | None = None
     """What starts the last line of the agent's screen while a dialog it puts up before its
     start holds it for the human, where an Enter answers it: Claude Code's ``Enter to
@@ -879,7 +900,8 @@ class AgentAdapter(Protocol):
     :meth:`label_args`, :meth:`resume_args`, :meth:`fork_args`,
     ``exit_command``, ``dismiss_key``, :meth:`queue_args`,
     :meth:`mcp_args`, :meth:`tools_only_args`, :meth:`context_files`,
-    :meth:`disable_native_teams`, :meth:`unattended_env`,
+    :meth:`disable_native_teams`, :meth:`fleet_settings`, :meth:`settings_layer`,
+    :meth:`unattended_env`,
     :meth:`telemetry_args` with ``telemetry_reader``. Personas: :meth:`system_prompt_args`,
     :meth:`skill_dirs`, :meth:`headless_call` with :meth:`headless_answer`. Accounts:
     ``accounts``.
@@ -994,8 +1016,9 @@ class AgentAdapter(Protocol):
         executable: str,
         args: list[str],
         env_vars: list[str] | None = None,
-    ) -> list[str]:
-        """Launch arguments that register AISquare's MCP server for this session only."""
+    ) -> LaunchPart:
+        """What registers AISquare's MCP server (``executable`` with ``args``, inheriting the
+        variables ``env_vars`` names) for this session only (:class:`LaunchPart`)."""
         ...
 
     def resolve_model(
@@ -1104,8 +1127,9 @@ class AgentAdapter(Protocol):
         """A fleet spawn's flags from the role's native permission settings, and its label."""
         ...
 
-    def label_args(self, label: str) -> list[str]:
-        """Flags that show the fleet label in the agent's UI; ``[]`` where it has none."""
+    def label_args(self, label: str) -> LaunchPart:
+        """What shows the fleet label in the agent's UI (Claude Code's ``--name``); empty
+        where it has none."""
         ...
 
     def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
@@ -1148,8 +1172,26 @@ class AgentAdapter(Protocol):
         an agent without such a queue (the message is then a board note)."""
         ...
 
-    def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
-        """Arguments and environment that keep the agent's own sub-agent teams off."""
+    def disable_native_teams(self) -> LaunchPart:
+        """What keeps the agent's own sub-agent teams off (``[fleet]
+        disable_native_agent_teams``)."""
+        ...
+
+    def fleet_settings(self, home: Path, args: Sequence[str]) -> LaunchPart:
+        """What the agent of a fleet window launches with to keep a dialog of its own out of a
+        pane the fleet types into, from config dir ``home`` with ``args``, less what a config
+        layer of the operator's sets itself (``services.agent_launch.fleet_settings``, asked
+        in a fleet window alone: elsewhere the human answers the agent's dialogs). Codex's
+        ``notice.hide_rate_limit_model_nudge`` and ``check_for_update_on_startup``."""
+        ...
+
+    def settings_layer(self, settings: Mapping[str, Any], file: Path) -> LaunchPart | None:
+        """What gives the session ``settings`` as a settings layer of its own, above the
+        operator's (the :class:`LaunchPart` settings a launch's slots answered,
+        :func:`merged_settings`), writing ``file`` (this launch's own, its directory made)
+        where the layer is a file: Claude Code's ``--settings <file>``, Codex's ``-c``
+        pairs, Gemini CLI's ``GEMINI_CLI_SYSTEM_DEFAULTS_PATH``. ``None`` for an agent with
+        none, whose slots answer no settings."""
         ...
 
     def unattended_env(self) -> Mapping[str, str]:
@@ -1159,9 +1201,9 @@ class AgentAdapter(Protocol):
         empty where none is kept out this way."""
         ...
 
-    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
-        """Arguments exporting the agent's OpenTelemetry logs to ``endpoint`` (OTLP/HTTP
-        JSON); ``[]`` without ``native_telemetry``. Never the receiver's ``Authorization``:
+    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> LaunchPart:
+        """What exports the agent's OpenTelemetry logs to ``endpoint`` (OTLP/HTTP JSON);
+        empty without ``native_telemetry``. Never the receiver's ``Authorization``:
         argv is every local user's to read, so the header rides in the launch environment
         (``services.native_telemetry.HEADERS_ENV``), and ``keep_out`` names the variables
         the shells the agent's tools run in must not inherit, that one among them. Whether

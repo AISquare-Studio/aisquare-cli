@@ -274,7 +274,7 @@ def _append_flags(
     except fleet_service.FleetError as exc:
         text.append(f"{adapter.label}: refused at spawn — {exc}", style="red")
         return
-    labelled = adapter.label_args(role)
+    labelled = list(adapter.label_args(role).args)
     if labelled and flags[-len(labelled) :] == labelled:
         flags = flags[: -len(labelled)]
     shown, store = _without_store_access(adapter, flags)

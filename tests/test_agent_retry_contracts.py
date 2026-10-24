@@ -863,15 +863,15 @@ def test_the_operators_own_tool_shell_exclude_or_header_leaves_native_tracing_of
     selected = agent_launch.resolve(agent="codex")
     env = {"AISQUARE_LAUNCH_ID": "launch-1"}
 
-    args, note = agent_launch.telemetry_args(
+    part, note = agent_launch.telemetry_args(
         selected, env, ["-c", 'shell_environment_policy.exclude=["MINE"]']
     )
-    assert args == [] and "native tracing is off" in note
+    assert not part and "native tracing is off" in note
 
     theirs = "x-honeycomb-team=abc"
     env[native_telemetry.HEADERS_ENV] = theirs
-    args, note = agent_launch.telemetry_args(selected, env, [])
-    assert args == [] and native_telemetry.HEADERS_ENV in note
+    part, note = agent_launch.telemetry_args(selected, env, [])
+    assert not part and native_telemetry.HEADERS_ENV in note
     assert env[native_telemetry.HEADERS_ENV] == theirs
 
 

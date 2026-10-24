@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import agents, claude_accounts, harness
 from aisquare.core.agent_adapters import codex_config
+from aisquare.core.agent_adapters.types import LaunchPart
 from aisquare.core.config import FleetRoleSettings, RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.services import agent_launch, fleet, lifecycle, native_telemetry
@@ -327,7 +328,9 @@ def test_native_launch_does_not_disable_tracing_for_prompts_or_unusable_config_o
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
-    start = Mock(return_value=(["-c", "fixture.receiver=true"], "fixture receiver started"))
+    start = Mock(
+        return_value=(LaunchPart(("-c", "fixture.receiver=true")), "fixture receiver started")
+    )
     monkeypatch.setattr(native_telemetry, "start_receiver", start)
     execute = Mock()
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
@@ -378,7 +381,7 @@ def test_unusable_native_config_layers_stand_down_with_the_exact_path(
     monkeypatch.setattr(native_telemetry, "start_receiver", start)
     selected = agent_launch.resolve(agent="codex", env_overrides={"CODEX_HOME": str(tmp_path)})
     injected, note = agent_launch.telemetry_args(selected, {}, ["--profile", "work"])
-    assert injected == [] and str(path) in note and layer in note
+    assert not injected and str(path) in note and layer in note
     start.assert_not_called()
 
 
@@ -578,7 +581,7 @@ def test_actual_launch_preserves_attached_options_and_native_prompt_terminators(
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
-    start = Mock(return_value=(["-c", "fixture.receiver=true"], "receiver started"))
+    start = Mock(return_value=(LaunchPart(("-c", "fixture.receiver=true")), "receiver started"))
     execute = Mock()
     monkeypatch.setattr(native_telemetry, "start_receiver", start)
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
@@ -603,7 +606,7 @@ def test_an_exporter_in_the_home_of_the_account_the_launch_runs_on_is_kept(
     monkeypatch.setenv("CODEX_HOME", str(shell))
     monkeypatch.setattr(codex_config, "SYSTEM_CONFIG", tmp_path / "system.toml")
     monkeypatch.setattr(agent_launch, "executable", lambda selected: "/fixture/codex")
-    start = Mock(return_value=(["-c", "fixture.receiver=true"], "receiver started"))
+    start = Mock(return_value=(LaunchPart(("-c", "fixture.receiver=true")), "receiver started"))
     monkeypatch.setattr(native_telemetry, "start_receiver", start)
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", Mock())
     slot = claude_accounts.create_account("codex")

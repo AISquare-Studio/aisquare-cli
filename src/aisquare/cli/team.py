@@ -513,7 +513,7 @@ def spawn(
         )
     )
     command = _reading_env_files(command, launch_profile.env_files)
-    argv = [argv[0], *agent_launch.mcp_args(selected), *argv[1:]]
+    mcp = agent_launch.mcp_args(selected)
     # A printed line adds nothing (below): say when the session it starts will join no board,
     # under --json as `not_added`.
     unjoined = None if execute else _joins_no_board()
@@ -644,10 +644,10 @@ def spawn(
                 # is what the hook inside the agent reads to record the join.
                 env.update(explainability_service.trace_marker(wiring))
 
-        native_trace_args, native_trace_note = agent_launch.telemetry_args(selected, env, argv[1:])
+        native_trace, native_trace_note = agent_launch.telemetry_args(selected, env, argv[1:])
         if native_trace_note:
             typer.echo(native_trace_note, err=True)
-        argv = [argv[0], *native_trace_args, *argv[1:]]
+        argv = [argv[0], *agent_launch.compose(selected, env, native_trace, mcp), *argv[1:]]
         # As `aisquare launch`: the store is read-only in the agent's sandbox, and its
         # board calls go through this launch's broker.
         try:

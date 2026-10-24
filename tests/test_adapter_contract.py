@@ -485,7 +485,7 @@ def test_launch_args_for_each_role(adapter: AgentAdapter, role: str) -> None:
     label = f"{role}-1"
     args = adapter.fleet_args(role, label, None)
     assert all(isinstance(arg, str) for arg in args)
-    labelled = adapter.label_args(label)
+    labelled = list(adapter.label_args(label).args)
     assert not labelled or args[-len(labelled) :] == labelled
     assert all(
         isinstance(arg, str)
@@ -664,16 +664,13 @@ def test_resume_exit_mcp_context_teams_and_telemetry(adapter: AgentAdapter, tmp_
     assert key and not any(char.isspace() for char in key), key
     assert key not in {"Enter", "C-m", "KPEnter", "Space"}, key
     mcp = adapter.mcp_args("/opt/aisquare", ["serve", "--stdio"], ["AISQUARE_HOME"])
-    assert any("/opt/aisquare" in arg for arg in mcp)
+    assert "/opt/aisquare" in json.dumps([mcp.args, dict(mcp.env), mcp.settings])
     files = adapter.context_files(tmp_path)
     assert files and all(path.parent == tmp_path for path in files)
-    args, env = adapter.disable_native_teams()
-    assert args or env, "the fleet keeps the agent's own sub-agent teams off"
+    assert adapter.disable_native_teams(), "the fleet keeps the agent's own sub-agent teams off"
     telemetry = adapter.telemetry_args("http://127.0.0.1:9/v1/logs")
     if adapter.capabilities.native_telemetry:
-        assert any("127.0.0.1:9" in arg for arg in telemetry)
-    else:
-        assert telemetry == []
+        assert "127.0.0.1:9" in json.dumps([telemetry.args, dict(telemetry.env)])
 
 
 def test_the_unattended_environment_is_the_agents_own_variables(adapter: AgentAdapter) -> None:
@@ -688,7 +685,7 @@ def test_the_unattended_environment_is_the_agents_own_variables(adapter: AgentAd
     capabilities = adapter.capabilities
     taken = {adapter.home_env, capabilities.pid_env, capabilities.tool_shell_env}
     assert not taken & set(env), "never a variable that identifies a session"
-    assert not set(adapter.disable_native_teams()[1]) & set(env)
+    assert not set(adapter.disable_native_teams().env) & set(env)
     assert not any(name.startswith("AISQUARE_") for name in env), "AISquare's are the fleet's"
 
 
@@ -714,7 +711,7 @@ def test_a_tools_only_session_names_its_server_and_leaves_no_built_in_tool(
     for switch in EXPECTED_TOOLS_OFF[adapter.id]:
         assert _runs_within(switch, only), f"{adapter.id} leaves a built-in tool: {switch}"
     assert "--enable" not in only
-    assert only != adapter.mcp_args(command, args, list(env))
+    assert only != list(adapter.mcp_args(command, args, list(env)).args)
 
 
 def _operator_server(adapter: AgentAdapter, home: Path, cwd: Path) -> None:
@@ -1834,3 +1831,42 @@ def test_the_receiver_keeps_what_the_agents_own_telemetry_reader_keeps(
     }
     [record] = native_telemetry.events(payload, reader)
     assert "DO_NOT_SPOOL" not in json.dumps(record) and record["event.name"] == "an.event"
+
+
+def test_every_launch_slot_answers_a_launch_part_and_its_settings_reach_the_agents_layer(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """S3: ``mcp_args``, ``label_args``, ``disable_native_teams``, ``fleet_settings`` and
+    ``telemetry_args`` answer ``LaunchPart(args, env, settings)``, so an agent whose only
+    seams are its variables and its settings files (the Gemini-shaped one) is no edit of the
+    launch's; an adapter whose slots answer settings has a ``settings_layer`` that gives them
+    to its session, and one that names a file names the one it wrote."""
+    from aisquare.core.agent_adapters.types import LaunchPart, merged_settings
+
+    parts = [
+        adapter.mcp_args("/opt/aisquare", ["serve", "--stdio"], ["AISQUARE_HOME"]),
+        adapter.label_args("coder-1"),
+        adapter.disable_native_teams(),
+        adapter.fleet_settings(tmp_path, []),
+        adapter.telemetry_args("http://127.0.0.1:9/v1/logs"),
+    ]
+    for part in parts:
+        assert isinstance(part, LaunchPart)
+        assert all(isinstance(arg, str) for arg in part.args)
+        assert all(isinstance(v, str) for v in part.env.values())
+        json.dumps(part.settings)  # a settings document
+    answered = merged_settings(*(part.settings for part in parts))
+    file = tmp_path / "launch-settings" / "launch-1.json"
+    file.parent.mkdir()
+    layer = adapter.settings_layer(answered or {"aisquare": {"conformance": True}}, file)
+    assert layer is not None or not answered, f"{adapter.id} answers settings with no layer"
+    if layer is None:
+        return
+    assert layer, "a layer gives the session its settings"
+    named = [*layer.args, *layer.env.values()]
+    if str(file) in named:
+        assert json.loads(file.read_text("utf-8")) == (
+            answered or {"aisquare": {"conformance": True}}
+        )
+    else:
+        assert not file.exists(), "a layer that names no file writes none"

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
+import uuid
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from aisquare.core import agents, harness, orchestrator, paths, selfcli
 from aisquare.core.agent_adapters import (
@@ -16,7 +19,12 @@ from aisquare.core.agent_adapters import (
     default_adapter,
     get_adapter,
 )
-from aisquare.core.agent_adapters.types import AgentAdapter, BadEffortError
+from aisquare.core.agent_adapters.types import (
+    AgentAdapter,
+    BadEffortError,
+    LaunchPart,
+    merged_settings,
+)
 from aisquare.core.config import AppConfig, config_snapshot, load_config, save_config
 from aisquare.core.spawn import LAUNCH_AGENT_ENV as LAUNCH_AGENT_ENV
 from aisquare.core.spawn import LAUNCH_PID_ENV
@@ -79,8 +87,6 @@ def executable(selected: ResolvedAgent) -> str | None:
 
 def launch_identity(env: dict[str, str], selected: ResolvedAgent, hub: Path | None) -> str | None:
     """Disown an inherited pane before giving this launch its own identity."""
-    import uuid
-
     from aisquare.services import explainability
 
     fleet = env.get("AISQUARE_FLEET_AGENT") if not env.get("AISQUARE_LAUNCH_ID") else None
@@ -368,13 +374,14 @@ def model_for(
     return result
 
 
-def mcp_args(selected: ResolvedAgent) -> list[str]:
+def mcp_args(selected: ResolvedAgent) -> LaunchPart:
+    """AISquare's MCP server for this launch (``[agents] mcp``), as the agent takes it."""
     try:
         enabled = load_config().agents.mcp
     except Exception:
-        return []
+        return LaunchPart()
     if not enabled:
-        return []
+        return LaunchPart()
     command = selfcli.argv_for(["serve", "--stdio", "--close-after", "0"])
     return selected.adapter.mcp_args(
         command[0],
@@ -393,7 +400,7 @@ def mcp_args(selected: ResolvedAgent) -> list[str]:
                 *(
                     key
                     for key in {**os.environ, **selected.profile.env}
-                    if key.startswith("AISQUARE_")
+                    if key.startswith("AISQUARE_") and key != LAUNCH_SETTINGS_ENV
                 ),
             }
         ),
@@ -447,76 +454,130 @@ def _launch_home(selected: ResolvedAgent, env: Mapping[str, str]) -> Path:
     return selected.config_dir
 
 
-def fleet_settings_args(
+def fleet_settings(
     selected: ResolvedAgent, env: Mapping[str, str], raw_args: list[str]
-) -> list[str]:
-    """The ``-c`` settings the agent of a fleet window launches with
-    (``capabilities.fleet_settings``), each one no config layer of the operator's sets
-    (``native_telemetry.operator_sets``: their overrides in ``raw_args``, the system and
-    user config of this launch's home, its ``-p`` profile); none outside a fleet window
-    (``AISQUARE_FLEET_AGENT``), where the human answers the agent's dialogs. A layer that
-    cannot be read may set it, and is left to: nothing is added for it."""
-    from aisquare.core.agent_adapters import codex_config
+) -> LaunchPart:
+    """What the agent of a fleet window launches with to keep a dialog of its own out of the
+    pane the fleet types into (``AgentAdapter.fleet_settings``, from this launch's home);
+    nothing outside a fleet window (``AISQUARE_FLEET_AGENT``), where the human answers the
+    agent's dialogs."""
+    if not env.get(orchestrator.FLEET_AGENT_ENV_VAR, "").strip():
+        return LaunchPart()
+    return selected.adapter.fleet_settings(_launch_home(selected, env), raw_args)
 
-    settings = selected.adapter.capabilities.fleet_settings
-    if not settings or not env.get(orchestrator.FLEET_AGENT_ENV_VAR, "").strip():
-        return []
-    home = _launch_home(selected, env)
+
+LAUNCH_SETTINGS_ENV = "AISQUARE_LAUNCH_SETTINGS"
+"""Where a fleet spawn hands its window's ``aisquare launch`` the settings its slots answered
+(``LaunchPart.settings``: the label's, the teams'), as JSON, for the one settings layer that
+launch writes (:func:`compose`); never in the agent's environment."""
+
+
+def carry_settings(env: dict[str, str], part: LaunchPart) -> None:
+    """Hand ``part``'s environment, and its settings (:data:`LAUNCH_SETTINGS_ENV`), to the
+    window ``env`` starts: what a fleet spawn's own slots answer beside their arguments."""
+    env.update(part.env)
+    if part.settings:
+        env[LAUNCH_SETTINGS_ENV] = json.dumps(
+            merged_settings(_carried(env.get(LAUNCH_SETTINGS_ENV)), part.settings)
+        )
+
+
+def _carried(raw: str | None) -> dict[str, Any]:
+    try:
+        carried = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    return carried if isinstance(carried, dict) else {}
+
+
+def compose(selected: ResolvedAgent, env: dict[str, str], *parts: LaunchPart) -> list[str]:
+    """The arguments ``parts`` add to this launch, in order, with their environment applied to
+    ``env``, and their settings and the spawn's (:data:`LAUNCH_SETTINGS_ENV`, taken out of
+    ``env``) given as the agent's one settings layer of this launch
+    (``AgentAdapter.settings_layer``: a file under the cache named for the launch, for an
+    agent whose layer is a file). ``ValueError`` for settings answered for an agent with no
+    layer, which the conformance suite refuses an adapter."""
     args: list[str] = []
-    for setting in settings:
-        try:
-            if codex_config.operator_sets(home, raw_args, setting.partition("=")[0]):
-                continue
-        except codex_config.NativeConfigError:
-            continue
-        args += ["-c", setting]
+    for part in parts:
+        args += part.args
+        env.update(part.env)
+    settings = merged_settings(
+        _carried(env.pop(LAUNCH_SETTINGS_ENV, None)), *(part.settings for part in parts)
+    )
+    if settings:
+        launch = env.get("AISQUARE_LAUNCH_ID") or uuid.uuid4().hex
+        file = paths.cache_dir() / "launch-settings" / f"{launch}.json"
+        file.parent.mkdir(parents=True, exist_ok=True)
+        _prune_settings(file.parent)
+        layer = selected.adapter.settings_layer(settings, file)
+        if layer is None:
+            raise ValueError(f"{selected.adapter.label} has no settings layer for {settings}")
+        args += layer.args
+        env.update(layer.env)
     return args
+
+
+_SETTINGS_KEPT_SECONDS = 7 * 24 * 3600
+
+
+def _prune_settings(directory: Path) -> None:
+    """Drop the settings layers of launches a week old: a running agent read its own at its
+    start, and one restarted later writes it again."""
+    import time
+
+    old = time.time() - _SETTINGS_KEPT_SECONDS
+    for stale in directory.glob("*.json"):
+        with suppress(OSError):
+            if stale.stat().st_mtime < old:
+                stale.unlink()
 
 
 def telemetry_args(
     selected: ResolvedAgent,
     env: dict[str, str],
     raw_args: list[str] | None = None,
-) -> tuple[list[str], str]:
+) -> tuple[LaunchPart, str]:
+    """The agent's native telemetry for this launch (``AgentAdapter.telemetry_args``, its
+    per-launch receiver started), and the note that says what came of it."""
     from aisquare.services import native_telemetry
 
     native_telemetry.disown_headers(env)
     adapter = selected.adapter
     reader = adapter.telemetry_reader
     if not adapter.capabilities.native_telemetry or reader is None:
-        return [], ""
+        return LaunchPart(), ""
     home = _launch_home(selected, env)
     cwd = Path.cwd()
     try:
         settings = load_config().explainability
         if not settings.enabled:
-            return [], ""
+            return LaunchPart(), ""
         if not settings.ship:
             return (
-                [],
+                LaunchPart(),
                 f"{adapter.label} model tracing requires configured insight shipping; "
                 "native auth unchanged",
             )
         if reader.operator_configured(home, raw_args or [], cwd):
             return (
-                [],
+                LaunchPart(),
                 f"{adapter.label} keeps your configured exporter; AISquare native tracing is off",
             )
         if env.get(native_telemetry.HEADERS_ENV):
             # The operator's own (ours was disowned above): the receiver's would replace
             # it in the agent's environment, and so in every process its tools start.
             return (
-                [],
+                LaunchPart(),
                 f"{adapter.label} keeps your {native_telemetry.HEADERS_ENV}; "
                 "AISquare native tracing is off",
             )
         excluded = reader.tool_shell_excludes(home, raw_args or [], cwd)
         if excluded is None:
             return (
-                [],
+                LaunchPart(),
                 f"{adapter.label} keeps your {reader.tool_shell_policy}, which "
                 "would hand AISquare's tracing token to every tool; native tracing is off",
             )
         return native_telemetry.start_receiver(env, adapter, excluded)
     except Exception as exc:
-        return [], f"{adapter.label} launched without native telemetry: {exc}"
+        return LaunchPart(), f"{adapter.label} launched without native telemetry: {exc}"

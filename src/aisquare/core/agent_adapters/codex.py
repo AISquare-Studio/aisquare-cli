@@ -23,6 +23,7 @@ from aisquare.core.agent_adapters.types import (
     HooksSwitch,
     InstallRoute,
     LastingInstall,
+    LaunchPart,
     NativeChoice,
     PermissionArgs,
     PermissionIntent,
@@ -191,6 +192,9 @@ PERMISSION_PROFILE = "aisquare"
 #: The system layer of Codex's config, under every user's (``services.native_telemetry``
 #: reads it too): 0.162.1 reads it (in its binary, review r14 of #113, finding 9).
 SYSTEM_CONFIG = Path("/etc/codex/config.toml")
+#: What a fleet window's Codex launches with (:meth:`CodexAdapter.fleet_settings`), each
+#: unless a config layer of the operator's sets its key.
+FLEET_SETTINGS = ("notice.hide_rate_limit_model_nudge=true", "check_for_update_on_startup=false")
 #: The managed layer an administrator sets over every user's config, also in 0.162.1's
 #: binary (review r15 of #113, finding 4). Its ``requirements.toml`` beside it only
 #: narrows what may be chosen, and its macOS MDM and cloud-managed layers are not files.
@@ -519,10 +523,6 @@ class CodexAdapter:
         one_press_exits=frozenset({"C-c", "C-d"}),
         dialog_on_screen=dialog_on_screen,
         screen_prompt=screen_prompt,
-        fleet_settings=(
-            "notice.hide_rate_limit_model_nudge=true",
-            "check_for_update_on_startup=false",
-        ),
         first_context_file_only=True,
         sandbox_permissions=True,
         sandboxes_tools=True,
@@ -838,17 +838,19 @@ class CodexAdapter:
         executable: str,
         args: list[str],
         env_vars: list[str] | None = None,
-    ) -> list[str]:
-        return [
-            "-c",
-            f"mcp_servers.aisquare.command={json.dumps(executable)}",
-            "-c",
-            f"mcp_servers.aisquare.args={json.dumps(args)}",
-            "-c",
-            f"mcp_servers.aisquare.env_vars={json.dumps(env_vars or [])}",
-            "-c",
-            "mcp_servers.aisquare.required=false",
-        ]
+    ) -> LaunchPart:
+        return LaunchPart(
+            (
+                "-c",
+                f"mcp_servers.aisquare.command={json.dumps(executable)}",
+                "-c",
+                f"mcp_servers.aisquare.args={json.dumps(args)}",
+                "-c",
+                f"mcp_servers.aisquare.env_vars={json.dumps(env_vars or [])}",
+                "-c",
+                "mcp_servers.aisquare.required=false",
+            )
+        )
 
     def tools_only_args(
         self,
@@ -1256,8 +1258,8 @@ class CodexAdapter:
             return []
         return ["-c", f"approvals_reviewer={json.dumps(REVIEWERS[approvals])}"]
 
-    def label_args(self, label: str) -> list[str]:
-        return []
+    def label_args(self, label: str) -> LaunchPart:
+        return LaunchPart()
 
     def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
         """``codex resume <SESSION_ID>``: the thread by its id, any options after it."""
@@ -1286,12 +1288,46 @@ class CodexAdapter:
         queue exits with "unexpected argument" (measured)."""
         return ["queue", "--thread", native_session_id, f"--message={message}"]
 
-    def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
-        return ["-c", "agents.enabled=false"], {}
+    def disable_native_teams(self) -> LaunchPart:
+        return LaunchPart(("-c", "agents.enabled=false"))
+
+    def fleet_settings(self, home: Path, args: Sequence[str]) -> LaunchPart:
+        """``-c`` for each of :data:`FLEET_SETTINGS` no config layer of the operator's sets
+        (``codex_config.operator_sets``: their overrides in ``args``, the system and user
+        config of ``home``, its ``-p`` profile; a layer that cannot be read may set it, and is
+        left to): ``notice.hide_rate_limit_model_nudge=true`` keeps its ``Switch to
+        gpt-6-luna for lower credit usage?`` dialog, opened past a turn near the five-hour
+        limit while its hooks say waiting, out of a pane the fleet types into (measured on
+        0.162.1), and ``check_for_update_on_startup=false`` its ``Update available`` dialog
+        out of a starting pane: an npm-installed 0.162.1 opened it once 0.163.0 was out (CI
+        on 72a88fc0), its first choice, which an Enter picks, running ``npm install -g
+        @openai/codex``."""
+        from aisquare.core.agent_adapters import codex_config
+
+        given: list[str] = []
+        for setting in FLEET_SETTINGS:
+            try:
+                if codex_config.operator_sets(home, list(args), setting.partition("=")[0]):
+                    continue
+            except codex_config.NativeConfigError:
+                continue
+            given += ["-c", setting]
+        return LaunchPart(tuple(given))
+
+    def settings_layer(self, settings: Mapping[str, Any], file: Path) -> LaunchPart | None:
+        """Its ``-c`` overrides, the top layer of its config, one a leaf (``a.b=<TOML>``):
+        no file. None of its slots answers settings today; they spell their ``-c``."""
+        return LaunchPart(
+            tuple(
+                arg
+                for key, value in _leaves(settings)
+                for arg in ("-c", f"{key}={json.dumps(value)}")
+            )
+        )
 
     def unattended_env(self) -> Mapping[str, str]:
         """None: the dialogs Codex opens in a running pane are kept out by
-        ``capabilities.fleet_settings`` (its model-switch offer and update notice)."""
+        :meth:`fleet_settings` (its model-switch offer and update notice)."""
         return MappingProxyType({})
 
     def system_prompt_args(
@@ -1381,7 +1417,7 @@ class CodexAdapter:
             (repo / ".agents" / "skills", repo / ".codex" / "skills") if repo is not None else (),
         )
 
-    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
+    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> LaunchPart:
         """Codex's own OTLP/HTTP log exporter (asynchronous; no model routing or auth
         change), without the user's prompts. Its headers come from the launch environment:
         0.162.1's exporter sends OTLP's ``OTEL_EXPORTER_OTLP_LOGS_HEADERS`` (measured).
@@ -1389,16 +1425,30 @@ class CodexAdapter:
         keeps a variable from every command the agent runs while Codex's own process and
         its exporter keep it (measured on 0.162.1)."""
         config = "otel.exporter.otlp-http"
-        excluded = ["-c", f"shell_environment_policy.exclude={json.dumps(list(keep_out))}"]
-        return [
-            "-c",
-            f"{config}.endpoint={json.dumps(endpoint)}",
-            "-c",
-            f'{config}.protocol="json"',
-            "-c",
-            "otel.log_user_prompt=false",
-            *(excluded if keep_out else []),
-        ]
+        excluded = ("-c", f"shell_environment_policy.exclude={json.dumps(list(keep_out))}")
+        return LaunchPart(
+            (
+                "-c",
+                f"{config}.endpoint={json.dumps(endpoint)}",
+                "-c",
+                f'{config}.protocol="json"',
+                "-c",
+                "otel.log_user_prompt=false",
+                *(excluded if keep_out else ()),
+            )
+        )
+
+
+def _leaves(settings: Mapping[str, Any], prefix: str = "") -> list[tuple[str, Any]]:
+    """Each leaf of ``settings``, by its dotted key, as a ``-c`` override names it."""
+    found: list[tuple[str, Any]] = []
+    for key, value in settings.items():
+        dotted = f"{prefix}{key}"
+        if isinstance(value, Mapping):
+            found += _leaves(value, f"{dotted}.")
+        else:
+            found.append((dotted, value))
+    return found
 
 
 def _toml_features(path: Path) -> dict[str, Any]:

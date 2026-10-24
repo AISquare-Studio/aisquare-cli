@@ -241,7 +241,8 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
         env["OPERATOR_SECRET"] = "kept-out"
         excluded = codex_config.tool_shell_excludes(native_home, ["-p", "p"], workspace)
         assert excluded == ["OPERATOR_SECRET"]
-        telemetry_args, note = native_telemetry.start_receiver(env, codex, excluded)
+        exporter, note = native_telemetry.start_receiver(env, codex, excluded)
+        telemetry_args = list(exporter.args)
         assert telemetry_args, note
         # The receiver's token reaches Codex in its environment, never on its command line.
         token = env[native_telemetry.HEADERS_ENV].rpartition("%20")[2]
@@ -250,7 +251,7 @@ def test_real_codex_hooks_resume_and_usage(tmp_path: Path, monkeypatch: pytest.M
         base = [
             binary,
             *telemetry_args,
-            *agent_launch.mcp_args(agent_launch.resolve(agent="codex")),
+            *agent_launch.mcp_args(agent_launch.resolve(agent="codex")).args,
             "-c",
             "mcp_optional_startup_grace_ms=0",
             "-c",

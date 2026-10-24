@@ -48,6 +48,7 @@ from aisquare.core.agent_adapters.types import (
     HooksSwitch,
     InstallRoute,
     LastingInstall,
+    LaunchPart,
     NativeChoice,
     PermissionArgs,
     PermissionIntent,
@@ -480,9 +481,9 @@ class FakeAgentAdapter:
 
     def mcp_args(
         self, executable: str, args: list[str], env_vars: list[str] | None = None
-    ) -> list[str]:
+    ) -> LaunchPart:
         server = {"command": executable, "args": args, "env": env_vars or []}
-        return ["--mcp", json.dumps({"aisquare": server})]
+        return LaunchPart(("--mcp", json.dumps({"aisquare": server})))
 
     def tools_only_args(
         self,
@@ -615,10 +616,10 @@ class FakeAgentAdapter:
             if permission_mode
             else PermissionIntent.for_role(role)
         )
-        return [*self.permission_args(intent, role).args, *self.label_args(label)]
+        return [*self.permission_args(intent, role).args, *self.label_args(label).args]
 
-    def label_args(self, label: str) -> list[str]:
-        return ["--title", label]
+    def label_args(self, label: str) -> LaunchPart:
+        return LaunchPart(("--title", label))
 
     def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
         return ["--thread", native_session_id]
@@ -629,14 +630,21 @@ class FakeAgentAdapter:
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
         return ["inbox", native_session_id, message]
 
-    def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
-        return ["--no-subagents"], {"FAKE_AGENT_TEAMS": "off"}
+    def disable_native_teams(self) -> LaunchPart:
+        return LaunchPart(("--no-subagents",), {"FAKE_AGENT_TEAMS": "off"})
+
+    def fleet_settings(self, home: Path, args: Sequence[str]) -> LaunchPart:
+        return LaunchPart(("--no-tips",))  # its tip of the day waits for a key
+
+    def settings_layer(self, settings: Mapping[str, Any], file: Path) -> LaunchPart | None:
+        file.write_text(json.dumps(settings), encoding="utf-8")
+        return LaunchPart(("--settings-file", str(file)))
 
     def unattended_env(self) -> Mapping[str, str]:
         return {"FAKE_AGENT_NO_TIPS": "1"}  # its tip of the day waits for a key
 
-    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
-        return []
+    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> LaunchPart:
+        return LaunchPart()
 
     def system_prompt_args(
         self, block: Path, text: str, args: Sequence[str], home: Path, *, cwd: Path

@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core import agents, harness, paths
 from aisquare.core.agent_adapters import codex_config, get_adapter
-from aisquare.core.agent_adapters.types import config_home, store_dir
+from aisquare.core.agent_adapters.types import LaunchPart, config_home, store_dir
 from aisquare.core.config import FleetRoleSettings, RoleLaunchProfile, load_config, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
@@ -285,7 +285,7 @@ def test_damaged_config_keeps_codex_launch_native_and_clears_parent_tracing(
         )
     )
     claude = agent_launch.resolve(agent="claude-code")
-    assert agent_launch.telemetry_args(claude, {}) == ([], "")
+    assert agent_launch.telemetry_args(claude, {}) == (LaunchPart(), "")
 
 
 def test_probe_cache_ignores_session_churn_but_separates_logins_and_providers(

@@ -327,3 +327,71 @@ def test_the_receiver_spools_its_records_as_its_own_reader_keeps_them() -> None:
         assert "model" not in native and "DO_NOT_SPOOL" not in json.dumps(record)
     finally:
         unregister(adapter.id)
+
+
+# --- launch: its environment and a settings layer, no flag of its own ----------------------
+
+
+def test_a_fleet_spawn_launches_it_by_its_variables_and_one_settings_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """S3: the Gemini-shaped agent takes no flag for its MCP server, its label, its teams or
+    its update notice. A fleet spawn hands its window the label's variable and the teams'
+    setting; the window's ``aisquare launch`` gives the agent the label, and its MCP server,
+    teams switch and fleet setting as ONE settings layer of its launch's own, named by its
+    variable, and its command line carries no flag of another agent's."""
+    from importlib import import_module
+    from unittest.mock import Mock
+
+    from aisquare.core.config import FleetRoleSettings, load_config, save_config
+    from aisquare.core.orchestrator import team_project
+    from aisquare.services import fleet as fleet_service
+    from tests import fakebin
+    from tests.test_fleet_service import FakeTmux
+
+    adapter = GeminiShapedAdapter()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        config = load_config()
+        config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+        config.agents.mcp = True
+        save_config(config)
+        bin_dir = tmp_path / "bin"
+        fakebin.executable_fake(bin_dir, "gemini", windows="set /p line=", posix="read line")
+        fakebin.prepend_to_path(bin_dir, monkeypatch)
+        tmux = FakeTmux()
+        monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+        project = team_project(tmp_path)
+
+        receipt = fleet_service.spawn(project, "coder", agent=adapter.id)
+
+        spawned = tmux.spawned[-1]
+        command, window = spawned["command"], spawned["env"]
+        assert isinstance(command, list) and isinstance(window, dict)
+        label = receipt.agent.label
+        assert window["CLI_TITLE"] == label
+        carried = json.loads(window["AISQUARE_LAUNCH_SETTINGS"])
+        assert carried == {"experimental": {"enableAgents": False}}
+        assert "has no reviewer of its own" in " ".join(receipt.notes)  # S4, on the receipt
+
+        for name in ("CLI_TITLE", "AISQUARE_LAUNCH_SETTINGS", "AISQUARE_FLEET_AGENT"):
+            monkeypatch.setenv(name, window[name])
+        execute = Mock()
+        monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+        result = runner.invoke(app, command[command.index("launch") :])
+
+        assert result.exit_code == 0, result.output
+        argv, launched = execute.call_args.args[1], execute.call_args.args[2]
+        assert Path(argv[0]).name == "gemini"
+        assert not {"--mcp-config", "--mcp", "--name", "-c"} & set(argv), argv
+        assert "AISQUARE_LAUNCH_SETTINGS" not in launched, "the agent never sees the carrier"
+        assert launched["CLI_TITLE"] == label
+        layer = json.loads(Path(launched["GEMINI_CLI_SYSTEM_DEFAULTS_PATH"]).read_text("utf-8"))
+        assert layer["experimental"] == {"enableAgents": False}
+        assert layer["general"] == {"enableAutoUpdateNotification": False}
+        server = layer["mcpServers"]["aisquare"]
+        assert server["args"][-4:] == ["serve", "--stdio", "--close-after", "0"]
+        assert server["env"]["AISQUARE_HOME"] == "$AISQUARE_HOME"
+    finally:
+        unregister(adapter.id)

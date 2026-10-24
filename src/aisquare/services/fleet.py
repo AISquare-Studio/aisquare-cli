@@ -4546,10 +4546,14 @@ def spawn(
             # read from this one switched off a server the window's config does not define,
             # and Codex refused that config (review r17 of #113, finding 8).
             env[selected.adapter.home_env] = str(selected.config_dir)
+    # The label's and the teams' own environment and settings beside their arguments (an
+    # agent whose seams are its variables and settings files), for the window's `launch` to
+    # give as the agent's settings layer (`agent_launch.compose`).
+    agent_launch.carry_settings(env, replace(selected.adapter.label_args(picked), args=()))
     if config.disable_native_agent_teams:
-        native_args, native_env = selected.adapter.disable_native_teams()
-        native += native_args
-        env.update(native_env)
+        teams = selected.adapter.disable_native_teams()
+        native += teams.args
+        agent_launch.carry_settings(env, teams)
     # `-E`: the window's `aisquare launch` ignores the tmux server's PYTHONPATH, which may
     # name a directory a sandboxed agent writes, while the agent it execs keeps it (review
     # r14 of #113, finding 4).
@@ -4967,7 +4971,7 @@ def permission_flags(
             granted = adapter.permission_args(intent, role, native)
         except ValueError as exc:
             raise FleetError(f"{adapter.label}: {exc}") from exc
-        flags = [*granted.args, *adapter.label_args(label)]
+        flags = [*granted.args, *adapter.label_args(label).args]
         if notes is not None:
             notes.extend(granted.notes)
         # Recorded as written, so a restart maps it again for whichever agent it starts.

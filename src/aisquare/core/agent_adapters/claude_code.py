@@ -24,6 +24,7 @@ from aisquare.core.agent_adapters.types import (
     HooksSwitch,
     InstallRoute,
     LastingInstall,
+    LaunchPart,
     NativeChoice,
     PermissionArgs,
     PermissionIntent,
@@ -355,13 +356,11 @@ class ClaudeCodeAdapter:
         executable: str,
         args: list[str],
         env_vars: list[str] | None = None,
-    ) -> list[str]:
+    ) -> LaunchPart:
         import json
 
-        return [
-            "--mcp-config",
-            json.dumps({"mcpServers": {"aisquare": {"command": executable, "args": args}}}),
-        ]
+        config = {"mcpServers": {"aisquare": {"command": executable, "args": args}}}
+        return LaunchPart(("--mcp-config", json.dumps(config)))
 
     def tools_only_args(
         self,
@@ -499,12 +498,12 @@ class ClaudeCodeAdapter:
             raise ValueError(
                 "Claude Code uses --permission-mode; sandbox/approval are Codex settings"
             )
-        return (["--permission-mode", permission_mode] if permission_mode else []) + (
-            self.label_args(label)
+        return (["--permission-mode", permission_mode] if permission_mode else []) + list(
+            self.label_args(label).args
         )
 
-    def label_args(self, label: str) -> list[str]:
-        return ["--name", label]
+    def label_args(self, label: str) -> LaunchPart:
+        return LaunchPart(("--name", label))
 
     def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
         """``--resume <transcript>``: Claude Code ≥ 2.1.223 finds a session by its
@@ -520,16 +519,28 @@ class ClaudeCodeAdapter:
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
         return None  # no queue: `fleet tell` types into its prompt when the pane waits
 
-    def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
-        return [], {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"}
+    def disable_native_teams(self) -> LaunchPart:
+        return LaunchPart(env={"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0"})
+
+    def fleet_settings(self, home: Path, args: Sequence[str]) -> LaunchPart:
+        """None: its dialogs in a running pane reach the board through ``Notification``."""
+        return LaunchPart()
+
+    def settings_layer(self, settings: Mapping[str, Any], file: Path) -> LaunchPart | None:
+        """``--settings <file>``, a JSON layer above the operator's settings files. None of its
+        slots answers settings today; an agent's own would come here."""
+        import json
+
+        file.write_text(json.dumps(settings), encoding="utf-8")
+        return LaunchPart(("--settings", str(file)))
 
     def unattended_env(self) -> Mapping[str, str]:
         """No session-rating survey (``How is Claude doing this session?``), which drew in the
         captain's pane mid-conversation, where nothing may type and no phone can answer."""
         return MappingProxyType({"CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1"})
 
-    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
-        return []
+    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> LaunchPart:
+        return LaunchPart()  # no native telemetry: its traffic goes through the proxy
 
     def system_prompt_args(
         self, block: Path, text: str, args: Sequence[str], home: Path, *, cwd: Path

@@ -916,14 +916,14 @@ def test_the_fleets_codex_setting_yields_to_any_layer_of_the_operators(
     )
     selected = agent_launch.resolve(agent="codex")
     window = {"CODEX_HOME": str(home), "AISQUARE_FLEET_AGENT": "agt-1"}
-    given = agent_launch.fleet_settings_args(selected, window, args)
+    given = list(agent_launch.fleet_settings(selected, window, args).args)
     assert (["-c", "notice.hide_rate_limit_model_nudge=true"] in _pairs(given)) is added
     if config is None:
         assert given == [], "a layer that cannot be read may set any of them"
     # Outside a fleet window the human answers Codex's dialogs, and nothing is added.
-    assert agent_launch.fleet_settings_args(selected, {"CODEX_HOME": str(home)}, args) == []
+    assert not agent_launch.fleet_settings(selected, {"CODEX_HOME": str(home)}, args)
     claude = agent_launch.resolve(agent="claude-code")
-    assert agent_launch.fleet_settings_args(claude, window, args) == []
+    assert not agent_launch.fleet_settings(claude, window, args)
 
 
 def _pairs(argv: list[str]) -> list[list[str]]:
@@ -955,7 +955,7 @@ def test_a_fleet_codex_window_starts_with_no_update_dialog_unless_the_operator_a
     )
     selected = agent_launch.resolve(agent="codex")
     window = {"CODEX_HOME": str(home), "AISQUARE_FLEET_AGENT": "agt-1"}
-    given = agent_launch.fleet_settings_args(selected, window, args)
+    given = list(agent_launch.fleet_settings(selected, window, args).args)
     assert (["-c", "check_for_update_on_startup=false"] in _pairs(given)) is added
 
 

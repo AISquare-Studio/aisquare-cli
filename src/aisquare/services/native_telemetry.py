@@ -34,7 +34,7 @@ from urllib.parse import quote
 
 from aisquare.core import insights, orchestrator, outbox, paths, selfcli, spawn
 from aisquare.core.agent_adapters import get_adapter
-from aisquare.core.agent_adapters.types import AgentAdapter, TelemetryReader
+from aisquare.core.agent_adapters.types import AgentAdapter, LaunchPart, TelemetryReader
 from aisquare.core.agent_sessions import METADATA_PRUNE_INTERVAL, prune_metadata
 from aisquare.core.agent_sessions import NATIVE_METADATA_TTL as NATIVE_METADATA_TTL
 from aisquare.core.store import store_session
@@ -336,7 +336,7 @@ def disown_headers(env: MutableMapping[str, str]) -> None:
 
 def start_receiver(
     env: dict[str, str], adapter: AgentAdapter, keep_out: Sequence[str] = ()
-) -> tuple[list[str], str]:
+) -> tuple[LaunchPart, str]:
     """Start only for an opted-in launch. Failure costs telemetry, never launch.
 
     The receiver's header (:data:`HEADERS_ENV`) is kept out of the shells the agent's
@@ -347,7 +347,7 @@ def start_receiver(
     place of the app's headers (review r2 of #113, finding 5)."""
     if os.name != "posix":
         return (
-            [],
+            LaunchPart(),
             f"{adapter.label} native telemetry requires POSIX or WSL; native launch is available",
         )
     directory = Path(tempfile.mkdtemp(prefix="aisquare-otel-"))
@@ -382,12 +382,12 @@ def start_receiver(
         state = json.loads(ready.read_text())
         # Native exporter does asynchronous delivery. No model routing or auth changes.
         endpoint = f"http://127.0.0.1:{state['port']}/v1/logs"
-        args = adapter.telemetry_args(endpoint, keep_out=[*keep_out, HEADERS_ENV])
+        exporter = adapter.telemetry_args(endpoint, keep_out=[*keep_out, HEADERS_ENV])
         env[HEADERS_ENV] = "Authorization=" + quote("Bearer " + state["token"], safe="")
         env["AISQUARE_PIPELINE_ID"] = env["AISQUARE_LAUNCH_ID"]
         env["AISQUARE_TRACE_AGENT_NAME"] = "aisquare-" + env.get("AISQUARE_ROLE", "coder")
         return (
-            args,
+            exporter,
             f"{adapter.label} native telemetry enabled "
             "(local receiver; gateway delivery uses ship)",
         )
@@ -398,7 +398,7 @@ def start_receiver(
         for file in directory.iterdir():
             file.unlink()
         directory.rmdir()
-        return [], f"{adapter.label} launched without native telemetry: {exc}"
+        return LaunchPart(), f"{adapter.label} launched without native telemetry: {exc}"
 
 
 if __name__ == "__main__":

@@ -54,6 +54,7 @@ from aisquare.core.agent_adapters.types import (
     HooksSwitch,
     InstallRoute,
     LastingInstall,
+    LaunchPart,
     NativeChoice,
     PermissionArgs,
     PermissionIntent,
@@ -563,11 +564,13 @@ class GeminiShapedAdapter:
 
     def mcp_args(
         self, executable: str, args: list[str], env_vars: list[str] | None = None
-    ) -> list[str]:
-        """The real CLI takes a server only from a settings file (S3, a later lane's
-        ``LaunchPart``); this one is given it inline, in the settings' own shape."""
-        server = {"command": executable, "args": args, "env": dict.fromkeys(env_vars or [], "")}
-        return ["--mcp-servers", json.dumps({"aisquare": server})]
+    ) -> LaunchPart:
+        """A server only from a settings file (docs/tools/mcp-server.md: no flag adds one for
+        a session): ``mcpServers`` in its launch's settings layer, each variable it inherits
+        named as ``$NAME``, which its settings expand."""
+        env = {name: f"${name}" for name in env_vars or []}
+        server = {"command": executable, "args": args, "env": env}
+        return LaunchPart(settings={"mcpServers": {"aisquare": server}})
 
     def tools_only_args(
         self,
@@ -671,8 +674,8 @@ class GeminiShapedAdapter:
         )
         return list(self.permission_args(intent, role, native).args)
 
-    def label_args(self, label: str) -> list[str]:
-        return []  # its title is the CLI_TITLE variable, not a flag
+    def label_args(self, label: str) -> LaunchPart:
+        return LaunchPart(env={"CLI_TITLE": label})  # its title is a variable, not a flag
 
     def resume_args(self, native_session_id: str, transcript_path: Path | None) -> list[str]:
         return ["--resume", native_session_id]
@@ -683,14 +686,38 @@ class GeminiShapedAdapter:
     def queue_args(self, native_session_id: str, message: str) -> list[str] | None:
         return None
 
-    def disable_native_teams(self) -> tuple[list[str], dict[str, str]]:
-        return [], {"GEMINI_EXPERIMENTAL_ENABLE_AGENTS": "false"}
+    def disable_native_teams(self) -> LaunchPart:
+        """Its sub-agents are a setting alone (docs/core/subagents.md), no flag or variable."""
+        return LaunchPart(settings={"experimental": {"enableAgents": False}})
+
+    def fleet_settings(self, home: Path, args: Sequence[str]) -> LaunchPart:
+        """Its update notice off (``general.enableAutoUpdateNotification``), unless the
+        operator's settings say it themselves."""
+        general = agents.read_json(home / self.settings_name).get("general")
+        if isinstance(general, dict) and "enableAutoUpdateNotification" in general:
+            return LaunchPart()
+        return LaunchPart(settings={"general": {"enableAutoUpdateNotification": False}})
+
+    def settings_layer(self, settings: Mapping[str, Any], file: Path) -> LaunchPart | None:
+        """A settings file of the launch's own, which ``GEMINI_CLI_SYSTEM_DEFAULTS_PATH`` names
+        (docs/reference/configuration.md): the system-defaults layer, under every operator's."""
+        file.write_text(json.dumps(settings), encoding="utf-8")
+        return LaunchPart(env={"GEMINI_CLI_SYSTEM_DEFAULTS_PATH": str(file)})
 
     def unattended_env(self) -> Mapping[str, str]:
         return {}
 
-    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> list[str]:
-        return []
+    def telemetry_args(self, endpoint: str, *, keep_out: Sequence[str] = ()) -> LaunchPart:
+        """Its exporter by its variables alone (docs/cli/telemetry.md), prompts left out."""
+        return LaunchPart(
+            env={
+                "GEMINI_TELEMETRY_ENABLED": "true",
+                "GEMINI_TELEMETRY_TARGET": "local",
+                "GEMINI_TELEMETRY_OTLP_ENDPOINT": endpoint,
+                "GEMINI_TELEMETRY_OTLP_PROTOCOL": "http",
+                "GEMINI_TELEMETRY_LOG_PROMPTS": "false",
+            }
+        )
 
     def system_prompt_args(
         self, block: Path, text: str, args: Sequence[str], home: Path, *, cwd: Path

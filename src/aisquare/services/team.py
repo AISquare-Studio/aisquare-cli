@@ -2892,6 +2892,26 @@ class PruneReport:
         return bool(self.pruned)
 
 
+def _forget_dead_marks(
+    store: ContextStore, sessions: list[TeamSession], pruned: set[str], now: datetime
+) -> None:
+    """Delete the unbriefed marks of the sessions that ended (before this prune or in it) and
+    have been silent past :data:`_CLAIM_ORPHAN_AFTER`, the clock a prune takes a session
+    for dead by. A prune keeps a session's mark, since its next turn may revive the row
+    (final delta review, m2), and a crashed session never ends, so its mark stayed until a
+    ``forget`` or a purge (last delta review, n7). One read of every mark, whatever the
+    number of sessions."""
+    marks = store.list_meta(_unbriefed(""))
+    for session in sessions:
+        ended = session.ended_at is not None or session.id in pruned
+        if (
+            ended
+            and _unbriefed(session.id) in marks
+            and now - session.last_seen_at > _CLAIM_ORPHAN_AFTER
+        ):
+            store.delete_meta(_unbriefed(session.id))
+
+
 def prune_sessions(
     older_than_minutes: int | None = None,
     *,
@@ -2939,7 +2959,8 @@ def prune_sessions(
         project = _project(store, cwd)
         spare = _resolve_session(store, keep) if keep else None
         spare_id = spare.id if spare else None
-        for session in store.team_sessions(project.id):
+        sessions = store.team_sessions(project.id)
+        for session in sessions:
             if session.ended_at is not None or session.id == spare_id:
                 continue
             idle = now - session.last_seen_at
@@ -2952,7 +2973,7 @@ def prune_sessions(
                 # Its unbriefed mark is KEPT: a prune ends by idleness, so the session may be
                 # alive, and its next turn revives the row (a Stop as much as a prompt). With
                 # the mark gone it was never briefed once a team formed (final delta review,
-                # m2). A dead one's mark goes with `forget` or a purge (_purge_team_meta).
+                # m2). One silent past the claim clock is taken for dead, below.
                 # end_session reports what it FOUND claimed either way, so only
                 # count them as released when they actually were — otherwise
                 # the summary claims to have freed work that is still held.
@@ -2978,6 +2999,8 @@ def prune_sessions(
                 )
             )
             released_total += released
+        if not dry_run:
+            _forget_dead_marks(store, sessions, {row.id for row in pruned}, now)
         summary = None
         if pruned and not dry_run:
             summary = _emit(

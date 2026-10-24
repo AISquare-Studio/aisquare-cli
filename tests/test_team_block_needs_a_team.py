@@ -371,6 +371,55 @@ def test_a_solo_session_pruned_while_alive_is_still_briefed_when_a_team_forms(
     assert "<aisquare-team>" not in _prompt(runner, SOLO, work_dir), "once"
 
 
+@pytest.mark.parametrize("ended", ["pruned earlier", "crashed"])
+def test_a_dead_sessions_unbriefed_mark_goes_once_it_is_silent_past_the_claim_clock(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, ended: str
+) -> None:
+    """Last delta review, n7: m2 keeps a pruned session's mark, as it may be alive. A
+    crashed one never ends, so its mark stayed until a ``forget`` or a purge: #45 n6's leak.
+    A prune takes a session silent past the claim clock (four hours) for dead, as it does
+    its claims, and its mark goes; a younger one's stays (m2)."""
+    from datetime import timedelta
+
+    _team_on(runner)
+    _start(runner, SOLO, work_dir)
+    if ended == "pruned earlier":
+        team_service.prune_sessions(older_than_minutes=0)
+    with store_session() as store:
+        assert store.get_meta(team_service._unbriefed(SOLO)) is not None, "m2: kept"
+
+    now = team_service._now()
+    later = now + team_service._CLAIM_ORPHAN_AFTER + timedelta(minutes=1)
+    monkeypatch.setattr(team_service, "_now", lambda: later)
+    team_service.prune_sessions(older_than_minutes=0)
+
+    with store_session() as store:
+        assert store.get_meta(team_service._unbriefed(SOLO)) is None
+        assert store.get_session(SOLO).ended_at is not None  # type: ignore[union-attr]
+
+
+def test_a_prune_keeps_the_mark_of_a_session_silent_under_the_claim_clock(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """n7's bound, not m2 undone: an ended session silent for less than the claim clock
+    keeps its mark through every prune, so it is briefed once a team forms."""
+    from datetime import timedelta
+
+    _team_on(runner)
+    _start(runner, SOLO, work_dir)
+    team_service.prune_sessions(older_than_minutes=0)
+    now = team_service._now
+    later = now() + team_service._CLAIM_ORPHAN_AFTER - timedelta(minutes=1)
+    monkeypatch.setattr(team_service, "_now", lambda: later)
+    team_service.prune_sessions(older_than_minutes=0)
+    monkeypatch.setattr(team_service, "_now", now)
+    with store_session() as store:
+        assert store.get_meta(team_service._unbriefed(SOLO)) is not None
+
+    _start(runner, OTHER, work_dir)
+    assert "<aisquare-team>" in _prompt(runner, SOLO, work_dir)
+
+
 # --- #48: a remote teammate over `aisquare serve` is a member (final review MAJOR-1) ----
 
 

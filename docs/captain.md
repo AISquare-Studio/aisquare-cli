@@ -262,16 +262,17 @@ a failing step stops it and says which. `aisquare captain actions` lists them.
 the pane's own agent. On Claude Code's permission chooser, yes is the digit of
 the option that says Yes (usually `1`), and no is Esc. On a `[y/N]` line they are
 `y` and `n`. The letter `y` does nothing on Claude Code's chooser. On Codex's
-approval view, yes is `1` (*Yes, proceed*) and no is Esc; every other dialog of
-Codex's own (its hook review, *Switch to gpt-6-luna?*, *Implement this plan?*)
-offers no yes or no, as its keys are yours. `1` to `9` press a digit.
+approval view, yes is `1` (*Yes, proceed*) and no is Esc. `1` to `9` press a digit.
 After a key that answers a prompt, the pane is read back, and the same prompt
 still showing is an error: the captain never reports a press the prompt ignored.
 The prompt is compared whole (what it asks about, its question, its options).
 The next prompt in line often asks the same question about another command, and
 it is not taken for the one just answered: it waits for you to read it.
-The trust dialog is refused by name for every key, because trusting a folder is
-yours to answer. An agent is ready for a key or a paste when it is waiting or asking. It
+The trust dialog is refused by name for every key and every paste, because trusting
+a folder is yours to answer. So is every other dialog of Codex's own (its hook review,
+*Switch to gpt-6-luna?*, *Implement this plan?*, its fork's *Working directory*
+chooser): each decides something new, Enter at the hook review trusting commands that
+run on every event, so its keys are yours, Esc included. An agent is ready for a key or a paste when it is waiting or asking. It
 is also ready when the fleet still reads it working but its screen shows a
 prompt, or its prompt drawn and idle (Claude Code's input box, Codex's empty
 composer): a freshly spawned agent reads working until its first reply.

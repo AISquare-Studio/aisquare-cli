@@ -121,10 +121,12 @@ def test_press_yes_at_a_dialog_of_codexs_own_is_the_owners_and_sends_nothing(
     alpha: ProjectInfo, codex: Pane
 ) -> None:
     """``Switch to gpt-6-luna for lower credit usage?``: its keys mean something new each
-    time, so it offers no yes for the captain to send."""
+    time, so it offers no yes for the captain to send, and every other key is refused as
+    well (review r17 of #113, finding 5)."""
     codex.screen = list(SWITCH)
     message = refused(lambda: actions.press("alpha", "coder-1", "yes"))
-    assert message.startswith("refused: the prompt on coder-1 offers no yes"), message
+    assert message.startswith("refused: a dialog of its own is showing on coder-1"), message
+    assert "its answer is the owner's" in message
     assert codex.typed == []
 
 

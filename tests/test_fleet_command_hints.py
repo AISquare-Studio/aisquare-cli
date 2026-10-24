@@ -127,7 +127,7 @@ _ROW_OF_SESSION = (
     "(``fleet_agent_for_session``): under a hub, not the session's board's"
 )
 PROJECT_OF: dict[tuple[str, str], str] = {
-    ("services/captain/actions.py", "_no_trust_dialog"): (
+    ("services/captain/actions.py", "_no_owners_dialog"): (
         "the project of the row the captain would type into (``fleet.project_of``)"
     ),
     ("services/captain/brain.py", "find"): (

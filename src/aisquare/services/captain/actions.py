@@ -747,7 +747,8 @@ def _ready(
     input box drawn and idle, is the evidence; anything else stays refused. The screen
     overrides the activity window, never a stop: limited, exited and lost are refused.
 
-    The trust dialog is refused for every caller (T1c, 13505): :func:`_no_trust_dialog`.
+    The trust dialog, and every other dialog whose answer is the owner's, is refused for every
+    caller (T1c, 13505; r17 of #113, finding 5): :func:`_no_owners_dialog`.
     So is an agent whose screen is not read for a prompt at all: nothing would tell its
     folder-trust dialog from its prompt. Returns what the pane showed, so a caller reads it
     once.
@@ -762,7 +763,7 @@ def _ready(
     srv = fleet.server_of(agent)
     lines: list[str] = []
     if status.state in READY_STATES or status.state == "working":
-        lines = _no_trust_dialog(srv, agent, label, verb)
+        lines = _no_owners_dialog(srv, agent, label, verb)
     if status.state not in READY_STATES and not (
         status.state == "working" and _asking_or_idle(agent, lines)
     ):
@@ -782,18 +783,24 @@ def _screen(srv: TmuxServer, pane_id: str) -> list[str]:
     return list(srv.capture(pane_id).lines)
 
 
-def _no_trust_dialog(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) -> list[str]:
-    """Read the agent's pane and refuse its folder-trust dialog by name (T1c, 13505), as the
-    pane's own agent reads it (``screen.prompt_showing``).
+def _no_owners_dialog(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) -> list[str]:
+    """Read the agent's pane and refuse a dialog whose answer is the owner's by name, as the
+    pane's own agent reads it (``screen.prompt_showing``): its folder-trust dialog (T1c,
+    13505) and any other dialog of its own (``ScreenPrompt`` shapes ``trust`` and
+    ``dialog``).
 
     An agent spawned into a folder it has never trusted parks at its own trust dialog, and
     anything typed there answers it: on Claude Code, Enter picks "No, exit" and the agent
     dies (the dry run's paste, 13504, which said success as it did); on Codex, Enter picks
-    "1. Trust and continue", the owner's decision made by the captain. Every door that
-    types into an agent asks here first: press and paste through :func:`_ready`, and the
-    doors that end in ``fleet.tell`` through :func:`_no_prompt`. A pane that cannot be read
-    is refused too: nothing is typed blind. Returns what the pane shows, for the caller
-    that reads it next.
+    "1. Trust and continue", the owner's decision made by the captain. Codex's other
+    dialogs are the owner's as well, whatever key answers them: Enter at its hook review
+    trusted new hook commands that run on every event, and its model switch, ``Implement
+    this plan?`` and its fork's directory chooser each decide something new (review r17 of
+    #113, finding 5). A chooser and a ``[y/N]`` line stay the captain's to answer. Every
+    door that types into an agent asks here first: press and paste through :func:`_ready`,
+    and the doors that end in ``fleet.tell`` through :func:`_no_prompt`. A pane that cannot
+    be read is refused too: nothing is typed blind. Returns what the pane shows, for the
+    caller that reads it next.
     """
     try:
         lines = _screen(srv, agent.pane_id)
@@ -802,11 +809,16 @@ def _no_trust_dialog(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) 
             f"{label}'s pane could not be read to see what is showing ({exc}) — nothing {verb}"
         ) from exc
     showing = screen.prompt_showing(agent, lines)
-    if showing is not None and showing.shape == "trust":
+    if showing is not None and showing.shape in ("trust", "dialog"):
         attach = project_service.fleet_command("attach", fleet.project_of(agent))
+        if showing.shape == "trust":
+            raise Refused(
+                f"the trust dialog is showing on {label}: trust this folder first — trusting "
+                f"a folder is the owner's to answer ({attach}) — nothing {verb}"
+            )
         raise Refused(
-            f"the trust dialog is showing on {label}: trust this folder first — trusting a "
-            f"folder is the owner's to answer ({attach}) — nothing {verb}"
+            f"a dialog of its own is showing on {label}: {showing.question} — its answer is "
+            f"the owner's ({attach}) — nothing {verb}"
         )
     return lines
 
@@ -820,13 +832,13 @@ def _no_prompt(srv: TmuxServer, agent: FleetAgent, label: str, verb: str) -> Non
     agent parked at a permission prompt as waiting once its attention row has gone stale,
     and there the Enter picks the highlighted "1. Yes": the command is approved by a
     message that asked for something else, and the tool says "typed". So the trust dialog's
-    rule (:func:`_no_trust_dialog`, an unreadable pane included) holds for every prompt the
+    rule (:func:`_no_owners_dialog`, an unreadable pane included) holds for every prompt the
     reader sees, and whatever the fleet reads, as it does there: ``fleet.tell`` asks the
     state again after this, and the screen is the evidence. ``press`` and ``paste`` are how
     a prompt IS answered, so they do not ask here. The refusal sends the captain to the
     owner before it sends it to ``press``: the answer is theirs, as every confirm is.
     """
-    showing = screen.prompt_showing(agent, _no_trust_dialog(srv, agent, label, verb))
+    showing = screen.prompt_showing(agent, _no_owners_dialog(srv, agent, label, verb))
     if showing is not None:
         raise Refused(
             f"a prompt is showing on {label}: {showing.question} — text typed there would "
@@ -859,7 +871,7 @@ def _press(target: ProjectInfo, label: str, key: str) -> Outcome:
     if key not in KEYS and key not in ANSWERS:
         raise Refused(f"key {key!r} is not one of {', '.join((*ANSWERS, *KEYS))}")
     agent, status, srv, lines = _ready(target, label, verb="pressed")
-    before = screen.prompt_showing(agent, lines)  # never the trust dialog: _ready refused it
+    before = screen.prompt_showing(agent, lines)  # never the owner's: _ready refused it
     if key in ANSWERS:
         if before is None:
             raise Refused(f"no prompt is showing on {label} — nothing pressed")
@@ -1972,11 +1984,11 @@ def press(project: str, label: str, key: str, utterance: str = "") -> str:
 
     ``yes``/``no`` are read off the pane by its own agent: on a numbered chooser (Claude
     Code's, Codex's approval view) yes is the digit of its Yes option and no is Esc; on a
-    [y/N] line, y and n; refused when no prompt shows, on the trust dialog and on any
-    other dialog of the agent's own (the owner's to answer). Literal keys: 1-9 y n
-    enter esc up down left right tab space ctrl-c. After a key that answers, the pane is
-    read back: the same prompt still showing is an error, never a success. Only into an
-    agent that is waiting or asking — never a busy one.
+    [y/N] line, y and n; refused when no prompt shows. Every key is refused on the trust
+    dialog and on any other dialog of the agent's own (the owner's to answer). Literal
+    keys: 1-9 y n enter esc up down left right tab space ctrl-c. After a key that answers,
+    the pane is read back: the same prompt still showing is an error, never a success. Only
+    into an agent that is waiting or asking — never a busy one.
     """
     return _run(
         "press",

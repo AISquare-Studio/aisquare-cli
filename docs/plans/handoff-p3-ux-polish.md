@@ -950,6 +950,25 @@ Every workstream, its PR, and what was measured. Reduced scale throughout (the o
 
 Built as each handoff section proposed, for the owner to confirm. One row per call in each PR body.
 
+### Calls that need the owner
+
+The consequential ones (security, a default a user notices, privacy, cost, or hard to reverse). The full table follows.
+
+| # | Call (PR) | What was chosen | How to flip it |
+| --- | --- | --- | --- |
+| 1 | **The captain's owner gate** (#339) | On while the captain is on, and **fails closed** until `aisquare captain gate enroll` with the `gate` extra. Eight owner tools are gated; `tell`, the manager ask, reads, notes, tasks and `bt` never are. A 15-minute window; three wrong codes lock entry for 5 minutes, doubling to 24 h. | `aisquare config set captain.gate false`; the gated set is `gate.PRIVILEGED` |
+| 2 | **A spoken code can be overheard** (#339) | Documented in `docs/captain.md`, not engineered around. Only TOTP ships; the verifier is a protocol for Touch ID or Windows Hello later. | docs / a later verifier |
+| 3 | **Remote Control** (#335, #349) | **Off for every role.** Carried on the row's spec and `launch --remote-control`, not an agent argument, so the blockers (another binary, a foreign `ANTHROPIC_BASE_URL`, an OAuth token, tracing) can stand aside. The docs say an agent keeps its role's permission mode and **anyone signed in to that Claude account can drive it**. | `fleet.roles.<role>.remote_control = true`, or `fleet spawn --remote-control` |
+| 4 | **The status line's install** (#362) | **Opt-in.** `--install` sets ours only where no `statusLine` is set, on every account unless `--slot`. A status line of yours is never replaced (`--wrap` keeps it and runs it first). | `--slot S` for one account; `--install --wrap` |
+| 5 | **The status line's uninstall** (#362) | `--uninstall` and `aisquare uninstall` remove only ours. A wrapped one goes back byte for byte (from a side copy made with at most the file's own 0600 bits), and a file ours created is removed. A failed removal keeps the package. | code change |
+| 6 | **The status line's records** (#362) | One file per session under `~/.aisquare/cache/statusline/`: ids, cwd, model and the usage figures, **never a prompt**, deleted after a day. `capture.enabled = false` does **not** stop them. The usage cache takes a reading only with both windows. | code change (gate records on `capture.enabled`) |
+| 7 | **Adopt's scope** (#370, #378; owner decision 2026-10-23) | **Phase A is out**: no directory the CLI did not create is adopted. `fleet adopt` searches only the CLI's own accounts, refuses a conversation a live `claude` holds, one the fleet owns and one in no onboarded project, and resumes it in its own directory without a worktree. | owner decision to reopen phase A |
+| 8 | **The manager's adopt sentence** (#370) | One sentence in the manager's cycle ("on request only…"). It costs tokens on every prompt. | move it to an on-request skill |
+| 9 | **`persona import --from-dir`** (#352) | Reads skill directories, `SKILL.md`, and non-repository `.md`/`.markdown`/`.txt`. A README, LICENSE or CHANGELOG is listed `skipped` (never a refusal) and spends no engine: 4 engine calls became 1 on the sample library. | name the file on the command line to import it anyway |
+| 10 | **Task keys for non-ASCII titles** (#314) | No store migration. A legacy-key lookup keeps re-adds idempotent, but a pre-upgrade task keyed `task` is not found again (CHANGELOG *Upgrading*). Emoji-only titles key `t-<hash>`. | code change; hard to reverse once keys are stored |
+
+### Every call
+
 | Workstream | PR | Call | Default taken | How to flip |
 | --- | --- | --- | --- | --- |
 | P3-W6a | #310 | 1. What to trim | Trim the stem; keep `-N`/task short id whole | code change |

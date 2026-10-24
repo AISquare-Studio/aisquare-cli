@@ -12,11 +12,13 @@ from aisquare.core import config as core_config
 from aisquare.core import paths
 from aisquare.core.config import (
     AppConfig,
+    FleetRoleSettings,
     RoleLaunchProfile,
     UiSettings,
     load_config,
     save_config,
 )
+from aisquare.core.harness import PLAIN_ROLE
 from aisquare.models import RedactionLevel
 
 
@@ -60,7 +62,7 @@ def anything_to_reset() -> bool:
 
 def get_value(key: str) -> str:
     """Return one configuration value as a string. Raises ``KeyError`` if unknown."""
-    return _format(_navigate(load_config().model_dump(mode="json"), key))
+    return _format(_navigate(_with_plain_role(load_config().model_dump(mode="json")), key))
 
 
 def set_value(key: str, value: str) -> str:
@@ -68,7 +70,7 @@ def set_value(key: str, value: str) -> str:
 
     Raises ``KeyError`` for an unknown key and ``ValueError`` for an invalid value.
     """
-    data = load_config().model_dump(mode="json")
+    data = _with_plain_role(load_config().model_dump(mode="json"))
     _assign(data, key, value)
     try:
         config = AppConfig.model_validate(data)
@@ -186,6 +188,22 @@ def clear_role_binding(role: str) -> None:
 def config_path() -> Path:
     """Where bindings are persisted — shown so the operator can hand-edit."""
     return paths.config_path()
+
+
+def _with_plain_role(data: dict[str, Any]) -> dict[str, Any]:
+    """``data`` with ``fleet.roles.agent`` at its defaults when the file has none.
+
+    The role-less agent (the Spawn dialog's *(none)* role) is not one of the built-in
+    roles, so its table was absent and ``config set fleet.roles.agent.*`` was refused as
+    an unknown key — while ``fleet spawn`` already read a hand-written table for it. Its
+    defaults are what spawn falls back to (``FleetRoleSettings()``), so a get shows what
+    a spawn does, and a set writes the one table. Any other unknown role stays refused:
+    a typo there would be a table nothing reads.
+    """
+    roles = data.get("fleet", {}).get("roles")
+    if isinstance(roles, dict) and PLAIN_ROLE not in roles:
+        roles[PLAIN_ROLE] = FleetRoleSettings().model_dump(mode="json")
+    return data
 
 
 def _navigate(data: dict[str, Any], key: str) -> Any:

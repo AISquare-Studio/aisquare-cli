@@ -1791,3 +1791,68 @@ def test_off_the_spawn_dialog_preset_to_a_declared_captain_is_an_ordinary_spawn(
     seen = drive(git_project, scenario, presets={"role": "captain"})
     assert seen == [False, False], "a label of its own and a role that can change"
     assert [call[1] for call in spawns.calls] == ["captain"], "through fleet.spawn"
+
+
+# --- task #4: the spawn dialog's follow-ups from PR #303 -------------------------------------
+
+
+def test_with_no_role_the_empty_persona_says_plain_claude_not_its_role_alone(
+    git_project: ProjectInfo,
+) -> None:
+    """Role *(none)* has no role to run as: the note said "runs as its role alone" for it."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [
+            select(dialog, "persona").value,
+            note(dialog, "#spawn-persona-description"),
+        ]
+        select(dialog, "role").value = spawn_module.NO_ROLE
+        await settle(pilot)
+        seen.append(note(dialog, "#spawn-persona-description"))
+        select(dialog, "role").value = "coder"
+        await settle(pilot)
+        seen.append(note(dialog, "#spawn-persona-description"))
+        return seen
+
+    persona, with_role, without, back = drive(git_project, scenario)
+    assert persona == ""
+    assert without == "(plain Claude: no role, no persona)"
+    assert with_role == back == "(no persona — the agent runs as its role alone)"  # the control
+
+
+def test_the_pick_note_shows_only_beside_a_pick_that_presses(
+    git_project: ProjectInfo, teammates: list[FleetAgentStatus]
+) -> None:
+    """A hand-off disables *Pick…* (``_lock_other_screens``), and the note went on saying what
+    it does; back to *(none)*, both come back."""
+    teammates.append(teammate(git_project))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        pick = dialog.query_one("#spawn-pick", Button)
+        seen: list[Any] = [pick.disabled, note(dialog, "#spawn-pick-note")]
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        seen += [pick.disabled, note(dialog, "#spawn-pick-note")]
+        select(dialog, "from").value = spawn_module.NO_SOURCE
+        await settle(pilot)
+        seen += [pick.disabled, note(dialog, "#spawn-pick-note")]
+        return seen
+
+    free, free_note, handed, handed_note, back, back_note = drive(git_project, scenario)
+    assert (free, handed, back) == (False, True, False)
+    assert free_note is not None and "fills Role, Binary and Account" in free_note
+    assert handed_note is None
+    assert back_note == free_note
+
+
+@pytest.mark.needs_captain
+def test_the_captains_dialog_hides_the_pick_note_beside_its_disabled_pick(
+    git_project: ProjectInfo,
+) -> None:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        return [dialog.query_one("#spawn-pick", Button).disabled, note(dialog, "#spawn-pick-note")]
+
+    disabled, shown_note = drive(
+        git_project, scenario, presets={"role": fleet_service.CAPTAIN_ROLE}
+    )
+    assert disabled is True and shown_note is None

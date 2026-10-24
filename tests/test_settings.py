@@ -69,3 +69,28 @@ def test_redaction_shortcut(runner: CliRunner) -> None:
     assert "redaction.level = strict" in result.stdout
     listed = runner.invoke(app, ["--json", "config", "list"])
     assert _json(listed.stdout)["redaction"]["level"] == "strict"
+
+
+def test_the_no_role_agents_defaults_can_be_read_and_set(runner: CliRunner) -> None:
+    """The Spawn dialog's *(none)* role is ``agent``, which is not one of the built-in roles:
+    ``config set fleet.roles.agent.*`` was refused as an unknown key, so its permission mode
+    and worktree could not be set. It reads as spawn's fallback and sets as any role does."""
+    from aisquare.core.harness import PLAIN_ROLE
+    from aisquare.services import fleet as fleet_service
+
+    before = runner.invoke(app, ["config", "get", f"fleet.roles.{PLAIN_ROLE}.worktree"])
+    assert before.exit_code == 0, before.output
+    assert f"fleet.roles.{PLAIN_ROLE}.worktree = false" in before.stdout
+    for key, value in (("permission_mode", "acceptEdits"), ("worktree", "true")):
+        written = runner.invoke(app, ["config", "set", f"fleet.roles.{PLAIN_ROLE}.{key}", value])
+        assert written.exit_code == 0, written.output
+        assert f"fleet.roles.{PLAIN_ROLE}.{key} = {value}" in written.stdout
+    shape = fleet_service.role_settings(PLAIN_ROLE)  # what a spawn of it reads
+    assert shape.permission_mode == "acceptEdits" and shape.worktree is True
+    assert fleet_service.role_settings("coder").permission_mode == "auto"  # its table alone
+
+
+def test_a_role_nobody_has_is_still_an_unknown_key(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["config", "set", "fleet.roles.coderr.worktree", "true"])
+    assert result.exit_code == 1
+    assert "unknown config key" in result.output

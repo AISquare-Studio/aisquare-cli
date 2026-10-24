@@ -443,6 +443,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Spawn dialog follow-ups to #303.** With Role *(none) — general-purpose
+  Claude* and no persona, the Persona note says *plain Claude: no role, no
+  persona* instead of "runs as its role alone". The *Pick…* note under Advanced
+  is hidden while *Pick…* cannot be pressed (the captain's dialog, a hand-off from
+  a teammate). `aisquare config get/set fleet.roles.agent.*` now works, so the
+  no-role agent's permission mode, worktree and extra args can be set like any
+  role's; another role the config does not have is still an unknown key.
+
 - **Restart all brings back the agents that died** (#38). After an outside SIGTERM
   killed every agent of a fleet (exit 143), *Settings ▸ Fleet ▸ Restart all…* and
   `fleet restart --all` listed each one as exited and restarted none: they acted on

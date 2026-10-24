@@ -387,6 +387,29 @@ Under `--json`, `typed` is `yes`, `no`, `unsent` or `maybe` beside `delivered`:
 its pane to send it), `maybe` when tmux did not answer in time with the text or its
 Enter, which may still arrive. Neither is to be told again: read the agent's pane.
 
+**Never over a draft.** Nothing the fleet types goes into a pane while its input
+box holds something a human typed and has not sent, or while someone has typed
+into the pane in `asq` within `[fleet] draft_quiet_seconds` (10). That covers a
+tell, the manager's nudge, a typed first message and the Remote's paste.
+Claude Code's own dim words in an empty box (its placeholder, its suggestion
+after a turn) are not a draft. A tell held back this way is filed as a note and
+says why ("a draft is in its input box, which nothing types over"). A manager's
+nudge waits, and goes out once the box is clear: `asq` retries it as it
+refreshes, and the next board write does too. If the human sends the draft
+first, that prompt hands the manager the same board update, and the nudge is
+dropped.
+
+**A note reaches a busy agent at the end of its turn.** A note addressed to an
+agent's label or role (`fleet tell` to a busy agent, `aisquare note --to
+<label|role>`) is handed to it by its `Stop` hook when the turn it was working
+on ends, the way the manager is woken: the board update as the reason it keeps
+going. It used to wait for the agent's next prompt, which an agent that had
+finished might never get. It is guarded like the manager's wake-up: not on a
+turn that is already continuing from a stop hook, and at most `[fleet]
+max_continuations_per_hour` times an hour. Only an addressed note does this;
+the rest of the board rides along with one, and waits for the next prompt
+otherwise. `[fleet] deliver_notes_at_turn_end = false` turns it off.
+
 `aisquare persona attach <name> --to <label>` types a persona's briefing into a
 waiting agent the same way, and keeps the persona on the agent's row so a `/clear`
 or a restart briefs it again ([docs/personas.md](personas.md)). A busy agent gets
@@ -1475,6 +1498,16 @@ config is bundled and regenerated (do not edit it): status line off,
 extended keys on so shift+enter and friends reach Claude Code, mouse off (the
 UI owns the mouse), monitor-activity on. One server for every project; one
 session per project; one window per agent.
+
+**The typing lease.** When you type into an agent's pane in `asq`, it touches
+`~/.aisquare/run/typing/<socket>-<server>-<pane>`, at most once a second.
+`<server>` is a digest of the socket's real path, so another `asq` server at
+another path, whose pane ids repeat this one's, is never held by it. For `[fleet]
+draft_quiet_seconds` (10) after your last key, no fleet write types into that
+pane: not a nudge, a tell, a typed first message or the Remote's paste. The
+input box is read too, so a draft you leave there holds them off for as long as
+it stays (see [`fleet tell`](#fleet-tell)). Typing through `tmux attach` leaves
+no lease, and the input box covers it.
 
 **Each agent is asked of its own server.** A spawn records the socket its
 server says it listens on, and every fleet command — `fleet ls` and the UI,

@@ -47,6 +47,7 @@ from typing import Any, Literal
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
+from aisquare.core import claude_screen as screen_reader
 from aisquare.core import (
     claude_sharing,
     codenames,
@@ -103,7 +104,6 @@ from aisquare.services import auto_mode, delivery, explainability_ops, pane_idle
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import project as project_service
-from aisquare.services.captain import screen as screen_reader
 
 # How a write into a pane ends lives with the one door every write goes through
 # (``services.delivery``, P0-W1a); its names stay importable from here, where every caller
@@ -144,6 +144,15 @@ injection on ``UserPromptSubmit`` delivers the details — and never starts with
 
 NUDGE_DEBOUNCE = timedelta(seconds=5)
 """Two board writes inside this window wake the manager once."""
+
+NUDGE_DEFERRED = "nudge_deferred:"
+"""The ``team_meta`` prefix of a nudge a draft held back (P0-W2): ``nudge_deferred:<session>``
+→ when it was held back. :func:`retry_deferred_nudges` sends it once the box is clear."""
+
+_NUDGE_RE_PRESS: tuple[float, ...] = (2.0,)
+_NUDGE_LAST_WAIT = 2.0
+"""A nudge's Enter is pressed again once at most, and its wait is short: it runs inside
+another agent's board write. A nudge still in the box is sent by the next one."""
 
 PROMPT_TIMEOUT = 20.0
 """How long ``spawn --prompt`` waits for the agent to come up before typing anyway."""
@@ -3611,6 +3620,7 @@ def spawn(
             to=(project, stored.label),
             agent_id=stored.id,
             reads_box=claude_code or harness.is_default_agent(resolution.binary),
+            guard=config.draft_quiet_seconds,
         )
         if typed == "unsent":
             _first_prompt_unsent(stored, "its first message is still in its input box")
@@ -4429,6 +4439,7 @@ def _type_prompt(
     to: tuple[ProjectInfo, str],
     agent_id: str | None = None,
     reads_box: bool = False,
+    guard: float | None = None,
 ) -> tuple[Typed, bool | None]:
     """Wait (bounded) for the agent to come up, then type the prompt: the typed way of
     :mod:`services.delivery`, for a binary whose command line does not take it.
@@ -4542,7 +4553,14 @@ def _type_prompt(
             sleep=_sleep,
             monotonic=_monotonic,
             what="the prompt",
+            guard=guard,
         )
+    if done.refused is not None:
+        notes.append(
+            f"the prompt was NOT typed: {done.refused}, which nothing types over. Send it "
+            f"once the box is clear: {_send_it_later(*to)}"
+        )
+        return "no", None
     told = done.told
     if isinstance(told, PaneWrite):
         if told.typed == "maybe":
@@ -5051,6 +5069,13 @@ def tell(
     was not typed is then the caller's to decide. :func:`attach_persona` asks so, because
     its message is a persona's body, which the board never carries (review of #240,
     finding 7). Not typed, ``how`` is the reason alone.
+
+    It types through the one door (``delivery.deliver_typed``, P0-W2, #276): never over a
+    draft in the agent's input box or while someone types in its pane (``draft_guard``) —
+    then it is filed as a note and says why ("a draft is in its input box") — and an
+    Enter the agent dropped is pressed again only while the text provably still waits
+    there, the agent's ``UserPromptSubmit`` its acknowledgement. A busy agent gets the note
+    at the end of its turn (``team.hook_stop``, ``[fleet] deliver_notes_at_turn_end``).
     """
 
     def noted(why: str) -> str:
@@ -5080,14 +5105,28 @@ def tell(
                     "launcher or a shell is in the foreground)"
                 )
             return TellResult("no", noted(why))
-        told = type_then_enter(
-            srv,
-            agent.pane_id,
-            text,
-            label,
-            press="press Enter in its pane",
-            done="typed into its pane (it was waiting)",
-        )
+        # One store connection for the acknowledgement wait (`delivery.prompted_since`).
+        with store_session() as store:
+            done = delivery.deliver_typed(
+                srv,
+                agent.pane_id,
+                text,
+                label,
+                press="press Enter in its pane",
+                acked=(
+                    delivery.prompted_since(store, agent.session_id, _now())
+                    if agent.session_id is not None
+                    else None
+                ),
+                reads_box=agent.session_id is not None or harness.is_default_agent(agent.binary),
+                sleep=_sleep,
+                monotonic=_monotonic,
+                done="typed into its pane (it was waiting)",
+                guard=settings().draft_quiet_seconds,
+            )
+        if done.refused is not None:
+            return TellResult("no", noted(f"{done.refused}, which nothing types over"))
+        told = done.told
         if not isinstance(told, PaneWrite):
             return told
         if told.typed == "maybe":
@@ -9208,6 +9247,13 @@ def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> 
     that comes with the pane's facts (``PaneFacts.last_output``, ``#{window_activity}``),
     in the one ``display-message``. A ``list-panes -a`` over every pane on the server for it
     was one more tmux process per nudge (review of #259, round 5).
+
+    It types through the one door (``delivery.deliver_typed``, P0-W2, #276), and never over a
+    human (``draft_guard``): a draft in the manager's input box, or someone typing in its
+    pane in ``asq``, and the nudge waits — recorded (:data:`NUDGE_DEFERRED`), and sent by the
+    next board write or by ``asq``'s refresh once the box is clear
+    (:func:`retry_deferred_nudges`). Nothing is lost meanwhile: the human's own submit runs
+    ``UserPromptSubmit``, which hands the manager the same delta.
     """
     try:
         with store_session() as store:
@@ -9234,12 +9280,70 @@ def nudge_manager(project_id: str, *, reason: str, board: str | None = None) -> 
             state, _ = _derive(manager, session, pane, observed=True, now=now)
             if state != "waiting":
                 return False
+            done = delivery.deliver_typed(
+                srv,
+                manager.pane_id,
+                NUDGE_TEXT,
+                MANAGER_LABEL,
+                press="press Enter in its pane",
+                acked=delivery.prompted_since(store, session.id, now),
+                reads_box=True,
+                sleep=_sleep,
+                monotonic=_monotonic,
+                what="the nudge",
+                guard=settings().draft_quiet_seconds,
+                re_press=_NUDGE_RE_PRESS,
+                last_wait=_NUDGE_LAST_WAIT,
+            )
+            deferred = f"{NUDGE_DEFERRED}{session.id}"
+            if done.refused is not None:
+                if not store.get_meta(deferred):
+                    store.set_meta(deferred, now.isoformat())
+                return False
             store.set_meta(key, now.isoformat())
-            srv.send_literal(manager.pane_id, NUDGE_TEXT)
-            srv.send_keys(manager.pane_id, "Enter")
-            return True
+            if store.get_meta(deferred):
+                store.set_meta(deferred, "")  # sent: nothing is held back any more
+            return done.told.typed == "yes"
     except Exception:
         return False
+
+
+def retry_deferred_nudges() -> int:
+    """Send each manager nudge a draft held back (:data:`NUDGE_DEFERRED`), now that its input
+    box may be clear: ``asq``'s refresh asks every frame. How many were sent.
+
+    One indexed read when nothing is held back. A nudge whose manager has prompted since it
+    was held back is dropped unsent: that prompt's ``UserPromptSubmit`` handed it the delta
+    the nudge was for. One whose manager row has ended is dropped too. A draft still there
+    keeps it held back (``nudge_manager`` asks the guard again). Never raises."""
+    try:
+        with store_session() as store:
+            held = {
+                key.removeprefix(NUDGE_DEFERRED): since
+                for key, since in store.list_meta(NUDGE_DEFERRED).items()
+                if since
+            }
+            targets: list[FleetAgent] = []
+            for session_id, since in held.items():
+                row = store.fleet_agent_for_session(session_id)
+                session = store.get_session(session_id)
+                prompted = session.prompted_at if session is not None else None
+                gone = row is None or row.ended_at is not None or row.label != MANAGER_LABEL
+                if gone or (prompted is not None and prompted >= datetime.fromisoformat(since)):
+                    store.set_meta(f"{NUDGE_DEFERRED}{session_id}", "")
+                    continue
+                assert row is not None
+                targets.append(row)
+    except Exception:
+        return 0
+    return sum(
+        nudge_manager(
+            row.project_id,
+            reason="deferred: a draft was in its input box",
+            board=_board_of_row(row),
+        )
+        for row in targets
+    )
 
 
 def attach_argv(project: ProjectInfo) -> list[str]:

@@ -3049,6 +3049,12 @@ def compact_refusal_key(session_id: str) -> str:
     return f"compact-refused:{session_id}"
 
 
+def compact_arm_key(session_id: str) -> str:
+    """The token of the manager's latest Stop (``services.quiet_compact.arm``): a worker
+    whose token it is no longer stands down."""
+    return f"compact-armed:{session_id}"
+
+
 def read_quiet_mark(store: ContextStore, session_id: str) -> QuietMark | None:
     """The quiet compaction's mark on ``session_id``, or ``None`` (none, or unreadable)."""
     raw = store.get_meta(compact_mark_key(session_id))
@@ -3523,8 +3529,9 @@ _START_PACK_BUDGET: Final = 20_000
 """The most a manager's start pack injects, in characters: every SessionStart's, a compaction's
 included. A new manager rebuilt its picture by re-reading the board, task details and files,
 and every request re-sent what it read (#281)."""
-_STATE_CLIP: Final = 8_000
-"""How much of the state file the pack quotes; the rest is a pointer to the file."""
+_STATE_CLIP: Final = harness.STATE_FILE_MAX
+"""How much of the state file the pack quotes, the length the manager cycle asks it to keep
+(one number, review of #361); the rest is a pointer to the file."""
 _RULES_CLIP: Final = 1_500
 """How much of the pack the rules index may take: one line per file, never its content."""
 _PACK_QUESTIONS: Final = 5

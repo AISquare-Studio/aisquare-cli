@@ -111,9 +111,9 @@ def test_the_pack_says_where_to_write_a_missing_state_file(
 def test_the_pack_stays_within_its_budget_and_says_what_it_left_out(
     work: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A 12,000-char state file is clipped at 8,000 with its path; 200 open tasks of 150
-    chars cannot all fit, and the line that ends them says how many did not and where they
-    are. Every line it keeps is whole."""
+    """A 12,000-char state file is clipped at 4,000, the cycle's own limit, with its path;
+    200 open tasks of 150 chars cannot all fit, and the line that ends them says how many did
+    not and where they are. Every line it keeps is whole."""
     _start(monkeypatch, work, MANAGER, "manager", "startup")
     for n in range(200):
         team_service.add_task(f"t{n:03d} " + "x" * 145, session_ref=MANAGER)
@@ -126,8 +126,8 @@ def test_the_pack_stays_within_its_budget_and_says_what_it_left_out(
     pack = _start(monkeypatch, work, MANAGER, "manager", "compact")
 
     assert len(pack) <= 20_000, len(pack)
-    assert "s" * 8_000 in pack and "s" * 8_001 not in pack
-    assert f"… clipped at 8,000 chars; the rest is in {state}" in pack
+    assert "s" * 4_000 in pack and "s" * 4_001 not in pack
+    assert f"… clipped at 4,000 chars; the rest is in {state}" in pack
     shown = [n for n in range(200) if f"t{n:03d} " in pack]
     assert shown == list(range(len(shown))) and 0 < len(shown) < 200
     assert f"  … {200 - len(shown)} more open tasks — `aisquare task list`" in pack

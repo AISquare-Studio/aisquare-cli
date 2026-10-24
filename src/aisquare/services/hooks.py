@@ -239,10 +239,10 @@ def turn_stopped(
     return decision
 
 
-def compact_check(session_id: str, *, cursor: int) -> str:
+def compact_check(session_id: str, *, cursor: int, token: str) -> str:
     """The quiet compaction's worker (``aisquare hook compact-check``): see
     :func:`quiet_compact.check`."""
-    return quiet_compact.check(session_id, cursor)
+    return quiet_compact.check(session_id, cursor, token)
 
 
 def needs_attention(

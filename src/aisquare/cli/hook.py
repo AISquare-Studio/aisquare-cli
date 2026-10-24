@@ -261,6 +261,7 @@ def hand_over(
 def compact_check(
     session_id: Annotated[str, typer.Argument(help="The manager's session id.")],
     cursor: Annotated[int, typer.Option("--cursor", help="Its board cursor when its turn ended.")],
+    token: Annotated[str, typer.Option("--token", help="The arm token its Stop wrote.")],
 ) -> None:
     """The detached half of a quiet compaction (no output; started by ``stop``).
 
@@ -271,7 +272,7 @@ def compact_check(
     line.
     """
     try:
-        hooks_service.compact_check(session_id, cursor=cursor)
+        hooks_service.compact_check(session_id, cursor=cursor, token=token)
     except Exception as exc:  # nothing else to disrupt: the manager was not touched
         _cost_of_failing_open("compact-check", exc, cost="the manager was not compacted")
         return

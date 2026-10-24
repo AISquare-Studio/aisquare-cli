@@ -1998,7 +1998,7 @@ and it cites them by path rather than pasting them into a prompt.
 
 **The start pack.** At every `SessionStart` (startup, resume, `/clear`, a
 compaction) a manager gets its start pack instead of the plain board. The pack
-holds its state file (the first 8,000 characters, with its age), every open
+holds its state file (up to its 4,000 characters, with its age), every open
 task on one line each (the board shows eight), the unanswered questions, the
 live agents with their task and account, how many wake events wait past its
 cursor, the project's `.aisquare/rules/*.md` by path and first line, and then

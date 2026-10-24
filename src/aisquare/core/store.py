@@ -2310,7 +2310,7 @@ class SqliteStore:
         """Delete the ``team_meta`` rows keyed by the project or by its sessions.
 
         Inside the caller's transaction, in statements of at most
-        :data:`_META_BATCH` sessions each (four terms per session): one statement
+        :data:`_META_BATCH` sessions each (five terms per session): one statement
         per purge was the shape SQLite refused at 500 sessions.
         """
         removed = self._conn.execute(
@@ -4710,9 +4710,9 @@ def _event_values(event: TeamEvent) -> tuple[object, ...]:
     )
 
 
-_SESSION_META_KINDS: tuple[str, ...] = ("nudge", "compact", "compact-refused")
+_SESSION_META_KINDS: tuple[str, ...] = ("nudge", "compact", "compact-refused", "compact-armed")
 """The ``team_meta`` keys kept per session as ``<kind>:<session id>``: the manager's nudge
-debounce, and the quiet compaction's mark and its newest refusal (P1 WS-4)."""
+debounce, and the quiet compaction's mark, its newest refusal and its latest arm (P1 WS-4)."""
 
 
 class Relevance(NamedTuple):

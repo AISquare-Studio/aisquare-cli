@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -79,7 +80,12 @@ def arm(
 ) -> str | None:
     """Start the quiet compaction's worker for a manager whose turn just ended, unless the
     turn itself rules it out. Returns why not, or ``None`` when the worker was started or
-    the session is none of this feature's (off, not a live fleet manager)."""
+    the session is none of this feature's (off, not a live fleet manager).
+
+    Every Stop of a manager writes a new arm token (:func:`team.compact_arm_key`), whether
+    it arms or refuses: a worker armed by an earlier turn finds the token no longer its own
+    and does nothing. A turn that ended on a question 20 s after a quiet one is the last
+    turn, and the earlier worker typed ``/compact`` right after it (review of #361, 1)."""
     if _settings().quiet_compact_at <= 0:
         return None
     with store_session() as store:
@@ -91,6 +97,8 @@ def arm(
         agent = store.fleet_agent_for_session(session.id)
         if agent is None or agent.ended_at is not None:
             return None  # a hand-launched manager: no pane of ours to type into
+        token = uuid.uuid4().hex
+        store.set_meta(team_service.compact_arm_key(session.id), token)
         if (last_message or "").rstrip().endswith("?"):
             return _refuse(store, session.id, "its turn ended on a question")
         if permission_mode == "plan":
@@ -99,7 +107,18 @@ def arm(
             return _refuse(store, session.id, "it needs the human")
         cursor = session.cursor
     detach(
-        selfcli.argv_for(["--quiet", "hook", "compact-check", session_id, "--cursor", str(cursor)])
+        selfcli.argv_for(
+            [
+                "--quiet",
+                "hook",
+                "compact-check",
+                session_id,
+                "--cursor",
+                str(cursor),
+                "--token",
+                token,
+            ]
+        )
     )
     return None
 
@@ -173,10 +192,12 @@ def refusal(
     return None
 
 
-def check(session_id: str, cursor: int) -> str:
+def check(session_id: str, cursor: int, token: str) -> str:
     """The worker (``aisquare hook compact-check``): wait, ask again, type ``/compact``.
 
-    Returns what happened, for the caller's log: ``compacted``, or why not.
+    Returns what happened, for the caller's log: ``compacted``, or why not. ``token`` is
+    the one its Stop wrote (:func:`arm`): a later Stop's replaces it, and this worker stands
+    down.
     """
     # Here, not at the top: the Stop hook imports this module on every turn of every agent,
     # and the fleet module is only this worker's.
@@ -192,6 +213,10 @@ def check(session_id: str, cursor: int) -> str:
         agent = store.fleet_agent_for_session(session_id) if session is not None else None
         if agent is not None and agent.ended_at is not None:
             agent = None
+        if store.get_meta(team_service.compact_arm_key(session_id)) != token:
+            # Not a refusal of the manager's state: the later turn's Stop decided, and its
+            # own refusal (or its own worker) is the one kept.
+            return "a later turn ended since it was armed"
         why = refusal(store, session, agent, cursor, settings)
         if why is not None:
             return _refuse(store, session_id, why)

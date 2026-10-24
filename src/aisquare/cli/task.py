@@ -123,8 +123,8 @@ def add(
 ) -> None:
     """Add a shared task. Re-adding the same task is safe — you get the original.
 
-    The contract is checked for ``[team] brief_blocks`` (objective:, acceptance:,
-    boundaries:): a missing block warns, or refuses under ``[team] brief_strict``."""
+    The contract is checked for ``\\[team] brief_blocks`` (objective:, acceptance:,
+    boundaries:): a missing block warns, or refuses under ``\\[team] brief_strict``."""
     missing: list[str] = []
     if detail is not None and detail_file is not None:
         fail("give --detail or --detail-file, not both", error="invalid_brief", exit_code=2)

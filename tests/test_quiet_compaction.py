@@ -174,8 +174,17 @@ def manager(
     return Manager(project, tmux, tmp_path)
 
 
-def _check(manager: Manager, cursor: int) -> str:
-    return quiet_compact.check(manager.sid, cursor)
+def _token(manager: Manager) -> str:
+    """The arm token of the manager's latest Stop."""
+    with store_session() as store:
+        token = store.get_meta(team_service.compact_arm_key(manager.sid))
+    assert token is not None
+    return token
+
+
+def _check(manager: Manager, cursor: int, token: str | None = None) -> str:
+    """The worker its latest Stop armed (``token``: an earlier Stop's, when given)."""
+    return quiet_compact.check(manager.sid, cursor, token or _token(manager))
 
 
 # --- the quiet point ---------------------------------------------------------------------
@@ -195,7 +204,18 @@ def test_a_quiet_manager_is_compacted_once(
     cursor = manager.stop(armed)
 
     assert armed == [
-        selfcli.argv_for(["--quiet", "hook", "compact-check", manager.sid, "--cursor", str(cursor)])
+        selfcli.argv_for(
+            [
+                "--quiet",
+                "hook",
+                "compact-check",
+                manager.sid,
+                "--cursor",
+                str(cursor),
+                "--token",
+                _token(manager),
+            ]
+        )
     ]
     assert _check(manager, cursor) == "compacted"
 
@@ -437,3 +457,25 @@ def test_the_stop_hook_hands_the_arm_its_last_message_and_mode(
     control = json.dumps({"cwd": str(manager.project.root), "session_id": manager.sid})
     assert CliRunner().invoke(app, ["hook", "stop"], input=control).exit_code == 0
     assert len(armed) == 1, "the same Stop without them arms the worker"
+
+
+def test_a_later_turn_that_asks_supersedes_the_worker_an_earlier_one_armed(
+    manager: Manager, armed: list[list[str]], slept: list[float], clock: FakeClock
+) -> None:
+    """Review of #361, major 1: turn 1 ends quietly and arms; within the delay the human asks
+    a follow-up, and turn 2 ends on a question, with nothing new on the board (the cursor
+    stays). Turn 2's own arm refuses, and turn 1's worker, woken later, must not type
+    ``/compact`` after the question: the latest Stop decides."""
+    manager.compacts_on_submit()
+    cursor = manager.stop(armed)
+    first = _token(manager)
+    second = manager.stop(armed, last_message="Shall I merge #12 now?")
+    assert second == cursor and manager.refusal() == "its turn ended on a question"
+
+    assert _check(manager, cursor, first) == "a later turn ended since it was armed"
+    assert manager.tmux.submitted == [] and manager.tmux.typed == []
+    assert manager.refusal() == "its turn ended on a question", "the latest turn's reason stays"
+
+    # The control: a third, quiet turn arms again, and its worker compacts.
+    third = manager.stop(armed)
+    assert _check(manager, third) == "compacted"

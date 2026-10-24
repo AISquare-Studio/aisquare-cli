@@ -539,7 +539,10 @@ def part_state(config_dir: Path, part: SharePart, source_dir: Path) -> PartState
 def _written_target(link: Path) -> str:
     """Where ``link`` points, as written: Windows reads a link back with the extended-length
     ``\\\\?\\`` prefix (``\\\\?\\C:\\Users\\...``), which no operator typed."""
-    return os.readlink(link).removeprefix("\\\\?\\")
+    target = os.readlink(link)
+    if target.startswith("\\\\?\\UNC\\"):  # a share reads back as \\?\UNC\server\...
+        return "\\\\" + target.removeprefix("\\\\?\\UNC\\")
+    return target.removeprefix("\\\\?\\")
 
 
 def _is_link(path: Path) -> bool:

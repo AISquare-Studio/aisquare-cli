@@ -373,3 +373,19 @@ def test_overlapping_ticks_never_deliver_twice(
     first.tick(NOW)
     assert inner and isinstance(inner[0], TimeoutError)
     assert len(_watch_events(project.id)) == 1
+
+
+def test_once_while_a_tick_holds_the_state_lock_is_busy_not_a_traceback(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--once`` beside a running watcher's tick waits ``STATE_LOCK_WAIT`` for the state
+    lock, then says it is busy: one JSON object under ``--json``, exit 1."""
+    monkeypatch.setattr(watch_service, "STATE_LOCK_WAIT", 0)
+    lock = watch_service._state_lock()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with locking.holding(lock, wait_s=0):
+        result = CliRunner().invoke(app, ["--json", "watch", "--once"])
+        human = CliRunner().invoke(app, ["watch", "--once"])
+    assert result.exit_code == 1, repr(result.exception)
+    assert json.loads(result.stdout) == {"error": "busy"}
+    assert human.exit_code == 1 and "another look is running" in human.output, human.output

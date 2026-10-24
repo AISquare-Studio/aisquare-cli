@@ -1,7 +1,9 @@
 # Work briefs, the evidence gate and command reports
 
-> **Status: not built.** This is the handoff for the parts of #136 that main
-> still lacks. #136 was closed unmerged on 2026-10-23: it was 2,555 commits
+> **Status: built in #300, #306 and #341 (fold after them, in that order).** Part
+> 1 is #300, part 2 is #306 plus the report-backed evidence in #341, and part 3 is
+> #341. The text below is the handoff as written, kept as the record of what was
+> asked. It was written for the parts of #136 that main still lacked. #136 was closed unmerged on 2026-10-23: it was 2,555 commits
 > behind main, and two of its four parts had been rebuilt on main in the
 > meantime. Its head, `bf822942`, passed review and CI on 2026-09-18 and is the
 > prior art to read. Build fresh from main, one part per PR. Do not merge or

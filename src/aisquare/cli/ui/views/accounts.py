@@ -52,7 +52,7 @@ import math
 import threading
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar, NamedTuple
 
@@ -67,6 +67,7 @@ from textual.widgets import Button, Input, Static
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.common import format_reset, local_time
+from aisquare.cli.ui.adopt_picker import AdoptPicker
 from aisquare.cli.ui.terminal import InPlaceField, TerminalPane
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core import browser, paths
@@ -84,6 +85,7 @@ from aisquare.models import (
     StatuslineSession,
     UsageTrend,
 )
+from aisquare.services import adopt as adopt_service
 from aisquare.services import auth as auth_service
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import credits as credits_service
@@ -120,6 +122,10 @@ REMOVE_WORKER = "claude-remove"
 ARRANGE_WORKER = "claude-arrange"
 RENAME_WORKER = "claude-rename"
 SESSIONS_WORKER = "machine-sessions"
+ADOPT_LIST_WORKER = "adopt-list"
+"""Reads the conversations *Adopt a conversation…* offers (``services.adopt.recent``)."""
+ADOPT_WORKER = "adopt-conversation"
+"""Adopts the one picked (``services.adopt.adopt``): a fleet spawn, so a writer."""
 """Reads the sessions the status line reported (``statusline_sessions``): files and a store."""
 SESSIONS_WINDOW = timedelta(minutes=15)
 """How recent a session's report must be for *Sessions on this machine* (#287, 2c)."""
@@ -991,6 +997,8 @@ class AccountsView(Vertical):
             with Horizontal(classes="actions", id="claude-actions"):
                 yield Button("+ Add Claude account", id="claude-add", variant="primary")
             yield Static("", id="machine-sessions")
+            with Horizontal(classes="actions", id="sessions-actions"):
+                yield Button("Adopt a conversation…", id="sessions-adopt", compact=True)
             yield Static("", id="accounts-notice")
             with Horizontal(id="accounts-next-row"):
                 yield Static("", id="accounts-next")
@@ -2016,6 +2024,52 @@ class AccountsView(Vertical):
             self._notice(f"✗ {worker.error}", "error")
         self.post_message(AccountsChanged())
 
+    # --- adopting a conversation (#290) ---------------------------------------------------------
+
+    @on(Button.Pressed, "#sessions-adopt")
+    def _adopt_pressed(self, event: Button.Pressed) -> None:
+        """``fleet adopt --list`` as a picker: read off the UI thread, then shown."""
+        event.stop()
+        self.run_worker(
+            lambda: adopt_service.recent(),
+            name=ADOPT_LIST_WORKER,
+            group=ADOPT_LIST_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _adopt_listed(self, worker: Worker[Any], state: WorkerState) -> None:
+        if state is WorkerState.SUCCESS and isinstance(worker.result, list):
+            picker = AdoptPicker(worker.result, datetime.now(tz=UTC))
+            self.app.push_screen(picker, self._adopt_chosen)
+        elif state is WorkerState.ERROR:
+            self._notice(f"✗ the conversations could not be read: {worker.error}", "error")
+
+    def _adopt_chosen(self, session_id: str | None) -> None:
+        if session_id is None:
+            return
+        self._notice(f"adopting {session_id[:8]}…")
+        self.run_worker(
+            lambda: adopt_service.adopt(session_id),
+            name=ADOPT_WORKER,
+            group=ADOPT_WORKER,
+            exclusive=True,
+            thread=True,
+            exit_on_error=False,
+        )
+
+    def _adopt_finished(self, worker: Worker[Any], state: WorkerState) -> None:
+        if state is WorkerState.SUCCESS and isinstance(worker.result, fleet_service.SpawnReceipt):
+            agent = worker.result.agent
+            self._notice(
+                f"✓ adopted {(agent.session_id or '')[:8]} as {agent.label}: "
+                "it runs in the fleet now, on its project in the sidebar",
+                "ok",
+            )
+        elif state is WorkerState.ERROR:
+            self._notice(f"✗ {worker.error}", "error")
+
     # --- worker results -----------------------------------------------------------------------
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
@@ -2034,6 +2088,10 @@ class AccountsView(Vertical):
         elif worker.name == CREDITS_WORKER:
             if state is WorkerState.SUCCESS and isinstance(worker.result, tuple):
                 self._show_credits(*worker.result)
+        elif worker.name == ADOPT_LIST_WORKER:
+            self._adopt_listed(worker, state)
+        elif worker.name == ADOPT_WORKER:
+            self._adopt_finished(worker, state)
         elif worker.name == SESSIONS_WORKER:
             if state is WorkerState.SUCCESS and isinstance(worker.result, list):
                 self.query_one("#machine-sessions", Static).update(

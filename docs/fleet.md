@@ -1220,6 +1220,10 @@ conversation's own. It is refused, with the reason, when:
   claude's `~/.claude`). A Claude directory the CLI did not create is never
   adopted (decided with the owner, `docs/plans/claude-accounts.md`).
 
+In `asq`, the Accounts page's *Adopt a conversation…* (under *Sessions on this
+machine*) shows the same list: one a `claude` still runs, or whose directory is no
+onboarded project, says so and cannot be picked; Enter on another adopts it.
+
 Nothing lists or adopts conversations on its own. The manager offers the list
 only when you ask what you were working on in Claude outside the CLI.
 

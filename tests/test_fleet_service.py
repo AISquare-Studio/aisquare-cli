@@ -1247,7 +1247,7 @@ def test_spawn_refuses_an_unknown_role_but_accepts_a_bound_one(
 def test_no_role_spawns_a_plain_claude_from_the_cli_as_from_the_dialog(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, runner: CliRunner
 ) -> None:
-    """The Spawn dialog's *(none) — general-purpose Claude* is `fleet spawn agent` (card
+    """The Spawn dialog's *(none) — general-purpose agent* is `fleet spawn agent` (card
     tsk_01m5mm2sz23b): a row and a window like any spawn's, launched as `agent`, so the agent
     joins the board, and briefed with no standing cycle and no mission, on no ladder."""
     result = runner.invoke(app, ["fleet", "spawn", fleet_service.PLAIN_ROLE, "-P", project.id])

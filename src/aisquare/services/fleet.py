@@ -144,7 +144,7 @@ FLEET_ROLES: tuple[str, ...] = ("manager", "coder", "tester", "reviewer", "valid
 """The fleet's own roles (§3.3). Any harness or ``team bind`` role is accepted too."""
 
 PLAIN_ROLE = harness.PLAIN_ROLE
-"""No role: a plain Claude Code session, on the board with no standing cycle or mission.
+"""No role: a plain session of its agent, on the board with no standing cycle or mission.
 Not one of :data:`FLEET_ROLES`, whose every member the manager's loop and the docs brief."""
 
 MANAGER_LABEL = "manager"

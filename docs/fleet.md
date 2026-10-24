@@ -146,8 +146,8 @@ its row says so (`no hooks`).
    second after they appear or move.
    **`＋ spawn agent`** under a project opens the **Spawn dialog** for that
    project, headed with its name and codename. It shows three fields: **role**
-   (`coder` preselected; first in the list *(none) — general-purpose Claude*, a
-   plain Claude Code session with no standing cycle or mission, `fleet spawn
+   (`coder` preselected; first in the list *(none) — general-purpose agent*, a
+   plain session of the chosen agent with no standing cycle or mission, `fleet spawn
    agent` below; then the fleet's roles plus any role bound with `team bind`;
    `manager` is greyed out while one runs), **hand off from** (a teammate to
    fork or take over) and **account** (the agent's slots alone; one preset or
@@ -235,7 +235,8 @@ default), and gives Codex its configured pins.
 | **ui-tester** | new | verifies tasks titled `UI: …` in a **real browser** — Claude in Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever this window has — and measures (screenshots, computed sizes, console, network) instead of eyeballing; `task done` names the branch or commit and the URL it verified, or `task reopen` carries a screenshot. With no browser tool it runs the non-browser checks and reopens the task as "not browser-verified", never passes it. **Asked to be read-only, not made read-only** — its briefing says never edit and never push, and nothing enforces that (see the permission-mode table below: no allowed-tools list is written or passed, and `--restricted` would remove the Bash its own `task done`/`task reopen` need). Launched with `--chrome` by the role itself (`RoleProfile.default_args`), on any machine, unless `--no-chrome` is given; on Codex it gets no flag and browses with Codex's own `browser_use` feature and bundled browser plugin, which `aisquare doctor`'s browser-tools line reads from its `config.toml` | the repo root. Like the tester it gets no worktree and **nothing moves it into the coder's** — worse here, because it fails silently: it opens the URL, sees a working page and measures the PRE-change build honestly. So whoever spawns it names the branch or tree and the URL in its `--prompt` (the manager's loop does), and its verdict says which build it measured |
 
 No role at all is `agent`: `aisquare fleet spawn agent` (the Spawn dialog's
-*(none) — general-purpose Claude*) starts a plain Claude Code session, labelled
+*(none) — general-purpose agent*) starts a plain session of its agent (Claude
+Code, or Codex with `--agent codex`), labelled
 `agent-1` and on, that joins the board like any agent but is briefed with no
 standing cycle and no mission, and runs on the session's own model rather than a
 role's ladder. `aisquare launch agent` is the same outside the fleet.

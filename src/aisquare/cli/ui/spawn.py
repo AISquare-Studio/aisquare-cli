@@ -13,9 +13,9 @@ the service picks the free label under the store it is writing with.
 **Two tiers: three fields, then Advanced** (tsk_01m5mm2sz23b). Always on show,
 in this order: Role, *Hand off from* (its *How* row only once a teammate is
 picked) and Account, then the status line and the buttons. Role's first option
-is *(none) — general-purpose Claude*, ``fleet.PLAIN_ROLE``: a plain Claude Code
-session on the board, with no standing cycle and no mission; ``coder`` stays
-the default. Everything else is folded into one *Advanced* section (a
+is *(none) — general-purpose agent*, ``fleet.PLAIN_ROLE``: a plain session of the
+Agent field's agent (Claude Code or Codex) on the board, with no standing cycle and
+no mission; ``coder`` stays the default. Everything else is folded into one *Advanced* section (a
 ``Collapsible``, opened by a click or ``Enter`` on its title): *Pick…*, Agent,
 Binary, Persona with *Import…*, Label with 🎲, Task, Worktree, Permission with
 the agent's own controls (Permission mode, or Sandbox and Approval), Extra
@@ -200,9 +200,10 @@ NO_SOURCE = ""
 """The Hand off from field's ``(none)``: the plain spawn, field for field (tsk_01m3ns5a736s)."""
 
 NO_ROLE = fleet_service.PLAIN_ROLE
-"""The Role field's ``(none)``: a plain Claude Code session, no standing cycle or mission."""
-NO_ROLE_CHOICE = "(none) — general-purpose Claude"
-NO_ROLE_NOTE = "a plain Claude Code session on the board: no standing cycle, no mission"
+"""The Role field's ``(none)``: a plain session of the Agent field's agent, no standing cycle
+or mission."""
+NO_ROLE_CHOICE = "(none) — general-purpose agent"
+NO_ROLE_NOTE = "a plain session of its agent on the board: no standing cycle, no mission"
 
 OPEN_TASK_STATUSES = ("todo", "doing", "review", "blocked")
 """A task an agent can still be spawned for; ``done`` and ``dropped`` are refused by the service."""

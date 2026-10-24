@@ -121,7 +121,7 @@ def _role_ok(role: str) -> bool:
     check rather than becoming free-form. It just stops rejecting the two
     shapes real crews use: numbered seats, and roles the operator has already
     written down. ``agent`` (:data:`harness.PLAIN_ROLE`) is the one word for "no
-    role": a plain Claude Code session on the board, with no cycle to brief.
+    role": a plain session of its agent on the board, with no cycle to brief.
 
     The captain (``experimental.captain_role``, the one definition) is a role only while the
     experimental captain is on, and never a numbered seat: it is one per HOME (T2), so

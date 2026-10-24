@@ -181,7 +181,7 @@ def spawn(
         str,
         typer.Argument(
             help=f"Role to run: {', '.join(fleet_service.FLEET_ROLES)}, a bound one, or "
-            f"{fleet_service.PLAIN_ROLE} for none (a plain Claude Code session)."
+            f"{fleet_service.PLAIN_ROLE} for none (a plain session of its agent)."
         ),
     ],
     label: Annotated[

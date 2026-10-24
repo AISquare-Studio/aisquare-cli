@@ -29,8 +29,10 @@ from aisquare.core import agents as agent_core
 from aisquare.core import experimental
 from aisquare.core.paths import HOME_ENV_VAR
 from aisquare.core.state import reset_state
+from aisquare.models import ProjectInfo
 from aisquare.services import ci_client
 from aisquare.services import hooks as hooks_service
+from aisquare.services import project as project_service
 from tests import private_fleets
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -843,6 +845,29 @@ def no_detached_code_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
     hook would start one, in a session of its own that outlives the test.
     """
     monkeypatch.setattr(hooks_service, "_refresh_code_index", lambda _project: None)
+
+
+REAL_ENSURE_CODE_INDEX = project_service._ensure_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_index_of_this_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """``init`` and ``project onboard`` build a symbol index only under pytest's temp dirs.
+
+    A test that runs either where it stands onboards this repository, and a full index of
+    it per test (a fresh home each time, so never incremental) took rc/p2's CI from ~20 to
+    60-90 minutes. Elsewhere the onboard reports no index, as with ``[code] enabled`` off.
+    """
+    base = tmp_path_factory.getbasetemp().resolve()
+
+    def ensure(project: ProjectInfo, *, refresh: bool) -> str | None:
+        if not project.root.resolve().is_relative_to(base):
+            return None
+        return REAL_ENSURE_CODE_INDEX(project, refresh=refresh)
+
+    monkeypatch.setattr(project_service, "_ensure_code_index", ensure)
 
 
 @pytest.fixture(autouse=True)

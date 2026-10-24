@@ -153,3 +153,16 @@ def test_onboard_builds_the_index_unless_code_is_off(runner: CliRunner, checkout
     save_config(config)
     result = runner.invoke(app, ["--json", "project", "onboard"])
     assert json.loads(result.output)["code_index"] is None
+
+
+def test_the_suite_never_indexes_its_own_checkout(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A test that runs ``init`` or ``project onboard`` where it stands onboards this
+    repository: a full index of it per test took rc/p2's CI from ~20 to 60-90 minutes.
+    ``tests/conftest.py`` builds an index only under pytest's temp dirs."""
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    result = runner.invoke(app, ["--json", "project", "onboard"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["code_index"] is None
+    assert not code_index.exists(code_service.project_here().id)

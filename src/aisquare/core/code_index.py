@@ -672,7 +672,7 @@ def _build(
                 )
                 report.unchanged += 1
                 continue
-            _drop(conn, rel)
+            _drop_file_rows(conn, rel)
             try:
                 if lang == "python":
                     symbols, refs = python_symbols(rel, data.decode("utf-8", "replace"))
@@ -693,7 +693,7 @@ def _build(
             _insert(conn, symbols, refs)
             report.parsed += 1
         for gone in set(known) - keep:
-            _drop(conn, gone)
+            _drop_file_rows(conn, gone)
             conn.execute("DELETE FROM file WHERE path = ?", (gone,))
             report.removed += 1
         report.symbols = conn.execute("SELECT COUNT(*) FROM symbol").fetchone()[0]
@@ -727,7 +727,7 @@ def _reset_if_foreign(project_id: str) -> None:
                 path.with_name(path.name + suffix).unlink()
 
 
-def _drop(conn: sqlite3.Connection, path: str) -> None:
+def _drop_file_rows(conn: sqlite3.Connection, path: str) -> None:
     rows = conn.execute("SELECT id, name FROM symbol WHERE path = ?", (path,)).fetchall()
     for row_id, name in rows:
         conn.execute(

@@ -4450,14 +4450,14 @@ def spawn(
     if forked is not None and forked.mints_id:
         # A FORK (card tsk_01m3ns5a736s) by an agent the launch names (`ForkArgs.mints_id`,
         # Claude Code's `--resume <transcript> --fork-session`): the source's conversation
-        # under a NEW id, minted here as a fresh start's is (`minted_identity`, passed as
-        # `--session-id`: Claude Code takes the two together only when it forks), so the row
-        # joins the fork's own session. The
-        # identity planner is not asked: it reads `--resume <path>` as the RESUMED id and
-        # knows nothing of `--fork-session`. The fork's arguments come before the recorded
-        # ones and are never recorded (`_without_session_choice`), so a restart of the fork
-        # resumes the fork, never its source.
-        identity = explainability_service.minted_identity()
+        # under a NEW id, minted here as a fresh start's is (`minted_identity`, passed in
+        # its own flag, `--session-id`: Claude Code takes the two together only when it
+        # forks), so the row joins the fork's own session. The identity planner is not
+        # asked: it reads `--resume <path>` as the RESUMED id and knows nothing of
+        # `--fork-session`. The fork's arguments come before the recorded ones and are never
+        # recorded (`_without_session_choice`), so a restart of the fork resumes the fork,
+        # never its source.
+        identity = explainability_service.minted_identity(selected.adapter)
     elif forked is not None:
         # A fork the agent names itself (Codex's `fork <id>`): a new thread, whose id its
         # first hook brings, as a fresh start's does.
@@ -5231,27 +5231,27 @@ def _without_session_choice(
     ``--fresh``, started the replacement on the old session id.
 
     These are the flags of an agent whose session AISquare names at launch
-    (``capabilities.assigns_session_id``: Claude Code's), so they go only where they
-    are known to be: another program's ``-c`` is its own — aider's config file,
-    codex's config override — and is replayed as given. Known three ways. By name
-    (``agent_adapters.adapter_for_binary``, as the role's ``default_args`` and
-    ``--session-id`` pinning know Claude Code). By ``family``: the board session its
-    hook joined, so a ``--fresh`` restart of a ``claude2``
-    spawned with ``-c`` does not continue the old conversation under the hand-off
-    prompt. And by the arguments NAMING a session (``--session-id <id>``,
-    ``--resume <id>``): the identity planner reads those whatever the binary
-    is called and joins the row to that session, so a restart resumes it with
-    its own ``--resume`` — the ``claude2`` parallel install
+    (``capabilities.assigns_session_id``), its own (``capabilities.session_flags``: Claude
+    Code's above), so they go only where they are known to be: another program's ``-c`` is
+    its own — aider's config file, codex's config override — and is replayed as given. Known
+    three ways. By name (``agent_adapters.adapter_for_binary``, as the role's
+    ``default_args`` and ``--session-id`` pinning know Claude Code). By ``family``: the
+    board session its hook joined, so a ``--fresh`` restart of a ``claude2`` spawned with
+    ``-c`` does not continue the old conversation under the hand-off prompt. And by the
+    arguments NAMING a session (``--session-id <id>``, ``--resume <id>``): the identity
+    planner reads those whatever the binary is called and joins the row to that session, so
+    a restart resumes it with its own ``--resume`` — the ``claude2`` parallel install
     (``AISQUARE_BIN_CODER=claude2``) spawned on a session its caller chose.
     """
     kind = recorded_adapter(family) if family else adapter_for_binary(binary)
     if kind is not None and kind.capabilities.assigns_session_id:
-        return explainability_service.without_session_choice(args)
+        return explainability_service.without_session_choice(args, kind.capabilities.session_flags)
     # An id the planner READ from the arguments, not one it minted — it mints
-    # only for Claude Code by name, answered above.
+    # only for an agent it knows by name, answered above.
     planned = explainability_service.plan_session_identity(binary, args)
     if planned.session_id is not None and not planned.inject_args:
-        return explainability_service.without_session_choice(args)
+        flags = explainability_service.session_flags_of(binary)
+        return explainability_service.without_session_choice(args, flags)
     return list(args)
 
 

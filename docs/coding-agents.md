@@ -1235,7 +1235,12 @@ service that reads it: `pid_env` (the variable that hands a hook the agent's own
 Claude Code's `CLAUDE_PID`) or `tool_shell_env` (the variable the agent sets in its
 tools' shells and never in its own hooks, Codex's `CODEX_THREAD_ID`, with `tool_shell_vars` the rest it sets there, stripped from every tmux client too) — how a fleet row
 tells its agent's own process from a nested child, across a `/clear` or a `/resume` —
-`assigns_session_id` (AISquare names the session at launch), `launch_inputs` (above),
+`assigns_session_id` (AISquare names the session at launch) with its `session_flags`, a
+`SessionFlags` in the agent's own spelling (Claude Code's: `names` is `--session-id`, which
+takes the id a fresh start or a fork is handed, `minted(id)` those two arguments; `resumes`
+`--resume`/`-r`, `continues` `--continue`/`-c` and `forks` `--fork-session`, which the
+session planner reads as a choice the caller made and a fleet row's recorded arguments go
+without), `launch_inputs` (above),
 `requires_hook_trust`, `hook_names_home`, `strict_hooks_file`, `stop_reason_as_prompt`,
 `limits_in_transcript` (no turn-failed event: the accounts slot's `limit_from_transcript` and `failed_turn` read it), `ambient_first_run`,
 `reads_pane_readiness` (`fleet tell` may type into a pane that looks idle),

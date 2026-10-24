@@ -1607,10 +1607,14 @@ def test_a_binarys_flags_session_id_and_account_are_its_adapters(
 
     monkeypatch.delenv(explainability._PIN_ENV_VAR, raising=False)
     takes = adapter.capabilities.assigns_session_id
+    flags = adapter.capabilities.session_flags
     assert explainability.accepts_session_id(binary) is takes
+    assert flags is not None or not takes, "an agent handed its session id names its flag"
     planned = explainability.plan_session_identity(binary, [])
     assert (planned.session_id is not None) is takes, planned.note
     assert takes or adapter.binary in str(planned.note)
+    if flags is not None and planned.session_id is not None:
+        assert planned.inject_args == flags.minted(planned.session_id), "in its own flag"
 
     home = tmp_path / "home"
     monkeypatch.setenv(adapter.home_env, str(home))
@@ -1958,6 +1962,7 @@ def test_the_guide_names_every_member_of_the_protocol() -> None:
         "FolderTrust",
         "LaunchPart",
         "PermissionArgs",
+        "SessionFlags",
     }
     missing = []
     for node in tree.body:

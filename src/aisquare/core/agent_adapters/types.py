@@ -178,6 +178,34 @@ class LastingInstall:
 
 
 @dataclass(frozen=True)
+class SessionFlags:
+    """How a launch names or picks the session it runs, in the agent's own flags, for an agent
+    whose session AISquare names at launch (``AgentCapabilities.assigns_session_id``): Claude
+    Code's ``--session-id <uuid>``, ``--resume``/``-r [<id>]``, ``--continue``/``-c`` and
+    ``--fork-session``, each as ``--flag value`` or ``--flag=value``. The session planner
+    reads a choice the caller made from them before it names one
+    (``services.explainability.plan_session_identity``), names a fresh start's by
+    :attr:`names` (``minted_identity``), and a fleet row records its arguments without them,
+    which are per launch (``without_session_choice``)."""
+
+    names: str
+    """The flag that takes the new session's id: a fresh start's, and a fork's that names the
+    new session itself (``ForkArgs.mints_id``)."""
+    resumes: tuple[str, ...] = ()
+    """Flags that take a session to resume (its id, or its transcript's path), or, with no
+    value, pick one at run time."""
+    continues: tuple[str, ...] = ()
+    """Flags, taking no value, that resume a session chosen at run time."""
+    forks: tuple[str, ...] = ()
+    """Flags, taking no value, meaningful only beside a resume: its conversation under a new
+    id."""
+
+    def minted(self, session_id: str) -> tuple[str, ...]:
+        """The arguments that start the new session ``session_id``: :attr:`names` and it."""
+        return (self.names, session_id)
+
+
+@dataclass(frozen=True)
 class AgentCapabilities:
     """What one agent does differently, as flags the shared services read instead of its id.
 
@@ -190,7 +218,12 @@ class AgentCapabilities:
     """AISquare names the session at launch (Claude Code's ``--session-id``), so the
     native id IS the board's session id; otherwise the board's is derived from the config
     dir and the native id (``services.agent_events.session_key``) and every hook binds
-    it to the launch (``core.agent_sessions.bind_launch_session``)."""
+    it to the launch (``core.agent_sessions.bind_launch_session``). Its flags are
+    :attr:`session_flags`."""
+    session_flags: SessionFlags | None = None
+    """The agent's flags that name or pick a launch's session (:class:`SessionFlags`), which
+    an agent with :attr:`assigns_session_id` declares: the session it is handed is named in
+    them, never in another agent's."""
     requires_hook_trust: bool = False
     """The agent runs a hook only once the user trusts its definition (Codex's
     ``/hooks``): the installed commands carry ``--definition <fingerprint>`` and the

@@ -76,7 +76,8 @@ from urllib.parse import SplitResult, urlsplit
 from urllib.request import urlopen
 
 from aisquare.core import insights, outbox, paths, spawn
-from aisquare.core.agent_adapters import adapter_for_binary, adapters
+from aisquare.core.agent_adapters import adapter_for_binary, adapters, default_adapter
+from aisquare.core.agent_adapters.types import AgentAdapter, SessionFlags
 from aisquare.core.atomic import write_replacing
 from aisquare.core.config import (
     AppConfig,
@@ -129,11 +130,10 @@ _PROBE_TIMEOUT_SECONDS = 1.5
 #: flag kills the launch; every other binary joins through the hook seam instead,
 #: which needs no flag at all, so the narrow match costs nothing but a nicety.
 
-#: Flags whose presence means the caller (or the human) already owns the
-#: session id, so we must read it rather than choose one.
-_SESSION_ID_FLAG = "--session-id"
-_RESUME_FLAGS = ("--resume", "-r")
-_CONTINUE_FLAGS = ("--continue", "-c")
+#: The flags whose presence means the caller (or the human) already owns the
+#: session id, so we must read it rather than choose one, are the agent's own
+#: (``capabilities.session_flags``, :func:`session_flags_of`): Claude Code's
+#: ``--session-id``, ``--resume``/``-r`` and ``--continue``/``-c``.
 
 #: Escape hatch for the launch that pinning breaks. Set to 0/false/no/off to
 #: keep the launcher out of the agent's argv; sessions then trace unjoined
@@ -424,6 +424,15 @@ def _session_id_binaries() -> str:
     return " or ".join(named) or "an agent that takes one"
 
 
+def session_flags_of(binary: str) -> SessionFlags | None:
+    """The session flags (``capabilities.session_flags``) of the agent ``binary``'s name runs,
+    and the default agent's for a name no agent's is (a ``claude2`` wrapper): what the
+    planner reads a caller's choice by, whatever the binary is called; ``None`` for an agent
+    whose session names itself (Codex's)."""
+    adapter = adapter_for_binary(binary) or default_adapter()
+    return adapter.capabilities.session_flags
+
+
 def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
     """Decide the id this launch is traced under, before anything is launched.
 
@@ -439,55 +448,62 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
     args = list(args)
     if "--" in args:
         args = args[: args.index("--")]
-    present, value = _flag_value(args, _SESSION_ID_FLAG)
-    if present:
-        if value is None:
-            return SessionIdentity(
-                None, note=f"{_SESSION_ID_FLAG} was passed without a readable value"
-            )
-        return SessionIdentity(value)
-    for flag in _RESUME_FLAGS:
-        present, value = _flag_value(args, flag)
+    flags = session_flags_of(binary)
+    if flags is not None:
+        present, value = _flag_value(args, flags.names)
         if present:
-            if value is not None:
-                return SessionIdentity(_resumed_session_id(value))
-            return SessionIdentity(None, note=f"{flag} picks the session at run time")
-    for flag in _CONTINUE_FLAGS:
-        if flag in args:
-            return SessionIdentity(None, note=f"{flag} resumes a session chosen at run time")
-    if not accepts_session_id(binary):
+            if value is None:
+                return SessionIdentity(
+                    None, note=f"{flags.names} was passed without a readable value"
+                )
+            return SessionIdentity(value)
+        for flag in flags.resumes:
+            present, value = _flag_value(args, flag)
+            if present:
+                if value is not None:
+                    return SessionIdentity(_resumed_session_id(value))
+                return SessionIdentity(None, note=f"{flag} picks the session at run time")
+        for flag in flags.continues:
+            if flag in args:
+                return SessionIdentity(None, note=f"{flag} resumes a session chosen at run time")
+    adapter = adapter_for_binary(binary)
+    if adapter is None or not accepts_session_id(binary):
         return SessionIdentity(
             None, note=f"{os.path.basename(binary)!r} is not {_session_id_binaries()}"
         )
-    return minted_identity()
+    return minted_identity(adapter)
 
 
-def minted_identity() -> SessionIdentity:
-    """A fresh session id, handed to the agent as ``--session-id``: for an agent whose
-    session AISquare names at launch (``capabilities.assigns_session_id``), a fresh start or
-    a fork that names the new session itself (``ForkArgs.mints_id``)."""
+def minted_identity(adapter: AgentAdapter) -> SessionIdentity:
+    """A fresh session id, handed to the agent in its own flag (``capabilities.
+    session_flags``' ``names``: Claude Code's ``--session-id``): for an agent whose session
+    AISquare names at launch (``capabilities.assigns_session_id``), a fresh start or a fork
+    that names the new session itself (``ForkArgs.mints_id``). ``ValueError`` for an agent
+    that declares no such flag."""
+    flags = adapter.capabilities.session_flags
+    if flags is None:
+        raise ValueError(f"{adapter.label} declares no flag that names its session")
     session_id = str(uuid.uuid4())
-    return SessionIdentity(session_id, inject_args=(_SESSION_ID_FLAG, session_id))
+    return SessionIdentity(session_id, inject_args=flags.minted(session_id))
 
 
-#: Only meaningful beside a session choice: next to a launch's own ``--resume``
-#: it forks a new id away from the one that launch resumes (#146).
-_FORK_SESSION_FLAG = "--fork-session"
-
-
-def without_session_choice(args: Sequence[str]) -> list[str]:
+def without_session_choice(args: Sequence[str], flags: SessionFlags | None) -> list[str]:
     """``args`` less every flag that picks WHICH session a launch runs.
 
-    The flags :func:`plan_session_identity` reads — ``--session-id <id>``,
-    ``--resume``/``-r [<id>]``, ``--continue``/``-c`` — plus ``--fork-session``,
-    in both the ``--flag value`` and ``--flag=value`` shapes, read the way
-    :func:`_flag_value` reads them: a next token that starts with ``-`` is
-    another flag, not a value, and is kept. It lives beside the planner rather
-    than beside its caller (the fleet's launch spec, #144) so the two cannot
-    come to disagree about which flags those are.
+    The flags :func:`plan_session_identity` reads (``flags``, the agent's: Claude Code's
+    ``--session-id <id>``, ``--resume``/``-r [<id>]``, ``--continue``/``-c``) plus its
+    ``forks`` (``--fork-session``, only meaningful beside a resume: next to a launch's own
+    ``--resume`` it forks a new id away from the one that launch resumes, #146), in both
+    the ``--flag value`` and ``--flag=value`` shapes, read the way :func:`_flag_value`
+    reads them: a next token that starts with ``-`` is another flag, not a value, and is
+    kept. ``args`` as given for an agent with none. It lives beside the planner rather
+    than beside its caller (the fleet's launch spec, #144) so the two cannot come to
+    disagree about which flags those are.
     """
-    valued = (_SESSION_ID_FLAG, *_RESUME_FLAGS)
-    bare = (*_CONTINUE_FLAGS, _FORK_SESSION_FLAG)
+    if flags is None:
+        return list(args)
+    valued = (flags.names, *flags.resumes)
+    bare = (*flags.continues, *flags.forks)
     kept: list[str] = []
     value_next = False
     for arg in args:

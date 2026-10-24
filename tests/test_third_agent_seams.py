@@ -405,6 +405,53 @@ def test_a_fleet_spawn_launches_it_by_its_variables_and_one_settings_layer(
         unregister(adapter.id)
 
 
+# --- a session it names at launch, in its own flags ---------------------------------------
+
+
+def test_an_agent_that_takes_its_session_id_is_handed_it_in_its_own_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review r18 of #113, finding 10: ``capabilities.assigns_session_id`` handed any agent
+    Claude Code's ``--session-id <uuid>``, and the planner read its caller's choice through
+    Claude Code's ``--resume``/``-r`` and ``--continue``/``-c``. The Gemini-shaped agent,
+    set to take a session id by a flag of its own (``capabilities.session_flags``), is
+    handed that flag, its own flags are read as its caller's choice and kept off a fleet
+    row's recorded arguments, and a ``-c`` of its is no "continue"."""
+    from dataclasses import replace
+
+    from aisquare.core.agent_adapters.types import SessionFlags
+    from aisquare.services import explainability
+    from aisquare.services import fleet as fleet_service
+
+    flags = SessionFlags(names="--new-session", resumes=("--resume", "-r"))
+
+    class Naming(GeminiShapedAdapter):
+        capabilities = replace(
+            GeminiShapedAdapter.capabilities, assigns_session_id=True, session_flags=flags
+        )
+
+    adapter = Naming()
+    register(adapter)
+    try:
+        monkeypatch.delenv(explainability._PIN_ENV_VAR, raising=False)
+        minted = explainability.plan_session_identity("/opt/bin/gemini", [])
+        assert minted.session_id is not None
+        assert minted.inject_args == ("--new-session", minted.session_id), minted
+        assert explainability.minted_identity(adapter).inject_args[0] == "--new-session"
+        chosen = explainability.plan_session_identity("gemini", ["--new-session", "abc"])
+        assert (chosen.session_id, chosen.inject_args) == ("abc", ())
+        resumed = explainability.plan_session_identity("gemini", ["-r", "def"])
+        assert (resumed.session_id, resumed.inject_args) == ("def", ())
+        own = explainability.plan_session_identity("gemini", ["-c", "x"])
+        assert own.inject_args[:1] == ("--new-session",), "its -c is no continue"
+        recorded = fleet_service._without_session_choice(
+            "gemini", ["--new-session", "abc", "-c", "x", "--resume", "def", "-m", "pro"]
+        )
+        assert recorded == ["-c", "x", "-m", "pro"]
+    finally:
+        unregister(adapter.id)
+
+
 # --- transcript: a call's result in a later line ------------------------------------------
 
 

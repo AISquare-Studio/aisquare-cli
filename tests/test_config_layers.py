@@ -248,6 +248,8 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults_and_th
             "import": {"engine": "auto", "api_model": "claude-opus-5"},
         },
         "experimental": {"captain": False},
+        # App settings ▸ User preferences, added since.
+        "ui": {"always_show_project_path": False},
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

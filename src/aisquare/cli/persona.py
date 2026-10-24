@@ -1,7 +1,7 @@
 """``aisquare persona`` — personas are Claude Code skill directories.
 
 A persona is ``<name>/SKILL.md`` in one of three layers — project
-(``<repo>/.aisquare/personas``), user (``$AISQUARE_HOME/personas``), bundled —
+(``<project>/.aisquare/personas``), user (``$AISQUARE_HOME/personas``), bundled —
 and the same directory is ``/name`` in Claude Code. Guide: docs/personas.md.
 Every write goes through ``services.personas``; this module parses flags and
 reports.
@@ -24,7 +24,6 @@ from aisquare.cli.fleet import ProjectRef, SessionRef, _fail_fleet, _project
 from aisquare.core import personas as core
 from aisquare.core.personas import Layer, Persona, PersonaError
 from aisquare.core.state import get_state
-from aisquare.core.workspace import git_common_root
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as persona_service
 from aisquare.services.personas import PersonaDraftView
@@ -36,18 +35,20 @@ app = typer.Typer(
 PersonaName = Annotated[str, typer.Argument(help="Persona name (its directory name).")]
 UserFlag = Annotated[bool, typer.Option("--user", help="The user layer ($AISQUARE_HOME).")]
 ProjectFlag = Annotated[
-    bool, typer.Option("--project", help="The project layer (<repo>/.aisquare/personas).")
+    bool, typer.Option("--project", help="The project layer (<project>/.aisquare/personas).")
 ]
 
 
 def _root() -> Path | None:
-    """The project layer's root: the git repository around the working directory.
+    """The project layer's root: the working directory's project (``core.project_root``),
+    the layer ``launch --persona`` resolves from there and ``fleet spawn`` checks.
 
-    Git rather than ``workspace.find_project_root``: that walk falls back to the
-    working directory and counts ``~/.aisquare`` as a project marker, so run from
-    ``$HOME`` it would read the user layer a second time as the project layer.
+    Not the git repository alone: a project that is not one listed no project personas
+    here, though spawn and launch used them (review of #201, R1-F6). A home at
+    ``<dir>/.aisquare`` is not read twice from ``<dir>``: ``core.layer_dirs`` drops a
+    project layer that is the user layer.
     """
-    return git_common_root(Path.cwd())
+    return core.project_root()
 
 
 @contextmanager
@@ -146,15 +147,18 @@ def list_(
 @app.command("show")
 def show(name: PersonaName) -> None:
     """Print exactly what a session would be briefed with, then its provenance and files."""
+    root = _root()
     with _reported():
-        persona = core.resolve(name, _root())
+        persona = core.resolve(name, root)
     lines = core.briefing(persona)
     warnings = core.warnings(persona)
     provenance = persona.provenance
     if _json():
         _emit(
             {
-                **_entry(persona, None),
+                # The root it resolved at: with none, ``shadows`` was always [] where
+                # ``list --json`` names what the persona shadows (review of #201, R1-F5).
+                **_entry(persona, root),
                 "frontmatter": persona.frontmatter,
                 "body": persona.body,
                 "briefing": "\n".join(lines),
@@ -467,7 +471,7 @@ def export(
     scope = resolve_pool(user, project)
     if skill and scope is None:
         fail(
-            "--skill needs --user (the agent's own skills) or --project (the repository's)",
+            "--skill needs --user (the agent's own skills) or --project (the project's)",
             error="usage",
         )
     if scope is not None and not skill:

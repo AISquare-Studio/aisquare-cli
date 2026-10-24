@@ -2,10 +2,8 @@
 
 docs/plans/spawn-personas.md §4.2 (this tab) and §4.3 to §4.5 (the dialogs it opens,
 in ``cli/ui/persona_dialogs.py``). Personas live where the fleet they serve
-lives: the tab's project supplies the project layer the way ``aisquare persona``
-takes it — the git repository around the directory (``git_common_root``) — so a
-project that is not a git repository shows the user and bundled layers only,
-exactly what the CLI shows from there.
+lives: the tab's project supplies the project layer (``core.project_root``), the one
+``fleet spawn`` checks and ``aisquare persona`` reads from the project's directory.
 
 **The tab holds no state the disk does not.** Every action ends by re-reading
 ``core.personas.catalogue``, and the selection is kept by row key (``layer:name``),
@@ -17,8 +15,8 @@ module at call time, so a test replaces each with a recorder.
 **Attach to existing / Attach to new** post :class:`AttachRequested`, which the
 tab answers itself with the target picker (``cli/ui/attach.py``): an agent is
 attached to after one confirmation (``fleet_service.attach_persona`` in a thread
-worker; the toast says whether the briefing was typed, or noted for the agent's
-own next prompt), a bind or an account opens the Spawn dialog preset with the
+worker; the toast says whether the briefing was typed, and when it was not, why and how
+the persona reaches the agent), a bind or an account opens the Spawn dialog preset with the
 persona, and *+ New account* hands over to the Accounts page. The message is not
 stopped, so the shell can see it.
 
@@ -55,7 +53,6 @@ from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
 from aisquare.core import personas as core
 from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.personas import Layer, Persona, PersonaError
-from aisquare.core.workspace import git_common_root
 from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
@@ -205,8 +202,10 @@ class PersonasTab(Vertical):
     def __init__(self, project: ProjectInfo, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self.project = project
-        self.root: Path | None = git_common_root(project.root)
-        """The project layer's root — ``None`` outside a git repository, as the CLI has it."""
+        self.root: Path | None = core.project_root(project)
+        """The project layer's root: the project's own, as spawn checks it (review of #201,
+        R1-F6). Asked of git, it hid a project that is not a repository's personas, and it
+        cost every project view a subprocess on the UI thread (R1-F10)."""
         self.entries: list[Entry] = []
         self.selected_key: str | None = None
         self.unavailable: str | None = None
@@ -422,12 +421,13 @@ class PersonasTab(Vertical):
             if isinstance(receipt, fleet_service.AttachReceipt):
                 label = receipt.agent.label
                 said = f"✓ attached {receipt.persona} to {label} ({receipt.delivered})"
-                noted = receipt.delivered == "noted"
-                if noted:
-                    # Nothing reached the agent yet: say why, and how the persona gets to
-                    # it, as the CLI's second line does (review of #240, finding 7).
+                typed = receipt.delivered == "typed"
+                if not typed:
+                    # Noted, unsent or maybe: the briefing may not have reached the agent, so
+                    # say why, and how the persona gets to it, as the CLI's second line does
+                    # (review of #240, finding 7; for all three, #201's R1-F9).
                     said = f"{said} — {receipt.how}"
-                self.notify(said, timeout=10 if noted else 6, markup=False)
+                self.notify(said, timeout=6 if typed else 10, markup=False)
             self.reload()
         elif event.state is WorkerState.ERROR:
             error = event.worker.error

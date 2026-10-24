@@ -1,10 +1,24 @@
 """App settings: the machine-wide settings, whatever project is open.
 
-Everything ``~/.aisquare/config.toml`` holds that is not about one project:
-the user's coding agent, then the agent, permission, worktree, persona and account
-per role, the fleet's escape key, agent cap, worktree root and native-teams switch,
-how launches pick an account, what a usage limit does and what the accounts
-share. The project's own
+Three tabs. *Agent settings* (shown first) is everything ``~/.aisquare/config.toml``
+holds that is not about one project: the user's coding agent, then the agent,
+permission, worktree, persona and account per role, the fleet's escape key, agent cap,
+worktree root and native-teams switch, how launches pick an account, what a usage limit
+does and what the accounts share. *User preferences* is ``[ui]``, how ``asq`` shows
+things to the person at it: today *Always show project directory*
+(``ui.always_show_project_path``). *Remote* is Remote control
+(``views.settings_remote``). Save, Reload and Reset all sit under the tabs and act on the
+first two; they hide on *Remote*, whose every control acts at once.
+
+**What shows, and what is folded** (#41, the owner's D8: the bare minimum that works in
+view, the rest a click away). *Agent settings* shows the *Captain (experimental)* box on
+top (``views.settings_captain``: it saves at once, as it did on the hub) and how launches
+pick an account and what a usage limit does; its *Advanced* holds the user's coding
+agent, the roles, the fleet and the rest of the accounts' rules. *User preferences* shows
+its switch, and folds the note on setting it from a shell. *Remote* shows Turn on/off,
+the token field when one is needed and the link, QR and password while on; its own
+*Advanced* holds the rest. A Save refused for a folded field opens that *Advanced*, so
+the reason is never out of sight. The project's own
 Settings tab keeps what IS the project's (its nickname). Written through
 ``core.config.save_config`` — the one writer, which keeps only what differs
 from the system defaults — and re-read
@@ -42,9 +56,13 @@ personas every project can resolve: the user layer and the bundled ones
 list lacks is shown as ``<name> (custom)``, so saving the form never silently drops
 it; ``fleet spawn`` refuses it where it does not resolve, naming the key.
 
-Save writes only the fields changed on the form since it was read: the file as it is
-then holds the rest, a ``config set`` or ``config reset`` made from a shell meanwhile
-included.
+Save writes only the fields changed on the form since it was read, on either tab: the
+file as it is then holds the rest, a ``config set`` or ``config reset`` made from a shell
+meanwhile included.
+
+Every re-read of the file (Save, Reload, Reset all) posts :class:`UiSettingsChanged`, so
+the app, which holds ``[ui]`` for the sidebar rather than reading the file every tick,
+follows at once.
 
 Reached from *⚙ Settings ▸ App settings*: the Settings hub opens
 ``AppSettingsView(id="app-settings")``.
@@ -62,10 +80,24 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Select, Static, Switch
+from textual.widgets import (
+    Button,
+    Collapsible,
+    Input,
+    Label,
+    Select,
+    Static,
+    Switch,
+    TabbedContent,
+    TabPane,
+)
 from textual.worker import Worker, WorkerState
 
+from aisquare.cli.ui.sidebar import short_path
+from aisquare.cli.ui.views.settings_captain import CaptainToggle
+from aisquare.cli.ui.views.settings_remote import RemoteSection
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import paths, personas
 from aisquare.core.agent_adapters import adapters, get_adapter
@@ -85,6 +117,7 @@ from aisquare.core.config import (
     FleetRoleSettings,
     FleetSettings,
     RoleLaunchProfile,
+    UiSettings,
     load_config,
     save_config,
 )
@@ -163,6 +196,18 @@ _ACCOUNT_SWITCHES = {
 }
 """``[accounts]``'s two switches, by id → field: what the accounts share
 (``core.claude_sharing``)."""
+_UI_SWITCHES = {"ui-always-show-path": "always_show_project_path"}
+"""*User preferences*' switches, by id → ``[ui]`` field."""
+AGENT_TAB = "tab-agent-settings"
+"""The *Agent settings* tab's pane id: roles, the fleet, accounts. Shown first."""
+PREFERENCES_TAB = "tab-user-preferences"
+"""The *User preferences* tab's pane id: ``[ui]``."""
+REMOTE_TAB = "tab-remote"
+"""The *Remote* tab's pane id: Remote control, which acts at once (no Save)."""
+AGENT_ADVANCED = "agent-settings-advanced"
+"""*Agent settings*' fold: the roles, the fleet and the rest of the accounts' rules."""
+PREFERENCES_ADVANCED = "user-preferences-advanced"
+"""*User preferences*' fold: the note on setting a preference from a shell."""
 
 
 def role_order(fleet: FleetSettings) -> list[str]:
@@ -359,6 +404,20 @@ class RoleRow(NamedTuple):
     account: Select[str]
 
 
+class UiSettingsChanged(Message):
+    """App settings re-read the file — after a Save, a Reload or a Reset all: ``[ui]`` as
+    it now holds it, for the app, which holds what the sidebar reads of it."""
+
+    def __init__(self, ui: UiSettings) -> None:
+        super().__init__()
+        self.ui = ui
+
+
+def section_title(title: str, about: str) -> Text:
+    """A section's header: its name in bold, then what it holds, dim."""
+    return Text.assemble((title, "bold"), ("  " + about, "dim"))
+
+
 class ConfirmReset(ModalScreen[bool]):
     """ "Reset every setting to its default?" — Reset or Cancel; Esc cancels."""
 
@@ -400,43 +459,88 @@ class ConfirmReset(ModalScreen[bool]):
         self.dismiss(False)
 
 
-class AppSettingsView(VerticalScroll):
-    """The machine-wide settings form: roles, fleet, accounts — Save, Reload, Reset all."""
+class AppSettingsView(Vertical):
+    """The machine-wide settings in three tabs — *Agent settings* (the captain, roles,
+    fleet, accounts), *User preferences* (``[ui]``) and *Remote* — and under the first two
+    Save, Reload, Reset all."""
 
     DEFAULT_CSS = """
-    AppSettingsView { padding: 1 2; }
+    AppSettingsView { padding: 1 1 0 1; }
+    AppSettingsView #app-settings-tabs { height: 1fr; }
+    AppSettingsView #app-settings-tabs > ContentSwitcher { height: 1fr; }
+    AppSettingsView #app-settings-tabs TabPane { height: 1fr; padding: 0; }
+    AppSettingsView .tab-body { height: 1fr; }
     AppSettingsView .row { height: auto; margin-bottom: 1; }
-    AppSettingsView .row Label { width: 24; padding-top: 1; }
+    AppSettingsView .row Label { width: 1fr; max-width: 24; padding-top: 1; }
     AppSettingsView .row Select { width: 26; }
-    AppSettingsView .row .account-select { width: 40; margin-left: 2; }
     AppSettingsView .row Input { width: 26; }
     AppSettingsView .row Switch { margin-left: 1; }
-    AppSettingsView .row .worktree-label { width: 10; margin-left: 2; }
-    AppSettingsView .row .persona-label { width: 9; margin-left: 2; }
-    AppSettingsView .row .persona-select { width: 20; }
+    AppSettingsView .role { height: auto; margin-bottom: 1; }
+    AppSettingsView .role .row { margin-bottom: 0; }
+    AppSettingsView .role .row .role-field { padding-left: 2; }
+    AppSettingsView .row .account-select { width: 1fr; min-width: 26; max-width: 40; }
     AppSettingsView #settings-personas-unavailable { display: none; color: $warning; height: auto; }
     AppSettingsView #settings-personas-unavailable.shown { display: block; }
-    AppSettingsView .section { text-style: bold; margin-top: 1; }
+    AppSettingsView .section {
+        margin-top: 1; height: 1; text-wrap: nowrap; text-overflow: ellipsis;
+    }
     AppSettingsView .launch-line { height: auto; margin-bottom: 1; }
     AppSettingsView #settings-config-error { color: $error; height: auto; }
-    AppSettingsView #settings-buttons Button { margin-right: 1; }
-    AppSettingsView #settings-note { color: $text-muted; margin-top: 1; height: auto; }
+    AppSettingsView .row.preference { margin-bottom: 0; }
+    AppSettingsView .row .preference-label { width: 32; max-width: 32; }
+    AppSettingsView .about { color: $text-muted; height: auto; margin-bottom: 1; }
+    AppSettingsView .advanced { margin-top: 1; padding: 0; border: none; }
+    AppSettingsView .advanced > Contents { padding: 0 0 0 1; }
+    AppSettingsView #settings-buttons { height: 1; }
+    AppSettingsView #settings-buttons Button { min-width: 0; margin-right: 1; }
+    AppSettingsView #settings-note {
+        color: $text-muted; height: 1; text-wrap: nowrap; text-overflow: ellipsis;
+    }
     """
-    ROLE_SECTION: ClassVar[str] = (
-        "roles — agent, permission, worktree, persona and account per role "
-        "(→ the flags a spawn passes)"
+    # Under the tabs, only what both tabs need, one line each: compact buttons and the
+    # note. They sat there three and eleven lines tall, and at 80x24 left the tabs two
+    # to four rows — the User preferences switch off screen (tester, PR #302). What the
+    # note said about the roles is the Agent settings tab's last line now
+    # (``#agent-settings-note``).
+    ROLE_SECTION: ClassVar[tuple[str, str]] = (
+        "Roles",
+        "agent, permission, worktree, persona and account per role",
     )
-    ACCOUNTS_SECTION: ClassVar[str] = (
-        "accounts — how launches pick one; what a usage limit does; what they share"
+    FLEET_SECTION: ClassVar[tuple[str, str]] = (
+        "Fleet",
+        "the escape key, the agent cap, where worktrees go",
     )
+    ACCOUNTS_SECTION: ClassVar[tuple[str, str]] = (
+        "Accounts",
+        "how launches pick one, what a usage limit does",
+    )
+    MORE_ACCOUNTS_SECTION: ClassVar[tuple[str, str]] = (
+        "Accounts",
+        "when to switch, how long to wait, what they share",
+    )
+    SIDEBAR_SECTION: ClassVar[tuple[str, str]] = ("Sidebar", "how the project list reads")
+    ALWAYS_SHOW_PATH_ABOUT: ClassVar[str] = (
+        "Show each project's path under its name in the sidebar. "
+        "Off: shown only when two projects share a name."
+    )
+    PREFERENCES_FROM_A_SHELL: ClassVar[tuple[str, str]] = (
+        "Set from a shell (",
+        "), a preference shows after Reload here or when asq next starts, not live.",
+    )
+    """The tab's note, around the command it names in bold: ``asq`` holds ``[ui]`` and
+    takes it from this page, so a ``config set`` made while it runs waits for one or the
+    other."""
 
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self._config_error = ""
+        self._config_reason = ""
+        """Why the file could not be read, for the Reload's warning; ``""`` when it was."""
         config = self._read_config()
         self._config = config
         self.fleet = config.fleet
         self.accounts = config.accounts
+        self.ui = config.ui
         self._roles: list[str] = role_order(self.fleet)
         self._account_bindings: dict[str, str] = settings_service.role_account_bindings(config)
         self._accounts: list[ClaudeAccount] = []
@@ -472,9 +576,10 @@ class AppSettingsView(VerticalScroll):
         """
         try:
             config = load_config()
-            self._config_error = ""
+            self._config_error = self._config_reason = ""
         except Exception as exc:
             config = AppConfig()
+            self._config_reason = str(exc)
             self._config_error = (
                 f"Cannot read {paths.config_path()}: {exc}. Showing defaults; "
                 "repair the file and reload before saving."
@@ -565,8 +670,53 @@ class AppSettingsView(VerticalScroll):
 
     def compose(self) -> ComposeResult:
         yield Static(Text("App settings", style="bold"), id="settings-title")
+        with TabbedContent(id="app-settings-tabs", initial=AGENT_TAB):
+            with (
+                TabPane("Agent settings", id=AGENT_TAB),
+                VerticalScroll(id="agent-settings", classes="tab-body"),
+            ):
+                yield CaptainToggle(id="settings-captain")
+                # Why the file could not be read, under the box main puts on top (#41): the
+                # defaults shown for a broken file are not saved over it unknowingly.
+                yield Static(Text(self._config_error), id="settings-config-error")
+                yield from self._compose_accounts()
+                with Collapsible(
+                    title="Advanced", collapsed=True, id=AGENT_ADVANCED, classes="advanced"
+                ):
+                    yield from self._compose_agent()
+                    yield from self._compose_roles()
+                    yield from self._compose_fleet()
+                    yield from self._compose_more_accounts()
+            with (
+                TabPane("User preferences", id=PREFERENCES_TAB),
+                VerticalScroll(id="user-preferences", classes="tab-body"),
+            ):
+                yield from self._compose_preferences()
+            with (
+                TabPane("Remote", id=REMOTE_TAB),
+                VerticalScroll(id="remote-settings", classes="tab-body"),
+            ):
+                yield RemoteSection(id="settings-remote")
+        with Horizontal(id="settings-buttons"):
+            yield Button("Save", id="save-settings", variant="primary", compact=True)
+            yield Button("Reload", id="reload-settings", compact=True)
+            yield Button(
+                "Reset all settings to default",
+                id="reset-settings",
+                variant="error",
+                compact=True,
+            )
+        saved = (
+            f"Saved to {short_path(paths.config_path())} · only non-defaults · "
+            "a per-spawn flag still wins"
+        )
+        note = Static(Text(saved), id="settings-note")
+        note.tooltip = saved  # cut short with an ellipsis on a narrow terminal
+        yield note
+
+    def _compose_agent(self) -> ComposeResult:
+        """The user's coding agent, the one a role with none of its own runs (#113)."""
         config = self._config
-        yield Static(Text(self._config_error), id="settings-config-error")
         with Horizontal(classes="row"):
             yield Label("user coding agent")
             yield Select(
@@ -575,7 +725,10 @@ class AppSettingsView(VerticalScroll):
                 allow_blank=False,
                 id="default-agent",
             )
-        yield Static(self.ROLE_SECTION, classes="section")
+
+    def _compose_roles(self) -> ComposeResult:
+        config = self._config
+        yield Static(section_title(*self.ROLE_SECTION), classes="section")
         yield Static(
             Text(self._personas_unavailable or ""),
             id="settings-personas-unavailable",
@@ -584,68 +737,86 @@ class AppSettingsView(VerticalScroll):
         for role in self._roles:
             settings = self.fleet.roles.get(role, FleetRoleSettings())
             binding = config.team.profiles.get(role, RoleLaunchProfile())
-            with Horizontal(classes="row"):
-                # Not markup: role names are free TOML keys, `qa[x]` showed as `qa` and
-                # `a[/b]c` raised MarkupError out of the render (review of #259, round 23).
-                yield Label(role, markup=False)
-                yield Select(
-                    _agent_options(binding.agent or ""),
-                    value=binding.agent or "",
-                    allow_blank=False,
-                    id=role_widget_id("family", role),
-                )
-                yield Select(
-                    _options(settings.permission or "", list(INTENT_OPTIONS)),
-                    value=settings.permission or "",
-                    allow_blank=False,
-                    id=role_widget_id("intent", role),
-                )
-                yield Label("worktree", classes="worktree-label")
-                yield Switch(settings.worktree, id=role_widget_id("worktree", role))
-                yield Label("persona", classes="persona-label")
-                yield Select(
-                    persona_options(settings.persona, self._persona_names),
-                    value=settings.persona or NO_PERSONA,
-                    allow_blank=False,
-                    id=role_widget_id("persona", role),
-                    classes="persona-select",
-                )
-                bound = self._account_bindings.get(role)
-                yield Select(
-                    account_options(self._accounts, bound, self._config_agent(role)),
-                    value=bound or NO_ACCOUNT,
-                    allow_blank=False,
-                    id=role_widget_id("acct", role),
-                    classes="account-select",
-                )
-            with Horizontal(classes="row"):
-                yield Label("each agent's own")
-                yield Select(
-                    permission_options(settings.permission_mode),
-                    value=settings.permission_mode,
-                    allow_blank=False,
-                    id=role_widget_id("perm", role),
-                )
-                yield Select(
-                    _options(settings.sandbox or "", SANDBOX_OPTIONS),
-                    value=settings.sandbox or "",
-                    allow_blank=False,
-                    id=role_widget_id("sandbox", role),
-                )
-                yield Select(
-                    _options(settings.approval_policy or "", APPROVAL_OPTIONS),
-                    value=settings.approval_policy or "",
-                    allow_blank=False,
-                    id=role_widget_id("approval", role),
-                )
-                yield Select(
-                    _options(approve_value(settings.approve_for_me), APPROVE_FOR_ME_OPTIONS),
-                    value=approve_value(settings.approve_for_me),
-                    allow_blank=False,
-                    id=role_widget_id("afm", role),
-                )
-            yield Static(id=role_widget_id("launch", role), classes="launch-line")
-        yield Static("fleet", classes="section")
+            # One label and one field a line, as every other row: on one line the role's
+            # four fields were 146 columns, cut at the tab's edge at any usual width, and
+            # at 80x24 the permission select's arrow went with them (#302; #44, m4).
+            with Vertical(classes="role"):
+                with Horizontal(classes="row"):
+                    # Not markup: role names are free TOML keys, `qa[x]` showed as `qa` and
+                    # `a[/b]c` raised MarkupError out of the render (review of #259, round 23).
+                    yield Label(role, markup=False)
+                    yield Select(
+                        _agent_options(binding.agent or ""),
+                        value=binding.agent or "",
+                        allow_blank=False,
+                        id=role_widget_id("family", role),
+                    )
+                with Horizontal(classes="row"):
+                    yield Label("permission", classes="role-field")
+                    yield Select(
+                        _options(settings.permission or "", list(INTENT_OPTIONS)),
+                        value=settings.permission or "",
+                        allow_blank=False,
+                        id=role_widget_id("intent", role),
+                    )
+                with Horizontal(classes="row"):
+                    yield Label("worktree", classes="role-field")
+                    yield Switch(settings.worktree, id=role_widget_id("worktree", role))
+                with Horizontal(classes="row"):
+                    yield Label("persona", classes="role-field")
+                    yield Select(
+                        persona_options(settings.persona, self._persona_names),
+                        value=settings.persona or NO_PERSONA,
+                        allow_blank=False,
+                        id=role_widget_id("persona", role),
+                    )
+                with Horizontal(classes="row"):
+                    yield Label("account", classes="role-field")
+                    bound = self._account_bindings.get(role)
+                    yield Select(
+                        account_options(self._accounts, bound, self._config_agent(role)),
+                        value=bound or NO_ACCOUNT,
+                        allow_blank=False,
+                        id=role_widget_id("acct", role),
+                        classes="account-select",
+                    )
+                # Each agent's own words, which `permission` replaces when it is set.
+                with Horizontal(classes="row"):
+                    yield Label("permission mode", classes="role-field")
+                    yield Select(
+                        permission_options(settings.permission_mode),
+                        value=settings.permission_mode,
+                        allow_blank=False,
+                        id=role_widget_id("perm", role),
+                    )
+                with Horizontal(classes="row"):
+                    yield Label("sandbox", classes="role-field")
+                    yield Select(
+                        _options(settings.sandbox or "", SANDBOX_OPTIONS),
+                        value=settings.sandbox or "",
+                        allow_blank=False,
+                        id=role_widget_id("sandbox", role),
+                    )
+                with Horizontal(classes="row"):
+                    yield Label("approval", classes="role-field")
+                    yield Select(
+                        _options(settings.approval_policy or "", APPROVAL_OPTIONS),
+                        value=settings.approval_policy or "",
+                        allow_blank=False,
+                        id=role_widget_id("approval", role),
+                    )
+                with Horizontal(classes="row"):
+                    yield Label("approve for me", classes="role-field")
+                    yield Select(
+                        _options(approve_value(settings.approve_for_me), APPROVE_FOR_ME_OPTIONS),
+                        value=approve_value(settings.approve_for_me),
+                        allow_blank=False,
+                        id=role_widget_id("afm", role),
+                    )
+                yield Static(id=role_widget_id("launch", role), classes="launch-line")
+
+    def _compose_fleet(self) -> ComposeResult:
+        yield Static(section_title(*self.FLEET_SECTION), classes="section")
         with Horizontal(classes="row"):
             yield Label("escape key")
             yield Input(
@@ -664,15 +835,14 @@ class AppSettingsView(VerticalScroll):
         with Horizontal(classes="row"):
             yield Label("native agent teams off")
             yield Switch(self.fleet.disable_native_agent_teams, id="native-teams")
-        yield Static(self.ACCOUNTS_SECTION, classes="section")
+
+    def _compose_accounts(self) -> ComposeResult:
+        yield Static(section_title(*self.ACCOUNTS_SECTION), classes="section")
         with Horizontal(classes="row"):
             yield Label("launches pick")
             yield Select(
                 PICK_MODES, value=self.accounts.pick, allow_blank=False, id="accounts-pick"
             )
-        with Horizontal(classes="row"):
-            yield Label("switch at (% used)")
-            yield Input(value=str(self.accounts.switch_at), type="integer", id="accounts-switch-at")
         with Horizontal(classes="row"):
             yield Label("on a usage limit")
             yield Select(
@@ -681,6 +851,12 @@ class AppSettingsView(VerticalScroll):
                 allow_blank=False,
                 id="accounts-on-limit",
             )
+
+    def _compose_more_accounts(self) -> ComposeResult:
+        yield Static(section_title(*self.MORE_ACCOUNTS_SECTION), classes="section")
+        with Horizontal(classes="row"):
+            yield Label("switch at (% used)")
+            yield Input(value=str(self.accounts.switch_at), type="integer", id="accounts-switch-at")
         with Horizontal(classes="row"):
             yield Label("wait if reset within (min)")
             yield Input(
@@ -694,22 +870,42 @@ class AppSettingsView(VerticalScroll):
         with Horizontal(classes="row"):
             yield Label("share settings.json")
             yield Switch(self.accounts.share_settings, id="accounts-share-settings")
-        with Horizontal(id="settings-buttons", classes="row"):
-            yield Button("Save", id="save-settings", variant="primary")
-            yield Button("Reload", id="reload-settings")
-            yield Button("Reset all settings to default", id="reset-settings", variant="error")
+        # The commands in bold, not in backticks: the note is a ``Text``, which shows them.
         yield Static(
-            Text(
-                f"saved to {paths.config_path()} (only what differs from the defaults) — a "
-                "per-spawn flag still wins over these (no [fleet] value is read from the "
-                "environment). Model, effort "
-                "and binary per role live in `aisquare team harness` and "
-                "`aisquare team bind`. The account per role is `team bind <role> "
-                "--account`; the machine and project defaults are on the Accounts page "
-                "and `aisquare accounts default`.",
+            Text.assemble(
+                "Model, effort and binary per role: ",
+                ("aisquare team harness", "bold"),
+                " and ",
+                ("aisquare team bind", "bold"),
+                "; the account select is ",
+                ("team bind <role> --account", "bold"),
+                ". The machine and project account defaults: the Accounts page and ",
+                ("aisquare accounts default", "bold"),
+                ". No value on this tab is read from the environment.",
             ),
-            id="settings-note",
+            id="agent-settings-note",
+            classes="about",
         )
+
+    def _compose_preferences(self) -> ComposeResult:
+        yield Static(section_title(*self.SIDEBAR_SECTION), classes="section")
+        with Horizontal(classes="row preference"):
+            yield Label("Always show project directory", classes="preference-label")
+            yield Switch(self.ui.always_show_project_path, id="ui-always-show-path")
+        yield Static(
+            Text(self.ALWAYS_SHOW_PATH_ABOUT), id="ui-always-show-path-about", classes="about"
+        )
+        before, after = self.PREFERENCES_FROM_A_SHELL
+        with Collapsible(
+            title="Advanced", collapsed=True, id=PREFERENCES_ADVANCED, classes="advanced"
+        ):
+            yield Static(
+                Text.assemble(
+                    before, ("aisquare config set ui.always_show_project_path true", "bold"), after
+                ),
+                id="preferences-from-a-shell",
+                classes="about",
+            )
 
     def on_mount(self) -> None:
         self._shown = self._field_values()
@@ -784,6 +980,21 @@ class AppSettingsView(VerticalScroll):
         if control == "default-agent" or control.startswith(f"{ROLE_ID_PREFIX}family-"):
             self._fill_account_selects()
 
+    def show_tab(self, tab: str) -> None:
+        """Bring ``tab`` (:data:`AGENT_TAB`, :data:`PREFERENCES_TAB`, :data:`REMOTE_TAB`) to
+        the front: the hub's *Remote control* and *Captain* links land on theirs."""
+        self.query_one("#app-settings-tabs", TabbedContent).active = tab
+        if tab == AGENT_TAB:
+            self.query_one("#agent-settings", VerticalScroll).scroll_home(animate=False)
+
+    @on(TabbedContent.TabActivated, "#app-settings-tabs")
+    def _tab_shown(self, event: TabbedContent.TabActivated) -> None:
+        """Save, Reload and Reset all, and the note on what Save writes, are the first two
+        tabs': *Remote* acts as each control is used, and has nothing for them to do."""
+        forms = event.pane.id != REMOTE_TAB
+        self.query_one("#settings-buttons").display = forms
+        self.query_one("#settings-note").display = forms
+
     def _field_values(self) -> dict[str, object]:
         """Every field's value by its id — not the account selects, which keep their own
         record of what they were read with (``_account_bindings``)."""
@@ -804,7 +1015,7 @@ class AppSettingsView(VerticalScroll):
         for wid in _SELECTS:
             values[wid] = self.query_one(f"#{wid}", Select).value
         values["native-teams"] = self.query_one("#native-teams", Switch).value
-        for wid in _ACCOUNT_SWITCHES:
+        for wid in (*_ACCOUNT_SWITCHES, *_UI_SWITCHES):
             values[wid] = self.query_one(f"#{wid}", Switch).value
         return values
 
@@ -822,9 +1033,21 @@ class AppSettingsView(VerticalScroll):
 
     @on(Button.Pressed, "#reload-settings")
     def reload_form(self) -> None:
-        """Discard edits: show what the file holds (the roles list can change with it)."""
+        """Discard edits on both tabs: show what the file holds (the roles list can change
+        with it), and tell the app what ``[ui]`` holds now (:class:`UiSettingsChanged`).
+
+        An unreadable file reads as the defaults, as at the first open, and the Captain off
+        (``experimental.captain_enabled``'s rule) — said, since every field then resets
+        (#274 delta review 2, n2), and on the form's first line (``_config_error``)."""
         config = self._read_config()
         self._config = config
+        if self._config_error:
+            self.notify(
+                f"config unreadable — showing the defaults, nothing saved: {self._config_reason}",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
         self.fleet = config.fleet
         self.query_one("#settings-config-error", Static).update(Text(self._config_error))
         default_agent = self.query_one("#default-agent", Select)
@@ -849,6 +1072,10 @@ class AppSettingsView(VerticalScroll):
         )
         for wid, key in _ACCOUNT_SWITCHES.items():
             self.query_one(f"#{wid}", Switch).value = getattr(self.accounts, key)
+        self.ui = config.ui
+        for wid, key in _UI_SWITCHES.items():
+            self.query_one(f"#{wid}", Switch).value = getattr(self.ui, key)
+        self.query_one(CaptainToggle).reread(config)
         for role in self._roles:
             row = self._role_row(role)
             if row is None:
@@ -877,6 +1104,7 @@ class AppSettingsView(VerticalScroll):
         self._shown = self._field_values()
         self._paint_launch_lines()
         self._load_accounts()  # the slots as they are now, off the UI thread
+        self.post_message(UiSettingsChanged(self.ui))
 
     # --- writing -----------------------------------------------------------------------
 
@@ -995,6 +1223,15 @@ class AppSettingsView(VerticalScroll):
                 update[key] = self.query_one(f"#{wid}", Switch).value
         return current.model_copy(update=update)
 
+    def _form_ui(self, current: UiSettings, changed: set[str]) -> UiSettings:
+        """``current`` with the *User preferences* fields ``changed`` applied."""
+        update = {
+            key: self.query_one(f"#{wid}", Switch).value
+            for wid, key in _UI_SWITCHES.items()
+            if wid in changed
+        }
+        return current.model_copy(update=update)
+
     def _apply_account_bindings(self, config: AppConfig) -> None:
         """Fold the account selects the operator CHANGED into ``config.team.profiles``.
 
@@ -1036,7 +1273,8 @@ class AppSettingsView(VerticalScroll):
 
     @on(Button.Pressed, "#save-settings")
     def _save_fleet_settings(self) -> None:
-        """Write the form through the one config writer, then show what landed."""
+        """Write both tabs' changed fields through the one config writer, then show what
+        landed."""
         try:
             config: AppConfig = load_config()
         except Exception as exc:  # a broken config.toml: say so, change nothing
@@ -1050,16 +1288,17 @@ class AppSettingsView(VerticalScroll):
         changed = self._changed()
         result = self._form_fleet(config.fleet, changed)
         if isinstance(result, str):
-            self.notify(result, severity="error", timeout=6, markup=False)
+            self._refused(result)
             return
         config.fleet = result
         self._apply_agents(config, changed)
         self._apply_account_bindings(config)
         accounts = self._form_accounts(config.accounts, changed)
         if isinstance(accounts, str):
-            self.notify(accounts, severity="error", timeout=6, markup=False)
+            self._refused(accounts)
             return
         config.accounts = accounts
+        config.ui = self._form_ui(config.ui, changed)
         try:
             written = save_config(config)
         except OSError as exc:  # the operator's filesystem saying no — the foreseeable failure
@@ -1072,6 +1311,13 @@ class AppSettingsView(VerticalScroll):
             return
         self.reload_form()
         self.notify(f"✓ settings saved to {written}", timeout=5, markup=False)
+
+    def _refused(self, why: str) -> None:
+        """Save said no: say why, and unfold *Agent settings*' Advanced, where every field a
+        save can refuse is (the agent cap, switch at, wait-if-reset-within), on its tab."""
+        self.notify(why, severity="error", timeout=6, markup=False)
+        self.show_tab(AGENT_TAB)
+        self.query_one(f"#{AGENT_ADVANCED}", Collapsible).collapsed = False
 
     # --- reset -------------------------------------------------------------------------
 

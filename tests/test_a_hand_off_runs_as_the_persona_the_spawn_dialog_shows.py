@@ -16,6 +16,7 @@ hook is the real one.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -73,6 +74,39 @@ def test_a_take_over_to_persona_none_briefs_no_persona_at_its_next_start(
     assert replaced.persona is None
     assert _session_persona(sid) is None, "the session runs as none now"
     assert "<aisquare-persona" not in _briefing(sid, project, replaced.id, monkeypatch)
+
+
+def test_a_resumed_restart_whose_persona_no_longer_resolves_records_and_briefs_none(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #201, R1-F2: the replay steps down to none (``_persona_for_replay``), the
+    window's ``AISQUARE_PERSONA`` is blank and a row with none asks for nothing, so the
+    store's COALESCE kept the old persona on the resumed session: its badge and briefing
+    named a persona the receipt said it started without. ``_respawn`` sets the resumed
+    session's persona before the window starts (e171262b, from #240's review), which
+    covers this path too; pinned here for it."""
+    tempo = project.root / ".aisquare" / "personas" / "tempo" / "SKILL.md"
+    tempo.parent.mkdir(parents=True)
+    tempo.write_text("---\nname: tempo\ndescription: A tempo.\n---\nKeep tempo.\n", "utf-8")
+    source = _coder(project, persona="tempo")
+    sid = source.session_id or ""
+    _on_disk(source, tmp_path)
+    with store_session() as store:
+        store.set_session_persona(sid, "tempo")
+    shutil.rmtree(tempo.parent)  # deleted since the spawn
+
+    receipt = fleet_service.restart(project, source.label)
+
+    assert receipt.resumed and receipt.started.session_id == sid, "premise: resumed"
+    assert any("persona tempo no longer resolves" in note for note in receipt.notes)
+    assert receipt.started.persona is None
+    briefed = _briefing(sid, project, receipt.started.id, monkeypatch)
+    assert _session_persona(sid) is None, "the session runs as none, as the receipt says"
+    assert "tempo" not in briefed
 
 
 def test_a_take_over_that_keeps_the_persona_still_briefs_it(

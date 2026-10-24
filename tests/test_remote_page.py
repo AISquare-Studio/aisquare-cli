@@ -2898,7 +2898,7 @@ def test_a_reply_to_a_coder_gone_since_it_asked_is_refused_as_a_tell_and_answere
     (card,) = remote_needs.scan_needs_you(sources, now=now, dismissed=())
     assert (card.kind, card.agent, card.agent_id) == ("board_question", "coder-1", "agt_c")
     with store_session() as store:
-        store.end_fleet_agent("agt_c", exit_status=0)
+        store.end_fleet_agent("agt_c", exit_status=0, ended_by="stopped")
     if since == "replaced":
         coder("ses_d", "agt_d", "%10", now)
     writes = live_writes().handlers

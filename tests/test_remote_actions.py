@@ -1067,6 +1067,7 @@ def test_stop_stops_the_pinned_row_and_audits_what_it_did(
         "claims_released": ["tsk_1"],
         "release_failed": None,
         "killed": None,
+        "marked_only": False,
         "project": project.id,
     }
     assert phone.audit() == [

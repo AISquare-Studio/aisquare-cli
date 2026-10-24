@@ -40,7 +40,7 @@ from typing import ClassVar, NamedTuple
 from rich.cells import cell_len
 from rich.text import Text
 from textual import events, on
-from textual.app import ComposeResult
+from textual.app import ComposeResult, RenderResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
@@ -167,7 +167,12 @@ class SettingsSelected(Message):
 
 
 class AppSettingsSelected(Message):
-    """The hub's *App settings*: the machine-wide settings page."""
+    """The hub's *App settings*: the machine-wide settings page — on ``tab`` when given (the
+    hub's *Remote control* and *Captain* open it on theirs), else on the tab it shows."""
+
+    def __init__(self, tab: str | None = None) -> None:
+        self.tab = tab
+        super().__init__()
 
 
 class RenameProject(Message):
@@ -237,6 +242,14 @@ def short_path(path: Path, home: Path | None = None) -> str:
         return str(path)
 
 
+def project_subtitle(project: ProjectInfo, names: Counter[str], *, always: bool) -> str | None:
+    """The dim line under a card's name: the project's directory (:func:`short_path`) when
+    ``always`` — ``[ui] always_show_project_path`` — or when another listed project shares
+    its name (``names`` counts the listed projects by :func:`project_name`); ``None``, no
+    line, otherwise."""
+    return short_path(project.root) if always or names[project_name(project)] > 1 else None
+
+
 def ordered_agents(statuses: Iterable[FleetAgentStatus]) -> list[FleetAgentStatus]:
     """Manager first, then by ``created_at`` (§4.1) — whatever order the service used."""
     return sorted(
@@ -251,6 +264,15 @@ whole at the right: a wide chip (``🔔``, ``💤 exited(N)``) or ``100%`` sits 
 BADGE_KEEP = 5
 """The fewest cells a cut persona badge keeps — `` · s…``, one letter of the name; with
 fewer left it is dropped rather than shown as a bare ``·``."""
+
+
+def persona_badge(status: FleetAgentStatus) -> Text:
+    """`` · skeptic``, dim: the persona the row was spawned with, or else the one its session
+    runs as; empty for none. A sidebar row and the agent info line both end with it, and
+    both drop it first, by :data:`BADGE_KEEP`."""
+    agent = status.agent
+    persona = agent.persona or (status.session.persona if status.session is not None else None)
+    return Text(f" · {persona}", style="dim") if persona else Text()
 
 
 def agent_row_text(
@@ -273,7 +295,10 @@ def agent_row_text(
     everything the owner's order holds (review of #267's merge, M-F1): the label's padding
     gives way first, then the badge is ellipsised, and dropped once fewer than
     :data:`BADGE_KEEP` cells are left for it; only then is the label cut. The row is built
-    to its width, so its own ellipsis never reaches the chip or the ``#N·NN%``.
+    to its width, so its own ellipsis never reaches the chip or the ``#N·NN%`` while the
+    width holds the icon, two cells of label and the tail; a row narrower than that (under
+    16 cells, with ``🔔 #1·100%``) is cut at its end, figure included (review of #267's
+    delta, m1).
     """
     agent = status.agent
     chip, style = STATE_CHIP.get(status.state, STATE_CHIP["unknown"])
@@ -289,20 +314,19 @@ def agent_row_text(
         tail.append(f" #{agent.account_slot}" + ("·" if percent is not None else ""), style="dim")
         if percent is not None:
             tail.append_text(used_percent_text(percent))
-    persona = agent.persona or (status.session.persona if status.session is not None else None)
-    badge = Text(f" · {persona}", style="dim") if persona else Text()
+    badge = persona_badge(status)
     label = Text(agent.label)
     room = LABEL_WIDTH if width is None else max(2, width - cell_len(icon) - 1 - tail.cell_len)
-    if width is None or label.cell_len <= room:
+    if width is None:
+        label.pad_right(LABEL_WIDTH - label.cell_len)
+    elif label.cell_len <= room:
         left = room - label.cell_len  # the cells after the label's own, the badge's to take
-        if width is not None and badge.cell_len > left:
+        if badge.cell_len > left:
             if left >= BADGE_KEEP:
                 badge.truncate(left, overflow="ellipsis")
             else:
                 badge = Text()
-        label.pad_right(
-            min(LABEL_WIDTH, room - (0 if width is None else badge.cell_len)) - label.cell_len
-        )
+        label.pad_right(min(LABEL_WIDTH, room - badge.cell_len) - label.cell_len)
     else:
         label.truncate(room, overflow="ellipsis")
         badge = Text()
@@ -891,6 +915,15 @@ class AgentRow(Activatable):
     def on_resize(self) -> None:
         self.paint()
 
+    def render(self) -> RenderResult:
+        """The row for the width it is drawn at. Built in ``__init__`` before it had one, the
+        first frame was the whole-width text until ``on_resize`` repainted it, and the
+        row's own ellipsis cut its end: the badge, or a ``#1·42%`` behind a long label
+        (review of #267's delta, m2). Painted here, a frame is never drawn at no width;
+        :meth:`paint` changes nothing when nothing it reads has changed."""
+        self.paint()
+        return super().render()
+
     def message(self) -> Message:
         return AgentSelected(self.status.agent.project_id, self.status.agent.id)
 
@@ -1089,6 +1122,11 @@ class ProjectCard(Vertical):
             stale.remove()
         self._paint_decorations()
 
+    def show_subtitle(self, subtitle: str | None) -> None:
+        """The dim line under the name alone, the rest of the card as it is."""
+        self.subtitle = subtitle
+        self._paint_decorations()
+
     def toggle(self) -> None:
         """Collapse or expand the agent rows; the header stays."""
         self.collapsed = not self.collapsed
@@ -1212,6 +1250,30 @@ def doctor_badge(failing: int, warning: int) -> str:
     )
 
 
+CAPTAIN_READING = "reading the captain's board…"
+"""The Captain section's line from the moment Settings switches the captain on until a read
+of the fleet that asked for it answers: until then nothing says there is no captain."""
+
+
+class StartCaptain(Activatable):
+    """*▶ Start captain*, in the Captain section while there is no captain: what the ``★`` does
+    then, the Spawn dialog with the captain chosen. It said "`aisquare captain` starts one",
+    a command to go and type, and the owner did not find how to start one (#33)."""
+
+    DEFAULT_CSS = """
+    StartCaptain { color: $accent; }
+    """
+
+    def __init__(self) -> None:
+        super().__init__(Text("▶ Start captain"), id="captain-empty")
+        # No selection key, as the ★ has none: the keyboard cursor's walk (pinned by the
+        # shell's tests) stays as it was, and the line is the mouse's way to a start.
+        self.tooltip = "No captain running — start one (aisquare captain)"
+
+    def message(self) -> Message:
+        return CaptainRequested()
+
+
 class CaptainSection(Vertical):
     """The home-level heading above the projects: the captain's row (one per home, T2).
 
@@ -1227,12 +1289,17 @@ class CaptainSection(Vertical):
     CaptainSection #captain-notice { height: auto; color: $text-muted; }
     """
 
+    def __init__(self, *, notice: str | None = None, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self._notice = notice
+        """The line it is built with, as :meth:`show` would say it with no row."""
+
     def compose(self) -> ComposeResult:
         yield Static(Text("Captain", style="bold"), id="captain-title")
-        yield Static(
-            Text("no captain — `aisquare captain` starts one", style="dim"), id="captain-empty"
-        )
-        yield Static("", id="captain-notice")
+        empty = StartCaptain()
+        empty.display = self._notice is None
+        yield empty
+        yield Static(Text(self._notice or "", style="dim"), id="captain-notice")
 
     def show(self, status: FleetAgentStatus | None, *, notice: str | None = None) -> None:
         """Show the captain's row, or the line saying how to start one.
@@ -1242,7 +1309,7 @@ class CaptainSection(Vertical):
         the "starts one" line, which is true only when the fleet ANSWERED none —
         the project cards' rule (``Sidebar.show_projects``), for the captain.
         """
-        empty = self.query_one("#captain-empty", Static)
+        empty = self.query_one("#captain-empty", StartCaptain)
         said = self.query_one("#captain-notice", Static)
         said.update(Text(notice or "", style="dim"))
         said.display = bool(notice)
@@ -1298,6 +1365,10 @@ class OthersSection(Vertical):
 # --- the pane ---------------------------------------------------------------------
 
 
+MOVE_KEYS = Binding.Group("move", compact=True)
+"""The sidebar's ↓ and ↑, as the footer shows them: one entry."""
+
+
 class Sidebar(Vertical):
     """Header and the scrolling project list; under the separator, *⚙ Settings* and its status.
 
@@ -1316,8 +1387,9 @@ class Sidebar(Vertical):
     """
 
     BINDINGS: ClassVar = [
-        ("down", "cursor_down", "next"),
-        ("up", "cursor_up", "previous"),
+        # One footer entry, "↓↑ move": two took the room "R remote" needs at 80 columns (#33).
+        Binding("down", "cursor_down", "next", group=MOVE_KEYS),
+        Binding("up", "cursor_up", "previous", group=MOVE_KEYS),
         ("enter", "activate", "open"),
         # Out of the footer, which is full at 80 columns; the help screen (?) lists it.
         Binding("x", "stop_agent", "stop", show=False),
@@ -1420,6 +1492,24 @@ class Sidebar(Vertical):
         self.query_one(CaptainSection).show(status, notice=notice)
         self.query_one(CaptainButton).show(status)
 
+    async def set_captain(self, on: bool) -> None:
+        """The captain switched on or off while asq runs (Settings, #33): the insignia and the
+        Captain section mounted, saying the captain is being read until a frame answers,
+        or removed. As at a start with the switch so (:meth:`compose`), never a restart."""
+        if on == self.captain:
+            return
+        self.captain = on
+        if not on:
+            for widget in [*self.query(CaptainButton), *self.query(CaptainSection)]:
+                await widget.remove()
+            return
+        header = self.query_one("#fleet-header", Horizontal)
+        await header.mount(CaptainButton(), before=self.query_one(AddButton))
+        # Built saying so: shown after the mount, the section said *Start captain* for as
+        # long as the mount took, to a frame and to a read in that window (review of #274, m7).
+        section = CaptainSection(notice=CAPTAIN_READING, id="captain-section")
+        await self.mount(section, before=self.query_one("#projects-notice"))
+
     def show_projects(
         self,
         projects: list[ProjectInfo],
@@ -1427,13 +1517,15 @@ class Sidebar(Vertical):
         *,
         notices: Mapping[str, str] | None = None,
         groups: list[ProjectGroup] | None = None,
+        always_show_paths: bool = False,
     ) -> None:
         """Paint one frame. Cards and rows are updated in place, keyed by id.
 
         ``notices`` says, per project, why its agent rows are missing (the
         cost of a fleet call that failed open); it is shown as a dim line
         where the rows would be, so an empty card is never mistaken for an
-        idle fleet.
+        idle fleet. ``always_show_paths`` is ``[ui] always_show_project_path``, which
+        the app holds (:func:`project_subtitle`).
 
         The ORDER is the arrangement's (#140): a **Pinned** section, then each
         group's header with its members indented under it (hidden while the
@@ -1464,7 +1556,7 @@ class Sidebar(Vertical):
         def card_for(project: ProjectInfo, *, scope: str | None, hidden: bool) -> None:
             nonlocal stripe
             statuses = ordered_agents(agents.get(project.id, []))
-            subtitle = short_path(project.root) if names[project_name(project)] > 1 else None
+            subtitle = project_subtitle(project, names, always=always_show_paths)
             notice = notices.get(project.id)
             card = existing_cards.pop(project.id, None)
             if card is None:
@@ -1527,6 +1619,16 @@ class Sidebar(Vertical):
         self.last_frame = (projects, agents)
         self._ring_on_attention(status for statuses in agents.values() for status in statuses)
         self._apply_selection()
+
+    def show_paths(self, always: bool) -> None:
+        """``[ui] always_show_project_path`` changed (App settings saved, reloaded or reset):
+        every card's directory line follows now, from the frame on screen, rather than at the
+        next frame's read."""
+        if self.last_frame is None:
+            return
+        names = Counter(project_name(project) for project in self.last_frame[0])
+        for card in self.query_one("#projects", VerticalScroll).query(ProjectCard):
+            card.show_subtitle(project_subtitle(card.project, names, always=always))
 
     # --- groups, pins and order (#140) ----------------------------------------------
 

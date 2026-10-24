@@ -108,6 +108,109 @@ def test_on_the_label_captain_is_the_captains(
     assert tmux.spawned == []
 
 
+# --- R2-m1: the switch flipped between a start and its restart ------------------------
+
+
+def _on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(experimental.CAPTAIN_ENV, "1")
+    assert experimental.captain_enabled()
+
+
+def test_a_coder_labelled_captain_while_off_is_never_stopped_by_a_restart_once_on(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    captain_off: None,
+) -> None:
+    """Review of #240, R2-m1: the reviewer's repro. Started off, restarted on: the restart
+    stopped the coder, then refused 'label captain is reserved', leaving the row exited."""
+    agent = fleet_service.spawn(project, "coder", label="captain", worktree=False).agent
+    _on(monkeypatch)
+
+    for verb in (fleet_service.restart, fleet_service.switch):
+        with pytest.raises(fleet_service.FleetError, match="reserved for the captain") as exc:
+            verb(project, "captain")
+        assert "nothing was stopped" in str(exc.value)
+
+    [live] = fleet_service.list_agents(project)
+    assert live.agent.id == agent.id and live.state != "exited"
+    assert tmux.killed == [] and len(tmux.spawned) == 1
+
+
+def test_a_declared_captain_on_a_project_while_off_is_never_stopped_by_a_restart_once_on(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    captain_off: None,
+    declared_captain: None,
+) -> None:
+    agent = fleet_service.spawn(project, "captain", worktree=False).agent
+    _on(monkeypatch)
+
+    with pytest.raises(fleet_service.FleetError, match="lives on the home board") as exc:
+        fleet_service.restart(project, agent.label)
+
+    assert "nothing was stopped" in str(exc.value)
+    [live] = fleet_service.list_agents(project)
+    assert live.agent.id == agent.id and live.state != "exited"
+    assert tmux.killed == [] and len(tmux.spawned) == 1
+
+
+# --- R2-m2: a declared captain in the home added as a project --------------------------
+
+
+def test_off_a_declared_captain_in_the_home_restarts_like_any_other_role(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captain_off: None,
+    declared_captain: None,
+) -> None:
+    """Review of #240, R2-m2: by role and board alone, a declared captain spawned into the
+    home was read as the captain's leftover row and refused with CAPTAIN_OFF. Only a row
+    launched as the captain is that."""
+    from aisquare.core import paths
+    from aisquare.core.workspace import project_id_for
+
+    root = paths.aisquare_home().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    home = ProjectInfo(id=project_id_for(root), root=root)
+    with store_session() as store:
+        store.ensure_project(home)
+    agent = fleet_service.spawn(home, "captain", worktree=False).agent
+
+    restarted = fleet_service.restart(home, agent.label)
+
+    assert restarted.started.role == "captain" and restarted.started.label == agent.label
+
+
+@pytest.mark.needs_captain
+def test_once_on_a_declared_captain_in_the_home_is_not_taken_for_the_captain(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captain_off: None,
+    declared_captain: None,
+) -> None:
+    """Review of #240, R2-m5: ``brain.find`` adopted any live home row whose role was
+    ``captain``, so `aisquare captain` attached to the owner's declared role."""
+    from aisquare.core import paths
+    from aisquare.core.workspace import project_id_for
+    from aisquare.services.captain import brain
+
+    root = paths.aisquare_home().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    home = ProjectInfo(id=project_id_for(root), root=root)
+    with store_session() as store:
+        store.ensure_project(home)
+    fleet_service.spawn(home, "captain", worktree=False)
+    _on(monkeypatch)
+
+    assert brain.find() is None
+
+
 # --- R1-F2: a declared role named captain ---------------------------------------------
 
 
@@ -169,9 +272,10 @@ def test_off_a_session_started_as_a_declared_captain_gets_the_ordinary_briefing(
         session = store.get_session("declared-captain-1")
         plain = store.get_session("plain-coder-1")
     # Not forced to anything: the state any role's start gives (#113: a Claude Code start
-    # sits at its prompt, `waiting`, for every role alike).
+    # sits at its prompt, `waiting`, for every role alike; #32, L1). What tells them apart
+    # is the briefing above.
     assert session is not None and plain is not None
-    assert session.state == plain.state, "not the captain's own state"
+    assert session.state == plain.state == "waiting", "not the captain's own state"
 
 
 @pytest.mark.needs_captain

@@ -759,7 +759,10 @@ def test_a_posix_acl_is_read_from_the_entry_itself(
 
 HOME_FOLDERS = "group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:everyone:12:deny:delete"
 """The ACL macOS puts on each folder of a home (``ls -le ~``), as ``acl_to_text`` writes it."""
-BOB = "user:FFFFEEEE-DDDD-CCCC-BBBB-AAAA000001F5:bob:501"
+_OTHER_UID = 502 if getattr(os, "getuid", lambda: 0)() == 501 else 501
+"""Another account's uid: never the runner's. 501 is macOS's first user, the runner on a
+Mac, whose entry is its own; Bob there read as the runner and opened nothing."""
+BOB = f"user:FFFFEEEE-DDDD-CCCC-BBBB-AAAA{_OTHER_UID:08X}:bob:{_OTHER_UID}"
 ADMIN = "group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000050:admin:80"
 
 

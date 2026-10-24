@@ -1087,7 +1087,7 @@ def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
     monkeypatch.chdir(here)
     monkeypatch.setattr(brain_core, "gbrain_version", lambda: "9.9")
     monkeypatch.setattr(brain_core, "brain_ready", lambda project_id: False)
-    # A machine that can pack, so `here`'s missing snapshot warns rather than reading
+    # A machine that can pack, so `here`'s missing snapshot reads opt-in rather than
     # off -- without a Node it is off on purpose, whatever this machine has on PATH.
     monkeypatch.setattr(snapshot_core, "can_pack", lambda: True)
     # Activate the orchestrator in `there` only, with an off-ladder live session.
@@ -1106,7 +1106,7 @@ def test_doctor_cwd_selects_the_project_for_the_project_scoped_checks(
     assert there_rows["brain"].status is CheckStatus.warn
     assert "not initialised" in there_rows["brain"].detail
     # The control: the process cwd is a different, never-activated project.
-    assert here_rows["snapshot"].status is CheckStatus.warn
+    assert here_rows["snapshot"].detail == "none — opt-in: aisquare project onboard packs one"
     assert here_rows["agent harness"].detail == "not activated for this project"
     assert "orchestrator not active here" in here_rows["brain"].detail
 

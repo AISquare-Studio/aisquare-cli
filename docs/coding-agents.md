@@ -1282,7 +1282,12 @@ ignores a new one, Codex's: a restart's receipt says a persona changed since rea
 through the briefing alone), `exports_home_env`, `own_doctor_check` (the doctor has a dedicated check for it, Claude Code's, which Welcome's step 2 probes it with too; the per-adapter row and the generic probe skip it), `model_ladders`,
 `model_proxy` (its traffic goes through the explainability proxy, the lane the doctor and
 Remote's card judge it by; with `native_telemetry` instead, the card judges its own
-telemetry's lane, and with neither it reads untraced), `positional_prompt`, `first_context_file_only`, `approves_for_me` (a reviewer of its own decides `auto` approvals; without one `auto` runs as `ask`), `sandbox_permissions`,
+telemetry's lane, and with neither it reads untraced), `transcript_usage` (its transcript
+carries every request's token usage as `core.usage` reads it, Claude Code's: its turn-end
+and session-end hooks record it for `aisquare metrics tokens`; without it none is
+recorded), `memory_files` (the files it loads into a session itself, Claude Code's
+`CLAUDE.md` chain: a user-pool entry one of them holds is left out of the session-start
+block; `None` injects every entry), `positional_prompt`, `first_context_file_only`, `approves_for_me` (a reviewer of its own decides `auto` approvals; without one `auto` runs as `ask`), `sandbox_permissions`,
 `sandboxes_tools` (its tools run in an OS sandbox, which `store_access` must open to
 the store), `redraws_while_asking` (its UI redraws while it waits on the human, so an
 attention row holds until a hook moves it or its screen's `working_on_screen` reads a turn running),

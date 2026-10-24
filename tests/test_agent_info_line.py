@@ -286,7 +286,9 @@ def test_a_persona_badge_gives_way_before_the_session_figure_never_after() -> No
             row = agent_row_text(status, 42.0, width=width)
             plain = row.plain
             assert row.cell_len <= width, (width, plain)
-            assert plain.endswith("⏸ #1·42%") or "⏸ #1·42% · " in plain, (width, plain)
+            # Every width here has room for a badge of BADGE_KEEP cells (review of #267's
+            # delta, n1: a branch for a row without one could never be taken).
+            assert "⏸ #1·42% · " in plain, (width, plain)
             badge = plain.partition("#1·42%")[2]
             assert badge.startswith(" · ") and len(badge) >= BADGE_KEEP, (width, plain)
             if persona in badge:
@@ -297,8 +299,120 @@ def test_a_persona_badge_gives_way_before_the_session_figure_never_after() -> No
     wide = agent_row_text(_status(slot=1, persona="skeptic"), 42.0, width=60).plain
     assert wide == "🔨 coder-auth    ▶ #1·42% · skeptic"
     # Too narrow even for a cut badge: it is dropped, the figure is not.
+    # Nothing after the figure (n1: '"·sk" not in tight' could not fail, as a cut badge
+    # reads " · s…").
     tight = agent_row_text(_status(slot=1, persona="skeptic"), 42.0, width=25).plain
-    assert tight.rstrip().endswith("▶ #1·42%") and "·sk" not in tight and " · " not in tight
+    assert tight.rstrip().endswith("▶ #1·42%"), tight
+    assert tight.partition("#1·42%")[2].strip() == "", tight
+
+
+def test_the_persona_ends_the_info_line_and_is_the_first_thing_a_narrow_row_drops() -> None:
+    """The owner's decision D4 on #267's m1: `` · <persona>`` closes the line. Narrow, it goes
+    first, as a sidebar row's badge does: cut, and dropped below ``BADGE_KEEP`` cells rather
+    than end the line in a bare ``·``; only then does the label give way, as before."""
+    usage = {3: 87.0}
+    status = _status(persona="skeptic")
+    bare = info_line(_status(), LABELS, usage)  # the same agent with no persona
+    assert bare.plain == "🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4"
+    assert info_line(status, LABELS, usage).plain == f"{bare.plain} · skeptic"
+    wide = info_line(status, LABELS, usage, width=100)
+    assert wide.plain == f"{bare.plain} · skeptic"
+    assert _style_of(wide, " · skeptic") == "dim" != _style_of(wide, "%4")
+    cut = info_line(status, LABELS, usage, width=bare.cell_len + 6)
+    assert cut.plain == f"{bare.plain} · sk…" and cut.cell_len == bare.cell_len + 6
+    for spare in range(BADGE_KEEP):  # too few cells for a letter of it: dropped, never " ·"
+        assert info_line(status, LABELS, usage, width=bare.cell_len + spare).plain == bare.plain
+    for width in (37, 30):  # too narrow even without it: gone, and the label cut as before
+        assert info_line(status, LABELS, usage, width=width).plain == (
+            info_line(_status(), LABELS, usage, width=width).plain
+        )
+    # The row's persona, else the one its session runs as: the sidebar badge's own source.
+    plain_row = _status()
+    assert plain_row.session is not None
+    ran_as = plain_row.model_copy(
+        update={"session": plain_row.session.model_copy(update={"persona": "tempo"})}
+    )
+    assert info_line(ran_as, LABELS, usage).plain.endswith("%4 · tempo")
+    assert agent_row_text(ran_as, 87.0, width=60).plain.endswith(" · tempo")
+
+
+@pytest.mark.parametrize("wide", [True, False], ids=["wide", "narrow"])
+def test_a_mounted_info_line_shows_the_persona_wide_and_drops_it_narrow(wide: bool) -> None:
+    """The header as the Agent view mounts it, at its own width: wide, the persona closes it;
+    with room for the pane id and three cells more, too few for a letter of the persona, the
+    line ends at the pane id, where the row's own ellipsis would have drawn a bare `` ·…``."""
+    import asyncio
+
+    from textual.app import App, ComposeResult
+    from textual.containers import Vertical
+    from textual.geometry import Region
+
+    from aisquare.cli.ui.views.agent import InfoLine
+
+    usage = {3: 87.0}
+    status = _status(persona="skeptic")
+    bare = info_line(_status(), LABELS, usage)
+    width = 100 if wide else bare.cell_len + 3
+    painted: list[str] = []
+
+    class Host(App[None]):
+        CSS = f"Vertical {{ width: {width}; }}"
+
+        def compose(self) -> ComposeResult:
+            with Vertical():
+                yield InfoLine(id="line")
+
+    async def run() -> None:
+        async with Host().run_test(size=(120, 5)) as pilot:
+            line = pilot.app.query_one(InfoLine)
+            line.show_line(status, LABELS, usage)
+            await pilot.pause()
+            await pilot.pause()
+            assert line.content_size.width == width, "the premise: the row's width"
+            (strip,) = line.render_lines(Region(0, 0, line.outer_size.width, 1))
+            painted.append(strip.text.rstrip())
+
+    asyncio.run(run())
+    assert painted == [f"{bare.plain} · skeptic" if wide else bare.plain], painted
+
+
+def test_a_mounted_row_is_never_drawn_wider_than_it_is() -> None:
+    """Review of #267's delta, m2: a row is built in ``__init__`` before it has a width, and
+    its first frame was the whole-width text until ``on_resize`` repainted it, cut at its
+    end by its own ellipsis: the badge, or the figure behind a long label. Every frame is
+    drawn at the width it has."""
+    import asyncio
+
+    from rich.cells import cell_len
+    from textual.app import App, ComposeResult, RenderResult
+    from textual.containers import Vertical
+
+    from aisquare.cli.ui.sidebar import AgentRow
+
+    drawn: list[tuple[int, str]] = []
+
+    class Recorded(AgentRow):
+        def render(self) -> RenderResult:
+            frame = super().render()
+            drawn.append((self.content_size.width, str(getattr(frame, "plain", frame))))
+            return frame
+
+    class Host(App[None]):
+        CSS = "Vertical { width: 30; }"
+
+        def compose(self) -> ComposeResult:
+            with Vertical():
+                yield Recorded(_status(label="manager", role="manager", slot=1, persona="skeptic"))
+
+    async def run() -> None:
+        async with Host().run_test(size=(80, 10)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+
+    asyncio.run(run())
+    sized = [(width, plain) for width, plain in drawn if width]
+    assert sized, "the premise: the row was drawn"
+    assert all(cell_len(plain) <= width for width, plain in sized), sized
 
 
 def test_no_hash_tmux_command_role_task_or_working_directory_in_the_info_line() -> None:

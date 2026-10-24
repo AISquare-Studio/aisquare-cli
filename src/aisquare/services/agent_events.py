@@ -139,6 +139,9 @@ def _dispatch(
     # The account a session runs under, where the hook names its home (else the services
     # read it off the transcript path).
     account = str(config_dir) if adapter.capabilities.hook_names_home else None
+    # The transcript a turn's token usage is read off, for an agent whose transcript carries
+    # it as `core.usage` reads it (#346); none for any other.
+    usage = event.transcript_path if adapter.capabilities.transcript_usage else None
     notice = (
         _usage_limit(adapter, event, session_id)
         if adapter.capabilities.limits_in_transcript
@@ -157,7 +160,7 @@ def _dispatch(
             hand_over=event.kind != "session_end",
         )
         if event.kind == "session_end":
-            hooks.session_ended(cwd, session_id=session_id)
+            hooks.session_ended(cwd, session_id=session_id, transcript_path=usage)
             metrics.close_turn(session_id)
         return None
     if event.kind == "session_start":
@@ -199,6 +202,7 @@ def _dispatch(
             stop_hook_active=event.stop_hook_active,
             model=event.model,
             effort=event.effort,
+            transcript_path=usage,
         )
         _deliver_owed_nudge(_nudge_owed_after(adapter, session_id))
         if decision is None:
@@ -211,11 +215,16 @@ def _dispatch(
                 )
         return decision.reason
     if event.kind == "session_end":
-        hooks.session_ended(cwd, session_id=session_id, reason=event.reason)
+        hooks.session_ended(cwd, session_id=session_id, reason=event.reason, transcript_path=usage)
         metrics.close_turn(session_id)
     elif event.kind == "turn_failed":
         hooks.turn_failed(
-            session_id=session_id, error=event.error, message=event.message, details=event.details
+            session_id=session_id,
+            error=event.error,
+            message=event.message,
+            details=event.details,
+            transcript_path=usage,
+            cwd=cwd,
         )
     elif event.kind in {"attention", "notification"}:
         hooks.needs_attention(

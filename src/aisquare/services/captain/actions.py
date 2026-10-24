@@ -1857,8 +1857,15 @@ def stop(
                 "label": receipt.agent.label,
                 "released": [t.id for t in receipt.released],
                 "release_failed": receipt.release_failed,
+                "marked_only": receipt.marked_only,
             },
-            said=f"stopped {label}{exited.note}",
+            # An agent that had ended with no window left is only recorded as stopped, so
+            # Restart all leaves it: said so, not "stopped" (final delta review, n4).
+            said=(
+                f"marked {label} stopped: it had already ended, and no window of its was left"
+                if receipt.marked_only
+                else f"stopped {label}{exited.note}"
+            ),
             receipt=exited.seq,
         )
 

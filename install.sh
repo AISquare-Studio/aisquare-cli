@@ -1662,7 +1662,7 @@ _install_node_via_fnm() {
     if run fnm install "$MIN_NODE_MAJOR" && run fnm default "$MIN_NODE_MAJOR"; then
         # fnm's shims live in a multishell dir that only a shell hook sets up, so
         # the alias directory is put on PATH for the rest of THIS run — that is
-        # what lets `aisquare init` below pack a snapshot.
+        # what lets `aisquare project onboard` pack a snapshot in it.
         for _alias in "$HOME/.local/share/fnm/aliases/default/bin" "$HOME/.fnm/aliases/default/bin"; do
             if [ -x "$_alias/node" ]; then
                 PATH="$_alias:$PATH"
@@ -1673,13 +1673,13 @@ _install_node_via_fnm() {
         _reread_node
         good "Node ${NODE_VERSION:-$MIN_NODE_MAJOR} via fnm"
         INSTALLED_LIST="$INSTALLED_LIST node(fnm)"
-        # Not "doctor reads snapshots as off": the project this run registers is
-        # packed now, on this PATH, and agents keep getting that pack in a shell
-        # with no node. What such a shell cannot do is pack or refresh one.
+        # Not "doctor reads snapshots as off": packing is opt-in (`project onboard`)
+        # and works on this PATH. What a shell with no node cannot do is pack or
+        # refresh one.
         warn "fnm's Node is only on PATH in shells that have run its hook. Add to your profile:
          eval \"\$(fnm env --use-on-cd)\"
          Until then those shells have no node, so they cannot pack or refresh a codebase
-         snapshot; agents still get any pack this run makes."
+         snapshot (aisquare project onboard, opt-in)."
     else
         warn "fnm could not install Node $MIN_NODE_MAJOR — snapshots need it; everything else works."
     fi
@@ -1823,9 +1823,9 @@ init_home() {
 
     # --agent claude-code installs the six lifecycle hooks and ingests the
     # CLAUDE.md of the config dir sessions from this shell read (--agent codex: Codex's
-    # hooks in $CODEX_HOME/hooks.json, and its AGENTS.md); without --no-onboard it also packs the Repomix
-    # snapshot in the same run. That is `claude-code` and `snapshot` fixed in one
-    # command (§4).
+    # hooks in $CODEX_HOME/hooks.json, and its AGENTS.md); without --no-onboard it also
+    # registers the project. It packs no Repomix snapshot: that is opt-in (`aisquare
+    # project onboard`), and doctor reads none as ok (§4).
     #
     # NEVER --reinit. It is exactly the flag a script author reaches for to make
     # a step "clean", and here it resets config.toml and DISCARDS the role
@@ -2254,15 +2254,8 @@ _actionable_fix() {
                 printf '%s' "run codex (sign in if it asks), open /hooks and trust aisquare's hooks"
             fi
             ;;
-        snapshot)
-            # A project with no snapshot yet. A snapshot packed too large before
-            # 0.7.0 is reused by a plain onboard, so that advice never turned it
-            # green; the doctor's fix for it is a re-pack (#82).
-            case "$(_doctor_detail snapshot)" in
-                *"no codebase snapshot"*) printf 'aisquare project onboard' ;;
-                *) printf '' ;;
-            esac
-            ;;
+        # NO snapshot either: a project with none reads ok (the pack is opt-in), and
+        # one packed too large before 0.7.0 needs the doctor's re-pack (#82).
         *) printf '' ;;
     esac
 }

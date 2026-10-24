@@ -5,6 +5,11 @@ Not a test module. A toast leaves the screen at its timeout, and Textual's own
 "✓ stopped" toasts were gone on windows-latest, and the test found none (PR #266, CI run
 39363641808). A test about what was said calls :func:`record` first, settles, and reads
 the list; a test about what is still on screen reads the screen.
+
+Read after a dismiss, ``app._notifications`` can be empty for a toast that was raised: a
+screen that notifies and then dismisses has its result callback run first (``call_next``),
+ahead of the queued ``Notify``, so a test that waits for the callback can read before the
+toast exists (the Stop dialog's, Windows, seq 381). :func:`record` has it at the call.
 """
 
 from __future__ import annotations

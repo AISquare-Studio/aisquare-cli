@@ -10,7 +10,13 @@ from pydantic import ValidationError
 
 from aisquare.core import config as core_config
 from aisquare.core import paths
-from aisquare.core.config import AppConfig, RoleLaunchProfile, load_config, save_config
+from aisquare.core.config import (
+    AppConfig,
+    RoleLaunchProfile,
+    UiSettings,
+    load_config,
+    save_config,
+)
 from aisquare.models import RedactionLevel
 
 
@@ -32,6 +38,16 @@ def reset_settings() -> Path | None:
     ``core.config.reset_config``.
     """
     return core_config.reset_config()
+
+
+def ui_settings() -> UiSettings:
+    """The ``[ui]`` section; defaults when the config is unreadable (fail-open), as
+    ``fleet.settings`` reads ``[fleet]``: a broken file costs a display preference, never
+    the UI."""
+    try:
+        return load_config().ui
+    except Exception:
+        return UiSettings()
 
 
 def anything_to_reset() -> bool:

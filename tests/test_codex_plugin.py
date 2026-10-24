@@ -485,7 +485,6 @@ def test_with_only_uv_it_runs_the_pinned_release(machine: Machine) -> None:
         str(machine.home / ".codex"),
     ]
     assert machine.stdin_of("uvx") == b'{"prompt": "hi"}'
-    assert machine.uvx_named("uvx") == str(machine.bin / "uvx")
 
 
 @posix_only

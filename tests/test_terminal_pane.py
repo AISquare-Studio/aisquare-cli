@@ -3184,7 +3184,10 @@ def test_hiding_the_pane_drops_its_highlight(fake: FakeTmux, tmp_path: Path) -> 
             await drag(pilot, first, (0, 1), (5, 1))
             standing = first.text_selection
             host.tabs.current = "second"
-            await pilot.pause()
+            # Hide reaches the pane at the next layout, which one pause did not always
+            # reach on Windows (CI runs 37790858879 and 38557402746): wait for it.
+            with contextlib.suppress(AssertionError):
+                await wait_until(pilot, lambda: first.text_selection is None)
             hidden = first.text_selection
             host.set_focus(None)
             await pilot.press("ctrl+c")
@@ -4764,6 +4767,11 @@ def test_a_double_click_the_program_copies_is_mirrored_once(
             await click(pilot, widget, (1, 1))
             await click(pilot, widget, (1, 1))
             fake.buffer = "word"  # the program's handler for the second release ran
+            # Waited for, not paused for: a fixed 0.2 s past the delay missed the read on
+            # a loaded Windows runner (main's scheduled run 38695758190, '' == 'word').
+            with contextlib.suppress(AssertionError):
+                await wait_until(pilot, lambda: host.clipboard == "word")
+            # A second mirror would read within one more delay of the first.
             await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.2)
             return host.clipboard, list(host.notices)
 

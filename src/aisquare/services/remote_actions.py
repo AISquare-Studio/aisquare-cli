@@ -1380,6 +1380,7 @@ def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         "release_failed": receipt.release_failed,
         # Why its window was killed with no exit command, as `fleet stop --json` says it.
         "killed": receipt.killed,
+        "marked_only": receipt.marked_only,  # ended already: only recorded as stopped (n4)
         "project": target.id,
     }
     summary = f"{audit_start} dismissed={action_yes_no(dismissed)} released={len(released)}"

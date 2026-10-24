@@ -53,9 +53,20 @@ def captain_enabled() -> bool:
     if override:
         return override in _ON_VALUES
     try:
-        return load_config().experimental.captain
+        return load_config(copy=False).experimental.captain  # a read, never a change (R2-m4)
     except Exception:  # an unreadable config is no opt-in
         return False
+
+
+def captain_forced() -> bool | None:
+    """What :data:`CAPTAIN_ENV` forces, as :func:`captain_enabled` reads it: on, off, or
+    ``None`` when it is unset or empty and the config decides.
+
+    For Settings' *Captain* box, which shows a forced state greyed and says why: a tick
+    there saves the config, which the variable then overrides.
+    """
+    override = os.environ.get(CAPTAIN_ENV, "").strip().lower()
+    return override in _ON_VALUES if override else None
 
 
 def captain_role(role: str) -> bool:

@@ -48,6 +48,7 @@ from aisquare.core.claude_accounts import (
     INSTALL_COMMAND,
     ClaudeCodeAccounts,
 )
+from aisquare.core.injection import claude_md_files
 
 #: ``--permission-mode`` for each approvals intent (``core.config.CLAUDE_PERMISSION_MODES``);
 #: ``never`` is ``bypassPermissions`` with a ``full`` write scope, else ``dontAsk``.
@@ -203,6 +204,8 @@ class ClaudeCodeAdapter:
         own_doctor_check=True,
         model_proxy=True,
         model_ladders=True,
+        transcript_usage=True,
+        memory_files=claude_md_files,
         legacy_fleet_args=True,
         value_options=frozenset(
             {
@@ -321,12 +324,22 @@ class ClaudeCodeAdapter:
                 effort=_effort_level(payload),
                 **common,
             )
+        # The transcript a turn's and a session's token usage is read off (#346).
+        transcript = payload_text(payload, "transcript_path")
         if event == "SessionEnd":
-            return AgentEvent("session_end", reason=payload_text(payload, "reason"), **common)
+            return AgentEvent(
+                "session_end",
+                reason=payload_text(payload, "reason"),
+                transcript_path=transcript,
+                **common,
+            )
         if event == "Stop":
             # The loop guard: any value but absent/null/false is "already continuing".
             return AgentEvent(
-                "stop", stop_hook_active=bool(payload.get("stop_hook_active")), **common
+                "stop",
+                stop_hook_active=bool(payload.get("stop_hook_active")),
+                transcript_path=transcript,
+                **common,
             )
         if event == "StopFailure":
             return AgentEvent(
@@ -334,6 +347,7 @@ class ClaudeCodeAdapter:
                 error=payload_text(payload, "error"),
                 message=payload_text(payload, "last_assistant_message"),
                 details=payload_text(payload, "error_details"),
+                transcript_path=transcript,
                 **common,
             )
         if event == "Notification":

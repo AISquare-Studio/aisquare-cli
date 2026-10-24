@@ -419,7 +419,7 @@ def test_dogfooded_schemas_reach_the_next_unused_migration(
     from aisquare.core import store as module
 
     # #113's own steps under its own stamps; the merges appended them as v26-v28, then
-    # v33-v35, then v34-v36.
+    # v33-v35, then v34-v36, then v36-v38.
     database = _dogfooded_113(version)
     monkeypatch.setattr(
         module, "_MIGRATIONS", (*module._MIGRATIONS, "CREATE TABLE next_feature (id TEXT);")

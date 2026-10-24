@@ -334,6 +334,17 @@ class AgentCapabilities:
     model_ladders: bool = False
     """AISquare's role model ladder and its probe choose the model (Claude Code); an
     agent without keeps its native default unless a model is pinned."""
+    transcript_usage: bool = False
+    """Every request's token usage is in the agent's transcript as ``core.usage`` reads it
+    (Claude Code's ``message.usage``): its turn-end and session-end hooks record what the
+    session spent (``services.metrics.record_usage``, ``aisquare metrics tokens``; #346).
+    Without it nothing is recorded: another agent's transcript is never read with Claude
+    Code's shapes."""
+    memory_files: Callable[[Path | None], list[Path]] | None = None
+    """The files the agent loads into a session started in a directory itself (Claude
+    Code's ``CLAUDE.md`` chain, ``core.injection.claude_md_files``): the user-pool entries
+    they hold already are left out of the session-start block (#346), which carried them
+    twice. ``None``: every entry is injected, as before."""
     positional_prompt: bool = False
     """The first prompt is a positional argument (Codex); otherwise the fleet types it."""
     first_context_file_only: bool = False

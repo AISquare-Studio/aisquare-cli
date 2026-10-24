@@ -1359,7 +1359,7 @@ def _recorded_usage(
                 if not taken:
                     continue
                 newest = taken[-1]
-                # Every window it read (v38); a row from before, the endpoint's two, each
+                # Every window it read (v40); a row from before, the endpoint's two, each
                 # read or not.
                 windows = (
                     newest.windows

@@ -665,13 +665,18 @@ def launch(
         if persona is not None
         else []
     )
+    # The captain's one server is its own (`tools_only_args`, from the fleet): the
+    # aisquare server `[agents] mcp` adds to every other launch would sit beside it, a
+    # second --mcp-config its --strict-mcp-config loads, a Codex server its off-list
+    # never names (review r17 of #113, finding 3).
+    aisquare_server = [] if experimental.captain_role(role) else agent_launch.mcp_args(selected)
     argv = [
         resolution.binary,
         *model_args,
         *pinned_id,
         *native_trace_args,
         *agent_launch.fleet_settings_args(selected, env, arguments.argv),
-        *agent_launch.mcp_args(selected),
+        *aisquare_server,
         *persona_args,
         *arguments.argv,
     ]

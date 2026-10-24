@@ -195,8 +195,14 @@ def test_the_other_roles_know_the_ui_tester_exists() -> None:
 # ── --chrome is the role's, applied exactly once, opt-out wins ───────────────
 
 
+def _defaults(binary: str, args: list[str], role: str = ROLE) -> harness.RoleDefaults:
+    """What ``launch``, ``team spawn`` and a fleet window ask: the selected agent's
+    ``role_defaults`` for the binary the role resolved to (Claude Code's, the default)."""
+    return get_adapter("claude-code").role_defaults(role, binary=binary, args=args)
+
+
 def _args(binary: str, args: list[str], role: str = ROLE) -> list[str]:
-    return harness.role_defaults(role, binary=binary, args=args).args
+    return _defaults(binary, args, role).args
 
 
 def test_default_args_apply_to_the_default_binary_only() -> None:
@@ -253,11 +259,11 @@ def test_a_withheld_flag_is_never_silent() -> None:
     """The sibling gate (`explainability.accepts_session_id`) returns a note that
     `launch` prints; this one printed nothing, so the operator saw a clean launch
     and a ui-tester that reopened every UI task as not browser-verified."""
-    withheld = harness.role_defaults(ROLE, binary="claude-next", args=[])
+    withheld = _defaults("claude-next", [])
     assert withheld.args == []
     assert withheld.notes and "--chrome withheld" in withheld.notes[0]
     assert "'claude-next' is not claude" in withheld.notes[0]
-    quiet = harness.role_defaults(ROLE, binary="claude", args=["--no-chrome"])
+    quiet = _defaults("claude", ["--no-chrome"])
     assert quiet.notes == [], "the operator's own opt-out is already on their screen"
 
 

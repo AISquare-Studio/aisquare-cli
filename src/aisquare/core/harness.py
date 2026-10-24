@@ -130,7 +130,7 @@ class RoleProfile(BaseModel):
     """Flags the role needs on the agent binary wherever it starts — ``launch``,
     ``team spawn``, a fleet window — applied only to the default agent (``claude``)
     and only when the operator has not already said otherwise (see
-    :func:`role_defaults`). A role's tooling is the role's business: the
+    :func:`profile_defaults`). A role's tooling is the role's business: the
     ui-tester needs Claude in Chrome, and asking every operator to remember
     ``--chrome`` is how the role silently degrades on the second machine."""
 
@@ -222,20 +222,6 @@ def _flag_present(args: Sequence[str], flag: str) -> bool:
     defeating the documented opt-out.
     """
     return any(arg == flag or arg.startswith(f"{flag}=") for arg in args)
-
-
-def role_defaults(role: str, *, binary: str, args: Sequence[str]) -> RoleDefaults:
-    """The flags ``role`` needs on ``binary``: the ``role_defaults`` of the agent the
-    binary's name runs (``agent_adapters.adapter_for_binary``; Claude Code's are the
-    role's :attr:`RoleProfile.default_args`, :func:`profile_defaults`). A wrapper by any
-    other name (``claude2``, ``claude-next``) may be another program and would reject
-    them, so it gets none, with a note (:func:`withheld_defaults`)."""
-    from aisquare.core.agent_adapters import adapter_for_binary  # lazy: they import us
-
-    adapter = adapter_for_binary(binary)
-    if adapter is None:
-        return withheld_defaults(role, binary, default_binary())
-    return adapter.role_defaults(role, binary=binary, args=args)
 
 
 def profile_defaults(role: str, args: Sequence[str]) -> RoleDefaults:

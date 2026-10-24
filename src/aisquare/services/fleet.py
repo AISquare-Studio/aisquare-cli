@@ -4496,7 +4496,7 @@ def spawn(
         # explicit `--bin`: with the variable exported in this shell and not in
         # the server's, the row recorded `claude2` while the pane silently ran
         # `claude`. Measured on a role whose flags are keyed on the binary
-        # (`harness.role_defaults`), that also decided the flag question against
+        # (the adapter's `role_defaults`), that also decided the flag question against
         # the wrong executable — a ui-tester launched without `--chrome`, exit 0,
         # nothing printed. `docs/fleet.md` promises `AISQUARE_BIN_<ROLE>` works
         # for a fleet launch; this is what makes that true.

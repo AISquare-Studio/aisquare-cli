@@ -1600,12 +1600,9 @@ def test_a_binarys_flags_session_id_and_account_are_its_adapters(
     from aisquare.services import team as team_service
 
     binary = f"/opt/bin/{adapter.binary}"
-    for role in harness.ROLE_PROFILES:
-        assert harness.role_defaults(role, binary=binary, args=[]) == adapter.role_defaults(
-            role, binary=binary, args=[]
-        ), role
-    wrapper = harness.role_defaults("ui-tester", binary=f"{binary}-next", args=[])
-    assert wrapper.args == [] and "withheld" in wrapper.notes[0]
+    assert adapter_for_binary(binary) is adapter
+    wrapper = adapter.role_defaults("ui-tester", binary=f"{binary}-next", args=[])
+    assert wrapper.args == [], "a wrapper by another name may be another program"
 
     monkeypatch.delenv(explainability._PIN_ENV_VAR, raising=False)
     takes = adapter.capabilities.assigns_session_id

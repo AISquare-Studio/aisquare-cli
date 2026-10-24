@@ -19,8 +19,10 @@ adapter.**
 - On a machine with Codex alone, every step has a Codex path:
   `install.sh --agent codex`, Welcome, a manager and two coders on Codex,
   restart, switch, tell, stop, accounts and usage limits.
-- What each Claude Code feature does on Codex, as observed in a live smoke test
-  and the live tests on the real Codex 0.162.1, is
+- What each Claude Code feature does on Codex, as observed in eight live smoke
+  tests (the last, SMOKE8, on 0.8.2's personas, captain, Spawn dialog, info line,
+  hand-off and `--all` on Codex 0.164.0 and 0.162.1) and the live tests on the
+  real Codex 0.164.0 and 0.162.1, is
   [the parity matrix](docs/coding-agents.md#parity-with-claude-code).
 - [Adding a terminal agent](docs/coding-agents.md#adding-a-terminal-agent):
   one adapter file and one registration line, held to a conformance suite

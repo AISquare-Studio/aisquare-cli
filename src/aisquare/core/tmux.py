@@ -252,6 +252,10 @@ _ABSENT = re.compile(r"no server running on |error connecting to .*\(No such fil
 #: Characters tmux reads as target separators; a session named with one can be
 #: created but never addressed by name again (``=a.b`` → "can't find pane: b").
 _UNTARGETABLE = frozenset(".:")
+#: tmux's own id for a session (``#{session_id}``): ``$`` and its number, fixed for the
+#: session's life whatever it is renamed to. A method below that takes a session takes
+#: this as well as a name, and a name may not look like one (:func:`_require_targetable`).
+_SESSION_ID = re.compile(r"\$\d+")
 
 #: tmux's command separator. It is not a shell feature and ``--`` does not stop
 #: it: tmux itself ends a command at ANY argument whose LAST character is this —
@@ -724,6 +728,10 @@ class WindowInfo:
     :meth:`TmuxServer.started_at` says it, ``None`` when tmux does not say: asked in the same
     ``list-panes``, as :attr:`PaneFacts.server_started` is, so a listing says which server's
     lifetime its pane ids belong to without a second process (review of #259, round 3)."""
+    session_id: str | None = None
+    """Set by :meth:`TmuxServer.spawn_window` alone: tmux's own id for the session the
+    window was made in (``$3``), which it keeps whatever the session is renamed to; the
+    one handle on it no name another session could take reaches."""
 
 
 def _int(value: str, default: int = 0) -> int:
@@ -777,12 +785,20 @@ def _facts(line: str) -> PaneFacts:
 
 
 def _require_targetable(name: str) -> None:
-    """Refuse a session name no method of this module could address afterwards."""
-    if not name or any(char in _UNTARGETABLE for char in name):
+    """Refuse a session name no method of this module could address afterwards, or one
+    it would read as a session's id (:data:`_SESSION_ID`)."""
+    if not name or any(char in _UNTARGETABLE for char in name) or _SESSION_ID.fullmatch(name):
         raise TmuxError(
             f"session name {name!r} cannot be targeted by tmux — '.' and ':' are "
-            "window and pane separators, and a name must not be empty"
+            "window and pane separators, a name must not be empty, and `$<number>` is "
+            "tmux's id for a session"
         )
+
+
+def _session_target(session: str) -> str:
+    """``-t`` for a session given by its id (``$3``, :data:`_SESSION_ID`) or by its name,
+    which is matched exactly (``=name``): a prefix of another session's name never is."""
+    return session if _SESSION_ID.fullmatch(session) else f"={session}"
 
 
 def _require_directory(cwd: Path) -> None:
@@ -1147,6 +1163,16 @@ class TmuxServer:
             raise TmuxError(completed.stderr.strip() or f"tmux {' '.join(args)} failed")
         return completed.stdout
 
+    def global_environment(self, variable: str) -> str | None:
+        """``variable`` in the server's global environment (``show-environment -g``), which
+        every window it opens inherits: ``None`` when no server answers, or it has no such
+        variable, or it cannot be asked. Names no pane, session or socket."""
+        try:
+            line = self.run("show-environment", "-g", variable).strip()
+        except (TmuxError, OSError):
+            return None
+        return line.partition("=")[2] if line.startswith(f"{variable}=") else None
+
     def check_conf(self, conf: Path | None = None) -> None:
         """Prove THIS tmux accepts the configuration, or raise with tmux's complaint.
 
@@ -1199,7 +1225,7 @@ class TmuxServer:
         raise TmuxError(completed.stderr.strip() or "tmux list-sessions could not be reached")
 
     def has_session(self, name: str) -> bool:
-        completed = self._runner(self.argv("has-session", "-t", f"={name}"), None)
+        completed = self._runner(self.argv("has-session", "-t", _session_target(name)), None)
         return completed.returncode == 0
 
     def has_session_or_raise(self, name: str) -> bool:
@@ -1212,7 +1238,7 @@ class TmuxServer:
         report an existing session as absent and clear its pause while the
         session survived (review of #121, round 8).
         """
-        completed = self._runner(self.argv("has-session", "-t", f"={name}"), None)
+        completed = self._runner(self.argv("has-session", "-t", _session_target(name)), None)
         if completed.returncode == 0:
             return True
         if _ABSENT.search(completed.stderr) or _NO_TARGET.search(completed.stderr):
@@ -1337,8 +1363,10 @@ class TmuxServer:
         env: Mapping[str, str] | None = None,
         width: int = DEFAULT_WINDOW_WIDTH,
         height: int = DEFAULT_WINDOW_HEIGHT,
+        create: bool = False,
     ) -> WindowInfo:
-        """A new window named ``name`` running ``command`` — creating the session if needed.
+        """A new window named ``name`` running ``command`` — creating the session if needed,
+        or, with ``create``, only in a session it creates (tmux refuses a name it holds).
 
         ``env`` pairs are set for the new window (``-e``) and are THIS WINDOW'S
         ALONE. When the window opens a new session tmux also writes them into
@@ -1386,8 +1414,15 @@ class TmuxServer:
 
         Refuses a ``session`` no other method here could target afterwards and
         a ``cwd`` that is not a directory (tmux would use ``$HOME`` silently).
+        ``session`` may be a session's id (``$3``), which names one that is there: a window
+        goes into that session, whatever it is called now, or into none.
+
+        The window returned carries the session as tmux answered it: its id
+        (:attr:`WindowInfo.session_id`) and its name.
         """
-        _require_targetable(session)
+        by_id = _SESSION_ID.fullmatch(session) is not None
+        if not by_id:
+            _require_targetable(session)
         _require_directory(cwd)
         env_flags = [
             flag
@@ -1395,11 +1430,16 @@ class TmuxServer:
             for flag in ("-e", _data_arg(f"{key}={value}"))
         ]
         args = [_data_arg(arg) for arg in command]
-        fmt = f"#{{window_id}}{_SEP}#{{pane_id}}"
-        existing = self.has_session(session)
+        fmt = f"#{{window_id}}{_SEP}#{{pane_id}}{_SEP}#{{session_id}}{_SEP}#{{session_name}}"
+        if by_id and create:
+            raise TmuxError(f"a session is created by a name, never by an id ({session})")
+        existing = False if create else self.has_session(session)
+        if by_id and not existing:
+            raise TmuxError(f"session {session} is no longer on the server")
         if existing:
             out = self.run(
-                "new-window", "-d", "-P", "-F", fmt, "-t", f"={session}:", "-n", _data_arg(name),
+                "new-window", "-d", "-P", "-F", fmt, "-t", f"{_session_target(session)}:",
+                "-n", _data_arg(name),
                 "-c", _data_arg(str(cwd)), *env_flags, "--", *args,
             )  # fmt: skip
         else:
@@ -1410,7 +1450,7 @@ class TmuxServer:
                 "--", *args,
             )  # fmt: skip
             self._forget_session_environment(session, env)
-        window_id, _, pane_id = out.strip().partition(_SEP)
+        window_id, pane_id, session_id, session_name = [*out.strip().split(_SEP, 3), "", "", ""][:4]
         refused: str | None = None
         if existing and pane_id:
             # Born at the session's size, not the caller's (see the docstring);
@@ -1426,7 +1466,7 @@ class TmuxServer:
             except TmuxError as exc:
                 refused = str(exc)
         return WindowInfo(
-            session=session,
+            session=session_name or session,
             window_id=window_id,
             name=name,
             pane_id=pane_id,
@@ -1435,6 +1475,7 @@ class TmuxServer:
             current_command=command[0] if command else "",
             activity=False,
             resize_refused=refused,
+            session_id=session_id if _SESSION_ID.fullmatch(session_id) else None,
         )
 
     def _forget_session_environment(self, session: str, env: Mapping[str, str] | None) -> None:
@@ -1486,10 +1527,29 @@ class TmuxServer:
             )
         return windows
 
+    def live_panes_or_raise(self) -> dict[str, set[str]]:
+        """Every live pane of every session on this server, by tmux's own id for its session
+        (``$N``): one ``list-panes -a`` where the fleet's listing tick asked three questions
+        per session (review r10 of #113, finding 11). ``{}`` when no server listens
+        (:data:`_ABSENT`); a question that could not be put raises :class:`TmuxError`."""
+        fields = _SEP.join(("#{session_id}", "#{pane_id}", "#{pane_dead}"))
+        completed = self._runner(self.argv("list-panes", "-a", "-F", fields), None)
+        if completed.returncode != 0:
+            if _ABSENT.search(completed.stderr):
+                return {}
+            raise TmuxError(completed.stderr.strip() or "tmux list-panes could not be reached")
+        panes: dict[str, set[str]] = {}
+        for line in completed.stdout.splitlines():
+            parts = line.split(_SEP)
+            if len(parts) == 3 and parts[2] != "1":
+                panes.setdefault(parts[0], set()).add(parts[1])
+        return panes
+
     def list_windows(self, session: str) -> list[WindowInfo]:
         """Every window (one pane each) of ``session``; empty when it does not exist."""
         completed = self._runner(
-            self.argv("list-panes", "-s", "-t", f"={session}", "-F", _WINDOW_FORMAT), None
+            self.argv("list-panes", "-s", "-t", _session_target(session), "-F", _WINDOW_FORMAT),
+            None,
         )
         if completed.returncode != 0:
             return []
@@ -1507,7 +1567,8 @@ class TmuxServer:
         that did not answer.
         """
         completed = self._runner(
-            self.argv("list-panes", "-s", "-t", f"={session}", "-F", _WINDOW_FORMAT), None
+            self.argv("list-panes", "-s", "-t", _session_target(session), "-F", _WINDOW_FORMAT),
+            None,
         )
         if completed.returncode != 0:
             if _ABSENT.search(completed.stderr) or _NO_TARGET.search(completed.stderr):
@@ -1556,6 +1617,20 @@ class TmuxServer:
             return None
         return _optional_int(pid)
 
+    def pane_session(self, pane_id: str) -> tuple[str, str] | None:
+        """``(session id, session name)`` of the session that holds ``pane_id`` (``$3``,
+        ``asq-amber-otter``), or ``None`` when the pane is gone or tmux will not say. The
+        same two shapes of "gone" as :meth:`pane_facts`, and the same guard against an
+        attached client's current pane answering for the one asked about."""
+        fmt = f"#{{pane_id}}{_SEP}#{{session_id}}{_SEP}#{{session_name}}"
+        completed = self._runner(self.argv("display-message", "-p", "-t", pane_id, fmt), None)
+        if completed.returncode != 0:
+            return None
+        answered, session_id, name = [*completed.stdout.rstrip("\n").split(_SEP, 2), "", ""][:3]
+        if answered != pane_id or not _SESSION_ID.fullmatch(session_id):
+            return None
+        return session_id, name
+
     def pane_facts_or_raise(self, pane_id: str) -> PaneFacts | None:
         """:meth:`pane_facts`, except a server that could not be ASKED raises.
 
@@ -1584,7 +1659,7 @@ class TmuxServer:
         self.run("kill-window", "-t", pane_id)
 
     def kill_session(self, session: str) -> None:
-        self.run("kill-session", "-t", f"={session}")
+        self.run("kill-session", "-t", _session_target(session))
 
     def kill_server(self) -> None:
         """Stop the whole private server — every session and every agent in it.
@@ -1646,11 +1721,11 @@ class TmuxServer:
 
     def rename_session(self, old: str, new: str) -> None:
         _require_targetable(new)
-        self.run("rename-session", "-t", f"={old}", new)
+        self.run("rename-session", "-t", _session_target(old), new)
 
     def attach_argv(self, session: str) -> list[str]:
         """The command a terminal runs to attach to ``session`` (the escape hatch)."""
-        return self.argv("attach-session", "-t", f"={session}")
+        return self.argv("attach-session", "-t", _session_target(session))
 
     # --- the screen -------------------------------------------------------------------
 
@@ -1689,6 +1764,10 @@ class TmuxServer:
         if bound is not None and len(rows) < facts.height:
             rows, wrapped, facts = self._frame(pane_id, scrollback, None, flags)
         return framed(rows, wrapped, facts, scrollback)
+
+    def screen_text(self, pane_id: str) -> list[str]:
+        """The rows on ``pane_id``'s screen now, as plain text: no escapes, no history."""
+        return self.run("capture-pane", "-p", "-t", pane_id).splitlines()
 
     def capture_history(self, pane_id: str, *, history: int) -> Capture:
         """Scrollback PLUS the live screen, oldest row first, in ONE contiguous frame.

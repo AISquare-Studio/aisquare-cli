@@ -89,6 +89,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from aisquare.core.agent_adapters.types import screen_of
 from aisquare.core.atomic import Replacement, replacement, write_replacing
 from aisquare.core.locking import acquire, open_lock_file, unlock
 from aisquare.core.paths import (
@@ -121,6 +122,7 @@ if TYPE_CHECKING:
     from starlette.routing import Route
     from starlette.websockets import WebSocket
 
+    from aisquare.core.agent_adapters.types import AgentAdapter
     from aisquare.core.store import ContextStore
     from aisquare.core.tmux import Capture, PaneFacts, TmuxServer
     from aisquare.services.remote_actions import ActionLedger
@@ -352,7 +354,8 @@ SEND_KEYS_TEXT_MAX = 2_048
 ``_HEX_CHUNK`` bytes even when every character is 4 bytes of UTF-8. Longer goes as a tell."""
 SEND_KEYS_KEYS_MAX = 32
 EXIT_KEY_REPEAT_SECONDS = 3.0
-"""A second Ctrl-C (or Ctrl-D) to one agent this soon exits Claude Code: refused unless meant."""
+"""A second Ctrl-C (or Ctrl-D) to one agent this soon exits its coding agent: refused unless
+meant."""
 EXIT_KEYS = frozenset({"C-c", "C-d"})
 SEND_KEYS_LOCK_WAIT_SECONDS = 2.0
 """How long a send-keys waits for its agent's action lock (:func:`remote_agent_lock`), counted
@@ -377,14 +380,16 @@ NUL_IN_A_PATH = "{field!r} holds a NUL byte, which no file's name or path holds"
 """The refusal of a path or a project ref the system would not look up (``field`` named)."""
 
 REMOTE_KEY_NAME = re.compile(
-    r"(?:Enter|Escape|Tab|BTab|BSpace|Space|Up|Down|Left|Right|Home|End|PageUp|PageDown|Delete"
-    r"|F(?:[1-9]|1[0-2])|C-[cdloru]|[0-9]|y|n)\Z"
+    r"(?:Enter|S-Enter|Escape|Tab|BTab|BSpace|Space|Up|Down|Left|Right|Home|End|PageUp|PageDown"
+    r"|Delete|F(?:[1-9]|1[0-2])|C-[cdloru]|[0-9]|y|n)\Z"
 )
 """Every key the pad sends and nothing else, used ONLY as ``REMOTE_KEY_NAME.fullmatch(key)``
 (``\\Z`` also guards a later ``.match``). A control key is added by NAME, never as a range:
-``C-z`` suspends Claude Code, and an ``M-`` key is an escape sequence, so neither is here."""
+``C-z`` suspends Claude Code, and an ``M-`` key is an escape sequence, so neither is here.
+``S-Enter`` is the newline in the prompt, sent as the row's agent reads one
+(:func:`remote_keys_spelled`)."""
 REMOTE_KEY_VOCABULARY = (
-    "Enter, Escape, Tab, BTab, BSpace, Space, Up, Down, Left, Right, Home, End, PageUp, "
+    "Enter, S-Enter, Escape, Tab, BTab, BSpace, Space, Up, Down, Left, Right, Home, End, PageUp, "
     "PageDown, Delete, F1-F12, C-c, C-d, C-l, C-o, C-r, C-u, 0-9, y, n"
 )
 REMOTE_BIDI_CONTROLS = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
@@ -965,7 +970,7 @@ def _remote_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _stamp() -> str:
+def _remote_stamp() -> str:
     return _iso_seconds(_remote_now())
 
 
@@ -2216,7 +2221,7 @@ class Runtime:
             _audit_clean(endpoint, AUDIT_ENDPOINT_MAX),
             _audit_clean(summary, AUDIT_SUMMARY_MAX),
         )
-        line = f"{_stamp()} {' '.join(fields)}\n".encode()
+        line = f"{_remote_stamp()} {' '.join(fields)}\n".encode()
         with self._audit_lock:
             self._audit_path.parent.mkdir(parents=True, exist_ok=True)
             try:
@@ -2386,6 +2391,104 @@ def check_remote_key_names(keys: object) -> list[str]:
                 f"one of: {REMOTE_KEY_VOCABULARY}",
             )
     return list(keys)
+
+
+def remote_keys_spelled(server: TmuxServer, agent: FleetAgent, keys: list[str]) -> list[str]:
+    """``keys`` as the agent of ``agent``'s row reads them, as the fleet UI's pane sends them
+    (``core.keys.translate``): each under its adapter's spelling
+    (``AgentAdapter.key_spellings``), and a chord a tmux below 3.5 would type by its name
+    under the older name that means the same (``keys.LEGACY_FALLBACK``: ``S-Enter`` as
+    ``C-j``).
+
+    The pad's names mean what they mean in Claude Code, whose ``S-Enter`` is a newline in
+    the prompt; Codex submits on ``S-Enter`` and takes ``C-j`` as its newline (0.162.1), so
+    the pad's ⇧⏎ reaches it as ``C-j``. Only a key some agent spells another way, or one
+    an old tmux types by name, needs the row's adapter or the server's version. A server
+    that will not say its version gets the older name: ``C-j`` is the newline of every agent
+    on every tmux. ``agent`` is the placed row (:func:`_remote_placed`), whose agent its
+    launch record holds.
+    """
+    from aisquare.core import keys as keys_core
+    from aisquare.core.agent_adapters import adapters, recorded_adapter
+    from aisquare.core.tmux import TmuxError
+
+    respelled = {key for adapter in adapters() for key in adapter.key_spellings}
+    if not any(key in respelled or keys_core.needs_extended_keys(key) for key in keys):
+        return keys
+    adapter = recorded_adapter(agent.agent)
+    spellings = adapter.key_spellings if adapter is not None else {}
+    spelled = [spellings.get(key, key) for key in keys]
+    if not any(keys_core.needs_extended_keys(key) for key in spelled):
+        return spelled
+    try:
+        version = server.server_version()
+    except TmuxError:
+        version = None
+    if version is not None and version >= keys_core.EXTENDED_MINIMUM:
+        return spelled
+    older = keys_core.LEGACY_FALLBACK
+    return [older[key].value if key in older else key for key in spelled]
+
+
+def remote_one_press_exit(
+    server: TmuxServer, agent: FleetAgent, keys: list[str], *, label: str
+) -> RequestError | None:
+    """409 ``one_press_exit`` when ``keys``, as the row's agent is sent them
+    (:func:`remote_keys_spelled`), hold a key that agent exits on with ONE press at its empty
+    prompt (``capabilities.one_press_exits``: Codex's ``C-c`` and ``C-d``) and it may be
+    there; ``None`` when none would end it. Its ``reason`` is the message's sentence without
+    the ``confirm_exit`` hint, naming the agent, which the page asks again in.
+
+    It may be there when its screen, read as plain text (``TmuxServer.screen_text``, as
+    ``fleet._idle_screen`` reads it), shows that prompt, or when nothing says it does not:
+    a screen tmux would not show, an agent whose prompt is not read off its screen, or keys
+    sent ahead of the exit key in the same body, which may empty the draft it shows. Codex
+    keeps that prompt on screen through a turn, where its Ctrl-D exits too and its Ctrl-C
+    opens a *Cancel task* / *Exit* choice: both are asked then as well. The double-press
+    guard alone let one Ctrl-C through to a Codex at its empty prompt, which it exits
+    (0.162.1). Only a key some agent exits on asks the row's agent, and only its agent's
+    key reads the screen: Claude Code asks for a second press, and its rows read nothing.
+    """
+    from aisquare.core.agent_adapters import adapters, recorded_adapter
+    from aisquare.core.tmux import TmuxError
+    from aisquare.services import fleet as fleet_service
+
+    exiting = {key for adapter in adapters() for key in adapter.capabilities.one_press_exits}
+    if not exiting.intersection(keys):
+        return None
+    adapter = recorded_adapter(agent.agent)
+    if adapter is None:
+        return None
+    capabilities = adapter.capabilities
+    at = next((i for i, key in enumerate(keys) if key in capabilities.one_press_exits), None)
+    if at is None:
+        return None
+    key, name = _key_said(keys[at]), adapter.label
+    if at > 0:
+        said = f"the keys before the {key} may leave {label} at {name}'s empty prompt"
+    elif not screen_of(adapter).reads_empty_prompt:
+        said = f"{label}'s screen does not say whether {name} is at its empty prompt"
+    else:
+        try:
+            screen = server.screen_text(agent.pane_id)
+        except TmuxError as exc:
+            log.debug("remote: %s's screen could not be read: %s", label, exc)
+            said = (
+                f"{label}'s screen could not be read to see whether {name} is at its empty prompt"
+            )
+        else:
+            if not fleet_service._idle_screen(adapter, screen):
+                return None
+            said = f"{label} is at {name}'s empty prompt"
+    reason = f"{said}, where one {key} can exit it"
+    return RequestError(
+        409, "one_press_exit", f"{reason} — send confirm_exit: true to mean it", reason=reason
+    )
+
+
+def _key_said(key: str) -> str:
+    """A tmux key name as a person reads it: ``C-c`` as ``Ctrl-C``, any other as it is."""
+    return f"Ctrl-{key[2:].upper()}" if key.startswith("C-") else key
 
 
 def check_remote_text(text: str, *, pasted: bool = False) -> None:
@@ -2726,12 +2829,12 @@ def _no_live_agent(target: ProjectInfo, label: str) -> NoSuchAgent:
 
 
 def _remote_live_row(target: ProjectInfo, label: str) -> FleetAgent:
-    """The newest live row holding ``label`` in ``target`` (:func:`remote_turn_row`);
-    :func:`_no_live_agent` when none does."""
+    """The newest live row holding ``label`` in ``target`` (:func:`remote_turn_row`), where its
+    launch record places it (:func:`_remote_placed`); :func:`_no_live_agent` when none does."""
     agent = remote_turn_row(target, label, live_only=True)
     if agent is None:
         raise _no_live_agent(target, label)
-    return agent
+    return _remote_placed(agent)
 
 
 PANE_NOT_AGENT = "{label}'s pane is not running the agent"
@@ -2786,11 +2889,25 @@ def _remote_facts_refusal(agent: FleetAgent, facts: PaneFacts | None) -> str | N
 def remote_turn_row(target: ProjectInfo, label: str, *, live_only: bool) -> FleetAgent | None:
     """The newest row holding ``label`` in ``target``, only a live one with ``live_only``: the
     row a write's turn at an agent reads, before its lock and under it
-    (:func:`remote_agent_turn`)."""
+    (:func:`remote_agent_turn`). As the store has it: who it is (its id, for a pin), never
+    where its pane is, which only its launch record says (:func:`_remote_placed`)."""
     from aisquare.core.store import store_session
 
     with store_session() as store:
         return store.fleet_agent_by_label(target.id, label, live_only=live_only)
+
+
+def _remote_placed(row: FleetAgent) -> FleetAgent:
+    """``row`` where its launch record places it (``fleet.placed_row``): its pane, socket and
+    server's start are the record's, never the store's word, which a sandbox could write
+    before its broker. A row no record places, or one rewritten in the store, is 409
+    ``not_agent``, nothing done."""
+    from aisquare.services import fleet as fleet_service
+
+    try:
+        return fleet_service.placed_row(row)
+    except fleet_service.FleetError as exc:
+        raise RequestError(409, "not_agent", f"{exc} — nothing was done") from exc
 
 
 def remote_stale(
@@ -2827,6 +2944,8 @@ def _remote_turn_pinned(
     """
     if live_only and pin is None:
         return _remote_live_row(target, label)
+    # Who holds the label is the store's to say, and judged against the pin first: a row the
+    # pin is not is `stale` whatever its place. Only the pinned row is then placed.
     row = remote_turn_row(target, label, live_only=live_only)
     if row is None and pin is None:
         from aisquare.services import project as project_service
@@ -2837,7 +2956,7 @@ def _remote_turn_pinned(
         raise RequestError(404, "no_such_agent", said)
     if row is None or (pin is not None and row.id != pin):
         raise remote_stale(target, label, row, done=done)
-    return row
+    return _remote_placed(row)
 
 
 @contextlib.contextmanager
@@ -2964,7 +3083,10 @@ def _live_transcript(
     """One page of the agent's own conversation, from the board's transcript (§4-M).
 
     The pane cannot answer this: agent panes are alternate-screen and tmux keeps
-    no scrollback for them. The board already records where the transcript is.
+    no scrollback for them. The board already records where the transcript is, and the
+    row which agent wrote it: its adapter reads the format (``transcript.reader_of``), so a
+    Codex rollout is a page of its turns under ``* codex``, where read as Claude Code's
+    JSONL it was empty, each Load older a further 2 MB read for nothing.
     ``width`` is the phone's own column count; without it the lines wrap at the
     agent's pane width, which a phone narrower than the pane re-wraps into a mess.
 
@@ -3001,6 +3123,7 @@ def _live_transcript(
         limit=limit or transcript_service.DEFAULT_LIMIT,
         before=offset,
         width=width or _pane_width(agent),
+        agent=agent.agent,
     )
     payload = page.page_json()
     if page.cursor is not None and session is not None:
@@ -3303,6 +3426,7 @@ def explainability_payload(
     turns: Sequence[TurnMetric],
     verdict: DoctorVerdict,
     policy: dict[str, object] | None,
+    source: str | None = None,
 ) -> dict[str, object]:
     """The §4-I card, assembled from facts already in hand — never raises.
 
@@ -3311,7 +3435,11 @@ def explainability_payload(
     session and the recorded turns regardless, so the card still shows what the
     fleet knows on a machine where the SDK is missing. It names no cost: the CLI
     carries no price table, and a guessed figure on a demo card is worse than none.
+    ``source`` is the lane that traces the agent's model traffic when it is not the
+    proxy (:func:`_explainability_source`), the policy's ``source``.
     """
+    if source is not None:
+        policy = {"source": source, **(policy or {})}
     payload: dict[str, object] = {"available": verdict.sdk_present and not verdict.red}
     if not verdict.sdk_present:
         hint = f" ({verdict.install_hint})" if verdict.install_hint else ""
@@ -3338,16 +3466,36 @@ def explainability_payload(
     return payload
 
 
-_doctor_cache: tuple[float, DoctorVerdict] | None = None
+_doctor_cache: dict[str | None, tuple[float, DoctorVerdict]] | None = None
 _doctor_lock = threading.Lock()
 
 
 def _doctor_verdict() -> DoctorVerdict:
-    """The doctor's word on explainability, cached for :data:`DOCTOR_TTL_SECONDS`."""
+    """The doctor's word on explainability, its proxy check included, cached for
+    :data:`DOCTOR_TTL_SECONDS`."""
+    return _lane_verdict(None)
+
+
+def _agent_verdict(adapter: AgentAdapter | None) -> DoctorVerdict:
+    """The verdict on the lane that traces ``adapter``'s sessions: the doctor's own
+    (:func:`_doctor_verdict`) for the proxy's (``capabilities.model_proxy``) and for an agent
+    this install does not know, the agent's own lane's for any other
+    (``explainability_ops.checks(adapter=)``)."""
+    if adapter is None or adapter.capabilities.model_proxy:
+        return _doctor_verdict()
+    return _lane_verdict(adapter)
+
+
+def _lane_verdict(adapter: AgentAdapter | None) -> DoctorVerdict:
+    """``explainability_ops.checks`` for ``adapter``'s lane (``None``: the doctor's), reduced
+    to what the card needs and cached for :data:`DOCTOR_TTL_SECONDS` per lane."""
     global _doctor_cache
+    lane = None if adapter is None else adapter.id
     with _doctor_lock:
-        if _doctor_cache is not None and time.monotonic() - _doctor_cache[0] < DOCTOR_TTL_SECONDS:
-            return _doctor_cache[1]
+        cache = _doctor_cache if _doctor_cache is not None else {}
+        kept = cache.get(lane)
+        if kept is not None and time.monotonic() - kept[0] < DOCTOR_TTL_SECONDS:
+            return kept[1]
         from aisquare.models import CheckStatus
         from aisquare.services import explainability as explainability_service
         from aisquare.services import explainability_ops as ops
@@ -3359,15 +3507,28 @@ def _doctor_verdict() -> DoctorVerdict:
         try:
             red = [
                 f"{check.name}: {check.detail}"
-                for check in ops.checks()
+                for check in ops.checks(adapter=adapter)
                 if check.status is CheckStatus.fail
             ]
         except Exception as exc:
             red = [f"doctor: {exc}"]
         hint = None if present else explainability_service.install_hint()
         verdict = DoctorVerdict(sdk_present=present, red=red, install_hint=hint)
-        _doctor_cache = (time.monotonic(), verdict)
+        _doctor_cache = {**cache, lane: (time.monotonic(), verdict)}
         return verdict
+
+
+def _explainability_source(adapter: AgentAdapter | None) -> str | None:
+    """What traces the model traffic of ``adapter``'s sessions, named on its card (the
+    policy's ``source``) when it is not the proxy, the one lane a card knew of before an
+    agent had telemetry of its own: that telemetry's receiver (``capabilities.
+    native_telemetry``: Codex's). ``None`` for the proxy (``model_proxy``), for an agent
+    with neither (its verdict says so) and for one this install does not know."""
+    if adapter is None or adapter.capabilities.model_proxy:
+        return None
+    if adapter.capabilities.native_telemetry:
+        return f"{adapter.label}'s own telemetry, to a receiver each launch starts"
+    return None
 
 
 def _explainability_policy(project: ProjectInfo | None = None) -> dict[str, object] | None:
@@ -3404,8 +3565,11 @@ def _explainability_policy(project: ProjectInfo | None = None) -> dict[str, obje
 def _live_explainability(label: str, project: str | None = None) -> dict[str, object]:
     """The card for one live agent of a project (the current one for ``None``).
 
-    Only an unknown label or project raises (→ 404), never anything else.
+    Only an unknown label or project raises (→ 404), never anything else. The verdict is
+    for the lane that traces the row's agent (:func:`_agent_verdict`): an agent with
+    telemetry of its own is not judged by the proxy, which never carries its traffic.
     """
+    from aisquare.core.agent_adapters import recorded_adapter
     from aisquare.core.store import store_session
     from aisquare.services import metrics as metrics_service
 
@@ -3421,12 +3585,14 @@ def _live_explainability(label: str, project: str | None = None) -> dict[str, ob
             turns = metrics_service.recent(project_id=target.id, session_id=agent.session_id)
         except Exception as exc:
             log.debug("remote: turn metrics for %s unavailable: %s", label, exc)
+    adapter = recorded_adapter(agent.agent)
     return explainability_payload(
         agent=agent,
         session=session,
         turns=turns,
-        verdict=_doctor_verdict(),
+        verdict=_agent_verdict(adapter),
         policy=_explainability_policy(target),
+        source=_explainability_source(adapter),
     )
 
 
@@ -3558,18 +3724,20 @@ def _remote_flag(body: Mapping[str, Any], key: str) -> bool:
 
 
 DOUBLE_PRESS = (
-    "a second Ctrl-C or Ctrl-D within 3 s exits Claude Code — send confirm_exit: true to mean it"
+    "a second Ctrl-C or Ctrl-D within 3 s exits the coding agent — send confirm_exit: true to "
+    "mean it"
 )
 
 
 class _ExitKeyGuard:
     """When each agent was last sent Ctrl-C or Ctrl-D (SPEC §2.1, part 2).
 
-    Claude Code exits on a second Ctrl-C ("Press Ctrl-C again to exit") and on
-    Ctrl-D at an empty prompt, and an exit ends the row, releases its claims and
-    wakes the manager: two taps on a phone that lagged, or two in one body, are
-    refused unless the body says ``confirm_exit: true``. Per ``(project id,
-    label)``, whichever phone sent the first.
+    Claude Code exits on a second Ctrl-C ("Press Ctrl-C again to exit") or Ctrl-D (2.1.304,
+    measured), and an exit ends the row, releases its claims and wakes the manager:
+    two taps on a phone that lagged, or two in one body, are refused unless the body
+    says ``confirm_exit: true``. Per ``(project id, label)``, whichever phone sent the
+    first. The page asks before every one it sends. An agent that exits on the first at
+    its empty prompt (Codex) has that one refused too (:func:`remote_one_press_exit`).
 
     A press counts once it was sent (:meth:`exit_keys_sent`), not as it is let through: a
     send that failed (400 ``write_failed``) reached no pane, and the tap that followed was
@@ -3924,7 +4092,10 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         ``"enter": "false"`` is a 400, not an Enter), the keys against the
         allowlist, the caps, no control character in the text, one input per body
         (``text`` went first, so "Esc, then type" arrived as "type, then Esc"), the
-        pane, and the double Ctrl-C. The pane must be running the agent, and be the
+        pane, the double Ctrl-C, and the one Ctrl-C or Ctrl-D that exits the row's agent at
+        its empty prompt (409 ``one_press_exit``, :func:`remote_one_press_exit`: Codex's,
+        its ``reason`` naming it), each sent once the body says ``confirm_exit: true``.
+        The pane must be running the agent, and be the
         row's own: after a tmux restart the row's pane id names another agent's pane
         (409 ``not_agent``, as the actions and quick answers refuse it). The pane is
         judged and typed into under the agent's action lock (:func:`remote_agent_turn`).
@@ -3936,6 +4107,9 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
         queued Enter may already have submitted (review of #259, round 10, 5/9). So did one
         whose text went in and whose Enter did not, or whose text tmux typed a part of
         (``core.tmux.TmuxPartlyTyped``): each says what is at the prompt (round 11, 4/13).
+        Pad keys go as the row's agent reads them (:func:`remote_keys_spelled`): the ⇧⏎
+        newline reaches a Codex as ``C-j``, which it takes as a newline where ``S-Enter``
+        submits; the audit line keeps the names tapped.
 
         ``dialog_guard`` is for a sender that does not see the pane, the page's
         Transcript tab: nothing is typed unless the agent is at rest at its prompt
@@ -4003,11 +4177,16 @@ def live_writes(*, clock: Callable[[], float] = time.monotonic) -> Writes:
                 raise RequestError(409, "not_agent", f"{said} — nothing was sent")
             if guarded:
                 remote_actions.action_keys_guard(target, label, agent.id)
+            keys = remote_keys_spelled(server, agent, keys)
             exits = sum(key in EXIT_KEYS for key in keys)
             if exits and not exit_keys.exit_keys_allowed(
                 (target.id, label), exits, confirmed=confirmed
             ):
                 raise RequestError(409, "double_press", DOUBLE_PRESS)
+            if not confirmed:
+                exiting = remote_one_press_exit(server, agent, keys, label=label)
+                if exiting is not None:
+                    raise exiting
             pane = agent.pane_id
             wrote = fleet_service.pane_writes(
                 ("the text", lambda: server.send_literal(pane, text)) if text else None,
@@ -5770,7 +5949,7 @@ def build_remote_app(
             response.delete_cookie(COOKIE, path=cookie_path(request))
         return response
 
-    async def panes(request: Request) -> Response:
+    async def panes_endpoint(request: Request) -> Response:
         agent = request.path_params["agent"]
         project = request.query_params.get("project") or None
         try:
@@ -6068,7 +6247,7 @@ def build_remote_app(
         async def send_frame(
             kind: str, payload: object, *, agent: str | None = None, project: str | None = None
         ) -> None:
-            frame: dict[str, object] = {"type": kind, "payload": payload, "ts": _stamp()}
+            frame: dict[str, object] = {"type": kind, "payload": payload, "ts": _remote_stamp()}
             if agent is not None:
                 frame["agent"] = agent
             if project is not None:
@@ -6292,7 +6471,7 @@ def build_remote_app(
         Route("/api/memory", guarded("memory", reads.memory), methods=["GET"]),
         Route("/api/devices", devices_list_endpoint, methods=["GET"]),
         Route("/api/devices/{device_id}", devices_delete_endpoint, methods=["DELETE"]),
-        Route("/api/panes/{agent}", panes, methods=["GET"]),
+        Route("/api/panes/{agent}", panes_endpoint, methods=["GET"]),
         Route("/api/transcript/{agent}", transcript, methods=["GET"]),
         Route("/api/explainability/{agent}", explainability, methods=["GET"]),
         # The lanes' routes: after the built-in reads, before the write catch-all.

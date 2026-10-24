@@ -1416,7 +1416,7 @@ def _script_claude_sign_in(
     )
     account.config_dir.mkdir(parents=True)
 
-    def begin(slot: int | None) -> ClaudeAccount:
+    def begin(slot: int | None, *, agent: str = core.AGENT) -> ClaudeAccount:
         seen["begin"] = slot
         return account
 

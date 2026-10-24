@@ -127,7 +127,7 @@ _ROW_OF_SESSION = (
     "(``fleet_agent_for_session``): under a hub, not the session's board's"
 )
 PROJECT_OF: dict[tuple[str, str], str] = {
-    ("services/captain/actions.py", "_no_trust_dialog"): (
+    ("services/captain/actions.py", "_no_owners_dialog"): (
         "the project of the row the captain would type into (``fleet.project_of``)"
     ),
     ("services/captain/brain.py", "find"): (
@@ -148,8 +148,7 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/diagnostics.py", "_check_resumable_agents"): _WALKED,
     ("services/diagnostics.py", "_left_from_before_capture"): "each captured row itself",
     ("services/diagnostics.py", "_check_dead_managers"): _WALKED,
-    ("services/diagnostics.py", "_claude_account_limit_checks"): _ROW_OF_SESSION,
-    ("services/fleet.py", "_live_agent"): _FLEET_OP,
+    ("services/diagnostics.py", "_account_limit_checks"): _ROW_OF_SESSION,
     ("services/fleet.py", "_replaced"): _FLEET_OP,
     ("services/fleet.py", "_in_hand_over"): _FLEET_OP,
     ("services/fleet.py", "spawn"): _FLEET_OP,
@@ -157,13 +156,17 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "_exited_note"): "each exited row's own ``project_id``",
     ("services/fleet.py", "_tell"): _FLEET_OP,
     ("services/fleet.py", "_send_it_later"): _FLEET_OP,
-    ("services/fleet.py", "_past_trust_prompt"): _FLEET_OP,
+    ("services/fleet.py", "_trust_note"): _FLEET_OP,
+    ("services/fleet.py", "_type_prompt"): _FLEET_OP,
+    ("services/fleet.py", "_type_at_its_start"): _FLEET_OP,
+    ("services/fleet.py", "_live_row"): _FLEET_OP,
+    ("services/fleet.py", "_launch_record"): _FLEET_OP,
+    ("services/fleet.py", "tell"): _FLEET_OP,
     ("services/fleet.py", "_forget"): (
         _FLEET_OP + ", or each stranded row's own (``_refuse_a_freed_socket``)"
     ),
     ("services/fleet.py", "switch"): _FLEET_OP,
     ("services/fleet.py", "restart"): _FLEET_OP,
-    ("services/fleet.py", "rename"): "the project renamed, with its new codename",
     ("services/fleet.py", "attach_argv"): _FLEET_OP,
     ("services/project.py", "BoardReader.frees"): (
         "each project whose fleet agents read a hub's board (``ProjectBusyError``, and doctor's "

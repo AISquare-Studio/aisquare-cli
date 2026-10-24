@@ -55,6 +55,10 @@ PYPI_JSON_URL="https://pypi.org/pypi/aisquare-cli/json"
 INSTALL_TARGET=${AISQUARE_INSTALL_PACKAGE:-$PYPI_PACKAGE}
 UV_INSTALLER_URL="https://astral.sh/uv/install.sh"
 CLAUDE_INSTALLER_URL="https://claude.ai/install.sh"
+# Codex's own standalone installer, the route its docs give for macOS and Linux
+# (learn.chatgpt.com/docs/codex/cli): it puts `codex` in ~/.local/bin, linked into
+# $CODEX_HOME/packages/standalone.
+CODEX_INSTALLER_URL="https://chatgpt.com/codex/install.sh"
 FNM_INSTALLER_URL="https://fnm.vercel.app/install"
 NODESOURCE_DEB_URL="https://deb.nodesource.com/setup_NODEMAJOR.x"
 NODESOURCE_RPM_URL="https://rpm.nodesource.com/setup_NODEMAJOR.x"
@@ -116,6 +120,13 @@ HAVE_WGET=0
 UV_VERSION=""
 CLI_VERSION=""
 CLAUDE_VERSION=""
+CODEX_VERSION=""
+# The coding agents this run installs and connects: Claude Code unless --agent names
+# others (`want_agent`). --no-agent (WANT_AGENT=0) switches both off whatever these say,
+# which is why every reader asks `wants_claude` / `wants_codex` rather than these.
+WANT_CLAUDE=1
+WANT_CODEX=0
+AGENT_NAMED=0
 TMUX_VERSION=""
 GH_VERSION=""
 GIT_VERSION=""
@@ -128,6 +139,7 @@ TMUX_ACTION=""   # install | current
 GH_ACTION=""     # install | current
 GIT_ACTION=""    # install | current
 CLAUDE_ACTION="" # install | update
+CODEX_ACTION=""  # install | update | current
 
 INSTALLED_LIST=""
 UPGRADED_LIST=""
@@ -203,6 +215,36 @@ aisquare_home_shown() {
 claude_settings_shown() {
     _cs_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
     shown_path "${_cs_dir%/}/settings.json"
+}
+# Codex's home the same way: CODEX_HOME when set (core/agent_adapters/types.py
+# config_home), else ~/.codex. Its hooks.json is where init merges Codex's hooks.
+codex_home_shown() {
+    _ch_dir=${CODEX_HOME:-$HOME/.codex}
+    shown_path "${_ch_dir%/}"
+}
+
+# Whether this run installs and connects Claude Code, and Codex (--agent, --no-agent).
+wants_claude() { [ "$WANT_AGENT" = 1 ] && [ "$WANT_CLAUDE" = 1 ]; }
+wants_codex() { [ "$WANT_AGENT" = 1 ] && [ "$WANT_CODEX" = 1 ]; }
+
+# The flag that left Claude Code alone, as a note names it: --no-agent, or --agent codex.
+agent_flag_shown() {
+    if [ "$WANT_AGENT" = 0 ]; then
+        printf -- '--no-agent'
+    else
+        printf -- '--agent codex'
+    fi
+}
+
+# The agents whose hooks this run connects, as the banner and the no-op summary name them.
+agents_connected_shown() {
+    if wants_claude && wants_codex; then
+        printf "claude-code's and codex's"
+    elif wants_codex; then
+        printf "codex's"
+    else
+        printf "claude-code's"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -593,6 +635,7 @@ first_line() { head -1 2>/dev/null || true; }
 version_of_aisquare() { aisquare --version 2>/dev/null | first_line | cut -d' ' -f2; }
 version_of_uv() { uv --version 2>/dev/null | first_line | cut -d' ' -f2; }
 version_of_claude() { claude --version 2>/dev/null | first_line | cut -d' ' -f1; }
+version_of_codex() { codex --version 2>/dev/null | first_line | cut -d' ' -f2; } # codex-cli X
 version_of_tmux() { tmux -V 2>/dev/null | first_line | cut -d' ' -f2; }
 version_of_gh() { gh --version 2>/dev/null | first_line | cut -d' ' -f3; }
 version_of_git() { git --version 2>/dev/null | first_line | cut -d' ' -f3; }
@@ -604,6 +647,7 @@ survey() {
     have uv && UV_VERSION=$(version_of_uv || true)
     have aisquare && CLI_VERSION=$(version_of_aisquare || true)
     have claude && CLAUDE_VERSION=$(version_of_claude || true)
+    have codex && CODEX_VERSION=$(version_of_codex || true)
     have tmux && TMUX_VERSION=$(version_of_tmux || true)
     have gh && GH_VERSION=$(version_of_gh || true)
     have git && GIT_VERSION=$(version_of_git || true)
@@ -612,6 +656,11 @@ survey() {
     _report uv "$UV_VERSION"
     _report aisquare "$CLI_VERSION"
     _report "Claude Code" "$CLAUDE_VERSION"
+    # Only where it is asked for or already there: a Claude Code install has no use for
+    # a "Codex — not installed" line.
+    if wants_codex || [ -n "$CODEX_VERSION" ]; then
+        _report "Codex" "$CODEX_VERSION"
+    fi
     _report tmux "$TMUX_VERSION"
     _report gh "$GH_VERSION"
     _report git "$GIT_VERSION"
@@ -714,7 +763,7 @@ resolve() {
     fi
 
     _resolve_system
-    debug "cli=$CLI_ACTION tmux=$TMUX_ACTION gh=$GH_ACTION git=$GIT_ACTION node=$NODE_ACTION claude=$CLAUDE_ACTION"
+    debug "cli=$CLI_ACTION tmux=$TMUX_ACTION gh=$GH_ACTION git=$GIT_ACTION node=$NODE_ACTION claude=$CLAUDE_ACTION codex=$CODEX_ACTION"
 }
 
 # The System and Agent classes' decisions, which do not depend on how the CLI
@@ -759,6 +808,18 @@ _resolve_system() {
     else
         CLAUDE_ACTION=update
     fi
+
+    # --- Codex: installed when absent, moved only by --upgrade-all -----------
+    # Never version-managed by us either: its standalone installer and `codex update`
+    # own the version. One that is there is left as it is unless --upgrade-all asks
+    # for every tool to move, which runs its own updater.
+    if [ -z "$CODEX_VERSION" ]; then
+        CODEX_ACTION=install
+    elif [ "$UPGRADE_ALL" = 1 ]; then
+        CODEX_ACTION=update
+    else
+        CODEX_ACTION=current
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -799,7 +860,12 @@ short_circuit() {
     # Code IS the requested state, and demanding it here meant a second run
     # never short-circuited — measured in the container matrix, where every
     # cell passes --no-agent.
-    [ "$WANT_AGENT" = 0 ] || [ -n "$CLAUDE_VERSION" ] || return 1
+    if wants_claude; then
+        [ -n "$CLAUDE_VERSION" ] || return 1
+    fi
+    if wants_codex; then
+        [ "$CODEX_ACTION" = current ] || return 1
+    fi
     have aisquare || return 1
 
     # A SUBSET, not an equal set. Measured on macOS, where the amber list came
@@ -816,16 +882,28 @@ short_circuit() {
     # for `--json doctor`. §3.8's own words: "a script that exits 0 onto a
     # broken machine is worse than one that never ran." An unanswerable doctor
     # is a reason to do the work, not to skip it.
-    _amber=$(doctor_amber 2>/dev/null) || return 1
+    #
+    # The payload is kept (DOCTOR_RAW) for the codex rows, which are read by their
+    # detail: amber only for the review in Codex's /hooks that no run can do, and
+    # not connected at all when they say so.
+    DOCTOR_RAW=$(doctor_json 2>/dev/null) || DOCTOR_RAW=""
+    _amber=$(doctor_amber "$DOCTOR_RAW" 2>/dev/null) || return 1
     for _amber_check in $_amber; do
-        is_expected_amber "$_amber_check" || return 1
+        is_expected_amber "$_amber_check" && continue
+        [ "$_amber_check" = codex ] && codex_awaits_trust_only && continue
+        return 1
     done
+    if wants_codex; then
+        codex_row_connected || return 1
+    fi
 
     say ""
     say "${C_BOLD}aisquare $CLI_VERSION is already the latest.${C_RESET}"
-    note "uv $UV_VERSION · Claude Code ${CLAUDE_VERSION:-skipped} · tmux $TMUX_VERSION · gh $GH_VERSION · git $GIT_VERSION · Node $NODE_VERSION"
+    _sc_codex=""
+    wants_codex && _sc_codex=" · Codex $CODEX_VERSION"
+    note "uv $UV_VERSION · Claude Code ${CLAUDE_VERSION:-skipped}$_sc_codex · tmux $TMUX_VERSION · gh $GH_VERSION · git $GIT_VERSION · Node $NODE_VERSION"
     if [ "$WANT_AGENT" = 1 ]; then
-        note "$(aisquare_home_shown) configured · claude-code hooks installed"
+        note "$(aisquare_home_shown) configured · $(agents_connected_shown | sed "s/'s//g") hooks installed"
     else
         note "$(aisquare_home_shown) configured (--no-agent: no agent hooks)"
     fi
@@ -841,7 +919,14 @@ short_circuit() {
     case " $_amber " in
         *" claude-code "*)
             [ -n "$_why" ] && _why="$_why; "
-            _why="${_why}Claude Code left alone (--no-agent)"
+            _why="${_why}Claude Code left alone ($(agent_flag_shown))"
+            ;;
+    esac
+    case " $_amber " in
+        *" codex "*)
+            # Only the review in Codex's /hooks gets this far (codex_awaits_trust_only).
+            [ -n "$_why" ] && _why="$_why; "
+            _why="${_why}Codex's hooks await your review in its /hooks"
             ;;
     esac
     case " $_amber " in
@@ -903,12 +988,16 @@ banner() {
         _plan="$_plan$_bn_nl  skip     tmux/gh/Node (--no-system-deps)"
     fi
 
-    if [ "$WANT_AGENT" = 1 ]; then
+    if wants_claude; then
         [ "$CLAUDE_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Claude Code"
         [ "$CLAUDE_ACTION" = update ] && _plan="$_plan$_bn_nl  update   Claude Code $CLAUDE_VERSION (via its own updater)"
-    else
-        _plan="$_plan$_bn_nl  skip     Claude Code (--no-agent)"
     fi
+    if wants_codex; then
+        [ "$CODEX_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Codex (its own installer, $CODEX_INSTALLER_URL)"
+        [ "$CODEX_ACTION" = update ] && _plan="$_plan$_bn_nl  update   Codex $CODEX_VERSION (codex update, --upgrade-all)"
+        [ "$CODEX_ACTION" = current ] && _plan="$_plan$_bn_nl  keep     Codex $CODEX_VERSION"
+    fi
+    [ "$WANT_AGENT" = 1 ] || _plan="$_plan$_bn_nl  skip     Claude Code (--no-agent)"
 
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
         _plan="$_plan$_bn_nl  register $PROJECT_DIR as a project"
@@ -917,7 +1006,7 @@ banner() {
     fi
     # Its own line: init connects the hooks with or without a project, and not
     # at all under --no-agent.
-    [ "$WANT_AGENT" = 1 ] && _plan="$_plan$_bn_nl  connect  claude-code's hooks"
+    [ "$WANT_AGENT" = 1 ] && _plan="$_plan$_bn_nl  connect  $(agents_connected_shown) hooks"
 
     # As text: as the format a % in a path was a conversion, and under %b a \c
     # ended the banner there and \t or \0NNN were rewritten (review of #257).
@@ -925,25 +1014,33 @@ banner() {
 
     # Only what THIS run's own steps write, from the same decisions as the plan
     # above: uv when it installs uv, aisquare and asq when it installs or upgrades
-    # the CLI, claude when it installs Claude Code. The updaters the plan names
-    # (`uv self update`, `claude update`) write at their own paths.
+    # the CLI, claude when it installs Claude Code, codex when it installs Codex. The
+    # updaters the plan names (`uv self update`, `claude update`, `codex update`) write
+    # at their own paths.
     _written=""
     [ -z "$UV_VERSION" ] && _written="uv"
     case "$CLI_ACTION" in
         install | upgrade) _written="${_written:+$_written, }aisquare, asq" ;;
     esac
-    [ "$WANT_AGENT" = 1 ] && [ "$CLAUDE_ACTION" = install ] && _written="${_written:+$_written, }claude"
+    wants_claude && [ "$CLAUDE_ACTION" = install ] && _written="${_written:+$_written, }claude"
+    wants_codex && [ "$CODEX_ACTION" = install ] && _written="${_written:+$_written, }codex"
     say ""
     say "Written to:"
     [ -n "$_written" ] && note "~/.local/bin/                     $_written"
     case "$CLI_ACTION" in
         install | upgrade) note "~/.local/share/uv/tools/          the $PYPI_PACKAGE tool environment" ;;
     esac
-    # Where this run's init writes, as aisquare resolves it: AISQUARE_HOME and
-    # CLAUDE_CONFIG_DIR redirect both, and the one-liner inherits them.
+    if wants_codex && [ "$CODEX_ACTION" = install ]; then
+        note "$(printf '%-33s %s' "$(codex_home_shown)/packages/" "Codex's own install (its installer's)")"
+    fi
+    # Where this run's init writes, as aisquare resolves it: AISQUARE_HOME,
+    # CLAUDE_CONFIG_DIR and CODEX_HOME redirect them, and the one-liner inherits them.
     note "$(printf '%-33s %s' "$(aisquare_home_shown)/" "config.toml, context.db, projects/")"
-    if [ "$WANT_AGENT" = 1 ]; then
+    if wants_claude; then
         note "$(printf '%-33s %s' "$(claude_settings_shown)" "MERGED — aisquare's hook groups only")"
+    fi
+    if wants_codex; then
+        note "$(printf '%-33s %s' "$(codex_home_shown)/hooks.json" "MERGED — aisquare's hook groups only")"
     fi
     say ""
 
@@ -1592,11 +1689,17 @@ _install_node_via_fnm() {
 # 14  install_claude — the Agent class. WARN-ONLY (§3.2).
 # ---------------------------------------------------------------------------
 
+# The coding agents --agent asked for, Claude Code by default: each WARN-ONLY.
+install_agent() {
+    install_claude
+    install_codex
+}
+
 install_claude() {
-    [ "$WANT_AGENT" = 1 ] || {
-        note "skipping Claude Code (--no-agent)"
+    if ! wants_claude; then
+        [ "$WANT_AGENT" = 1 ] || note "skipping Claude Code (--no-agent)"
         return 0
-    }
+    fi
 
     if [ "$CLAUDE_ACTION" = update ]; then
         step "Claude Code $CLAUDE_VERSION — letting its own updater run"
@@ -1639,6 +1742,72 @@ install_claude() {
     fi
 }
 
+# Codex, by the route its own docs give (CODEX_INSTALLER_URL), only when it is absent;
+# an installed one is moved only by --upgrade-all, through `codex update`. WARN-ONLY,
+# as Claude Code is: the CLI works without it.
+install_codex() {
+    wants_codex || return 0
+
+    case "$CODEX_ACTION" in
+        current)
+            good "Codex $CODEX_VERSION"
+            SKIPPED_LIST="$SKIPPED_LIST codex"
+            return 0
+            ;;
+        update)
+            step "Codex $CODEX_VERSION — letting its own updater run (--upgrade-all)"
+            _cx_was=$CODEX_VERSION
+            if run codex update; then
+                CODEX_VERSION=$(version_of_codex || true)
+                good "Codex $CODEX_VERSION"
+                if [ "$CODEX_VERSION" = "$_cx_was" ]; then
+                    SKIPPED_LIST="$SKIPPED_LIST codex"
+                else
+                    UPGRADED_LIST="$UPGRADED_LIST codex"
+                fi
+            else
+                note "codex update did not succeed — Codex $_cx_was stays; run codex update later"
+            fi
+            return 0
+            ;;
+    esac
+
+    step "Installing Codex"
+    if [ "$DRY_RUN" = 1 ]; then
+        printf '  %swould run:%s fetch %s | sh\n' "$C_DIM" "$C_RESET" "$CODEX_INSTALLER_URL"
+        return 0
+    fi
+    if ! have tar; then
+        warn "Codex's installer needs tar, which is not on this machine.
+         The CLI works; Codex is not installed. Install tar, then:
+         curl -fsSL $CODEX_INSTALLER_URL | sh"
+        return 0
+    fi
+    if ! fetch_into_shell "$CODEX_INSTALLER_URL" codex_installer_sh >/dev/null 2>&1; then
+        warn "the Codex installer failed. The CLI works; Codex is not installed. Install it
+         with: curl -fsSL $CODEX_INSTALLER_URL | sh  (https://learn.chatgpt.com/docs/codex/cli)"
+        return 0
+    fi
+    PATH="$HOME/.local/bin:$PATH"
+    export PATH
+    CODEX_VERSION=$(version_of_codex || true)
+    if [ -n "$CODEX_VERSION" ]; then
+        good "Codex $CODEX_VERSION"
+        INSTALLED_LIST="$INSTALLED_LIST codex"
+    else
+        warn "Codex installed but \`codex\` is not on PATH yet. Open a new shell."
+    fi
+}
+
+# The shell Codex's installer runs in, told nobody is there to answer. It asks on
+# /dev/tty whether to start Codex at the end, and whether to remove an npm or Homebrew
+# Codex it finds; under `curl … | sh` that is the user's terminal, and a yes to the
+# first would start Codex in the middle of this run. Its own variable answers no to
+# both. A function, so the assignment reaches that one `sh` alone.
+codex_installer_sh() {
+    CODEX_NON_INTERACTIVE=1 sh "$@"
+}
+
 # ---------------------------------------------------------------------------
 # 15  init (§3.4) — NEVER --reinit
 # ---------------------------------------------------------------------------
@@ -1653,7 +1822,8 @@ init_home() {
     step "Setting up $(aisquare_home_shown)"
 
     # --agent claude-code installs the six lifecycle hooks and ingests the
-    # CLAUDE.md of the config dir sessions from this shell read; without --no-onboard it also packs the Repomix
+    # CLAUDE.md of the config dir sessions from this shell read (--agent codex: Codex's
+    # hooks in $CODEX_HOME/hooks.json, and its AGENTS.md); without --no-onboard it also packs the Repomix
     # snapshot in the same run. That is `claude-code` and `snapshot` fixed in one
     # command (§4).
     #
@@ -1662,7 +1832,8 @@ init_home() {
     # bindings made with `team bind` — silently destroying user configuration on
     # every re-run.
     set -- init --local --yes
-    [ "$WANT_AGENT" = 1 ] && set -- "$@" --agent claude-code
+    wants_claude && set -- "$@" --agent claude-code
+    wants_codex && set -- "$@" --agent codex
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
         set -- "$@" "$PROJECT_DIR"
     else
@@ -1671,10 +1842,18 @@ init_home() {
 
     if [ "$DRY_RUN" = 1 ]; then
         printf '  %swould run:%s aisquare %s\n' "$C_DIM" "$C_RESET" "$*"
+        if wants_codex && ! wants_claude; then
+            printf '  %swould run:%s aisquare agents use codex\n' "$C_DIM" "$C_RESET"
+        fi
         return 0
     fi
     if ! run aisquare "$@"; then
         die "\`aisquare $*\` failed. Rerun with --verbose to see its output."
+    fi
+    # Codex alone: the agent launches use, which is Claude Code until told otherwise
+    # (docs/coding-agents.md, "Selection order"). With both, Claude Code stays it.
+    if wants_codex && ! wants_claude; then
+        run aisquare agents use codex || die "\`aisquare agents use codex\` failed. Rerun with --verbose to see its output."
     fi
     if [ "$WANT_PROJECT" = 1 ] && [ -n "$PROJECT_DIR" ]; then
         good "$(aisquare_home_shown) set up, $PROJECT_DIR registered"
@@ -1702,12 +1881,13 @@ DOCTOR_AMBER=""
 expected_amber() {
     # Alphabetical, to read the same way as doctor_amber's sorted output.
     _exp="$EXPECTED_AMBER"
-    if [ "$WANT_AGENT" = 0 ]; then
+    if ! wants_claude; then
         # `--no-agent` asked for Claude Code to be left alone, and the run touches
         # none of it, so no claude-code state is one this run caused or could
         # change: not connected, a settings.json `agents connect` refuses, hooks
         # switched off, hooks running another aisquare. Each is the requested
-        # state; `summary` names it in the doctor's words, as information.
+        # state; `summary` names it in the doctor's words, as information. So
+        # is `--agent codex`, which asks for Codex alone.
         _exp="$_exp claude-code"
     fi
     if [ "$WANT_SYSTEM_DEPS" = 0 ]; then
@@ -1720,6 +1900,11 @@ expected_amber() {
         # provisioning run with that flag failed its caller, always.
         _exp="$_exp gh repomix"
     fi
+    # `sandbox-path` is the shell's state, not the install's: PATH names a directory of
+    # the project this ran in (an activated virtualenv), which a sandboxed Codex agent
+    # launched there may write. The doctor says so; this run neither caused nor can
+    # change it, so it is information, not a failure (review r13 of #113, finding 1).
+    _exp="$_exp sandbox-path"
     if [ "$WANT_PROJECT" = 0 ] || [ -z "$PROJECT_DIR" ]; then
         _exp="$_exp snapshot"
     fi
@@ -1757,8 +1942,8 @@ is_expected_amber() {
 # printed "claude-code hooks installed", wired nothing and exited 0, and a run
 # whose hooks could not be written listed nothing (review of #257). The other
 # rows stay this folder's: snapshot, brain and harness are about its project.
-# Under --no-agent the script wires nothing, so claude-code stays this folder's
-# too: the row `aisquare doctor` shows here.
+# Under --no-agent, or an --agent that leaves Claude Code out, the script wires none
+# of it, so claude-code stays this folder's too: the row `aisquare doctor` shows here.
 #
 # `/` is asked only where this folder's answer could differ from it, and that is
 # a second full doctor otherwise spent on one row it already has (review of #257):
@@ -1769,7 +1954,7 @@ is_expected_amber() {
 doctor_json() {
     _dj_here=$(aisquare --json doctor 2>/dev/null | tr '{' '\n' || true)
     _dj_row=$(printf '%s\n' "$_dj_here" | grep '"name": *"claude-code"' || true)
-    if [ -z "$_dj_row" ] || [ "$WANT_AGENT" = 0 ] || ! _folder_may_load_a_repo_plugin; then
+    if [ -z "$_dj_row" ] || ! wants_claude || ! _folder_may_load_a_repo_plugin; then
         printf '%s' "$_dj_here"
         return 0
     fi
@@ -1922,6 +2107,28 @@ _doctor_fix() {
     _doctor_row "$1" | sed -n 's/.*"fix": *"\([^"\\]*\(\\.[^"\\]*\)*\)".*/\1/p'
 }
 
+# Whether every amber `codex` row in DOCTOR_RAW is the step only the user can take:
+# aisquare's hooks are installed and Codex has not yet been told to trust them
+# (`Codex: unverified in <home>`, services/diagnostics.py). Codex gives one row per
+# home, so each is read; false with no amber row at all.
+codex_awaits_trust_only() {
+    _cx_amber=$(_doctor_row codex | grep -e '"status": *"warn"' -e '"status": *"fail"' || true)
+    [ -n "$_cx_amber" ] || return 1
+    if printf '%s\n' "$_cx_amber" | grep -v '"detail": *"Codex: unverified in ' >/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+# Whether DOCTOR_RAW's codex rows show aisquare's hooks in a Codex home: any row but
+# the two a Codex this home never connected reads as (not detected, not selected).
+codex_row_connected() {
+    _cx_rows=$(_doctor_row codex)
+    [ -n "$_cx_rows" ] || return 1
+    printf '%s\n' "$_cx_rows" |
+        grep -v -e 'not detected on this machine' -e 'AISquare integration not selected' >/dev/null
+}
+
 # A JSON string's body ($1) as the text it encodes, for printing (RFC 8259 §7).
 #
 # In this shell alone, because nothing else can be counted on here. The doctor
@@ -2038,6 +2245,15 @@ _actionable_fix() {
         # and `agents connect` makes a never-started ~/.claude itself. Every amber
         # claude-code row this script did not expect is unexpected, exits 2, and
         # `summary` prints the doctor's own detail and fix for it (review of #257).
+        codex)
+            # The one step this script leaves to the user on purpose: Codex runs hooks
+            # only once they are trusted, and nothing here may trust them for anyone
+            # (docs/coding-agents.md). Only for rows that say exactly that ("unverified");
+            # any other amber codex row is unexpected, and the doctor has its fix.
+            if codex_awaits_trust_only; then
+                printf '%s' "run codex (sign in if it asks), open /hooks and trust aisquare's hooks"
+            fi
+            ;;
         snapshot)
             # A project with no snapshot yet. A snapshot packed too large before
             # 0.7.0 is reused by a plain onboard, so that advice never turned it
@@ -2069,6 +2285,10 @@ summary() {
     _actionable=""
     _unexpected=""
     for _check in $DOCTOR_AMBER; do
+        # Once each: Codex gives one row per home, so its name can come twice.
+        case " $_expected $_actionable $_unexpected " in
+            *" $_check "*) continue ;;
+        esac
         if is_expected_amber "$_check"; then
             _expected="$_expected $_check"
             continue
@@ -2113,18 +2333,18 @@ summary() {
         esac
         case " $_expected " in
             *" claude-code "*)
-                # Information, not an instruction: under --no-agent no state of
-                # Claude Code is this run's to change, so the doctor's fix is not
-                # printed. Asked in this folder (doctor_json), so the doctor run
+                # Information, not an instruction: under --no-agent, or --agent codex,
+                # no state of Claude Code is this run's to change, so the doctor's fix
+                # is not printed. Asked in this folder (doctor_json), so the doctor run
                 # here shows the same row.
                 _cc_said=$(_json_text "$(_doctor_detail claude-code)")
                 if [ -n "$_cc_said" ]; then
-                    note "  claude-code — left alone by --no-agent; aisquare doctor here says:"
+                    note "  claude-code — left alone by $(agent_flag_shown); aisquare doctor here says:"
                     note "             $_cc_said"
                 else
                     # A detail that could not be read off the payload (a `{` in a
                     # path splits it): named where it can be read in full.
-                    note "  claude-code — left alone by --no-agent; aisquare doctor here shows its state."
+                    note "  claude-code — left alone by $(agent_flag_shown); aisquare doctor here shows its state."
                 fi
                 ;;
         esac
@@ -2273,7 +2493,9 @@ have to be handed to sh explicitly):
 
 Options
   -y, --yes            Never prompt, and do not launch the UI at the end.
-      --no-agent       Skip Claude Code.
+      --agent NAME     Coding agent to install and connect: claude-code (the
+                       default), codex, or both. Repeat it to name both.
+      --no-agent       Skip coding agent installation and hooks.
       --no-system-deps Skip tmux, gh and Node.
       --project DIR    Register DIR as the project (default: $PWD if a git repo).
       --no-project     Machine setup only; register nothing.
@@ -2303,8 +2525,9 @@ Exit codes
      or Node did not install
 
 Not installed, on purpose: gbrain (out of scope), explainability tracing (off
-unless asked for), and any credential — `claude` and `gh auth login` do their
-own. Full design and measurements: docs/plans/one-line-install.md
+unless asked for), and any credential — `claude`, `codex` and `gh auth login` do
+their own. Codex runs aisquare's hooks once you trust them in its /hooks menu.
+Full design and measurements: docs/plans/one-line-install.md
 USAGE
 }
 
@@ -2312,6 +2535,12 @@ parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             -y | --yes) ASSUME_YES=1 ;;
+            --agent)
+                [ $# -ge 2 ] || die "--agent needs claude-code, codex or both"
+                want_agent "$2"
+                shift
+                ;;
+            --agent=*) want_agent "${1#--agent=}" ;;
             --no-agent) WANT_AGENT=0 ;;
             --no-system-deps) WANT_SYSTEM_DEPS=0 ;;
             --no-project) WANT_PROJECT=0 ;;
@@ -2356,6 +2585,28 @@ parse_args() {
         esac
         shift
     done
+    if [ "$AGENT_NAMED" = 1 ] && [ "$WANT_AGENT" = 0 ]; then
+        die "--agent and --no-agent ask for opposite things; pass one of them"
+    fi
+}
+
+# One --agent value. The first replaces the default (Claude Code); each adds its
+# agent, so `--agent claude-code --agent codex` and `--agent both` ask for both.
+want_agent() {
+    if [ "$AGENT_NAMED" = 0 ]; then
+        AGENT_NAMED=1
+        WANT_CLAUDE=0
+        WANT_CODEX=0
+    fi
+    case "$1" in
+        claude-code) WANT_CLAUDE=1 ;;
+        codex) WANT_CODEX=1 ;;
+        both)
+            WANT_CLAUDE=1
+            WANT_CODEX=1
+            ;;
+        *) die "unknown coding agent: $1 (use claude-code, codex or both)" ;;
+    esac
 }
 
 # Which project to register (§4): $PWD when it is a git repo, and nothing
@@ -2413,7 +2664,7 @@ main() {
     install_gh
     install_git
     install_node
-    install_claude
+    install_agent
     init_home
     run_doctor
     summary

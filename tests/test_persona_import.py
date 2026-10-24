@@ -11,6 +11,7 @@ fixture runs, and puts them back only where they are the thing under test.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import types
@@ -228,9 +229,7 @@ def test_the_manager_engine_runs_the_contract_argv_under_the_managers_binding(
     assert _flag(argv, "--tools") == ""
     assert _flag(argv, "--max-turns") == "1"
     assert _flag(argv, "--output-format") == "json"
-    assert (
-        json.loads(_flag(argv, "--json-schema")) == persona_import.PersonaDraft.model_json_schema()
-    )
+    assert json.loads(_flag(argv, "--json-schema")) == persona_import.DRAFT_SCHEMA
     assert "--no-session-persistence" in argv and "--strict-mcp-config" in argv
     assert _flag(argv, "--settings") == "{}"
     assert "Name risks before style." in kwargs["input"]
@@ -258,7 +257,7 @@ def test_the_manager_engine_runs_the_contract_argv_under_the_managers_binding(
         False,
     )
     assert not (_user_layer() / service.DRAFTS_DIR / "kind-reviewer").exists()
-    assert progress[0].startswith("manager engine: other-claude -p")
+    assert progress[0].startswith("manager engine: other-claude (Claude Code headless, ")
 
 
 def test_a_draft_can_also_arrive_as_a_json_result_string(
@@ -277,7 +276,7 @@ def test_a_draft_can_also_arrive_as_a_json_result_string(
         (_Completed(1, "", "Invalid API key · Please run /login"), "exited 1 — Invalid API key"),
         (subprocess.TimeoutExpired(["claude"], 180), "no answer within 180 s"),
         (FileNotFoundError(), "is not on PATH"),
-        (_Completed(0, "not json at all"), "the answer was not JSON"),
+        (_Completed(0, "not json at all"), "Claude Code gave no JSON answer — not json at all"),
     ],
     ids=["exit-1", "timeout", "missing-binary", "unparseable"],
 )
@@ -645,6 +644,195 @@ def test_stdin_bytes_stand_in_for_stdin_and_record_stdin_as_the_source() -> None
     )
 
     assert (result.persona.name, result.source) == ("pasted", "stdin")
+
+
+def _codex_manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """The manager bound to Codex (``team bind manager --agent codex``), a stub where PATH
+    finds ``codex``; returns the stub's path."""
+    stub = tmp_path / "bin" / "codex"
+    monkeypatch.setattr(
+        "aisquare.services.persona_import.shutil.which",
+        lambda name: str(stub) if name == "codex" else None,
+    )
+    config = AppConfig()
+    config.team.profiles["manager"] = RoleLaunchProfile(agent="codex")
+    save_config(config)
+    return stub
+
+
+def _codex_answers(draft: object) -> Callable[[list[str], dict[str, Any]], _Completed]:
+    """What Codex's ``exec -o`` does: the final message, the JSON, written to the file."""
+
+    def answer(argv: list[str], kwargs: dict[str, Any]) -> _Completed:
+        Path(_flag(argv, "-o")).write_text(json.dumps(draft), encoding="utf-8")
+        return _Completed(0, "", "")
+
+    return answer
+
+
+def test_the_manager_engine_on_codex_runs_exec_and_reads_the_draft_from_its_output_file(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SCOPE #113 0.8.2 A5: with the manager bound to Codex the engine started ``codex -p
+    …``, which is Codex's ``--profile``. It runs the adapter's headless call, measured on
+    0.162.1: ``exec --ephemeral`` (no rollout) with hooks off (a manager slot's trusted
+    hooks fire under exec), the schema as a file, the source on stdin, the draft from
+    ``-o``, on the manager's Codex account (its ``CODEX_HOME``)."""
+    from aisquare.core import claude_accounts as accounts_core
+    from aisquare.services import settings as settings_service
+
+    stub = _codex_manager(monkeypatch, tmp_path)
+    slot = accounts_core.create_account("codex")
+    settings_service.bind_role("manager", account=str(slot.slot))
+    # The slot's own MCP server: switched off, as every tool is (review r17 of #113, 4).
+    (slot.config_dir / "config.toml").write_text(
+        '[mcp_servers.slots_own]\ncommand = "/opt/slots-own"\n', encoding="utf-8"
+    )
+    runs = _Runs(_Completed(0))
+    seen: list[dict[str, Any]] = []
+
+    def record(argv: list[str], **kwargs: Any) -> Any:
+        if argv and argv[0] == "git":
+            return _REAL_RUN(argv, **kwargs)
+        seen.append({"schema": json.loads(Path(_flag(argv, "--output-schema")).read_text())})
+        runs.calls.append((list(argv), kwargs))
+        return _codex_answers(DRAFT)(argv, kwargs)
+
+    monkeypatch.setattr("aisquare.services.persona_import.subprocess.run", record)
+    progress: list[str] = []
+
+    result = _import(str(_notes(tmp_path)), engine="manager", progress=progress)
+
+    [(argv, kwargs)] = runs.calls
+    assert argv[:3] == [str(stub), "exec", "--ephemeral"]
+    assert "-p" not in argv and "--json-schema" not in argv, "no Claude Code flag reaches Codex"
+    assert argv[argv.index("features.hooks=false") - 1] == "-c"
+    assert argv[argv.index("mcp_servers.slots_own.enabled=false") - 1] == "-c"
+    assert _flag(argv, "--disable") == "shell_tool"
+    assert _flag(argv, "--sandbox") == "read-only"
+    assert argv[-1] == "-", "the prompt is read from stdin"
+    assert seen == [{"schema": persona_import.DRAFT_SCHEMA}]
+    assert not Path(_flag(argv, "-o")).exists(), "the answer file goes with the scratch dir"
+    assert "<<<SOURCE" in kwargs["input"] and "Name risks before style." in kwargs["input"]
+    assert kwargs["cwd"] == str(aisquare_home())
+    assert kwargs["env"]["CODEX_HOME"] == str(slot.config_dir)
+    assert kwargs["env"]["AISQUARE_TEAM"] == "0"
+    assert (result.engine, result.model) == ("manager", None), "Codex has no ladder: its default"
+    assert result.persona.name == "kind-reviewer"
+    assert progress[0] == "manager engine: codex (Codex headless, up to 180 s)"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stub codex is a POSIX shell script")
+def test_persona_import_engine_manager_runs_a_stub_codex_the_manager_is_bound_to(
+    engines: None, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``persona import --engine manager`` end to end, the manager bound to a stub ``codex``
+    on PATH that records its argv and stdin and answers the way ``exec -o`` does."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    record = tmp_path / "argv.txt"
+    stub = bin_dir / "codex"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" > "{record}"\n'
+        f'cat > "{tmp_path / "stdin.txt"}"\n'
+        "while [ $# -gt 0 ]; do\n"
+        '  if [ "$1" = "-o" ]; then out="$2"; fi\n'
+        "  shift\n"
+        "done\n"
+        f"printf '%s' '{json.dumps(DRAFT)}' > \"$out\"\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    config = AppConfig()
+    config.team.profiles["manager"] = RoleLaunchProfile(agent="codex")
+    save_config(config)
+    notes = _notes(tmp_path)
+
+    result = runner.invoke(
+        app, ["persona", "import", str(notes), "--engine", "manager", "--llm", "--yes"]
+    )
+
+    assert result.exit_code == 0, result.output
+    argv = record.read_text(encoding="utf-8").splitlines()
+    assert argv[:2] == ["exec", "--ephemeral"]
+    assert argv[argv.index("features.hooks=false") - 1] == "-c"
+    assert "--output-schema" in argv and "-o" in argv and argv[-1] == "-"
+    assert "Name risks before style." in (tmp_path / "stdin.txt").read_text(encoding="utf-8")
+    assert "✓ imported kind-reviewer (manager) into user" in result.stdout
+    assert (_user_layer() / "kind-reviewer" / "SKILL.md").is_file()
+
+
+def test_the_manager_engine_on_codex_takes_a_pinned_model_and_names_a_missing_answer(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Codex pin (``AISQUARE_MODEL_MANAGER``) is its ``-m``; an exit 0 with nothing in
+    ``-o`` is a reason for the ladder, never a traceback."""
+    _codex_manager(monkeypatch, tmp_path)
+    monkeypatch.setenv("AISQUARE_MODEL_MANAGER", "gpt-fixture")
+    runs = _runs(monkeypatch, _Completed(0, "", ""))
+
+    with pytest.raises(PersonaError) as caught:
+        _import(str(_notes(tmp_path)), engine="manager")
+
+    [(argv, _kwargs)] = runs.calls
+    assert _flag(argv, "-m") == "gpt-fixture"
+    assert caught.value.code == "no_import_engine"
+    assert "manager engine: Codex gave no JSON answer" in str(caught.value)
+
+
+def test_a_codex_manager_whose_mcp_server_cannot_be_switched_off_runs_nothing(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server whose name a ``-c`` key cannot hold cannot be switched off, so the source is
+    never handed to a session that would load it: a reason for the ladder, in one line."""
+    _codex_manager(monkeypatch, tmp_path)
+    home = tmp_path / "plain-codex"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        '[mcp_servers."has.dot"]\ncommand = "/opt/x"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    runs = _runs(monkeypatch, _Completed(0, "", ""))
+
+    with pytest.raises(PersonaError) as caught:
+        _import(str(_notes(tmp_path)), engine="manager")
+
+    assert runs.calls == []
+    assert "manager engine: Codex's tools cannot be switched off" in str(caught.value)
+    assert "'has.dot'" in str(caught.value)
+
+
+def test_a_manager_whose_agent_has_no_headless_call_is_a_reason_for_the_ladder(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An adapter that answers ``None`` runs nothing, and the ladder goes on to ``api``."""
+    from aisquare.core.agent_adapters import register, unregister
+    from tests.fake_agent import FakeAgentAdapter
+
+    class _NoCall(FakeAgentAdapter):
+        def headless_call(
+            self, schema: Path, out: Path, model: str | None, *, home: Path, cwd: Path
+        ) -> list[str] | None:
+            return None
+
+    fake = _NoCall()
+    register(fake)
+    config = AppConfig()
+    config.team.profiles["manager"] = RoleLaunchProfile(agent=fake.id)
+    save_config(config)
+    runs = _runs(monkeypatch, _Completed(0))
+    _fake_sdk(monkeypatch, persona_import.PersonaDraft.model_validate(DRAFT))
+    progress: list[str] = []
+    try:
+        result = _import(str(_notes(tmp_path)), model="claude-opus-5", progress=progress)
+    finally:
+        unregister(fake.id)
+
+    assert runs.calls == []
+    assert result.engine == "api"
+    assert "manager engine: Fake Agent has no headless call" in progress
 
 
 # --- the guards ----------------------------------------------------------------------------

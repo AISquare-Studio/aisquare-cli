@@ -21,15 +21,26 @@ import re
 import sqlite3
 import sys
 from collections.abc import Callable, Collection, Mapping, Sequence
+from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import EllipsisType
-from typing import Any, Final, NamedTuple
+from typing import Any, Final, NamedTuple, NoReturn
 
-from aisquare.core import brain, experimental, harness, insights, orchestrator, workspace
+from aisquare.core import (
+    agent_sessions,
+    brain,
+    experimental,
+    harness,
+    insights,
+    launch_seal,
+    orchestrator,
+    workspace,
+)
 from aisquare.core import claude_accounts as claude_accounts_core
+from aisquare.core.agent_adapters import DEFAULT_AGENT, recorded_adapter
 from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.ids import new_event_id, new_task_id
 from aisquare.core.store import AmbiguousIdError, ContextStore, store_session, unmet_needs
@@ -234,6 +245,20 @@ class DeliveryUnconfirmedError(RuntimeError):
         self.board_name = board_name
 
 
+class ForeignSessionError(PermissionError):
+    """A command a sandboxed agent's broker runs (``services.store_broker.CALLER_ENV``)
+    named a session that is not its launch's own: one the agent's own hooks, outside the
+    sandbox, bound to that launch (``core.agent_sessions.bind_launch_session``)."""
+
+    def __init__(self, ref: str, own: list[str]) -> None:
+        mine = ", ".join(short_id(value) for value in own) or "none yet: its first hook has not run"
+        super().__init__(
+            f"--as {ref} is not this agent's own session (its own: {mine}): a command from "
+            "its sandbox acts only as the sessions its own launch registered"
+        )
+        self.ref = ref
+
+
 class NoSuchTaskNumber(KeyError):
     """``12`` / ``#12`` names no task on the caller's board — said so, never looked for
     elsewhere."""
@@ -272,9 +297,10 @@ class StopDecision:
     offers ``{"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext":
     …}}``, which continues the conversation too but is labelled "Stop hook
     feedback" in the transcript rather than a hook error; switching is one
-    method. Claude Code itself ends the turn after 8 consecutive blocks and caps
-    hook output at 10,000 characters, truncating the rest — mid-JSON-string if it
-    must, which costs the whole payload and not just the tail. The event COUNT
+    function (``agent_adapters.types.block_reply``). Claude Code itself ends the turn
+    after 8 consecutive blocks and caps hook output at 10,000 characters, truncating
+    the rest — mid-JSON-string if it must, which costs the whole payload and not just
+    the tail. The event COUNT
     does not bound that: ``event.text`` is unbounded board text, and the coder's
     own standing cycle asks for ``--note "how to verify + evidence"``. Measured
     with the real renderer: ten ``task_review`` events carrying a 2 KB note each
@@ -286,9 +312,6 @@ class StopDecision:
     reason: str
     cursor: int
     """The event seq the manager's cursor advanced to — what the reason covers."""
-
-    def as_hook_output(self) -> dict[str, str]:
-        return {"decision": "block", "reason": self.reason}
 
 
 @dataclass(frozen=True)
@@ -413,12 +436,89 @@ def _project_root(store: ContextStore, project_id: str) -> Path | None:
     return project.root if project is not None else None
 
 
-def _resolve_session(store: ContextStore, ref: str | None) -> TeamSession | None:
+def _resolve_session(
+    store: ContextStore, ref: str | None, *, acting: bool = True
+) -> TeamSession | None:
+    """The session ``ref`` names (an id prefix); the one a command acts as unless it is
+    only a filter (``acting``), which a brokered command may name only when it is its own
+    (:func:`_acting_as`)."""
     if ref is None:
         return None
     session = store.get_session(ref)
     if session is None:
         raise KeyError(ref)
+    return _acting_as(store, session, ref) if acting else session
+
+
+def brokered() -> bool:
+    """Whether this command is one a sandboxed agent's broker runs for it
+    (``services.store_broker.CALLER_ENV``)."""
+    from aisquare.services.store_broker import brokered_call
+
+    return brokered_call()
+
+
+def _own_task(store: ContextStore, ref: str, board_id: str | Callable[[], str]) -> TeamTask:
+    """The task ``ref`` names (:func:`find_task`: a number on ``board_id``, the caller's,
+    else an id); for a command a sandboxed agent's broker runs, only one of its launch's
+    own board (``services.store_broker.BOARD_ENV``): task ids resolve across every board,
+    and a task of another one done, blocked or released from a sandbox would retire that
+    board's assignments and wake its manager (review r10 of #113, finding 3)."""
+    from aisquare.services.store_broker import OutOfScope, own_board
+
+    task = find_task(store, ref, board_id)
+    if task is None:
+        raise KeyError(ref)
+    board = own_board()
+    if board is not None and task.project_id != board:
+        raise OutOfScope(
+            f"task {task.id} is on another board than this agent's: a command from its "
+            "sandbox names only its own board's tasks"
+        )
+    return task
+
+
+def _out_of_board(message: str) -> NoReturn:
+    """Refuse a ref to another board's task: ``ValueError`` as ever, and for a command a
+    sandboxed agent's broker runs the scope refusal, which leaves its record (review r11
+    of #113, finding 13)."""
+    from aisquare.services.store_broker import OutOfScope
+
+    if brokered():
+        raise OutOfScope(message)
+    raise ValueError(message)
+
+
+def note_refusal(project_id: str, text: str, *, key: str) -> bool:
+    """Put ``text`` on ``project_id``'s board for its manager, once per ``key``: a refusal
+    of what a sandboxed agent asked its broker for (``services.store_broker.
+    record_refusal``). ``False`` when this key's note is there already."""
+    with store_session() as store, store.transaction():
+        # One transaction: a note that fails takes its once-only mark back with it, or that
+        # launch's refusals of this kind were never noted again (review r12 of #113, 10).
+        if not store.set_meta_once(key, _now().isoformat()):
+            return False
+        _emit(store, project_id, "note", text, to_role="manager")
+    return True
+
+
+def _acting_as(store: ContextStore, session: TeamSession, ref: str) -> TeamSession:
+    """``session``, when this command may act as it: any session for a command run here,
+    only its launch's own for one a sandboxed agent's broker runs (:func:`brokered`).
+    Its own are the sessions bound to the launch's tokens, which the broker's environment
+    carries (the launch's, never the caller's) and only the agent's own hooks bind, from
+    outside the sandbox, where nothing inside it writes (``types.store_read_only``)."""
+    if not brokered():
+        return session
+    own = list(
+        dict.fromkeys(
+            bound
+            for prefix, token in agent_sessions.launch_tokens()
+            if (bound := store.get_meta(f"{prefix}-session:{token}"))
+        )
+    )
+    if session.id not in own:
+        raise ForeignSessionError(ref, own)
     return session
 
 
@@ -516,11 +616,26 @@ def _board(
     identity (#20's misrouting bug: cwd resolution silently sent writes to a
     different board than the session's audience). Without a session, cwd
     resolves the board exactly as before. A cwd that disagrees with the
-    session's board produces a warning, never a reroute.
+    session's board produces a warning, never a reroute. A command a sandboxed agent's
+    broker runs delivers only to its launch's board (``services.store_broker.BOARD_ENV``),
+    asked before any project is registered.
     """
+    from aisquare.services.store_broker import OutOfScope, own_board
+
+    own = own_board()
     if session is None:
+        if own is not None and orchestrator.team_project(cwd).id != own:
+            raise OutOfScope(
+                "this directory's board is not this agent's: a command from its sandbox "
+                "writes only its own board"
+            )
         return _board_named(store, _project(store, cwd, write=write))
     board = _board_of(store, session.project_id)
+    if own is not None and board.id != own:
+        raise OutOfScope(
+            f"session {short_id(session.id)} is on another board than this agent's launch: "
+            "a command from its sandbox writes only its own board"
+        )
     cwd_board = orchestrator.team_project(cwd)
     if cwd_board.id == board.id:
         return board
@@ -555,22 +670,28 @@ def _record_delivery(event: TeamEvent, board: _Board) -> TeamEvent:
     return stored
 
 
-def session_account(transcript_path: str | None) -> str | None:
-    """Which agent config dir (account) a session runs under, or ``None``.
+def session_account(transcript_path: str | None, agent: str | None = None) -> str | None:
+    """Which agent config dir (account) a session of ``agent`` runs under, or ``None``: what
+    to read where its hook did not name it.
 
-    Derived from the transcript path in the hook payload
-    (``<config-dir>/projects/<slug>/<session>.jsonl``) rather than from
-    ``CLAUDE_CONFIG_DIR``: the variable only reaches us if the agent happens to
-    export it to hook subprocesses, whereas the transcript path is always in
-    the payload and names the directory unambiguously. Falls back to the
-    variable when the path has an unexpected shape.
+    An agent whose hook commands name their config dir (``capabilities.hook_names_home``:
+    Codex's ``--config-dir``) is not told its home otherwise, so nothing here guesses it from
+    the transcript. Any other agent's is derived from the transcript path in the hook
+    payload (``<config-dir>/projects/<slug>/<session>.jsonl``, Claude Code's) rather than
+    from its home variable (``CLAUDE_CONFIG_DIR``): the variable only reaches us if the
+    agent happens to export it to hook subprocesses, whereas the transcript path is always
+    in the payload and names the directory unambiguously. Falls back to the agent's home
+    variable (``AgentAdapter.home_env``) when the path has an unexpected shape.
     """
-    if transcript_path:
+    adapter = recorded_adapter(agent)
+    if adapter is None:
+        return None
+    if transcript_path and not adapter.capabilities.hook_names_home:
         path = Path(transcript_path)
         # …/<config-dir>/projects/<project-slug>/<session-id>.jsonl
         if len(path.parents) >= 3 and path.parents[1].name == "projects":
             return str(path.parents[2])
-    return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or None
+    return os.environ.get(adapter.home_env, "").strip() or None
 
 
 def slot_labels_via(store: ContextStore) -> Mapping[int, str]:
@@ -613,7 +734,7 @@ def account_label(account: str | None, labels: Mapping[int, str] | None = None) 
         named = (labels or {}).get(slot)
         if named:
             return named
-        return "plain claude" if slot == claude_accounts_core.DEFAULT_SLOT else f"account {slot}"
+        return claude_accounts_core.slot_name(slot)
     return Path(account).name
 
 
@@ -744,6 +865,8 @@ def _nudge_manager(project_id: str, *, reason: str, board: str) -> None:
     nudge. The fleet decides whether a nudge is due — state ``waiting``, pane
     alive, debounced — and what the one fixed line says; the details reach the
     manager through the delta its next prompt injects, never through the nudge.
+    That process may be a command in Codex's sandbox, which tmux refuses: the fleet
+    then leaves the nudge owed, for the agent's hooks to send from outside it.
     """
     try:
         from aisquare.services import fleet as fleet_service  # lazy: fleet imports the store
@@ -984,7 +1107,7 @@ def log_events(
     with store_session() as store:
         session = _resolve_session(store, session_ref)
         board = _board(store, session, cwd)
-        author = _resolve_session(store, by)
+        author = _resolve_session(store, by, acting=False)
         task_id: str | None = None
         if task_ref is not None:
             task = find_task(store, task_ref, board.id)
@@ -1053,6 +1176,9 @@ def verify_receipt(
 
 _SIGNAL_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 _SIGNAL_VALUE = re.compile(r"\S{1,128}")
+#: The fleet's own signals (``services.fleet.PAUSE_SIGNAL``, ``fleet-paused``): set by the
+#: fleet and its operator, never by a command a sandboxed agent's broker runs.
+_FLEET_SIGNAL_PREFIX = "fleet-"
 
 
 @dataclass(frozen=True)
@@ -1093,8 +1219,12 @@ def set_signal(
     session_ref: str | None = None,
     cwd: Path | None = None,
     project_id: str | None = None,
+    agent_tool: bool = False,
 ) -> tuple[SignalState, str | None]:
     """Set a named board state (``team signal NAME VALUE``); returns (state, prev).
+    The fleet's own signals (``fleet-paused``) are set by the fleet and its operator, never
+    by an agent's tool: a command its sandbox's broker runs, or its MCP ``signal`` tool
+    (``agent_tool``; review r10 of #113, finding 8).
 
     Names and values are single tokens by contract — that is exactly what
     makes the emitted ``signal`` event's text decodable into structured
@@ -1106,6 +1236,14 @@ def set_signal(
     _require_enabled()
     _DELIVERY.set(None)  # FIRST: a refused signal must not leave the last write's receipt readable
     _validate_signal(name, value)  # before any store is opened or board resolved
+    if (brokered() or agent_tool) and name.startswith(_FLEET_SIGNAL_PREFIX):
+        from aisquare.services.store_broker import OutOfScope
+
+        raise OutOfScope(
+            f"signal {name!r} is the fleet's own: an agent's tool, its sandbox's commands "
+            "included, may read it, not set it",
+            kind="fleet",
+        )
     with store_session() as store:
         session = _resolve_session(store, session_ref)
         # A caller that names the project by ID resolves the board id-addressed,
@@ -1294,7 +1432,7 @@ def set_role(role: str, session_ref: str, cwd: Path | None = None) -> TeamSessio
     # CLI prints no receipt for it.
     _DELIVERY.set(None)
     with store_session() as store:
-        session = store.get_session(session_ref)
+        session = _resolve_session(store, session_ref)
         if session is None:
             raise KeyError(session_ref)
         return store.update_session(session.id, role=role)
@@ -1305,7 +1443,7 @@ def set_focus(text: str, session_ref: str, cwd: Path | None = None) -> TeamSessi
     _require_enabled()
     _DELIVERY.set(None)
     with store_session() as store:
-        session = store.get_session(session_ref)
+        session = _resolve_session(store, session_ref)
         if session is None:
             raise KeyError(session_ref)
         updated = store.update_session(session.id, focus=text)
@@ -1355,7 +1493,7 @@ def add_note(
                 # Same contamination --needs rejects: a foreign board's task
                 # attached to this board's event would render as a broken
                 # ref for every reader here.
-                raise ValueError(f"--task {task_ref}: that task belongs to another project's board")
+                _out_of_board(f"--task {task_ref}: that task belongs to another project's board")
             task_id = task.id
         event = _emit(
             store,
@@ -1415,7 +1553,7 @@ def add_task(
             if needed.project_id != board.id:
                 # A cross-project need would count as unmet forever (readiness
                 # only sees this project's statuses) — starve, silently.
-                raise ValueError(f"--needs {ref}: that task belongs to another project's board")
+                _out_of_board(f"--needs {ref}: that task belongs to another project's board")
             if needed.id not in resolved_needs:
                 resolved_needs.append(needed.id)
         now = _now()
@@ -1481,9 +1619,7 @@ def show_task(ref: str, *, session_ref: str | None = None, cwd: Path | None = No
     _require_enabled()
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        task = find_task(store, ref, lambda: _caller_board_id(store, session, cwd))
-        if task is None:
-            raise KeyError(ref)
+        task = _own_task(store, ref, lambda: _caller_board_id(store, session, cwd))
         return task
 
 
@@ -1545,9 +1681,7 @@ def claim_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
-        if task is None:
-            raise KeyError(ref)
+        task = _own_task(store, ref, lambda: _caller_board_id(store, session, None))
         claimant = session.id if session else "cli"
         lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
         if not store.claim_task(task.id, claimant, lease):
@@ -1588,9 +1722,7 @@ def _finish_task(
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
-        if task is None:
-            raise KeyError(ref)
+        task = _own_task(store, ref, lambda: _caller_board_id(store, session, None))
         manager = (
             _nudge_target(store, session.id if session else None, task.project_id, cwd, task=task)
             if wakes
@@ -1656,9 +1788,7 @@ def reopen_task(ref: str, *, reason: str, session_ref: str | None = None) -> Tea
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
-        if task is None:
-            raise KeyError(ref)
+        task = _own_task(store, ref, lambda: _caller_board_id(store, session, None))
         manager = _nudge_target(store, session.id if session else None, task.project_id, task=task)
         reopened = store.reopen_task(task.id)
         event = _emit(
@@ -1756,9 +1886,7 @@ def release_task(ref: str, *, session_ref: str | None = None) -> TeamTask:
     _DELIVERY.set(None)
     with store_session() as store:
         session = _resolve_session(store, session_ref)
-        task = find_task(store, ref, lambda: _caller_board_id(store, session, None))
-        if task is None:
-            raise KeyError(ref)
+        task = _own_task(store, ref, lambda: _caller_board_id(store, session, None))
         released = store.release_task(task.id)
         event = _emit(
             store,
@@ -1794,6 +1922,7 @@ def recall(query: str, cwd: Path | None = None) -> str | None:
     and takes a few seconds; subsequent ones are instant.
     """
     _require_enabled()
+    brain.check_query(query)  # before anything is drained or asked
     project = orchestrator.team_project(cwd)
     with store_session() as store:
         backlog = distill_service.pending(store, project.id)
@@ -1875,6 +2004,9 @@ def hook_session_start(
     transcript_path: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    agent: str = "claude-code",
+    native_session_id: str | None = None,
+    account: str | None = None,
 ) -> str:
     """Register this session with the orchestrator and return the board injection.
 
@@ -1904,17 +2036,34 @@ def hook_session_start(
         # other session's injected context.
         model = harness.clean_model_id(model)
         effort = harness.clean_effort(effort)
+        adapter = recorded_adapter(agent)
+        # At its prompt, and nothing fires before its first one: the row's
+        # `working` was the column's default, so `fleet ls` read a fresh Claude Code
+        # agent as working for as long as it sat there, `fleet tell` filed a note
+        # instead of typing, and the nudge passed over a fresh manager (SMOKE2 on
+        # 2.1.300). A compaction comes mid-turn as often as not, and keeps it. In
+        # the statement that opens the session, which the fleet types a spawn's
+        # prompt at once on: written at this hook's end, it overwrote the `working`
+        # of a first prompt submitted meanwhile (review r4 of #113, finding 9).
+        at_its_prompt = (
+            source != "compact"
+            and adapter is not None
+            and adapter.capabilities.starts_at_its_prompt
+        )
         asked_persona, persona_note, named = _asked_persona(store, project.id)
         session = store.upsert_session(
             TeamSession(
                 id=session_id,
+                agent=agent,
+                native_session_id=native_session_id or session_id,
                 project_id=project.id,
                 role=role or (known.role if known else "unassigned"),
                 started_at=now,
                 last_seen_at=now,
                 cursor=store.latest_seq(project.id),
+                state="waiting" if at_its_prompt else "working",
                 transcript_path=transcript_path,
-                account=session_account(transcript_path),
+                account=account or session_account(transcript_path, agent),
                 model=model,
                 effort=effort,
                 # Recorded as ASKED, loadable or not (§3.7): this pane's fleet row
@@ -1925,6 +2074,7 @@ def hook_session_start(
         )
         if role is not None and known is not None and known.role != role:
             session = store.update_session(session.id, role=role)
+        session = agent_sessions.adopt_local_session(store, session)
         if experimental.captain_role(base_role(session.role)):
             # Bound like every fleet row (rule 1 of the fleet-row section), or a
             # `/clear` left the row on the ended id and `say` waited on a session that
@@ -1948,6 +2098,9 @@ def hook_session_start(
         # ``source`` plays no part — see rule 1 of the fleet-row section. The row the window
         # names was read once, above, for the persona, the assignment and the cycle's project.
         assigned = _assignment(store, session.id, project.id, named=named)
+        store.renew_leases(session.id, now + timedelta(minutes=orchestrator.lease_minutes()))
+        if known is None and source in (None, "startup"):
+            session = _behind_notes_to_its_row(store, session)
         _settle_owed_persona(store, session)  # this start briefs the persona itself
         fleet = _cycle_project(store, project, cwd, session.id, named=named)
         # Presence is board state, not feed traffic: /clear cycles, resumes and
@@ -1976,6 +2129,9 @@ def hook_prompt_heartbeat(
     transcript_path: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    agent: str = "claude-code",
+    native_session_id: str | None = None,
+    account: str | None = None,
 ) -> str:
     """Heartbeat on prompt submit; returns the teammate delta to inject (or '').
 
@@ -2002,23 +2158,27 @@ def hook_prompt_heartbeat(
             session = store.upsert_session(
                 TeamSession(
                     id=session_id,
+                    agent=agent,
+                    native_session_id=native_session_id or session_id,
                     project_id=project.id,
                     role=role or "unassigned",
                     started_at=now,
                     last_seen_at=now,
                     cursor=store.latest_seq(project.id),
                     transcript_path=transcript_path,
-                    account=session_account(transcript_path),
+                    account=account or session_account(transcript_path, agent),
                     model=harness.clean_model_id(model),
                     effort=harness.clean_effort(effort),
                 )
             )
+            session = agent_sessions.adopt_local_session(store, session)
             # This door binds a fleet row too (an agent that started before the
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
             # under its old holder on this very board (review of #135).
             named = _hook_named_row(store)
             assigned = _assignment(store, session.id, project.id, named=named)
+            store.renew_leases(session.id, now + timedelta(minutes=orchestrator.lease_minutes()))
             return _render_board(
                 project,
                 store.team_sessions(project.id),
@@ -2029,6 +2189,11 @@ def hook_prompt_heartbeat(
                 labels=lambda: slot_labels_via(store),
                 fleet=_cycle_project(store, project, cwd, session.id, named=named),
             )
+        session = agent_sessions.adopt_local_session(store, session)
+        # What this turn runs with, where the start said nothing of it (Codex's effort).
+        store.set_session_model(
+            session.id, harness.clean_model_id(model), harness.clean_effort(effort)
+        )
         # Same check as session_start, on the path that actually runs every turn.
         # It must survive the empty-delta early return below: a collision warning
         # that only rides along with unrelated teammate traffic would go unseen for
@@ -2081,7 +2246,12 @@ def hook_prompt_heartbeat(
 
 
 def hook_stop(
-    session_id: str, cwd: Path | None, *, stop_hook_active: bool = False
+    session_id: str,
+    cwd: Path | None,
+    *,
+    stop_hook_active: bool = False,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> StopDecision | None:
     """The session finished its turn: it is now waiting for input.
 
@@ -2114,6 +2284,10 @@ def hook_stop(
         if session is None:
             return None
         store.renew_leases(session.id, _now() + timedelta(minutes=orchestrator.lease_minutes()))
+        # The model and effort the turn ran with, as its stop reports them (Codex's rollout).
+        store.set_session_model(
+            session.id, harness.clean_model_id(model), harness.clean_effort(effort)
+        )
         if session.state == HANDOVER_STATE:
             # `fleet switch`, or `fleet restart` of a running agent, marked it and typed
             # `/exit`, which an agent mid-turn runs once the turn is over. `waiting`
@@ -2205,6 +2379,13 @@ def _wake_candidates(store: ContextStore, me: TeamSession) -> list[TeamEvent]:
         exclude_kinds=HUMAN_BOARD_KINDS,
         limit=_DELTA_LIMIT * 3 + 1,
     )
+
+
+def wake_pending(store: ContextStore, me: TeamSession) -> bool:
+    """Whether news a manager wakes for is past its cursor, unread: what a nudge owed
+    since a write tmux refused (``services.fleet.deliver_owed_nudge``) is still due for.
+    Every write that nudges is one of these events (:func:`_wakes_manager`)."""
+    return any(_wakes_manager(event) for event in _wake_candidates(store, me))
 
 
 def _deferred_wake_reason(store: ContextStore, me: TeamSession) -> str | None:
@@ -2397,6 +2578,7 @@ def hook_stop_failure(
     error: str | None,
     message: str | None,
     details: str | None,
+    notice: claude_accounts_core.LimitNotice | None = None,
 ) -> TurnFailure | None:
     """The turn ended on an API error — Claude Code's ``StopFailure`` (#146).
 
@@ -2437,7 +2619,10 @@ def hook_stop_failure(
             )
             refreshed = store.get_session(session.id) or session
             return TurnFailure(refreshed, kind, None)
-        notice = claude_accounts_core.parse_limit_notice(message, now=_now())
+        if notice is None:
+            # Claude Code's own text; an agent that read its limit elsewhere (Codex,
+            # from the end of its rollout: `core.codex_accounts`) hands the notice in.
+            notice = claude_accounts_core.parse_limit_notice(message, now=_now())
         # A row `fleet switch` has marked HANDOVER_STATE is already handled: a
         # re-fire during the hand-over must neither start a second worker nor
         # write `limited` over the mark — its SessionEnd would then release the
@@ -2740,7 +2925,7 @@ def prune_sessions(
     released_total = 0
     with store_session() as store:
         project = _project(store, cwd)
-        spare = _resolve_session(store, keep) if keep else None
+        spare = _resolve_session(store, keep, acting=False) if keep else None
         spare_id = spare.id if spare else None
         for session in store.team_sessions(project.id):
             if session.ended_at is not None or session.id == spare_id:
@@ -2887,7 +3072,9 @@ def _render_board(
                 parts.append(f"[{session.model}]")
                 # base_role: a seat rides its role's ladder, so `coder1` on a
                 # model outside the coder ladder is flagged like `coder` is.
-                mismatch = harness.model_mismatch(base_role(session.role), session.model)
+                mismatch = harness.model_mismatch(
+                    base_role(session.role), session.model, agent=session.agent
+                )
                 if mismatch:
                     parts.append("⚠ off-ladder")
             if session.persona:
@@ -2964,7 +3151,7 @@ def _render_board(
 #    hands every hook the pid of the process that fired it (``CLAUDE_PID``), and
 #    tmux knows the pid at the root of the row's pane (``#{pane_pid}``);
 #    ``launch`` execs the agent, so for the pane's own agent the two are equal
-#    and for a child they never are (``orchestrator.env_claude_pid``, measured
+#    and for a child they never are (``orchestrator.env_agent_pid``, measured
 #    across a ``/clear`` on 2.1.272). A row bound to another session id is
 #    ADOPTED — rebound, its claims moved — only by the pane's process, whatever
 #    ``SessionStart`` source the caller reports: ``startup``, ``resume``, ``fork``
@@ -2973,6 +3160,14 @@ def _render_board(
 #    cannot be checked — no ``CLAUDE_PID``, tmux not answering — stays with the
 #    session it has; only an UNBOUND row binds on first arrival then, because a
 #    binary that could not be started on a chosen id has nothing better.
+#    An agent that hands its hooks no pid of its own (Codex, whose ``CLAUDE_PID``
+#    is whoever started the tmux server's: ``AgentCapabilities.pid_env``) is told
+#    apart the other way round: Codex sets ``CODEX_THREAD_ID`` in the shells its
+#    tools run in and never in its own hooks (``tool_shell_env``, measured on
+#    0.162.1), so a hook that finds it is a nested ``codex exec``'s, and one that
+#    does not is the agent ``launch`` started in the pane — a ``/clear`` (which
+#    fires no ``SessionEnd`` for the thread it leaves), a ``/resume`` to an
+#    earlier thread, the first start of a fresh hand-over's replacement.
 # 2. A /CLEAR KEEPS THE CLAIMS. Claude Code fires ``SessionEnd(reason=clear)``
 #    for the old id BEFORE ``SessionStart(source=clear)`` for the new one, so
 #    the end hook — when the pane's process is the one clearing — retires the
@@ -3143,27 +3338,43 @@ def _fleet_row_hint(
         return None
 
 
-def _pane_holds(agent: FleetAgent) -> bool | None:
+def _pane_holds(agent: FleetAgent, session_agent: str | None) -> bool | None:
     """Whether the process running this hook is the one in ``agent``'s pane (rule 1).
 
-    ``None`` when it cannot be told: no ``CLAUDE_PID`` in the environment (a
-    binary that does not export one), a tmux that does not answer, or a pane
-    that is already gone. Callers treat that as "not proven" — a bound row is
-    not adopted on a guess, because the guess that was wrong here handed a
-    parent's task to its child. The fleet's own server factory is used so the
-    row's socket is asked (``[fleet] tmux_socket`` may have changed since the
-    spawn), at the path its spawn recorded (another ``TMUX_TMPDIR`` reaches
-    another server on the name, whose ``%N`` is another agent), and so a test's
-    fake tmux is seen; imported here because ``services.fleet`` imports this
-    module the same lazy way.
+    ``session_agent`` is the agent whose hook this is (the session's ``agent``), and
+    the question is put in its terms: its pid, read from the variable it hands its hooks
+    (``AgentCapabilities.pid_env``) and compared with the pane's; or, for an agent that
+    marks its tools' shells instead (``tool_shell_env``), whether this hook runs under
+    one (``agent_sessions.own_process``). A session of another agent than the row's is
+    never the pane's own: a ``codex exec`` a Claude Code agent's tool runs carries no
+    ``CODEX_THREAD_ID`` and the window's ``AISQUARE_FLEET_AGENT``, and took the row and
+    its claims as Codex's own process (review r2 of #113, finding 1).
+
+    ``None`` when it cannot be told: neither (a binary that exports no pid), a tmux
+    that does not answer, a pane that is already gone, or a row no launch record places.
+    Callers treat that as "not proven" — a bound row is not adopted on a guess, because
+    the guess that was wrong here handed a parent's task to its child. The row's pane and
+    its agent are the ones its launch record holds (``services.fleet.resolve_place``, the
+    one resolver every tmux question about a row goes through), never the row's
+    ``pane_id``, ``socket_path`` or ``agent``, which an agent's sandbox writes; the
+    fleet's own server factory asks it, so a test's fake tmux is seen. Imported here
+    because ``services.fleet`` imports this module the same lazy way.
     """
-    pid = orchestrator.env_claude_pid()
-    if pid is None:
-        return None
     from aisquare.services import fleet as fleet_service
 
+    placement = fleet_service.resolve_place(agent)
+    if not isinstance(placement, fleet_service.Placed):
+        return None
+    if (session_agent or DEFAULT_AGENT) != (placement.agent.agent or DEFAULT_AGENT):
+        return False
+    adapter = recorded_adapter(session_agent)
+    if adapter is not None and adapter.capabilities.pid_env is None:
+        return agent_sessions.own_process(adapter)
+    pid = orchestrator.env_agent_pid(adapter.capabilities.pid_env if adapter else None)
+    if pid is None:
+        return None
     try:
-        pane_pid = fleet_service.server_of(agent).pane_pid(agent.pane_id)
+        pane_pid = placement.pane.pid()
     except TmuxError:
         return None
     if pane_pid is None:
@@ -3182,11 +3393,18 @@ def _adopt(store: ContextStore, agent: FleetAgent, session_id: str) -> bool:
     bound by somebody else, between the read and the write — ``fleet stop`` and
     this hook are different processes.
     """
-    holds = _pane_holds(agent)
+    session = store.get_session(session_id)
+    holds = _pane_holds(agent, session.agent if session is not None else None)
     if holds is False or (holds is None and agent.session_id is not None):
         return False
     lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
-    return store.adopt_fleet_agent_session(agent.id, agent.session_id, session_id, lease)
+    if not store.adopt_fleet_agent_session(agent.id, agent.session_id, session_id, lease):
+        return False
+    # The row's launch record takes the session this hook was handed (`core.launch_seal`):
+    # what a replay resumes, never the session row an agent's sandbox can write.
+    with suppress(Exception):
+        launch_seal.adopted(agent.id, session_id)
+    return True
 
 
 def _handing_over_a_fleet_row(store: ContextStore, session: TeamSession) -> bool:
@@ -3211,7 +3429,7 @@ def _clearing_its_own_pane(store: ContextStore, session: TeamSession) -> bool:
     """
     try:
         row = _fleet_row_for(store, session.id)
-        return row is not None and _pane_holds(row) is True
+        return row is not None and _pane_holds(row, session.agent) is True
     except Exception:
         return False
 
@@ -3255,6 +3473,42 @@ def _assignment(
         return _resolve_assignment(store, session_id, project_id, named)
     except Exception:
         return None
+
+
+def _behind_notes_to_its_row(store: ContextStore, session: TeamSession) -> TeamSession:
+    """``session``, a new one, with its cursor before the notes to its fleet row's label
+    filed since the row was spawned, so its first prompt's delta carries them.
+
+    A new session's cursor starts at the board's newest event, and a note to its label
+    filed before its start was behind it: a ``fleet tell`` into a pane whose session had
+    not started, a ``fleet spawn`` prompt its folder-trust dialog kept from being typed.
+    No delta carried it, and the start's board showed it only while it was one of the
+    last few events. Only this row's: a label is reused once its agent ends, and a
+    ``/clear``'s session (not a new start) read what came before. The first is read
+    oldest-first from the board's start, addressed to the label in the query: a window
+    of the newest notes since the spawn lost the earliest on a busy board, the spawn's
+    own prompt among them (review r4 of #113, finding 11). Fail-open: the cursor stays
+    where it was.
+    """
+    try:
+        row = store.fleet_agent_for_session(session.id)
+        if row is None:
+            return session
+        notes = store.filtered_events(
+            session.project_id,
+            since_iso=row.created_at.isoformat(),
+            since_seq=0,
+            kind="note",
+            to_role=row.label,
+            limit=1,
+        )
+        first = notes[0].seq if notes else None
+        if first is None or first > session.cursor:
+            return session
+        store.touch_session(session.id, cursor=first - 1)
+        return store.get_session(session.id) or session
+    except Exception:
+        return session
 
 
 def _late_assignment(store: ContextStore, session: TeamSession) -> Assignment | None:

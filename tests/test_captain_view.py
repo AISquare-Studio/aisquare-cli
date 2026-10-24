@@ -336,7 +336,7 @@ def test_the_quick_action_types_nothing_into_a_fresh_captains_trust_dialog(
     said = drive(_whats_up)
     assert fake.typed == [] and fake.told == []
     assert any("nothing typed" in line and "trust its folder" in line for line in said), said
-    assert any("choose Yes, I trust this folder (once)" in line for line in said), said
+    assert any("trust it there (once)" in line for line in said), said
 
 
 @pytest.mark.needs_captain

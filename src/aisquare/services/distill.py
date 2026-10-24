@@ -124,7 +124,7 @@ def spawn_drain(
     named = [] if board is None else ["--board", board]
     try:
         subprocess.Popen(
-            selfcli.argv_for(["--quiet", "team", "distill", *named]),
+            selfcli.isolated_argv_for(["--quiet", "team", "distill", *named]),
             cwd=None if root is None else str(root),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

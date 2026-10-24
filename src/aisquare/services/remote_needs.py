@@ -56,6 +56,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from aisquare.core.agent_adapters.types import screen_of
 from aisquare.models import (
     CLOSED_STATUSES,
     FleetAgent,
@@ -76,6 +77,7 @@ if TYPE_CHECKING:
     from starlette.responses import Response
     from starlette.routing import BaseRoute
 
+    from aisquare.core.agent_adapters.types import AgentAdapter, AgentTranscript, AnswerKind
     from aisquare.core.config import AccountsSettings
     from aisquare.core.tmux import TmuxServer
     from aisquare.services.fleet import PaneWrite
@@ -211,9 +213,6 @@ _FAILURE_KIND = re.compile(r"[A-Za-z0-9_.-]{1,40}")
 """The error a failed turn's reason may name (``authentication_failed``, ``billing_error``,
 ``server_error``): Claude Code's word for it, or nothing."""
 
-_SUBAGENT_TOOLS = frozenset({"Task", "Agent"})
-"""The tools a sub-agent runs inside: a prompt pending under one is the sub-agent's."""
-
 _NOTICE_WAIT = timedelta(seconds=20)
 """How long after its pane printed a sub-agent's prompt may still be waiting for the
 notification that names it (:func:`_needs_drawn_since_notice`). Claude Code sends it 6 s
@@ -238,13 +237,6 @@ _PROMPT_RULE = re.compile(r"\s*[╭╰┌└├]?[─━═]{8,}")
 _PROMPT_UNSPACED = re.compile(r"[\s─-╿…`*]+")
 """What :func:`_needs_squashed` drops: blanks, wraps, box edges, an ellipsis and the marks a
 terminal draws as style."""
-
-_NEEDS_ASKING_TOOLS = frozenset({"AskUserQuestion", "ExitPlanMode"})
-"""The tools whose card needs no notice: their dialog is the call itself."""
-
-_PROMPT_FILE_TOOLS = frozenset({"Edit", "MultiEdit", "Write", "NotebookEdit"})
-"""The tools whose prompt names the file by its base name, in the line above its options
-("Do you want to make this edit to cache.py?"), however tall its diff."""
 
 _DETAIL_INPUT_KEYS = (
     "command",
@@ -380,6 +372,13 @@ class AgentNow:
     items: tuple[NeedsItem, ...]
     """Every current item of this project whose ``agent`` is this label, project-level kinds
     included, and dismissed ones too: a dismissal hides a card, it does not close a dialog."""
+    screen: tuple[str, ...] | None = None
+    """The rows the agent's pane shows, read for an agent whose adapter tells its empty
+    prompt from its screen (``AgentScreen.idle_on_screen`` or ``idle_prompt_mark``:
+    Codex's), whose pane is its own; ``None`` for any other (:func:`_needs_screen_drawn`)."""
+    screen_unread: bool = False
+    """Such an agent's screen, which tmux would not show: nothing here says whether it sits
+    at its empty prompt (:func:`needs_unseen`)."""
 
 
 def _needs_lists_every(project_id: str) -> bool:
@@ -392,7 +391,7 @@ def _needs_answers_every(socket: str, path: Path | None) -> bool:
     return True
 
 
-def _needs_hands_over_anywhere(leaving: int | None) -> bool:
+def _needs_hands_over_anywhere(leaving: int | None, agent: str | None) -> bool:
     """A source's ``hands_over`` when it says nothing: every agent has somewhere to go."""
     return True
 
@@ -454,7 +453,10 @@ class NeedsSources:
     """The project's sessions with the given ids: the authors of the board's open questions."""
     task_status: Callable[[str], str | None]
     """A task's status; ``None`` when it is gone."""
-    transcript_tail: Callable[[str], TranscriptTail | None]
+    transcript_tail: Callable[[str, str | None], TranscriptTail | None]
+    """The tail of the transcript at the path, as the agent a row recorded writes it
+    (``FleetAgent.agent``; ``transcript.read_transcript_tail``): a Codex rollout read as
+    Claude Code's JSONL said nothing, and a long one read as a walk cut short."""
     accounts: Callable[[], AccountsSettings]
     """``[accounts]`` as configured: ``on_limit`` and ``wait_if_reset_within_minutes``."""
     has_live_agents: Callable[[str], bool] = _needs_lists_every
@@ -480,12 +482,17 @@ class NeedsSources:
     to show. One tmux could not show raises, a failed read of that agent's alone
     (:func:`_needs_screen_read`).
     Asked only of an agent with more than one call pending, whose prompt on screen may be
-    any of them (:func:`_needs_on_screen`)."""
-    hands_over: Callable[[int | None], bool] = _needs_hands_over_anywhere
+    any of them (:func:`_needs_on_screen`), and of one whose adapter reads its own dialogs off
+    its screen (``AgentScreen.dialog_on_screen``: Codex's) with no call pending and no bell:
+    every scan, since none of those dialogs fires a hook (:func:`_needs_screen_dialog`)."""
+    hands_over: Callable[[int | None, str | None], bool] = _needs_hands_over_anywhere
     """Whether ``on_limit = "switch"`` hands an agent leaving the given slot over: an
-    account to go to (``claude_accounts.somewhere_to_hand_over``), asked with the slot the
-    StopFailure hook asks with (``claude_accounts.leaving_slot``). Asked only of a limited
-    row that no reset or live manager settles first (:func:`_needs_limited_push`)."""
+    account of the given agent's to go to (``claude_accounts.somewhere_to_hand_over``),
+    asked with the slot and the agent the limit's hook asks with
+    (``claude_accounts.leaving_slot``, the row's ``agent``). Asked with the slot alone, a
+    limited Codex agent counted Claude Code accounts it can never go to, and its push
+    waited 90 s for a hand-over that never came. Asked only of a limited row that no reset
+    or live manager settles first (:func:`_needs_limited_push`)."""
     board_project: Callable[[ProjectInfo], str] = _needs_own_board
     """The id of the project whose board a project's agents write: the project's own, a
     worktree's principal checkout's, or under ``AISQUARE_TEAM_HUB`` the hub's, as ``asq board``
@@ -887,6 +894,8 @@ def _needs_trust_item(
     detail = status.detail or ""
     if status.state != "attention" or not detail.startswith(TRUST_PROMPT):
         return None
+    if _needs_dialog_reader(status.agent) is not None:
+        return None  # its screen's own card, with its words (rule 5a)
     agent = status.agent
     return _needs_item(
         "permission",
@@ -901,11 +910,113 @@ def _needs_trust_item(
     )
 
 
+_SCREEN_DIALOG_PUSH_DELAY = _TRUST_PUSH_DELAY
+"""How long after a scan first saw it a dialog only the agent's screen shows waits for its
+push (:func:`_needs_screen_dialog_item`), as the folder-trust question does: one drawn at a
+start is often answered by the human who spawned the agent from the UI, at its window."""
+
+
+def _needs_dialog_reader(agent: FleetAgent) -> Callable[[Sequence[str]], str | None] | None:
+    """How the agent's adapter reads a dialog of its own off its screen
+    (``AgentScreen.dialog_on_screen``: Codex's); ``None`` for one that reads none."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent.agent)
+    return None if adapter is None else screen_of(adapter).dialog_on_screen
+
+
+def _needs_on_its_screen(status: FleetAgentStatus) -> bool:
+    """Whether the row reads ``attention`` only for a dialog the listing read off its screen
+    with its adapter (``fleet.TRUST_PROMPT``, ``fleet.AT_A_DIALOG``: Codex's, before its first
+    hook), which no hook reported: its card is rule 5a's, read off the screen here, as it
+    was while the listing read such a row ``waiting``."""
+    from aisquare.services.fleet import AT_A_DIALOG, TRUST_PROMPT
+
+    return (
+        status.state == "attention"
+        and (status.detail or "").startswith((TRUST_PROMPT, AT_A_DIALOG))
+        and _needs_dialog_reader(status.agent) is not None
+    )
+
+
+def _needs_screen_dialog(
+    agent: FleetAgent, screen: Callable[[], Sequence[str] | None] | None
+) -> str | None:
+    """What a dialog of the agent's own on its screen asks (``AgentScreen.dialog_on_screen``),
+    read without the escapes the scan's capture keeps (:data:`_ESCAPES`); ``None`` for an
+    agent whose adapter reads no dialog off its screen, which is then not read, and for a
+    screen this derivation was not given, could not read, or shows no dialog on."""
+    read = _needs_dialog_reader(agent)
+    rows = None if read is None or screen is None else screen()
+    if read is None or rows is None:
+        return None
+    return read([_ESCAPES.sub("", row) for row in rows])
+
+
+def _needs_screen_dialog_item(
+    status: FleetAgentStatus, words: str, *, project: ProjectInfo, name: str, now: datetime
+) -> NeedsItem:
+    """The card of a dialog the agent's screen shows (:func:`_needs_screen_dialog`), which no
+    hook reported: Codex's folder trust and hook review before its first prompt, its
+    ``Switch to gpt-6-luna for lower credit usage?`` after a turn's ``Stop`` and ``Implement
+    this plan?`` after a Plan-mode turn's (measured on 0.162.1). The row read ``waiting``
+    with no bell, so nothing needed the human: no card, no push, while the guard refused
+    every tell as a dialog (SMOKE7 of #113).
+
+    Its words are the excerpt; the reason and the push say only who, as of every dialog's
+    card. No quick answers: what a key picks differs from one dialog to the next (Enter
+    trusts the folder and Esc quits Codex, a digit on its hook review moves the highlight
+    and picks nothing), so the key pad beside the live pane answers what it shows. One card
+    per dialog while it is up, whatever its highlight: named by the row, the session's last
+    hook (the ``Stop`` before the dialog; none before the first prompt) and the dialog's
+    words as squashed (:func:`_needs_squashed`), which a resize that rewraps them leaves as
+    they were. The next dialog, or the same one after another turn, is a card of its own.
+    Dated by the scan that first saw it, and pushed :data:`_SCREEN_DIALOG_PUSH_DELAY` after.
+    """
+    session, agent = status.session, status.agent
+    hook = "-" if session is None else session.last_seen_at.isoformat()
+    return _needs_item(
+        "permission",
+        f"screen:{agent.id}:{hook}:{_needs_squashed(words)}",
+        project=project,
+        agent=agent,
+        reason=f"{name} shows a dialog that needs you",
+        excerpt=words,
+        detail=_needs_fit({"text": words}, _DETAIL_TEXT_MAX),
+        since=now,
+        push_after=now + _SCREEN_DIALOG_PUSH_DELAY,
+    )
+
+
 def _needs_is_manager(role: str | None) -> bool:
     """Whether ``role`` is the manager's, a numbered seat of it included."""
     from aisquare.core import harness
 
     return role is not None and harness.base_role(role) == "manager"
+
+
+def _needs_reader(agent: FleetAgent) -> AgentTranscript | None:
+    """The transcript reader of the agent the row recorded (``transcript.reader_of``): what
+    its calls wait for, what its prompts show of them, and the keys its dialogs take."""
+    from aisquare.services.transcript import reader_of
+
+    return reader_of(agent.agent)
+
+
+def _needs_asks(reader: AgentTranscript | None, tool: PendingTool) -> str:
+    """What a pending call waits on the human for (``AgentTranscript.call_asks``); a call of
+    an agent with no reader is a tool's."""
+    return "tool" if reader is None else reader.call_asks(tool)
+
+
+def _needs_answers(
+    reader: AgentTranscript | None, kind: AnswerKind, options: int = 0
+) -> tuple[QuickAnswer, ...]:
+    """The quick answers of a card of ``kind`` on the agent's dialog
+    (``AgentTranscript.answer_keys``); none for an agent with no reader, whose card the key
+    pad answers."""
+    keys = () if reader is None else reader.answer_keys(kind, options)
+    return tuple(QuickAnswer(key.label, key.keys) for key in keys)
 
 
 # --- one agent ----------------------------------------------------------------------------
@@ -920,7 +1031,7 @@ def needs_from_agent(
     now: datetime,
     manager_live: bool = False,
     accounts: AccountsSettings | None = None,
-    hands_over: Callable[[int | None], bool] = _needs_hands_over_anywhere,
+    hands_over: Callable[[int | None, str | None], bool] = _needs_hands_over_anywhere,
     pane_output: Callable[[], datetime | None] | None = None,
     pane_screen: Callable[[], Sequence[str] | None] | None = None,
 ) -> list[NeedsItem]:
@@ -966,6 +1077,15 @@ def needs_from_agent(
        which is rule 8's, and with a question or a plan among them is rule 8's before any
        notice too, once a dialog is drawn (:func:`_needs_drawn_dialog`), named after the
        question or the plan and what the dialog shows, before its notice and after alike;
+    5a. no pending tool and no attention, and the agent's screen shows a dialog of its own,
+       read by its adapter (``AgentScreen.dialog_on_screen``) → ``permission``, the
+       dialog's card (:func:`_needs_screen_dialog_item`): one that fires no hook, which the
+       board never hears of, as Codex's folder trust, hook review, ``Switch to
+       gpt-6-luna for lower credit usage?`` after a turn's ``Stop`` and ``Implement this
+       plan?`` after a Plan-mode turn's (measured on 0.162.1).
+       Before rules 6, 9 and 10, whose answers are words and an Enter typed at the prompt,
+       into the dialog while it is up. An agent whose adapter reads none is never asked, nor
+       one in a turn, as its board and its listing both read it ``working``;
     6. no pending tool, and the newest record an interruption later than the session's last
        hook, or one only Claude Code's own records follow (a local or ``!`` command run at
        the prompt since, which fires no hook either) → ``interrupted``, whatever the row
@@ -999,7 +1119,7 @@ def needs_from_agent(
     a limited agent (:attr:`NeedsSources.hands_over`, whose default it shares: one default,
     never ``None`` read as yes). ``pane_output`` says when the agent's pane last printed,
     asked only of a sub-agent's prompt; ``pane_screen`` is what it shows, asked only with
-    more than one call pending.
+    more than one call pending, and for rule 5a.
 
     A held row got rules 3 to 10 from its board while that was fresh: permission and
     question cards, pushed, whose every answer was a 409 ``not_agent`` (its pane id is
@@ -1060,19 +1180,36 @@ def needs_from_agent(
     if trust is not None:
         return [trust]
     pending = _needs_pending(tail, agent)
-    attention = _needs_attention(status)
-    asking = next((tool for tool in pending if tool.name in _NEEDS_ASKING_TOOLS), None)
+    attention = _needs_attention(status) and not _needs_on_its_screen(status)
+    reader = _needs_reader(agent)
+    asking = next(
+        (tool for tool in pending if _needs_asks(reader, tool) in ("question", "plan")), None
+    )
     screen = _needs_screen_once(pane_screen)
     # The screen is read only where a card could come of it: not for calls at work, unasked.
-    call = _needs_prompt_call(pending, screen) if attention or asking is not None else None
-    if call is not None and call.name == "AskUserQuestion":
-        return [_needs_question_item(call, project=project, agent=agent, name=name, now=now)]
-    if call is not None and call.name == "ExitPlanMode":
-        return [_needs_plan_item(call, project=project, agent=agent, name=name, now=now)]
+    call = _needs_prompt_call(pending, screen, reader) if attention or asking is not None else None
+    asks = None if call is None else _needs_asks(reader, call)
+    if call is not None and asks == "question":
+        return [
+            _needs_question_item(
+                call, project=project, agent=agent, name=name, now=now, reader=reader
+            )
+        ]
+    if call is not None and asks == "plan":
+        return [
+            _needs_plan_item(call, project=project, agent=agent, name=name, now=now, reader=reader)
+        ]
     # Rule 8's card beside a question or a plan no screen names is named after it, not after
     # the notices around it: one card before its notice and after (round 10, 2/9).
     asked = asking if call is None else None
     drawn = None if asked is None else _needs_drawn_dialog(screen)
+    # Rule 5a: a dialog no hook reported, which words typed by rules 6, 9 and 10 would answer.
+    # None is drawn while a turn runs, so the screen is not captured then (review r16 of
+    # #113, 6/8): a row with no session yet (its folder trust, its hook review) is read.
+    turning = status.state == "working" and session is not None and session.state == "working"
+    shown = None if pending or attention or turning else _needs_screen_dialog(agent, screen)
+    if shown is not None:
+        return [_needs_screen_dialog_item(status, shown, project=project, name=name, now=now)]
     if pending:
         if not attention:
             if drawn is not None:
@@ -1097,15 +1234,19 @@ def needs_from_agent(
             form = (
                 len(pending) == 1
                 and call is not None
-                and call.name not in _SUBAGENT_TOOLS
+                and asks != "subagent"
                 and _needs_later_notice(attention_event, tail, session)
             )
         if not form and call is not None:
-            if call.name in _SUBAGENT_TOOLS and session is not None:
+            if asks == "subagent" and session is not None:
                 return _needs_subagent_prompt(
-                    call, session, pane_output, project=project, agent=agent, now=now
+                    call, session, pane_output, project=project, agent=agent, now=now, reader=reader
                 )
-            return [_needs_permission_item(call, project=project, agent=agent, name=name, now=now)]
+            return [
+                _needs_permission_item(
+                    call, project=project, agent=agent, name=name, now=now, reader=reader
+                )
+            ]
     elif tail is not None and _needs_marker_later(status, tail):
         return [_needs_interrupted_item(tail, project=project, agent=agent, name=name, now=now)]
     if attention or _needs_unanswered(status, tail, unread=False):
@@ -1371,7 +1512,7 @@ def _needs_limited_item(
     now: datetime,
     manager_live: bool,
     accounts: AccountsSettings | None,
-    hands_over: Callable[[int | None], bool],
+    hands_over: Callable[[int | None, str | None], bool],
 ) -> NeedsItem:
     """A row parked on a usage limit: the subject is its newest ``limited`` event.
 
@@ -1402,9 +1543,13 @@ def _needs_limited_item(
         detail["resets_at"] = _iso_seconds(resets)
 
     def handed_over() -> bool:
+        from aisquare.core.agent_adapters import DEFAULT_AGENT
+
         account = session.account if session is not None else None
         leaving = claude_accounts_service.leaving_slot(agent.account_slot, account)
-        return hands_over(leaving)
+        # A row with no agent recorded is Claude Code's, as the switch moves it (review r16
+        # of #113, 3/8): every agent's accounts held its push 90 s for a refusal.
+        return hands_over(leaving, agent.agent or DEFAULT_AGENT)
 
     return _needs_item(
         "limited",
@@ -1502,13 +1647,21 @@ def _needs_str(value: object) -> str:
 
 
 def _needs_question_item(
-    tool: PendingTool, *, project: ProjectInfo, agent: FleetAgent, name: str, now: datetime
+    tool: PendingTool,
+    *,
+    project: ProjectInfo,
+    agent: FleetAgent,
+    name: str,
+    now: datetime,
+    reader: AgentTranscript | None,
 ) -> NeedsItem:
-    """A pending ``AskUserQuestion``: every question in ``detail``, digits for a simple one.
+    """A pending question (Claude Code's ``AskUserQuestion``, Codex's ``request_user_input``):
+    every question in ``detail``, the agent's keys for a simple one.
 
     Quick answers only for one single-select question of at most nine options,
-    which its digits pick; anything else is answered from the key pad, with the
-    live pane beside it.
+    which the agent's keys pick (``AgentTranscript.answer_keys``, its digits on both
+    agents), each labelled with its option; anything else is answered from the key pad,
+    with the live pane beside it.
     """
     questions = _needs_questions(tool.input.get("questions"))
     excerpt = ""
@@ -1520,13 +1673,16 @@ def _needs_question_item(
         if len(questions) > 1:
             excerpt += f" (+{len(questions) - 1} more)"
         if len(questions) == 1 and not first["multiSelect"] and 1 <= len(first["options"]) <= 9:
-            answers = (
-                *(
-                    QuickAnswer(needs_push_safe(option["label"], 80) or str(n), (str(n),))
-                    for n, option in enumerate(first["options"], start=1)
-                ),
-                QuickAnswer("Cancel", ("Escape",)),
-            )
+            options = first["options"]
+            keys = _needs_answers(reader, "question", len(options))
+            if len(keys) >= len(options):
+                answers = (
+                    *(
+                        replace(answer, label=needs_push_safe(option["label"], 80) or answer.label)
+                        for option, answer in zip(options, keys, strict=False)
+                    ),
+                    *keys[len(options) :],
+                )
     since = tool.at or now
     detail: dict[str, Any] = {"questions": questions}
     said = _needs_said(detail)
@@ -1551,7 +1707,13 @@ def _needs_question_item(
 
 
 def _needs_plan_item(
-    tool: PendingTool, *, project: ProjectInfo, agent: FleetAgent, name: str, now: datetime
+    tool: PendingTool,
+    *,
+    project: ProjectInfo,
+    agent: FleetAgent,
+    name: str,
+    now: datetime,
+    reader: AgentTranscript | None,
 ) -> NeedsItem:
     """A plan waiting for approval: the plan itself in ``detail``, its first line as excerpt."""
     raw = tool.input.get("plan")
@@ -1571,12 +1733,7 @@ def _needs_plan_item(
         detail=_needs_tool_detail(tool, detail, _DETAIL_PLAN_MAX, shown=detail),
         since=since,
         push_after=since,
-        answers=(
-            QuickAnswer("1", ("1",)),
-            QuickAnswer("2", ("2",)),
-            QuickAnswer("3", ("3",)),
-            QuickAnswer("Keep planning", ("Escape",)),
-        ),
+        answers=_needs_answers(reader, "plan"),
     )
 
 
@@ -1588,6 +1745,7 @@ def _needs_subagent_prompt(
     project: ProjectInfo,
     agent: FleetAgent,
     now: datetime,
+    reader: AgentTranscript | None,
 ) -> list[NeedsItem]:
     """A prompt of a sub-agent's: one item per notification, never the one before's.
 
@@ -1613,6 +1771,7 @@ def _needs_subagent_prompt(
             now=now,
             subject=f"{tool.tool_use_id}:{seen.isoformat()}",
             since=seen,
+            reader=reader,
         )
     ]
 
@@ -1689,17 +1848,19 @@ def _needs_drawn_dialog(screen: Callable[[], Sequence[str] | None] | None) -> st
 
 
 def _needs_prompt_call(
-    pending: Sequence[PendingTool], pane_screen: Callable[[], Sequence[str] | None] | None
+    pending: Sequence[PendingTool],
+    pane_screen: Callable[[], Sequence[str] | None] | None,
+    reader: AgentTranscript | None,
 ) -> PendingTool | None:
     """The pending call whose prompt is up: the one call, or of more than one, the call the
     pane's screen names (:func:`_needs_on_screen`); ``None`` when nothing says which."""
     if len(pending) <= 1:
         return pending[0] if pending else None
-    return _needs_on_screen(pending, None if pane_screen is None else pane_screen())
+    return _needs_on_screen(pending, None if pane_screen is None else pane_screen(), reader)
 
 
 def _needs_on_screen(
-    pending: Sequence[PendingTool], rows: Sequence[str] | None
+    pending: Sequence[PendingTool], rows: Sequence[str] | None, reader: AgentTranscript | None
 ) -> PendingTool | None:
     """Of more than one pending call, the one whose prompt the screen ``rows`` show: the only
     one whose mark (:func:`_needs_prompt_mark`) is in the prompt's text above its options
@@ -1717,7 +1878,7 @@ def _needs_on_screen(
         return None
     shown: list[tuple[PendingTool, str]] = []
     for tool in pending:
-        mark = _needs_prompt_mark(tool)
+        mark = _needs_prompt_mark(tool, reader)
         if mark is None:
             return None
         if mark in region:
@@ -1727,25 +1888,13 @@ def _needs_on_screen(
     return shown[0][0]
 
 
-def _needs_prompt_mark(tool: PendingTool) -> str | None:
-    """The text a call's prompt shows of it, squashed and cut to :data:`_PROMPT_MARK_MAX`:
-    a question's words, a command, a file's base name, a URL; ``None`` for a call whose
-    prompt is not known to show one, or that shows nothing of it."""
-    if tool.name == "AskUserQuestion":
-        questions = _needs_questions(tool.input.get("questions"))
-        text = questions[0]["question"] if questions else ""
-    elif tool.name == "Bash":
-        text = _needs_str(tool.input.get("command"))
-    elif tool.name in _PROMPT_FILE_TOOLS:
-        path = _needs_str(tool.input.get("file_path")) or _needs_str(
-            tool.input.get("notebook_path")
-        )
-        text = path.replace("\\", "/").rsplit("/", 1)[-1]
-    elif tool.name == "WebFetch":
-        text = _needs_str(tool.input.get("url"))
-    else:
-        return None
-    return _needs_squashed(text)[:_PROMPT_MARK_MAX] or None
+def _needs_prompt_mark(tool: PendingTool, reader: AgentTranscript | None) -> str | None:
+    """The text a call's prompt shows of it (``AgentTranscript.call_mark``: a question's
+    words, a command, a file's base name, a URL), squashed and cut to
+    :data:`_PROMPT_MARK_MAX`; ``None`` for a call whose prompt is not known to show one, or
+    that shows nothing of it."""
+    text = None if reader is None else reader.call_mark(tool)
+    return None if text is None else _needs_squashed(text)[:_PROMPT_MARK_MAX] or None
 
 
 def _needs_prompt_region(rows: Sequence[str], *, ruled: bool = False) -> str | None:
@@ -1844,18 +1993,21 @@ def _needs_permission_item(
     now: datetime,
     subject: str | None = None,
     since: datetime | None = None,
+    reader: AgentTranscript | None,
 ) -> NeedsItem:
     """A permission prompt: the call in ``detail``, and what of it the card cannot hold
     (:func:`_needs_tool_fields`, :func:`_needs_tool_detail`), so nobody approves blind.
 
-    The buttons are the dialog's own digits and Esc; the card shows the live
-    pane beside them, so the options' real text is on screen. A prompt under a
-    ``Task``/``Agent`` tool is a sub-agent's, whose own tool use is in its own
-    records, not this transcript: its detail is the task the sub-agent was given,
-    marked ``subagent``, since the call its "1" approves is not in it.
-    ``subject`` and ``since`` default to the tool use's.
+    The buttons are the dialog's own keys (``AgentTranscript.answer_keys``: its digits and
+    Esc on both agents); the card shows the live pane beside them, so the options' real
+    text is on screen. A prompt under a call a sub-agent runs in (Claude Code's
+    ``Task``/``Agent``) is the sub-agent's, whose own tool use is in its own records, not
+    this transcript: its detail is the task the sub-agent was given, marked ``subagent``,
+    since the call its "1" approves is not in it. ``subject`` and ``since`` default to the
+    tool use's.
     """
-    if tool.name in _SUBAGENT_TOOLS:
+    subagent = _needs_asks(reader, tool) == "subagent"
+    if subagent:
         reason = f"{name} waits for a permission answer (in a sub-agent)"
     elif _TOOL_NAME.fullmatch(tool.name):
         reason = f"{name} waits for a permission answer to use {tool.name}"
@@ -1870,7 +2022,7 @@ def _needs_permission_item(
     detail: dict[str, Any] = {"tool": _needs_cut(tool.name, 200), "input": shown}
     if omitted:
         detail["omitted"] = omitted
-    if tool.name in _SUBAGENT_TOOLS:
+    if subagent:
         detail["subagent"] = True
     return _needs_item(
         "permission",
@@ -1882,11 +2034,7 @@ def _needs_permission_item(
         detail=_needs_tool_detail(tool, detail, _DETAIL_TOOL_MAX, shown=shown, whole=whole),
         since=since,
         push_after=since,
-        answers=(
-            QuickAnswer("1", ("1",)),
-            QuickAnswer("2", ("2",)),
-            QuickAnswer("No", ("Escape",)),
-        ),
+        answers=_needs_answers(reader, "permission"),
     )
 
 
@@ -2349,7 +2497,9 @@ def _needs_tail_of(
     path = None if session is None else session.transcript_path
     if not path or status.state in ("exited", "unknown", "lost"):
         return None
-    return reads.needs_read(partial(sources.transcript_tail, path), "a transcript")
+    return reads.needs_read(
+        partial(sources.transcript_tail, path, status.agent.agent), "a transcript"
+    )
 
 
 def _needs_own_events(
@@ -3162,14 +3312,31 @@ def _needs_snapshot(
     now: datetime,
 ) -> AgentNow:
     """The snapshot of ``status``'s row, with tmux asked about its pane only where the
-    derivation vouched for it: a live row that reads none of :data:`_NEEDS_PANE_UNVOUCHED`."""
-    pane_is_agent, pane_quiet = False, None
+    derivation vouched for it: a live row that reads none of :data:`_NEEDS_PANE_UNVOUCHED`.
+
+    The pane of an agent whose adapter reads its empty prompt off its screen
+    (:func:`_needs_screen_reader`) is read too, once it is the agent's, as plain text
+    (``TmuxServer.screen_text``, as ``fleet._idle_screen`` reads it; the capture the phone
+    draws keeps its escapes, and ``? for shortcuts`` came bold): what the predicates go by
+    for it (:func:`_needs_screen_drawn`). One tmux would not show is ``screen_unread``:
+    unknown is not an empty prompt, and the agent is one nothing here reads
+    (:func:`needs_unseen`), typed into only behind an Escape.
+    """
+    from aisquare.core.tmux import TmuxError
+
+    pane_is_agent, pane_quiet, screen, unread = False, None, None, False
     if (
         status is not None
         and status.agent.ended_at is None
         and status.state not in _NEEDS_PANE_UNVOUCHED
     ):
         pane_is_agent, pane_quiet = _needs_pane_now(_needs_pane_server(status), status.agent, now)
+        if pane_is_agent and _needs_screen_reader(status) is not None:
+            try:
+                screen = tuple(_needs_pane_server(status).screen_text(status.agent.pane_id))
+            except TmuxError as exc:
+                log.debug("remote: %s's screen could not be read: %s", status.agent.label, exc)
+                unread = True
     return AgentNow(
         project=project,
         status=status,
@@ -3177,6 +3344,8 @@ def _needs_snapshot(
         pane_is_agent=pane_is_agent,
         pane_quiet=pane_quiet,
         items=items,
+        screen=screen,
+        screen_unread=unread,
     )
 
 
@@ -3230,10 +3399,18 @@ def needs_dialog_open(snap: AgentNow) -> bool:
     An action that would type an Enter asks :func:`needs_tool_pending` as well.
     A tail whose walk ran out before the newest message (:func:`_needs_cut_short`) may hold
     a pending tool it did not read, and counts as one here.
+
+    An agent whose adapter reads its empty prompt off its screen is answered by its screen
+    where that settles it (:func:`_needs_screen_drawn`): its quiet empty prompt shows none,
+    anything else drawn over that prompt is one, read before what the board and its
+    transcript say.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent:
         return False
+    drawn = _needs_screen_drawn(snap)
+    if drawn is not None:
+        return drawn
     pending = bool(_needs_pending(snap.tail, status.agent)) or _needs_cut_short(
         snap.tail, status.agent
     )
@@ -3263,10 +3440,14 @@ def needs_tool_pending(snap: AgentNow) -> bool:
     answer "1. Yes", takes it for a prompt. Tools older than the row do not count
     (a resumed session's leftovers), and neither does a pane that is not the
     agent's. A tail whose walk ran out before the newest message
-    (:func:`_needs_cut_short`) may hold one it did not read, so it counts.
+    (:func:`_needs_cut_short`) may hold one it did not read, so it counts. An agent whose
+    screen shows its quiet empty prompt (:func:`_needs_screen_drawn`) has none: a tool at
+    work redraws its pane, and a prompt for one is drawn over that empty prompt.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent:
+        return False
+    if _needs_screen_drawn(snap) is False:
         return False
     return bool(_needs_pending(snap.tail, status.agent)) or _needs_cut_short(
         snap.tail, status.agent
@@ -3286,11 +3467,17 @@ def needs_unseen(snap: AgentNow) -> bool:
     #243, round 7). A session whose transcript cannot be read hides a tool use's first
     seconds the same way. Such an agent is a dialog that may be up: nothing is typed
     into it without an Escape before it.
+
+    Never an agent whose screen was read (:attr:`AgentNow.screen`): its screen says
+    whether it sits at its empty prompt, and a Codex fires no hook before its first
+    prompt, so it has no board session until then. Always one whose screen tmux would not
+    show (:attr:`AgentNow.screen_unread`): its board and transcript do not see the dialog
+    Codex opens after a turn's ``Stop``.
     """
     status = snap.status
-    if status is None or not snap.pane_is_agent:
+    if status is None or not snap.pane_is_agent or snap.screen is not None:
         return False
-    return status.session is None or snap.tail is None
+    return status.session is None or snap.tail is None or snap.screen_unread
 
 
 def needs_at_input_prompt(snap: AgentNow) -> bool:
@@ -3312,10 +3499,21 @@ def needs_at_input_prompt(snap: AgentNow) -> bool:
     No hook follows a local command either (``/model``, ``/mcp``, a ``/compact``, whose
     ``SessionStart`` marks the session ``working`` again), and its records read as the
     human's prompt of a turn under way, for the same 30 minutes (sweep 4 of #243).
+
+    An agent whose adapter reads its empty prompt off its screen is at it when its quiet
+    screen shows it (:func:`_needs_screen_drawn`), whatever the board and its transcript
+    say. Codex's hooks fire nothing before its first prompt, so a fresh Codex had no
+    session to go by and was refused. And a dialog Codex opens after a turn's ``Stop``,
+    which no hook reports (its ``Switch to gpt-6-luna for lower credit usage?``, its
+    hook review), sits quiet under a row that reads ``waiting``: prompt mode pasted
+    into it, and its Enter picked for the human.
     """
     status = snap.status
     if status is None or not snap.pane_is_agent or snap.pane_quiet is not True:
         return False
+    drawn = _needs_screen_drawn(snap)
+    if drawn is not None:
+        return not drawn
     if needs_dialog_open(snap) or snap.tail is None or needs_unseen(snap):
         return False
     if _needs_pending(snap.tail, status.agent) or _needs_cut_short(snap.tail, status.agent):
@@ -3333,6 +3531,65 @@ def _needs_nothing_said(tail: TranscriptTail, agent: FleetAgent) -> bool:
     if tail.empty:
         return True
     return tail.newest_at is not None and tail.newest_at < agent.created_at
+
+
+def _needs_screen_reader(status: FleetAgentStatus) -> AgentAdapter | None:
+    """The adapter of ``status``'s row when it reads the agent's empty prompt off its screen
+    (``AgentScreen.idle_on_screen`` or ``idle_prompt_mark``: Codex's), else ``None``."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(status.agent.agent)
+    if adapter is None:
+        return None
+    return adapter if screen_of(adapter).reads_empty_prompt else None
+
+
+def _needs_screen_drawn(snap: AgentNow) -> bool | None:
+    """Whether the agent's screen (:attr:`AgentNow.screen`) shows something drawn over its
+    empty prompt, where a typed line and its Enter would answer it: ``True`` for a screen
+    neither at that prompt nor running a turn (``AgentScreen.working_on_screen``),
+    ``False`` for its empty prompt in a quiet pane (``fleet._idle_screen``), and ``None``
+    where the screen does not settle it: none was read, or a turn is on it.
+
+    Codex's empty prompt holds through a turn, its status line above the composer, so the
+    pane's quiet tells a turn from rest; a dialog of its own replaces that prompt (its
+    folder-trust and hook-review dialogs, ``Switch to gpt-6-luna for lower credit usage?``
+    after a turn's ``Stop``, its approval view), and so does a draft in its composer, which
+    a typed line would join (measured on 0.162.1)."""
+    from aisquare.services import fleet as fleet_service
+
+    status = snap.status
+    if snap.screen is None or status is None:
+        return None
+    adapter = _needs_screen_reader(status)
+    if adapter is None:
+        return None
+    if fleet_service._idle_screen(adapter, snap.screen):
+        return False if snap.pane_quiet is True else None
+    working = screen_of(adapter).working_on_screen
+    return None if working is not None and working(snap.screen) else True
+
+
+def needs_screen_at_rest(snap: AgentNow) -> bool:
+    """Whether the agent's screen shows its empty prompt with no turn on it, its pane quiet or
+    not: an adapter that reads both off its screen (``AgentScreen.idle_on_screen`` or
+    ``idle_prompt_mark``, and ``working_on_screen``: Codex's), and a screen read.
+
+    Interrupt & tell sends its Escape for a turn to stop, and there is none here. Sent
+    anyway, after one Esc already in (a pad Esc at Codex's idle prompt, whose redraw left
+    the pane busy for :data:`fleet.ACTIVITY_WINDOW`), it was the second: Codex opened its
+    transcript, where Enter rewinds, the tell ended 409 ``still_busy`` and left it there
+    (review r16 of #113, 2/8)."""
+    from aisquare.services import fleet as fleet_service
+
+    status = snap.status
+    if snap.screen is None or status is None or not snap.pane_is_agent:
+        return False
+    adapter = _needs_screen_reader(status)
+    working = None if adapter is None else screen_of(adapter).working_on_screen
+    if adapter is None or working is None:
+        return False
+    return fleet_service._idle_screen(adapter, snap.screen) and not working(snap.screen)
 
 
 def needs_item_current(snap: AgentNow, item_id: str) -> bool:
@@ -3369,18 +3626,33 @@ def needs_prompt_now(
     is none: rule 8's card there was a dialog that was not drawn, the tap told "shows
     another prompt" and the page "No longer needs you: coder-1 shows a dialog that needs
     you" while nothing waited (round 10, 1/9).
+
+    For an agent whose screen says when it is at work or at its empty prompt
+    (``AgentCapabilities.working_on_screen``, ``idle_on_screen``: Codex's), the screen is
+    read for one call too, and a dialog's keys go in only while a dialog is drawn
+    (:func:`_needs_undrawn`). Codex records a call as it streams, and draws its approval or
+    its question view only once the call's hooks have run (PermissionRequest, PreToolUse):
+    its question card came that early, and a ``2`` tapped at once went into the composer
+    under the view, which then waited unanswered (measured on 0.162.1). An answer in words
+    (``asked``, ``interrupted``) is typed at the prompt, and is not held to it.
     """
     status = snap.status
     pending = () if status is None else _needs_pending(snap.tail, status.agent)
     named = {needs_item_id(snap.project.id, item.kind, tool.tool_use_id): tool for tool in pending}
-    if len(pending) <= 1 or item.id not in named or status is None:
+    several = status is not None and len(pending) > 1 and item.id in named
+    drawn_only = (
+        status is not None and item.kind in _NEEDS_DIALOG_KEYS and _needs_screen_says(status)
+    )
+    if status is None or not (several or drawn_only):
         return (item,)
     rows = _needs_screen_now(status)
     if rows is None:
         return None
-    if _needs_prompt_region(rows) is None:
+    if _needs_prompt_region(rows) is None or (drawn_only and _needs_undrawn(status, rows)):
         return ()
-    if _needs_on_screen(pending, rows) is named[item.id]:
+    if not several:
+        return (item,)
+    if _needs_on_screen(pending, rows, _needs_reader(status.agent)) is named[item.id]:
         return (item,)
     instead = needs_from_agent(
         status, snap.tail, project=snap.project, events=(), now=now, pane_screen=lambda: rows
@@ -3389,6 +3661,41 @@ def needs_prompt_now(
     return tuple(instead) or (
         _needs_dialog_item(status, None, None, project=snap.project, now=now),
     )
+
+
+_NEEDS_DIALOG_KEYS = frozenset({"permission", "question", "plan"})
+"""The cards whose quick answers are a dialog's keys, not words typed at the prompt."""
+
+
+def _needs_screen_says(status: FleetAgentStatus) -> bool:
+    """Whether the row's agent reads from its screen when it is at work or at its empty prompt
+    (``AgentCapabilities.working_on_screen``, ``idle_on_screen``)."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(status.agent.agent)
+    return adapter is not None and (
+        screen_of(adapter).working_on_screen is not None
+        or screen_of(adapter).idle_on_screen is not None
+    )
+
+
+def _needs_undrawn(status: FleetAgentStatus, rows: Sequence[str]) -> bool:
+    """Whether ``rows`` show the row's agent at work or at its empty prompt, by its own reading
+    of its screen: no dialog drawn for a card's keys to answer, whatever option row the
+    conversation above may hold.
+
+    Read without the escapes ``capture-pane -e`` keeps (:data:`_ESCAPES`), as the fleet reads
+    them (``TmuxServer.screen_text``): Codex draws its status line and its composer styled
+    (``\x1b[2mWorking\x1b[0m``, a bold chevron), and its readers, given the rows as captured,
+    found neither (measured on 0.162.1)."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(status.agent.agent)
+    if adapter is None:
+        return False
+    plain = [_ESCAPES.sub("", row) for row in rows]
+    working, idle = screen_of(adapter).working_on_screen, screen_of(adapter).idle_on_screen
+    return (working is not None and working(plain)) or (idle is not None and idle(plain))
 
 
 def _needs_screen_now(status: FleetAgentStatus) -> list[str] | None:
@@ -3579,20 +3886,15 @@ def _needs_with_board_sessions(
     if not held:
         return statuses
     rows = [status.agent for status in elsewhere if status.agent.id in held]
-    tmux_session = elsewhere[0].tmux_session  # the listing's one, its project's
     config = fleet_service.settings()
-    views = fleet_service._observe_sockets(rows, tmux_session, config)
+    # Where their launch records place them, as the listing placed them (`fleet.resolve_place`):
+    # the server's word as given, which `_status` reads for a row held as another server's.
+    placements = fleet_service._resolve_all(rows, config)
+    views = fleet_service._observe_sockets(placements)
     now = fleet_service._now()
     derived = {
-        agent.id: fleet_service._status(
-            agent,
-            held[agent.id],
-            views.get(fleet_service._address(agent, config)),  # as given: `_status` reads it
-            tmux_session,
-            now,
-            config,
-        )
-        for agent in rows
+        placement.row.id: fleet_service._status(placement, held[placement.row.id], views, now)
+        for placement in placements
     }
 
     def again(status: FleetAgentStatus) -> FleetAgentStatus:
@@ -3600,7 +3902,7 @@ def _needs_with_board_sessions(
         if found is None:
             return status
         if status.state == "attention" and (status.detail or "").startswith(
-            fleet_service.TRUST_PROMPT
+            (fleet_service.TRUST_PROMPT, fleet_service.AT_A_DIALOG)
         ):
             return found.model_copy(update={"state": status.state, "detail": status.detail})
         return found
@@ -3612,14 +3914,15 @@ _NEEDS_HANDS_OVER_KEPT = 60.0
 """Seconds an answer of :func:`_needs_hands_over_kept` is kept: the question opens the store
 and parses every account's ``.claude.json`` (tens of MB) and ``.credentials.json``, and an
 agent that no hand-over can move stays limited for hours, every 3 s scan of them."""
-_hands_over: dict[tuple[str, int | None], tuple[float, bool]] = {}
+_hands_over: dict[tuple[str, int | None, str | None], tuple[float, bool]] = {}
 _hands_over_lock = threading.Lock()
 
 
-def _needs_hands_over_kept(leaving: int | None) -> bool:
-    """``claude_accounts.somewhere_to_hand_over(leaving)`` for the scan: kept a minute
-    (:data:`_NEEDS_HANDS_OVER_KEPT`), by the machine's accounts directory and the slot,
-    and fail-open.
+def _needs_hands_over_kept(leaving: int | None, agent: str | None) -> bool:
+    """``claude_accounts.somewhere_to_hand_over(leaving, agent=agent)`` for the scan, asked
+    as the limit's hook asks it (``hooks.py``, with the row's agent): kept a minute
+    (:data:`_NEEDS_HANDS_OVER_KEPT`), by the machine's accounts directory, the slot and the
+    agent, and fail-open.
 
     It is asked only of a limited row that no reset, live manager or ``wait`` settles
     first (:func:`_needs_limited_push`). Read as ``[accounts]`` itself was, every scan
@@ -3633,14 +3936,14 @@ def _needs_hands_over_kept(leaving: int | None) -> bool:
     from aisquare.core import claude_accounts as claude_accounts_core
     from aisquare.services import claude_accounts as claude_accounts_service
 
-    key = (str(claude_accounts_core.accounts_root()), leaving)
+    key = (str(claude_accounts_core.accounts_root()), leaving, agent)
     now = time.monotonic()
     with _hands_over_lock:
         kept = _hands_over.get(key)
     if kept is not None and now - kept[0] < _NEEDS_HANDS_OVER_KEPT:
         return kept[1]
     try:
-        answer = claude_accounts_service.somewhere_to_hand_over(leaving)
+        answer = claude_accounts_service.somewhere_to_hand_over(leaving, agent=agent)
     except Exception as exc:
         log.debug("remote: whether slot %s can be handed over is not known: %s", leaving, exc)
         answer = True
@@ -3651,13 +3954,14 @@ def _needs_hands_over_kept(leaving: int | None) -> bool:
     return answer
 
 
-_tails: dict[str, tuple[tuple[int, int], TranscriptTail | None]] = {}
+_tails: dict[str, tuple[tuple[int, int, str | None], TranscriptTail | None]] = {}
 _tails_lock = threading.Lock()
 _TAILS_KEPT = 512
 
 
-def _needs_cached_tail(path: str) -> TranscriptTail | None:
-    """:func:`read_transcript_tail`, read again only when the file's size or mtime moved.
+def _needs_cached_tail(path: str, agent: str | None = None) -> TranscriptTail | None:
+    """:func:`read_transcript_tail` as the row's ``agent`` writes it, read again only when the
+    file's size or mtime moved (or another agent's row names it).
 
     An unchanged transcript costs one ``stat()``. Shared by the watcher and
     :func:`needs_agent_now`, and bounded: the oldest entries go first. A path the
@@ -3672,12 +3976,12 @@ def _needs_cached_tail(path: str) -> TranscriptTail | None:
         return _TAIL_NOTHING
     except OSError:
         return None
-    key = (stat.st_size, stat.st_mtime_ns)
+    key = (stat.st_size, stat.st_mtime_ns, agent)
     with _tails_lock:
         cached = _tails.get(path)
     if cached is not None and cached[0] == key:
         return cached[1]
-    tail = read_transcript_tail(path)
+    tail = read_transcript_tail(path, agent=agent)
     with _tails_lock:
         _tails.pop(path, None)
         _tails[path] = (key, tail)

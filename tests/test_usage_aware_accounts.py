@@ -466,6 +466,27 @@ def test_claude_codes_routine_notices_leave_a_parked_or_handed_over_row_as_it_is
 # --------------------------------------------------------------------------- the hand-over decision
 
 
+def test_a_hand_over_its_launch_record_refuses_is_said_on_the_board_once(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner
+) -> None:
+    """The usage-limit hand-over of a row with no launch record (``core.launch_seal``) that
+    the census of the fleet before records did not find (``fleet.take_census``) is refused
+    before anything is stopped; the reason is on the board once, said by the switch, not
+    again by the hand-over's own line, and not again at the next limit."""
+    _session(work, "sess-fleet")
+    fleet_service.take_census()  # taken before the row was written
+    _fleet_row(work, "agt_unrecorded", "coder-db", "sess-fleet")
+    for _ in range(2):
+        with store_session() as store:
+            store.mark_limited("sess-fleet", None)
+        assert runner.invoke(app, ["hook", "hand-over", "sess-fleet"]).exit_code == 0
+
+    said = [text for _, text in _events(work) if "no launch record was written" in text]
+    assert len(said) == 1 and said[0].startswith("coder-db: cannot switch it — "), said
+    assert not any("not switched" in text for _, text in _events(work))
+    assert _state("sess-fleet")[0] == "limited"
+
+
 def _fleet_row(project: ProjectInfo, agent_id: str, label: str, session_id: str) -> None:
     with store_session() as store:
         store.upsert_fleet_agent(
@@ -532,8 +553,10 @@ def test_the_hook_starts_a_detached_hand_over_only_when_configured_and_the_reset
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert len(started) == 1
     argv = started[0]
-    assert argv[:4] == selfcli.argv_for([])  # this interpreter, -P, -m aisquare
-    assert argv[4:] == ["--quiet", "hook", "hand-over", "sess-fleet", "--reason", "weekly limit"]
+    # This interpreter, -E -P -m aisquare: the hook that starts it runs for a sandboxed
+    # agent, outside its sandbox, in its environment (review r14 of #113, finding 4).
+    assert argv[:5] == selfcli.isolated_argv_for([])
+    assert argv[5:] == ["--quiet", "hook", "hand-over", "sess-fleet", "--reason", "weekly limit"]
 
     # …one that lifts within the wait window does not (the note says why)…
     soon = (datetime.now().astimezone() + timedelta(minutes=5)).strftime("%I:%M%p").lstrip("0")
@@ -638,6 +661,50 @@ def test_with_no_other_account_a_limit_starts_no_hand_over_and_posts_nothing_of_
         store.touch_session("sess-fleet", state="working")
     _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
     assert len(started) == 1
+
+
+def test_a_row_with_no_agent_recorded_counts_no_codex_account_as_somewhere_to_go(
+    fake_home: Path, work: ProjectInfo, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review r16 of #113, 3/8: a row from before adapters records no agent, and is Claude
+    Code's (``recorded_adapter``, the switch's launch record). The hook asked
+    ``somewhere_to_hand_over`` with that ``None``, which counts every agent's accounts: a
+    signed-in Codex one started a worker whose pick, among Claude Code's, could only refuse
+    and post "not switched" at each limit, and Remote held the limit's push 90 s for it."""
+    monkeypatch.setattr(team_service, "_nudge_manager", lambda project_id, *, reason, board: None)
+    started: list[list[str]] = []
+    monkeypatch.setattr(hooks_service, "_detach", lambda argv: started.append(list(argv)))
+    mine = _slot("work@example.com", "tok-work")
+    codex = core.create_account("codex")
+    (codex.config_dir / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-test"}))
+    _session(work, "sess-fleet")
+    _fleet_row(work, "agt_legacy", "coder-db", "sess-fleet")
+    with store_session() as store:
+        row = store.fleet_agent_for_session("sess-fleet")
+        assert row is not None and row.agent is None, "the premise: no agent recorded"
+        store.upsert_fleet_agent(row.model_copy(update={"account_slot": mine.slot}))
+    assert service.somewhere_to_hand_over(mine.slot), "the premise: every agent's, the Codex"
+
+    _fire_limit(runner, work, WEEKLY_LIMIT, "sess-fleet")
+
+    assert started == []
+    now = datetime.now(UTC)
+    with store_session() as store:
+        session = store.get_session("sess-fleet")
+        row = store.fleet_agent_for_session("sess-fleet")
+    assert isinstance(session, TeamSession) and row is not None
+    status = FleetAgentStatus(agent=row, state="limited", session=session)
+    (card,) = remote_needs.needs_from_agent(
+        status,
+        None,
+        project=work,
+        events=[],
+        now=now,
+        accounts=AccountsSettings(on_limit="switch"),
+        hands_over=remote_needs.live_needs_sources().hands_over,
+    )
+    assert card.kind == "limited"
+    assert card.push_after == card.since, "no other Claude account: pushed at once"
 
 
 def test_with_the_registry_unreadable_a_limit_still_reaches_the_worker_that_says_why(
@@ -1478,10 +1545,10 @@ def test_one_launch_reads_the_registry_and_the_settings_once(
     real_read = service._read_registry
 
     def counted_read(
-        project: ProjectInfo | None = None,
+        project: ProjectInfo | None = None, *, agent: str = core.AGENT
     ) -> tuple[list[ClaudeAccount], str | None, int | None]:
         reads.append(1)
-        return real_read(project)
+        return real_read(project, agent=agent)
 
     loads: list[int] = []
     real_settings = service.accounts_settings

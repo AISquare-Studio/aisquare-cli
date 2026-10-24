@@ -7,6 +7,7 @@ Layout:
     ├── context.db      # SQLite store: context entries and projects (see core.store)
     ├── agents.json     # registry of detected and connected agents
     ├── claude-accounts/# one CLAUDE_CONFIG_DIR per managed account (core.claude_accounts)
+    ├── codex-accounts/ # one CODEX_HOME per managed Codex account (core.codex_accounts)
     ├── cache/          # disposable cached data (incl. each managed account's TMPDIR)
     ├── explainability/ # session→Run join records (see services.explainability)
     └── log/            # capture and diagnostic logs
@@ -502,19 +503,25 @@ def credentials_path() -> Path:
     return aisquare_home() / "credentials"
 
 
-def claude_accounts_dir() -> Path:
-    """Where the CLI keeps the Claude Code config directories it owns, one per slot."""
-    return aisquare_home() / "claude-accounts"
-
-
-def claude_accounts_tmp_dir() -> Path:
-    """Where each managed account's ``CLAUDE_CODE_TMPDIR`` lives — disposable, under cache."""
-    return cache_dir() / "claude-accounts"
+def agent_accounts_dir(name: str) -> Path:
+    """Where the CLI keeps an agent's homes, one per slot: its accounts' ``dir_name``
+    (``claude-accounts``, ``codex-accounts``), as ``core.claude_accounts.accounts_root`` asks."""
+    return aisquare_home() / name
 
 
 def agents_registry_path() -> Path:
     """Path of the agents registry (detected and connected agents)."""
     return aisquare_home() / "agents.json"
+
+
+def explainability_key_path() -> Path:
+    """The workspace ingest key (mode 600)."""
+    return aisquare_home() / "explainability-key"
+
+
+def oidc_cache_dir() -> Path:
+    """The sign-in tokens ``services.iam`` caches, one file per server."""
+    return cache_dir() / "oidc"
 
 
 def explainability_dir() -> Path:

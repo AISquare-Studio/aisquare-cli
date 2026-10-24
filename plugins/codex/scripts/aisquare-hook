@@ -1,0 +1,442 @@
+#!/bin/sh
+# aisquare's plugin launcher, for Claude Code and for Codex: run `aisquare hook` for
+# one lifecycle event.
+#
+# One script, shipped in both plugins (plugins/claude-code and plugins/codex, the same
+# bytes; tests/test_codex_plugin.py fails when the copies differ):
+#
+#   Claude Code: hooks/hooks.json calls `aisquare-hook <event>` for the six events
+#     `aisquare agents connect claude-code` writes into settings.json, and it runs
+#     `aisquare hook <event>`.
+#   Codex: hooks/hooks.json calls `aisquare-hook codex <Event>` for the events
+#     `aisquare agents connect codex` writes into $CODEX_HOME/hooks.json, and it runs
+#     `aisquare hook codex`, which reads the event from the payload.
+#
+# The work is the CLI's, through the entry point those hooks run, so the two routes
+# cannot behave differently:
+#
+#   1. Stand down when the agent's own hooks already run aisquare: settings.json for
+#      this event, or $CODEX_HOME/hooks.json. Both agents run a plugin's hooks AND
+#      their own, so both firing would inject the context twice and capture every
+#      prompt twice.
+#   2. Else run the aisquare CLI: on PATH, or in ~/.local/bin, where `uv tool
+#      install` puts it, or ~/.cargo/bin (a session started from a desktop app may
+#      lack them on PATH).
+#   3. Else run the pinned release with uvx, so a machine with only uv has memory
+#      without an installer.
+#   4. Else do nothing, and say so once, at session start.
+#
+# It never reads stdin, so the child gets the hook payload untouched, and it always
+# exits 0: a hook that fails costs its own feature, never the session. aisquare's
+# hooks exit 0 themselves; an exit 2 from a broken install would block a prompt.
+#
+# POSIX sh, like install.sh: no `local`, no `[[`. Checked by shellcheck --shell=sh,
+# shfmt -i 4 -ci, dash -n and busybox ash -n (.github/workflows/install.yml).
+
+# The aisquare-cli release uvx runs. The release commit bumps it together with
+# pyproject.toml and both plugins' plugin.json; tests/test_claude_plugin.py and
+# tests/test_codex_plugin.py fail when they disagree. AISQUARE_PLUGIN_FROM replaces
+# the whole requirement (a wheel, a path) for testing a build that is not on PyPI yet.
+AISQUARE_PLUGIN_VERSION=0.8.2
+
+# The event, and the one a session starts with: Claude Code's are the `aisquare hook`
+# subcommands, Codex's the names its payload carries (core.agent_adapters.codex).
+event=${1:-}
+case $event in
+    session-start | user-prompt-submit | session-end | stop | notification | stop-failure)
+        _agent=claude-code
+        _start=session-start
+        ;;
+    codex)
+        _agent=codex
+        _start=SessionStart
+        event=${2:-}
+        case $event in
+            SessionStart | UserPromptSubmit | Stop | SessionEnd) ;;
+            Interrupt | PermissionRequest | PreToolUse | PostToolUse) ;;
+            *) exit 0 ;;
+        esac
+        ;;
+    *) exit 0 ;;
+esac
+
+# The hook `agents connect` writes for this event, as it reads in settings.json's or
+# hooks.json's JSON text, matched the way core.agents._is_aisquare_hook_command
+# matches it: the command's first word is a program named aisquare or asq (a path or
+# the bare name, plain or in single or double quotes, `.exe` on Windows), or it is
+# `python [-P] -m aisquare`; then `hook <event>` ends it, with any options before
+# `hook`. A user's own `webhook stop`, `~/bin/my-hook stop` or `echo aisquare hook
+# stop` does not match. Codex's is `hook codex` for every event, which may be followed
+# by its --config-dir and --definition: hooks.json gives each event the same command,
+# so for Codex any of ours stands for all of them, as `agents connect codex` writes
+# them all at once.
+_a="'"
+# One character of a single-quoted word. An apostrophe in the word is written
+# '"'"' ('\"'\"' in JSON text), as shlex.quote does for `agents connect`, or '\''.
+_sq="[^$_a]|$_a\\\\\"$_a\\\\\"$_a|$_a\\\\\\\\$_a$_a"
+_dq='\"'                   # a double quote, as JSON escapes it
+_ws='( |\\t)'              # a space, or a tab as JSON escapes it
+_p1="${_a}(($_sq)*/)?"     # '/a path/with spaces/ (or a bare name, quoted)
+_p2="[^ \"${_a}\\\\]*/"    # /a/plain/path/
+_p3="[^ \"${_a}]*\\\\\\\\" # C:\\a\\windows\\path\\ (JSON escapes \)
+_p4="\\\\\"[^\"]*\\\\\\\\" # \"C:\\a quoted\\windows\\path\\
+_p5='([^"]|\\")* -m '      # python -P -m, its path quoted or not
+_p6='\\"([^"]*/)?'         # \"/a path/with spaces/ (or a bare name, quoted)
+# \"$HOME\"/a/path/ and \"${HOME}\"/a/path/, which the hook's shell reads as $HOME/
+_p7="\\\\\"[\$]([{]HOME[}]|HOME)\\\\\"$_p2"
+_program="($_p1|$_p2|$_p3|$_p4|$_p5|$_p6|$_p7)?(aisquare|asq)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
+_hook=$event
+_tail=
+if [ "$_agent" = codex ]; then
+    _hook=codex
+    # --config-dir and --definition, and whatever their values hold, to the end of
+    # the JSON string: any character but a quote or a backslash, or an escape.
+    _tail="($_ws+--(config-dir|definition)([^\"\\\\]|\\\\.)*)?"
+fi
+_ours="\"command\" *: *\"$_program($_ws+-[^\"]*)?$_ws+hook$_ws+$_hook$_tail$_ws*\""
+
+# The single-quoted word $1 opens with, its quotes gone, into _word. It is quoted
+# piece by piece, an apostrophe in it between two pieces, written '"'"' (shlex.quote
+# for `agents connect`, uv for a trampoline) or '\'' (see $_sq): read whole, or
+# Jane's was read as Jane. $2 is how the text spells a double quote and $3 a
+# backslash: as they are in a file, or as JSON escapes them in settings.json's.
+_sq_word() {
+    _rest=${1#"$_a"}
+    _word=
+    while :; do
+        _word=$_word${_rest%%"$_a"*}
+        _rest=${_rest#*"$_a"}
+        case $_rest in
+            "$2$_a$2$_a"*) _rest=${_rest#"$2$_a$2$_a"} ;;
+            "$3$_a$_a"*) _rest=${_rest#"$3$_a$_a"} ;;
+            *) break ;;
+        esac
+        _word=$_word$_a
+    done
+}
+
+# Whether the program at path $1 can start: an executable file and, when it is a
+# script, its #! interpreter is one too. A console script whose environment lost
+# its Python (uv python uninstall, a removed Homebrew python@3.x) stays executable
+# and fails every run with "bad interpreter", exit 126. Only an absolute
+# interpreter is checked; `#!/usr/bin/env python3` and binaries are trusted.
+# Where the Python's path has a space or is over 127 bytes, pip and uv write
+# #!/bin/sh and exec it from the second line, '''exec' "<python>" "$0" "$@"
+# (uv quotes it with '; pip quotes only a path with a space, so a long one is
+# bare): that Python is the interpreter checked.
+_starts() {
+    [ -f "$1" ] && [ -x "$1" ] || return 1
+    _first=
+    _second=
+    {
+        IFS= read -r _first
+        IFS= read -r _second
+    } <"$1" 2>/dev/null
+    case $_first in
+        '#!'*) ;;
+        *) return 0 ;;
+    esac
+    _interp=${_first#??}
+    _interp=${_interp#"${_interp%%[!	 ]*}"}
+    _interp=${_interp%%[	 ]*}
+    if [ "$_interp" = /bin/sh ]; then
+        case $_second in
+            "$_a$_a${_a}exec$_a \""*)
+                _interp=${_second#*\"}
+                _interp=${_interp%%\"*}
+                ;;
+            "$_a$_a${_a}exec$_a $_a"*)
+                _sq_word "${_second#"$_a$_a${_a}exec$_a "}" \" \\
+                _interp=$_word
+                ;;
+            "$_a$_a${_a}exec$_a "*)
+                _interp=${_second#"$_a$_a${_a}exec$_a "}
+                _interp=${_interp%%[	 ]*}
+                ;;
+        esac
+    fi
+    case $_interp in
+        /*) [ -f "$_interp" ] && [ -x "$_interp" ] ;;
+        *) return 0 ;;
+    esac
+}
+
+# Whether the program one matching hook ($1, the text grep matched) names can
+# start. A hook naming an aisquare that is gone -- the CLI uninstalled after
+# `agents connect` -- fails on every event, and standing down beside it would
+# leave the session running none. The program is read from between its quotes,
+# single or double, else up to the first space or tab. One sh cannot read out of
+# the JSON text (an escape other than a \" in single quotes: a Windows or
+# non-ASCII path) is trusted, as every match was before this check.
+_runnable() {
+    _cmd=${1#*\"command\"}
+    _cmd=${_cmd#*:}
+    _cmd=${_cmd#*\"}
+    # "$HOME"/ and "${HOME}"/ are $HOME/, expanded below.
+    case $_cmd in
+        "$_dq\$HOME$_dq/"* | "$_dq\${HOME}$_dq/"*) _cmd=\$HOME/${_cmd#*"$_dq/"} ;;
+    esac
+    case $_cmd in
+        "$_dq"*)
+            _prog=${_cmd#"$_dq"}
+            _prog=${_prog%%"$_dq"*}
+            ;;
+        "$_a"*)
+            # JSON's text: a double quote is \" there and a backslash \\.
+            _sq_word "$_cmd" "$_dq" "\\\\"
+            # Then each \" left is a double quote in the path, as JSON escapes it.
+            _cmd=$_word
+            _prog=
+            while :; do
+                case $_cmd in
+                    *"$_dq"*) ;;
+                    *) break ;;
+                esac
+                _prog=$_prog${_cmd%%"$_dq"*}\"
+                _cmd=${_cmd#*"$_dq"}
+            done
+            _prog=$_prog$_cmd
+            ;;
+        *)
+            _prog=${_cmd%% *}
+            _prog=${_prog%%"\\t"*}
+            _prog=${_prog%%\"*}
+            ;;
+    esac
+    # $HOME/ and ${HOME}/ as the hook's own shell expands them, like ~/: read
+    # literally, a working hook graded as gone and every event ran twice.
+    # shellcheck disable=SC2016
+    case $_prog in
+        *\\*) return 0 ;;
+        \~/*) _prog=$HOME/${_prog#??} ;;
+        '$HOME/'*) _prog=$HOME/${_prog#'$HOME/'} ;;
+        '${HOME}/'*) _prog=$HOME/${_prog#'${HOME}/'} ;;
+    esac
+    case $_prog in
+        */*) _starts "$_prog" ;;
+        *)
+            _prog=$(command -v "$_prog" 2>/dev/null) || return 1
+            case $_prog in
+                /*) _starts "$_prog" ;;
+                *) return 0 ;;
+            esac
+            ;;
+    esac
+}
+_nl='
+'
+
+# The files a session reads its own hooks from: in the config dir this copy of the
+# plugin was installed in (both agents keep it under <dir>/plugins/cache), and in the
+# one the agent's variable names, else its default. Claude Code's settings.json, in
+# CLAUDE_CONFIG_DIR or ~/.claude; Codex's hooks.json, in CODEX_HOME or ~/.codex.
+if [ "$_agent" = codex ]; then
+    _root=${PLUGIN_ROOT:-}
+    _home=${CODEX_HOME:-$HOME/.codex}
+    _file=hooks.json
+else
+    _root=${CLAUDE_PLUGIN_ROOT:-}
+    _home=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+    _file=settings.json
+fi
+case $_root in
+    */plugins/cache/*) _installed_in=${_root%%/plugins/cache/*} ;;
+    *) _installed_in= ;;
+esac
+for _dir in "$_installed_in" "$_home"; do
+    [ -n "$_dir" ] || continue
+    # Each match alone (-o), one per line, never the line it is on: in a minified
+    # settings.json every hook shares one line, and the program graded must be the
+    # one in OUR hook, not the first "command" on that line. Any of ours that can
+    # start means that file runs aisquare for this event. A missing or unreadable
+    # file is grep's error, which is no match.
+    _matches=$(grep -o -E "$_ours" "$_dir/$_file" 2>/dev/null) || continue
+    while [ -n "$_matches" ]; do
+        _match=${_matches%%"$_nl"*}
+        case $_matches in
+            *"$_nl"*) _matches=${_matches#*"$_nl"} ;;
+            *) _matches= ;;
+        esac
+        if _runnable "$_match"; then
+            exit 0
+        fi
+    done
+done
+
+# The first program named $1 that can start (_starts): on PATH, then where uv
+# installs tools. One that cannot is passed over, so the uvx fallback still runs.
+_find() {
+    _found=$(command -v "$1" 2>/dev/null)
+    if [ -n "$_found" ] && _starts "$_found"; then
+        printf '%s\n' "$_found"
+        return 0
+    fi
+    for _found in "$HOME/.local/bin/$1" "$HOME/.cargo/bin/$1"; do
+        if _starts "$_found"; then
+            printf '%s\n' "$_found"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# The Pythons CI tests aisquare on, as uv reads a request.
+_tested='>=3.11,<3.14'
+
+# Where the answers below are kept between events: one line each, `ranged` or `plain`,
+# when it was asked (seconds since 1970), then what it was asked under (_key). Under
+# XDG_CACHE_HOME, unless it is relative, which the XDG spec says to ignore, as uv does
+# and `aisquare uninstall --purge` reads it (core.agents.xdg_cache_home).
+case ${XDG_CACHE_HOME:-} in
+    /*) _answers=$XDG_CACHE_HOME/aisquare ;;
+    *) _answers=$HOME/.cache/aisquare ;;
+esac
+_answer_file=$_answers/plugin-tested-python
+# Seconds a `plain` answer stands. It may be a moment's: no network, so no fetch.
+_plain_for=300
+
+# The answer kept for $_key into _kept_answer (`ranged` or `plain`), else return 1. A
+# `plain` one older than $_plain_for is no answer. The file is read with builtins, so
+# a `ranged` answer costs no process, and a `plain` one costs one `date`.
+_kept() {
+    [ -f "$_answer_file" ] || return 1
+    while IFS= read -r _line; do
+        _rest=${_line#* }
+        [ "${_rest#* }" = "$_key" ] || continue
+        _kept_answer=${_line%% *}
+        _asked=${_rest%% *}
+        case $_kept_answer in
+            ranged) return 0 ;;
+            plain)
+                _now=$(date +%s 2>/dev/null) || return 1
+                case $_asked$_now in
+                    '' | *[!0-9]*) return 1 ;;
+                esac
+                [ "$_now" -ge "$_asked" ] && [ $((_now - _asked)) -lt "$_plain_for" ]
+                return
+                ;;
+        esac
+        return 1
+    done <"$_answer_file"
+    return 1
+}
+
+# Keep $1 for $_key, first, and up to seven answers kept for other keys after it.
+# Written beside the file and moved over it, so a hook reading it meanwhile (another
+# session's, starting at the same moment) reads the old answers or the new ones, never
+# a file cut short; written in place, it read none and ran the slow probe the file is
+# there to spare (round 25 of #257). Two keeping at once each move a whole file: the
+# last stands, and the other's key is asked again at its next event.
+_keep() {
+    _stamp=$(date +%s 2>/dev/null) || _stamp=0
+    _others=
+    _count=0
+    if [ -f "$_answer_file" ]; then
+        while IFS= read -r _line && [ "$_count" -lt 7 ]; do
+            _rest=${_line#* }
+            [ "${_rest#* }" = "$_key" ] && continue
+            _others=$_others$_line$_nl
+            _count=$((_count + 1))
+        done <"$_answer_file"
+    fi
+    [ -d "$_answers" ] || mkdir -p "$_answers" 2>/dev/null
+    _fresh=$_answer_file.$$
+    if printf '%s %s %s\n%s' "$1" "$_stamp" "$_key" "$_others" 2>/dev/null >"$_fresh"; then
+        mv -f "$_fresh" "$_answer_file" 2>/dev/null && return
+    fi
+    rm -f "$_fresh" 2>/dev/null
+}
+
+# Whether uv has a Python in $_tested, or may fetch one: `uv python find` answers
+# for the installed ones, and `uv run` fetches one wherever uv's python-downloads
+# allows it (Fedora's packaged uv sets "manual"). Asked of the uv beside uvx, else
+# the first that can start; with none to ask, uvx is given the range as it always
+# was. Neither question reads stdin or prints, so the payload stays the hook's.
+# Asked at session start, and on another event only when no answer is kept: every
+# prompt paid for one or two uv runs, and an offline `uv run` waits for its download
+# to time out (round 19 of #257). Kept per uv, range, PATH and the uv settings that
+# change the answer, so a session started under others neither reads nor replaces
+# this one's; a `plain` answer for five minutes alone, so one asked while offline is
+# asked again; and `plain` before the slow `uv run`, so a probe the hook's timeout
+# kills still spares the events after it (round 20). The cost of that order: while
+# the `uv run` downloads a tested Python, tens of seconds the first time, an event
+# of another session under the same key reads that `plain` and runs on uv's default
+# Python, which may be outside the range (3.14 on Fedora 43), and a `ranged` kept
+# for the key is replaced until the `uv run` answers. A `probing` answer would cost
+# more: read as no answer, each of those events asks uv itself and waits out the
+# same download, or offline the same timeout, which keeping the answer exists to
+# spare a prompt (round 19); read as `ranged`, each waits for a download of its
+# own, and offline fails. So they run as where uv may fetch none (round 21).
+# Revisited for 0.8.1, and kept: the window opens only where `uv python find` found no
+# tested Python for the key, and a Python any session's probe found or fetched before
+# would be found by it. So no event in the window could run on a tested Python without
+# waiting for this download itself, or failing offline. Waiting a moment for the probe
+# helps only a download done within that moment, adds the moment to each of those
+# prompts, and `sleep` here counts whole seconds.
+_has_tested_python() {
+    _uv=${_runner%/*}/uv
+    _starts "$_uv" || _uv=$(_find uv) || return 0
+    _key="$_uv $_tested ${UV_PYTHON_DOWNLOADS-}|${UV_PYTHON_PREFERENCE-}|${UV_MANAGED_PYTHON-}|${UV_NO_MANAGED_PYTHON-}|${UV_PYTHON_INSTALL_DIR-}|${UV_CACHE_DIR-}|${UV_OFFLINE-}|${UV_CONFIG_FILE-}|${UV_NO_CONFIG-}|$PATH"
+    case $_key in
+        *"$_nl"*) _key= ;; # not one line: kept, it could never be read back
+    esac
+    if [ -n "$_key" ] && [ "$event" != "$_start" ] && _kept; then
+        [ "$_kept_answer" = ranged ]
+        return
+    fi
+    if "$_uv" python find --system "$_tested" </dev/null >/dev/null 2>&1; then
+        [ -z "$_key" ] || _keep ranged
+        return 0
+    fi
+    [ -z "$_key" ] || _keep plain
+    if "$_uv" run --no-project --python "$_tested" python -c '' </dev/null >/dev/null 2>&1; then
+        [ -z "$_key" ] || _keep ranged
+        return 0
+    fi
+    return 1
+}
+
+# What `aisquare hook` is run with: the event, or for Codex `codex`, told the Codex home
+# this copy was installed in, which keys its sessions as the hooks.json route's
+# --config-dir does.
+if [ "$_agent" = codex ]; then
+    set -- codex
+    [ -z "$_installed_in" ] || set -- codex --config-dir "$_installed_in"
+else
+    set -- "$event"
+fi
+
+# Neither PYTHONPATH nor PYTHONHOME reaches the aisquare a hook runs: the agent's session
+# keeps them for its own tools, and a sandboxed agent's sandbox may write a directory they
+# name (direnv's PYTHONPATH=$PWD/src; an empty entry is the folder the hook runs in),
+# where a module of a standard name or a sitecustomize would run here, outside its
+# sandbox. aisquare is installed in its own interpreter and needs neither.
+unset PYTHONPATH PYTHONHOME
+
+if _runner=$(_find aisquare); then
+    "$_runner" hook "$@"
+    _status=$?
+elif _runner=$(_find uvx); then
+    _from=${AISQUARE_PLUGIN_FROM:-aisquare-cli==$AISQUARE_PLUGIN_VERSION}
+    # A Python CI tests where uv has one or may fetch one, else whatever uv has:
+    # asked for the range with neither, uvx fails. Decided BEFORE the one run, as a
+    # retry cannot be: a run that failed may be aisquare's own, which has read the
+    # payload and may have printed, so a second would get no payload and print twice.
+    # The uvx found is named to aisquare, which tells the agent how to run it.
+    if _has_tested_python; then
+        AISQUARE_PLUGIN_UVX=$_runner "$_runner" --python "$_tested" --from "$_from" aisquare hook "$@"
+    else
+        AISQUARE_PLUGIN_UVX=$_runner "$_runner" --from "$_from" aisquare hook "$@"
+    fi
+    _status=$?
+else
+    if [ "$event" = "$_start" ]; then
+        printf '%s\n' '{"systemMessage": "aisquare: neither the aisquare CLI nor uv was found, so this session has no aisquare memory. Install uv: https://docs.astral.sh/uv/"}'
+    fi
+    exit 0
+fi
+
+if [ "$_status" -ne 0 ] && [ "$event" = "$_start" ]; then
+    printf '{"systemMessage": "aisquare: its session-start hook failed (exit %s), so this session has no aisquare memory."}\n' "$_status"
+fi
+exit 0

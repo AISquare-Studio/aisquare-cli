@@ -614,6 +614,7 @@ def emit_agents(agents: list[AgentInfo]) -> None:
     table.add_column("AGENT")
     table.add_column("DETECTED")
     table.add_column("CONNECTED")
+    table.add_column("INTEGRATION")
     table.add_column("HOOKS IN")
     table.add_column("CONTEXT")
     for agent in agents:
@@ -622,10 +623,14 @@ def emit_agents(agents: list[AgentInfo]) -> None:
             agent.name,
             "yes" if agent.detected else "no",
             "yes" if agent.connected else "no",
+            agent.readiness.replace("_", " "),
             _hook_sites(agent),
             context,
         )
     stdout_console().print(table)
+    for agent in agents:
+        if agent.detected and agent.detail:
+            stdout_console().print(f"{agent.name}: {agent.detail}", markup=False)
 
 
 def _hook_sites(agent: AgentInfo) -> str:
@@ -677,15 +682,23 @@ def emit_connected(connection: AgentConnection) -> None:
     noun = "entry" if connection.imported == 1 else "entries"
     imported = f"imported {connection.imported} {noun}"
     if connection.hooks_off is not None:
+        from aisquare.core import agents as agent_core
+
+        spec = agent_core.spec(connection.name)
         stdout_console().print(
             f"hooks installed for {connection.name}, but switched off — {imported}"
         )
         stderr_console().print(
-            f'note: {connection.hooks_off} sets "disableAllHooks": true, so Claude Code runs '
-            "none of its hooks, aisquare's included — remove that key to turn them on"
+            f"note: {connection.hooks_off} sets "
+            f"{agent_core.HOOKS_OFF_SETTINGS.get(connection.name, 'every hook off')}, so "
+            f"{spec.label if spec else connection.name} runs none of its hooks, aisquare's "
+            "included — remove that key to turn them on",
+            markup=False,
         )
-        return
-    stdout_console().print(f"✓ connected {connection.name} — hooks installed; {imported}")
+    else:
+        stdout_console().print(f"✓ connected {connection.name} — hooks installed; {imported}")
+    if connection.detail:
+        stdout_console().print(connection.detail, markup=False)
 
 
 def emit_onboard(report: OnboardReport) -> None:

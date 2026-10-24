@@ -723,6 +723,8 @@ class FakePane:
         its list, Escape answers it "No" and Enter its highlighted "1. Yes"."""
         self.answered: list[str] = []
         """How each prompt drawn was answered, in order."""
+        self.gone = False
+        """The pane is gone: tmux names no pane under its id (``pane_facts`` is ``None``)."""
 
     def send_keys(self, pane_id: str, *keys: str) -> None:
         for key in keys:
@@ -754,9 +756,11 @@ class FakePane:
         self.sent.append((pane_id, "literal", text))
         self.log.append("literal")
 
-    def pane_facts(self, pane_id: str) -> SimpleNamespace:
+    def pane_facts(self, pane_id: str) -> SimpleNamespace | None:
         """What ``fleet tell`` and ``send-keys`` ask before they type: the pane runs the agent,
         on a server that started before its row was written (said in the same answer)."""
+        if self.gone:
+            return None
         return SimpleNamespace(
             dead=False, current_command="claude", server_started=self.started_at()
         )
@@ -1062,6 +1066,7 @@ def test_stop_stops_the_pinned_row_and_audits_what_it_did(
         "agent": receipts.stop.agent.model_dump(mode="json"),
         "claims_released": ["tsk_1"],
         "release_failed": None,
+        "killed": None,
         "project": project.id,
     }
     assert phone.audit() == [
@@ -1883,6 +1888,7 @@ def test_a_pinned_action_in_a_hand_overs_gap_is_stale_not_a_gone_agent(
     agent is still 404: it asked for whoever holds the label."""
     _row(project, ended=True)
     needs.window_gone = True  # and its window went with it
+    pane.gone = True  # as tmux says too: no pane runs under its id (`fleet._pane_alive`)
     monkeypatch.setattr(fleet_service, "_kill_lingering_window", lambda *args: False)
     response = phone.post(name, **body)
     assert response.status_code == 409, response.text
@@ -2488,7 +2494,7 @@ def test_every_write_tmux_did_not_answer_in_time_says_it_may_still_land_and_audi
     if write.body.get("mode") == "auto":  # fleet tell types, into an agent reading `waiting`
         monkeypatch.setattr(fleet_service, "tell", _FLEET_TELL)
         monkeypatch.setattr(
-            fleet_service, "status_of", lambda row: SimpleNamespace(state="waiting")
+            fleet_service, "status_of", lambda row, record=None: SimpleNamespace(state="waiting")
         )
     pane.timing_out.add(write.late)
     body = phone.post(write.route, **{"agent": LABEL, "text": "hi", **write.body}).json()
@@ -3241,7 +3247,7 @@ def test_an_auto_tell_never_types_into_a_permission_prompt_left_for_half_an_hour
         state="attention",
     )
 
-    def status_of(agent: FleetAgent) -> FleetAgentStatus:
+    def status_of(agent: FleetAgent, record: object = None) -> FleetAgentStatus:
         """``fleet tell``'s own read of the row, as ``_derive`` words a stale attention."""
         return FleetAgentStatus(agent=agent, state="waiting", session=own_predicates.session)
 
@@ -3683,7 +3689,9 @@ def _fleet_switch_itself(
 
     monkeypatch.setattr(fleet_service, "stop", stop)
     monkeypatch.setattr(
-        fleet_service, "_refuse_a_replay_that_cannot_start", lambda agent, session, project: None
+        fleet_service,
+        "_refuse_a_replay_that_cannot_start",
+        lambda project, record, home=None, permission_mode=None, branch=None: None,
     )
     if choice is not None:
         monkeypatch.setattr(

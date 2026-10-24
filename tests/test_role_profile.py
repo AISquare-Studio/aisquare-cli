@@ -508,7 +508,7 @@ class TestLaunchHonoursTheBoundBinary:
     def test_a_bound_bin_is_what_gets_executed(
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
     ) -> None:
-        _bind("coder", bin="claude-wrapper")
+        _bind("coder", agent="claude-code", bin="claude-wrapper")
         result = runner.invoke(app, ["launch", "coder"])
 
         assert result.exit_code == 0, result.output
@@ -518,7 +518,7 @@ class TestLaunchHonoursTheBoundBinary:
     def test_command_flag_still_overrides_the_binding(
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
     ) -> None:
-        _bind("coder", bin="from-config")
+        _bind("coder", agent="claude-code", bin="from-config")
         result = runner.invoke(app, ["launch", "coder", "--command", "from-flag"])
 
         assert result.exit_code == 0, result.output
@@ -538,7 +538,7 @@ class TestLaunchHonoursTheBoundBinary:
     ) -> None:
         # A bare "not on your PATH" sends the reader hunting through flag, env
         # and config to work out which of them picked the thing that is absent.
-        _bind("coder", bin="nowhere-to-be-found")
+        _bind("coder", agent="claude-code", bin="nowhere-to-be-found")
         monkeypatch.setattr(shutil, "which", lambda _cmd: None)
         result = runner.invoke(app, ["launch", "coder"])
 
@@ -550,7 +550,7 @@ class TestLaunchHonoursTheBoundBinary:
         self, runner: CliRunner, work_dir: Path, spy: dict[str, Any]
     ) -> None:
         # The invariant the defect broke: two entry points, one answer.
-        _bind("coder", bin="claude-wrapper")
+        _bind("coder", agent="claude-code", bin="claude-wrapper")
         assert harness.resolve_binary("coder").binary == "claude-wrapper"
         runner.invoke(app, ["launch", "coder"])
         assert spy["argv"][0] == harness.resolve_binary("coder").binary
@@ -576,7 +576,7 @@ class TestTracingReadsTheBoundBinaryNotTheFlag:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         _tracing_on(monkeypatch)
-        _bind("coder", bin="my-agent-wrapper")
+        _bind("coder", agent="claude-code", bin="my-agent-wrapper")
 
         result = runner.invoke(app, ["launch", "coder"])
 
@@ -765,7 +765,11 @@ class TestEnvFiles:
             done = subprocess.run(
                 ["sh", "-c", command], env=shell, capture_output=True, check=False, timeout=120
             )  # bytes: text mode would read a CR in the value as a newline
-            return done.returncode, done.stdout.decode(), done.stderr.decode()
+            # The line runs `aisquare launch` (#113), whose banner names what it starts: any
+            # other line on stderr (a `cat:`, a note) is one this test refuses.
+            said = done.stderr.decode().splitlines(keepends=True)
+            err = "".join(line for line in said if not line.startswith("Launching "))
+            return done.returncode, done.stdout.decode(), err
 
         assert paste() == (0, f"[{TOKEN}]", ""), "the value as launch reads it, no CR"
         # Review of #259, round 3: a token saved with a byte-order mark (PowerShell 5.1's

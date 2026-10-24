@@ -29,6 +29,7 @@ from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import experimental
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters import claude_code
 from aisquare.core.config import load_config, save_config
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed, TmuxServer
@@ -150,7 +151,7 @@ def test_tmux_is_asked_for_the_captains_window_with_the_switch_among_its_e_pairs
     window_pairs = [started[i + 1] for i, word in enumerate(started[:split]) if word == "-e"]
     assert f"{ENV}=1" in window_pairs
     launcher = started[split + 1 :]
-    assert launcher[:6] == [sys.executable, "-P", "-m", "aisquare", "launch", "captain"]
+    assert launcher[:7] == [sys.executable, "-E", "-P", "-m", "aisquare", "launch", "captain"]
     assert not any(ENV in word for word in launcher)
 
 
@@ -179,12 +180,12 @@ def test_the_window_finds_the_captain_persona_on_a_server_started_without_the_sw
     for key, value in _window_env(tmux).items():  # … and the window adds its own pairs
         monkeypatch.setenv(key, value)
     monkeypatch.chdir(cwd)
-    assert command[:4] == [sys.executable, "-P", "-m", "aisquare"]
-    result = runner.invoke(app, command[4:])
+    assert command[:5] == [sys.executable, "-E", "-P", "-m", "aisquare"]
+    result = runner.invoke(app, command[5:])
     assert result.exit_code == 0, result.output
     assert "no persona named" not in result.output
     assert launched["env"]["AISQUARE_PERSONA"] == "captain"
-    assert launch_cli.SYSTEM_PROMPT_FLAG in launched["argv"], "briefed as the captain"
+    assert claude_code.SYSTEM_PROMPT_FLAG in launched["argv"], "briefed as the captain"
     assert launched["env"][ENV] == "1"
 
 

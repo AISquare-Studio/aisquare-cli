@@ -806,7 +806,10 @@ def test_the_panels_first_paint_never_waits_for_another_processs_lock_on_remote_
         return took, made_meanwhile
 
     took, made_meanwhile = drive(go, tunnel=missing_ngrok)
-    assert took < 1.5, f"the panel took {took:.1f} s to open"
+    # Waiting for the lock is the 10 s above. 1.5 s was the bound, and GitHub's runners took
+    # 1.5-1.6 s to paint the panel on main at 09f48563 as on #113 (0.2 s here): what is
+    # measured is that the lock is not waited for, which half the wait still tells apart.
+    assert took < 5.0, f"the panel took {took:.1f} s to open"
     assert not made_meanwhile and state.exists() and remote_server.remote_state_loaded()
 
 

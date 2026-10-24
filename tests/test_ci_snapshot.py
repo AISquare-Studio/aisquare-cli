@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ast
 import inspect
 import os
+import re
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -362,3 +364,145 @@ def test_a_trace_id_that_cannot_be_a_ref_still_yields_the_object(tmp_path: Path)
     assert snapshot is not None
     assert snapshot.ref is None
     assert len(snapshot.object_id) == 40
+
+
+def test_the_snapshots_git_runs_no_hook_of_the_repository(tmp_path: Path) -> None:
+    """Review r12 of #113, finding 2: the snapshot's ``stash create`` runs from the agent's
+    hooks outside any sandbox, and with ``core.hooksPath`` in the tree (husky's layout) it
+    ran the tree's ``post-index-change``, which a sandboxed agent may write."""
+    if os.name == "nt":
+        pytest.skip("a POSIX hook script")
+    root = repo(tmp_path / "r")
+    hooks = root / ".husky"
+    hooks.mkdir()
+    marker = tmp_path / "ran"
+    hook = hooks / "post-index-change"
+    hook.write_text(f"#!/bin/sh\necho x >> {marker}\n", encoding="utf-8")
+    hook.chmod(0o755)
+    git(root, "config", "core.hooksPath", ".husky")
+    (root / "tracked.txt").write_text("edited\n", encoding="utf-8")
+
+    snapshot = ci_snapshot.capture(root, TRACE)
+
+    assert snapshot is not None and snapshot.dirty
+    assert not marker.exists(), "the snapshot ran the tree's hook"
+    git(root, "-c", "user.name=t", "-c", "user.email=t@t", "stash", "create")
+    assert marker.exists(), "the repository's own git still runs it"
+
+
+#: What runs a program, by the name it is called by however it was imported: subprocess's,
+#: os's, asyncio's and shutil.which.
+_RUNNERS = frozenset(
+    {
+        "run", "Popen", "call", "check_call", "check_output", "getoutput", "getstatusoutput",
+        "system", "popen", "execv", "execve", "execvp", "execvpe", "execl", "execlp",
+        "execle", "execlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe", "posix_spawn",
+        "posix_spawnp", "create_subprocess_exec", "create_subprocess_shell", "which",
+    }
+)  # fmt: skip
+
+
+#: A call whose name says it runs or splits a command, as a helper's often does
+#: (``_run``, ``run_git``, ``_exec``, ``shlex.split``): matched on its name's words.
+_RUNNER_WORDS = re.compile(r"(?:^|_)(?:run|call|exec\w*|spawn\w*|popen|system|split|git)(?:_|$)")
+
+
+def _names_git(node: ast.AST | None) -> bool:
+    """A string that is ``git`` or starts a git command line (``"git status"``), however it
+    is built: an f-string, ``"git " + args``, ``"git %s" % args``, ``"git {}".format(args)``."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value == "git" or node.value.startswith("git ")
+    if isinstance(node, ast.JoinedStr) and node.values:
+        return _names_git(node.values[0])
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add | ast.Mod):
+        return _names_git(node.left)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+    ):
+        return _names_git(node.func.value)
+    return False
+
+
+def _git_programs(tree: ast.AST) -> list[ast.AST]:
+    """Each place in ``tree`` that names git as a program to run, in these shapes: the
+    first element of a list or tuple (however it is laid out, ``["git"] + args`` and
+    ``("git",)`` included); an argument of a call that runs a program (:data:`_RUNNERS`:
+    ``subprocess.*``, ``os.system``/``os.exec*``, a ``shell=True`` string, ``which`` however
+    imported, ``asyncio.create_subprocess_*``), a string or an f-string starting
+    ``git``; a parameter's default; a name bound to it (``GIT = "git"``)."""
+    found: list[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.List | ast.Tuple) and node.elts and _names_git(node.elts[0]):
+            found.append(node)
+        elif isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if (name in _RUNNERS or _RUNNER_WORDS.search(name)) and any(
+                _names_git(arg) for arg in [*node.args, *(k.value for k in node.keywords)]
+            ):
+                found.append(node)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            defaults = [*node.args.defaults, *node.args.kw_defaults]
+            found += [d for d in defaults if d is not None and _names_git(d)]
+        elif (
+            isinstance(node, ast.Assign | ast.AnnAssign)
+            and node.value is not None
+            and _names_git(node.value)
+        ):
+            found.append(node)
+    return found
+
+
+def test_the_git_guard_sees_each_shape_it_lists() -> None:
+    """Review r13 of #113, finding 11, r14, finding 10, and r15, finding 10: the guard was a
+    one-line regex, then blind to a command line in a string, an f-string, ``which``
+    imported by name, asyncio's runners, a parameter's default, a helper of its own
+    (``_run("git", ...)``), ``shlex.split`` and a command built by ``+``, ``%`` or
+    ``.format``. Each shape it reads is here, and only these are claimed."""
+    shapes = [
+        'run(\n    [\n        "git",\n        "status",\n    ]\n)',
+        'run(["git"] + args)',
+        'run(("git",))',
+        'GIT = "git"',
+        'subprocess.run(argv, executable="git")',
+        'shutil.which("git")',
+        'os.system("git status")',
+        'subprocess.run("git status --porcelain", shell=True)',
+        'subprocess.run(f"git -C {root} status", shell=True)',
+        'from shutil import which\nwhich("git")',
+        'await asyncio.create_subprocess_exec("git", "status")',
+        'def run_git(program="git"): ...',
+        '_run("git", "status")',
+        'run_git("git", "status")',
+        'shlex.split("git status --porcelain")',
+        'subprocess.run("git -C " + str(root) + " status", shell=True)',
+        'os.system("git %s" % args)',
+        'subprocess.run("git {}".format(args), shell=True)',
+    ]
+    for shape in shapes:
+        assert _git_programs(ast.parse(shape)), shape
+    for innocent in ('KEYS = ("editable", "git", "url")', 'raise Error("git is not installed")'):
+        assert not _git_programs(ast.parse(innocent)), innocent
+
+
+def test_every_git_aisquare_runs_is_its_own_hookless_one() -> None:
+    """Review r12 of #113, finding 2: aisquare runs git through ``workspace.git_argv`` alone
+    (no hook, no fsmonitor of the repository's), never a git argv of its own; the others
+    are command lines printed for the user to run (``install_route.command_line``): the
+    pull of an editable install, and ``fleet reap``'s way to drop a branch it kept. Read by
+    the syntax tree (r13, 11)."""
+    source = Path(__file__).resolve().parents[1] / "src" / "aisquare"
+    found = []
+    for path in sorted(source.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for node in _git_programs(ast.parse(text, filename=str(path))):
+            found.append(
+                f"{path.relative_to(source).as_posix()}: {ast.get_source_segment(text, node)}"
+            )
+    assert found == [
+        'cli/fleet.py: ["git", "-C", str(root), "branch", "-D", branch]',
+        'core/workspace.py: ["git", *GIT_OWN, *args]',
+        'services/install_route.py: ["git", "-C", route.source or ".", "pull"]',
+    ], found

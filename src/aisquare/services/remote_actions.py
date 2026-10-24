@@ -698,8 +698,8 @@ def action_pane_agent(snap: AgentNow, label: str) -> FleetAgent:
 
 
 def action_press_escape(snap: AgentNow, label: str, *, audit: Callable[[str], str]) -> None:
-    """ONE Escape into the agent's pane. Never two: a second one on an idle prompt opens
-    Claude Code's Rewind selector.
+    """ONE Escape into the agent's pane. Never two: a second one on an idle prompt opens the
+    agent's rewind (Claude Code's Rewind selector; Codex's transcript, where Enter rewinds).
 
     tmux refusing it is a 409 ``fleet_error`` that did nothing, and stays off the trail. One
     that timed out (``TmuxTimedOut``) may still land: a wedged server may have the keys
@@ -900,6 +900,8 @@ def action_unseen_why(snap: AgentNow, label: str | None = None) -> str:
     said of ``label``, or of "it"."""
     who, whose = ("it", "its") if label is None else (label, f"{label}'s")
     status = snap.status
+    if snap.screen_unread:
+        return f"{whose} screen cannot be read"
     if status is not None and status.agent.session_id is None:
         return f"{who} runs without aisquare's hooks"
     if status is not None and status.session is None:
@@ -1159,6 +1161,9 @@ def action_type_now(
     ``interrupt`` sends one Escape and waits for the prompt to come back. If it does
     not, nothing is typed. By then the Escape has cut the agent's turn short, so a
     refusal after it is audited: ``trail`` words the tell's line from how it ended.
+    An agent whose own screen shows its empty prompt with no turn on it
+    (:func:`remote_needs.needs_screen_at_rest`) has no turn to stop: its line is typed
+    with no Escape, which there could be the second one, into Codex's transcript.
 
     A limited agent sits quiet at its prompt, Claude Code's limit message its newest
     words, and ``needs_at_input_prompt`` reads that as a prompt to type at. Both
@@ -1182,6 +1187,9 @@ def action_type_now(
     if not interrupt:
         if not remote_needs.needs_at_input_prompt(snap):
             raise RequestError(409, "agent_busy", action_busy_sentence(snap, label))
+        return action_paste(snap, label, text, interrupted=False, trail=trail)
+    if remote_needs.needs_screen_at_rest(snap):
+        # No turn to stop, and its Escape may be the second (review r16 of #113, 2/8).
         return action_paste(snap, label, text, interrupted=False, trail=trail)
     action_press_escape(
         snap, label, audit=lambda error: trail(f"delivered=no escape=maybe refused={error}")
@@ -1228,7 +1236,10 @@ def action_tell_auto(
     ``fleet tell`` took for one waiting at its prompt, whatever it showed. The board
     reaches an agent through aisquare's hooks, so of one started without them (``no
     hooks``) ``how`` says the note is not shown to it, and that Interrupt & tell, whose
-    Escape goes first, types the text. ``fleet tell`` pastes before it presses Enter
+    Escape goes first, types the text: once its prompt is answered, while it shows one.
+    Interrupt & tell refuses a dialog before its Escape (:func:`action_type_now`), and the
+    receipt sent the human to it at a fresh Codex's folder-trust dialog, where it was a 409
+    (SMOKE7 of #113). ``fleet tell`` pastes before it presses Enter
     (``fleet.type_then_enter``): a paste refused or not answered in time is filed as a
     note, the second of them perhaps typed as well (``delivered=maybe``); an Enter that
     did not go through files nothing, the text left at the agent's prompt
@@ -1239,7 +1250,8 @@ def action_tell_auto(
     snap = snap if snap is not None else action_snapshot(target, label, pin)
     if action_may_answer(snap):
         state = action_state(snap)
-        if remote_needs.needs_dialog_open(snap):
+        dialog = remote_needs.needs_dialog_open(snap)
+        if dialog:
             why = "it is showing a prompt, which typing would answer"
         elif state != "waiting":
             why = f"it is {state}"
@@ -1256,7 +1268,11 @@ def action_tell_auto(
         )
         if snap.status is not None and snap.status.agent.session_id is None:
             # The board reaches an agent through its hooks: `no hooks`, and the note waits unread.
-            filed += ", which it is not shown without aisquare's hooks: Interrupt & tell types it"
+            # Interrupt & tell refuses a dialog as this does, so it types once that is answered.
+            then = "once its prompt is answered, " if dialog else ""
+            filed += (
+                f", which it is not shown without aisquare's hooks: {then}Interrupt & tell types it"
+            )
         return fleet_service.TellResult("no", f"{why} — {filed}")
     with action_audited(lambda error: trail(f"delivered=no failed={error}")):
         return action_pinned_call(
@@ -1362,6 +1378,8 @@ def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         "agent": receipt.agent.model_dump(mode="json"),
         "claims_released": released,
         "release_failed": receipt.release_failed,
+        # Why its window was killed with no exit command, as `fleet stop --json` says it.
+        "killed": receipt.killed,
         "project": target.id,
     }
     summary = f"{audit_start} dismissed={action_yes_no(dismissed)} released={len(released)}"
@@ -1445,12 +1463,14 @@ def action_restart(body: dict[str, Any]) -> tuple[dict[str, object], str]:
 
 
 def action_switch(body: dict[str, Any]) -> tuple[dict[str, object], str]:
-    """``POST api/agent/switch``: move the pinned agent to another Claude account to un-park it.
+    """``POST api/agent/switch``: move the pinned agent to another account of its own agent's
+    to un-park it.
 
     A usage limit parks an agent as ``limited`` until the reset. Short of waiting,
     the one way out is a hand-over to another account: the ``aisquare fleet switch
-    <label>`` the manager is told to run. Headroom picks the account unless
-    ``to`` names one. There is no ``force`` (SPEC §9.3).
+    <label>`` the manager is told to run. Headroom picks the account among that agent's
+    own (``fleet.switch``: a Codex agent moves between Codex accounts) unless ``to`` names
+    one. There is no ``force`` (SPEC §9.3).
 
     ``fleet.switch`` gets the pin (``agent_id``), as ``fleet.stop`` and
     ``fleet.restart`` do. The manager's switch and the automatic hand-over run in

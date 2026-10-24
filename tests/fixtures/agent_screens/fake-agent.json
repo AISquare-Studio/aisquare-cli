@@ -1,0 +1,39 @@
+{
+  "about": "The fake agent's own screens (tests/fake_agent.py dialog_on_screen): a dialog asks on a `?? ` row and ends on its keys, `(y/n)`. A screen marked ready is one AgentScreen.ready_on_screen (or its default) reads as ready for a typed line; every other is not. AgentScreen.modal_on_screen (or its default) names each dialog by its words, and no screen without one.",
+  "dialogs": [
+    {
+      "what": "a dialog of its own",
+      "rows": [
+        "fake> deploy it",
+        "running it",
+        "?? Allow shell: make deploy",
+        "(y/n)"
+      ],
+      "words": "Allow shell: make deploy"
+    },
+    {
+      "what": "a dialog whose question scrolled off",
+      "rows": [
+        "  make deploy",
+        "(y/n)"
+      ],
+      "words": ""
+    }
+  ],
+  "not_dialogs": [
+    {
+      "what": "its empty prompt",
+      "rows": [
+        "fake> deploy it",
+        "done",
+        "fake> "
+      ]
+    },
+    {
+      "what": "a draft that asks",
+      "rows": [
+        "fake> ?? deploy it (y/n)"
+      ]
+    }
+  ]
+}

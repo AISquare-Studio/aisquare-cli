@@ -56,7 +56,7 @@ from textual.widgets import (
 from textual.worker import Worker, WorkerState, get_current_worker
 
 from aisquare.core import personas as core
-from aisquare.core.agents import _claude_home
+from aisquare.core.agent_adapters import adapters
 from aisquare.core.personas import Layer, PersonaError
 from aisquare.services import personas as personas_service
 
@@ -197,9 +197,7 @@ class ImportPersonaScreen(_Dialog):
                     )
                 with Horizontal(classes="dialog-row"):
                     yield Label("Browse skills")
-                    yield Select[str](
-                        [], prompt="Claude Code skills — reading…", id="import-browse"
-                    )
+                    yield Select[str]([], prompt="agent skills — reading…", id="import-browse")
                 with Horizontal(classes="dialog-row"):
                     yield Label("Layer")
                     yield layer_radios(self.root, "import")
@@ -408,10 +406,11 @@ class ImportPersonaScreen(_Dialog):
                 imported = " · imported" if ref.imported else ""
                 # Text, not str: Select parses a str label as markup, so a description
                 # holding "[/]" raised MarkupError and one holding "[docs]" lost it.
-                label = Text(f"{ref.name} · {ref.scope} · {what}{imported}")
+                readers = f" · {', '.join(ref.agents)}" if ref.agents else ""
+                label = Text(f"{ref.name} · {ref.scope}{readers} · {what}{imported}")
                 options.append((label, str(ref.path)))
             select.set_options(options)
-            select.prompt = "Claude Code skills" if options else "no Claude Code skills found"
+            select.prompt = "agent skills" if options else "no agent skills found"
         elif state is WorkerState.ERROR:
             select.prompt = f"skills unavailable — {type(worker.error).__name__}"
 
@@ -734,11 +733,18 @@ class ExportDone:
     name: str
     path: Path
     skill: Literal["user", "project"] | None
-    """Set for the two Claude Code skill targets — after which it is ``/name`` there."""
+    """Set for a coding agent's skill targets — after which that agent reads it."""
+    agent: str | None = None
+    """The agent whose skills ``skill`` names, by id."""
+
+
+#: An export destination's radio id: ``export-personal-<agent>``, ``export-project-<agent>``.
+_SCOPE_IDS: dict[Literal["user", "project"], str] = {"user": "personal", "project": "project"}
 
 
 class ExportPersonaScreen(_Dialog):
-    """``persona export`` to Claude's skills, the project's skills, or a directory."""
+    """``persona export`` to each coding agent's personal or project skills, or a
+    directory."""
 
     DEFAULT_CSS = dialog_css("ExportPersonaScreen")
 
@@ -746,28 +752,44 @@ class ExportPersonaScreen(_Dialog):
         super().__init__()
         self.persona_name = name
         self.root = root
+        self._targets: dict[str, tuple[Literal["user", "project"], str]] = {}
+
+    def _destinations(self) -> list[RadioButton]:
+        """One button per agent and scope it reads skills in (``skill_target``): every
+        agent's personal skills, then every agent's project skills, disabled outside a git
+        repository."""
+        buttons: list[RadioButton] = []
+        for scope in ("user", "project"):
+            for adapter in adapters():
+                try:
+                    where = str(
+                        personas_service.skill_target(adapter, scope, self.root) / self.persona_name
+                    )
+                except PersonaError as exc:
+                    if exc.code != "no_project":
+                        continue  # the agent reads no skills of this scope
+                    where = "needs a git repository"
+                ident = f"export-{_SCOPE_IDS[scope]}-{adapter.id}"
+                self._targets[ident] = (scope, adapter.id)
+                which = "personal" if scope == "user" else "project"
+                buttons.append(
+                    RadioButton(
+                        # Text, not str: a path is data, and a str label is parsed as markup.
+                        Text(f"{adapter.label} {which} skills — {where}"),
+                        value=not buttons,
+                        id=ident,
+                        disabled=where == "needs a git repository",
+                    )
+                )
+        return buttons
 
     def compose(self) -> ComposeResult:
         name = self.persona_name
-        personal = _claude_home() / "skills" / name
-        project = (
-            f"{self.root / '.claude' / 'skills' / name}" if self.root else "needs a git repository"
-        )
         with Vertical():
             yield Static(Text(f"Export {name}", style="bold"), classes="dialog-header")
             yield RadioSet(
-                # Text, not str: a path is data, and a str label is parsed as markup.
-                RadioButton(
-                    Text(f"Claude personal skills — {personal}"),
-                    value=True,
-                    id="export-personal",
-                ),
-                RadioButton(
-                    Text(f"Project skills — {project}"),
-                    id="export-project",
-                    disabled=self.root is None,
-                ),
-                RadioButton("Directory…", id="export-directory"),
+                *self._destinations(),
+                RadioButton("Directory…", id="export-directory", value=not self._targets),
                 id="export-destination",
             )
             with Horizontal(classes="dialog-row"):
@@ -787,7 +809,8 @@ class ExportPersonaScreen(_Dialog):
 
     def _destination(self) -> str:
         pressed = self.query_one("#export-destination", RadioSet).pressed_button
-        return (pressed.id or "export-personal") if pressed is not None else "export-personal"
+        first = next(iter(self._targets), "export-directory")
+        return (pressed.id or first) if pressed is not None else first
 
     def _validate(self) -> bool:
         directory = self._destination() == "export-directory"
@@ -805,17 +828,17 @@ class ExportPersonaScreen(_Dialog):
     def export_kwargs(self) -> dict[str, Any]:
         destination = self._destination()
         skill: Literal["user", "project"] | None = None
+        agent: str | None = None
         to: Path | None = None
-        if destination == "export-personal":
-            skill = "user"
-        elif destination == "export-project":
-            skill = "project"
+        if destination in self._targets:
+            skill, agent = self._targets[destination]
         else:
             to = Path(self.query_one("#export-dir", Input).value.strip()).expanduser()
         return {
             "root": self.root,
             "to": to,
             "skill": skill,
+            "agent": agent,
             "force": self.query_one("#export-force", Switch).value,
         }
 
@@ -834,7 +857,7 @@ class ExportPersonaScreen(_Dialog):
             where = written.path
         else:
             where = Path(written)
-        self.dismiss(ExportDone(self.persona_name, where, kwargs["skill"]))
+        self.dismiss(ExportDone(self.persona_name, where, kwargs["skill"], kwargs["agent"]))
 
     @on(Button.Pressed, "#export-cancel")
     def _cancel(self) -> None:

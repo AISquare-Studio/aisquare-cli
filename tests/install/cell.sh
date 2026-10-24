@@ -28,6 +28,11 @@
 #   CELL_SKIP_AGENT=0         install Claude Code for real (one cell does; the
 #                             rest pass --no-agent so the matrix does not depend
 #                             on a third party's CDN being up).
+#   CELL_AGENT=codex          install Codex for real instead (one cell does), with
+#                             `--agent codex` on a machine with no Claude Code. The
+#                             doctor's codex row stays amber for the one step no
+#                             script may take, trusting the hooks in Codex's /hooks,
+#                             so that row is expected beside brain.
 
 set -eu
 
@@ -38,6 +43,7 @@ WORKDIR=${WORKDIR:-/work}
 STUBDIR=${STUBDIR:-$HOME/pkg-stub}
 STUB_LOG=${STUB_LOG:-${TMPDIR:-/tmp}/pkg-stub.log}
 SKIP_AGENT=${CELL_SKIP_AGENT:-1}
+AGENT=${CELL_AGENT:-}
 
 fail() {
     printf '\n### FAIL: %s\n' "$*" >&2
@@ -96,6 +102,13 @@ fi
 
 AGENT_FLAG=""
 [ "$SKIP_AGENT" = 1 ] && AGENT_FLAG="--no-agent"
+# What run 2 accepts as the whole amber set: brain alone, and for the Codex cell the
+# codex row too, whose detail is then checked to be the trust step and nothing else.
+EXPECTED="brain"
+if [ "$AGENT" = codex ]; then
+    AGENT_FLAG="--agent codex"
+    EXPECTED="brain codex"
+fi
 
 # ---------------------------------------------------------------------------
 # helpers that read the installed CLI
@@ -173,6 +186,14 @@ case "$(amber_checks)" in
     *install*) fail "the 'install' check is amber — uv produced a shape doctor rejects" ;;
 esac
 
+if [ "$AGENT" = codex ]; then
+    command -v codex >/dev/null 2>&1 || fail "codex is not on PATH after run 1 — its installer did not take"
+    head1 "codex: $(codex --version)"
+    if command -v claude >/dev/null 2>&1; then
+        fail "claude is on PATH after an --agent codex run — Claude Code was installed"
+    fi
+fi
+
 for tool in tmux gh git node; do
     if command -v "$tool" >/dev/null 2>&1; then
         printf '  %-5s %s\n' "$tool" "present"
@@ -202,9 +223,10 @@ git commit -qm "one file, so Repomix has something to pack"
 
 set +e
 # shellcheck disable=SC2086
-sh "$INSTALLER" --yes $AGENT_FLAG
+sh "$INSTALLER" --yes $AGENT_FLAG >"${TMPDIR:-/tmp}/run2.log" 2>&1
 run2=$?
 set -e
+cat "${TMPDIR:-/tmp}/run2.log"
 printf '\nrun 2 exit: %s\n' "$run2"
 [ "$run2" = 1 ] && fail "run 2 exited 1 — a fatal step failed"
 
@@ -217,14 +239,24 @@ head1 "doctor: $total checks, not-ok = [$amber]"
 [ "$total" -ge 15 ] || fail "doctor reported only $total checks — expected the full set (17+)"
 
 # THE ACCEPTANCE CRITERION OF THE WHOLE FEATURE (§0.3, §0.4, §8.3).
-if [ "$amber" != "brain" ]; then
+if [ "$amber" != "$EXPECTED" ]; then
     printf '\n--- full doctor, for the log ---\n'
     aisquare doctor || true
-    fail "expected exactly [brain] amber, got [$amber]"
+    fail "expected exactly [$EXPECTED] amber, got [$amber]"
 fi
-head1 "ACCEPTANCE: 	 every check ok except brain"
+if [ "$AGENT" = codex ]; then
+    # Amber for the review in Codex's /hooks, and for nothing else: hooks installed,
+    # never yet trusted, so never yet seen running.
+    codex_rows=$(aisquare --json doctor 2>/dev/null | tr '{' '\n' | grep '"name": *"codex"' || true)
+    printf '%s\n' "$codex_rows" | grep -q '"detail": *"Codex: unverified in ' ||
+        fail "the codex row is amber for something other than the /hooks review: $codex_rows"
+    # And the summary names that step as the user's own, rather than as unexpected.
+    grep -q "codex — run codex (sign in if it asks), open /hooks and trust aisquare's hooks" \
+        "${TMPDIR:-/tmp}/run2.log" || fail "run 2's summary did not name the /hooks step"
+fi
+head1 "ACCEPTANCE: 	 every check ok except $EXPECTED"
 
-[ "$run2" = 0 ] || fail "with only brain amber the installer must exit 0, got $run2"
+[ "$run2" = 0 ] || fail "with only [$EXPECTED] amber the installer must exit 0, got $run2"
 
 # ---------------------------------------------------------------------------
 # RUN 3 — idempotence, with the package managers stubbed (§3.9.4, §8.4)
@@ -272,6 +304,7 @@ done
 # filtering its own groups is what prevents it — so the file is fingerprinted
 # rather than trusted.
 SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
+[ "$AGENT" = codex ] && SETTINGS="${CODEX_HOME:-$HOME/.codex}/hooks.json"
 before=""
 [ -f "$SETTINGS" ] && before=$(cksum <"$SETTINGS")
 
@@ -310,11 +343,11 @@ if [ -f "$SETTINGS" ]; then
     after=$(cksum <"$SETTINGS")
     [ "$before" = "$after" ] ||
         fail "$SETTINGS changed on a re-run (hook accumulation): $before -> $after"
-    head1 "settings.json byte-identical across the re-run"
+    head1 "$(basename "$SETTINGS") byte-identical across the re-run"
 fi
 
 amber_again=$(amber_checks)
-[ "$amber_again" = "brain" ] || fail "after the re-run, not-ok = [$amber_again], expected [brain]"
+[ "$amber_again" = "$EXPECTED" ] || fail "after the re-run, not-ok = [$amber_again], expected [$EXPECTED]"
 
 # ---------------------------------------------------------------------------
 # RUN 4 — the upgrade path (§3.9.1, §8.4)
@@ -360,7 +393,12 @@ latest=$(
 )
 latest=$(printf '%s' "$latest" | tr ',' '\n' | sed -n 's/^"version":"\([^"]*\)".*/\1/p' | head -1)
 
-if [ -z "$latest" ]; then
+if [ "$AGENT" = codex ]; then
+    # PyPI's release is the target here, and 0.8.0 predates Codex support: its `init
+    # --agent codex` connects nothing. Run 4 is about uv's pin, which the other cells
+    # already prove; this cell's subject is Codex.
+    echo "SKIP: PyPI's aisquare-cli $latest has no Codex hooks to connect yet"
+elif [ -z "$latest" ]; then
     echo "SKIP: could not read the latest version from PyPI"
 elif [ "$latest" = "$pinned" ]; then
     echo "SKIP: PyPI's latest IS $pinned, so an upgrade assertion would be vacuous"

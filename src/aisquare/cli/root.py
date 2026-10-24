@@ -203,7 +203,14 @@ def remember(
     ] = None,
 ) -> None:
     """Remember something across sessions (shorthand for `context add`)."""
-    entry = context_service.remember(text, pool=resolve_pool(user, project), tags=tag or [])
+    from aisquare.services.store_broker import OutOfScope, brokered_call, record_refusal
+
+    try:
+        entry = context_service.remember(text, pool=resolve_pool(user, project), tags=tag or [])
+    except OutOfScope as exc:
+        if brokered_call():
+            record_refusal(exc.kind, str(exc))
+        fail(str(exc), error="out_of_scope")
     emit_entry(entry, verb="remembered")
 
 

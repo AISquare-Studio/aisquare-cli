@@ -129,6 +129,9 @@ Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
   * ``services/fleet.py::_git`` — ``git worktree`` (add, remove, list) and the
     branch queries behind ``fleet reap`` (§3.5); no model, stripped, as every git
     seam is (:func:`git_env`).
+  * ``services/fleet.py::_run_native`` — ``codex queue`` for ``fleet tell`` to a
+    busy Codex agent: a client of the agent's local session store, no model;
+    stripped, so the caller's identity is not handed to a Codex process.
   * ``services/ngrok_tunnel.py::popen_tied`` — the R panel's ngrok, under the
     parent that ends it with this process; a tunnel to ``127.0.0.1``, no model,
     not stripped.
@@ -163,6 +166,13 @@ from dataclasses import dataclass
 #: :data:`IDENTITY_ENV_VARS`, which is this plus :data:`MARKER_ENV_VARS` below.
 TRACING_ENV_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
 
+LAUNCH_AGENT_ENV = "AISQUARE_LAUNCH_AGENT"
+
+#: The pid ``aisquare launch`` ran as, which the agent it execs keeps (POSIX): a hook
+#: whose agent hands it this pid (``AgentCapabilities.pid_env``) is the launch's own
+#: process (``core.agent_sessions.own_process``).
+LAUNCH_PID_ENV = "AISQUARE_LAUNCH_PID"
+
 #: The MARKER half, and the INVENTORY of it: the run key, the role the launch
 #: ran as, and — when the launch owns its Run rather than letting the proxy key
 #: it — the gateway Run key, all exported beside the headers by
@@ -185,7 +195,14 @@ TRACING_ENV_VARS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS")
 #: default) filed its insights and its join under whoever started the server,
 #: which ``trace_marker``'s own docstring calls "worse than no record because it
 #: reads as evidence".
-MARKER_ENV_VARS = ("AISQUARE_PIPELINE_ID", "AISQUARE_TRACE_AGENT_NAME", "AISQUARE_RUN_TRACE_ID")
+MARKER_ENV_VARS = (
+    "AISQUARE_PIPELINE_ID",
+    "AISQUARE_TRACE_AGENT_NAME",
+    "AISQUARE_RUN_TRACE_ID",
+    "AISQUARE_LAUNCH_ID",
+    LAUNCH_AGENT_ENV,
+    "AISQUARE_FLEET_AGENT",
+)
 
 #: Everything :func:`untraced_env` removes: the whole identity, header and
 #: marker. Separate from :data:`TRACING_ENV_VARS` because that tuple has a
@@ -225,6 +242,9 @@ class Seam:
 #: not part of the key: they move on every edit, and a guard that fails on
 #: reformatting is a guard people learn to silence.
 SEAMS: dict[str, Seam] = {
+    "aisquare/services/native_telemetry.py::start_receiver": Seam(
+        EXCLUDED, "local OTLP receiver; not a model process", strips_identity=True
+    ),
     "aisquare/cli/launch.py::_exec": Seam(
         TRACED, "the launch seam — this process BECOMES the agent"
     ),
@@ -377,10 +397,29 @@ SEAMS: dict[str, Seam] = {
         "`doctor --live` needs the EXPLAINABILITY_* environment to diagnose the "
         "machine it is on, the same reason `sdk_doctor` is not",
     ),
+    "aisquare/services/store_broker.py::run_broker": Seam(
+        EXCLUDED,
+        "the store broker a launch of a sandboxed agent starts outside its sandbox (review "
+        "r9 of #113): a process of ours, no model process. NOT stripped: what it runs is the "
+        "agent's own board calls, which keep the agent's Run as from its tool shell",
+    ),
+    "aisquare/services/store_broker.py::_run": Seam(
+        EXCLUDED,
+        "one whitelisted board call (`aisquare <argv>`) the broker runs for its sandboxed "
+        "agent; no model process. NOT stripped: it is the agent's own call, filed under its "
+        "Run as it would be from the tool shell it came from",
+    ),
     "aisquare/cli/fleet.py::_exec_attach": Seam(
         EXCLUDED,
         "`tmux attach` — a terminal client on the fleet server, not an agent; "
         "the agents inside already have their identities",
+    ),
+    "aisquare/services/fleet.py::_run_native": Seam(
+        EXCLUDED,
+        "`codex queue --thread <id> --message <text>` for `fleet tell` to a busy Codex "
+        "agent (`AgentAdapter.queue_args`): a client of the agent's local session store, "
+        "no model process; stripped, so the caller's run and fleet identity stay its own",
+        strips_identity=True,
     ),
     "aisquare/services/fleet.py::_git": Seam(
         EXCLUDED,
@@ -423,7 +462,15 @@ def untraced_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     to is not a failure worth reporting.
     """
     source = os.environ if base is None else base
-    return {key: value for key, value in source.items() if key not in IDENTITY_ENV_VARS}
+    # Nor the scope of a command a sandboxed agent's broker runs (``AISQUARE_BROKERED*``,
+    # ``services.store_broker``): its child (a detached `team distill`) is aisquare's own work
+    # outside the sandbox, run in the board's directory, which the scope's tree need not hold
+    # (review r12 of #113, finding 5).
+    return {
+        key: value
+        for key, value in source.items()
+        if key not in IDENTITY_ENV_VARS and not key.startswith("AISQUARE_BROKERED")
+    }
 
 
 def git_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -446,13 +493,67 @@ def git_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def agent_identity_env_vars() -> tuple[str, ...]:
+    """Every registered agent's process-identity variables: the one it sets in its tools'
+    shells alone (``AgentCapabilities.tool_shell_env``, Codex's ``CODEX_THREAD_ID``), the
+    others those shells get for that one session or sandbox (``tool_shell_vars``: Codex's
+    ``CODEX_SESSION_ID``, ``CODEX_CI``, …) and the one it hands each hook its pid in
+    (``pid_env``, Claude Code's ``CLAUDE_PID``).
+
+    Each says which agent process a shell is under. A tmux server started from inside an
+    agent's tool shell pinned them for every window opened on it, and a ``codex`` started by
+    hand in such a window took itself for that thread's nested child
+    (``core.agent_sessions.own_process``); ``aisquare launch`` clears them only for the
+    agent it starts."""
+    from aisquare.core.agent_adapters import adapters
+
+    named = (
+        name
+        for adapter in adapters()
+        for name in (
+            adapter.capabilities.tool_shell_env,
+            adapter.capabilities.pid_env,
+            *adapter.capabilities.tool_shell_vars,
+        )
+        if name
+    )
+    return tuple(dict.fromkeys(named))
+
+
+def tool_shell_homes(env: Mapping[str, str]) -> tuple[str, ...]:
+    """The config-dir variable (``AgentAdapter.home_env``) of every agent whose tool shell
+    ``env`` is: one holding a variable only its tools' shells are given
+    (``AgentCapabilities.tool_shell_env``, ``tool_shell_vars``). That home is the spawner's
+    own: a fleet server started from a Codex tool shell pinned its ``CODEX_HOME`` for every
+    window, while the one a slot's window runs under travels with that window
+    (``claude_accounts.carry_environment``) and the launch sets its agent's (SMOKE8 of
+    #113). Claude Code's hooks get its ``CLAUDE_PID``, its shells nothing of their own, so
+    its home is never one."""
+    from aisquare.core.agent_adapters import adapters
+
+    homes = (
+        adapter.home_env
+        for adapter in adapters()
+        if any(
+            env.get(name)
+            for name in (adapter.capabilities.tool_shell_env, *adapter.capabilities.tool_shell_vars)
+            if name
+        )
+    )
+    return tuple(dict.fromkeys(homes))
+
+
 def tmux_client_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
-    """What a tmux client runs with: :func:`untraced_env` less :data:`TEAM_ENV_VARS`.
+    """What a tmux client runs with: :func:`untraced_env` less :data:`TEAM_ENV_VARS`, every
+    agent's process identity (:func:`agent_identity_env_vars`) and, from an agent's tool
+    shell, that agent's home (:func:`tool_shell_homes`).
 
     The client that finds no server starts one, and the server keeps that client's
     environment as its global one, so a server the fleet starts holds no team
     variable: ``AISQUARE_PERSONA`` among them, so a window opened in it by hand is briefed
-    as no one's persona (review of #201, F7). The home (``AISQUARE_HOME``) stays: the
-    windows need it.
+    as no one's persona (review of #201, F7). Nor the identity of the agent whose tool
+    shell started it. The home (``AISQUARE_HOME``) stays: the windows need it.
     """
-    return {k: v for k, v in untraced_env(base).items() if k not in TEAM_ENV_VARS}
+    env = untraced_env(base)
+    dropped = {*TEAM_ENV_VARS, *agent_identity_env_vars(), *tool_shell_homes(env)}
+    return {k: v for k, v in env.items() if k not in dropped}

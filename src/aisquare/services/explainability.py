@@ -75,7 +75,8 @@ from urllib.error import URLError
 from urllib.parse import SplitResult, urlsplit
 from urllib.request import urlopen
 
-from aisquare.core import harness, insights, outbox, paths, spawn
+from aisquare.core import insights, outbox, paths, spawn
+from aisquare.core.agent_adapters import adapter_for_binary, adapters
 from aisquare.core.atomic import write_replacing
 from aisquare.core.config import (
     AppConfig,
@@ -118,16 +119,15 @@ _SAFE_ROLE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 _PROBE_TIMEOUT_SECONDS = 1.5
 
-#: The ONE program verified to accept ``--session-id <uuid>`` (Claude Code
-#: 2.1.233) — the name, for the note a refused pin prints. WHETHER a binary is
-#: that program is ``harness.is_default_agent``, the single predicate this and
-#: the role's own ``default_args`` now share: the two gates ran 55 lines apart
-#: in the same launch, each with its own ``"claude"`` literal, and each missed
-#: ``claude.cmd`` and a binding typed with a trailing slash. Since #57 a role
-#: can be bound to any executable, and an unknown flag kills the launch; every
-#: other binary joins through the hook seam instead, which needs no flag at
-#: all, so the narrow match costs nothing but a nicety.
-_SESSION_ID_AGENT = harness.DEFAULT_AGENT_BINARY
+#: The programs verified to accept ``--session-id <uuid>`` are the agents whose
+#: session AISquare names at launch (``capabilities.assigns_session_id``: Claude
+#: Code 2.1.233), each known by its binary's name (``agent_adapters.
+#: adapter_for_binary``), the predicate this and the role's own ``default_args``
+#: share: the two gates ran 55 lines apart in the same launch, each with its own
+#: ``"claude"`` literal, and each missed ``claude.cmd`` and a binding typed with a
+#: trailing slash. Since #57 a role can be bound to any executable, and an unknown
+#: flag kills the launch; every other binary joins through the hook seam instead,
+#: which needs no flag at all, so the narrow match costs nothing but a nicety.
 
 #: Flags whose presence means the caller (or the human) already owns the
 #: session id, so we must read it rather than choose one.
@@ -358,15 +358,15 @@ def disown_inherited_trace(env: MutableMapping[str, str]) -> str | None:
     name needs no pass at all.
     """
     parent_run = (env.get(PIPELINE_ID_ENV_VAR) or "").strip()
-    if not parent_run or not any(env.get(name) for name in RESERVED_ENV_VARS):
-        return None
+    owns_routing = bool(parent_run and any(env.get(name) for name in RESERVED_ENV_VARS))
     # Read off the module, not bound at import, so the derivation is testable:
     # `tests/test_spawn_seams.py` adds a name to the tuple and asserts this
     # pops it. A `from … import` here would coincidentally match the tuple
     # today and silently stop following it tomorrow.
     for name in spawn.IDENTITY_ENV_VARS:
-        env.pop(name, None)
-    return parent_run
+        if owns_routing or name in spawn.MARKER_ENV_VARS:
+            env.pop(name, None)
+    return parent_run if owns_routing else None
 
 
 def trace_marker(wiring: SessionWiring) -> dict[str, str]:
@@ -410,10 +410,18 @@ def traced_by(env: Mapping[str, str] | None = None) -> tuple[str, str] | None:
 
 
 def accepts_session_id(binary: str) -> bool:
-    """Whether ``binary`` is one we may hand ``--session-id`` to."""
+    """Whether ``binary`` is one we may hand ``--session-id`` to: its name runs an agent whose
+    session AISquare names at launch (``capabilities.assigns_session_id``)."""
     if os.environ.get(_PIN_ENV_VAR, "").strip().lower() in _OFF_VALUES:
         return False
-    return harness.is_default_agent(binary)
+    adapter = adapter_for_binary(binary)
+    return adapter is not None and adapter.capabilities.assigns_session_id
+
+
+def _session_id_binaries() -> str:
+    """The binaries that take ``--session-id``, as a refused pin's note names them."""
+    named = [a.binary for a in adapters() if a.capabilities.assigns_session_id]
+    return " or ".join(named) or "an agent that takes one"
 
 
 def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
@@ -427,6 +435,10 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
     may not speak the flag: same answer, for the same reason. Otherwise mint a
     fresh id and hand it over — the only case that produces a real join.
     """
+    # Flags past the native literal boundary are prompt text, not identity.
+    args = list(args)
+    if "--" in args:
+        args = args[: args.index("--")]
     present, value = _flag_value(args, _SESSION_ID_FLAG)
     if present:
         if value is None:
@@ -445,8 +457,15 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
             return SessionIdentity(None, note=f"{flag} resumes a session chosen at run time")
     if not accepts_session_id(binary):
         return SessionIdentity(
-            None, note=f"{os.path.basename(binary)!r} is not {_SESSION_ID_AGENT}"
+            None, note=f"{os.path.basename(binary)!r} is not {_session_id_binaries()}"
         )
+    return minted_identity()
+
+
+def minted_identity() -> SessionIdentity:
+    """A fresh session id, handed to the agent as ``--session-id``: for an agent whose
+    session AISquare names at launch (``capabilities.assigns_session_id``), a fresh start or
+    a fork that names the new session itself (``ForkArgs.mints_id``)."""
     session_id = str(uuid.uuid4())
     return SessionIdentity(session_id, inject_args=(_SESSION_ID_FLAG, session_id))
 
@@ -1083,7 +1102,7 @@ def install_hint(*, editable: bool | None = None) -> str:
 
 def key_path() -> Path:
     """File holding the workspace ingest key (mode 600)."""
-    return paths.aisquare_home() / "explainability-key"
+    return paths.explainability_key_path()
 
 
 def stored_api_key() -> str | None:
@@ -1681,14 +1700,36 @@ def _init_sdk(gateway_url: str, api_key: str) -> Any:
 
 
 def _drain(sdk: Any, settings: ExplainabilitySettings, batch: list[Path]) -> ShipReport:
+    groups = _group_by_session(batch)
+    # The whole batch is claimed in one receipts transaction; what this drain does not
+    # reach (a gateway failure ends it) goes back to the queue.
+    ordered = [path for paths_for_run in groups.values() for path in paths_for_run]
+    held = {
+        path: handle
+        for path, handle in zip(ordered, outbox.claim_all(ordered), strict=True)
+        if handle is not None
+    }
+    try:
+        return _ship(sdk, settings, groups, held)
+    finally:
+        for handle in held.values():
+            outbox.release(handle)
+
+
+def _ship(
+    sdk: Any,
+    settings: ExplainabilitySettings,
+    groups: dict[str, list[Path]],
+    held: dict[Path, Path],
+) -> ShipReport:
     sent = 0
     deferred = 0
     dead = 0
     runs: list[str] = []
-    for run_key, paths_for_run in _group_by_session(batch).items():
+    for run_key, paths_for_run in groups.items():
         claimed: list[tuple[Path, dict[str, object]]] = []
         for path in paths_for_run:
-            handle = outbox.claim(path)
+            handle = held.pop(path, None)
             if handle is None:  # another sweeper got there first
                 continue
             record = outbox.load(handle)
@@ -1858,6 +1899,38 @@ class _ClientLaneSegment:
 def _emit_span(sdk: Any, record: dict[str, object]) -> None:
     """Replay one spooled record as a span inside the open Run."""
     text = str(record.get("text") or "")
+    if record.get("kind") == "native_event":
+        facts = record.get("native")
+        facts = facts if isinstance(facts, dict) else {}
+        name = str(facts.get("event.name", "codex.event"))
+        if name == "codex.tool_result":
+            with sdk.ToolCallTracer(
+                tool_name=str(facts.get("tool_name") or facts.get("tool.name") or name)
+            ) as tool:
+                tool.set_result(json.dumps(facts, sort_keys=True))
+        elif any(key in facts for key in ("input_token_count", "gen_ai.usage.input_tokens")):
+            model = str(facts.get("model") or facts.get("gen_ai.request.model") or "unknown")
+            with sdk.LLMCallTracer(
+                model=model, provider=str(facts.get("provider_name") or "unknown")
+            ) as llm:
+                llm.set_token_counts(
+                    prompt=insights.token_count(
+                        facts.get("input_token_count")
+                        or facts.get("gen_ai.usage.input_tokens")
+                        or 0
+                    ),
+                    completion=insights.token_count(
+                        facts.get("output_token_count")
+                        or facts.get("gen_ai.usage.output_tokens")
+                        or 0
+                    ),
+                )
+        else:
+            with sdk.DecisionTracer(decision_type=name) as decision:
+                decision.set_selected(
+                    json.dumps(facts, sort_keys=True), reason="Codex native telemetry"
+                )
+        return
     if record.get("kind") == "ci_turn":
         # The CI test bed's ledger-join record: ids and timings, no prose. It
         # is a fact about the turn rather than a decision anyone took, but a

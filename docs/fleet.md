@@ -12,8 +12,9 @@ Three ideas carry the whole feature:
 - **One view.** Left: a navigator — `Fleet ▸ projects ▸ agents`, then under a
   line *⚙ Settings* (App settings, Accounts, Doctor, and *Fleet*'s *Restart all…*
   and *Stop all…*) with a dim status line: the
-  AISquare sign-in and the Claude accounts' headroom as two dots (`?` explains
-  the colours; a click opens Accounts). Right: whatever you clicked — onboarding
+  AISquare sign-in and the Claude accounts' headroom as two dots, and with Codex
+  accounts a line of their own under it, `● 1× codex` (`?` explains the colours;
+  a click opens Accounts). Right: whatever you clicked — onboarding
   for a new directory, a project's manager, an agent's live session, the board,
   the settings, doctor findings with their fixes.
 - **tmux is the substrate.** Agents run as windows of a per-project session on a
@@ -37,7 +38,7 @@ Three ideas carry the whole feature:
 | Tool | Needed for | Minimum |
 | --- | --- | --- |
 | **`tmux`** | the fleet itself — spawning and surfacing agents | **3.2** (`new-window -e`, extended keys); **3.5+ recommended**, where shift+enter and the other extended chords reach the agent (3.3/3.4 would mistype them, so there shift+enter travels as ctrl+J — Claude Code's same newline — and the rest are refused with a warning) |
-| **`claude`** | every fleet role runs on Claude Code | 2.1.x — `--session-id`, `--permission-mode`, `--effort` |
+| **`claude`** or **`codex`** | every fleet role runs on a terminal coding agent: Claude Code, Codex, or each role its own ([coding agents](coding-agents.md)) | Claude Code 2.1.x — `--session-id`, `--permission-mode`, `--effort`; Codex CLI 0.162.1 — `--approve-for-me`, hooks |
 | `git` | worktrees for coders and reviewers | 2.20+ |
 | `gh` | *optional* — the coder opens PRs and the reviewer reviews them with it | any current release |
 | Python | the CLI | 3.11+ |
@@ -56,20 +57,24 @@ Windows: run everything inside WSL2, as you already would for Claude Desktop.
 On Windows-native, `asq` prints a one-line "the fleet needs tmux — run inside
 WSL2" and every other command works as before.
 
-Then the CLI, connected to Claude Code:
+Then the CLI, connected to your coding agent (the Welcome page in `asq` does
+this step for you):
 
 ```sh
 pipx install 'aisquare-cli[tui]'          # or: pip install 'aisquare-cli[tui]'
 aisquare agents connect claude-code       # the lifecycle hooks the fleet reads state from
+aisquare agents connect codex             # or Codex's, in CODEX_HOME
+aisquare agents use codex                 # Codex for every launch (the default is Claude Code)
 aisquare doctor                           # is everything wired? (and how to fix anything)
 ```
 
 Textual, the UI toolkit, becomes a core dependency of `aisquare-cli` with the
 fleet (plan §3.7); `[tui]` stays as a no-op alias for one release, so the line
 above is right on either side of that change. The hooks matter: an agent's
-state chip (working · waiting · needs you) comes from the same five Claude Code
-hooks the board already uses, so an agent launched without them shows only what
-tmux can see and its row says so (`no hooks`).
+state chip (working · waiting · needs you) comes from the lifecycle hooks the
+board already uses (Claude Code's, or Codex's once you trust them in its
+`/hooks`), so an agent launched without them shows only what tmux can see and
+its row says so (`no hooks`).
 
 ---
 
@@ -77,8 +82,21 @@ tmux can see and its row says so (`no hooks`).
 
 1. **Run `asq`** (or `aisquare`) in a terminal. The UI opens: the navigator on
    the left and a Welcome page on the right that walks you to a fleet in three
-   steps: pick a project, connect Claude Code (it names the install command
-   when Claude Code is missing), then start the manager and two coders. Press
+   steps: pick a project, set up your coding agent, then start the manager and
+   two coders. Step 2 is the agent the fleet will launch: Claude Code, or Codex
+   where you chose it or where it is the only one installed. It names the
+   install commands when the agent is missing (both agents' when neither is
+   installed), and with both installed it asks which to use and saves the pick as
+   your default (`aisquare agents use`). It shows the version, whether the account
+   the manager will run on is signed in — *Sign in* opens the Accounts page, for
+   Codex with `codex login` already open there — and *Connect* installs aisquare's
+   hooks. Codex runs hooks only once you trust them: the card says so, and you do
+   it in the manager's pane (`/hooks`), the first time it starts. Step 3 starts
+   the manager and the coders on that agent, each on the account the account
+   ladder picks (see [Accounts](#accounts)); a role bound to an agent of its own
+   (`aisquare team bind coder --agent claude-code`) keeps it. Both agents ask
+   whether to trust a new folder on their first start, so step 3 types nothing
+   into the manager: you answer it in its pane. Press
    `w` in the sidebar to come back to it. No script ever meets a
    full-screen app, and the two ways of getting no UI differ. **In a pipe or
    with `TERM=dumb`**: the help page on stdout and exit 2, byte for byte as
@@ -96,8 +114,9 @@ tmux can see and its row says so (`no hooks`).
    navigator. Doctor warnings are listed with their fixes; the fix is one click
    where it is a known command (Phase 2).
 3. **Click the project.** The Project view opens on its **Manager** tab. Press
-   *Start manager* and the manager's live Claude Code session fills the pane.
-   Type your goal to it in prose, exactly as you would to any Claude session. It
+   *Start manager* and the manager's live coding-agent session fills the pane.
+   Type your goal to it in prose, exactly as you would to any supported terminal
+   agent session. It
    writes contract-carrying tasks, spawns coders, a tester, a ui-tester for
    anything a user sees, and a reviewer as the
    work needs them, reopens what fails, calls a validator once everything is
@@ -109,7 +128,7 @@ tmux can see and its row says so (`no hooks`).
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
    state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
-   bell), **⏳ limited** (parked on a Claude usage limit, with the reset time),
+   bell), **⏳ limited** (parked on a usage limit, Claude Code's or Codex's, with the reset time),
    **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it. The header
    carries a **Stop** button whenever the agent still has a process, and on a
@@ -129,26 +148,33 @@ tmux can see and its row says so (`no hooks`).
    project, headed with its name and codename. It reads in two steps. First who
    runs it: role (the fleet's roles plus any role bound with `team bind`;
    `manager` is greyed out while one runs; *Pick…* beside it opens the target
-   picker — a bound teammate or an account fills these fields), account and
-   binary. Then as whom:
+   picker — a bound teammate or an account fills these fields), agent (blank: the
+   role's, which the field names), account (that agent's slots alone; one preset
+   or picked brings its agent) and binary (its placeholder is that agent's).
+   Then as whom:
    **persona** — `(none)` or one of the project's personas, the role's
    `[fleet.roles.<role>].persona` preselected, its description shown under it,
    and *Import…* beside it to bring one in (`docs/personas.md`).
    Then label (prefilled `<role>-1`, or `<role>-<task short id>` once a task is
    picked; 🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
    disables *Spawn* and shows the rule), task (the project's open tasks),
-   worktree (disabled with "not a git repository" outside one), permission mode,
-   extra agent args (split like a shell would; a quoting error is shown inline)
+   worktree (disabled with "not a git repository" outside one), permission (one
+   `WRITE:APPROVALS` for every agent, else the agent's own: Claude Code's mode,
+   or Codex's sandbox and approval policy, with the flags they pass shown under
+   them), extra agent args (split like a shell would; a quoting error is shown inline)
    and a first prompt. A field left as it opened means the role's default,
    exactly as an omitted `fleet spawn` flag does; picking `(none)` over a role
    that has a default persona spawns without one. A refusal —
    the agent limit, a binary not on your `PATH` — stays in the dialog with its
    reason; a spawn toasts its receipt and notes and opens the new agent's pane.
+   The dialog has no agent field yet: the role's binding (`team bind`,
+   `[agents]`) decides between Claude Code and Codex, and `fleet spawn --agent`
+   picks one for a single spawn.
    `Esc` cancels, except while a spawn is already running: that one cannot be
    taken back, so the dialog waits for its answer, and *Pick…* and *Import…*
    are disabled until it has it.
 5. Selecting an agent gives its pane the keyboard at once — type, and it reaches
-   Claude Code. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
+   the agent. **Press `F12`** to hand focus back to the sidebar (it is the one key the pane
    never forwards; configurable). With the sidebar focused: `t` picks a theme,
    `x` opens the Stop dialog for the selected agent — the same rule as the
    button, so on a project row or a **✗ lost** agent it does nothing — `q` quits
@@ -184,7 +210,14 @@ manager's loop. Model ladders and effort come from the existing harness
 (`aisquare team harness` shows the matrix): the manager rides the planner's
 ladder (`fable → opus → sonnet`); coder, tester, ui-tester and reviewer start on `sonnet`
 with `opus` as the fallback rung; the validator runs `fable → opus`, one effort
-tier above the work it gates.
+tier above the work it gates. `fleet spawn` passes the role's model and effort as
+`team spawn` resolves them, without a paid probe at the spawn (the cached verdicts,
+else the first rung; Claude Code runs its own default where the account lacks the
+model). A Codex role takes `[agents.models.codex]` (and `[agents.models.codex.roles.
+<role>]`), else Codex's own default; `[agents.models.claude-code]` pins Claude Code's
+over the ladder, and `AISQUARE_MODEL_<ROLE>`/`AISQUARE_EFFORT_<ROLE>` pin either. A
+hand `aisquare launch <role>` leaves Claude Code's argv as it always was (its own
+default), and gives Codex its configured pins.
 
 | Fleet role | Repo role | Job in the loop | Runs in |
 | --- | --- | --- | --- |
@@ -193,14 +226,20 @@ tier above the work it gates.
 | **tester** | `runner` (`tester` is the fleet's name for it; `runner` still works everywhere) | adversarial verification: runs the *full* check the contract names, tries to break the change, then `task done` with evidence or `task reopen` with the reason | the repo root. It gets no worktree of its own and **nothing moves it into the coder's** — so whoever spawns it names the branch or the tree to check, in the tester's `--prompt` or a later `fleet tell`, or its "full check" runs against an unchanged root |
 | **reviewer** | new | reads the PR as the stranger who will maintain it; findings on the PR via `gh pr review`. Launched without the tools that edit files (`--disallowedTools=Edit Write NotebookEdit`) and with its shell: Claude Code's `--restricted` removes the Bash that `gh pr diff`, `gh pr review` and its `aisquare` cycle need (0.6.0 and 0.7.0 launched it so, and it could do none of them). Its shell could still push or merge: its briefing forbids both and `auto` mode checks each action, but only the credentials it runs with can refuse them (see the table below) | its own worktree |
 | **validator** | `validator` | one final gate over the assembled deliverable before the manager says READY | the repo root |
-| **ui-tester** | new | verifies tasks titled `UI: …` in a **real browser** — Claude in Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever this window has — and measures (screenshots, computed sizes, console, network) instead of eyeballing; `task done` names the branch or commit and the URL it verified, or `task reopen` carries a screenshot. With no browser tool it runs the non-browser checks and reopens the task as "not browser-verified", never passes it. **Asked to be read-only, not made read-only** — its briefing says never edit and never push, and nothing enforces that (see the permission-mode table below: no allowed-tools list is written or passed, and `--restricted` would remove the Bash its own `task done`/`task reopen` need). Launched with `--chrome` by the role itself (`RoleProfile.default_args`), on any machine, unless `--no-chrome` is given | the repo root. Like the tester it gets no worktree and **nothing moves it into the coder's** — worse here, because it fails silently: it opens the URL, sees a working page and measures the PRE-change build honestly. So whoever spawns it names the branch or tree and the URL in its `--prompt` (the manager's loop does), and its verdict says which build it measured |
+| **ui-tester** | new | verifies tasks titled `UI: …` in a **real browser** — Claude in Chrome, the Chrome DevTools MCP or a Playwright MCP, whichever this window has — and measures (screenshots, computed sizes, console, network) instead of eyeballing; `task done` names the branch or commit and the URL it verified, or `task reopen` carries a screenshot. With no browser tool it runs the non-browser checks and reopens the task as "not browser-verified", never passes it. **Asked to be read-only, not made read-only** — its briefing says never edit and never push, and nothing enforces that (see the permission-mode table below: no allowed-tools list is written or passed, and `--restricted` would remove the Bash its own `task done`/`task reopen` need). Launched with `--chrome` by the role itself (`RoleProfile.default_args`), on any machine, unless `--no-chrome` is given; on Codex it gets no flag and browses with Codex's own `browser_use` feature and bundled browser plugin, which `aisquare doctor`'s browser-tools line reads from its `config.toml` | the repo root. Like the tester it gets no worktree and **nothing moves it into the coder's** — worse here, because it fails silently: it opens the URL, sees a working page and measures the PRE-change build honestly. So whoever spawns it names the branch or tree and the URL in its `--prompt` (the manager's loop does), and its verdict says which build it measured |
 
 The manager talks to its agents only through the board — tasks, notes, signals
 — and `fleet tell` nudges. When a sub-agent writes a result to the board, the
 manager is woken (a fixed one-line nudge typed into its pane, only while it is
 *waiting*) and reads the update on its next turn; when the manager stops with
 new board events pending, its `Stop` hook lets it continue. No daemon, no poll
-loop, and it works with the UI closed (Phase 5).
+loop, and it works with the UI closed (Phase 5). A Codex agent's board write
+is run by its launch's broker, outside Codex's sandbox (where the fleet's tmux
+socket is refused, and stays refused: from there it could type into any pane), so
+the nudge is sent from there; where tmux refuses it all the same, the write
+leaves the nudge owed in the store and the agent's own `PostToolUse` hook, which
+Codex runs outside the sandbox, sends it as the command ends (its `Stop` hook, if
+that one could not), only while the manager has not yet read the news.
 
 Standalone use is unchanged: `aisquare launch planner` and `aisquare launch
 runner` keep working outside any fleet.
@@ -223,7 +262,7 @@ aisquare fleet spawn coder --label coder-auth --task tsk_01k9q8p3
 aisquare fleet spawn tester --no-worktree
 aisquare fleet spawn reviewer --permission-mode acceptEdits
 aisquare fleet spawn coder --persona skeptic
-aisquare fleet spawn coder --bin claude2 --prompt "start from the failing test" -- --model opus
+aisquare fleet spawn coder --agent claude-code --bin claude2 --prompt "start from the failing test" -- --model opus
 ```
 
 Starts an agent in the project's tmux session — a window running
@@ -241,9 +280,11 @@ follows as a `⚠` line.
 | `--label L` / `-l L` | the agent's label (see [Naming](#naming)) | `<role>-<task short id>` with `--task`, else `<role>-<n>` |
 | `--task ID` | the board task this agent is for (id or prefix) | none |
 | `--worktree` / `--no-worktree` | run in its own git worktree | the role's setting: on for coder and reviewer |
-| `--permission-mode M` | Claude Code permission mode | the role's setting: `auto` |
-| `--bin B` | the agent executable | the role's binding, else `claude` |
-| `--prompt TEXT` | first message typed once the agent is up | none |
+| `--permission-mode M` | one permission for any agent, `WRITE:APPROVALS` (`workspace:auto`, `read_only:auto`, `workspace:ask`, `full:never`…), mapped to the agent's own flags ([the table](#one-permission-for-every-agent)); or a value in the agent's own words (Claude Code's `auto`, `acceptEdits`, …; Codex's sandbox) | the role's setting: `permission`, else the agent's own (`auto` on Claude Code, `--approve-for-me` on Codex) |
+| `--agent A` | the coding agent (`claude-code`, `codex`) | the role's binding, the project's, the user's default |
+| `--sandbox S` / `--approval P` | Codex's own sandbox and approval policy for this spawn; not beside a `WRITE:APPROVALS` `--permission-mode` | the role's setting |
+| `--bin B` | the agent executable | the role's binding, else the agent's (`claude`, `codex`) |
+| `--prompt TEXT` | its first message: typed once Claude Code's session has started, on Codex's command line ([below](#the-first-prompt-and-the-folder-trust-dialog)) | none |
 | `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
@@ -256,6 +297,32 @@ persona the project does not have (the known names are listed; a stale
 before any window exists. A known role is one of `aisquare launch`'s roles, a
 numbered seat of one (`coder2`), or a role bound with `team bind` — the same
 rule `aisquare launch` applies, public as `services.fleet.role_ok`.
+
+#### The first prompt and the folder-trust dialog
+
+A folder an account has not trusted (each account slot keeps its own trust, so a
+spawn onto a new `--account` meets it) opens Claude Code at its folder-trust
+dialog. The agent is already in the pane's foreground there, the dialog fires no
+hook, and an Enter answers it with its default, *No, exit* (measured on Claude Code
+2.1.300). So `--prompt` waits for the agent's `SessionStart`, which Claude Code
+fires once it sits at its prompt, past the dialog, and types the prompt then (a
+folder inside one the account trusts asks nothing, and it starts in a few
+seconds). If the session has not started within 20 s and a dialog is on the
+agent's screen (its `Enter to confirm` row, under the folder-trust and MCP-server
+dialogs alike), the prompt is not typed: it is filed as a board note to the agent's
+label, and the receipt says so. Answer the dialog in the agent's pane (`aisquare
+fleet attach`), then `aisquare fleet tell <label> …` types its first prompt, whose
+delta carries the note. With no dialog on screen the start is waited for up to two
+minutes (a slow machine; Claude Code 2.1.300 started within a second resuming a
+67 MB transcript), and the same note follows only past that. `fleet restart`,
+`fleet switch` and the automatic hand-over type their one line the same way. Where
+no hook can say the session started — the board off (`AISQUARE_TEAM=0`), or a
+launch that names no session (`-- --continue`) — the prompt is typed once the agent
+is in the foreground, as before, and not while a dialog is on its screen: past 20 s
+at one it is not typed, and the receipt says to answer it and `fleet tell` the
+prompt. Codex takes its first prompt on its
+command line and submits it after its own folder-trust and hook-review dialogs are
+answered, so nothing is typed into a Codex pane at spawn.
 
 **What the agent is told.** `fleet spawn` exports `AISQUARE_FLEET_AGENT` — the
 agent's row — onto its window, and the session-start hook joins the session to
@@ -295,6 +362,18 @@ task and never takes its row, whatever start it reports. A binary that exports
 no `CLAUDE_PID` binds its row on first arrival and keeps that session; a
 `/clear` there releases its claims, as any session end does.
 
+A **Codex** agent hands its hooks no pid of its own (the `CLAUDE_PID` one finds
+is whoever started the tmux server's). It is told apart the other way round:
+Codex sets `CODEX_THREAD_ID` in the shells its tools run in and never in its own
+hooks (measured on 0.162.1), so a `codex exec` one of its tools starts fires every
+hook with its parent's thread there, and is never briefed on the parent's task
+and never takes its row; `aisquare launch` clears the variable for the agent it
+starts. Codex's `/clear` (and `/new`) fires no `SessionEnd` for the thread it
+leaves, only a `SessionStart` with source `clear` for a new id, which comes with the
+new thread's first prompt: the row and every claim move to that id there. A `/resume` to an earlier thread takes the row, the
+claims and the MCP server's identity back to it; a fresh hand-over's replacement
+takes over the parked claims at its first start.
+
 ### `fleet ls` / `fleet status`
 
 ```sh
@@ -310,7 +389,10 @@ have ended. `status` is the same data, always live only.
 
 State is **derived, never stored**: a fresh board session row wins (working ·
 waiting · attention · limited — the last one trusted until the reset it names
-has passed, since a parked agent fires no hook); otherwise tmux's facts (a dead
+has passed, since a parked agent fires no hook; and a Codex agent's attention
+until one of its hooks moves it or its screen shows Codex's working line again,
+which is the moment the human allows the command, since Codex redraws its
+approval view every second it waits); otherwise tmux's facts (a dead
 pane → exited with its code; activity → working; else waiting); no pane at all → lost; `· unknown`
 when neither source can answer. A row whose socket another tmux server answers on
 reads `unknown (another tmux server on its socket)` whatever its board says (see
@@ -348,6 +430,44 @@ Under `--json`, `typed` is `yes`, `no`, `unsent` or `maybe` beside `delivered`:
 its pane to send it), `maybe` when tmux did not answer in time with the text or its
 Enter, which may still arrive. Neither is to be told again: read the agent's pane.
 
+A **Claude Code** agent is *waiting* from its `SessionStart` on: Claude Code fires
+it once the agent sits at its prompt, past the folder-trust dialog, so a fresh
+agent is typed into before its first prompt (a compaction's `SessionStart` comes
+mid-turn and changes nothing). Until it has started, the message is a board
+note: the folder-trust dialog fires no hook and is as quiet as a prompt, and an
+Enter there picks its default, *No, exit* (measured on Claude Code 2.1.300).
+Started is what the agent's own hook wrote in this launch's record, never the
+board session's last-seen time: a resumed replacement keeps its predecessor's
+session, which a `team prune` may end after the launch, and that stamp is the
+prune's. An
+agent whose start no hook can say (the board off, `-- --continue`) is typed into
+when it reads *waiting*, as before, unless a dialog of its own is on its screen:
+then the message is the board note, and with the board off `fleet tell` refuses.
+
+A **Codex** agent's pane going quiet does not show that it sits at its prompt —
+its folder-trust and hook-review dialogs are as quiet — so its own hooks decide:
+typed when they freshly say *waiting*; when they freshly say *working*, queued
+for its next turn with `codex queue --thread <its thread> --message=<text>` under
+its own `CODEX_HOME` (`✓ queued for its next turn`; measured on 0.162.1: the
+message ran as the next turn of an interactive session busy with one). When they
+say nothing fresh — Codex fires no hook before its first prompt, so an agent
+started without one (asq Welcome's coders) has none yet — it is typed into when
+its pane is quiet and shows Codex's empty prompt (the footer `? for shortcuts`);
+`codex queue` cannot reach a thread before its first prompt (under
+`--no-alt-screen`, which draws no such footer, the empty composer with only its
+model line under it). Hooks that say *waiting* need that empty prompt too: after a turn ends Codex can open a dialog of its
+own (*Switch to gpt-6-luna for lower credit usage?*, past a turn near its limit),
+where the Enter after a typed line picks for you, so a message to a Codex showing
+anything else is a board note that says so. A fleet window's Codex launches with
+`-c notice.hide_rate_limit_model_nudge=true`, which keeps that dialog closed, and
+`-c check_for_update_on_startup=false`, which keeps its *Update available* dialog out of
+a starting pane (whose first choice, *Update now*, an Enter picks), each unless your own
+config (or `-c`, or the `-p` profile) sets that key. Anything else, or a
+queue that fails, is the board note. Every typed line is one paste with its Enter
+a moment later, as `fleet stop` types `/exit`: Codex reads keys in one burst as a
+paste and keeps an Enter inside it as text. The manager's wake-up nudge is typed
+the same way, under the same rule.
+
 `aisquare persona attach <name> --to <label>` types a persona's briefing into a
 waiting agent the same way, and keeps the persona on the agent's row so a `/clear`
 or a restart briefs it again ([docs/personas.md](personas.md)). A busy agent gets
@@ -362,7 +482,8 @@ aisquare fleet stop coder-auth
 aisquare fleet stop coder-auth --force
 ```
 
-Sends `/exit`, waits a grace period, then kills the window. The agent's own
+Sends the agent's exit command (`/exit` for Claude Code and Codex, typed with its
+Enter a moment later), waits a grace period, then kills the window. The agent's own
 `SessionEnd` hook releases its task claims on the way out; whatever the ended
 session still held (a killed process fires no hook) is released here and named
 in the output — `🔓 N claimed task(s) released back to the board`, each task
@@ -371,9 +492,16 @@ inherits is visible. A release the store refused — or one the board could not
 be told about — is reported, never swallowed: the row is down, the operator is
 told which claims stayed with the ended session, and the command **exits 1**,
 the same contract `fleet shutdown` and `fleet reap` keep for the same fact.
-`--force` skips the graceful exit. In `asq` this is the agent view's **Stop**
-button and `x` on the selected sidebar row — the same command behind one
-confirmation, `--force` included.
+`--force` skips the graceful exit. A Codex agent whose screen does not show its
+empty prompt (kept under an empty composer through a turn) is showing a dialog or
+a draft that `/exit` and its Enter would answer, so nothing is
+typed: the window is killed at once and the output says why (`killed` under
+`--json`). The automatic usage-limit hand-over, which nobody watches, presses Esc
+there first (the agent's `dismiss_key`), and types `/exit` once the empty prompt
+is back, so the agent's `SessionEnd` ends the session it leaves; a screen Esc does
+not bring back is killed as above.
+In `asq` this is the agent view's **Stop** button and `x` on the selected sidebar
+row — the same command behind one confirmation, `--force` included.
 
 **When tmux cannot confirm the pane died** — a wedged server, a `tmux` that
 left `PATH`, a socket that is there but refuses this user (`Permission denied`)
@@ -535,13 +663,27 @@ nothing is stopped or killed: a socket is asked without tmux. Without
 leaving `PATH`. `aisquare uninstall` names it for a row it counts as running
 that no tmux here can reach.
 
-What it kills is the fleet's own `asq-<codename>` sessions, never the server:
-`tmux kill-server` would take down every session on that socket, and the fleet's
-claim is only ever to its own (a hand-made session, or one a failed `rename`
-left under an old name, is not the fleet's to destroy — and `[fleet]
-tmux_socket` may point anywhere). A server with nothing left on it exits by
-itself, so the next `asq` or `fleet spawn` starts a fresh one on whichever
-account that shell carries.
+What it kills is the fleet's own sessions, never the server: `tmux kill-server`
+would take down every session on that socket, and the fleet's claim is only ever
+to its own (a hand-made session is not the fleet's to destroy — and `[fleet]
+tmux_socket` may point anywhere). A project's sessions are every one its spawns
+made, by tmux's own id for it (`$3`), kept beside the launch records, plus the ones
+its records name and the session its agents from before this version run in (the
+one tmux says holds their panes) — whatever rows are left, or how long ago they
+ended, and never by the project's codename in the store, which no agent's sandbox
+can write now (the store is read-only there) and none trusts. A row ended in the store while its window runs is stopped like a running
+one. `--all` also sweeps every `asq-` session tmux lists, sparing one that holds a
+row the run left live. A server with nothing left on it exits by itself, so the
+next `asq` or `fleet spawn` starts a fresh one on whichever account that shell
+carries.
+
+An agent spawned before this version is stopped like any other: the first fleet
+command of this version took a census of such rows, before anything sandboxed could
+write the store, and placed each by its row as it stood then. A row with no record
+that the census did not find (a fake row, or one whose record was lost) is stopped
+only by removing a dead window of its, ended as lost when it was spawned before this
+boot, and otherwise left live, saying so: end it in its own window, and `--forget`
+ends its row on your word.
 
 Board notes and tasks are kept, but the ended rows' **claims are released**: a
 task left `doing` by a session that no longer exists is not untouched, it is
@@ -591,15 +733,13 @@ aisquare fleet attach --project amber-otter
 
 Replaces this terminal with `tmux attach` on the project's fleet session — the
 full-fidelity escape hatch. Under `--json` it prints the command it would run
-instead of running it. The session is found on the server the project's live
-agents are on, at the socket their spawns recorded (`tmux -S`), the line the
-project's Settings tab prints, so it works from a shell under another `TMUX_TMPDIR`. With
-no live agent, the servers its ended agents were on are asked, the latest to
-end first: an ended manager's window lingers there and holds the session, the
-screen behind the 💤 row. Last, the socket this shell's tmux looks at, but
-only while no live agent recorded where its server listens: from a shell under
-another `TMUX_TMPDIR` that is another server, and its session of that name is
-not the one the agents are in.
+instead of running it. The session is one the project's spawns made, its live
+agents' records name (the manager's first) or its agents from before this version
+run in, by tmux's own id for it, on the server their spawns recorded (`tmux -S`),
+the line the project's Settings tab prints, so it works from a shell under another
+`TMUX_TMPDIR` and after a rename tmux was not told of. A session the project's
+spawns made is asked however long ago its last agent ended: an ended manager's
+window lingers there and holds the session, the screen behind the 💤 row.
 
 **Scope and exit codes.** `--all` and `--project` name different scopes and are
 refused together rather than one silently winning — a usage error, exit **2**,
@@ -735,7 +875,8 @@ tunnel, with the link, a QR code and the passphrase in one panel — see
 ## Accounts
 
 *⚙ Settings ▸ Accounts* — or a click on the status line under *⚙ Settings* —
-opens one page for the two logins the fleet leans on.
+opens one page for the logins the fleet leans on: AISquare's, and each coding
+agent's.
 
 **AISquare** is on top. The card reads the session `aisquare login` stores and
 shows who you are and when it expires. *Sign in* runs the same browser flow the
@@ -889,6 +1030,17 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   accounts trust <dir>`* in `fleet ls`, the sidebar and the Remote, and a spawn
   does not type its prompt into it: it waits for the answer, then leaves the
   prompt untyped with a note.
+
+  Codex accounts share it the same way, among themselves: Codex keeps a yes as a
+  `[projects."<folder>"]` table of `trust_level = "trusted"` in each slot's
+  `config.toml`, so the table that covers the folder is appended to the slot a
+  launch runs on, every other byte of the file kept, the file made if the slot
+  has none. Codex's own rules decide (measured on 0.162.1): it asks only in a git
+  checkout and records the repository's root; the folder's own entry decides
+  first, then the root's, and nothing above them. A table that says
+  `untrusted` is that account's no and is never overridden; `accounts trust`
+  reports it and leaves it to you. A Claude account's yes is not a Codex
+  account's, nor the reverse: each agent asks its own question.
 - **One settings.json.** Opt-in — *share settings.json* in App settings,
   `accounts.share_settings` — every managed account's `settings.json`
   (permissions, hooks, model, status line) becomes a link to the plain claude's,
@@ -907,22 +1059,66 @@ are read from what Claude Code recorded, and a token is never refreshed by the
 CLI. Claude Code refreshes it on the account's next session. The two things the
 accounts share (above) are the only writes into an account's directory.
 
+**Codex** accounts are slots on the same ladder — one number names one login
+across both agents — and everything above works for them, with four
+differences ([Codex accounts](coding-agents.md#codex-accounts) has the
+details):
+
+- Slot **0** is the plain `codex` of your shell (`CODEX_HOME`, else
+  `~/.codex`); a managed one lives under `~/.aisquare/codex-accounts/` and
+  launches with `CODEX_HOME` pointing at it. The page shows them in a **Codex**
+  section of their own, below Claude Code's, once Codex is installed or has a
+  slot. **+ Add Codex account** (or `accounts add --agent codex`) runs `codex
+  login` in a fresh slot in the same watched pane, and **Sign in** on a row
+  runs it there; the account is recorded and its hooks connected the moment
+  `auth.json` lands.
+- **Usage is read offline**, from the `rate_limits` the account's own sessions
+  recorded in their rollouts — never over the network — so a Codex bar is as
+  fresh as that account's last turn and says how old it is.
+- **Defaults are per agent**, and every rung of the launch order answers with
+  an account of the role's agent: a Codex role gets a Codex slot, and naming a
+  Claude slot for it (or the reverse) is refused, naming both.
+- **A usage limit** is read off the end of the session's rollout when its turn
+  stops (Codex has no `StopFailure`), and the row turns **⏳ limited** the same
+  way. Codex 0.162.1 fires no `Stop` for a turn that ends on its limit (or on any
+  other error), so every read of the fleet (`fleet ls`, the app, `fleet tell`)
+  reads the end of a working Codex row's rollout too: a failed turn is recorded
+  there once, **⏳ limited** for a limit, waiting with a `turn_failed` line for
+  any other error. A Codex agent's `fleet switch`, by hand or by `on_limit = "switch"`, is
+  **fresh** onto another account: its thread lives under the old `CODEX_HOME` and
+  cannot be resumed from another, so the replacement starts with the hand-off
+  prompt and takes the claims over at its first start. A target on the home the
+  thread ran under resumes it. At its limit, a Codex whose operator keeps the
+  *Switch to gpt-6-luna?* dialog on (`[notice] hide_rate_limit_model_nudge =
+  false`) shows that dialog under the error. The automatic hand-over answers it
+  with Esc (keep the current model) before its `/exit`, so the session it leaves
+  ends, and `doctor` stops listing it as parked.
+- **Restart resumes the thread.** `fleet restart` (and the agent view's Restart)
+  relaunches a Codex agent as `codex <options> resume <thread id> -- <continue
+  line>`, the thread its first hook bound, on the same account; a row whose agent
+  never reached a hook, or whose session has no thread id, starts fresh with the
+  hand-off prompt and the receipt says which.
+
 Everything the page does is a command, and every reporting one takes `--json`:
 
 ```sh
 aisquare accounts list                 # slots, who is signed in, plan, hooks
 aisquare accounts list --usage         # …plus the two windows, percent USED (read at most every 5 min)
 aisquare accounts add                  # a fresh slot; Claude Code opens for the sign-in, then exits
+aisquare accounts add --agent codex    # a fresh Codex slot; `codex login` runs in it
 aisquare accounts run 2                # a plain Claude Code session on account 2
 aisquare accounts run 2 --model opus   # arguments after the slot go to claude
+aisquare accounts run 3 login          # on a Codex slot: codex (here its login) with CODEX_HOME=slot
 aisquare accounts usage                # the windows, per signed-in account; --refresh reads now
 aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
 aisquare launch coder --account 2      # a board role on account 2
 aisquare fleet spawn coder --account 2 # a fleet agent on account 2
+aisquare fleet spawn coder --agent codex --account 3   # a Codex agent on Codex slot 3
 aisquare accounts default 2            # the machine default — what a launch runs on when nothing else says
 aisquare accounts default 3 --project . # this project's default (codename, name, id prefix, or . for here)
 aisquare accounts default 1 --role coder # coders run on the plain claude (= team bind coder --account 1)
 aisquare accounts default              # the three levels, as they stand
+aisquare accounts default --clear --agent codex   # defaults are per agent
 aisquare accounts alias 2 work         # a name: --account work, [work] on the board
 aisquare accounts order work 3         # the priority order; the rest follow as they were
 aisquare accounts move 3 top           # up · down · top · bottom
@@ -930,7 +1126,7 @@ aisquare accounts disable 3            # out of automatic selection; enable puts
 aisquare config set accounts.pick default      # spawns stay on the machine default (headroom is the default)
 aisquare config set accounts.on_limit wait     # an agent that hits its limit stays parked (switch is the default)
 aisquare accounts trust                # trust this folder on every account (its repository, in a checkout)
-aisquare accounts trust --sync         # every folder any account trusts, trusted on all of them
+aisquare accounts trust --sync         # every folder an account trusts, on all of its agent's accounts
 aisquare config set accounts.share_trust false # launches stop copying a folder's trust (on by default)
 aisquare accounts settings             # what each account's settings.json is: shared, its own, none
 aisquare accounts settings --sync      # link every managed account's settings.json to the plain claude's
@@ -941,10 +1137,11 @@ aisquare fleet restart manager         # an exited (or stuck) agent, back under 
                                        # …launched as it was first launched: the row records the
                                        # binary, permission mode, arguments and account (#144)
 aisquare fleet restart coder-auth --permission-mode acceptEdits   # …another mode; later restarts keep it
+aisquare fleet restart coder-auth --permission-mode workspace:ask # …or one for any agent (below)
 aisquare fleet switch coder-auth --to personal --fresh   # a named account; a new session + hand-off
 ```
 
-`add` and `run` hand the terminal to Claude Code, so they have no `--json`
+`add` and `run` hand the terminal to the agent, so they have no `--json`
 form and `add` refuses outside an interactive terminal. `aisquare doctor` gains a
 `claude-accounts` line naming any slot that still needs a sign-in, a
 `claude-account-default` line when the default is not signed in or is disabled,
@@ -979,6 +1176,105 @@ that agent's own pane and the spawn does not fall back: pick another mode
 yourself, per spawn (`--permission-mode acceptEdits`) or for the role
 (`aisquare config set fleet.roles.coder.permission_mode acceptEdits`).
 `bypassPermissions` is available and is never a default.
+
+### One permission for every agent
+
+`fleet.roles.<role>.permission` holds the role's permission once, for whichever
+agent it runs on: `WRITE:APPROVALS`, where WRITE is `read_only`, `workspace` (the
+project and its worktree) or `full`, and APPROVALS is `ask` (the human), `auto`
+(the agent's own reviewer decides) or `never` (what is not allowed fails). Each
+agent's adapter maps it to its own flags; the same value works as `fleet spawn
+--permission-mode` and `fleet restart --permission-mode`, and *⚙ Settings ▸ App
+settings* offers it per role, with what each agent would be passed under it. Set, it wins
+over the agent-specific settings (`permission_mode` for Claude Code; `sandbox`,
+`approval_policy`, `approve_for_me` for Codex); unset — the default, so an
+existing config means what it always meant — those apply. A native flag passed for
+one spawn (`--sandbox`, `--approval`, or the agent's own in its arguments) still
+wins, as a per-spawn flag always does, and the restart replays the value the agent
+was launched with.
+
+| Permission | Claude Code | Codex |
+| --- | --- | --- |
+| `workspace:auto` | `--permission-mode auto` | `--approve-for-me`, store profile over `:workspace` |
+| `read_only:auto` | `--permission-mode auto --disallowedTools=Edit Write NotebookEdit` | `--ask-for-approval on-request -c approvals_reviewer="auto_review"`, store profile over `:read-only` |
+| `workspace:ask` | `--permission-mode manual` | `--ask-for-approval on-request -c approvals_reviewer="user"`, store profile over `:workspace` |
+| `workspace:never` | `--permission-mode dontAsk` | `--ask-for-approval never`, store profile over `:workspace` |
+| `read_only:ask` | `--permission-mode manual --disallowedTools=Edit Write NotebookEdit` | `--ask-for-approval on-request -c approvals_reviewer="user"`, store profile over `:read-only` |
+| `read_only:never` | `--permission-mode dontAsk --disallowedTools=Edit Write NotebookEdit` | `--ask-for-approval never`, store profile over `:read-only` |
+| `full:ask` | `--permission-mode manual` | `--ask-for-approval on-request -c approvals_reviewer="user" --sandbox danger-full-access` |
+| `full:never` | `--permission-mode bypassPermissions` | `--ask-for-approval never --sandbox danger-full-access` |
+| `full:auto` | `--permission-mode auto` | refused at spawn: Codex's reviewer runs only in workspace-write |
+
+The built-in roles are `workspace:auto` and, for the reviewer, `read_only:auto`:
+exactly what each agent gets with nothing set. Claude Code has no sandbox,
+so its read-only is the reviewer's denial of the tools that edit files, given once
+even where the role's own arguments carry it too.
+
+Codex runs its tools in a sandbox. The **store profile** is the fleet's own Codex
+permission profile: Codex's built-in `:workspace` or `:read-only`, with the aisquare
+home read-only within it, all of it (the board's database, the launch records, the
+census, the config, the account homes, credentials and keys, the fleet's tmux conf, the
+agent registry, the model probe's cache), and one path writable: the launch's broker
+inbox. Read-only too: what the tops of the launch's trees hold that a launch outside any
+sandbox reads (`.claude/`, `.mcp.json`, `.codex/`, `.agents/`, `.aisquare`, `.git`),
+every worktree but the agent's own (and that one too for a `read-only` seat), and the
+directories tmux keeps its sockets in (the socket itself where that directory is a shared
+one, `/tmp`), so a Codex tester in the project's directory cannot write the manager's
+Claude Code settings, nor move the fleet's socket out of `/tmp`. A native `--sandbox`
+the operator picks replaces the profile, and these paths with it. Every `aisquare` board call the agent makes there
+goes, unchanged, through that broker, which its launch runs outside the sandbox: it runs
+only a whitelist of board and memory commands, only as the agent's own board sessions,
+only in its own tree, on its own board's tasks and in its own project's memory pool (for
+reads too: `context show` and `log` included), and never a fleet operation (`spawn`, `stop`, `restart`, `switch`, `tell`, `shutdown` …), a
+launch, a hook, the config or an account. So nothing that a restart, a switch, a
+hand-over, `tell`, `stop`, `shutdown`, the manager's nudge, `reap` or a spawn reads can
+have been written from inside a sandbox; every git aisquare runs runs no hook and no
+fsmonitor of the repository's, and gbrain starts in its brain's home. The boundary is the
+tree the agent may write: what the user's own tools run from it (git hooks in the tree
+and git config the repository includes from it, a project venv, a subdirectory's
+settings, what `aisquare project onboard` packs it with, `CLAUDE.md`) is the agent's to
+write, as on Claude Code, and so is the window's `PATH`, where Codex itself and aisquare's
+hooks find `git`: a launch whose `PATH` names a directory its sandbox may write (an empty
+entry is the directory a process runs in) is warned; the restart and spawn checks read
+the `PATH` the window will have: the role binding's where it sets one, else the fleet
+server's.
+Whatever its sandbox, a launch is refused, by `fleet spawn` before any window, by a
+restart, switch or hand-over before it stops the agent, and by `aisquare launch`, where
+that sandbox may write an aisquare that runs outside it, the launcher's own install or
+what the agent's hooks run (their `hooks.json`'s program, or what the plugin's launcher
+finds as its own `_find` does, where its hooks run), with its environment, as read from
+Codex's system, user and managed config, its `-p` profile and its
+arguments (the
+workspace, `-C`, `--add-dir`, `writable_roots`, `/tmp`; none of them for a `read-only`
+seat): install `aisquare-cli` outside the project (`uv tool install aisquare-cli`) and
+connect the hooks with it. The agent keeps `PYTHONPATH` and `PYTHONHOME` as you set them,
+for its own tools; every Python aisquare starts for it ignores them (`-E`): the window's
+`aisquare launch`, its hooks as `agents connect codex` writes them, the plugin's launcher,
+its broker and what the broker runs, the hand-over. A fleet Codex window
+starts with `check_for_update_on_startup=false` unless your config sets it: an `Update
+available` dialog in a starting pane takes an Enter as `npm install -g @openai/codex`
+([the trust boundary](coding-agents.md#the-sandbox-and-the-aisquare-store)). The launch records stay as defence
+in depth: `fleet spawn` writes each agent's launch record in `launch-seals/` (binary,
+arguments, permission, role, agent, directory, account, and the tmux socket and pane
+its window is in), the agent's own hook adds its session (transcript, thread, home), and
+a replay and `fleet tell`'s queue read that record and nothing else. What `tell`, `stop`
+(restart, switch, the hand-over, `shutdown`) and the manager's nudge type into or kill
+is the pane the record places, by the record's agent's rules, and `shutdown` takes down
+the sessions the records name; a failed turn's limit is read from the record's
+transcript. One resolver (`fleet.resolve_place`) answers every such question, and
+`tests/test_fleet_placement.py` fails on a tmux call that does not go through it. A row
+rewritten to name another pane is told nothing and stopped where its record places it;
+a row without one has its window killed by `stop` with nothing typed, only in a session
+a record of its project names, and its replay, like a project whose directory in the
+store is not the record's, is refused with the reason. So a Codex agent's board calls
+succeed on their first, sandboxed attempt, a reviewer's verdict included, while its
+worktree stays read-only
+([the sandbox and the store](coding-agents.md#the-sandbox-and-the-aisquare-store)).
+`ask` is the human's to answer on Codex as on Claude Code: the reviewer is pinned on
+every spawn and restart, as a resumed thread keeps its own otherwise, so `fleet
+restart <label> --permission-mode workspace:ask` turns an agent's `--approve-for-me`
+into Codex's approval prompts in its pane. A pick in Codex's own `/permissions`
+replaces the store profile until the next restart.
 
 **`auto` behind the explainability proxy.** The classifier auto mode relies on
 makes a separate, non-streaming request the proxy currently cuts short once the
@@ -1021,10 +1317,11 @@ which is the harness's rule, not this one.
 
 Three places to change one:
 
-- **per spawn** — `fleet spawn … --permission-mode acceptEdits --no-worktree --bin claude2`;
+- **per spawn** — `fleet spawn … --agent claude-code --permission-mode acceptEdits --no-worktree --bin claude2`;
 - **in config** — `aisquare config set fleet.max_agents_per_project 6`, or
-  `aisquare config set fleet.roles.coder.permission_mode acceptEdits`, or edit
-  the file directly;
+  `aisquare config set fleet.roles.coder.permission workspace:ask` (any agent), or
+  `aisquare config set fleet.roles.coder.permission_mode acceptEdits` (Claude
+  Code's own words), or edit the file directly;
 - **in the UI** — *⚙ Settings ▸ App settings* writes the same config, and its
   *Reset all settings to default* is `config reset`. Its *Save* writes only the
   settings changed on the page, so one changed in a shell while it was open is
@@ -1067,34 +1364,41 @@ disable_native_agent_teams = true         # exports CLAUDE_CODE_EXPERIMENTAL_AGE
 max_continuations_per_hour = 30           # cap on the manager's Stop-hook continuations
 
 [fleet.roles.manager]
+# permission = "workspace:auto"           # one value for every agent (WRITE:APPROVALS); unset = the agent's own below
 permission_mode = "auto"                  # any Claude Code mode; "" = pass no flag
 worktree = false
 extra_args = []
+agent_args = {}
 
 [fleet.roles.coder]
 permission_mode = "auto"
 worktree = true                           # one worktree per coder: parallel coders never share a tree
 extra_args = []
+agent_args = {}
 
 [fleet.roles.tester]                      # `runner` is accepted as an alias
 permission_mode = "auto"
 worktree = false                          # runs in the repo root; point it at the branch yourself
 extra_args = []
+agent_args = {}
 
 [fleet.roles.reviewer]
 permission_mode = "auto"
 worktree = true
 extra_args = ["--disallowedTools=Edit Write NotebookEdit"]  # a shell, no editing tools
+agent_args = {}
 
 [fleet.roles.ui-tester]
 permission_mode = "auto"
 worktree = false                          # tests the running app, not a tree of its own
 extra_args = []                           # --chrome is the role's own default; put "--no-chrome" here to drop it
+agent_args = {}
 
 [fleet.roles.validator]
 permission_mode = "auto"
 worktree = false
 extra_args = []
+agent_args = {}
 ```
 
 A role may also name a default persona — every spawn of that role runs as it
@@ -1111,10 +1415,29 @@ never the fleet: the defaults apply and nothing refuses.
 
 **Model, effort and binary per role stay where they already live** — one home
 per concept: `aisquare team harness` (the ladder and the effort offsets),
-`aisquare team bind <role> --bin … --env … --arg …` (launch profiles),
+`aisquare team bind <role> --agent claude-code --bin … --env … --arg …` (launch profiles),
 `AISQUARE_MODEL_<ROLE>`, `AISQUARE_EFFORT_<ROLE>` and `AISQUARE_BIN_<ROLE>` in
 the environment. A fleet launch is an `aisquare launch <role>` inside a tmux
 window, so all of it applies unchanged, as does the Explainability wiring.
+For an arbitrary wrapper binary, declare its family with
+`aisquare team bind ROLE --agent claude-code --bin PATH` (or `--agent codex`),
+or pass `--agent` on that launch. User/project defaults and an operator-exported
+`AISQUARE_CODING_AGENT` do not identify arbitrary wrappers. Existing bin-only
+configurations without those defaults retain Claude compatibility, including
+inside AISquare-launched panes: a parent's family does not reclassify another
+wrapper. This also applies to wrappers selected through `AISQUARE_AGENT_BIN`
+and `AISQUARE_BIN_<ROLE>`.
+
+Legacy `[fleet.roles.ROLE] extra_args` belong to Claude Code. Agent-specific
+arguments name their owner, for example:
+
+```toml
+[fleet.roles.reviewer]
+agent_args = { codex = ["--no-alt-screen"], claude-code = ["--verbose"] }
+```
+
+The selected adapter combines only its own arguments with the role's native
+permission flags. Explicit arguments on a spawn still go to that launch.
 
 **Native agent teams are off in fleet launches.** Claude Code's own
 experimental *agent teams* (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`) let a
@@ -1287,11 +1610,16 @@ roots that are gone from disk and worktrees of a repository that is itself
 registered, showing the plan and asking first. The navigator only loads what is
 registered, so this is also how a slow start is cured (#83).
 
-**tmux.** Session `asq-<codename>`, always targeted exactly (`=asq-amber-otter`)
-so `asq-ruby-fox` never prefix-matches an `asq-ruby-foxhound`. Window name =
-agent label; panes are addressed by `%id`, never by name, so renames are
-harmless. A row stores the pane id and *derives* the session name from the
-current codename — a rename never strands an agent.
+**tmux.** Session `asq-<codename>`, made by the project's first spawn and
+joined by every later one by tmux's own id for it (`$3`), which the project's
+session list beside the launch records holds however long its last agent has been
+gone; agents spawned before this version are joined in the session tmux says holds
+theirs. A session found only under that name is not joined (a swap of two projects'
+codenames in the store would put an agent into the other's), and the spawn makes
+`asq-<codename>-2` instead. Window name = agent label; panes are addressed by
+`%id`, sessions by `$id`, never by name, so renames are harmless: a rename tmux was
+not told of strands nothing, and `fleet rename` gives each of a project's sessions a
+name of its own.
 
 **Agent labels.** `manager` — always, one per project; a second is refused.
 Everything else matches `^[a-z][a-z0-9-]{1,23}$`: 2–24 characters, lowercase
@@ -1557,6 +1885,13 @@ whether the running fleet server still has a prefix key.
 | ctrl+Z | `C-z` — suspends Claude Code *inside the pane*; type `fg` there to resume | same | every terminal |
 | ctrl+D | `C-d` — exits Claude Code; the pane reads 💤 exited and offers Restart | same | every terminal |
 | `[` in the transcript viewer | the character — inside tmux "native scrollback" is the pane's 50 000-line history, which shift+PgUp already reads | same | every terminal |
+
+**A Codex pane** gets the same keys, in Codex's own spelling where it has one
+(`AgentAdapter.key_spellings`, measured on Codex 0.162.1 under tmux 3.7c):
+**shift+Enter is sent as ctrl+J on every tmux**, because Codex submits the prompt on
+`S-Enter` and takes `C-j` as its newline (alt+Enter is a newline too). Esc
+interrupts a running turn (`esc to interrupt`), shift+Tab (`BTab`) cycles Codex's
+Default and Plan modes, and ctrl+C reaches Codex as it is.
 
 **tmux pitfalls the fleet engineers around.** *Prefix:* the private server runs
 with `prefix None`, so in `fleet attach` ctrl+B is Claude Code's
@@ -1915,6 +2250,8 @@ terminal — or `aisquare fleet attach` and answer there. If prompts are routine
 for that project, the role's `permission_mode` is the knob — per spawn
 (`--permission-mode`) or in `[fleet.roles.<role>]`; there is no project
 allowlist in this checkout. `bypassPermissions` exists and is never a default.
+A Codex agent rings only for a request you answer: under `--approve-for-me`
+Codex's own reviewer answers, with no prompt in the pane and no bell.
 
 **The manager needs you.** 🔔 on the project, and a `question` note on the
 board (the manager asks after being blocked twice on one task). Open the
@@ -1947,12 +2284,11 @@ issue with your terminal's name.
 
 ## Later
 
-- **Other agents, Codex first.** The substrate is agent-agnostic — a fleet
-  window runs whatever binary the role is bound to, and `--bin` already takes
-  one — so *surfacing* a Codex session needs nothing new. What Codex lacks is
-  our lifecycle hooks: until an equivalent exists it would have no board state
-  and no wake-ups, and its row would say `no hooks`. v1 is Claude Code only
-  (plan §8.5); nothing in the schema blocks the rest.
+- **Other terminal agents.** Claude Code and Codex both run the fleet now
+  ([coding agents](coding-agents.md)). Another terminal agent (Gemini CLI, …)
+  is one adapter and its fixtures
+  ([Adding a terminal agent](coding-agents.md#adding-a-terminal-agent)), with
+  no change to the fleet.
 - **Auto-merge on green** as an opt-in policy. In v1 a human merges (plan §3.5).
 - **Remote or multi-machine fleets** — the cloud roadmap is unchanged.
 - **A tmux-less backend** for hosts without tmux (plan §3.1, option A).

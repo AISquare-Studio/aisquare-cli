@@ -108,6 +108,8 @@ def pane(monkeypatch: pytest.MonkeyPatch) -> FakePane:
     monkeypatch.setattr(remote_server, "_resolve_project", resolve)
     monkeypatch.setattr(store_module, "store_session", lambda: Store())
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: fake)
+    # The store is faked whole and keeps no launch records: placement has tests of its own.
+    monkeypatch.setattr(fleet_service, "placed_row", lambda row: row)
     return fake
 
 

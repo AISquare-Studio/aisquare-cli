@@ -8,7 +8,14 @@ from typing import Annotated
 
 import typer
 
-from aisquare.cli.common import emit_agents, emit_connected, emit_disconnected, fail
+from aisquare.cli.common import (
+    emit_agents,
+    emit_connected,
+    emit_disconnected,
+    expected_config_write_errors,
+    fail,
+)
+from aisquare.core.agents import AgentSettingsError
 from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.services import agents as agents_service
@@ -46,8 +53,7 @@ ConfigDir = Annotated[
     Path | None,
     typer.Option(
         "--config-dir",
-        help="Claude Code config directory to target (for CLAUDE_CONFIG_DIR "
-        "installs, e.g. ~/.claude4). Default: $CLAUDE_CONFIG_DIR or ~/.claude.",
+        help="Agent config directory. Default: its native environment override or home.",
     ),
 ]
 
@@ -65,6 +71,8 @@ def connect(name: AgentName, config_dir: ConfigDir = None) -> None:
         # `detail` too: under --json `fail` drops the message, and asq's Connect
         # button shows the error with its detail, so the file is named there as well.
         fail(str(exc), error="agent_file_unreadable", ref=name, detail=str(exc))
+    except AgentSettingsError as exc:
+        fail(str(exc), error="agent_configuration", ref=name, detail=str(exc))
     except agents_service.AgentNotInstalledError as exc:
         fail(str(exc), error="not_installed", ref=name)
     emit_connected(connection)
@@ -86,9 +94,38 @@ def disconnect(name: AgentName, config_dir: ConfigDir = None) -> None:
         fail(f"unknown agent: {name}", error="unknown_agent", ref=name)
     except agents_service.AgentFileUnreadableError as exc:
         fail(str(exc), error="agent_file_unreadable", ref=name, detail=str(exc))
+    except AgentSettingsError as exc:
+        fail(str(exc), error="agent_configuration", ref=name, detail=str(exc))
     for note in agents_service.disconnect_notes(name, config_dir, removed=removed):
         stderr_console().print(f"note: {note}")
     emit_disconnected(name)
+
+
+@app.command("use")
+def use(
+    name: AgentName,
+    project: Annotated[bool, typer.Option("--project", help="Set this project's default.")] = False,
+) -> None:
+    """Choose the coding agent for future launches (role bindings take precedence)."""
+    from aisquare.services import agent_launch
+
+    try:
+        with expected_config_write_errors():
+            scope = agent_launch.use(name, project=project)
+    except ValueError as exc:
+        fail(str(exc), error="unknown_agent")
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "agent": name,
+                    "scope": "project" if project else "user",
+                    **({"project_id": scope} if project else {}),
+                }
+            )
+        )
+    else:
+        typer.echo(f"Default coding agent: {name} ({scope})")
 
 
 @app.command("refresh-hooks", hidden=True)
@@ -100,6 +137,7 @@ def refresh_hooks(name: AgentName, config_dir: ConfigDir = None) -> None:
     person types. Later releases must keep it, or an upgrade from this one
     cannot refresh hooks.
     """
+    before = _hooks_text(name, config_dir)
     try:
         written = agents_service.refresh_hooks(name, config_dir)
     except KeyError:
@@ -110,7 +148,27 @@ def refresh_hooks(name: AgentName, config_dir: ConfigDir = None) -> None:
         fail(str(exc), error="not_installed", ref=name)
     if not written:
         fail(f"{name} has no hooks for aisquare to write", error="no_hooks", ref=name)
+    # "Rewritten" only for a file that changed: one already current is left as it was, and
+    # said so (SMOKE6).
+    changed = before is None or before != _hooks_text(name, config_dir)
     if get_state().json_output:
+        # As every release has printed it: the upgrade that runs this reads it.
         typer.echo(json.dumps({"name": name, "hooks_installed": True}))
-    else:
+    elif changed:
         stdout_console().print(f"✓ hooks rewritten for {name}")
+    else:
+        stdout_console().print(f"✓ hooks already current for {name}")
+
+
+def _hooks_text(name: str, config_dir: Path | None) -> bytes | None:
+    """The hooks file ``name``'s hooks live in under ``config_dir``, as bytes; ``None`` where
+    there is none or it cannot be read."""
+    from aisquare.core import agents as agent_core
+
+    try:
+        spec = agent_core.spec(name, config_dir)
+        if spec is None or spec.settings_path is None:
+            return None
+        return spec.settings_path.read_bytes()
+    except (OSError, KeyError, ValueError):
+        return None

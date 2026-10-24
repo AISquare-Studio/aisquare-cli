@@ -434,8 +434,10 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v27 a project's nickname, v28 which token took a usage reading (its fingerprint),
     # v29 a task's number on its board, v30 its unique index, v31 the branch of a fleet
     # agent's worktree (review of #259, round 15), v32 the board a fleet agent reads (round 25),
-    # v33 the persona a session and a fleet agent run as (#201)
-    assert version == SCHEMA_VERSION == 33
+    # v33 the persona a session and a fleet agent run as (#201),
+    # v34-v36 the coding-agent identity, team_meta dates and their repair (#113),
+    # v37 the arrangement of another agent's account slots (Codex accounts)
+    assert version == SCHEMA_VERSION == 37
 
 
 def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -> None:
@@ -489,6 +491,151 @@ def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -
     assert old_session is not None and old_session.persona is None
     assert old_agent is not None and old_agent.persona is None
     assert restarted.persona == "skeptic"
+
+
+def test_v14_upgrades_native_identity_without_guessing_legacy_agents() -> None:
+    db = _at_version(14)
+    now = datetime.now(UTC).isoformat()
+    with sqlite3.connect(str(db)) as raw:
+        for sid, account, transcript in (
+            ("claude", "/home/claude", "/home/claude/projects/repo/thread.jsonl"),
+            ("unclassified", None, None),
+            ("wrapper", "/home/other", "/home/other/session.jsonl"),
+        ):
+            raw.execute(
+                "INSERT INTO team_session "
+                "(id, project_id, started_at, last_seen_at, account, transcript_path) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (sid, "prj_old", now, now, account, transcript),
+            )
+    open_store().close()
+    with sqlite3.connect(str(db)) as raw:
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert raw.execute(
+            "SELECT id, agent, native_session_id FROM team_session ORDER BY id"
+        ).fetchall() == [
+            ("claude", "claude-code", "claude"),
+            ("unclassified", None, None),
+            ("wrapper", None, None),
+        ]
+        assert "forgotten_at" in {row[1] for row in raw.execute("PRAGMA table_info(project)")}
+
+
+#: The steps #113's line ran above v25 before it merged 0.8.1, which took v26-v32 first,
+#: and 0.8.2's persona step, which took v33: stamped 26-29, then 33-36, and v34-v37 here,
+#: the same steps (byte for byte: the merges moved them).
+_BRANCH_113_STEPS = range(33, 37)
+
+
+def _branch_113_store(stamp: int, *, main_steps: int = 25) -> Path:
+    """A store the ladder carried through ``main_steps`` of this line's steps and then
+    #113's own (:data:`_BRANCH_113_STEPS`), stamped ``stamp``, with a board's two tasks and
+    a fleet agent written as that branch wrote them: no number, no board."""
+    from aisquare.core.store import _run_step
+
+    db = _db_path()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    raw = sqlite3.connect(str(db))
+    try:
+        for step in [*range(main_steps), *_BRANCH_113_STEPS]:
+            _run_step(raw, step)
+        raw.executescript(
+            _TWO_PROJECTS
+            + """
+INSERT INTO team_task (id, project_id, key, title, status, created_at, updated_at) VALUES
+    ('tsk_b', 'prj_used', 'second', 'second', 'todo', '2026-09-02T00:00:00+00:00',
+     '2026-09-02T00:00:00+00:00'),
+    ('tsk_a', 'prj_used', 'first', 'first', 'todo', '2026-09-01T00:00:00+00:00',
+     '2026-09-01T00:00:00+00:00');
+INSERT INTO team_session (id, project_id, started_at, last_seen_at, agent, native_session_id)
+    VALUES ('ses_1', 'prj_used', '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00',
+            'codex', 'nat_1');
+UPDATE fleet_agent SET agent = 'codex', session_id = 'ses_1';
+"""
+        )
+        raw.execute(f"PRAGMA user_version = {stamp}")
+        raw.commit()
+    finally:
+        raw.close()
+    return db
+
+
+def _branch_113_reads(db: Path) -> dict[str, object]:
+    from aisquare.core.store import _steps_missing
+
+    raw = sqlite3.connect(str(db))
+    try:
+        return {
+            "version": raw.execute("PRAGMA user_version").fetchone()[0],
+            "missing": _steps_missing(raw, SCHEMA_VERSION),
+            "shape": _shape(raw),
+            "numbers": raw.execute("SELECT id, number FROM team_task ORDER BY id").fetchall(),
+            "fleet": raw.execute("SELECT id, agent, board FROM fleet_agent").fetchall(),
+            "sessions": raw.execute(
+                "SELECT id, agent, native_session_id FROM team_session"
+            ).fetchall(),
+        }
+    finally:
+        raw.close()
+
+
+@pytest.mark.parametrize(
+    ("stamp", "main_steps"),
+    [(29, 25), (28, 25), (32, 32), (36, 32)],
+    ids=[
+        "#113 at 29, before the merge",
+        "#113 at 28, before t3",
+        "0.8.1's v32 with #113's too",
+        "#113 at 36, before the 0.8.2 merge",
+    ],
+)
+def test_a_store_113_stamped_before_the_081_merge_reaches_every_step(
+    stamp: int, main_steps: int
+) -> None:
+    """#113 stamped 26-29 for its own steps while 0.8.1 took those numbers for others, so a
+    store that branch made claims steps it never ran: no ``fleet_agent.server_started_at``,
+    no nickname, no token fingerprint, no task number. Its stamp read positionally, a task
+    read and the v30 index failed on ``number``. The presence pass applies 0.8.1's steps
+    before the ladder goes on, with their backfills (each task numbered in the order it was
+    added, the fleet agent's board its session's), and #113's own steps add nothing to what
+    it holds. The third is the maintainer's store: 0.8.1 carried it to v32, and a build of
+    #113 from before the merge then added its own products past that stamp. The fourth is
+    the store a build of #113 from after the 0.8.1 merge and before 0.8.2's wrote: 0.8.1's
+    v32 and #113's four steps, stamped v36, with no persona columns (0.8.2's v33), which the
+    presence pass adds before the ladder runs v37."""
+    if stamp == 28:
+        # Before t3 the branch had no ``agent_account``: its v29 is the step that makes it.
+        db = _branch_113_store(stamp)
+        raw = sqlite3.connect(str(db))
+        try:
+            raw.executescript(
+                "DROP INDEX agent_account_alias; DROP INDEX agent_account_default; "
+                "DROP TABLE agent_account;"
+            )
+        finally:
+            raw.close()
+    else:
+        db = _branch_113_store(stamp, main_steps=main_steps)
+
+    with store_session() as store:
+        tasks = sorted((task.id, task.number) for task in store.team_tasks("prj_used"))
+        fleet = [(agent.id, agent.agent, agent.board) for agent in store.fleet_agents("prj_used")]
+    first = _branch_113_reads(db)
+    open_store().close()
+
+    assert tasks == [("tsk_a", 1), ("tsk_b", 2)], "numbered in the order they were added"
+    assert fleet == [("agt_1", "codex", "prj_used")]
+    assert first == {
+        "version": SCHEMA_VERSION,
+        "missing": [],
+        "shape": _built(SCHEMA_VERSION),
+        "numbers": [("tsk_a", 1), ("tsk_b", 2)],
+        # The v32 backfill gave it its session's board; a row written after v32 with
+        # none (0.8.0's spawn) keeps NULL, which every read takes as its session's.
+        "fleet": [("agt_1", "codex", "prj_used" if main_steps < 32 else None)],
+        "sessions": [("ses_1", "codex", "nat_1")],
+    }
+    assert _branch_113_reads(db) == first, "a second open changes nothing"
 
 
 def test_the_metric_check_constraints_mirror_the_python_vocabularies() -> None:
@@ -613,6 +760,42 @@ def _at_version(version: int, *, after: str = "", stamp: int | None = None) -> P
     finally:
         raw.close()
     return db
+
+
+#: The steps #113 stamped 15, 16 and 17 while it was dogfooded, as that branch ran them,
+#: before the merge appended them to the ladder as v26-v28 (v33-v35 since it merged 0.8.1,
+#: which took v26-v32 first; the note above
+#: ``store._SCHEMA_V15``). A store they made lacks this line's v15-v17, which the presence
+#: pass (``store._converge_by_presence``) restores.
+DOGFOODED_113 = (
+    """
+ALTER TABLE team_session ADD COLUMN agent TEXT;
+ALTER TABLE team_session ADD COLUMN native_session_id TEXT;
+ALTER TABLE fleet_agent ADD COLUMN agent TEXT;
+UPDATE team_session SET agent = 'claude-code', native_session_id = id
+ WHERE account IS NOT NULL AND transcript_path LIKE '%/projects/%.jsonl';
+UPDATE fleet_agent SET agent = 'claude-code' WHERE binary = 'claude';
+""",
+    """
+ALTER TABLE team_meta ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER);
+CREATE TRIGGER team_meta_insert_time AFTER INSERT ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+CREATE TRIGGER team_meta_update_time AFTER UPDATE OF value ON team_meta BEGIN
+ UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER) WHERE key = NEW.key;
+END;
+""",
+    """
+UPDATE team_meta SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+ WHERE updated_at = 0;
+""",
+)
+
+
+def _dogfooded_113(version: int) -> Path:
+    """A store #113 carried from v14 to ``version`` (15-17) with its own steps, stamped so."""
+    return _at_version(14, after="".join(DOGFOODED_113[: version - 14]), stamp=version)
 
 
 # The metric table the branch's v1 contract created (7557751..31956f2), stamped
@@ -1258,6 +1441,14 @@ def test_a_foreign_store_a_build_without_the_pass_carried_on_converges_too(
 _SCHEMAS = Path(__file__).parent / "fixtures" / "store_schemas"
 _RC_V21_SCHEMAS = ("rc_v21_owner_home.sql", "rc_v21_owner_asqui.sql", "rc_v21_fresh.sql")
 _PERSONA_COLUMNS = {("column", "team_session.persona"), ("column", "fleet_agent.persona")}
+
+
+def _pr_113_steps() -> set[tuple[str, str]]:
+    """#113's v34 to v37 by name (the coding-agent steps, appended on main's v33): what a
+    fresh store holds past main's ladder."""
+    return _built(SCHEMA_VERSION) - _built(33)
+
+
 # Main's v22 to v24 by name: SQLite's automatic index for the primary key is left out.
 _MAINS_STEPS_PAST_21 = {
     ("table", "pending_revocation"),
@@ -1447,7 +1638,7 @@ def test_mains_v24_store_gains_the_persona_columns_and_keeps_every_row() -> None
     finally:
         raw.close()
     assert (version, missing) == (SCHEMA_VERSION, [])
-    assert shape == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS
+    assert shape == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | _pr_113_steps()
     assert shape == _built(SCHEMA_VERSION), "not the schema a fresh store has"
     assert after == before, "a row the store held changed on a column it had"
     assert agent is not None and (agent.persona, agent.account_slot) == (None, 1)
@@ -1515,11 +1706,14 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     by it."""
     fresh = _built(SCHEMA_VERSION)
 
-    assert SCHEMA_VERSION == 33
-    assert fresh == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS
+    assert SCHEMA_VERSION == 37
+    ours = _pr_113_steps()
+    assert fresh == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | ours
     for schema in _RC_V21_SCHEMAS:
-        assert fresh == _replayed_shape(schema) | _MAINS_STEPS_PAST_21 | _mains_steps_past_24()
-    assert fresh == _replayed_shape("rc_v24_fresh.sql") | _mains_steps_past_24()
+        assert (
+            fresh == _replayed_shape(schema) | _MAINS_STEPS_PAST_21 | _mains_steps_past_24() | ours
+        )
+    assert fresh == _replayed_shape("rc_v24_fresh.sql") | _mains_steps_past_24() | ours
     open_store().close()
     raw = sqlite3.connect(str(_db_path()))
     try:
@@ -1620,7 +1814,7 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
     _schema_again, rows_again = _contents(db)
     version, shape, notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 33, label
+    assert version == SCHEMA_VERSION == 37, label
     assert shape == _built(SCHEMA_VERSION), label
     assert notnull == {"team_session": 0, "fleet_agent": 0}, label
     assert old_session is not None and old_session.persona == persona, label
@@ -1635,7 +1829,7 @@ def test_a_fresh_store_is_built_with_the_persona_step() -> None:
     open_store().close()
     version, shape, notnull = _persona_shape(_db_path())
 
-    assert version == SCHEMA_VERSION == 33
+    assert version == SCHEMA_VERSION == 37
     assert shape == _built(SCHEMA_VERSION)
     assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
     assert notnull == {"team_session": 0, "fleet_agent": 0}
@@ -3148,8 +3342,9 @@ def test_a_fleet_row_is_read_as_the_columns_it_is_written_with_whatever_follows_
     SQL. Both lists come from one tuple, and a read names each column as it is written."""
     later = (*store_module._FLEET_AGENT_FIELDS, "later")
     read = store_module._read_list(later, {"board": "COALESCE(board, project_id)"})
-    # `persona` (v33) is the column that came after it, and is read as written.
-    assert read.endswith(", COALESCE(board, project_id) AS board, persona, later"), read
+    # #113's ``agent`` and 0.8.2's ``persona`` are the columns after it now, appended when
+    # the branch merged 0.8.1, and 0.8.2 (v33), both read as written.
+    assert read.endswith(", COALESCE(board, project_id) AS board, agent, persona, later"), read
 
     cursor = store._conn.execute(  # type: ignore[attr-defined]
         f"SELECT {store_module._FLEET_AGENT_READ} FROM fleet_agent LIMIT 0"

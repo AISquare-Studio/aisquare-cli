@@ -147,7 +147,7 @@ def test_an_entry_the_user_added_to_a_mapping_is_written_with_only_what_it_sets(
     save_config(config, target)
     written = _file(target)
     assert written["team"] == {"profiles": {"coder": {"account": "2"}}}
-    designer = {"permission_mode": "auto", "worktree": False, "extra_args": []}
+    designer = {"permission_mode": "auto", "worktree": False, "extra_args": [], "agent_args": {}}
     assert written["fleet"] == {"roles": {**_ROLES, "designer": designer}}
     loaded = load_config(target)
     assert loaded.team.profiles == {"coder": RoleLaunchProfile(account="2")}
@@ -227,7 +227,7 @@ def test_config_list_overrides_with_none_still_prints_toml(runner: CliRunner) ->
 # --- version 1 -> 2 --------------------------------------------------------------------
 
 
-def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> None:
+def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults_and_the_agents() -> None:
     """The snapshot is version 1's defaults, frozen. When a default changes later, or a
     setting is added, it changes here — never in ``_V1_DEFAULTS``, which is what 0.8.0 wrote."""
     changed = {
@@ -238,6 +238,10 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "share_settings": False,
         },
         "projects": {"capture": False},
+        # Added with the coding-agent adapters (#113): each agent's own role arguments, its
+        # model pins and whether its MCP server is wired.
+        "agents": {"mcp": False, "models": {}},
+        "fleet": {"roles": {role: {"agent_args": {}} for role in _V1_DEFAULTS["fleet"]["roles"]}},
         # The persona train and the captain's switch, added since (#201, #240).
         "persona": {
             "system_prompt": True,

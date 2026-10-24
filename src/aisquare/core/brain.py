@@ -62,6 +62,20 @@ def embed_model() -> str:
     )
 
 
+def _away_from_any_tree(home: Path | None = None) -> str | None:
+    """The directory gbrain starts in: ``home`` (a brain's), else the aisquare home, never
+    the caller's. A runtime may read its configuration from the directory it starts in
+    (Bun, gbrain's, reads ``bunfig.toml``, whose ``preload`` runs a script, and ``.env``
+    there), and a brokered ``recall`` or a note's distill starts in a sandboxed agent's
+    tree, which the agent may write; these are not, to it (not measured here: no gbrain on
+    the host this was written on). ``None`` (the caller's) only where neither exists yet,
+    which no agent's call is."""
+    for place in (home, paths.aisquare_home()):
+        if place is not None and place.is_dir():
+            return str(place)
+    return None
+
+
 def gbrain_version() -> str | None:
     """The installed gbrain version, or ``None`` when unavailable."""
     binary = shutil.which("gbrain")
@@ -70,6 +84,7 @@ def gbrain_version() -> str | None:
     try:
         result = subprocess.run(
             [binary, "--version"],
+            cwd=_away_from_any_tree(),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -155,13 +170,16 @@ def _lock(home: Path, *, wait_s: float) -> Iterator[bool]:
 
 
 def _run(home: Path, argv: list[str], *, stdin: str | None = None, timeout: int) -> str | None:
-    """Run one gbrain command against ``home``; stdout on success, else ``None``."""
+    """Run one gbrain command against ``home``, in it (:func:`_away_from_any_tree`); stdout
+    on success, else ``None``."""
     binary = shutil.which("gbrain")
     if binary is None:
         return None
     try:
+        home.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(
             [binary, *argv],
+            cwd=_away_from_any_tree(home),
             input=stdin,
             capture_output=True,
             text=True,
@@ -213,6 +231,18 @@ def drain_lock(project_id: str) -> Iterator[bool]:
         yield won
 
 
+def check_query(query: str) -> None:
+    """Refuse a recall query gbrain would read as one of its options (it starts with
+    ``-``): the query is the caller's text, a sandboxed agent's through its broker among
+    them, and goes on gbrain's command line outside any sandbox (review r11 of #113,
+    finding 12). ``ValueError``."""
+    if query.lstrip().startswith("-"):
+        raise ValueError(
+            "a recall query may not start with '-', which gbrain would read as an option of "
+            "its own: start it with a word"
+        )
+
+
 def recall(project_id: str, query: str) -> str | None:
     """Search the project brain. ``None`` = unavailable (missing/busy/failed).
 
@@ -223,6 +253,7 @@ def recall(project_id: str, query: str) -> str | None:
     ``search`` rather than turning a working recall into a hard failure.
     ``--no-expand`` keeps recall LLM-free on either path.
     """
+    check_query(query)
     if not brain_enabled() or not brain_ready(project_id):
         return None
     home = brain_home(project_id)
@@ -230,6 +261,10 @@ def recall(project_id: str, query: str) -> str | None:
     with _lock(home, wait_s=_RECALL_LOCK_WAIT_S) as won:
         if not won:
             return None
+        # The query as gbrain's positional, as every release since 0.42 parses it: a bare
+        # `--` there is read as an option with no name that takes the query, and the
+        # search fails (review r12 of #113, finding 8). A query gbrain would read as an
+        # option is refused before this (:func:`check_query`).
         if use_hybrid:
             hybrid = _run(home, ["query", query, "--no-expand"], timeout=_CALL_TIMEOUT_S)
             if hybrid is not None:

@@ -125,6 +125,21 @@ def marks_project_root(directory: Path) -> bool:
     return False
 
 
+#: What every git aisquare itself runs is given first: no hook of the repository's runs
+#: (``core.hooksPath`` pointed at nothing) and no file-system monitor command
+#: (``core.fsmonitor``). A hook in the tree (``.husky/``, ``.githooks/``) or a monitor
+#: command is the sandboxed agent's to write, and aisquare runs git outside its sandbox: the
+#: agent's own hooks (``services.ci_snapshot``'s ``git stash create``), the fleet's worktrees
+#: (review r11 of #113, finding 4; r12, finding 2). Git config the repository includes
+#: from a file in its own tree is the tree's, as it is for every git run there.
+GIT_OWN = ("-c", f"core.hooksPath={os.devnull}", "-c", "core.fsmonitor=false")
+
+
+def git_argv(*args: str) -> list[str]:
+    """``git`` with :data:`GIT_OWN` and then ``args``: the one way aisquare runs git."""
+    return ["git", *GIT_OWN, *args]
+
+
 def _resolved(path: Path) -> Path:
     """``path.resolve()``, a symlink loop on the way raised as ``OSError`` (``ELOOP``) on every
     Python, as ``stat`` raises it. A path that is missing still resolves: ``directory_project``
@@ -226,7 +241,7 @@ def git_common_root(start: Path) -> Path | None:
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(start), "rev-parse", "--git-common-dir", "--show-cdup"],
+            git_argv("-C", str(start), "rev-parse", "--git-common-dir", "--show-cdup"),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -288,6 +303,51 @@ def find_project_root(start: Path) -> Path:
         if marks_project_root(directory):
             return directory
     return start
+
+
+def real_project_root(start: Path) -> Path | None:
+    """The project root git or a project marker finds for ``start``, as
+    :func:`find_project_root` does, but never its fallback, ``start`` itself for want of
+    one, and never the home or a filesystem root: ``None`` there. Where a launch or a
+    doctor run is in a project, rather than above one (review r13 of #113, findings 2
+    and 10)."""
+    try:
+        start = start.resolve()
+        root = git_common_root(start)
+        if root is None:
+            root = next((d for d in (start, *start.parents) if marks_project_root(d)), None)
+        if root is None:
+            return None
+        root = root.resolve()
+        if root == Path.home().resolve() or root == Path(root.anchor):
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return root
+
+
+def project_tree(start: Path) -> Path | None:
+    """The tree a launch at ``start`` writes as its project's: the checkout ``start`` is in
+    (the nearest directory holding a ``.git``, file or directory: a linked worktree's own
+    top, even one outside its principal repository, review r14 of #113, finding 8), within
+    a real project (:func:`real_project_root`); else that project's root. ``None`` outside
+    a real project."""
+    root = real_project_root(start)
+    if root is None:
+        return None
+    try:
+        start = start.resolve()
+        for directory in (start, *start.parents):
+            if (directory / ".git").exists():
+                top = directory.resolve()
+                if top == Path.home().resolve() or top == Path(top.anchor):
+                    return root
+                return top
+            if directory == root:
+                break
+    except (OSError, RuntimeError):
+        return root
+    return root
 
 
 def worktree_principal(root: Path) -> Path | None:

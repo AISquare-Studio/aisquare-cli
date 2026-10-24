@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from http.client import HTTPException, IncompleteRead
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -88,6 +88,9 @@ from aisquare.services.explainability import (
 from aisquare.services.explainability import (
     INSTALL_HINT as _EXTRA_INSTALL_HINT,
 )
+
+if TYPE_CHECKING:
+    from aisquare.core.agent_adapters.types import AgentAdapter
 
 #: Distribution that provides the SDK, and the console script it installs. The
 #: script is the collision-free way to reach it: it runs in whatever
@@ -1064,7 +1067,7 @@ def sdk_doctor(*, env: Mapping[str, str] | None = None) -> list[tuple[str, str, 
         # Not a declared dependency and deliberately not stubbed: the whole
         # point is that this import may not resolve, which the guard above and
         # the except below both handle.
-        from aisquare.explainability.doctor import run_doctor  # type: ignore[import-not-found]
+        run_doctor = importlib.import_module("aisquare.explainability.doctor").run_doctor
 
         return [(str(n), str(s), str(d)) for n, s, d in run_doctor()]
     except Exception:  # diagnostics must never crash
@@ -1460,12 +1463,17 @@ def checks(
     live: bool = False,
     env: Mapping[str, str] | None = None,
     project_id: str | None = None,
+    adapter: AgentAdapter | None = None,
 ) -> list[DoctorCheck]:
     """The explainability section of ``aisquare doctor``, in dependency order.
 
     ``project_id`` resolves the key (and, through the project's destination,
     the target) as that project's launches do (``doctor --project``); without
     it the read is machine-level and opens no store.
+
+    ``adapter`` reads the section for that agent's sessions (Remote's card): the lane
+    that traces its model traffic stands where the proxy's does (:func:`_check_lane`).
+    ``aisquare doctor`` names none, and checks the proxy.
 
     Severity follows a single rule: **an unwired machine is not a broken
     machine**. Nothing here fails while tracing is off — the section reads as
@@ -1500,7 +1508,7 @@ def checks(
     results = [switch, _check_sdk(on=touched, live=live, deployable=target.configured)]
     results.append(_check_config(target, on=on))
     results.append(_check_redaction(_redaction_level(), shipping=resolved_settings.ship))
-    results.append(_check_proxy(target, on=on, live=live))
+    results.append(_check_lane(adapter, target, resolved_settings, on=on, live=live))
     if live:
         results.extend(_live_checks(target, on=on))
     return results
@@ -2186,6 +2194,63 @@ def _check_proxy(target: ResolvedTarget, *, on: bool, live: bool = False) -> Doc
     if state.severity is CheckStatus.warn:
         return _warn(name, state.summary, state.remediation)
     return _ok(name, state.summary)
+
+
+def _check_lane(
+    adapter: AgentAdapter | None,
+    target: ResolvedTarget,
+    settings: ExplainabilitySettings,
+    *,
+    on: bool,
+    live: bool = False,
+) -> DoctorCheck:
+    """The lane that traces an agent's model traffic: the proxy's (:func:`_check_proxy`) with
+    no agent named and for one whose traffic goes through it (``capabilities.model_proxy``:
+    Claude Code's), its own telemetry's for one that exports it (``native_telemetry``:
+    Codex's, :func:`_check_native`). An agent with neither has no lane: once tracing is
+    on, that fails, as an untraced session would."""
+    if adapter is None or adapter.capabilities.model_proxy:
+        return _check_proxy(target, on=on, live=live)
+    if adapter.capabilities.native_telemetry:
+        return _check_native(adapter, settings, on=on)
+    degrade: Degrade = _fail if on else _warn
+    return degrade(
+        f"explainability {adapter.label}",
+        f"{adapter.label} has no tracing lane: neither the proxy nor telemetry of its own "
+        "carries its model traffic, so its sessions run untraced",
+        "None from here: run the work on an agent AISquare traces",
+    )
+
+
+def _check_native(
+    adapter: AgentAdapter, settings: ExplainabilitySettings, *, on: bool
+) -> DoctorCheck:
+    """The lane of an agent that exports its own OpenTelemetry (``capabilities.
+    native_telemetry``): the loopback receiver each of its launches starts
+    (``services.native_telemetry``), whose events the client lane spools and ``ship``
+    delivers. So it runs only while insight shipping is on, and only on POSIX, as
+    ``agent_launch.telemetry_args`` starts it; an operator's own exporter in a launch's
+    config is that launch's to say (its launch note)."""
+    name = f"explainability {adapter.label} telemetry"
+    degrade: Degrade = _fail if on else _warn
+    if not settings.ship:
+        return degrade(
+            name,
+            f"{adapter.label} exports its own telemetry to a receiver each launch starts, "
+            "which runs only while insight shipping is on: its sessions run untraced",
+            "Turn shipping on: aisquare init --explainability",
+        )
+    if os.name != "posix":
+        return degrade(
+            name,
+            f"{adapter.label}'s telemetry receiver runs on POSIX only: its sessions run untraced",
+            "Run the fleet under WSL",
+        )
+    return _ok(
+        name,
+        f"{adapter.label} exports its own telemetry to a receiver each launch starts; "
+        "ship delivers it",
+    )
 
 
 def _live_checks(target: ResolvedTarget, *, on: bool) -> list[DoctorCheck]:

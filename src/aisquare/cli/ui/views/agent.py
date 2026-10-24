@@ -44,9 +44,10 @@ from aisquare.cli.ui.sidebar import (
     STATE_CHIP,
     STOP_STATES,
     StopAgent,
-    session_percent_text,
+    used_percent_text,
 )
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
+from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.tmux import TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
 from aisquare.services import claude_accounts as accounts_service
@@ -109,7 +110,7 @@ def info_line(
     <pane id>``. The role icon and the label; the state chip (``💤 exited(N)`` once it
     ended); the account (:func:`account_text`, its NAME alone — no ``#slot``) with its
     five-hour window percent USED from ``usage`` (slot → percent, the slow headroom read's
-    ``session_by_slot``); the model and the effort the session reported
+    ``limit_by_slot``); the model and the effort the session reported
     (``TeamSession.effort``, left out while unknown); the state's detail; and the pane id.
     No role word, task, working directory or tmux command: the sidebar row says the role,
     and the attach command is the Settings tab's.
@@ -157,6 +158,8 @@ def _info_line(
     text = Text(no_wrap=True, overflow="ellipsis")
     text.append(f"{ROLE_ICON.get(agent.role, '🤖')} ")
     text.append_text(label)
+    if agent.agent:
+        text.append(SEPARATOR + agent.agent, style="dim")
     text.append(SEPARATOR)
     exited = status.state == "exited" and agent.exit_status is not None
     code = f"({agent.exit_status})" if exited else ""
@@ -169,7 +172,7 @@ def _info_line(
         percent = (usage or {}).get(slot) if slot is not None else None
         if percent is not None:
             text.append(" · ", style="dim")
-            text.append_text(session_percent_text(percent))
+            text.append_text(used_percent_text(percent))
     essential = text.cell_len
     if session is not None and session.model:
         text.append(SEPARATOR)
@@ -263,6 +266,13 @@ class SlotLabels:
             return False
         self.labels = result
         return True
+
+
+def key_spellings(status: FleetAgentStatus | None) -> Mapping[str, str]:
+    """The key names the agent in ``status``'s pane reads its own way
+    (``AgentAdapter.key_spellings``); none for a row this install has no adapter for."""
+    adapter = recorded_adapter(status.agent.agent) if status is not None else None
+    return adapter.key_spellings if adapter is not None else {}
 
 
 def shown_pane(status: FleetAgentStatus) -> str | None:
@@ -377,6 +387,7 @@ class AgentView(Vertical):
             server=self.server,
             escape_key=self.escape_key,
             placeholder=PANE_GONE,
+            key_spellings=key_spellings(self.status),
             label=self.status.agent.label,
             id="agent-pane",
         )
@@ -405,6 +416,7 @@ class AgentView(Vertical):
             return
         self._paint_info()
         self._paint_actions()
+        self.pane.key_spellings = key_spellings(status)
         self.labels.ask(self)
         self.pane.label = status.agent.label
         if (wanted := shown_pane(status)) != self.pane.pane_id:

@@ -1,3 +1,5 @@
-# Claude Code runs the plugin's hook launcher with `sh`, which reads a CR as part of
-# the line it ends: LF in every checkout, whatever core.autocrlf says.
+# Claude Code and Codex run the plugins' hook launcher with `sh`, which reads a CR as part
+# of the line it ends: LF in every checkout, whatever core.autocrlf says. The two copies
+# are one script (tests/test_codex_plugin.py holds them byte for byte).
 plugins/claude-code/scripts/aisquare-hook text eol=lf
+plugins/codex/scripts/aisquare-hook text eol=lf

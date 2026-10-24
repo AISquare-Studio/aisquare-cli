@@ -41,6 +41,7 @@ from typing import TypedDict
 from aisquare.core import paths
 from aisquare.core.config import SnapshotSettings
 from aisquare.core.spawn import git_env
+from aisquare.core.workspace import git_argv
 from aisquare.models import Snapshot
 
 
@@ -258,7 +259,7 @@ def head_sha(root: Path) -> str | None:
     """Best-effort current commit of ``root``."""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            git_argv("rev-parse", "HEAD"),
             cwd=root,
             capture_output=True,
             text=True,

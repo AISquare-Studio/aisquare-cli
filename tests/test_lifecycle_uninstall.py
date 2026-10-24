@@ -26,6 +26,8 @@ from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import paths
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters import claude_installs, get_adapter
+from aisquare.core.agent_adapters.lasting import fetches_aisquare, runs_aisquare
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import store_session
 from aisquare.core.tmux import (
@@ -226,7 +228,7 @@ def test_the_plan_finds_every_kind_of_hook_site(
     ambient = _hooked(tmp_path / "elsewhere" / "claude-config", tool.script)
     recorded = _hooked(tmp_path / "recorded" / "claude", tool.script)
     _record(recorded)
-    slot = _hooked(paths.claude_accounts_dir() / "2", tool.script)
+    slot = _hooked(accounts_core.accounts_root() / "2", tool.script)
     (slot / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(ambient))
 
@@ -256,7 +258,7 @@ def test_the_plan_names_the_logins_a_purge_would_delete(
     tool: Tool, world: World, runner: CliRunner, tmp_path: Path
 ) -> None:
     _initialised(runner, tmp_path)
-    slot = paths.claude_accounts_dir() / "2"
+    slot = accounts_core.accounts_root() / "2"
     slot.mkdir(parents=True)
     (slot / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
     (slot / ".claude.json").write_text(
@@ -280,7 +282,7 @@ def test_the_plan_parses_each_slots_claude_json_once(
     of logins parsed it again for the email; such a file can reach tens of MB. The login is
     taken from the scan's parse. The control: the login is still named."""
     _initialised(runner, tmp_path)
-    slot = paths.claude_accounts_dir() / "2"
+    slot = accounts_core.accounts_root() / "2"
     slot.mkdir(parents=True)
     (slot / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
     (slot / ".claude.json").write_text(
@@ -335,7 +337,7 @@ def test_mcp_servers_that_run_aisquare_are_listed_and_never_edited(
     }, "playwright does not run aisquare"
     assert result.exit_code == 0, result.output
     for entry in plan.mcp:  # the plan's own command for each, never a bare one
-        assert f"remove it: {lifecycle.mcp_removal(entry)}" in result.stdout, result.stdout
+        assert f"remove it: {entry.remove}" in result.stdout, result.stdout
     assert "claude mcp remove <name>" not in result.stdout
     assert beside.read_bytes() == before, ".claude.json is Claude Code's; uninstall only reads it"
     assert agent_core.hook_commands("claude-code", default) == []
@@ -412,7 +414,9 @@ def test_json_without_yes_is_one_plan_object(
     assert result.exit_code == 0, result.output
     plan = _one_object(result.stdout)
     assert plan["dry_run"] is True
-    assert plan["hooks"] == [{"config_dir": str(site), "programs": [str(tool.script)]}]
+    assert plan["hooks"] == [
+        {"config_dir": str(site), "agent": "claude-code", "programs": [str(tool.script)]}
+    ]
     assert plan["package"]["command"] == "uv tool uninstall aisquare-cli"
     assert plan["package"]["runs"] is True
     assert (plan["home"]["exists"], plan["home"]["action"]) == (False, "keep"), "no home here"
@@ -517,7 +521,9 @@ def test_under_json_the_report_is_one_object_and_uv_is_pointed_at_stderr(
     assert result.exit_code == 0, result.output
     report = _one_object(result.stdout)
     assert report["dry_run"] is False
-    assert report["hooks"] == [{"config_dir": str(site), "removed": True, "error": None}]
+    assert report["hooks"] == [
+        {"config_dir": str(site), "agent": "claude-code", "removed": True, "error": None}
+    ]
     assert report["package"]["runs"] is True
     assert world.execs[0][2] is True, "uv's stdout must not follow the report onto stdout"
 
@@ -1394,8 +1400,8 @@ def test_purge_deletes_the_home_and_never_follows_a_link_inside_it(
     claude = _hooked(isolated_agent_home / ".claude", tool.script)
     (claude / "projects").mkdir()
     (claude / "projects" / "transcript.jsonl").write_text("precious\n", encoding="utf-8")
-    paths.claude_accounts_dir().mkdir(parents=True, exist_ok=True)
-    (paths.claude_accounts_dir() / "3").symlink_to(claude, target_is_directory=True)
+    accounts_core.accounts_root().mkdir(parents=True, exist_ok=True)
+    (accounts_core.accounts_root() / "3").symlink_to(claude, target_is_directory=True)
 
     result = runner.invoke(app, ["uninstall", "--yes", "--purge"])
 
@@ -1474,7 +1480,15 @@ def test_an_enabled_plugin_is_named_with_its_removal_and_a_purge_waits_for_it(
     assert removal.endswith("claude plugin uninstall aisquare@aisquare-cli"), removal
     scopes = [(plugin.pop("scope"), plugin.pop("project")) for plugin in plan["plugins"]]
     assert scopes == [("user", None)], "enabled in the config dir itself: user scope"
-    assert plan["plugins"] == [{"config_dir": str(site), "version": "0.9.0", "remove": removal}]
+    assert plan["plugins"] == [
+        {
+            "agent": "claude-code",
+            "config_dir": str(site),
+            "plugin": agent_core.CLAUDE_PLUGIN_ID,
+            "version": "0.9.0",
+            "remove": removal,
+        }
+    ]
     refused = _one_object(purge.stdout)
     assert (purge.exit_code, refused["error"]) == (1, "plugin_enabled"), refused
     assert removal in refused["detail"] and untouched, "refused with the command, nothing touched"
@@ -1499,7 +1513,7 @@ def test_a_plugin_inside_the_home_a_purge_deletes_does_not_hold_the_purge_up(
     was refused for it all the same (review of #257)."""
     monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: True)  # the route's rule
     _initialised(runner, tmp_path)
-    slot = _plugin_installed(paths.claude_accounts_dir() / "2")
+    slot = _plugin_installed(accounts_core.accounts_root() / "2")
 
     plan = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
     kept = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
@@ -1767,7 +1781,9 @@ def test_a_plugin_a_repository_enables_is_named_with_its_removal_and_a_purge_wai
     assert removal.endswith(f"claude plugin uninstall aisquare@aisquare-cli --scope {scope}")
     assert plan["plugins"] == [
         {
+            "agent": "claude-code",
             "config_dir": str(config),
+            "plugin": agent_core.CLAUDE_PLUGIN_ID,
             "version": "0.8.0",
             "scope": scope,
             "project": str(repo),
@@ -2060,7 +2076,7 @@ def test_a_settings_file_that_is_not_utf8_is_reported_not_raised(
 )
 def test_an_mcp_server_runs_aisquare_only_by_program_name(spec: dict[str, Any], runs: bool) -> None:
     """Finding 5: a path or file merely named aisquare is not aisquare."""
-    assert lifecycle._runs_aisquare(spec) is runs
+    assert runs_aisquare(spec) is runs
 
 
 def test_a_refused_purge_says_why_under_json(
@@ -2237,7 +2253,7 @@ def test_purge_says_the_keychain_keeps_the_slots_tokens_on_macos(
     purge does not touch — said, rather than promised away."""
     monkeypatch.setattr(accounts_core, "keychain_platform", lambda: keychain)
     _initialised(runner, tmp_path)
-    slot = paths.claude_accounts_dir() / "2"
+    slot = accounts_core.accounts_root() / "2"
     slot.mkdir(parents=True)
     (slot / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
 
@@ -2482,7 +2498,7 @@ def test_the_question_never_offers_what_an_unreadable_site_rules_out(
 def _retired_slot_with_broken_hooks(program: Path | str) -> Path:
     """A slot `accounts remove` retired with aisquare's hooks still in it: its settings.json
     was not valid JSON, so they could not be taken out first, and that failure is swallowed."""
-    slot = paths.claude_accounts_dir() / "2.removed-20261001T120000Z"
+    slot = accounts_core.accounts_root() / "2.removed-20261001T120000Z"
     slot.mkdir(parents=True)
     (slot / "settings.json").write_text(_hooks_text(program, trailing_comma=True), "utf-8")
     return slot
@@ -2573,7 +2589,7 @@ def test_a_slot_that_links_out_of_the_home_still_holds_the_purge_up(
     broken = tmp_path / "elsewhere" / "claude-old"  # reached through the slot alone
     broken.mkdir(parents=True)
     (broken / "settings.json").write_text(_hooks_text(tool.script, trailing_comma=True), "utf-8")
-    slot = paths.claude_accounts_dir() / "3"
+    slot = accounts_core.accounts_root() / "3"
     slot.parent.mkdir(parents=True, exist_ok=True)
     slot.symlink_to(broken, target_is_directory=True)
 
@@ -2755,7 +2771,7 @@ def test_a_purge_the_guard_refuses_is_planned_as_keeping_the_home(
     monkeypatch.setattr(agent_core, "plugin_route_supported", lambda: True)  # the route's rule
     _initialised(runner, tmp_path)  # in AISQUARE_HOME, which the suite moves
     home = paths.aisquare_home()
-    slot = _plugin_installed(paths.claude_accounts_dir() / "2")
+    slot = _plugin_installed(accounts_core.accounts_root() / "2")
     _hooked(isolated_agent_home / ".claude", tool.script)
 
     machine = _one_object(runner.invoke(app, ["--json", "uninstall", "--purge"]).stdout)
@@ -2826,7 +2842,7 @@ def test_an_mcp_server_a_purge_deletes_with_the_home_is_not_kept(
     (sweep 2 of #257). One in ~/.claude.json outlives the purge, and without --purge the
     slot's stays too (controls)."""
     _initialised(runner, tmp_path)
-    _mcp_server(paths.claude_accounts_dir() / "2" / ".claude.json", "fleet-memory")
+    _mcp_server(accounts_core.accounts_root() / "2" / ".claude.json", "fleet-memory")
     _mcp_server(isolated_agent_home / ".claude.json", "user-memory")
 
     plain = runner.invoke(app, ["uninstall", "--dry-run"]).stdout
@@ -2863,7 +2879,7 @@ def test_an_mcp_server_reached_through_a_link_in_the_home_is_kept_by_its_own_fil
     if not can_symlink():
         pytest.skip("this machine cannot create symlinks")
     _initialised(runner, tmp_path)
-    slot = paths.claude_accounts_dir() / "2"
+    slot = accounts_core.accounts_root() / "2"
     if link == "slot-file":
         held = _mcp_server(tmp_path / "elsewhere" / ".claude.json", "linked-memory")
         slot.mkdir(parents=True)
@@ -2883,7 +2899,9 @@ def test_an_mcp_server_reached_through_a_link_in_the_home_is_kept_by_its_own_fil
     named = [line.strip() for line in kept if line.strip().startswith("linked-memory")]
     assert machine["home"]["action"] == "delete", machine["home"]
     listed = [{key: value for key, value in m.items() if key != "remove"} for m in machine["mcp"]]
-    assert listed == [{"name": "linked-memory", "file": str(held), "project": None}]
+    assert listed == [
+        {"name": "linked-memory", "agent": "claude-code", "file": str(held), "project": None}
+    ]
     remove = machine["mcp"][0]["remove"]  # aimed at the directory the purge leaves
     assert str(held.parent) in remove and str(slot) not in remove, remove
     assert named == [f"linked-memory in {held}"], human
@@ -2909,7 +2927,9 @@ def test_one_claude_json_reached_two_ways_is_listed_once(
 
     named = [line.strip() for line in human.splitlines() if line.strip().startswith("memory in")]
     listed = [{key: value for key, value in m.items() if key != "remove"} for m in machine["mcp"]]
-    assert listed == [{"name": "memory", "file": str(held), "project": None}]
+    assert listed == [
+        {"name": "memory", "agent": "claude-code", "file": str(held), "project": None}
+    ]
     assert named == [f"memory in {held}"], human
 
 
@@ -2970,7 +2990,7 @@ def test_each_mcp_server_is_named_with_the_command_that_reaches_it(
     spec = {"command": "aisquare", "args": ["serve"]}
     repo = tmp_path / "my repo"
     sibling = isolated_agent_home / ".claude-c2"
-    slot = paths.claude_accounts_dir() / "2"
+    slot = accounts_core.accounts_root() / "2"
     (isolated_agent_home / ".claude.json").parent.mkdir(parents=True, exist_ok=True)
     (isolated_agent_home / ".claude.json").write_text(
         json.dumps(
@@ -3022,14 +3042,18 @@ def test_on_native_windows_what_a_removal_needs_is_said_after_its_command(
     needs are said after it, never written in a syntax the shell cannot run."""
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     sibling = tmp_path / ".claude-c2"
-    top = lifecycle.McpRegistration("top", tmp_path / ".claude.json")
-    proj = lifecycle.McpRegistration("proj", tmp_path / ".claude.json", "C:\\work\\my repo")
-    other = lifecycle.McpRegistration("c2", sibling / ".claude.json", None, sibling)
     monkeypatch.setattr(sys, "platform", "win32")
 
-    default_shell = [lifecycle.mcp_removal(entry) for entry in (top, proj, other)]
+    def removal(name: str, project: str | None = None, config_dir: Path | None = None) -> str:
+        return claude_installs.mcp_removal(name, project=project, config_dir=config_dir)
+
+    default_shell = [
+        removal("top"),
+        removal("proj", project="C:\\work\\my repo"),
+        removal("c2", config_dir=sibling),
+    ]
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(sibling))
-    sibling_shell = [lifecycle.mcp_removal(entry) for entry in (top, other)]
+    sibling_shell = [removal("top"), removal("c2", config_dir=sibling)]
 
     assert default_shell == [
         "claude mcp remove --scope user top",
@@ -3136,7 +3160,7 @@ def test_a_slot_linked_where_this_user_cannot_enter_costs_no_other_slot(
     _initialised(runner, tmp_path)
     home = paths.aisquare_home()
     outside = _broken_hooks(tmp_path / "elsewhere" / "claude-old", tool.script)
-    accounts = paths.claude_accounts_dir()
+    accounts = accounts_core.accounts_root()
     (accounts / "2").mkdir(parents=True)
     (accounts / "2" / accounts_core.MARKER).write_text('{"slot": 2}', encoding="utf-8")
     (accounts / "3").symlink_to(outside, target_is_directory=True)
@@ -3328,7 +3352,7 @@ def test_uv_run_fetches_aisquare_when_with_names_it_in_any_spelling(args: list[s
     a URL, a checkout, a wheel — may be aisquare, and so may an editable path or a
     requirements file: `--with git+https://…/aisquare-cli` read as a package called `git`,
     and a purge it undoes went ahead (round 25 of #257)."""
-    assert lifecycle._fetches_aisquare({"command": "uv", "args": args})
+    assert fetches_aisquare({"command": "uv", "args": args})
 
 
 @pytest.mark.parametrize(
@@ -3357,7 +3381,7 @@ def test_a_runner_that_does_not_fetch_aisquare_is_not_read_as_one(
 ) -> None:
     """`uv run` without a `--with` naming aisquare runs the project's or PATH's program, and
     the arguments after the program are its own: each fails once the package is gone."""
-    assert not lifecycle._fetches_aisquare({"command": command, "args": args})
+    assert not fetches_aisquare({"command": command, "args": args})
 
 
 def test_a_purge_waits_for_a_project_mcp_json_server_that_fetches_aisquare(
@@ -3455,7 +3479,7 @@ def test_a_purge_does_not_wait_for_a_project_server_only_its_own_slots_left_unan
     (isolated_agent_home / ".claude.json").write_text(
         json.dumps({"projects": {str(repo): answer}}), encoding="utf-8"
     )
-    slot = paths.claude_accounts_dir() / "2"
+    slot = accounts_core.accounts_root() / "2"
     slot.mkdir(parents=True)
     (slot / ".claude.json").write_text(
         json.dumps(
@@ -3524,3 +3548,309 @@ def test_a_project_server_is_left_out_only_where_every_block_declined_it(
 
     shared = [(entry.name, entry.shared) for entry in plan.mcp if entry.shared]
     assert shared == ([] if unanswered is None else [("memory", True)]), plan.mcp
+
+
+# --- Codex homes ---------------------------------------------------------------------------
+
+#: What `agents connect codex` writes, event by event (the Codex adapter's hooks).
+_CODEX_HOOKS = get_adapter("codex").capabilities.hooks
+#: A Codex hook of the user's own, which uninstall must leave exactly where it is.
+_CODEX_FOREIGN = {"hooks": [{"type": "command", "command": "notify-send 'codex stopped'"}]}
+_CODEX_CONFIG = """\
+model = "gpt-5-codex"
+
+[mcp_servers.aisquare]
+command = {program}
+args = ["serve", "--stdio"]
+
+[mcp_servers.docs]
+command = "npx"
+args = ["docs-mcp"]
+"""
+
+
+def _codex_hooked(home: Path, program: Path | str, *, config: str | None = None) -> Path:
+    """A Codex home whose hooks.json carries aisquare's hooks and one group of the user's own,
+    with a config.toml (``config``, else one registering aisquare's MCP server beside the
+    user's own) and an AGENTS.md."""
+    home.mkdir(parents=True, exist_ok=True)
+    hooks: dict[str, list[dict[str, Any]]] = {}
+    for spec in _CODEX_HOOKS:
+        handler = {
+            "type": "command",
+            "command": f"{program} hook codex --config-dir {home}",
+            "timeout": spec.timeout,
+        }
+        group: dict[str, Any] = {"hooks": [handler]}
+        if spec.matcher is not None:
+            group["matcher"] = spec.matcher
+        hooks.setdefault(spec.event, []).append(group)
+    hooks["Stop"].insert(0, _CODEX_FOREIGN)
+    (home / "hooks.json").write_text(json.dumps({"hooks": hooks}, indent=2), encoding="utf-8")
+    # A TOML string, escaped: a Windows path's `\U` in a bare "…" is an invalid escape,
+    # and Codex's config.toml (and the plan's read of it) would not parse.
+    text = _CODEX_CONFIG.format(program=json.dumps(str(program))) if config is None else config
+    (home / "config.toml").write_text(text, encoding="utf-8")
+    (home / "AGENTS.md").write_text("# House rules\nsmall commits\n", encoding="utf-8")
+    return home
+
+
+def _codex_account(slot: str) -> Path:
+    return paths.aisquare_home() / "codex-accounts" / slot
+
+
+def _record_codex(*homes: Path) -> None:
+    paths.ensure_home()
+    paths.agents_registry_path().write_text(
+        json.dumps(
+            {"connected": ["codex"], "connections": {"codex": [str(home) for home in homes]}}
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_the_plan_finds_every_codex_home_and_its_mcp_server(
+    tool: Tool,
+    world: World,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance 2 of t4: ~/.codex, a sibling ~/.codex-work, $CODEX_HOME elsewhere, a
+    connected home, and a Codex account home inside this home: each one's hooks, and each
+    `[mcp_servers.aisquare]` with the exact `codex mcp remove` that removes it there."""
+    default = _codex_hooked(isolated_agent_home / ".codex", tool.script)
+    sibling = _codex_hooked(isolated_agent_home / ".codex-work", tool.script)
+    ambient = _codex_hooked(tmp_path / "elsewhere" / "codex-home", tool.script)
+    recorded = _codex_hooked(tmp_path / "recorded" / "codex", tool.script)
+    slot = _codex_hooked(_codex_account("2"), tool.script)
+    _record_codex(recorded)
+    monkeypatch.setenv("CODEX_HOME", str(ambient))
+
+    plan = lifecycle.uninstall_plan()
+
+    found = {(site.agent, site.config_dir) for site in plan.hooks}
+    assert found == {("codex", home) for home in (default, sibling, ambient, recorded, slot)}
+    assert all(site.programs == (str(tool.script),) for site in plan.hooks)
+    removals = {entry.file.parent: entry.remove for entry in plan.mcp}
+    assert {entry.name for entry in plan.mcp} == {"aisquare"}, "docs does not run aisquare"
+    assert all(entry.agent == "codex" for entry in plan.mcp)
+
+    def aimed(home: Path | None) -> str:
+        if sys.platform == "win32":  # no `env -u` or `VAR=value command`: said after it
+            need = "unset" if home is None else f"set to {home}"
+            return f"codex mcp remove aisquare (run it with CODEX_HOME {need})"
+        prefix = "env -u CODEX_HOME" if home is None else f"CODEX_HOME={home}"
+        return f"{prefix} codex mcp remove aisquare"
+
+    assert removals == {
+        ambient: "codex mcp remove aisquare",  # the home this shell's codex reads
+        default: aimed(None),
+        sibling: aimed(sibling),
+        recorded: aimed(recorded),
+        slot: aimed(slot),
+    }
+    assert plan.account_homes == (("codex", slot),)
+
+
+def test_without_codex_home_set_the_default_homes_removal_is_the_bare_command(
+    tool: Tool, world: World, isolated_agent_home: Path
+) -> None:
+    default = _codex_hooked(isolated_agent_home / ".codex", tool.script)
+
+    [entry] = lifecycle.uninstall_plan().mcp
+
+    assert entry.file.parent == default
+    assert entry.remove == "codex mcp remove aisquare"
+
+
+def test_yes_removes_only_aisquares_codex_hooks_and_never_rewrites_config_toml(
+    tool: Tool,
+    world: World,
+    runner: CliRunner,
+    isolated_agent_home: Path,
+) -> None:
+    """Uninstall takes out aisquare's hook groups and nothing else: the user's own group,
+    config.toml (aisquare's MCP server included, named with its removal instead) and
+    AGENTS.md stay byte for byte, and the package goes last."""
+    codex = _codex_hooked(isolated_agent_home / ".codex", tool.script)
+    claude = _hooked(isolated_agent_home / ".claude", tool.script)
+    _record_codex(codex)
+    config = (codex / "config.toml").read_bytes()
+    agents_md = (codex / "AGENTS.md").read_bytes()
+
+    result = runner.invoke(app, ["uninstall", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert agent_core.hook_commands("codex", codex) == []
+    assert json.loads((codex / "hooks.json").read_text("utf-8")) == {
+        "hooks": {"Stop": [_CODEX_FOREIGN]}
+    }, "the user's own group stays exactly; aisquare's emptied events go"
+    assert agent_core.hook_commands("claude-code", claude) == []
+    assert (codex / "config.toml").read_bytes() == config, "config.toml is Codex's: only read"
+    assert (codex / "AGENTS.md").read_bytes() == agents_md
+    assert f"✓ hooks removed from {codex} (Codex)" in result.stdout, result.stdout
+    assert "open Codex sessions keep the hooks they started with" in result.stdout
+    assert "the MCP server aisquare is still registered in" in result.stdout
+    assert "Codex owns that file — remove it: codex mcp remove aisquare" in result.stdout
+    assert "Claude Code and Codex stay installed" in result.stdout
+    assert [kind for kind, _ in world.events] == ["hooks", "hooks", "package"]
+    assert agent_core.connected_dirs("codex") == [], "the kept home connects nothing"
+
+
+def test_the_codex_plan_under_json_names_each_site_and_server_by_agent(
+    tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    codex = _codex_hooked(isolated_agent_home / ".codex", tool.script)
+
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+
+    assert plan["hooks"] == [
+        {"config_dir": str(codex), "agent": "codex", "programs": [str(tool.script)]}
+    ]
+    assert plan["mcp"] == [
+        {
+            "name": "aisquare",
+            "agent": "codex",
+            "file": str(codex / "config.toml"),
+            "project": None,
+            "remove": "codex mcp remove aisquare",
+        }
+    ]
+    assert plan["plugins"] == []
+
+
+def test_an_enabled_codex_plugin_is_named_with_its_removal_and_a_purge_waits_for_it(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """The Codex plugin route's `[plugins."aisquare@…"]`: listed with `codex plugin remove`,
+    and a purge it would undo is refused as the Claude Code plugin's is. A disabled one, or
+    another plugin, is not."""
+    _initialised(runner, tmp_path)
+    plugin_config = (
+        '[plugins."aisquare@aisquare-cli"]\nenabled = true\n\n'
+        '[plugins."browser@openai-bundled"]\nenabled = true\n'
+    )
+    codex = _codex_hooked(isolated_agent_home / ".codex", tool.script, config=plugin_config)
+    before = _snapshot(tmp_path)
+
+    plan = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+    purge = runner.invoke(app, ["--json", "uninstall", "--yes", "--purge"])
+    untouched = _snapshot(tmp_path) == before and world.events == []
+    plain = runner.invoke(app, ["uninstall", "--yes"])
+    (codex / "config.toml").write_text(plugin_config.replace("true", "false", 1), "utf-8")
+    disabled = _one_object(runner.invoke(app, ["--json", "uninstall"]).stdout)
+
+    removal = "codex plugin remove aisquare@aisquare-cli"
+    assert plan["plugins"] == [
+        {
+            "agent": "codex",
+            "config_dir": str(codex),
+            "plugin": "aisquare@aisquare-cli",
+            "version": None,
+            "scope": "user",
+            "project": None,
+            "remove": removal,
+        }
+    ]
+    refused = _one_object(purge.stdout)
+    assert (purge.exit_code, refused["error"]) == (1, "plugin_enabled"), refused
+    assert removal in refused["detail"] and untouched, "refused with the command, nothing touched"
+    assert plain.exit_code == 0, plain.output
+    assert f"the aisquare plugin is still enabled in {codex}, so Codex keeps" in plain.stdout
+    assert f"remove it: {removal}" in plain.stdout and world.events[-1][0] == "package"
+    assert disabled["plugins"] == [], "control: a disabled plugin runs nothing"
+
+
+def test_a_purge_refuses_a_codex_mcp_server_that_fetches_aisquare(
+    tool: Tool,
+    world: World,
+    default_home: None,
+    runner: CliRunner,
+    user_home: Path,
+    isolated_agent_home: Path,
+    tmp_path: Path,
+) -> None:
+    """`uvx --from aisquare-cli aisquare serve` in a Codex home outlives the package, and
+    Codex's next session would make the purged home again: refused, with its removal."""
+    _initialised(runner, tmp_path)
+    fetching = (
+        '[mcp_servers.memory]\ncommand = "uvx"\n'
+        'args = ["--from", "aisquare-cli", "aisquare", "serve", "--stdio"]\n'
+    )
+    _codex_hooked(isolated_agent_home / ".codex", tool.script, config=fetching)
+
+    result = runner.invoke(app, ["--json", "uninstall", "--yes", "--purge"])
+
+    refused = _one_object(result.stdout)
+    assert (result.exit_code, refused["error"]) == (1, "mcp_registered"), refused
+    assert "so Codex's next session starts it" in refused["detail"], refused
+    assert "codex mcp remove memory" in refused["detail"], refused
+    assert paths.aisquare_home().is_dir() and world.events == []
+
+
+def test_a_codex_hooks_file_holding_ours_that_cannot_be_parsed_keeps_the_package(
+    tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    """A hooks.json with our hooks and a trailing comma: Codex may still run them, and
+    nothing here can take them out safely, so the run keeps the package, as for Claude's."""
+    codex = isolated_agent_home / ".codex"
+    _codex_hooked(codex, tool.script)
+    text = (codex / "hooks.json").read_text("utf-8")
+    (codex / "hooks.json").write_text(text[: text.rindex("\n}")] + ",\n}", encoding="utf-8")
+
+    plan = lifecycle.uninstall_plan()
+    result = runner.invoke(app, ["uninstall", "--yes"])
+
+    [site] = plan.unreadable
+    assert site.agent == "codex" and site.config_dir == codex
+    assert site.reason is not None and site.reason.startswith(
+        "its hooks.json holds aisquare hooks but cannot be read as UTF-8 JSON"
+    )
+    assert result.exit_code == 1
+    assert world.execs == [], "the package stays while those hooks still call it"
+
+
+def test_a_claude_only_machine_with_codex_installed_plans_nothing_for_codex(
+    tool: Tool, world: World, runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    """Negative control: a Codex home with no hooks, server or plugin of aisquare's (a
+    plain Codex install) is not in the plan, which reads as it always did."""
+    plain = isolated_agent_home / ".codex"
+    plain.mkdir(parents=True)
+    (plain / "config.toml").write_text('model = "gpt-5-codex"\n', encoding="utf-8")
+    (plain / "hooks.json").write_text(json.dumps({"hooks": {"Stop": [_CODEX_FOREIGN]}}), "utf-8")
+    claude = _hooked(isolated_agent_home / ".claude", tool.script)
+
+    plan = lifecycle.uninstall_plan()
+    result = runner.invoke(app, ["uninstall", "--dry-run"])
+
+    assert [(site.agent, site.config_dir) for site in plan.hooks] == [("claude-code", claude)]
+    assert plan.mcp == () and plan.plugins == () and plan.unreadable == ()
+    assert "Codex" not in result.stdout, result.stdout
+    assert "uv, tmux, Node, gh and Claude Code" in result.stdout
+
+
+def test_disconnect_refuses_a_codex_hooks_file_it_may_not_write(
+    tool: Tool, runner: CliRunner, isolated_agent_home: Path
+) -> None:
+    """`agents disconnect codex` asks uninstall's rule of the Codex home's own hooks.json:
+    it read Claude Code's settings.json there, found nothing, and the write then failed."""
+    if sys.platform == "win32" or not can_deny_reads():
+        pytest.skip("needs a file this user may not write")
+    codex = _codex_hooked(isolated_agent_home / ".codex", tool.script)
+    (codex / "hooks.json").chmod(0o444)
+    try:
+        result = runner.invoke(app, ["agents", "disconnect", "codex"])
+    finally:
+        (codex / "hooks.json").chmod(0o644)
+
+    assert result.exit_code == 1
+    assert "its hooks.json cannot be rewritten" in result.output, result.output
+    assert agent_core.hook_commands("codex", codex) != []

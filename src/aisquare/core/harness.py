@@ -52,8 +52,11 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -61,7 +64,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from aisquare.core import experimental, spawn
-from aisquare.core.paths import aisquare_home, expand_user
+from aisquare.core.paths import aisquare_home, cache_dir, expand_user
 
 if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
     from aisquare.core.config import TeamSettings
@@ -69,6 +72,22 @@ if TYPE_CHECKING:  # runtime import stays lazy: config imports harness back
 _OFF_VALUES = {"0", "false", "no", "off"}
 PROBE_TIMEOUT_SECONDS = 150
 CACHE_TTL = timedelta(hours=24)
+
+
+@dataclass(frozen=True)
+class ProbeContext:
+    """The exact executable and effective account used by a launch.
+
+    The executable's resolved path and stat fingerprint invalidate availability
+    on upgrades without executing wrappers during read-only status queries.
+    """
+
+    binary: str
+    env: dict[str, str]
+
+
+_PROBE_CONTEXT: ContextVar[ProbeContext | None] = ContextVar("agent_probe", default=None)
+_RESOLUTION_SCOPE: ContextVar[str | None] = ContextVar("agent_resolution_scope", default=None)
 
 #: alias → the family token that proves the alias actually resolved to it. Matched
 #: as a substring so full ids (``claude-sonnet-5``), dated legacy ids
@@ -206,36 +225,57 @@ def _flag_present(args: Sequence[str], flag: str) -> bool:
 
 
 def role_defaults(role: str, *, binary: str, args: Sequence[str]) -> RoleDefaults:
-    """The role's :attr:`RoleProfile.default_args` this launch still needs.
+    """The flags ``role`` needs on ``binary``: the ``role_defaults`` of the agent the
+    binary's name runs (``agent_adapters.adapter_for_binary``; Claude Code's are the
+    role's :attr:`RoleProfile.default_args`, :func:`profile_defaults`). A wrapper by any
+    other name (``claude2``, ``claude-next``) may be another program and would reject
+    them, so it gets none, with a note (:func:`withheld_defaults`)."""
+    from aisquare.core.agent_adapters import adapter_for_binary  # lazy: they import us
 
-    Applied only when the agent is Claude Code (:func:`is_default_agent`) — a
-    wrapper or another agent has its own flags and would reject Claude Code's;
-    skipped for any flag already present in ``args`` (a binding, a fleet
-    ``extra_args``, the operator's own line) and for any flag whose ``--no-``
-    opt-out is present. So the fleet's ``aisquare launch ui-tester`` inside a
-    tmux window and an operator's ``ais-cli-ais ui-tester --chrome`` both end
-    with exactly one ``--chrome``, and ``--no-chrome`` anywhere wins.
+    adapter = adapter_for_binary(binary)
+    if adapter is None:
+        return withheld_defaults(role, binary, default_binary())
+    return adapter.role_defaults(role, binary=binary, args=args)
 
-    Only the BINARY gate produces a note. The other two withholdings are
-    already on screen — the flag or its opt-out is in the command the operator
-    typed — while this one happens inside a tmux window nobody watched, for a
-    binding made in another shell.
+
+def profile_defaults(role: str, args: Sequence[str]) -> RoleDefaults:
+    """The role's :attr:`RoleProfile.default_args` this launch still needs: Claude Code's
+    answer (``ClaudeCodeAdapter.role_defaults``), for a binary its name says it runs.
+
+    Skipped for any flag already present in ``args`` (a binding, a fleet ``extra_args``,
+    the operator's own line) and for any flag whose ``--no-`` opt-out is present. So the
+    fleet's ``aisquare launch ui-tester`` inside a tmux window and an operator's
+    ``ais-cli-ais ui-tester --chrome`` both end with exactly one ``--chrome``, and
+    ``--no-chrome`` anywhere wins.
     """
     profile = ROLE_PROFILES.get(base_role(role))
     if profile is None or not profile.default_args:
         return RoleDefaults()
-    if not is_default_agent(binary):
-        return RoleDefaults(
-            notes=[
-                f"{', '.join(profile.default_args)} withheld: "
-                f"{os.path.basename(binary)!r} is not {DEFAULT_AGENT_BINARY}"
-            ]
-        )
     return RoleDefaults(
         args=[
             flag
             for flag in profile.default_args
             if not _flag_present(args, flag) and not _flag_present(args, _opt_out_of(flag))
+        ]
+    )
+
+
+def withheld_defaults(role: str, binary: str, runs: str) -> RoleDefaults:
+    """None of the role's :attr:`RoleProfile.default_args`, with the note that says why:
+    ``binary`` is not ``runs``, the binary whose flags they are.
+
+    Only this withholding produces a note. The other two (:func:`profile_defaults`) are
+    already on screen — the flag or its opt-out is in the command the operator typed —
+    while this one happens inside a tmux window nobody watched, for a binding made in
+    another shell.
+    """
+    profile = ROLE_PROFILES.get(base_role(role))
+    if profile is None or not profile.default_args:
+        return RoleDefaults()
+    return RoleDefaults(
+        notes=[
+            f"{', '.join(profile.default_args)} withheld: "
+            f"{os.path.basename(binary)!r} is not {runs}"
         ]
     )
 
@@ -280,10 +320,20 @@ def normalize_effort(value: str | None) -> str | None:
     return candidate if candidate in EFFORT_SCALE else None
 
 
-def role_effort_override(role: str) -> str | None:
+def effective_env() -> Mapping[str, str]:
+    context = _PROBE_CONTEXT.get()
+    return context.env if context is not None else os.environ
+
+
+def role_env_key(kind: str, role: str) -> str:
+    return f"AISQUARE_{kind}_" + "".join(c if c.isalnum() else "_" for c in role.upper())
+
+
+def role_effort_override(role: str, env: Mapping[str, str] | None = None) -> str | None:
     """The ``AISQUARE_EFFORT_<ROLE>`` pin for ``role`` — absolute, offset not applied."""
-    key = "AISQUARE_EFFORT_" + "".join(c if c.isalnum() else "_" for c in role.upper())
-    return os.environ.get(key, "").strip() or None
+    return (effective_env() if env is None else env).get(
+        role_env_key("EFFORT", role), ""
+    ).strip() or None
 
 
 def base_effort() -> tuple[str, str]:
@@ -295,7 +345,7 @@ def base_effort() -> tuple[str, str]:
     fleet you spawn from it, without configuring anything.
     """
     for name, source in (("AISQUARE_EFFORT", "env"), ("CLAUDE_EFFORT", "inherited")):
-        raw = os.environ.get(name, "").strip()
+        raw = effective_env().get(name, "").strip()
         if not raw:
             continue
         rung = normalize_effort(raw)
@@ -332,7 +382,7 @@ def resolve_effort(role: str, *, explicit: str | None = None) -> tuple[str, str]
     base, base_source = base_effort()
     profile = ROLE_PROFILES.get(base_role(role))
     offset = profile.effort_offset if profile else 0
-    wants_ultracode = os.environ.get("AISQUARE_EFFORT", "").strip().lower() == ULTRACODE
+    wants_ultracode = effective_env().get("AISQUARE_EFFORT", "").strip().lower() == ULTRACODE
     return _apply_offset(base, offset, ultracode=wants_ultracode), base_source
 
 
@@ -359,6 +409,8 @@ class ModelResolution(BaseModel):
     """Where the effort came from: explicit, pinned, env, inherited, or default."""
     skipped: list[str] = []
     """Ladder rungs that were probed (or cached) unavailable, in order."""
+    notes: list[str] = []
+    """Native argument precedence or compatibility mappings worth reporting."""
 
 
 class ProbeResult(BaseModel):
@@ -375,14 +427,66 @@ class ProbeResult(BaseModel):
 
 def probing_enabled() -> bool:
     """Whether availability probes may spawn subprocesses (default: yes)."""
-    return os.environ.get("AISQUARE_HARNESS_PROBE", "").strip().lower() not in _OFF_VALUES
+    return effective_env().get("AISQUARE_HARNESS_PROBE", "").strip().lower() not in _OFF_VALUES
 
 
-def role_model_override(role: str) -> str | None:
+def role_model_override(role: str, env: Mapping[str, str] | None = None) -> str | None:
     """The ``AISQUARE_MODEL_<ROLE>`` pin for ``role``, if set."""
-    key = "AISQUARE_MODEL_" + "".join(c if c.isalnum() else "_" for c in role.upper())
-    value = os.environ.get(key, "").strip()
+    value = (effective_env() if env is None else env).get(role_env_key("MODEL", role), "").strip()
     return value or None
+
+
+def executable_path(binary: str, env: Mapping[str, str]) -> str | None:
+    path = env.get("PATH")
+    return (
+        shutil.which(binary) if path == os.environ.get("PATH") else shutil.which(binary, path=path)
+    )
+
+
+_SCOPE_CACHE: ContextVar[dict[str, str] | None] = ContextVar(
+    "diagnostic_account_scopes", default=None
+)
+_PROBE_CACHE: ContextVar[dict[Path, dict[str, ProbeResult]] | None] = ContextVar(
+    "diagnostic_probes", default=None
+)
+
+
+@contextlib.contextmanager
+def probe_snapshot() -> Iterator[None]:
+    scope_token = _SCOPE_CACHE.set({})
+    cache_token = _PROBE_CACHE.set({})
+    try:
+        yield
+    finally:
+        _PROBE_CACHE.reset(cache_token)
+        _SCOPE_CACHE.reset(scope_token)
+
+
+@contextlib.contextmanager
+def probe_context(context: ProbeContext) -> Iterator[None]:
+    token = _PROBE_CONTEXT.set(context)
+    scope_token = _RESOLUTION_SCOPE.set(None)
+    try:
+        # Only account, provider and executable selectors affect entitlement.
+        selectors = [
+            context.binary,
+            context.env.get("PATH"),
+            context.env.get("HOME"),
+            context.env.get("CLAUDE_CONFIG_DIR"),
+            _provider_identity(context.env),
+        ]
+        key = hashlib.sha256(json.dumps(selectors).encode()).hexdigest()
+        cache = _SCOPE_CACHE.get()
+        scope = cache.get(key) if cache is not None else None
+        if scope is None:
+            scope = account_scope()
+            if cache is not None:
+                cache[key] = scope
+        _RESOLUTION_SCOPE.set(scope)
+        yield
+    finally:
+        _RESOLUTION_SCOPE.reset(scope_token)
+        _PROBE_CONTEXT.reset(token)
 
 
 def account_scope() -> str:
@@ -393,6 +497,52 @@ def account_scope() -> str:
     ``CLAUDE_CONFIG_DIR`` is the only account selector Claude Code exposes to
     us; unset means the default ``~/.claude``.
     """
+    cached_scope = _RESOLUTION_SCOPE.get()
+    if cached_scope is not None:
+        return cached_scope
+    context = _PROBE_CONTEXT.get()
+    if context is not None:
+        from aisquare.core import agents, claude_accounts
+        from aisquare.models import ClaudeAccount
+
+        resolved = executable_path(context.binary, context.env)
+        executable = Path(resolved or context.binary)
+        identity: list[object] = ["claude-code", str(executable.resolve()), resolved is not None]
+        with contextlib.suppress(OSError):
+            stat = executable.stat()
+            identity += [stat.st_mtime_ns, stat.st_size]
+        # The directory this probe's claude runs under, as it reads it: not
+        # `default_account`'s, which maps a managed slot back to the plain account.
+        raw = context.env.get(claude_accounts.CONFIG_DIR_VAR, "").strip()
+        home = expand_user(Path(raw)) if raw else claude_accounts.home_config_dir()
+        slot = claude_accounts.managed_slot(home)
+        selected_account = ClaudeAccount(
+            slot=claude_accounts.DEFAULT_SLOT if slot is None else slot,
+            config_dir=home,
+            managed=slot is not None,
+        )
+        identity.append(str(home.resolve()))
+        account = claude_accounts.identity(selected_account, env=context.env)
+        identity.append(account.model_dump() if account else None)
+        credentials = (
+            None
+            if claude_accounts.keychain_platform()
+            else claude_accounts.credentials(selected_account)
+        )
+        identity += [
+            credentials.subscription_type if credentials else None,
+            credentials.rate_limit_tier if credentials else None,
+        ]
+        # Login identity, provider routing and explicit credentials affect
+        # entitlement. Hook edits, OAuth refreshes and parent-session IDs do not.
+        settings = agents._read_settings(home / "settings.json")
+        configured_env = settings.get("env", {})
+        identity += [
+            _provider_identity(configured_env if isinstance(configured_env, dict) else {}),
+            settings.get("apiKeyHelper"),
+            _provider_identity(context.env),
+        ]
+        return hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:20]
     raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if not raw:
         return "default"
@@ -400,13 +550,52 @@ def account_scope() -> str:
     return hashlib.sha256(resolved.encode("utf-8")).hexdigest()[:12]
 
 
+def _provider_identity(env: dict[str, object] | dict[str, str]) -> list[tuple[str, object]]:
+    """Account/provider selectors, excluding per-process and tracing variables."""
+    keys = {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "AWS_PROFILE",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_ROLE_ARN",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "ANTHROPIC_BEDROCK_BASE_URL",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "CLOUD_ML_REGION",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "ANTHROPIC_FOUNDRY_RESOURCE",
+        "ANTHROPIC_FOUNDRY_BASE_URL",
+        "ANTHROPIC_FOUNDRY_API_KEY",
+    }
+    return sorted((key, env[key]) for key in keys if key in env)
+
+
 def _cache_path() -> Path:
-    return aisquare_home() / "cache" / f"harness_models.{account_scope()}.json"
+    return cache_dir() / f"harness_models.{account_scope()}.json"
 
 
 def _load_cache() -> dict[str, ProbeResult]:
+    path = _cache_path()
+    snapshot = _PROBE_CACHE.get()
+    if snapshot is not None and path in snapshot:
+        return dict(snapshot[path])
+    results = _read_cache(path)
+    if snapshot is not None:
+        snapshot[path] = results
+    return dict(results)
+
+
+def _read_cache(path: Path) -> dict[str, ProbeResult]:
     try:
-        raw = json.loads(_cache_path().read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     if not isinstance(raw, dict):
@@ -426,6 +615,10 @@ def _save_cache(cache: dict[str, ProbeResult]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {alias: item.model_dump(mode="json") for alias, item in cache.items()}
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        snapshot = _PROBE_CACHE.get()
+        if snapshot is not None:
+            snapshot[path] = dict(cache)
+        _prune_probe_scopes()
     except OSError:
         pass  # the cache is disposable; failing to write it must not surface
 
@@ -463,7 +656,8 @@ def _probe_env() -> dict[str, str]:
     junk-run suppression: the traffic is ours not to send in the first place.
     """
     keep = {"AISQUARE_HOME"}  # a relocated tree must stay relocated in the child
-    ambient = spawn.untraced_env()
+    context = _PROBE_CONTEXT.get()
+    ambient = spawn.untraced_env(context.env if context else None)
     env = {k: v for k, v in ambient.items() if k in keep or not k.startswith("AISQUARE_")}
     for name in (
         "ANTHROPIC_MODEL",
@@ -499,8 +693,9 @@ def probe_model(alias: str) -> ProbeResult:
     home = aisquare_home()
     with contextlib.suppress(OSError):
         home.mkdir(parents=True, exist_ok=True)
+    context = _PROBE_CONTEXT.get()
     argv = [
-        "claude",
+        context.binary if context is not None else default_binary(),
         "-p",
         "reply with exactly: ok",
         "--model",
@@ -598,7 +793,23 @@ def probe_model(alias: str) -> ProbeResult:
     return ProbeResult(alias=alias, available=True, resolved_id=resolved, checked_at=now)
 
 
+_PROBE_NOTICE: ContextVar[Callable[[], None] | None] = ContextVar("probe_notice", default=None)
+
+
+@contextlib.contextmanager
+def probe_notice(notice: Callable[[], None]) -> Iterator[None]:
+    token = _PROBE_NOTICE.set(notice)
+    try:
+        yield
+    finally:
+        _PROBE_NOTICE.reset(token)
+
+
 def _probe_and_cache(alias: str) -> ProbeResult:
+    notice = _PROBE_NOTICE.get()
+    if notice is not None:
+        _PROBE_NOTICE.set(None)
+        notice()
     result = probe_model(alias)
     if not result.conclusive:
         return result  # never cache "we could not tell" — retry next time
@@ -609,9 +820,26 @@ def _probe_and_cache(alias: str) -> ProbeResult:
 
 
 def clear_probe_cache() -> None:
-    """Forget every cached availability verdict (``spawn --refresh``)."""
+    """Refresh this account; prune expired scopes without spending other logins' probes."""
+    directory = cache_dir()
+    snapshot = _PROBE_CACHE.get()
+    if snapshot is not None:
+        snapshot.pop(_cache_path(), None)
+    for path in (_cache_path(), directory / "harness_models.json"):
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+    _prune_probe_scopes()
+
+
+def _prune_probe_scopes() -> None:
+    """Normal probe writes collect expired scopes left by upgrades or account changes."""
+    directory = cache_dir()
+    cutoff = (datetime.now(tz=UTC) - CACHE_TTL).timestamp()
     with contextlib.suppress(OSError):
-        _cache_path().unlink(missing_ok=True)
+        for path in directory.glob("harness_models.*.json"):
+            with contextlib.suppress(OSError):
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
 
 
 def resolve_model(
@@ -620,6 +848,7 @@ def resolve_model(
     probe: bool | None = None,
     refresh: bool = False,
     effort: str | None = None,
+    context: ProbeContext | None = None,
 ) -> ModelResolution | None:
     """Resolve the model for ``role`` down its ladder; ``None`` for untiered roles.
 
@@ -629,6 +858,11 @@ def resolve_model(
     rung of a ladder is always accepted without proof — resolution never comes
     back empty-handed, and a launch is never blocked.
     """
+    if context is not None:
+        with probe_context(context):
+            return resolve_model(role, probe=probe, refresh=refresh, effort=effort)
+    if refresh:
+        clear_probe_cache()
     profile = ROLE_PROFILES.get(base_role(role))
     level, effort_source = resolve_effort(role, explicit=effort)
     pinned = role_model_override(role)
@@ -704,7 +938,16 @@ def resolve_model(
     return None  # unreachable: the last rung always returns
 
 
-def model_mismatch(role: str, model: str | None) -> str | None:
+def _has_ladders(agent: str | None) -> bool:
+    """Whether ``agent``'s models come from the role ladders (``capabilities.model_ladders``);
+    a session recorded with no agent is the default agent's."""
+    from aisquare.core.agent_adapters import recorded_adapter
+
+    adapter = recorded_adapter(agent)
+    return adapter is not None and adapter.capabilities.model_ladders
+
+
+def model_mismatch(role: str, model: str | None, *, agent: str | None = None) -> str | None:
     """A warning when a session's captured model does not fit its role's tiering.
 
     ``None`` when there is nothing to say: untiered role, no capture, or a
@@ -717,7 +960,7 @@ def model_mismatch(role: str, model: str | None) -> str | None:
     inside the role's ladder is unflagged anyway; one outside it is worth
     saying out loud.
     """
-    if model is None:
+    if model is None or not _has_ladders(agent):
         return None
     profile = ROLE_PROFILES.get(base_role(role))
     if profile is None:
@@ -1109,38 +1352,13 @@ def _role_cycle_core(
 # — `claude`, `claude2`, a wrapper script — and want a role pinned to one
 # without retyping a flag on every spawn (#52).
 
-#: The executable used when nothing else says otherwise.
-DEFAULT_AGENT_BINARY = "claude"
 
-#: Every basename that IS Claude Code's own executable. The ``.exe``/``.cmd``/
-#: ``.ps1`` spellings are what npm writes on Windows, where this CLI also
-#: installs (``install.ps1``) — a bare-name test dropped Claude Code's flags on
-#: every one of them.
-_DEFAULT_AGENT_BASENAMES = frozenset(
-    {DEFAULT_AGENT_BINARY, *(f"{DEFAULT_AGENT_BINARY}{ext}" for ext in (".exe", ".cmd", ".ps1"))}
-)
+def default_binary() -> str:
+    """The executable used when nothing else says otherwise: the default agent's
+    (``agent_adapters.default_binary``)."""
+    from aisquare.core.agent_adapters import default_binary  # lazy: the adapters import us
 
-
-def is_default_agent(binary: str) -> bool:
-    """Whether ``binary`` is Claude Code, so Claude Code's flags apply to it.
-
-    ONE predicate, because two places decide it: the role's ``default_args``
-    here and ``--session-id`` pinning in ``explainability.accepts_session_id``,
-    which used to carry its own ``"claude"`` literal 55 lines away in the same
-    launch.
-
-    Matched on the basename with the Windows shims included and a trailing
-    separator tolerated — ``os.path.basename("claude/")`` is ``""``, so a
-    binding typed with a slash silently lost the role's flags.
-
-    **A wrapper script literally named ``claude`` is accepted**, deliberately:
-    ``~/bin/claude`` and ``/opt/wrap/claude`` are the shape operators actually
-    use to add an account or a flag to Claude Code, from here a wrapper is
-    indistinguishable from the real thing, and the cost of being wrong is one
-    unknown flag on a program the operator named after Claude Code. Anything
-    else — ``claude2``, ``claude-next``, ``aider`` — gets nothing.
-    """
-    return Path(binary.rstrip("/\\")).name.lower() in _DEFAULT_AGENT_BASENAMES
+    return default_binary()
 
 
 #: Per-role override, e.g. AISQUARE_BIN_CODER=claude2. Role names are upper-cased
@@ -1153,8 +1371,7 @@ _BIN_ENV_GLOBAL = "AISQUARE_AGENT_BIN"
 
 
 def _bin_env_var(role: str) -> str:
-    slug = "".join(ch if ch.isalnum() else "_" for ch in role).upper()
-    return f"{_BIN_ENV_PREFIX}{slug}"
+    return role_env_key("BIN", role)
 
 
 class BinaryResolution(BaseModel):
@@ -1216,7 +1433,7 @@ def resolve_binary(role: str, *, override: str | None = None) -> BinaryResolutio
     profile = team.profiles.get(role) if team is not None else None
     if profile is not None and profile.bin:
         return BinaryResolution(binary=profile.bin, source="config")
-    return BinaryResolution(binary=DEFAULT_AGENT_BINARY, source="default")
+    return BinaryResolution(binary=default_binary(), source="default")
 
 
 # ─── The LAUNCH PROFILE: env and args a role runs with ───────────────────────

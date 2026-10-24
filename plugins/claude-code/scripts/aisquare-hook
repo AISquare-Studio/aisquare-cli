@@ -1,15 +1,27 @@
 #!/bin/sh
-# aisquare's Claude Code plugin: run `aisquare hook <event>` for one lifecycle event.
+# aisquare's plugin launcher, for Claude Code and for Codex: run `aisquare hook` for
+# one lifecycle event.
 #
-# hooks/hooks.json calls this for the six events `aisquare agents connect
-# claude-code` writes into settings.json. The work is the CLI's, through the entry
-# point those hooks run, so the two routes cannot behave differently:
+# One script, shipped in both plugins (plugins/claude-code and plugins/codex, the same
+# bytes; tests/test_codex_plugin.py fails when the copies differ):
 #
-#   1. Stand down when settings.json already runs aisquare for this event. Claude
-#      Code runs a plugin's hooks AND the settings.json hooks, so both firing would
-#      inject the context twice and capture every prompt twice.
+#   Claude Code: hooks/hooks.json calls `aisquare-hook <event>` for the six events
+#     `aisquare agents connect claude-code` writes into settings.json, and it runs
+#     `aisquare hook <event>`.
+#   Codex: hooks/hooks.json calls `aisquare-hook codex <Event>` for the events
+#     `aisquare agents connect codex` writes into $CODEX_HOME/hooks.json, and it runs
+#     `aisquare hook codex`, which reads the event from the payload.
+#
+# The work is the CLI's, through the entry point those hooks run, so the two routes
+# cannot behave differently:
+#
+#   1. Stand down when the agent's own hooks already run aisquare: settings.json for
+#      this event, or $CODEX_HOME/hooks.json. Both agents run a plugin's hooks AND
+#      their own, so both firing would inject the context twice and capture every
+#      prompt twice.
 #   2. Else run the aisquare CLI: on PATH, or in ~/.local/bin, where `uv tool
-#      install` puts it (a session started from a desktop app may lack it on PATH).
+#      install` puts it, or ~/.cargo/bin (a session started from a desktop app may
+#      lack them on PATH).
 #   3. Else run the pinned release with uvx, so a machine with only uv has memory
 #      without an installer.
 #   4. Else do nothing, and say so once, at session start.
@@ -22,24 +34,42 @@
 # shfmt -i 4 -ci, dash -n and busybox ash -n (.github/workflows/install.yml).
 
 # The aisquare-cli release uvx runs. The release commit bumps it together with
-# pyproject.toml and .claude-plugin/plugin.json; tests/test_claude_plugin.py fails
-# when the three disagree. AISQUARE_PLUGIN_FROM replaces the whole requirement
-# (a wheel, a path) for testing a build that is not on PyPI yet.
+# pyproject.toml and both plugins' plugin.json; tests/test_claude_plugin.py and
+# tests/test_codex_plugin.py fail when they disagree. AISQUARE_PLUGIN_FROM replaces
+# the whole requirement (a wheel, a path) for testing a build that is not on PyPI yet.
 AISQUARE_PLUGIN_VERSION=0.8.2
 
+# The event, and the one a session starts with: Claude Code's are the `aisquare hook`
+# subcommands, Codex's the names its payload carries (core.agent_adapters.codex).
 event=${1:-}
 case $event in
-    session-start | user-prompt-submit | session-end | stop | notification | stop-failure) ;;
+    session-start | user-prompt-submit | session-end | stop | notification | stop-failure)
+        _agent=claude-code
+        _start=session-start
+        ;;
+    codex)
+        _agent=codex
+        _start=SessionStart
+        event=${2:-}
+        case $event in
+            SessionStart | UserPromptSubmit | Stop | SessionEnd) ;;
+            Interrupt | PermissionRequest | PreToolUse | PostToolUse) ;;
+            *) exit 0 ;;
+        esac
+        ;;
     *) exit 0 ;;
 esac
 
-# The hook `agents connect` writes for this event, as it reads in settings.json's
-# JSON text, matched the way core.agents._is_aisquare_hook_command matches it: the
-# command's first word is a program named aisquare or asq (a path or the bare name,
-# plain or in single or double quotes, `.exe` on Windows), or it is `python [-P] -m
-# aisquare`; then `hook <event>` ends it, with any options before `hook`. A user's
-# own `webhook stop`, `~/bin/my-hook stop` or `echo aisquare hook stop` does not
-# match.
+# The hook `agents connect` writes for this event, as it reads in settings.json's or
+# hooks.json's JSON text, matched the way core.agents._is_aisquare_hook_command
+# matches it: the command's first word is a program named aisquare or asq (a path or
+# the bare name, plain or in single or double quotes, `.exe` on Windows), or it is
+# `python [-P] -m aisquare`; then `hook <event>` ends it, with any options before
+# `hook`. A user's own `webhook stop`, `~/bin/my-hook stop` or `echo aisquare hook
+# stop` does not match. Codex's is `hook codex` for every event, which may be followed
+# by its --config-dir and --definition: hooks.json gives each event the same command,
+# so for Codex any of ours stands for all of them, as `agents connect codex` writes
+# them all at once.
 _a="'"
 # One character of a single-quoted word. An apostrophe in the word is written
 # '"'"' ('\"'\"' in JSON text), as shlex.quote does for `agents connect`, or '\''.
@@ -55,7 +85,15 @@ _p6='\\"([^"]*/)?'         # \"/a path/with spaces/ (or a bare name, quoted)
 # \"$HOME\"/a/path/ and \"${HOME}\"/a/path/, which the hook's shell reads as $HOME/
 _p7="\\\\\"[\$]([{]HOME[}]|HOME)\\\\\"$_p2"
 _program="($_p1|$_p2|$_p3|$_p4|$_p5|$_p6|$_p7)?(aisquare|asq)(\\.[eE][xX][eE])?(\\\\\"|$_a)?"
-_ours="\"command\" *: *\"$_program($_ws+-[^\"]*)?$_ws+hook$_ws+$event$_ws*\""
+_hook=$event
+_tail=
+if [ "$_agent" = codex ]; then
+    _hook=codex
+    # --config-dir and --definition, and whatever their values hold, to the end of
+    # the JSON string: any character but a quote or a backslash, or an escape.
+    _tail="($_ws+--(config-dir|definition)([^\"\\\\]|\\\\.)*)?"
+fi
+_ours="\"command\" *: *\"$_program($_ws+-[^\"]*)?$_ws+hook$_ws+$_hook$_tail$_ws*\""
 
 # The single-quoted word $1 opens with, its quotes gone, into _word. It is quoted
 # piece by piece, an apostrophe in it between two pieces, written '"'"' (shlex.quote
@@ -188,21 +226,31 @@ _runnable() {
 _nl='
 '
 
-# The settings.json files a session reads its hooks from: the config dir this copy
-# of the plugin was installed in (Claude Code keeps it under <dir>/plugins/cache),
-# and the one CLAUDE_CONFIG_DIR names, else ~/.claude.
-case ${CLAUDE_PLUGIN_ROOT:-} in
-    */plugins/cache/*) _installed_in=${CLAUDE_PLUGIN_ROOT%%/plugins/cache/*} ;;
+# The files a session reads its own hooks from: in the config dir this copy of the
+# plugin was installed in (both agents keep it under <dir>/plugins/cache), and in the
+# one the agent's variable names, else its default. Claude Code's settings.json, in
+# CLAUDE_CONFIG_DIR or ~/.claude; Codex's hooks.json, in CODEX_HOME or ~/.codex.
+if [ "$_agent" = codex ]; then
+    _root=${PLUGIN_ROOT:-}
+    _home=${CODEX_HOME:-$HOME/.codex}
+    _file=hooks.json
+else
+    _root=${CLAUDE_PLUGIN_ROOT:-}
+    _home=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+    _file=settings.json
+fi
+case $_root in
+    */plugins/cache/*) _installed_in=${_root%%/plugins/cache/*} ;;
     *) _installed_in= ;;
 esac
-for _dir in "$_installed_in" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; do
+for _dir in "$_installed_in" "$_home"; do
     [ -n "$_dir" ] || continue
     # Each match alone (-o), one per line, never the line it is on: in a minified
     # settings.json every hook shares one line, and the program graded must be the
     # one in OUR hook, not the first "command" on that line. Any of ours that can
-    # start means settings.json runs aisquare for this event. A missing or
-    # unreadable settings.json is grep's error, which is no match.
-    _matches=$(grep -o -E "$_ours" "$_dir/settings.json" 2>/dev/null) || continue
+    # start means that file runs aisquare for this event. A missing or unreadable
+    # file is grep's error, which is no match.
+    _matches=$(grep -o -E "$_ours" "$_dir/$_file" 2>/dev/null) || continue
     while [ -n "$_matches" ]; do
         _match=${_matches%%"$_nl"*}
         case $_matches in
@@ -332,7 +380,7 @@ _has_tested_python() {
     case $_key in
         *"$_nl"*) _key= ;; # not one line: kept, it could never be read back
     esac
-    if [ -n "$_key" ] && [ "$event" != session-start ] && _kept; then
+    if [ -n "$_key" ] && [ "$event" != "$_start" ] && _kept; then
         [ "$_kept_answer" = ranged ]
         return
     fi
@@ -348,8 +396,25 @@ _has_tested_python() {
     return 1
 }
 
+# What `aisquare hook` is run with: the event, or for Codex `codex`, told the Codex home
+# this copy was installed in, which keys its sessions as the hooks.json route's
+# --config-dir does.
+if [ "$_agent" = codex ]; then
+    set -- codex
+    [ -z "$_installed_in" ] || set -- codex --config-dir "$_installed_in"
+else
+    set -- "$event"
+fi
+
+# Neither PYTHONPATH nor PYTHONHOME reaches the aisquare a hook runs: the agent's session
+# keeps them for its own tools, and a sandboxed agent's sandbox may write a directory they
+# name (direnv's PYTHONPATH=$PWD/src; an empty entry is the folder the hook runs in),
+# where a module of a standard name or a sitecustomize would run here, outside its
+# sandbox. aisquare is installed in its own interpreter and needs neither.
+unset PYTHONPATH PYTHONHOME
+
 if _runner=$(_find aisquare); then
-    "$_runner" hook "$event"
+    "$_runner" hook "$@"
     _status=$?
 elif _runner=$(_find uvx); then
     _from=${AISQUARE_PLUGIN_FROM:-aisquare-cli==$AISQUARE_PLUGIN_VERSION}
@@ -359,19 +424,19 @@ elif _runner=$(_find uvx); then
     # payload and may have printed, so a second would get no payload and print twice.
     # The uvx found is named to aisquare, which tells the agent how to run it.
     if _has_tested_python; then
-        AISQUARE_PLUGIN_UVX=$_runner "$_runner" --python "$_tested" --from "$_from" aisquare hook "$event"
+        AISQUARE_PLUGIN_UVX=$_runner "$_runner" --python "$_tested" --from "$_from" aisquare hook "$@"
     else
-        AISQUARE_PLUGIN_UVX=$_runner "$_runner" --from "$_from" aisquare hook "$event"
+        AISQUARE_PLUGIN_UVX=$_runner "$_runner" --from "$_from" aisquare hook "$@"
     fi
     _status=$?
 else
-    if [ "$event" = session-start ]; then
+    if [ "$event" = "$_start" ]; then
         printf '%s\n' '{"systemMessage": "aisquare: neither the aisquare CLI nor uv was found, so this session has no aisquare memory. Install uv: https://docs.astral.sh/uv/"}'
     fi
     exit 0
 fi
 
-if [ "$_status" -ne 0 ] && [ "$event" = session-start ]; then
+if [ "$_status" -ne 0 ] && [ "$event" = "$_start" ]; then
     printf '{"systemMessage": "aisquare: its session-start hook failed (exit %s), so this session has no aisquare memory."}\n' "$_status"
 fi
 exit 0

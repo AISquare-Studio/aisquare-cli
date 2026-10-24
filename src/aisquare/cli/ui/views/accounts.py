@@ -1,4 +1,4 @@
-"""The Accounts page: the AISquare sign-in on top, the Claude Code accounts under it.
+"""The Accounts page: the AISquare sign-in on top, the coding agents' accounts under it.
 
 docs/plans/claude-accounts.md. Two halves, one page:
 
@@ -20,6 +20,14 @@ docs/plans/claude-accounts.md. Two halves, one page:
   (:func:`needs_login`) — then the window waits for a NEW login, not the stale
   one on disk. Nothing is typed for the user and nothing is written into
   Claude Code's files.
+- **Codex** — the same table for every Codex slot (slot 0 is the plain
+  ``codex``; managed slots share the one ladder), in a section of its own,
+  shown once Codex is installed or has a slot. The usage is what the
+  account's own sessions recorded — read offline from its rollouts, never
+  over the network — so a row says how old that reading is. *Add* (and *Log
+  in*) opens ``codex login`` in the slot's ``CODEX_HOME`` (``accounts run <n>
+  login``) in the same watched pane, and the account is recorded, hooks and
+  all, the moment ``auth.json`` lands.
 - **Arranging** (#145) — each row carries *Default*, *↑*/*↓* and
   *Disable*/*Enable*: the machine default a launch picks when nothing more
   specific says, the priority order, and whether the slot may be picked at
@@ -71,6 +79,7 @@ from aisquare.cli.ui.terminal import InPlaceField, TerminalPane
 from aisquare.cli.ui.ticks import while_running
 from aisquare.core import browser, paths
 from aisquare.core import claude_accounts as core
+from aisquare.core.agent_adapters import get_adapter
 from aisquare.core.config import FleetSettings
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
@@ -408,8 +417,14 @@ def account_cells(
     reading still owed, or where the session window is heading at the current pace
     (#146). ``usage`` is ``None`` while a reading is owed; a slot with no login shows
     no bars at all.
+
+    Another agent's row (Codex's) says how old its reading is (:func:`reading_age`): it
+    is what the account's own sessions recorded, as fresh as its last turn, never asked
+    of a server; and a login it lacks is "incomplete", never a token to refresh.
     """
     account = status.account
+    # Asked with its token (Claude Code's): a missing token, and no age to its reading.
+    tokened = core.kind(account.agent).network_usage
     cells = {column.key: Text() for column in COLUMNS}
     if account.is_default:
         cells["default"] = Text(DEFAULT_BADGE, style="bold green")
@@ -427,7 +442,9 @@ def account_cells(
         for window in ("session", "week"):
             cells[window], cells[f"{window}-resets"] = _window_cells(reading, window, now=now)
         if not status.signed_in:
-            notes.append(Text("⚠ token missing", style="yellow"))
+            notes.append(
+                Text("⚠ token missing" if tokened else "⚠ login incomplete", style="yellow")
+            )
         elif status.token_state == "expired":
             notes.append(Text("⚠ token expired", style="yellow"))
         elif usage is not None and usage.needs_login:
@@ -440,6 +457,8 @@ def account_cells(
             pace = accounts_service.describe_trend(trend)
             if pace:
                 notes.append(Text(pace, style="dim italic"))  # a projection, so dim
+            if not tokened and (age := reading_age(usage, now=now).removeprefix(" · ")):
+                notes.append(Text(age, style="dim"))
     if account.disabled:
         notes.append(Text("disabled", style="dim italic"))
     cells["status"] = Text(" · ").join(notes)
@@ -447,6 +466,73 @@ def account_cells(
         text.no_wrap = True
         text.overflow = "ellipsis"
     return cells
+
+
+def reading_age(usage: ClaudeUsage, *, now: datetime | None = None) -> str:
+    """`` · as of 3h ago`` for a reading a session recorded a while back; ``""`` when recent."""
+    return core.format_age(usage.fetched_at, now=now)
+
+
+def _sign_in_command(agent: str) -> str:
+    """The agent's own sign-in command line, as a hint shows it (``codex login``)."""
+    return " ".join((get_adapter(agent).binary, *core.kind(agent).sign_in_args()))
+
+
+def _sign_in_opens(agent: str) -> str:
+    """What a *Log in* window opens, for its tooltip: the agent's sign-in command, or the
+    agent itself where it signs in from its TUI, with what to type there if it does not
+    ask (``AgentAccounts.relogin``)."""
+    accounts = core.kind(agent)
+    if accounts.sign_in_args():
+        return f"`{_sign_in_command(agent)}` opens below"
+    asks = f"; type {accounts.relogin} if it does not ask" if accounts.relogin else ""
+    return f"{core.agent_label(agent)} opens below{asks}"
+
+
+def _sign_in_prompt(agent: str) -> str:
+    """The sign-in pane's header, after "Logging in to …"."""
+    accounts = core.kind(agent)
+    if accounts.sign_in_args():
+        return f" — finish `{_sign_in_command(agent)}` in this pane."
+    if accounts.relogin:
+        return f" — type {accounts.relogin} if {core.agent_label(agent)} does not prompt you."
+    return f" — sign in to {core.agent_label(agent)} in this pane."
+
+
+def agent_title_text(agent: str, overview: AccountsOverview) -> Text:
+    """Another agent's section title: ``Codex 0.162.1 · /path``, or how to install it."""
+    if core.kind(agent).legacy_slots:
+        return claude_title_text(overview)
+    found = overview.installs.get(agent)
+    name = core.agent_label(agent)
+    text = Text()
+    if found is None or not found.installed:
+        text.append(f"{name} is not installed", style="bold red")
+        text.append(f"\n  install it: {core.kind(agent).install_command}", style="dim")
+        return text
+    text.append(name, style="bold")
+    if found.version:
+        text.append(f" {found.version}")
+    if found.binary:
+        text.append(f" · {found.binary}", style="dim")
+    return text
+
+
+def other_agents() -> tuple[str, ...]:
+    """The agents with account slots besides Claude Code (whose slots are the page's first
+    section, ``AgentAccounts.legacy_slots``), each a section of its own."""
+    return tuple(agent for agent in core.account_agents() if not core.kind(agent).legacy_slots)
+
+
+def agent_section_shown(agent: str, overview: AccountsOverview) -> bool:
+    """Another agent's section is on the page once it is installed or has a slot.
+
+    So a machine without Codex reads as the page always did.
+    """
+    found = overview.installs.get(agent)
+    return (found is not None and found.installed) or any(
+        status.account.agent == agent for status in overview.accounts
+    )
 
 
 def claude_title_text(overview: AccountsOverview) -> Text:
@@ -474,7 +560,7 @@ def _host(url: str) -> str:
 
 @dataclass
 class _ClaudeLogin:
-    """A Claude Code sign-in window that is open right now."""
+    """A sign-in window that is open right now (Claude Code's own, or ``codex login``)."""
 
     account: ClaudeAccount
     pane_id: str
@@ -499,12 +585,13 @@ def _poll_sign_in(login: _ClaudeLogin) -> tuple[_ClaudeLogin, ClaudeIdentity | E
         return login, exc
 
 
-def _hooks_did_not_install(error: object) -> str:
+def _hooks_did_not_install(error: object, agent: str = core.AGENT) -> str:
     """What the page says of a slot signed in whose hooks did not install: after its sign-in
-    (``complete_sign_in``), or after a cancel that found its login landed (``settle_sign_in``)."""
+    (``complete_sign_in``), or after a cancel that found its login landed (``settle_sign_in``).
+    ``agent`` is the slot's, whose ``agents connect`` the line names."""
     return (
         f"⚠ signed in, but aisquare's hooks did not install: {error} — "
-        "run: aisquare agents connect claude-code --config-dir <the slot's directory>"
+        f"run: aisquare agents connect {agent} --config-dir <the slot's directory>"
     )
 
 
@@ -530,7 +617,8 @@ _ACTIONS: tuple[tuple[str, str, int], ...] = (
 
 
 class AccountsTable(Vertical):
-    """The Claude accounts table: a header line, then one :class:`AccountRow` per slot.
+    """An agent's accounts table (Claude Code's, Codex's): a header line, then one
+    :class:`AccountRow` per slot.
 
     The whole table scrolls sideways as one when the page is narrower than it, so the
     header stays over its columns and the action buttons stay reachable at any width
@@ -539,7 +627,7 @@ class AccountsTable(Vertical):
 
     DEFAULT_CSS = """
     AccountsTable { height: auto; overflow-x: auto; overflow-y: hidden; }
-    AccountsTable #claude-rows { width: auto; height: auto; }
+    AccountsTable #claude-rows, AccountsTable .agent-rows { width: auto; height: auto; }
     AccountsTable .cell { height: 1; margin: 0 1 0 0; text-wrap: nowrap; text-overflow: ellipsis; }
     AccountsTable .account-actions { width: auto; height: 1; }
     """ + _column_css()
@@ -786,7 +874,7 @@ class AccountRow(Horizontal, can_focus=True):
                 # The whole value, for the cell that cut it short with an ellipsis.
                 cell.tooltip = self._cell_tooltip(column.key, cells[column.key])
         login = self.query_one(f"#account-login-{self.slot}", Button)
-        login.tooltip = "log in again: Claude Code opens below; type /login if it does not ask"
+        login.tooltip = f"log in again: {_sign_in_opens(account.agent)}"
         self._offer(login, needs_login(self.status, self.usage))
         self._offer(self.query_one(f"#account-default-{self.slot}", Button), not account.is_default)
         self.query_one(f"#account-up-{self.slot}", Button).disabled = self.first
@@ -822,6 +910,8 @@ class AccountsView(Vertical):
     AccountsView .actions { height: auto; margin-top: 1; }
     AccountsView .actions Button { margin: 0 1 0 0; }
     AccountsView #claude-table { margin-top: 1; }
+    AccountsView .agent-section { height: auto; }
+    AccountsView .agent-table { margin-top: 1; }
     AccountsView #usage-bar Button { margin: 0 2 0 0; }
     AccountsView #usage-age { width: auto; height: 1; color: $text-muted; }
     AccountsView #accounts-notice { height: auto; margin-top: 1; }
@@ -879,6 +969,8 @@ class AccountsView(Vertical):
         """*Rename* writes sent and not yet reported, by worker (``rename_account``)."""
         self._saved: dict[int, _Saved] = {}
         """Names *Rename* saved, by slot, until the frames have caught up (``_settle_saved``)."""
+        self._completing = core.AGENT
+        """The agent of the slot whose hooks the last sign-in is wiring (``_complete_finished``)."""
         self._on_screen = False
 
     # --- layout ------------------------------------------------------------------------
@@ -906,6 +998,25 @@ class AccountsView(Vertical):
                 yield Vertical(id="claude-rows")
             with Horizontal(classes="actions", id="claude-actions"):
                 yield Button("+ Add Claude account", id="claude-add", variant="primary")
+            for agent in other_agents():
+                # One section per other agent, hidden until it is installed or has a
+                # slot (`agent_section_shown`); its rows keep the ladder's slot ids.
+                with Vertical(id=f"{agent}-section", classes="agent-section"):
+                    yield Static(
+                        Text(core.agent_label(agent), style="bold"),
+                        id=f"{agent}-title",
+                        classes="section-title",
+                    )
+                    with AccountsTable(id=f"{agent}-table", classes="agent-table"):
+                        yield AccountsHeader(id=f"{agent}-header")
+                        yield Vertical(id=f"{agent}-rows", classes="agent-rows")
+                    with Horizontal(classes="actions", id=f"{agent}-actions"):
+                        yield Button(
+                            f"+ Add {core.agent_label(agent)} account",
+                            id=f"{agent}-add",
+                            classes="agent-add",
+                            variant="primary",
+                        )
             yield Static("", id="accounts-notice")
         with Vertical(id="login-box"):
             yield Static("", id="login-header")
@@ -917,6 +1028,8 @@ class AccountsView(Vertical):
         self.query_one("#aisquare-code", Static).display = False
         self.query_one("#aisquare-cancel", Button).display = False
         self.query_one("#login-box", Vertical).display = False
+        for agent in other_agents():
+            self.query_one(f"#{agent}-section", Vertical).display = False
         self._paint_aisquare()
         if self.overview is not None:
             self._paint_claude(self.overview)
@@ -1060,10 +1173,32 @@ class AccountsView(Vertical):
     def _paint_claude(self, overview: AccountsOverview) -> None:
         self.query_one("#claude-title", Static).update(claude_title_text(overview))
         self.query_one("#claude-add", Button).disabled = not overview.claude.installed
-        holder = self.query_one("#claude-rows", Vertical)
+        self._paint_rows(
+            self.query_one("#claude-rows", Vertical),
+            [
+                status
+                for status in overview.accounts
+                if core.kind(status.account.agent).legacy_slots
+            ],
+        )
+        for agent in other_agents():
+            section = self.query_one(f"#{agent}-section", Vertical)
+            section.display = agent_section_shown(agent, overview)
+            self.query_one(f"#{agent}-title", Static).update(agent_title_text(agent, overview))
+            found = overview.installs.get(agent)
+            self.query_one(f"#{agent}-add", Button).disabled = not (
+                found is not None and found.installed
+            )
+            self._paint_rows(
+                self.query_one(f"#{agent}-rows", Vertical),
+                [status for status in overview.accounts if status.account.agent == agent],
+            )
+
+    def _paint_rows(self, holder: Vertical, statuses: list[ClaudeAccountStatus]) -> None:
+        """One agent's rows into its holder, in priority order; ↑/↓ end stops per agent."""
         existing = {row.slot: row for row in holder.query(AccountRow)}
-        count = len(overview.accounts)
-        for index, frame_status in enumerate(overview.accounts):
+        count = len(statuses)
+        for index, frame_status in enumerate(statuses):
             status = self._as_saved(frame_status)
             slot = status.account.slot
             row = existing.pop(slot, None)
@@ -1191,10 +1326,13 @@ class AccountsView(Vertical):
         # said "refreshing…" (the button off) every minute for no request. Said for a read
         # that asks — *↻ Refresh usage*'s, or the first, with nothing read yet.
         running = self._usage_running()
+        # Only readings taken over the network refresh: a Codex row's is what its sessions
+        # recorded, as old as its last turn, and says so on the row (``reading_age``).
         slots = [
             row.slot
             for row in self.rows()
-            if accounts_service.usage_is_readable(row.status, self.usage.get(row.slot))
+            if core.kind(row.status.account.agent).network_usage
+            and accounts_service.usage_is_readable(row.status, self.usage.get(row.slot))
         ]
         read = [self._read_at[slot] for slot in slots if slot in self._read_at]
         failed = [
@@ -1382,6 +1520,12 @@ class AccountsView(Vertical):
     def _add_claude_account(self) -> None:
         self.begin_claude_sign_in(None)
 
+    @on(Button.Pressed, ".agent-add")
+    def _add_agent_account(self, event: Button.Pressed) -> None:
+        event.stop()
+        button_id = event.button.id or ""
+        self.begin_claude_sign_in(None, agent=button_id.removesuffix("-add"))
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
         if button_id.startswith("account-login-"):
@@ -1393,9 +1537,15 @@ class AccountsView(Vertical):
         elif button_id.startswith("account-default-"):
             event.stop()
             slot = int(button_id.rsplit("-", 1)[1])
+            whose = self._agent_of(slot)
+            what = (
+                "the machine default"
+                if core.kind(whose).legacy_slots
+                else f"the {core.agent_label(whose)} machine default"
+            )
             self.arrange_accounts(
                 lambda: accounts_service.set_default(str(slot)),
-                done=f"✓ slot {slot} is the machine default",
+                done=f"✓ slot {slot} is {what}",
             )
         elif button_id.startswith("account-up-") or button_id.startswith("account-down-"):
             event.stop()
@@ -1417,6 +1567,11 @@ class AccountsView(Vertical):
                 lambda: accounts_service.set_disabled(str(slot), disabling),
                 done=f"✓ slot {slot} {outcome}",
             )
+
+    def _agent_of(self, slot: int) -> str:
+        """The agent of the row showing ``slot`` (Claude Code when no row shows it)."""
+        current = self.row_of(slot)
+        return current.status.account.agent if current is not None else core.AGENT
 
     # --- arranging (#145): default, order, disabled ----------------------------------------------
 
@@ -1606,13 +1761,17 @@ class AccountsView(Vertical):
                 row.close_rename()
         self.post_message(AccountsChanged())
 
-    def begin_claude_sign_in(self, slot: int | None) -> None:
+    def begin_claude_sign_in(self, slot: int | None, *, agent: str = core.AGENT) -> None:
         """Open Claude Code on ``slot`` (a fresh slot when ``None``) in a pane, watched.
 
+        ``agent`` is whose fresh slot ``None`` makes: ``codex`` opens ``codex login``
+        in a new Codex slot. An existing slot is its own agent's, whatever is passed.
+
         *Add* and *Log in* both come here. A slot still holding a login — an
-        expired or rejected token — is watched for a DIFFERENT login
-        (``login_fingerprint``): the stale one is a signed-in directory, and the
-        window closed at the first poll, before Claude Code had refreshed it. That
+        expired or rejected token, a Codex ``auth.json`` ``codex login`` replaces — is
+        watched for a DIFFERENT login (``login_fingerprint``, the slot's agent's): the
+        stale one is a signed-in directory, and the window closed at the first poll,
+        before Claude Code had refreshed it or ``codex login`` had written. That
         login is read before the window opens (a Claude Code starting there may
         refresh the token at once, which is the new login), off the UI thread
         (:data:`LOGIN_OPEN_WORKER`): on macOS it is a Keychain read.
@@ -1622,7 +1781,7 @@ class AccountsView(Vertical):
             self._notice(f"a sign-in for {self._name_of(opening)} is already open below", "warn")
             return
         try:
-            account = accounts_service.begin_sign_in(slot)
+            account = accounts_service.begin_sign_in(slot, agent=agent)
         except accounts_service.AccountsError as exc:
             self._notice(f"✗ {exc}", "error")
             return
@@ -1674,10 +1833,10 @@ class AccountsView(Vertical):
         self.login = _ClaudeLogin(account, window.pane_id, server, fresh, since)
         header = Text()
         header.append(f"Logging in to {self._name_of(account)}", style="bold")
+        prompt = _sign_in_prompt(account.agent)
         header.append(
-            " — type /login if Claude Code does not prompt you. This pane closes by itself "
-            f"once the login is recorded; {self.escape_key.upper()} hands focus back to the "
-            "sidebar.",
+            f"{prompt} This pane closes by itself once the login is recorded; "
+            f"{self.escape_key.upper()} hands focus back to the sidebar.",
             style="dim",
         )
         self.query_one("#login-header", Static).update(header)
@@ -1733,7 +1892,8 @@ class AccountsView(Vertical):
             )
         facts = login.server.pane_facts(login.pane_id)
         if facts is None or facts.dead:
-            self._abandon_login("Claude Code closed before a sign-in landed")
+            name = core.agent_label(login.account.agent)
+            self._abandon_login(f"{name} closed before a sign-in landed")
 
     def _close_login_window(self) -> _ClaudeLogin | None:
         login = self.login
@@ -1755,6 +1915,7 @@ class AccountsView(Vertical):
         if login is None:
             return
         account = login.account
+        self._completing = account.agent
         # The reading taken over the old token (expired, rejected) is not this login's:
         # the row says "reading usage…" until the next frame asks again (``show``).
         self.usage.pop(account.slot, None)
@@ -1763,8 +1924,9 @@ class AccountsView(Vertical):
         if row is not None:
             row.show(row.status, None, trend=row.trend)
         if login.fresh:
+            name = core.kind(account.agent).noun
             self._notice(
-                f"✓ Added Claude account {account.slot}: {email} — wiring its hooks…", "ok"
+                f"✓ Added {name} account {account.slot}: {email} — wiring its hooks…", "ok"
             )
         else:
             self._notice(
@@ -1785,8 +1947,10 @@ class AccountsView(Vertical):
             who = status.identity.email if status.identity else name
             hooks = "hooks installed" if status.hooks_installed else "hooks NOT installed"
             self._notice(f"✓ {name}: {who} · {hooks}", "ok" if status.hooks_installed else "warn")
+            if status.detail:
+                self._notice(status.detail, "warn")
         elif state is WorkerState.ERROR:
-            self._notice(_hooks_did_not_install(worker.error), "warn")
+            self._notice(_hooks_did_not_install(worker.error, self._completing), "warn")
         self.post_message(AccountsChanged())
 
     def _abandon_login(self, reason: str) -> None:
@@ -1801,6 +1965,7 @@ class AccountsView(Vertical):
             return
         account = login.account
         self._abandoning = reason
+        self._completing = account.agent  # a login that landed after all is wired as its agent's
         self.run_worker(
             lambda: (account, accounts_service.settle_sign_in(account)),
             name=ABANDON_WORKER,
@@ -1822,7 +1987,7 @@ class AccountsView(Vertical):
             who = settled.identity.email if settled.identity else self._name_of(account)
             self._notice(f"✓ {self._name_of(account)}: the login had landed — kept as {who}", "ok")
         elif isinstance(worker.error, accounts_service.LandedNotWired):
-            self._notice(_hooks_did_not_install(worker.error), "warn")
+            self._notice(_hooks_did_not_install(worker.error, self._completing), "warn")
         elif state is WorkerState.ERROR:
             self._notice(
                 f"✗ sign-in cancelled — {reason}; whether its login landed could not be told "

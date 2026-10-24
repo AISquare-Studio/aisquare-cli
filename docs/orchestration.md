@@ -60,7 +60,7 @@ agentic work. Launch a role through the harness and it resolves the ladder
 for you:
 
 ```sh
-aisquare team spawn planner            # prints: AISQUARE_ROLE=planner claude --model fable --effort high
+aisquare team spawn planner            # prints a complete aisquare launch command for this role
 aisquare team spawn coder --exec       # or replace this terminal with the session
 aisquare team harness                  # the whole role→model matrix + how it resolves now
 ```
@@ -73,8 +73,9 @@ nothing, so in a directory nobody added the print says so on stderr (under `--js
 Availability is *probed*, never assumed — `claude --model` silently
 substitutes the default when a known model isn't available to the account,
 so the harness verifies the reply's `modelUsage` before trusting a rung, and
-caches that verdict per account for a day (`--refresh` re-checks after an
-entitlement changes). The probe runs isolated: it never executes the current
+caches that verdict per account for a day (`--refresh` re-checks after
+entitlements change; use it after macOS Keychain plan changes, which are not
+detected automatically). The probe runs isolated: it never executes the current
 repo's hooks or MCP servers, and never joins the board.
 
 Resolution is fail-open and, deliberately, only *demotes on proof*: a

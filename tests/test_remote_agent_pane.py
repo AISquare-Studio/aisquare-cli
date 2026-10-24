@@ -33,10 +33,11 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app as cli
+from aisquare.core import launch_seal
 from aisquare.core import tmux as tmux_module
 from aisquare.core.store import store_session
 from aisquare.core.tmux import _SEP, CHECK_SOCKET_SUFFIX, Completed, TmuxError, TmuxServer
-from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
+from aisquare.models import FleetAgent, FleetAgentStatus, LaunchSpec, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_needs, remote_server
 from aisquare.services.remote_server import (
@@ -89,6 +90,34 @@ def _seed(project: ProjectInfo, label: str, pane_id: str, born: datetime, **kw: 
     )
     with store_session() as store:
         store.upsert_fleet_agent(row)
+    return _recorded(row)
+
+
+def _recorded(row: FleetAgent) -> FleetAgent:
+    """``row`` with what its spawn writes outside the store: its launch record and where its
+    window is (``core.launch_seal``), which Remote's keys and screens place it by
+    (``fleet.placed_row``)."""
+    record = launch_seal.LaunchRecord(
+        id=row.id,
+        project_id=row.project_id,
+        project_root=str(row.cwd),
+        role=row.role,
+        agent=row.agent or "claude-code",
+        binary=row.binary,
+        cwd=str(row.cwd),
+        spec=LaunchSpec(binary=row.binary),
+        label=row.label,
+    )
+    assert launch_seal.write(record) is None
+    window = launch_seal.WindowPlace(
+        tmux_socket=row.tmux_socket,
+        pane_id=row.pane_id,
+        socket_path=str(row.socket_path) if row.socket_path is not None else None,
+        boot_id=row.boot_id,
+        created_at=row.created_at,
+        server_started_at=row.server_started_at,
+    )
+    assert launch_seal.placed(row.id, window) is None
     return row
 
 
@@ -246,6 +275,47 @@ def test_send_keys_types_nothing_into_a_pane_not_running_the_agent(
         live_writes().handlers["send-keys"]({"agent": "coder-1", "text": "yes", "enter": True})
     assert (refused.value.status, refused.value.error) == (409, "not_agent")
     assert refused.value.message == "coder-1's pane is not running the agent — nothing was sent"
+    assert tmux.sent == []
+
+
+# --- a row its launch record does not vouch for ------------------------------------------
+
+
+@pytest.mark.parametrize("tampered", ["its pane rewritten", "no launch record"])
+def test_send_keys_types_nothing_where_only_the_store_says_the_agent_is(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tampered: str
+) -> None:
+    """The store is the sandbox's to write before its broker, so no store column says where
+    Remote types (``fleet.placed_row``, review r5 of #113, finding 1): a row pointed at
+    another pane of the user's, or one no launch record places, is 409 ``not_agent`` and
+    nothing is typed, its own pane included. The control first: the row as its spawn wrote it
+    takes the key."""
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    send = live_writes().handlers["send-keys"]
+    assert send({"agent": "coder-1", "keys": ["1"]})[0]["sent"] is True
+    tmux.sent.clear()
+    if tampered == "its pane rewritten":
+        with store_session() as store:
+            row = store.get_fleet_agent("agt_coder-1")
+            assert row is not None
+            store.upsert_fleet_agent(row.model_copy(update={"pane_id": "%7"}))
+    else:
+        unrecorded = FleetAgent(
+            id="agt_coder-2",
+            project_id=project.id,
+            label="coder-2",
+            role="coder",
+            pane_id="%7",
+            cwd=project.root,
+            created_at=BORN,
+        )
+        with store_session() as store:  # in the store alone, as a sandbox could write it
+            store.upsert_fleet_agent(unrecorded)
+    label = "coder-1" if tampered == "its pane rewritten" else "coder-2"
+    with pytest.raises(RequestError) as refused:
+        send({"agent": label, "text": "yes", "enter": True})
+    assert (refused.value.status, refused.value.error) == (409, "not_agent")
+    assert refused.value.message.endswith("— nothing was done"), refused.value.message
     assert tmux.sent == []
 
 
@@ -535,8 +605,33 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     runtime = make_runtime()
     app = build_app(runtime, sources=_sources(), writes=live_writes(), dist_dir=tmp_path)
     taps = 36  # more than any default pool: min(32, CPUs + 4) threads
-    answers: list[tuple[int, float]] = []
+    answers: list[int] = []
     action = remote_agent_lock(project.id, "coder-1")
+    # Each key's wait is timed at the lock, from when its request reached the server. Timed
+    # at the client, it took in the 36 requests' dispatch and the 28 keys queued behind the
+    # write pool's 8 threads reading their row from the store before finding their wait
+    # spent: 3.3 s on a Windows runner, 29 s on two cores beside a disk being fsynced, and
+    # no key waited for the lock past its 2 s.
+    arrival: contextvars.ContextVar[float] = contextvars.ContextVar("arrival")
+    waits: list[float] = []
+    run_write = app.kit.kit_run_write
+
+    async def stamped(handler: Any, body: dict[str, Any], arrived: float, *rest: Any) -> Any:
+        arrival.set(arrived)  # the write thread runs in a copy of this context
+        return await run_write(handler, body, arrived, *rest)
+
+    class Timed:
+        def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+            try:
+                return action.acquire(blocking, timeout)
+            finally:
+                waits.append(time.monotonic() - arrival.get())
+
+        def release(self) -> None:
+            action.release()
+
+    monkeypatch.setattr(app.kit, "kit_run_write", stamped)
+    monkeypatch.setattr(remote_server, "remote_agent_lock", lambda project_id, label: Timed())
     assert action.acquire(blocking=False)
     try:
         with make_client(app) as client:
@@ -545,9 +640,8 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
             url = f"{base(runtime)}/api/send-keys"
 
             def tap() -> None:
-                sent = time.monotonic()
                 response = client.post(url, json={"agent": "coder-1", "keys": ["Down"]})
-                answers.append((response.status_code, time.monotonic() - sent))
+                answers.append(response.status_code)
 
             tappers = [threading.Thread(target=tap) for _ in range(taps)]
             for tapper in tappers:
@@ -561,9 +655,9 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     finally:
         action.release()
     assert read.status_code == 200 and took < 1.0, f"the read waited {took:.2f} s"
-    assert [status for status, _ in answers] == [409] * taps and tmux.sent == []
-    slowest = max(elapsed for _, elapsed in answers)
-    assert slowest < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.0, slowest
+    assert answers == [409] * taps and tmux.sent == []
+    # Waited from when a thread was free, the keys behind the first 8 waited a whole 2 s more.
+    assert waits and max(waits) < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.0, waits
 
 
 def test_keys_queued_behind_actions_holding_every_write_thread_are_not_typed_as_one_ends(
@@ -656,7 +750,7 @@ def _replace(project: ProjectInfo, pane_id: str = "%2") -> FleetAgent:
     )
     with store_session() as store:
         store.upsert_fleet_agent(row)
-    return row
+    return _recorded(row)
 
 
 @pytest.mark.parametrize(

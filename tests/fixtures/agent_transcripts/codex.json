@@ -1,0 +1,106 @@
+{
+  "about": "Codex 0.162.1's rollout, measured (codex-0.162.1.jsonl): each moment is its first lines. Each release recorded beside it (beside) holds the same four moments, read the same.",
+  "moments": {
+    "permission": {
+      "rollout": "codex-0.162.1.jsonl",
+      "lines": 10,
+      "expect": {
+        "newest": "assistant_tool",
+        "pending": [
+          [
+            "call_1",
+            "exec_command",
+            "tool"
+          ]
+        ],
+        "mark": "touch /work/outside-probe"
+      }
+    },
+    "question": {
+      "rollout": "codex-0.162.1.jsonl",
+      "lines": 53,
+      "expect": {
+        "newest": "assistant_tool",
+        "pending": [
+          [
+            "call_9",
+            "request_user_input",
+            "question"
+          ]
+        ],
+        "options": 2
+      }
+    },
+    "interrupted": {
+      "rollout": "codex-0.162.1.jsonl",
+      "lines": 14,
+      "expect": {
+        "newest": "interrupted",
+        "pending": []
+      }
+    },
+    "asked": {
+      "rollout": "codex-0.162.1.jsonl",
+      "lines": 29,
+      "expect": {
+        "newest": "assistant_text",
+        "pending": [],
+        "last_text_end": "Shall I go on?"
+      }
+    }
+  },
+  "beside": [
+    {
+      "about": "Codex 0.164.0's rollout, measured the same way (codex-0.164.0.jsonl): its one more thread_settings_applied before the first prompt, and each message's content_item_metadata provenance, move nothing the reader reads.",
+      "moments": {
+        "permission": {
+          "rollout": "codex-0.164.0.jsonl",
+          "lines": 12,
+          "expect": {
+            "newest": "assistant_tool",
+            "pending": [
+              [
+                "call_1",
+                "exec_command",
+                "tool"
+              ]
+            ],
+            "mark": "touch /work/refused"
+          }
+        },
+        "question": {
+          "rollout": "codex-0.164.0.jsonl",
+          "lines": 51,
+          "expect": {
+            "newest": "assistant_tool",
+            "pending": [
+              [
+                "call_8",
+                "request_user_input",
+                "question"
+              ]
+            ],
+            "options": 2
+          }
+        },
+        "interrupted": {
+          "rollout": "codex-0.164.0.jsonl",
+          "lines": 16,
+          "expect": {
+            "newest": "interrupted",
+            "pending": []
+          }
+        },
+        "asked": {
+          "rollout": "codex-0.164.0.jsonl",
+          "lines": 31,
+          "expect": {
+            "newest": "assistant_text",
+            "pending": [],
+            "last_text_end": "Shall I go on?"
+          }
+        }
+      }
+    }
+  ]
+}

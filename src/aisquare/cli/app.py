@@ -169,6 +169,24 @@ app.add_typer(hook.app, name="hook", hidden=True)
 app.add_typer(explainability.app, name="explainability")
 
 
-def main() -> None:
-    """Console-script entry point for both ``aisquare`` and ``asq``."""
-    app()
+def main(prog_name: str | None = None) -> None:
+    """Console-script entry point for both ``aisquare`` and ``asq``.
+
+    In an agent's sandbox, where the aisquare store is read-only, a command goes to its
+    launch's broker outside it and prints what ran there (``services.store_broker``).
+    ``prog_name`` is what a usage line calls the program: ``python -m aisquare`` (what the
+    broker, the hooks and the fleet run) passes ``aisquare``, which Click would otherwise
+    print as ``python -m aisquare`` (SMOKE6)."""
+    import sys
+
+    from aisquare.services import store_broker
+
+    code = store_broker.forward(sys.argv[1:])
+    if code is not None:
+        raise SystemExit(code)
+    why = store_broker.check_cwd()
+    if why is not None:
+        store_broker.record_refusal("board", why)
+        sys.stderr.write(f"aisquare: {why}\n")
+        raise SystemExit(2)
+    app(prog_name=prog_name)

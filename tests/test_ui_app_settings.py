@@ -19,8 +19,9 @@ from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
 from textual.widgets import Button, Input, Select, Static, Switch
 
-from aisquare.cli.ui.views.app_settings import AppSettingsView, ConfirmReset
+from aisquare.cli.ui.views.app_settings import ON_LIMIT_MODES, AppSettingsView, ConfirmReset
 from aisquare.core import paths
+from aisquare.core.agent_adapters import adapters
 from aisquare.core.config import AppConfig, load_config, overrides, save_config
 from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
@@ -102,7 +103,12 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml() -> None:
     assert on_disk["coder"]["permission_mode"] == "plan"  # the bytes, not the widget
     assert on_disk["coder"]["worktree"] is True  # the role's table whole, for older builds
     assert load_config().fleet.roles["coder"].worktree is True  # untouched fields survive
-    assert on_disk["manager"] == {"permission_mode": "auto", "worktree": False, "extra_args": []}
+    assert on_disk["manager"] == {
+        "permission_mode": "auto",
+        "worktree": False,
+        "extra_args": [],
+        "agent_args": {},  # each agent's own arguments (#113), written whole with the role
+    }
     assert fleet_on_disk["worktree_dir"] == ".fleet-trees"  # the worktree root (§4.2)
     assert "escape_key" not in fleet_on_disk  # an untouched fleet field keeps its default
     assert load_config().fleet.escape_key == "f12"
@@ -580,12 +586,12 @@ def test_a_role_named_like_a_fixed_field_neither_takes_its_id_nor_takes_the_form
         return ids
 
     ids = drive(scenario)
-    from aisquare.cli.ui.views.app_settings import ROLE_ID_PREFIX, role_widget_id
+    from aisquare.cli.ui.views.app_settings import ROLE_ID_PREFIX, ROLE_SELECTS, role_widget_id
 
     assert len(ids) == len(set(ids)), "one field per id, on the whole form"
     assert {wid for wid in ids if wid.startswith(ROLE_ID_PREFIX)} == {
         role_widget_id(kind, role)
-        for kind in ("perm", "worktree", "persona", "acct")
+        for kind in ("perm", "worktree", "persona", "acct", *ROLE_SELECTS)
         for role in roles
     }, "the prefix is the roles' alone"
     saved = load_config().fleet
@@ -631,6 +637,16 @@ def test_role_names_modes_and_bindings_written_by_hand_are_shown_as_text_not_mar
     assert saved.fleet.max_agents_per_project == 5
     assert saved.fleet.roles["a[/b]c"].permission_mode == "x[/y]", "the hand edit stands"
     assert saved.team.profiles["a[/b]c"].account == "w[/z]"
+
+
+def test_the_usage_limit_choices_name_no_agent() -> None:
+    """SCOPE #113, 0.8.1 item 19: *wait* read "Claude Code continues by itself", which a
+    Codex agent does not (it waits for its next prompt). The choice is every agent's."""
+    said = " ".join(label for label, _value in ON_LIMIT_MODES)
+    for adapter in adapters():
+        assert adapter.label not in said, adapter.label
+        assert adapter.binary not in said.split(), adapter.binary
+    assert [value for _label, value in ON_LIMIT_MODES] == ["wait", "switch"]
 
 
 # --- the persona per role (#201) ------------------------------------------------------------

@@ -33,8 +33,10 @@ from aisquare.cli.ui.sidebar import (
     ORANGE_RED,
     RED,
     SETTINGS_KEY,
+    STATUS_INDENT,
     TIMES,
     YELLOW,
+    AgentHeadroom,
     OthersSection,
     SettingsRow,
     StatusLine,
@@ -49,6 +51,7 @@ from aisquare.models import (
     AccountsOverview,
     CheckStatus,
     ClaudeAccount,
+    ClaudeAccountStatus,
     ClaudeUsage,
     DoctorCheck,
     FleetAgentStatus,
@@ -684,3 +687,53 @@ def test_a_sign_out_while_an_accounts_read_is_in_flight_reaches_the_warning_at_o
     before, after = _drive(go, headroom=lambda accounts: GOOD, accounts=overview)
     assert before == 0, "the premise: both signed in at first"
     assert after == 1, "the ⚠ follows the sign-out, not a minute later"
+
+
+# --- Codex accounts on the status line (SCOPE #113, 0.8.1 item 14) -------------------------
+
+
+def _codex(slot: int, email: str | None, *, signed_in: bool | None = None) -> ClaudeAccountStatus:
+    """A Codex slot's row in the frame: slot 0 is the plain codex, the rest managed."""
+    status = _status(slot, email, signed_in=signed_in, managed=slot != 0)
+    home = Path("/h/.codex") if slot == 0 else Path("/h/.aisquare/codex-accounts") / str(slot)
+    account = status.account.model_copy(update={"agent": "codex", "config_dir": home})
+    return status.model_copy(update={"account": account, "label": core.label(account)})
+
+
+def test_another_agents_accounts_have_a_dot_of_their_own_under_the_first() -> None:
+    codex = HeadroomSummary(level="low", percent_left=10.0, usable=1, needs_login=1)
+    text = status_line_text(True, GOOD, more=[AgentHeadroom("codex", codex)])
+    assert text.plain == f"● aisquare  ● 3{TIMES} claude\n{STATUS_INDENT}● 1{TIMES} codex ⚠"
+    assert status_line_text(True, GOOD).plain == f"● aisquare  ● 3{TIMES} claude", "alone"
+
+
+def test_the_status_line_reads_and_names_the_codex_accounts_apart_from_claudes() -> None:
+    """The dot was the Claude accounts' alone, and nothing on the sidebar named a Codex
+    account: each agent's accounts are read apart (a Codex account's room is nothing to a
+    Claude Code agent) and get a dot of their own, the signed-out Codex slot its ⚠."""
+    asked: list[list[tuple[str, int]]] = []
+    claude = HeadroomSummary(level="fair", percent_left=40.0, usable=1)
+    codex = HeadroomSummary(level="good", percent_left=70.0, usable=1)
+
+    def reader(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
+        assert accounts is not None
+        asked.append([(account.agent, account.slot) for account in accounts])
+        return codex if accounts[0].agent == "codex" else claude
+
+    def overview() -> AccountsOverview:
+        return _overview(
+            _status(1, "me@example.com"),
+            _codex(0, "me@example.com"),
+            _codex(3, None, signed_in=False),
+        )
+
+    async def go(pilot: Pilot[None]) -> tuple[str, tuple[AgentHeadroom, ...]]:
+        app = _app(pilot)
+        await settle_until(app, lambda: bool(app.sidebar.more_headroom))
+        return _shown(app.query_one(StatusLine)), app.sidebar.more_headroom
+
+    line, more = _drive(go, headroom=reader, accounts=overview)
+
+    assert line == f"● aisquare  ● 1{TIMES} claude\n{STATUS_INDENT}● 1{TIMES} codex ⚠"
+    assert asked[-2:] == [[("claude-code", 1)], [("codex", 0), ("codex", 3)]]
+    assert more == (AgentHeadroom("codex", codex.model_copy(update={"needs_login": 1})),)

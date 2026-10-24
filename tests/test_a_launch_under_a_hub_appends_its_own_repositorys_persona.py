@@ -27,6 +27,7 @@ from typer.testing import CliRunner
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import orchestrator, personas
+from aisquare.core.agent_adapters import claude_code
 
 
 @pytest.fixture
@@ -64,7 +65,7 @@ def _persona(root: Path, name: str, body: str) -> None:
 
 
 def _system_prompt(spy: dict[str, Any]) -> str:
-    assert spy["argv"][:2] == ["claude", launch_cli.SYSTEM_PROMPT_FLAG], spy["argv"]
+    assert spy["argv"][:2] == ["claude", claude_code.SYSTEM_PROMPT_FLAG], spy["argv"]
     return Path(spy["argv"][2]).read_text(encoding="utf-8")
 
 

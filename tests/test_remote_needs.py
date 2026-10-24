@@ -134,6 +134,59 @@ def _row(
     )
 
 
+def _derived(
+    row: FleetAgent, session: TeamSession | None, observed: dict[str, Any] | None
+) -> FleetAgentStatus:
+    """``fleet._status`` of ``row`` as its launch record places it (``fleet.resolve_place``),
+    ``observed`` what its server said: a record as the row's spawn wrote it."""
+    from aisquare.core import launch_seal
+    from aisquare.models import LaunchSpec
+
+    record = launch_seal.LaunchRecord(
+        id=row.id,
+        project_id=row.project_id,
+        project_root=str(PROJECT.root),
+        role=row.role,
+        agent=row.agent or "claude-code",
+        binary=row.binary,
+        cwd=str(row.cwd),
+        spec=LaunchSpec(binary=row.binary),
+        label=row.label,
+        window=launch_seal.WindowPlace(
+            tmux_socket=row.tmux_socket, pane_id=row.pane_id, created_at=row.created_at
+        ),
+    )
+    placement = fleet_service.resolve_place(row, record, FleetSettings())
+    assert isinstance(placement, fleet_service.Placed)
+    return fleet_service._status(placement, session, {placement.pane.address: observed}, NOW)
+
+
+def _recorded(row: FleetAgent) -> FleetAgent:
+    """``row`` with what its spawn writes outside the store: its launch record and where its
+    window is (``core.launch_seal``), which the fleet places it by (``fleet.resolve_place``).
+    A row of :data:`PROJECT`, which the store does not list, is in no census."""
+    from aisquare.core import launch_seal
+    from aisquare.models import LaunchSpec
+
+    record = launch_seal.LaunchRecord(
+        id=row.id,
+        project_id=row.project_id,
+        project_root=str(PROJECT.root),
+        role=row.role,
+        agent=row.agent or "claude-code",
+        binary=row.binary,
+        cwd=str(row.cwd),
+        spec=LaunchSpec(binary=row.binary),
+        label=row.label,
+    )
+    assert launch_seal.write(record) is None
+    window = launch_seal.WindowPlace(
+        tmux_socket=row.tmux_socket, pane_id=row.pane_id, created_at=row.created_at
+    )
+    assert launch_seal.placed(row.id, window) is None
+    return row
+
+
 def _session(
     row: FleetAgent,
     *,
@@ -311,12 +364,7 @@ def test_rule_1_a_held_row_is_one_lost_card_saying_why_whatever_its_board_says()
     pending = _tail(_tool("toolu_1"))
     fresh = _session(row, state="attention")
     stale = _session(row, state="attention", seen=NOW - timedelta(hours=1))
-    held = [
-        fleet_service._status(
-            row, session, {row.id: fleet_service.HELD}, None, NOW, FleetSettings()
-        )
-        for session in (fresh, stale)
-    ]
+    held = [_derived(row, session, {row.id: fleet_service.HELD}) for session in (fresh, stale)]
     assert all(status.held for status in held)
     # And a status that reads its board's state, as one from before the derivation held it.
     held.append(_status(row, "attention", fresh).model_copy(update={"held": True}))
@@ -1517,7 +1565,7 @@ def _sources(fleet: Fleet, *, accounts: AccountsSettings | None = None) -> Needs
             session for session in fleet.sessions if session.id in ids
         ],
         task_status=lambda ref: fleet.tasks.get(ref),
-        transcript_tail=lambda path: fleet.tails.get(path),
+        transcript_tail=lambda path, agent: fleet.tails.get(path),
         accounts=lambda: accounts or AccountsSettings(),
         has_live_agents=lambda pid: any(status.agent.ended_at is None for status in fleet.agents),
         tmux_answers=tmux_answers,
@@ -1942,9 +1990,7 @@ def test_a_row_held_as_another_servers_does_not_silence_the_server_that_answered
     was not answering. A held row's server answered; on its own it is no outage either."""
     old, new = _row("coder-1"), _row("coder-2")
     stale = _session(old, state="working", seen=NOW - timedelta(hours=1))
-    held = fleet_service._status(
-        old, stale, {old.id: fleet_service.HELD}, None, NOW, FleetSettings()
-    )
+    held = _derived(old, stale, {old.id: fleet_service.HELD})
     assert (held.state, held.detail, held.held) == ("unknown", fleet_service.ANOTHER_SERVER, True)
     fleet = Fleet(agents=[held, _status(new, "attention", _session(new, state="attention"))])
 
@@ -1958,7 +2004,7 @@ def test_a_row_held_as_another_servers_does_not_silence_the_server_that_answered
     assert said == ["lost"], "no `tmux is not answering` for a server that answered"
     assert fleet.probed == []
     # The control: the same row unknown because its server could not be asked.
-    unasked = fleet_service._status(old, stale, None, None, NOW, FleetSettings())
+    unasked = _derived(old, stale, None)
     fleet.agents = [unasked, _status(new, "attention", _session(new, state="attention"))]
     assert [item.kind for item in _scan(fleet)] == ["fleet_down"]
 
@@ -1973,10 +2019,7 @@ def _on_a_dead_tmux() -> Fleet:
         _session(rows[2], state="limited", resets=NOW + timedelta(hours=3)),
     ]
     return Fleet(
-        agents=[
-            fleet_service._status(row, session, None, None, NOW, FleetSettings())
-            for row, session in zip(rows, sessions, strict=True)
-        ]
+        agents=[_derived(row, session, None) for row, session in zip(rows, sessions, strict=True)]
     )
 
 
@@ -2637,7 +2680,7 @@ def test_a_limit_is_held_by_the_hand_over_question_asked_with_the_agents_own_slo
     a row no reset or manager settles first."""
     asked: list[int | None] = []
 
-    def hands_over(leaving: int | None) -> bool:
+    def hands_over(leaving: int | None, agent: str | None) -> bool:
         asked.append(leaving)
         return somewhere
 
@@ -2661,7 +2704,7 @@ def test_the_hand_over_question_is_asked_once_a_scan_and_only_of_a_limited_row()
     its slot, however many rows are on it."""
     asked: list[int | None] = []
 
-    def hands_over(leaving: int | None) -> bool:
+    def hands_over(leaving: int | None, agent: str | None) -> bool:
         asked.append(leaving)
         return True
 
@@ -2693,7 +2736,7 @@ def test_the_live_hand_over_question_is_kept_a_minute_and_a_raise_is_a_yes(
 
     calls: list[int | None] = []
 
-    def unreadable(leaving: int | None) -> bool:
+    def unreadable(leaving: int | None, *, agent: str | None = None) -> bool:
         calls.append(leaving)
         raise OSError("[Errno 13] Permission denied: 'claude-accounts'")
 
@@ -2703,10 +2746,10 @@ def test_the_live_hand_over_question_is_kept_a_minute_and_a_raise_is_a_yes(
     monkeypatch.setattr(claude_accounts_service, "somewhere_to_hand_over", unreadable)
     hands_over = remote_needs.live_needs_sources().hands_over
 
-    assert hands_over(2) is True and hands_over(2) is True
+    assert hands_over(2, None) is True and hands_over(2, None) is True
     assert calls == [2], "kept"
     clock[0] += remote_needs._NEEDS_HANDS_OVER_KEPT
-    assert hands_over(2) is True and calls == [2, 2], "asked again a minute on"
+    assert hands_over(2, None) is True and calls == [2, 2], "asked again a minute on"
 
     monkeypatch.undo()
     monkeypatch.setattr(
@@ -3298,6 +3341,10 @@ class FakeTmux:
             raise TmuxError(f"can't find pane: {pane_id}")
         return SimpleNamespace(lines=list(self.screen))
 
+    def screen_text(self, pane_id: str) -> list[str]:
+        """``capture-pane -p``, as a placed pane reads its screen: what :meth:`capture` shows."""
+        return list(self.capture(pane_id).lines)
+
     def answers(self) -> bool:
         return True
 
@@ -3503,9 +3550,7 @@ def _printed_since_the_notice(tail: TranscriptTail | None, *, printed: datetime)
     row = _row()
     session = _session(row, state="attention", seen=NOW - timedelta(minutes=1))
     view = fleet_service._PaneView(False, None, "claude", printed)
-    fleet = Fleet(
-        agents=[fleet_service._status(row, session, {row.id: view}, None, NOW, FleetSettings())]
-    )
+    fleet = Fleet(agents=[_derived(row, session, {row.id: view})])
     if tail is not None:
         fleet.tails["/transcripts/coder-1.jsonl"] = tail
     return fleet
@@ -3774,7 +3819,7 @@ class _TailOnly:
     nothing of its project. Asking for any other source fails the test."""
 
     def __init__(self, read: Callable[[str], TranscriptTail | None]) -> None:
-        self.transcript_tail = read
+        self.transcript_tail = lambda path, agent: read(path)
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"a read of one agent asked its project's sources for {name}")
@@ -3925,7 +3970,7 @@ def test_the_agent_alone_is_derived_on_its_own_server_and_its_transcript_alone_i
     one, other = _row(), _row("reviewer", role="reviewer")
     with store_session() as store:
         for row in (one, other):
-            store.upsert_fleet_agent(row)
+            store.upsert_fleet_agent(_recorded(row))
             store.upsert_session(_session(row, state="attention", seen=NOW - timedelta(seconds=30)))
     read: list[str] = []
 
@@ -3979,7 +4024,9 @@ def test_the_agent_alone_never_asks_about_the_pane_of_a_row_that_ended(
     tmux = FakeTmux(reference=NOW)
     monkeypatch.setattr(fleet_service, "_now", lambda: NOW)
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
-    monkeypatch.setattr(remote_needs, "_needs_cached_tail", lambda path: _tail(_tool("toolu_a")))
+    monkeypatch.setattr(
+        remote_needs, "_needs_cached_tail", lambda path, agent=None: _tail(_tool("toolu_a"))
+    )
     snap = needs_single_agent_now(PROJECT, "coder-1", now=NOW)
     assert snap.status is not None and snap.status.state == "exited"
     assert tmux.asked == [] and not snap.pane_is_agent and snap.pane_quiet is None
@@ -4122,18 +4169,20 @@ def test_the_live_sources_read_an_unchanged_transcript_once(
     reads: list[str] = []
     real = read_transcript_tail
 
-    def counted(path: Path | str | None, *, budget: int = TAIL_BUDGET) -> TranscriptTail | None:
+    def counted(
+        path: Path | str | None, *, budget: int = TAIL_BUDGET, agent: str | None = None
+    ) -> TranscriptTail | None:
         reads.append(str(path))
-        return real(path, budget=budget)
+        return real(path, budget=budget, agent=agent)
 
     monkeypatch.setattr(remote_needs, "read_transcript_tail", counted)
     monkeypatch.setattr(remote_needs, "_tails", {})
     transcript = tmp_path / "coder-1.jsonl"
     transcript.write_text(json.dumps(_asking_record(NOW)) + "\n", encoding="utf-8")
     tail_of = remote_needs.live_needs_sources().transcript_tail
-    first = tail_of(str(transcript))
+    first = tail_of(str(transcript), None)
     assert first is not None and [tool.tool_use_id for tool in first.pending] == ["toolu_q"]
-    assert tail_of(str(transcript)) is first
+    assert tail_of(str(transcript), None) is first
     assert reads == [str(transcript)], "unchanged: read once"
     answer = {
         "type": "user",
@@ -4143,7 +4192,7 @@ def test_the_live_sources_read_an_unchanged_transcript_once(
     }
     with transcript.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(answer) + "\n")
-    again = tail_of(str(transcript))
+    again = tail_of(str(transcript), None)
     assert len(reads) == 2 and again is not None and again.pending == (), "it grew: read again"
 
 
@@ -4159,7 +4208,7 @@ def test_the_cache_of_tails_keeps_the_newest_it_read(
         path.write_text(json.dumps(_asking_record(NOW)) + "\n", encoding="utf-8")
     tail_of = remote_needs.live_needs_sources().transcript_tail
     for path in paths:
-        assert tail_of(str(path)) is not None
+        assert tail_of(str(path), None) is not None
     assert list(remote_needs._tails) == [str(path) for path in paths[2:]]
 
 
@@ -4215,6 +4264,9 @@ def test_a_scan_builds_none_of_a_projects_history_it_cannot_use(
                 kind="question", text="Which cache?", created_at=now - timedelta(hours=1),
             )
         )  # fmt: skip
+    # The census of rows spawned before launch records were kept reads every project's rows,
+    # once on this machine (`fleet.take_census`): taken before the scan is measured.
+    fleet_service.take_census()
     built: dict[str, list[str]] = {"rows": [], "sessions": []}
     rows, sessions = store_module._row_to_fleet_agent, store_module._row_to_session
 
@@ -6262,9 +6314,9 @@ def test_under_a_team_hub_a_projects_rows_are_derived_again_in_one_look_at_tmux(
     looks: list[list[str]] = []
     observe = fleet_service._observe
 
-    def looked(srv: Any, tmux_session: str | None, agents: Any, reads: Any = None) -> Any:
-        looks.append(sorted(agent.label for agent in agents))
-        return observe(srv, tmux_session, agents, reads)
+    def looked(placements: Any, also: Any = (), reads: Any = None) -> Any:
+        looks.append(sorted(placement.row.label for placement in placements))
+        return observe(placements, also, reads)
 
     tmux = FakeTmux()
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
@@ -6595,11 +6647,15 @@ def test_an_agent_idle_after_a_local_command_is_at_its_prompt_and_told_now(
             store, project, "coder-1", state="waiting", seen=now - timedelta(minutes=1),
             born=born, transcript=path,
         )  # fmt: skip
-        store.upsert_session(session)  # as SessionStart (startup or compact) writes it
+        # As SessionStart writes it (`team.hook_session_start`): a start comes to rest at its
+        # prompt, `waiting` (Claude Code's, review r4 of #113); a compaction, mid-turn as often
+        # as not, keeps the session `working`.
+        started = "working" if case == "a /compact after its turn" else "waiting"
+        store.upsert_session(session.model_copy(update={"state": started}))
     tmux = FakeTmux(quiet_for=30)
     monkeypatch.setattr(fleet_service, "server_for", lambda socket, config=None: tmux)
     snap = needs_agent_now(project, "coder-1")
-    assert snap.status is not None and snap.status.state == "working"
+    assert snap.status is not None and snap.status.state == started
     assert snap.tail is not None and snap.tail.newest == "own"
     assert needs_at_input_prompt(snap)
     body = {"agent": "coder-1", "text": "now the docs", "project": project.id}

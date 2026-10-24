@@ -213,7 +213,9 @@ def test_team_spawn_adds_its_project_when_it_starts_the_session_not_when_it_prin
 ) -> None:
     """``--exec`` is ``launch`` by another door: the session it starts joins this board,
     so it adds the project as ``launch`` does. A printed line may never be run."""
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "aisquare.services.agent_launch.executable", lambda _selected: "/usr/bin/claude"
+    )
     monkeypatch.setattr("aisquare.cli.team.os.execvpe", lambda *_args: None)
 
     printed = runner.invoke(app, ["team", "spawn", "coder", "--no-probe"])

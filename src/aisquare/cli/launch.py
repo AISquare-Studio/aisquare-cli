@@ -8,11 +8,12 @@ removed — it validates the role, opts the repo in explicitly, then *replaces*
 this process with the agent so signals, job control and the TTY behave exactly
 as if you had run the agent yourself.
 
-Anything after the role is forwarded untouched: ``aisquare launch coder
---model opus`` runs ``claude --model opus``.
+Native arguments follow the AISquare options: ``aisquare launch coder
+--model opus`` runs ``claude --model opus``. A native command/prompt or an
+explicit ``--`` ends AISquare's option parsing.
 
 One exception, and only when tracing is on AND actually succeeded: the launch
-appends ``--session-id <uuid>`` so the agent's session id, the board row and
+prepends ``--session-id <uuid>`` so the agent's session id, the board row and
 the gateway Run's ``X-Pipeline-Id`` are one key (see
 ``services.explainability``). With tracing off — the default — the argv is
 byte-identical to what it always was.
@@ -22,7 +23,8 @@ The environment has one more decision in it since #145: WHICH CLAUDE ACCOUNT.
 project's default and the machine's default are consulted in that order
 (``aisquare accounts default``), and with none of those set the environment is
 exactly what it always was. One resolver, ``services.claude_accounts.choose``,
-answers for ``launch`` and ``fleet spawn`` alike.
+answers for ``launch`` and ``fleet spawn`` alike — for a Codex role too, where
+the account is a Codex slot and the launch sets ``CODEX_HOME`` to it.
 """
 
 from __future__ import annotations
@@ -31,10 +33,9 @@ import contextlib
 import hashlib
 import os
 import re
-import shutil
 import sqlite3
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Annotated
 
@@ -42,16 +43,18 @@ import typer
 from rich.text import Text
 
 from aisquare.cli.common import fail
+from aisquare.cli.native_args import NativeForwardingCommand as LaunchCommand
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, orchestrator, paths, personas
+from aisquare.core.agent_adapters.types import BadEffortError, LaunchPart
 from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.core.workspace import git_common_root
 from aisquare.models import ProjectInfo
+from aisquare.services import agent_launch, explainability_ops
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
-from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
@@ -77,7 +80,10 @@ ROLES = ("planner", "coder", "runner", "tester", "reviewer", "validator", "manag
 #: with no standing cycle and off every ladder.
 _SEAT = re.compile(rf"^({'|'.join(ROLES)})\d+$")
 
-DEFAULT_AGENT = "claude"
+#: launch's own short options, which an agent may spell with a value of its own (Codex's
+#: ``-a`` is its approval policy): one the agent's ``capabilities.value_options`` names too
+#: is told apart in the refusal of a value that is none of launch's.
+_ACCOUNT_SHORT = "-a"
 
 FLEET_ROW_TIMEOUT = 10.0
 """Seconds of LOOKS a fleet launch spends on its row before starting the agent anyway.
@@ -165,32 +171,31 @@ def _check_persona(name: str, project: ProjectInfo | None) -> None:
         fail(str(exc), error="unknown_persona", ref=name)
 
 
-SYSTEM_PROMPT_FLAG = "--append-system-prompt-file"
-"""Claude Code's seam for appending to its default system prompt — a FILE, so the body
-never sits in argv, which ``ps`` shows (the name travels as ``AISQUARE_PERSONA``)."""
-_SYSTEM_PROMPT_FLAGS = (SYSTEM_PROMPT_FLAG, "--append-system-prompt")
-
-
 def _persona_system_prompt(
-    name: str, project: ProjectInfo | None, binary: str, args: Sequence[str]
+    name: str,
+    project: ProjectInfo | None,
+    selected: agent_launch.ResolvedAgent,
+    env: Mapping[str, str],
+    args: Sequence[str],
 ) -> list[str]:
-    """The persona in the agent's system prompt too, where the binary has a seam for it.
+    """The persona in the agent's system prompt too, where its adapter has a seam for it
+    (``system_prompt_args``).
 
-    Claude Code takes ``--append-system-prompt-file``: the same block the
-    session-start hook briefs (``personas.briefing``), written under the home
-    and appended to the default system prompt, so the persona holds over a
-    long session as hook context alone may not (docs/plans/spawn-personas.md
-    §9; gh #210). The system prompt is the LAUNCH's, for the life of the
-    process: ``/clear`` keeps it, and a persona attached since (``persona
-    attach``) reaches the agent through the hook alone, which briefs the persona
-    the fleet row names at every session start. A restart replays the row's
-    persona, so the two agree again from it on (review of #240, "also
-    confirmed": this docstring said ``/clear`` dropped the system prompt).
-    ``[persona] system_prompt = false`` keeps the hook alone. Any other binary —
-    codex, aider, a wrapper not named claude — has no seam this launcher knows
-    (codex reads AGENTS.md, aider its own prompts), so it gets the hook alone and
-    one dim line says so, as does a cache it cannot write. An ``--append-system-prompt``
-    of either spelling already in the arguments is the operator's and wins.
+    The block is the one the session-start hook briefs (``personas.briefing``), so the two
+    channels cannot disagree, and the persona holds over a long session as hook context
+    alone may not (docs/plans/spawn-personas.md §9; gh #210). Claude Code takes the block's
+    file (``--append-system-prompt-file``); Codex takes its text as ``-c
+    developer_instructions=…`` after the operator's own, from the config dir this launch
+    runs in and the trusted project it runs in. The system prompt is the LAUNCH's, for the
+    life of the process: ``/clear`` keeps it, and a persona attached since (``persona
+    attach``) reaches the agent through the hook alone, which briefs the persona the fleet
+    row names at every session start. A
+    restart replays the row's persona, so the two agree again from it on (review of #240),
+    except on an agent whose resumed thread keeps its first system prompt
+    (``capabilities.resume_keeps_system_prompt``: Codex's). ``[persona] system_prompt =
+    false`` keeps the hook alone. An agent with no seam, or a launch whose own arguments
+    already set it (the operator's, which wins), gets the hook alone and one dim line
+    saying so, as does a cache it cannot write where the seam takes the file.
 
     The file is named by the block's own hash: two launches of one persona
     share it, and a project-layer persona that differs from a bundled one of
@@ -202,17 +207,6 @@ def _persona_system_prompt(
     except Exception:  # an unreadable config was already said above; the default stands
         wanted = True
     if not wanted:
-        return []
-    if any(
-        arg == flag or arg.startswith(f"{flag}=") for arg in args for flag in _SYSTEM_PROMPT_FLAGS
-    ):
-        return []
-    if not harness.is_default_agent(binary):
-        stderr_console().print(
-            f"persona {name}: {os.path.basename(binary)!r} takes no system-prompt flag this "
-            "launcher knows — briefed by the session-start hook alone",
-            style="dim",
-        )
         return []
     try:
         persona = personas.resolve(name, _persona_root(project))
@@ -228,6 +222,19 @@ def _persona_system_prompt(
     block = "\n".join(personas.briefing(persona)) + "\n"
     digest = hashlib.sha256(block.encode("utf-8")).hexdigest()[:12]
     path = paths.aisquare_home() / "cache" / "persona-prompts" / f"{name}-{digest}.md"
+    adapter = selected.adapter
+    home = agent_launch._launch_home(selected, env)
+    seam = adapter.system_prompt_args(path, block, args, home, cwd=Path.cwd())
+    if seam is None:
+        stderr_console().print(
+            f"persona {name}: no system-prompt seam for {adapter.label} on this launch (it "
+            "has none, or the launch's own arguments set it) — briefed by the session-start "
+            "hook alone",
+            style="dim",
+        )
+        return []
+    if str(path) not in seam:  # the agent took the text itself
+        return seam
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists() or path.read_text(encoding="utf-8") != block:
@@ -242,7 +249,7 @@ def _persona_system_prompt(
             style="dim",
         )
         return []
-    return [SYSTEM_PROMPT_FLAG, str(path)]
+    return seam
 
 
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
@@ -326,11 +333,24 @@ def launch(
         typer.Option(
             "--command",
             "-c",
-            help="Agent command to launch. Overrides the role's bound `bin`; "
-            f"defaults to that, then to `{DEFAULT_AGENT}`.",
+            help="Agent command to launch (-c BINARY; Codex -c KEY=VALUE is forwarded). "
+            "Overrides the role's bound `bin`; "
+            "defaults to that, then to the selected coding agent.",
             metavar="CMD",
         ),
     ] = None,
+    agent: Annotated[str | None, typer.Option("--agent", help="Coding agent family.")] = None,
+    bound_args: Annotated[
+        bool,
+        typer.Option(
+            "--bound-args/--no-bound-args",
+            help="Use the role's saved native arguments (disable to supply a complete command).",
+        ),
+    ] = True,
+    custom_role: Annotated[
+        bool,
+        typer.Option("--custom-role", help="Allow an unbound custom role, as team spawn does."),
+    ] = False,
     env_pairs: Annotated[
         list[str] | None,
         typer.Option(
@@ -346,10 +366,12 @@ def launch(
         typer.Option(
             "--account",
             "-a",
-            help="Claude Code account to run under: a slot number, an alias or the email it "
-            "is signed in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and "
-            "CLAUDE_CODE_TMPDIR over the role's binding. Without it: the role's bound "
-            "account, then the project default, then the machine default.",
+            help="Account to run under, of the role's agent: a slot number, an alias or the "
+            "email it is signed in as (see `aisquare accounts`). Sets CLAUDE_CONFIG_DIR and "
+            "CLAUDE_CODE_TMPDIR (Claude Code) or CODEX_HOME (Codex) over the role's binding. "
+            "Without it: the role's bound account, then the project default, then the "
+            "machine default. -a is this option's, not Codex's --ask-for-approval: spell "
+            "that one out, or pass it after --.",
             metavar="ACCOUNT",
         ),
     ] = None,
@@ -376,7 +398,7 @@ def launch(
     ``--command`` cannot resolve — an alias is not an executable — so bind the
     variables the alias sets and keep the ordinary binary.
     """
-    if not _role_ok(role):
+    if not custom_role and not _role_ok(role):
         fail(
             f"unknown role {role!r} — expected one of: {', '.join(ROLES)}, "
             "a numbered seat of one (coder1, coder2), or a role you have "
@@ -396,8 +418,21 @@ def launch(
     # alone and ignore the binding entirely, which is worse than not supporting
     # it: the docstring promised the profile supplied the binary, so `launch`
     # silently started the DEFAULT agent under the right role name and exited 0.
-    resolution = harness.resolve_binary(role, override=command)
-    binary = shutil.which(resolution.binary)
+    try:
+        environment = harness.parse_env_pairs(env_pairs or [])
+    except ValueError as exc:
+        fail(str(exc), error="bad_env_pair")
+    try:
+        selected = agent_launch.resolve(
+            role,
+            agent=agent,
+            binary=command,
+            env_overrides=environment,
+        )
+    except ValueError as exc:
+        fail(str(exc), error="agent_configuration")
+    resolution = selected.binary
+    binary = agent_launch.executable(selected)
     if binary is None:
         # Name the candidate AND who chose it — a bare "not on your PATH" sends
         # the reader hunting through flag, env and config to learn which won.
@@ -437,11 +472,7 @@ def launch(
     # The role's bound spec plus this launch's overrides, carried verbatim.
     # Resolved even with no flag, so a bound role launches correctly without
     # the operator remembering to say anything.
-    try:
-        overrides = harness.parse_env_pairs(env_pairs or [])
-    except ValueError as exc:
-        fail(str(exc), error="bad_env_pair")
-    profile = harness.resolve_profile(role, env_overrides=overrides)
+    profile = selected.profile if bound_args else selected.profile.model_copy(update={"args": []})
     if profile.notice is not None:
         # No silent fail-soft: unreadable config means this role launches
         # UNBOUND — possibly on a different install than the operator believes.
@@ -455,6 +486,7 @@ def launch(
         fail(profile.refusal, error="env_file_unreadable", detail=profile.refusal)
     env.update(profile.env)
     env.update(profile.file_env)
+    parent_run = agent_launch.launch_identity(env, selected, project.root if project else None)
     # WHICH ACCOUNT, decided in exactly one place (#145): the flag, else the
     # role's `team bind --account`, else the project's default, else the
     # machine's — `services.claude_accounts.choose`, pinned by
@@ -465,11 +497,29 @@ def launch(
     # own two variables (or their absence) over whatever the binding set — a
     # launch announced as `[plain claude]` must not run on the binding's other
     # login. When NOTHING chose (no flag, no binding, no default — every
-    # machine before #145), the environment is left exactly as it was.
-    try:
-        choice = claude_accounts_service.choose(account, role=role, project=project)
-    except claude_accounts_service.NoSuchAccount as exc:
-        fail(str(exc), error="unknown_account", ref=account)
+    # machine before #145), the environment is left exactly as it was. Every
+    # rung answers with an account of the role's agent: a Codex role runs on a
+    # Codex slot (`CODEX_HOME`), and another agent's account is refused, naming both.
+    choice = claude_accounts_service.AccountChoice(account=None, source=None)
+    if selected.adapter.accounts is not None:
+        try:
+            choice = claude_accounts_service.choose(
+                account, role=role, project=project, agent=selected.adapter.id
+            )
+        except claude_accounts_service.NoSuchAccount as exc:
+            message = str(exc)
+            native = selected.adapter.capabilities.value_options
+            if _ACCOUNT_SHORT in native and account is not None and not account.isdigit():
+                message += (
+                    f". launch's {_ACCOUNT_SHORT} is --account: for {selected.adapter.label}'s "
+                    f"own {_ACCOUNT_SHORT}, pass {_ACCOUNT_SHORT} {account} after --"
+                )
+            fail(message, error="unknown_account", ref=account)
+    elif account is not None:
+        fail(
+            f"--account selects an account, and {selected.adapter.label} has no account slots",
+            error="agent_configuration",
+        )
     for note in choice.notes:
         # A skipped rung is otherwise invisible: the launch lands on the next
         # one down and nobody learns why. Same channel and style as the
@@ -483,7 +533,9 @@ def launch(
     # Not again for the account a fleet spawn just shared into: it says so on the window.
     settled = env.pop(claude_accounts_service.SHARED_ENV, None)
     if choice.account is None or settled != str(choice.account.slot):
-        for note in claude_accounts_service.share_for_launch(account=choice.account, env=env):
+        for note in claude_accounts_service.share_for_launch(
+            account=choice.account, env=env, agent=selected.adapter.id
+        ):
             stderr_console().print(f"accounts: {note}", style="dim")
     carried = sorted({*profile.env, *profile.file_env})
     whose = f" ({','.join(carried)})" if carried else ""
@@ -499,14 +551,10 @@ def launch(
             f"explainability: config unreadable ({exc}) — launching untraced",
             style="dim",
         )
-    # The role's OWN flags (`RoleProfile.default_args`), resolved before the
-    # tracing block because the identity planner below must see every arg the
-    # agent will get. ONE precedence rule, shared with `team spawn`: the role's
-    # defaults sit after the binding's args, and an explicit flag or its
-    # `--no-` opt-out WINS wherever it appears — not because of where these
-    # land in argv, but because `role_defaults` stands down when either
-    # spelling is already in the args it is given.
-    defaults = harness.role_defaults(
+    # Managed role defaults precede saved and forwarded arguments so a native
+    # literal separator cannot turn them into prompt text. Explicit opt-outs
+    # still win: role_defaults stands down when either spelling is present.
+    defaults = selected.adapter.role_defaults(
         role, binary=resolution.binary, args=[*profile.args, *ctx.args]
     )
     role_args = defaults.args
@@ -515,9 +563,19 @@ def launch(
         # role degrades silently (a ui-tester with no browser reopens every UI
         # task). Same surface and style as the tracing notes below.
         stderr_console().print(f"{role}: {note}", style="dim")
-    #: Appended to the agent's argv, and empty unless a trace actually happened.
+    try:
+        arguments = agent_launch.prepare_arguments(selected, [*role_args, *profile.args], ctx.args)
+        native_model = agent_launch.launch_model_for(selected, role, arguments)
+        for message in native_model.notes if native_model else []:
+            stderr_console().print(message, markup=False)
+        model_args = agent_launch.resolved_model_args(selected, native_model, arguments)
+    except BadEffortError as exc:
+        fail(str(exc), error="bad_effort")
+    except ValueError as exc:
+        fail(str(exc), error="agent_configuration")
+    #: Managed flags precede native arguments, and are empty unless tracing succeeded.
     pinned_id: list[str] = []
-    if tracing is not None and tracing.enabled:
+    if tracing is not None and tracing.enabled and selected.adapter.capabilities.model_proxy:
         # Fail-open by contract: wire_session returns an empty env delta (plus
         # the reason) rather than raising, so a dead or wrong proxy can only
         # ever cost the trace, never the launch. Disabled config skips even
@@ -534,29 +592,15 @@ def launch(
         # is disowned and the child wires its own. A gateway the operator set
         # up has no marker beside it, is not ours, and still makes us stand
         # down at the reserved-var guard exactly as before.
-        parent_run = explainability_service.disown_inherited_trace(env)
         if parent_run:
             stderr_console().print(
                 f"explainability: launched from a session traced as {parent_run} — "
                 "this one takes its own identity",
                 style="dim",
             )
-        # The EFFECTIVE argument list, not just what this invocation typed.
-        # `argv` below is
-        # `[binary, *profile.args, *role_args, *ctx.args, *pinned_id]`, so a
-        # role bound with `--session-id`, `--resume` or `--continue` via
-        # `team bind --arg` — or handed one by its own `RoleProfile.default_args`
-        # — carries it here without appearing in `ctx.args`.
-        # Planning on `ctx.args` alone therefore read those launches as fresh:
-        # a bound `--session-id X` got a SECOND `--session-id` appended after
-        # it, and a bound `--continue`/`--resume` defeated the deliberate
-        # refusal to pin — the one this module's own comment calls "pure risk
-        # for no correlation", because guessing an id merges two agents onto one
-        # board row and one Run. `team spawn` already passes its profile args
-        # (cli/team.py), so this path was the asymmetric one.
-        identity = explainability_service.plan_session_identity(
-            resolution.binary, [*profile.args, *role_args, *ctx.args]
-        )
+        # Plan from the complete normalized argument list, including saved
+        # session/resume flags. The planner ignores literal prompt text.
+        identity = explainability_service.plan_session_identity(resolution.binary, arguments.argv)
         # The ACTIVE target's overrides folded onto the settings the wiring
         # reads. `explainability enable --target prod --proxy-url …` writes
         # them per target, and wire_session only ever looks at the top level —
@@ -607,18 +651,52 @@ def launch(
             # the join for EVERY binary, wrapper or not — which is why nothing
             # here needs to write one, and why an unpinnable launch still joins.
             env.update(explainability_service.trace_marker(wiring))
-    # The persona's system-prompt seam, after the role's own flags and before the
-    # operator's line: `_persona_system_prompt` stands down when that line already
-    # carries the flag. `_check_persona` refused an unknown name above, so the
-    # resolve inside cannot fail here.
+    native_trace, native_trace_note = agent_launch.telemetry_args(selected, env, arguments.argv)
+    if native_trace_note:
+        stderr_console().print(native_trace_note, markup=False)
+    # The persona's system-prompt seam, before the role's and the operator's line:
+    # `_persona_system_prompt` stands down when that line already sets the seam, and for
+    # an agent with none. `_check_persona` refused an unknown name above, so the resolve
+    # inside cannot fail here.
     persona_args = (
-        _persona_system_prompt(
-            persona, project, resolution.binary, [*profile.args, *role_args, *ctx.args]
-        )
+        _persona_system_prompt(persona, project, selected, env, arguments.argv)
         if persona is not None
         else []
     )
-    argv = [resolution.binary, *profile.args, *role_args, *persona_args, *ctx.args, *pinned_id]
+    # The captain's one server is its own (`tools_only_args`, from the fleet): the
+    # aisquare server `[agents] mcp` adds to every other launch would sit beside it, a
+    # second --mcp-config its --strict-mcp-config loads, a Codex server its off-list
+    # never names (review r17 of #113, finding 3).
+    aisquare_server = (
+        LaunchPart() if experimental.captain_role(role) else agent_launch.mcp_args(selected)
+    )
+    # The launch slots (``LaunchPart``): their arguments here, in this order, their environment
+    # into the agent's, and their settings, with the spawn's, as its one settings layer.
+    launched = agent_launch.compose(
+        selected,
+        env,
+        native_trace,
+        agent_launch.fleet_settings(selected, env, arguments.argv),
+        aisquare_server,
+    )
+    argv = [
+        resolution.binary,
+        *model_args,
+        *pinned_id,
+        *launched,
+        *persona_args,
+        *arguments.argv,
+    ]
+    # Last, over the environment as it will be exec'd: the store is read-only in the
+    # agent's sandbox, and its board calls go through this launch's broker.
+    from aisquare.services.store_broker import LaunchRefused
+
+    try:
+        argv, broker_note = agent_launch.start_broker(selected, env, argv)
+    except LaunchRefused as exc:
+        fail(str(exc), error="sandbox_writes_aisquare")
+    if broker_note:
+        stderr_console().print(broker_note, markup=False)
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling
@@ -632,6 +710,7 @@ def launch(
             else " with no board row (context.db unreadable)…",
         )
     )
+    agent_launch.prepare_sandbox(selected)
     _await_fleet_row()
     _exec(binary, argv, env)
 
@@ -640,5 +719,6 @@ def register(app: typer.Typer) -> None:
     """Attach ``launch`` to ``app``, forwarding unknown options to the agent."""
     app.command(
         "launch",
+        cls=LaunchCommand,
         context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     )(launch)

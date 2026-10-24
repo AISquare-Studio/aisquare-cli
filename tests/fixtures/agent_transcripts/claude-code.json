@@ -1,0 +1,222 @@
+{
+  "about": "Claude Code 2.1.292+ session JSONL, in the shapes tests/test_remote_transcript_tail.py records.",
+  "moments": {
+    "permission": {
+      "records": [
+        {
+          "type": "user",
+          "uuid": "u1",
+          "timestamp": "2026-10-19T18:40:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "deploy it"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a1",
+          "timestamp": "2026-10-19T18:40:05.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Pushing."
+              }
+            ]
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a2",
+          "timestamp": "2026-10-19T18:40:06.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_bash",
+                "name": "Bash",
+                "input": {
+                  "command": "git push --force",
+                  "description": "Push"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "newest": "assistant_tool",
+        "pending": [
+          [
+            "toolu_bash",
+            "Bash",
+            "tool"
+          ]
+        ],
+        "mark": "git push --force"
+      }
+    },
+    "question": {
+      "records": [
+        {
+          "type": "user",
+          "uuid": "u1",
+          "timestamp": "2026-10-19T18:40:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "set up the cache"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a1",
+          "timestamp": "2026-10-19T18:40:05.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_ask",
+                "name": "AskUserQuestion",
+                "input": {
+                  "questions": [
+                    {
+                      "header": "Cache",
+                      "question": "Which store should the cache use?",
+                      "multiSelect": false,
+                      "options": [
+                        {
+                          "label": "Redis",
+                          "description": "shared"
+                        },
+                        {
+                          "label": "SQLite",
+                          "description": "local"
+                        },
+                        {
+                          "label": "none",
+                          "description": "no cache"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "newest": "assistant_tool",
+        "pending": [
+          [
+            "toolu_ask",
+            "AskUserQuestion",
+            "question"
+          ]
+        ],
+        "options": 3
+      }
+    },
+    "interrupted": {
+      "records": [
+        {
+          "type": "user",
+          "uuid": "u1",
+          "timestamp": "2026-10-19T18:40:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "deploy it"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a1",
+          "timestamp": "2026-10-19T18:40:05.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "tool_use",
+                "id": "toolu_bash",
+                "name": "Bash",
+                "input": {
+                  "command": "git push --force",
+                  "description": "Push"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "r1",
+          "timestamp": "2026-10-19T18:40:09.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_bash",
+                "content": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.",
+                "is_error": true
+              }
+            ]
+          }
+        },
+        {
+          "type": "user",
+          "uuid": "u2",
+          "timestamp": "2026-10-19T18:40:09.000Z",
+          "message": {
+            "role": "user",
+            "content": "[Request interrupted by user for tool use]"
+          }
+        }
+      ],
+      "expect": {
+        "newest": "interrupted",
+        "pending": []
+      }
+    },
+    "asked": {
+      "records": [
+        {
+          "type": "user",
+          "uuid": "u1",
+          "timestamp": "2026-10-19T18:40:00.000Z",
+          "message": {
+            "role": "user",
+            "content": "tidy the tests"
+          }
+        },
+        {
+          "type": "assistant",
+          "uuid": "a1",
+          "timestamp": "2026-10-19T18:40:30.000Z",
+          "message": {
+            "id": "m1",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Done. Shall I push?"
+              }
+            ]
+          }
+        }
+      ],
+      "expect": {
+        "newest": "assistant_text",
+        "pending": [],
+        "last_text_end": "Shall I push?"
+      }
+    }
+  }
+}

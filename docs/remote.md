@@ -185,11 +185,12 @@ The screens, along the bottom bar:
 - **An agent** — **Live** (its pane, colours included, the cursor where the
   program shows one, with Fit width), **Transcript** (the conversation, wrapped
   to the phone, each turn's time in the phone's own time zone, older pages on
-  demand) and **Card** (model, tokens and the explainability verdict). Under Live
-  and Transcript sit the input bar and the key pad. Live, Transcript and a Needs
-  card's pane strip stay dark with the phone in light mode too: an agent's colours
-  are picked for its own theme, dark in Claude Code by default, so an agent on a
-  light theme draws its dark text on that ground as well.
+  demand) and **Card** (model, tokens and the explainability verdict, for a Codex
+  agent its own telemetry's). Under Live and Transcript sit the input bar and the
+  key pad. Live, Transcript and a Needs card's pane strip stay dark with the phone
+  in light mode too: an agent's colours are picked for its own theme, dark in
+  Claude Code by default, so an agent on a light theme draws its dark text on that
+  ground as well.
 - **Devices** — every device that unlocked, which one is this one, last seen, when
   its sign-in ends. Sign out of this one, or revoke another (a write, so only
   while writes are on).
@@ -301,7 +302,7 @@ aisquare --json remote needs
 
 | kind | means |
 | --- | --- |
-| permission | an agent waits for you to allow a tool (a Bash command, an edit), or shows one of Claude Code's own dialogs |
+| permission | an agent waits for you to allow a tool (a Bash command, an edit), or shows a dialog of its own: one of Claude Code's, or one Codex draws that fires no hook (its folder-trust question and hook review before its first prompt, *Switch to gpt-6-luna?* or *Implement this plan?* after a turn), read off its screen, quoted on the card and pushed 30 s after it was first seen |
 | question | an agent asks you a question with options |
 | plan | an agent asks you to approve its plan |
 | board_question | the manager asks on the board, or a coder asks you (no `--to`, or `--to user`, `human`, `owner`, `all` or `everyone`), or asks the manager when no manager is there to answer it (below) |
@@ -376,8 +377,10 @@ back a second later if the prompt is still there. So does one whose answer went 
 and whose Enter did not: the reply says the answer waits at the agent's prompt,
 and Enter on the key pad sends it. Anything else (one of
 Claude Code's own dialogs, a form an MCP server asks you to fill in, a question of
-several answers) is answered from the agent's key pad. The board keeps the words
-of only the first thing a turn asks for. A form an MCP server asks for while its
+several answers) is answered from the agent's key pad. So is a dialog of Codex's own
+that fires no hook (its folder-trust question, its hook review, *Switch to
+gpt-6-luna?*, *Implement this plan?*): Enter and Esc mean something else in each.
+The board keeps the words of only the first thing a turn asks for. A form an MCP server asks for while its
 tool runs is a card without quick answers when it is that first thing, or when
 it comes straight after the tool's own permission prompt. When the agent already
 went on past an earlier prompt in the same turn, the form reads as its tool's
@@ -410,7 +413,7 @@ From an agent's **Actions…** menu, or from a card:
 | --- | --- |
 | Tell (from the menu) | typed into the agent's prompt when it is waiting there; otherwise left as a board note it reads at its next prompt |
 | Tell (from a card) | typed now, and refused if the agent is working or showing a dialog of its own |
-| Interrupt & tell | one Esc stops what the agent is doing; the message is typed once it is back at its prompt |
+| Interrupt & tell | one Esc stops what the agent is doing; the message is typed once it is back at its prompt. An agent whose screen shows its empty prompt with no turn running (Codex) gets no Esc: there is nothing to stop, and after an Esc from the pad a second one opens its transcript |
 
 When an agent is working, a card's Tell offers **Interrupt & tell** instead.
 Neither types into an agent parked on its usage limit (`agent_busy`): a message
@@ -472,12 +475,17 @@ that one.
 On a phone wide enough for eight keys (412 px is, 390 px is not) the key pad is
 one row, `Esc 1 2 3 ⏎ ↑ ↓ More` (⏎ being Enter), with the rest under More. On
 a narrower phone More takes the line under the seven, and below 360 px the
-eight are two rows of four, More last.
-Ctrl-C and Ctrl-D ask first, and a second one within 3 seconds asks again,
-because Claude Code exits on it. A second Esc within a second and a half of the
-last one sent asks too, again after its sheet was closed unanswered, and from
-the Transcript tab is not sent, nor is any Esc there until a second and a half
-passes with none tapped: two in a row open Claude Code's Rewind selector. The
+eight are two rows of four, More last. More's ⇧⏎ is a newline in the prompt,
+sent as the agent reads one (Codex takes Ctrl-J, and submits on Shift-Enter).
+Ctrl-C and Ctrl-D ask first, and the machine asks again before one that exits
+the coding agent: a second within 3 seconds (Claude Code exits on a second of
+either), and for Codex, which exits on one at its empty prompt, the first while
+its screen shows that prompt or cannot be read. A second Esc within a
+second and a half of the last one sent asks too, again after its sheet was
+closed unanswered, and from the Transcript tab is not sent, nor is any Esc there
+until a second and a half passes with none tapped: two in a row open the agent's
+rewind (Claude Code's Rewind selector, Codex's transcript), where Enter goes
+back to an earlier message. The
 pad and the phone's keyboard never share the screen. Keys reach an agent one at
 a time, in the order they were tapped, and a key shows in the accent colour
 until the machine has answered it; one that waits behind a key that did not get
@@ -751,7 +759,10 @@ does, and nothing is typed while the agent may be showing a prompt (409
 `api/panes` and a transcript page name the agent they were read from
 (`agent_id`); sent with the keys, as the page sends it, nothing is typed once
 another agent holds the label, or none does yet, after a restart or a switch
-(409 `stale`).
+(409 `stale`). A `C-c` or `C-d` that may exit the coding agent is refused until
+the body says `"confirm_exit": true`: a second within 3 seconds (409
+`double_press`), or the first to a Codex agent that may be at its empty prompt,
+where one exits it (409 `one_press_exit`, whose `reason` says why).
 
 The code is `src/aisquare/services/remote_server.py` (the server and its gates)
 and `src/aisquare/services/remote_page.py` (the bundled page, whose files are in

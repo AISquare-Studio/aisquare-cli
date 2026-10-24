@@ -36,7 +36,7 @@ from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.board import BoardPanel
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
-from aisquare.cli.ui.views.agent import InfoLine, SlotLabels, shown_pane
+from aisquare.cli.ui.views.agent import InfoLine, SlotLabels, key_spellings, shown_pane
 from aisquare.cli.ui.views.explainability import ExplainabilityView
 from aisquare.cli.ui.views.personas_tab import PersonasTab
 from aisquare.cli.ui.views.settings import SettingsView
@@ -183,8 +183,11 @@ class ManagerTab(Vertical):
             return
         try:
             status = fleet_service.status_of(manager)
-        except fleet_service.FleetError:
-            status = FleetAgentStatus(agent=manager, socket_at=fleet_service.socket_at(manager))
+        except fleet_service.FleetError as exc:
+            # No pane from the row itself: the store's word for where it is, which a
+            # sandboxed agent writes (`fleet.resolve_place`), is never shown or typed into.
+            self.show(None, unavailable=str(exc))
+            return
         self.show(status)
 
     def show(
@@ -220,6 +223,7 @@ class ManagerTab(Vertical):
         self.labels.ask(self)
         button.display = False
         pane.display = True
+        pane.key_spellings = key_spellings(status)
         pane.label = status.agent.label
         if (wanted := shown_pane(status)) != pane.pane_id:
             if wanted is not None:
@@ -298,7 +302,7 @@ class ManagerTab(Vertical):
 class ProjectView(TabbedContent):
     """One project: its manager's pane first, then the board, AISquare and settings.
 
-    ``usage`` is the shell's last per-slot session use (``HeadroomSummary.session_by_slot``),
+    ``usage`` is the shell's last per-slot session use (``HeadroomSummary.limit_by_slot``),
     so a view opened between two headroom reads shows the figure at once.
     """
 

@@ -47,6 +47,7 @@ from aisquare.cli.ui.views.onboard import ProjectOnboarded
 from aisquare.cli.ui.views.welcome import FLEET_UP, Seams, WelcomeView
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters import claude_code
 from aisquare.core.store import store_session
 from aisquare.core.tmux import Completed
 from aisquare.core.workspace import project_id_for
@@ -133,6 +134,14 @@ class Machine:
     frames: list[list[ProjectInfo] | None] = field(default_factory=list)
     onboarded: list[Path] = field(default_factory=list)
     connects: int = 0
+    connected_states: list[ClaudeState | None] = field(default_factory=list)
+    """The step-2 state each Connect was asked for (whose agent, which home)."""
+    chosen: list[str] = field(default_factory=list)
+    """Every agent a *Use …* pick saved as the user default."""
+    sign_ins: list[ClaudeState] = field(default_factory=list)
+    sign_in_slot: int = 0
+    after_choice: list[ClaudeState] = field(default_factory=list)
+    """What the looks answer once a pick is saved; the current answers when empty."""
     starts: list[tuple[str, bool, int]] = field(default_factory=list)
     live: list[FleetAgent] = field(default_factory=list)
     states: dict[str, FleetAgentState] = field(default_factory=dict)
@@ -179,8 +188,9 @@ class Machine:
             report = SetupReport(home=path / ".home", already_initialized=False, project=project)
             return OnboardOutcome(path=path, project_id=project.id, report=report)
 
-        def connect() -> FixResult:
+        def connect(state: ClaudeState | None) -> FixResult:
             self.connects += 1
+            self.connected_states.append(state)
             if self.connect_answer is not None:
                 return self.connect_answer
             self.claude = [READY]
@@ -197,6 +207,18 @@ class Machine:
                 restart=self.restart,
             )
 
+        def sign_in(state: ClaudeState) -> int:
+            self.sign_ins.append(state)
+            return self.sign_in_slot
+
+        def choose(agent: str) -> None:
+            self.chosen.append(agent)
+            # Saved: the next look is about that agent, now the user's default.
+            self.claude = [
+                dataclasses.replace(answer, agent=agent, chosen_by="user")
+                for answer in (self.after_choice or self.claude)
+            ]
+
         return Seams(
             tmux=lambda: self.tmux,
             claude=claude,
@@ -206,6 +228,8 @@ class Machine:
             onboard=onboard,
             project=self.stored.get,
             connect=connect,
+            sign_in=sign_in,
+            choose=choose,
             start=start,
             platform=platform,
         )
@@ -382,8 +406,8 @@ def test_each_platform_names_its_own_install() -> None:
 
     mac = hosted(Machine(), go, platform="darwin")
     windows = hosted(Machine(), go, platform="win32")
-    assert first_run.BREW_COMMAND in mac and "WSL2" not in mac
-    assert "WSL2" in windows and first_run.BREW_COMMAND not in windows
+    assert claude_code.BREW_COMMAND in mac and "WSL2" not in mac
+    assert "WSL2" in windows and claude_code.BREW_COMMAND not in windows
 
 
 def test_an_override_that_is_missing_is_named_not_claude() -> None:

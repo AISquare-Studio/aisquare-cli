@@ -21,6 +21,7 @@ anyone is asked, and only a confirmed draft becomes a persona (§3.9).
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import sys
@@ -33,8 +34,11 @@ from typing import Literal, cast
 
 from pydantic import BaseModel
 
+from aisquare.core import agents as agents_core
+from aisquare.core import claude_accounts
 from aisquare.core import personas as core
-from aisquare.core.agents import _claude_home
+from aisquare.core.agent_adapters import DEFAULT_AGENT, adapters, get_adapter
+from aisquare.core.agent_adapters.types import AgentAdapter, SkillDirs
 from aisquare.core.config import PersonaImportSettings, load_config
 from aisquare.core.editor import edit_text
 from aisquare.core.personas import Layer, Persona, PersonaError, Provenance
@@ -60,13 +64,26 @@ _FETCH_TIMEOUT_SECONDS = 20.0
 _FETCH_MAX_BYTES = 2 * 1024 * 1024
 
 
+class SkillRoot(BaseModel):
+    """A directory of skills a coding agent reads (``AgentAdapter.skill_dirs``)."""
+
+    path: Path
+    scope: SkillScope
+    agents: list[str] = []
+    """The agents that read it, by id."""
+
+
 class SkillRef(BaseModel):
-    """A skill in one of Claude Code's own skill directories — an import source (§3.4)."""
+    """A skill in one of the coding agents' own skill directories — an import source
+    (§3.4)."""
 
     name: str
     description: str
     path: Path
     scope: SkillScope
+    agents: list[str] = []
+    """The agents that read the skill's directory (``AgentAdapter.skill_dirs``), by id: a
+    directory more than one reads (``~/.agents/skills``) is listed once."""
     recognised: bool
     reason: str | None = None
     imported: bool = False
@@ -588,7 +605,7 @@ def _read_source(source: str, root: Path | None, *, stdin: bytes | None = None) 
         if ref.name == source:
             return _read_source(str(ref.path), root)
     raise PersonaError(
-        f"no such file, directory or Claude Code skill: {source} "
+        f"no such file, directory or agent skill: {source} "
         "(`aisquare persona import --list` shows the skills)",
         code="source_not_found",
     )
@@ -646,12 +663,124 @@ def _is_skill_name(name: str) -> bool:
     )
 
 
+def skill_agent(agent: str | None) -> AgentAdapter:
+    """The coding agent whose skill directories ``export --skill`` writes into: ``agent``,
+    else the one a launch in this directory picks with no binding (the project's, then the
+    user's default, then :data:`DEFAULT_AGENT`)."""
+    if agent is None:
+        try:
+            from aisquare.services import agent_launch
+
+            agent = agent_launch.project_default() or load_config().agents.default
+        except Exception:  # a damaged board or config costs the preference, never the export
+            agent = None
+    try:
+        return get_adapter(agent or DEFAULT_AGENT)
+    except ValueError as exc:
+        raise PersonaError(str(exc), code="unknown_agent") from None
+
+
+def skill_dirs(adapter: AgentAdapter, root: Path | None) -> SkillDirs:
+    """Where ``adapter`` reads skills for this user's config dir (its home variable, else
+    its default) and, with ``root``, in that repository."""
+    home = adapter.config_dir(agents_core.home(), os.environ)
+    return adapter.skill_dirs(home, root)
+
+
+def skill_target(adapter: AgentAdapter, scope: SkillScope, root: Path | None) -> Path:
+    """The directory ``export --skill`` writes into for ``adapter``: the first of its user
+    or project skill directories. ``no_project`` outside a git repository, and
+    ``no_skill_dir`` for an agent that reads none of that scope."""
+    if scope == "project" and root is None:
+        raise PersonaError(
+            "--skill --project needs a git repository around the working directory",
+            code="no_project",
+        )
+    dirs = skill_dirs(adapter, root)
+    found = dirs.user if scope == "user" else dirs.project
+    if not found:
+        raise PersonaError(
+            f"{adapter.label} reads no {scope} skills", code="no_skill_dir", path=adapter.id
+        )
+    return found[0]
+
+
+def skill_homes(adapter: AgentAdapter) -> list[Path]:
+    """Every config dir of ``adapter`` the accounts layer knows: this
+    environment's (:func:`skill_dirs`'), then the plain home's and each account slot's
+    (``AgentAccounts.config_dir``), whose own skills dir a session there reads (Codex's
+    ``$CODEX_HOME/skills`` on a slot). Slots that cannot be listed cost only the slots."""
+    homes = [adapter.config_dir(agents_core.home(), os.environ)]
+    accounts = adapter.accounts
+    if accounts is not None:
+        try:
+            known = [
+                claude_accounts.default_account(agent=adapter.id),
+                *claude_accounts.managed_accounts(adapter.id),
+            ]
+        except OSError:
+            known = []
+        homes.extend(accounts.config_dir(account.config_dir) for account in known)
+    return homes
+
+
+def skill_roots(root: Path | None) -> list[SkillRoot]:
+    """Every skill directory of every coding agent under every home it has
+    (:func:`skill_homes`), the user's first and each agent's in its own order within, a
+    directory two agents or two homes read (``~/.agents/skills``) once with its agents."""
+    found: dict[Path, SkillRoot] = {}
+    every = [
+        (adapter, [adapter.skill_dirs(home, root) for home in skill_homes(adapter)])
+        for adapter in adapters()
+    ]
+    for scope in ("user", "project"):
+        for adapter, per_home in every:
+            for dirs in per_home:
+                for base in dirs.user if scope == "user" else dirs.project:
+                    where = found.setdefault(_dir_key(base), SkillRoot(path=base, scope=scope))
+                    if adapter.id not in where.agents:
+                        where.agents.append(adapter.id)
+    return list(found.values())
+
+
+def resume_seam_note(agent: str, persona: str | None, began_as: str | None = None) -> str | None:
+    """The receipt line for a launch that RESUMES a session of ``agent`` as ``persona``
+    when the agent's resumed thread keeps the system prompt it began with
+    (``capabilities.resume_keeps_system_prompt``: Codex's, measured on 0.162.1 — ``codex
+    resume`` ignores a new ``developer_instructions``): the persona passed now reaches the
+    agent through the session-start briefing alone. With no persona passed, the thread
+    still holds ``began_as``, the one it began with, which no briefing takes back (review
+    r17 of #113, finding 10). ``None`` for an agent that takes its system prompt again at
+    every launch (Claude Code), an unknown agent, or neither persona. The caller asks it
+    for a row whose persona changed since the thread began (``persona attach``, a
+    take-over's, one dropped)."""
+    try:
+        adapter = get_adapter(agent)
+    except ValueError:
+        return None
+    if not adapter.capabilities.resume_keeps_system_prompt:
+        return None
+    if not persona:
+        if not began_as:
+            return None
+        return (
+            f"no persona: {adapter.label} resumes the thread with the system prompt it began "
+            f"with, so its system seam keeps {began_as} — restart it with --fresh to drop it"
+        )
+    return (
+        f"persona {persona}: {adapter.label} resumes the thread with the system prompt it "
+        "began with, so its system seam keeps its first persona — "
+        f"{persona} reaches it through the session-start briefing"
+    )
+
+
 def importable_skills(root: Path | None) -> list[SkillRef]:
-    """Every skill in ``<config dir>/skills`` and ``<repo>/.claude/skills`` —
-    personal first, as Claude Code ranks them. ``imported`` is provenance, not a
-    name match: some user or project persona — shadowed or not, under any name —
-    was copied from the skill. ``taken_by`` names the layer whose persona holds the
-    skill's name without having come from it."""
+    """Every skill in every coding agent's skill directories
+    (``AgentAdapter.skill_dirs``) — personal first, as the agents rank them, each
+    directory once with the agents that read it. ``imported`` is provenance, not a
+    name match: some user or project persona — shadowed or not, under any name — was
+    copied from the skill. ``taken_by`` names the layer whose persona holds the skill's
+    name without having come from it."""
     holders = {persona.name: persona for persona in core.catalogue(root)[0]}
     sources: set[Path] = set()
     for layer, layer_base in core.layer_dirs(root):
@@ -664,12 +793,10 @@ def importable_skills(root: Path | None) -> list[SkillRef]:
                 continue
             if source is not None:
                 sources.add(source)
-    places: list[tuple[SkillScope, Path]] = [("user", _claude_home() / "skills")]
-    if root is not None:
-        places.append(("project", root / ".claude" / "skills"))
     refs: list[SkillRef] = []
-    for scope, base in places:
-        for directory in _skill_dirs(base):
+    for where in skill_roots(root):
+        scope, readers = where.scope, where.agents
+        for directory in _skill_dirs(where.path):
             origin = directory.resolve()
             try:
                 persona = core.load(directory, layer="user")
@@ -680,6 +807,7 @@ def importable_skills(root: Path | None) -> list[SkillRef]:
                         description="",
                         path=directory,
                         scope=scope,
+                        agents=readers,
                         recognised=False,
                         reason=exc.rule,
                         imported=origin in sources,
@@ -693,12 +821,22 @@ def importable_skills(root: Path | None) -> list[SkillRef]:
                     description=persona.description,
                     path=directory,
                     scope=scope,
+                    agents=readers,
                     recognised=True,
                     imported=origin in sources,
                     taken_by=_taken_by(holders.get(persona.name), origin),
                 )
             )
     return refs
+
+
+def _dir_key(path: Path) -> Path:
+    """``path`` as a key two spellings of one directory share, as written where it cannot
+    be resolved (a loop)."""
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return path
 
 
 def _source_dir(persona: Persona) -> Path | None:
@@ -848,11 +986,14 @@ def export(
     to: Path | None,
     skill: Literal["user", "project"] | None,
     force: bool,
+    agent: str | None = None,
 ) -> ExportResult | str:
-    """The SKILL.md text (no destination), or the directory written — ``to/<name>/``,
-    ``<config dir>/skills/<name>/`` or ``<repo>/.claude/skills/<name>/`` — with the
-    symbolic links the copy left out: a link is never followed. A persona whose SKILL.md
-    is itself a link is not written anywhere (``symlink_refused``).
+    """The SKILL.md text (no destination), or the directory written — ``to/<name>/``, or
+    ``<name>/`` in the first user or project skill directory of ``agent``
+    (:func:`skill_agent`, :func:`skill_target`: Claude Code's ``<config dir>/skills``,
+    Codex's ``~/.agents/skills``, which every Codex home reads) — with the symbolic links
+    the copy left out: a link is never followed. A persona whose SKILL.md is itself a link
+    is not written anywhere (``symlink_refused``).
     """
     persona = core.resolve(name, root)
     if to is not None and skill is not None:
@@ -861,15 +1002,8 @@ def export(
         return (persona.path / core.SKILL_FILE).read_bytes().decode("utf-8")
     # Before the destination's parent is made:
     _refuse_a_linked_skill_md(persona.path, "export")
-    if skill == "user":
-        base = _claude_home() / "skills"
-    elif skill == "project":
-        if root is None:
-            raise PersonaError(
-                "--skill --project needs a git repository around the working directory",
-                code="no_project",
-            )
-        base = root / ".claude" / "skills"
+    if skill is not None:
+        base = skill_target(skill_agent(agent), skill, root)
     else:
         assert to is not None
         base = to.expanduser()

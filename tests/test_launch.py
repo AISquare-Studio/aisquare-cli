@@ -5,8 +5,9 @@ from __future__ import annotations
 import contextlib
 import shutil
 import sqlite3
+import tomllib
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,12 +18,14 @@ from typer.testing import CliRunner
 from aisquare.cli import launch as launch_cli
 from aisquare.cli.app import app
 from aisquare.core import paths, personas
+from aisquare.core.agent_adapters import claude_code, codex, register, unregister
 from aisquare.core.config import AppConfig, save_config
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, store_session
 from aisquare.models import FleetAgent
 from aisquare.services.explainability import join_records
 from tests import bundled_personas
+from tests.fake_agent import FakeAgentAdapter
 
 
 @pytest.fixture
@@ -320,7 +323,9 @@ def test_launch_reports_a_missing_agent_binary(
 def test_launch_honours_a_custom_agent_command(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any]
 ) -> None:
-    result = runner.invoke(app, ["launch", "coder", "--command", "claude-next"])
+    result = runner.invoke(
+        app, ["launch", "coder", "--agent", "claude-code", "--command", "claude-next"]
+    )
 
     assert result.exit_code == 0, result.output
     assert spy["argv"] == ["claude-next"]
@@ -499,7 +504,7 @@ def test_spawn_exec_survives_a_base_url_the_agent_could_not_parse(
     _tracing_on("$http://127.0.0.1:9190")
     seen: dict[str, Any] = {}
 
-    monkeypatch.setattr("aisquare.cli.team.shutil.which", lambda _name: "/usr/bin/claude")
+    monkeypatch.setattr("aisquare.core.harness.shutil.which", lambda _name: "/usr/bin/claude")
     monkeypatch.setattr(
         "aisquare.cli.team.os.execvpe",
         lambda file, argv, env: seen.update(argv=argv, env=env),
@@ -645,7 +650,9 @@ def test_a_role_bound_to_a_wrapper_traces_and_still_joins(
         save_config(
             AppConfig(
                 explainability=ExplainabilitySettings(enabled=True, proxy_url=proxy_url),
-                team=TeamSettings(profiles={"coder": RoleLaunchProfile(bin="my-wrapper")}),
+                team=TeamSettings(
+                    profiles={"coder": RoleLaunchProfile(agent="claude-code", bin="my-wrapper")}
+                ),
             )
         )
         result = runner.invoke(app, ["launch", "coder"])
@@ -740,7 +747,9 @@ def test_launch_does_not_pin_an_id_it_cannot_own(
         (record,) = _join_seen_by_the_agent(monkeypatch, spy["env"], "the-resumed-session")
         assert record["pipeline_id"] == spy["env"]["AISQUARE_PIPELINE_ID"]
 
-        result = runner.invoke(app, ["launch", "coder", "--command", "aider"])
+        result = runner.invoke(
+            app, ["launch", "coder", "--agent", "claude-code", "--command", "aider"]
+        )
         assert result.exit_code == 0, result.output
         assert spy["argv"] == ["aider"], "no flag reaches a binary we did not resolve"
         assert "X-Pipeline-Id" in spy["env"]["ANTHROPIC_CUSTOM_HEADERS"], "still traced"
@@ -985,7 +994,7 @@ def test_launch_persona_exports_the_name_for_the_session_start_hook(
     # The NAME travels as a variable; the BODY reaches Claude Code's system prompt by
     # file, never as an argument (`ps` shows argv) — the same block the session-start
     # hook briefs, so the two channels cannot disagree (owner decision, gh #210).
-    assert spy["argv"][:2] == ["claude", launch_cli.SYSTEM_PROMPT_FLAG]
+    assert spy["argv"][:2] == ["claude", claude_code.SYSTEM_PROMPT_FLAG]
     assert len(spy["argv"]) == 3
     prompt = Path(spy["argv"][2])
     briefed = "\n".join(personas.briefing(personas.resolve("skeptic"))) + "\n"
@@ -1008,18 +1017,106 @@ def test_launch_persona_system_prompt_is_a_switch_the_hook_channel_ignores(
     assert spy["argv"] == ["claude"]
 
 
-def test_launch_persona_on_a_binary_without_a_seam_keeps_the_hook_alone_and_says_so(
-    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+class _NoSeam(FakeAgentAdapter):
+    """The fake agent, with no system-prompt seam: its ``system_prompt_args`` answers None."""
+
+    def system_prompt_args(
+        self, block: Path, text: str, args: Sequence[str], home: Path, *, cwd: Path
+    ) -> list[str] | None:
+        return None
+
+
+@pytest.fixture
+def fake_agent() -> Iterator[FakeAgentAdapter]:
+    """The fake agent registered for one test, unregistered after it."""
+    fake = FakeAgentAdapter()
+    register(fake)
+    try:
+        yield fake
+    finally:
+        unregister(fake.id)
+
+
+def _briefed(name: str) -> str:
+    return "\n".join(personas.briefing(personas.resolve(name))) + "\n"
+
+
+def test_launch_persona_on_codex_adds_it_to_the_operators_developer_instructions(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """codex, aider, a wrapper not named claude: no system-prompt flag this launcher
-    knows, so the briefing is the channel, and one line says so."""
-    result = runner.invoke(app, ["launch", "coder", "--persona", "skeptic", "--command", "aider"])
+    """SCOPE #113 0.8.2 A3: Codex's seam is ``-c developer_instructions=…`` (measured on
+    0.162.1: it lands in the request's developer message). The ``-c`` replaces the
+    config's own value, so the operator's is kept ahead of the persona's block, and the
+    body travels as text: no file is written for it."""
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "config.toml").write_text('developer_instructions = "Answer in French."\n')
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(codex, "SYSTEM_CONFIG", tmp_path / "no-system.toml")
+    monkeypatch.setattr(codex, "MANAGED_CONFIG", tmp_path / "no-managed.toml")
+
+    result = runner.invoke(app, ["launch", "coder", "--agent", "codex", "--persona", "skeptic"])
 
     assert result.exit_code == 0, result.output
     assert spy["env"]["AISQUARE_PERSONA"] == "skeptic"
-    assert spy["argv"] == ["aider"]
-    said = result.output + (result.stderr if hasattr(result, "stderr") else "")
-    assert "takes no system-prompt flag" in said
+    argv = spy["argv"]
+    seams = [arg for arg in argv if arg.startswith("developer_instructions=")]
+    assert len(seams) == 1, argv
+    assert argv[argv.index(seams[0]) - 1] == "-c"
+    value = tomllib.loads(seams[0])["developer_instructions"]
+    assert value == "Answer in French.\n\n" + _briefed("skeptic")
+    assert not (paths.aisquare_home() / "cache" / "persona-prompts").exists()
+
+
+def test_launch_persona_on_codex_leaves_the_operators_own_developer_instructions_alone(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """A ``-c developer_instructions=`` on the launch's own line is the operator's and wins;
+    the hook briefs the persona, and one line says the seam was not used."""
+    mine = ["-c", 'developer_instructions="mine"']
+    result = runner.invoke(
+        app, ["launch", "coder", "--agent", "codex", "--persona", "skeptic", "--", *mine]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_PERSONA"] == "skeptic"
+    assert [arg for arg in spy["argv"] if "developer_instructions" in arg] == [mine[1]]
+    assert "no system-prompt seam for Codex" in result.output
+
+
+def test_launch_persona_on_an_agent_whose_adapter_takes_the_text_puts_it_in_argv(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any], fake_agent: FakeAgentAdapter
+) -> None:
+    """No agent named here: the adapter's own answer is the seam (the fake's preamble)."""
+    result = runner.invoke(
+        app, ["launch", "coder", "--agent", fake_agent.id, "--persona", "skeptic"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"][-2:] == ["--preamble", _briefed("skeptic")]
+
+
+def test_launch_persona_on_an_agent_without_a_seam_keeps_the_hook_alone_and_says_so(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """An adapter that answers None: the briefing is the channel, and one dim line says so."""
+    fake = _NoSeam()
+    register(fake)
+    try:
+        result = runner.invoke(app, ["launch", "coder", "--agent", fake.id, "--persona", "skeptic"])
+    finally:
+        unregister(fake.id)
+
+    assert result.exit_code == 0, result.output
+    assert spy["env"]["AISQUARE_PERSONA"] == "skeptic"
+    assert not any(_briefed("skeptic") in arg for arg in spy["argv"])
+    assert "--preamble" not in spy["argv"]
+    assert "no system-prompt seam for Fake Agent" in result.output
+    assert "session-start hook alone" in result.output
 
 
 def test_launch_persona_with_a_cache_it_cannot_write_launches_on_the_hook_alone(

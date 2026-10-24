@@ -214,6 +214,8 @@ class StopAgentScreen(ModalScreen[FleetAgent | None]):
         if event.state is WorkerState.SUCCESS:
             receipt = event.worker.result
             if isinstance(receipt, fleet_service.StopReceipt):
+                if receipt.killed:
+                    self.app.notify(receipt.killed, severity="warning", timeout=8, markup=False)
                 if receipt.release_failed:
                     # `fleet stop` prints this and exits 1: a claim left with the ended
                     # session is not a clean stop, and the dialog must not read as one.

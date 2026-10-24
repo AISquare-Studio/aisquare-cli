@@ -4,7 +4,7 @@
 answer to "is Claude Code connected here?". The doctor's Connect button, ``agents
 list`` and ``agents status``, the Accounts page and the Welcome view ask it, and the
 plugin route extends it, so the hooks are never offered, or installed, twice.
-``agents connect`` refuses an agent aisquare has no hooks for (Codex, Cursor) instead
+``agents connect`` refuses an agent aisquare has no hooks for (Cursor) instead
 of recording a connection that installs nothing, and names a file of Claude Code's it
 cannot read instead of calling Claude Code not installed. The doctor has a row for
 every agent in the registry: Claude Code's with its Connect fix, the others ok,
@@ -14,6 +14,7 @@ button. Each claim has its negative control in the same test.
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import json
 import os
@@ -312,17 +313,38 @@ def test_an_undecodable_sibling_settings_json_costs_doctor_nothing(
 # --------------------------------------------------------------------------- the refusal
 
 
-#: The detect-only agents and the release each is planned for. Cursor has none: the
-#: release plan schedules Codex (10.1), and a row promising Cursor in 0.10 would be
-#: false on 0.10 itself.
-_DETECT_ONLY = [("codex", "Codex", "0.10"), ("cursor", "Cursor", None)]
+#: The detect-only agents and the release each is planned for. Codex was one, planned
+#: for 0.10, until #113 gave it hooks; Cursor is the one left and plans none, so the
+#: planned case is Cursor with a release planned for it here (:func:`_plan`).
+_DETECT_ONLY = [("cursor", "Cursor", "0.10"), ("cursor", "Cursor", None)]
+
+
+def _plan(monkeypatch: pytest.MonkeyPatch, name: str, planned: str | None) -> None:
+    """Plan ``planned`` for the detect-only agent ``name`` in the registry, where it is set."""
+    if planned is None:
+        return
+    specs = agent_core._specs
+    monkeypatch.setattr(
+        agent_core,
+        "_specs",
+        lambda config_dir=None: [
+            dataclasses.replace(spec, planned=planned) if spec.name == name else spec
+            for spec in specs(config_dir)
+        ],
+    )
 
 
 @pytest.mark.parametrize(("name", "label", "planned"), _DETECT_ONLY)
 def test_connect_refuses_an_agent_it_has_no_hooks_for(
-    runner: CliRunner, isolated_agent_home: Path, name: str, label: str, planned: str | None
+    runner: CliRunner,
+    isolated_agent_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    label: str,
+    planned: str | None,
 ) -> None:
     """It exited 0 and wrote the agent into agents.json as connected, installing nothing."""
+    _plan(monkeypatch, name, planned)
     agent_dir = isolated_agent_home / f".{name}"
     agent_dir.mkdir(parents=True)
 
@@ -346,13 +368,13 @@ def test_connect_refuses_an_agent_it_has_no_hooks_for(
 def test_an_absent_unsupported_agent_gets_the_same_answer(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Saying "not installed" would send someone to install Codex, still unable to connect it."""
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: None)  # absent: not on PATH
-    refused = runner.invoke(app, ["agents", "connect", "codex"])
+    """Saying "not installed" would send someone to install Cursor, still unable to connect it."""
+    monkeypatch.setattr(agent_core, "on_path", lambda name: None)  # absent: not on PATH
+    refused = runner.invoke(app, ["agents", "connect", "cursor"])
     absent = runner.invoke(app, ["agents", "connect", "claude-code"])
 
     assert refused.exit_code == 1
-    assert "can't connect Codex yet" in refused.output
+    assert "can't connect Cursor yet" in refused.output
     assert "not installed" not in refused.output
     assert "not installed" in absent.output, "control: an absent connectable agent says so"
 
@@ -360,13 +382,13 @@ def test_an_absent_unsupported_agent_gets_the_same_answer(
 def test_init_reports_the_refusal_as_a_note_and_records_nothing(
     runner: CliRunner, isolated_agent_home: Path
 ) -> None:
-    (isolated_agent_home / ".codex").mkdir(parents=True)
+    (isolated_agent_home / ".cursor").mkdir(parents=True)
 
-    result = runner.invoke(app, ["--json", "init", "--yes", "--no-onboard", "--agent", "codex"])
+    result = runner.invoke(app, ["--json", "init", "--yes", "--no-onboard", "--agent", "cursor"])
 
     assert result.exit_code == 0, result.output
     notes = json.loads(result.stdout)["notes"]
-    assert "Could not connect codex: aisquare can't connect Codex yet" in " ".join(notes), notes
+    assert "Could not connect cursor: aisquare can't connect Cursor yet" in " ".join(notes), notes
     listed = runner.invoke(app, ["--json", "agents", "list"])
     connected = {agent["name"]: agent["connected"] for agent in json.loads(listed.stdout)}
     assert connected == {"claude-code": False, "cursor": False, "codex": False}, connected
@@ -374,13 +396,19 @@ def test_init_reports_the_refusal_as_a_note_and_records_nothing(
 
 @pytest.mark.parametrize(("name", "label", "planned"), _DETECT_ONLY)
 def test_a_record_an_older_aisquare_wrote_is_no_connection(
-    runner: CliRunner, claude_home: Path, name: str, label: str, planned: str | None
+    runner: CliRunner,
+    claude_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    label: str,
+    planned: str | None,
 ) -> None:
     """0.7.0's `agents connect codex` exited 0 and recorded the agent in agents.json while
     writing nothing under ~/.codex. On this release `agents list`/`status` and `aisquare
     status` still called it connected, beside a doctor row saying aisquare can't connect it
     and a connect that refuses (review of #257). A record alone is no connection, and
     `agents disconnect` still clears it, with no note about hooks it never had."""
+    _plan(monkeypatch, name, planned)
     agent_dir = claude_home.parent / f".{name}"
     agent_dir.mkdir()
     _connect(runner)
@@ -424,15 +452,15 @@ def test_the_refusal_never_reaches_a_damaged_store(
     damaged_store: str,  # noqa: F811 — pytest resolves fixtures by NAME, so the import must keep it
 ) -> None:
     """Refused before the store is opened: one JSON object, no traceback, the file untouched."""
-    (isolated_agent_home / ".codex").mkdir(parents=True)
+    (isolated_agent_home / ".cursor").mkdir(parents=True)
     (isolated_agent_home / ".claude").mkdir(parents=True)
     before = paths.db_path().read_bytes()
 
-    refused = runner.invoke(app, ["--json", "agents", "connect", "codex"])
+    refused = runner.invoke(app, ["--json", "agents", "connect", "cursor"])
 
     assert isinstance(refused.exception, SystemExit), repr(refused.exception)
     assert refused.exit_code == 1
-    assert json.loads(refused.stdout) == {"error": "unsupported_agent", "ref": "codex"}
+    assert json.loads(refused.stdout) == {"error": "unsupported_agent", "ref": "cursor"}
     assert paths.db_path().read_bytes() == before
 
     # Control: a real connect does reach the store. A file that is no database stops
@@ -449,7 +477,7 @@ def test_connect_names_a_context_file_it_cannot_read(
 ) -> None:
     """A CLAUDE.md saved as Latin-1 was reported as ``not_installed``: an installed Claude
     Code, and asq's Connect button saying it was not, with no file named."""
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: None)  # for "absent"
+    monkeypatch.setattr(agent_core, "on_path", lambda name: None)  # for "absent"
     claude_md = claude_home / "CLAUDE.md"
     claude_md.write_bytes("# Prefs\ncaf\xe9\n".encode("latin-1"))
 
@@ -477,11 +505,15 @@ def test_a_claude_code_on_path_that_never_started_is_detected_and_offered_connec
     detection still keyed on the directory: doctor gave a green "not detected" row with no
     Connect, and `agents status` said detected: false, while Welcome offered Connect
     (review of #257)."""
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     row = diagnostics._check_claude_code()
     listed = json.loads(runner.invoke(app, ["--json", "agents", "status", "claude-code"]).stdout)
     named = agent_core.detect("claude-code", isolated_agent_home / ".claude-typo")
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: None)
+    monkeypatch.setattr(agent_core, "on_path", lambda name: None)
     nowhere = diagnostics._check_claude_code()
 
     assert row.status is CheckStatus.warn, row
@@ -500,10 +532,14 @@ def test_a_claude_code_on_path_that_never_started_is_connected_not_refused(
     claude-code` refused; only Welcome's own Connect made it (review of #257)."""
     claude = isolated_agent_home / ".claude"
     typo = isolated_agent_home / ".claud"
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: None)
+    monkeypatch.setattr(agent_core, "on_path", lambda name: None)
     absent = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
     made_without = claude.exists()
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     named = runner.invoke(
         app, ["--json", "agents", "connect", "claude-code", "--config-dir", str(typo)]
     )
@@ -528,7 +564,11 @@ def test_a_recorded_claude_dir_that_was_removed_is_made_by_the_doctors_connect(
     `claude` still on PATH: the doctor's Connect names the recorded directory with
     --config-dir, and connect refused it as not installed, while the bare Connect, Welcome's,
     made it and connected (review of #257). Named or not, that directory is made."""
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     claude = isolated_agent_home / ".claude"
     claude.mkdir(parents=True)
     _connect(runner)
@@ -560,7 +600,11 @@ def test_a_config_dir_that_is_a_symlink_loop_is_not_installed_not_a_traceback(
     traceback where connect said "not installed" before."""
     if os.name == "nt":
         pytest.skip("a symlink loop is a POSIX shape; NTFS links need a privilege")
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     isolated_agent_home.mkdir(parents=True, exist_ok=True)
     loop = isolated_agent_home / "loop"
     loop.symlink_to(loop)
@@ -586,7 +630,11 @@ def test_a_recorded_dir_connect_cannot_make_is_named_gone_with_the_way_to_forget
     it, everywhere."""
     from aisquare.cli.common import _hook_sites
 
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     claude = isolated_agent_home / ".claude"
     claude.mkdir(parents=True)
     _connect(runner)
@@ -595,7 +643,7 @@ def test_a_recorded_dir_connect_cannot_make_is_named_gone_with_the_way_to_forget
         gone.mkdir()
         _connect(runner, gone)
     else:
-        monkeypatch.setattr(agent_core, "claude_on_path", lambda: None)
+        monkeypatch.setattr(agent_core, "on_path", lambda name: None)
     kept = isolated_agent_home / ".claude-c3"  # the control: recorded, and still there
     kept.mkdir()
     _connect(runner, kept)
@@ -671,7 +719,11 @@ def test_an_exported_config_dir_in_a_home_this_machine_lacks_is_never_offered_co
     ~/.aisquare (review of #257). Named everywhere, before anything is written."""
     if os.name == "nt":
         pytest.skip("Windows guesses a ~user's home instead of failing to expand it")
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
@@ -828,7 +880,11 @@ def test_a_config_dir_connect_cannot_make_is_named_everywhere_and_never_offered_
     recorded one."""
     if os.name == "nt":
         pytest.skip("links, loops and mode 555 are POSIX shapes here")
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     home = isolated_agent_home
     try:
         blocking = _cannot_make_shape(shape, home, tmp_path, runner)
@@ -1038,7 +1094,9 @@ def test_a_config_dir_variable_naming_no_directory_to_read_is_named_on_any_path(
     if os.name == "nt" and "link" in shape:
         pytest.skip("links need a privilege on Windows")
     on_path = None if "no claude" in shape else "/opt/homebrew/bin/claude"
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: on_path)
+    monkeypatch.setattr(
+        agent_core, "on_path", lambda name: on_path if name == "claude-code" else None
+    )
     home = isolated_agent_home
     home.mkdir(parents=True)
     if "beside" in shape:
@@ -1144,7 +1202,11 @@ def test_a_link_loop_windows_reports_as_einval_is_named_in_its_own_words(
     #257). Named with what the operating system said, whatever errno it chose."""
     if os.name == "nt":
         pytest.skip("links need a privilege on Windows; its error is played here")
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     home = isolated_agent_home
     home.mkdir(parents=True)
     loop = home / "loop"
@@ -1221,7 +1283,11 @@ def test_the_variables_remedy_is_never_unset_and_done_as_worded_clears_the_row(
     work. Each remedy printed, done as worded, lets connect write and clears the row."""
     if os.name == "nt" and "may not write" in shape:
         pytest.skip("mode 555 denies nothing on NTFS")
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     home = isolated_agent_home
     claude = home / ".claude"
     home.mkdir(parents=True)
@@ -1390,7 +1456,11 @@ def test_the_doctor_welcome_and_agents_list_give_one_remedy_list_for_0_7_0_hooks
     it to know), and only it adds the remedy for that, where the file is generated."""
     from aisquare.cli.ui.views.welcome import claude_text
 
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     _connect(runner)
     settings = claude_home / "settings.json"
     if program == "a lost program":
@@ -1436,7 +1506,11 @@ def test_welcome_step_two_ends_on_the_command_it_names_as_printed(
     run as printed it does what the remedy says."""
     from aisquare.cli.ui.views.welcome import claude_text
 
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     _connect(runner)
     (claude_home / "settings.json").write_text("{}", encoding="utf-8")  # hooks taken out
     _utf16(claude_home / "CLAUDE.md")
@@ -1564,7 +1638,11 @@ def test_welcome_calls_hooks_that_cannot_start_not_connected_and_connect_points_
 
     if os.name == "nt" and program != "gone":
         pytest.skip("a #! interpreter and the plugin route are POSIX shapes")
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     _connect(runner)
     lost = tmp_path / "opt" / "gone" / "venv" / "bin" / "aisquare"
     if "script" in program:
@@ -1603,7 +1681,11 @@ def test_a_welcome_tick_reads_settings_json_fewer_times(
     step 2 never asks, and a sibling scan read every ~/.claude* (review of #257)."""
     import io
 
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: "/opt/homebrew/bin/claude")
+    monkeypatch.setattr(
+        agent_core,
+        "on_path",
+        lambda name: "/opt/homebrew/bin/claude" if name == "claude-code" else None,
+    )
     settings = claude_home / "settings.json"
     settings.write_text('{"hooks": {},}', encoding="utf-8")  # one trailing comma: refused
     for sibling in ("2", "-work", "-old"):
@@ -1739,7 +1821,9 @@ def test_a_config_dir_claude_code_has_not_made_is_offered_connect_beside_other_s
     those sessions ran no hooks, and Welcome said not connected. The test above covers no
     other site (review of #257)."""
     on_path = "/opt/homebrew/bin/claude"
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: on_path)
+    monkeypatch.setattr(
+        agent_core, "on_path", lambda name: on_path if name == "claude-code" else None
+    )
     if shape == "new-profile":
         _connect(runner)  # makes and connects ~/.claude
         ambient = isolated_agent_home / ".claude-work"
@@ -1755,7 +1839,7 @@ def test_a_config_dir_claude_code_has_not_made_is_offered_connect_beside_other_s
     welcome = first_run.probe_claude(sign_in=False, which=lambda _name: on_path)
     made_by_asking = ambient.exists()
     with monkeypatch.context() as no_claude_here:
-        no_claude_here.setattr(agent_core, "claude_on_path", lambda: None)
+        no_claude_here.setattr(agent_core, "on_path", lambda name: None)
         no_claude = diagnostics._check_claude_code()
     clicked = runner.invoke(app, ["--json", "agents", "connect", "claude-code"])
     after = diagnostics._check_claude_code()
@@ -1930,8 +2014,9 @@ def test_a_detect_only_agent_row_names_the_path_it_checked(
     label: str,
     planned: str | None,
 ) -> None:
-    """By path, not "on this machine": a Codex kept elsewhere through ``CODEX_HOME`` is
-    not looked for there, so a sentence about the machine could be false."""
+    """By path, not "on this machine": an agent kept elsewhere (as Codex can be, through
+    ``CODEX_HOME``) is not looked for there, so a sentence about the machine could be false."""
+    _plan(monkeypatch, name, planned)
     monkeypatch.chdir(tmp_path)
     home = isolated_agent_home / f".{name}"
     absent = _row(name)
@@ -1968,7 +2053,8 @@ def test_every_planned_release_is_still_ahead_of_this_one() -> None:
     running = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
     planned = {spec.name: spec.planned for spec in agent_core.specs() if spec.planned}
 
-    assert planned, "the registry plans no release, so this guards nothing (Codex: 0.10)"
+    # The registry plans no release today: Codex's (0.10) was kept by #113, which gave it
+    # hooks. The guard stays for the next agent planned, and its controls run regardless.
     overdue = {name: when for name, when in planned.items() if not _still_ahead(when, running)}
     assert overdue == {}, f"planned releases already reached by {running}: {overdue}"
     # The rule's controls: by number, not by text, and a release that has arrived is due.
@@ -2014,7 +2100,7 @@ def test_every_reader_follows_the_shared_check(
         return diagnostics._check_claude_code(), site, slot.hooks_installed
 
     before = readers()
-    monkeypatch.setattr(agent_core, "claude_code_connected", lambda config_dir=None, cwd=None: True)
+    monkeypatch.setattr(agent_core, "connected", lambda name, config_dir=None, cwd=None: True)
     after = readers()
 
     row, site, slot = before
@@ -2495,7 +2581,8 @@ def test_the_agent_rows_read_paths_only(
 
     rows = diagnostics._planned_agent_checks()
 
-    assert {row.name for row in rows} == {"codex", "cursor"}
+    # Codex has hooks since #113, and a row of its own (`_check_other_agents`).
+    assert {row.name for row in rows} == {"cursor"}
     assert started == []
     assert not paths.aisquare_home().exists()
     assert _tree(isolated_agent_home) == before
@@ -2504,7 +2591,7 @@ def test_the_agent_rows_read_paths_only(
     with pytest.raises(OSError):
         subprocess.run(["true"], check=False)
     with pytest.raises(OSError):
-        agent_core.detect("codex")
+        agent_core.detect("cursor")
     assert started == ["socket", "process", "registry"]
 
 
@@ -2527,8 +2614,9 @@ def test_doctor_with_every_agent_on_disk_writes_nothing(
     assert result.exception is None or isinstance(result.exception, SystemExit), repr(
         result.exception
     )
-    for name, label in (("codex", "Codex"), ("cursor", "Cursor")):
-        assert str(_row_named(result.stdout, name)["detail"]).startswith(f"{label} detected at ")
+    # Codex's row is its integration's since #113 (`_check_other_agents`), not a path's.
+    for name, seen in (("codex", "Codex detected"), ("cursor", "Cursor detected at ")):
+        assert str(_row_named(result.stdout, name)["detail"]).startswith(seen)
     assert _tree(isolated_agent_home) == before
     assert not paths.aisquare_home().exists()
     _connect(runner)  # control: a real connect writes, and the listing sees it
@@ -2542,7 +2630,7 @@ def test_the_agent_rows_survive_a_damaged_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (isolated_agent_home / ".codex").mkdir(parents=True)
-    monkeypatch.setattr(agent_core, "claude_on_path", lambda: None)  # no Claude Code anywhere
+    monkeypatch.setattr(agent_core, "on_path", lambda name: None)  # no Claude Code anywhere
 
     result = runner.invoke(app, ["--json", "doctor"])
 
@@ -2550,7 +2638,33 @@ def test_the_agent_rows_survive_a_damaged_store(
         result.exception
     )
     rows = {row["name"]: row for row in json.loads(result.stdout)}
-    assert rows["codex"]["status"] == "ok" and "Codex detected at" in rows["codex"]["detail"]
+    assert rows["codex"]["status"] == "ok" and "Codex detected" in rows["codex"]["detail"]
     assert rows["cursor"]["status"] == "ok" and rows["claude-code"]["status"] == "ok"
     if damaged_store == "at-open":  # control: doctor does see this damage (a zeroed page it
         assert rows["database"]["status"] == "fail", rows["database"]  # never reads, it cannot)
+
+
+def test_the_plugin_route_is_an_adapter_slot(claude_home: Path) -> None:
+    """``AgentAdapter.plugin``: Claude Code's reads its plugin files."""
+    from aisquare.core.agent_adapters import get_adapter
+
+    claude = get_adapter("claude-code").plugin
+    assert claude is not None and claude.supported() == agent_core.plugin_route_supported()
+    assert claude.installed(claude_home) == agent_core.claude_plugin(claude_home)
+    assert claude.repo_installs(claude_home) == agent_core.claude_repo_plugins(claude_home)
+    assert claude.command("disable", claude_home) == agent_core.claude_plugin_command(
+        "disable", claude_home
+    )
+    assert get_adapter("codex").plugin is not None, "plugins/codex: tests/test_codex_plugin*.py"
+    assert agent_core.plugin_of("cursor") is None
+
+
+def test_refresh_hooks_says_rewritten_only_when_the_file_changed(
+    runner: CliRunner, claude_home: Path
+) -> None:
+    """SMOKE6, observed: ``refresh-hooks`` printed "rewritten" for a hooks file it left as
+    it was (inode and mtime unchanged). It says so only for one that changed."""
+    first = runner.invoke(app, ["agents", "refresh-hooks", "claude-code"])
+    assert first.exit_code == 0 and "hooks rewritten for claude-code" in first.stdout, first.output
+    again = runner.invoke(app, ["agents", "refresh-hooks", "claude-code"])
+    assert again.exit_code == 0 and "already current" in again.stdout, again.output

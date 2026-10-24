@@ -629,17 +629,20 @@ def test_real_codex_panes_take_a_told_line_before_any_hook_and_the_managers_nudg
 
             until(lambda: bound() is not None, 20, "its first prompt bound the row", coder.pane_id)
             # A Codex whose hooks are not trusted opens at the hook review, as quiet as its
-            # prompt: an Enter there would answer it, so the line is a board note.
+            # prompt, which the listing reads off its screen as a dialog of its own
+            # (attention, `fleet.AT_A_DIALOG`, since 57ea5994): an Enter there would answer
+            # it, so the line is a board note.
             untrusted = fleet.spawn(project, "coder", agent="codex", worktree=False).agent
-            until(
-                lambda: (
-                    fleet.status_of(untrusted).state == "waiting"
+
+            def at_the_review() -> bool:
+                status = fleet.status_of(untrusted)
+                return (
+                    status.state == "attention"
+                    and fleet.AT_A_DIALOG in (status.detail or "")
                     and "Hooks need review" in screen(untrusted.pane_id)
-                ),
-                30,
-                "a quiet hook review",
-                untrusted.pane_id,
-            )
+                )
+
+            until(at_the_review, 30, "the hook review read as a dialog", untrusted.pane_id)
             refused = fleet.tell(project, untrusted.label, "not into a dialog")
             assert not refused.delivered and "board note" in refused.how, refused
             time.sleep(1)

@@ -4,14 +4,21 @@ Written from SCOPE #113 0.8.2 part C (Gemini CLI's docs, read only: nothing of i
 installed or measured) to hold the shapes neither Claude Code nor Codex has, which the
 shared code once assumed: its launch variable ``GEMINI_CLI_HOME`` names the folder its
 config dir ``.gemini`` is in (``AgentAccounts.config_dir``, S1), its hook timeouts are
-milliseconds (``AgentAdapter.hook_entry``, S2), and every hook reply is JSON. Its
-installers, what it keeps of aisquare's (MCP servers in ``settings.json``, the aisquare
-extension) and its account slots are its own answers. ``id`` is not ``gemini-cli``: a real
-adapter for it takes that name, and this one is retired then.
+milliseconds (``AgentAdapter.hook_entry``, S2), and every hook reply is JSON. And, of
+lane L7's: its MCP server, sub-agent switch and update notice are settings in a settings
+layer of the launch's own, and its label a variable (``LaunchPart``, ``settings_layer``,
+S3); it has no reviewer of its own, so ``auto`` runs as ``ask`` (S4); a tool call's result
+arrives in a later ``$patch`` line its ``records`` fold (S5); its quotas are a window of a
+day per model (``UsageWindow``, S6); it signs in from its TUI (S7); its telemetry has a
+reader of its own (B7); and it declares no screen. Its installers, what it keeps of
+aisquare's (MCP servers in ``settings.json``, the aisquare extension) and its account slots
+are its own answers. ``id`` is not ``gemini-cli``: a real adapter for it takes that name,
+and this one is retired then.
 
 tests/test_adapter_contract.py holds it to the protocol beside the fake;
-tests/test_third_agent_seams.py runs it through hooks, uninstall and Welcome. No other
-file names it.
+tests/test_third_agent_seams.py runs it through hooks, uninstall, Welcome, a fleet launch,
+its transcript's tail and pages, usage and the info line, and the receiver. No other file
+names it but its fixtures and the guide (that suite asserts so).
 """
 
 from __future__ import annotations

@@ -7,12 +7,20 @@ and taken out again, the uninstall plan names what its homes keep with its own r
 commands (and refuses a purge one of them would undo), Welcome offers its own installers,
 and first run finds, connects and reads it. The Gemini-shaped one does so with a home
 variable that names the folder its config dir is in, and hook timeouts in milliseconds.
+
+L7 (board task #120) runs the Gemini-shaped one through the rest of the shared code with no
+shared file edited: a fleet spawn and its window's launch (its variables and one settings
+layer, S3; ``auto`` as ``ask``, S4), its transcript's tail and pages (a later patch line,
+S5), its usage and the info line (daily per-model windows, S6), and the telemetry receiver
+(its reader, B7); and asserts that the files naming it are its own of the nine the guide
+lists (``test_a_new_agent_touches_the_nine_files_the_guide_lists``).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -441,3 +449,70 @@ def test_a_calls_result_in_a_later_patch_line_reaches_its_tail_and_its_page(
         assert "$patch" not in shown
     finally:
         unregister(adapter.id)
+
+
+# --- the files a new agent touches ---------------------------------------------------------
+
+ROOT = Path(__file__).resolve().parents[1]
+#: Each file the guide's "The files" table lists, and where the Gemini-shaped synthetic agent
+#: keeps its own of it: registered in tests alone, its adapter module is a test module and its
+#: registration the suites' that hold it; it declares no screen, so it has no screens fixture;
+#: and with no binary to run, this suite stands in for its native test and it has no runner.
+COUNTERPARTS: dict[str, str | None] = {
+    "src/aisquare/core/agent_adapters/<agent>.py": "tests/gemini_shaped_agent.py",
+    "src/aisquare/core/agent_adapters/__init__.py": None,
+    "tests/fixtures/agent_events/<id>.json": "tests/fixtures/agent_events/gemini-shaped.json",
+    "tests/test_adapter_contract.py": "tests/test_adapter_contract.py",
+    "tests/fixtures/agent_transcripts/<id>.json": (
+        "tests/fixtures/agent_transcripts/gemini-shaped.json"
+    ),
+    "tests/fixtures/agent_screens/<id>.json": None,
+    "tests/test_<agent>_native.py": "tests/test_third_agent_seams.py",
+    "tests/run_<agent>_native.py": None,
+    "docs/coding-agents.md": "docs/coding-agents.md",
+}
+NAMES_IT = re.compile(r"gemini[-_]shaped|GeminiShaped", re.IGNORECASE)
+
+
+def _guide_files() -> list[str]:
+    """The files the guide's "Adding a terminal agent" table lists, in its order."""
+    guide = (ROOT / "docs" / "coding-agents.md").read_text("utf-8")
+    table = guide.split("### The files", 1)[1].split("\n\n|", 1)[1].split("\n\n", 1)[0]
+    rows = [row for row in ("|" + table).splitlines() if re.match(r"\| \d", row)]
+    return [path for row in rows for path in re.findall(r"`([^`]+)`", row.split("|")[2])]
+
+
+def _files_naming_it() -> set[str]:
+    """Every file under ``src``, ``tests``, ``docs`` and the top of the repository that names
+    the Gemini-shaped agent, by path relative to the repository."""
+    found: set[str] = set()
+    for top in (ROOT / "src", ROOT / "tests", ROOT / "docs"):
+        for path in top.rglob("*"):
+            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
+                try:
+                    text = path.read_text("utf-8")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                if NAMES_IT.search(text):
+                    found.add(path.relative_to(ROOT).as_posix())
+    found |= {
+        path.name
+        for path in ROOT.iterdir()
+        if path.is_file()
+        and path.suffix in {".md", ".toml"}
+        and NAMES_IT.search(path.read_text("utf-8"))
+    }
+    return found
+
+
+def test_a_new_agent_touches_the_nine_files_the_guide_lists() -> None:
+    """Acceptance 3 of L7: the guide lists exactly the files a new terminal agent touches,
+    nine, and every file that names the Gemini-shaped synthetic agent, whose launch,
+    transcript, usage and info line run through the shared code above, is its own of one of
+    them: none under ``src``, nothing shared edited for it."""
+    listed = _guide_files()
+    assert listed == list(COUNTERPARTS), listed
+    assert len(listed) == 9
+    named = _files_naming_it()
+    assert not {path for path in named if path.startswith("src/")}, named
+    assert named == {own for own in COUNTERPARTS.values() if own is not None}, named

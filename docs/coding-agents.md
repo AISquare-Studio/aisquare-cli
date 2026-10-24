@@ -1139,6 +1139,13 @@ integration.
 
 ### The files
 
+A new terminal agent touches these nine files, and no other: no shared module names an
+agent, compares with an agent's id or constant, or asks a binary's name
+(`tests/test_no_agent_literals.py`), and `tests/test_third_agent_seams.py` holds it with the
+Gemini-shaped synthetic agent (`tests/gemini_shaped_agent.py`, registered in tests alone),
+whose launch, hooks, transcript tail and pages, usage and info line, uninstall and Welcome
+run through the shared code: every file that names it is one of the nine.
+
 | # | File | What |
 |---|------|------|
 | 1 | `src/aisquare/core/agent_adapters/<agent>.py` | A class implementing `AgentAdapter` (`types.py`), with its `AgentCapabilities`. |
@@ -1150,7 +1157,14 @@ integration.
 | 5 | `tests/test_<agent>_native.py`, `tests/run_<agent>_native.py` | The opt-in test against the real binary (`AISQUARE_TEST_<AGENT>=1`), as `test_codex_native.py` and its CI job do for Codex. |
 | 6 | `docs/coding-agents.md` | Its setup and native settings. |
 
-Nothing else, and no new `aisquare hook` subcommand: Welcome offers its `install_routes`,
+Nothing else, and no new `aisquare hook` subcommand. Its launch is its slots' answers, each a
+`LaunchPart` of arguments, environment and settings for its own settings layer
+(`settings_layer`), so an agent whose seams are variables and settings files edits no
+launch; its transcript is read through its `records`, a record a later line completes
+included; its usage is the windows its plan has (`UsageWindow`), whichever limits shown
+beside its account; its permissions step `auto` down to `ask` without a reviewer of its own
+(`approves_for_me`); its telemetry is its `telemetry_reader`'s; its screen its `screen`'s,
+or none. Welcome offers its `install_routes`,
 `agents connect <id>` is the doctor's one-click fix for it (`onboarding.KNOWN_FIXES`' one
 agent row), `core.agents.install_hooks` writes its `hook_entry`, and upgrade and uninstall
 find its homes (the ones it was connected in, its default, its `~/<home_name>*` siblings and

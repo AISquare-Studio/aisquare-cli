@@ -726,8 +726,21 @@ class AppSettingsView(Vertical):
     @on(Button.Pressed, "#reload-settings")
     def reload_form(self) -> None:
         """Discard edits on both tabs: show what the file holds (the roles list can change
-        with it), and tell the app what ``[ui]`` holds now (:class:`UiSettingsChanged`)."""
-        config = self._read_config()
+        with it), and tell the app what ``[ui]`` holds now (:class:`UiSettingsChanged`).
+
+        An unreadable file reads as the defaults, as at the first open, and the Captain off
+        (``experimental.captain_enabled``'s rule) — said, since every field then resets
+        (#274 delta review 2, n2)."""
+        try:
+            config = load_config()
+        except Exception as exc:
+            config = AppConfig()
+            self.notify(
+                f"config unreadable — showing the defaults, nothing saved: {exc}",
+                severity="warning",
+                timeout=8,
+                markup=False,
+            )
         self.fleet = config.fleet
         self._roles = role_order(self.fleet)
         self._account_bindings = settings_service.role_account_bindings(config)

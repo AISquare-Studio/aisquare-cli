@@ -872,6 +872,25 @@ def test_reload_reads_the_preference_a_shell_set_meanwhile() -> None:
     assert drive(scenario) == (True, [True])
 
 
+def test_reload_over_an_unreadable_config_says_so_as_it_shows_the_defaults() -> None:
+    """#274 delta review 2, n2: every field, the Captain and ``[ui]`` reset to the defaults
+    when the file cannot be read, so Reload says why rather than resetting silently."""
+    settings_service.set_value("ui.always_show_project_path", "true")
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> tuple[bool, list[tuple[str, str]]]:
+        await pilot.pause()
+        paths.config_path().write_text("[ui\nnot toml", encoding="utf-8")  # broken meanwhile
+        host.query_one("#reload-settings", Button).press()
+        await settle(pilot)
+        return host.query_one("#ui-always-show-path", Switch).value, host.notices
+
+    shown, notices = drive(scenario)
+    assert shown is False, "the defaults, as the first open shows them"
+    [(said, severity)] = [notice for notice in notices if "unreadable" in notice[0]]
+    assert severity == "warning"
+    assert said.startswith("config unreadable — showing the defaults, nothing saved: ")
+
+
 def test_reset_all_turns_always_show_project_directory_off() -> None:
     settings_service.set_value("ui.always_show_project_path", "true")
 

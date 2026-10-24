@@ -53,14 +53,15 @@ class Price:
     output: float
     cache_read: float = 0.1
     """A multiple of the input price, as the pricing page states it."""
-    cache_write: float | None = CACHE_WRITE_5M
-    """A cache write of the shorter TTL, a multiple of the input price (Anthropic's 5-minute
-    1.25x, its 1-hour write being :data:`CACHE_WRITE_1H`); ``None`` where the source lists
-    no cache-write price, which leaves a request that wrote to the cache unpriced."""
     long_prompt_over: int | None = None
     """Prompt size (input + cache reads + cache writes) above which ``long_*`` apply."""
     long_input: float | None = None
     long_output: float | None = None
+    cache_write: float | None = CACHE_WRITE_5M
+    """A cache write of the shorter TTL, a multiple of the input price (Anthropic's 5-minute
+    1.25x, its 1-hour write being :data:`CACHE_WRITE_1H`); ``None`` where the source lists
+    no cache-write price, which leaves a request that wrote to the cache unpriced. Last, so
+    main's positional order of the fields before it holds."""
 
     def rates(self, prompt_tokens: int) -> tuple[float, float]:
         """``(input, output)`` per MTok for a request whose prompt is ``prompt_tokens``."""

@@ -139,7 +139,12 @@ def test_liveness_on_windows_asks_the_process_and_never_signals_it(
     monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append((pid, sig)))
     monkeypatch.setattr(sys, "platform", "win32")
     asked: list[int] = []
-    monkeypatch.setattr(adopt_service, "_alive_on_windows", lambda pid: asked.append(pid) or True)
+
+    def query(pid: int) -> bool:
+        asked.append(pid)
+        return True
+
+    monkeypatch.setattr(adopt_service, "_alive_on_windows", query)
 
     assert adopt_service._alive(os.getpid()) is True
     assert adopt_service._alive(0) is False

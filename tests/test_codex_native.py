@@ -30,7 +30,7 @@ import pytest
 
 from aisquare.core import agents, launch_seal, outbox, selfcli
 from aisquare.core.agent_adapters import get_adapter
-from aisquare.core.agent_adapters.types import store_dir, store_read_only
+from aisquare.core.agent_adapters.types import screen_ready, store_dir, store_read_only
 from aisquare.core.config import load_config, save_config
 from aisquare.core.entries import new_entry
 from aisquare.core.store import SqliteStore, store_session
@@ -856,6 +856,16 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             def state(agent: Any) -> str:
                 return fleet.status_of(agent).state
 
+            capabilities = get_adapter("codex").capabilities
+
+            def at_rest(agent: Any) -> bool:
+                """Waiting, and at its empty prompt with no turn on its screen: Codex's Stop
+                hook says waiting before its screen is at rest, and a tell is refused until
+                it is ("its hooks say waiting, but its pane is not at Codex's empty
+                prompt", in the r16 lane's live run)."""
+                rows = srv.run("capture-pane", "-p", "-t", agent.pane_id).splitlines()
+                return state(agent) == "waiting" and screen_ready(capabilities, rows)
+
             seen = len(outputs())
             coder = fleet.spawn(
                 project,
@@ -868,7 +878,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             pane, label = coder.pane_id, coder.label
             until(lambda: answered(seen), 40, "the sandboxed note ran", pane)
             assert "shared (note)" in outputs()[-1], outputs()[-1]
-            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            until(lambda: at_rest(coder), 20, "waiting, at rest", pane)
             row = fleet.status_of(coder).session
             assert row is not None
             task, _ = team.add_task("lane-a sandboxed claim", cwd=workspace)
@@ -883,7 +893,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             def sandboxed_calls(commands: list[str], what: str) -> list[str]:
                 """Each of ``commands`` (aisquare's arguments) run in the coder's sandbox,
                 in one turn: each one's exit status."""
-                until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+                until(lambda: at_rest(coder), 20, "waiting, at rest", pane)
                 seen = len(outputs())
                 chain = "; ".join(f'{cli} {c} >/dev/null 2>&1; echo "rc=$?"' for c in commands)
                 assert fleet.tell(project, label, f"RUN {chain}").delivered
@@ -953,7 +963,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             elsewhere.mkdir()
             team.activate(elsewhere)
             elsewhere_task, _ = team.add_task("their task", cwd=elsewhere)
-            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            until(lambda: at_rest(coder), 20, "waiting, at rest", pane)
             seen = len(outputs())
             launch_inputs = "; ".join(
                 [
@@ -999,7 +1009,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             # A board call as another session (the manager's) is refused by the broker.
             manager_seat = fleet.status_of(manager).session
             assert manager_seat is not None
-            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            until(lambda: at_rest(coder), 20, "waiting, at rest", pane)
             seen = len(outputs())
             forged = f"RUN {cli} note 'as the manager' --as {manager_seat.id[:8]}"
             assert fleet.tell(project, label, forged).delivered
@@ -1008,7 +1018,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             with store_session() as handle:
                 texts = [event.text for event in handle.recent_events(project.id, limit=80)]
             assert "as the manager" not in texts
-            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            until(lambda: at_rest(coder), 20, "waiting, at rest", pane)
             seen, reviewed = len(outputs()), reviews()
             socket = config.fleet.tmux_socket
             tmux_probe = f"RUN tmux -L {socket} list-sessions; {cli} note 'lane-d' --kind result"
@@ -1019,7 +1029,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             assert reviews() == reviewed, "on the first, sandboxed attempt"
             until(lambda: ran(fleet.NUDGE_TEXT), 10, "the result woke the manager", manager.pane_id)
             # What runs outside the sandbox stays out of its reach.
-            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            until(lambda: at_rest(coder), 20, "waiting, at rest", pane)
             seen = len(outputs())
             probe = (
                 f"RUN touch {store / 'credentials'}; touch {store / 'codex-accounts' / 'x'};"
@@ -1036,7 +1046,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             recorded = launch_seal.read(coder.id)
             assert isinstance(recorded, launch_seal.LaunchRecord) and recorded.binary == "codex"
             # An escalation Codex's reviewer answers: reviewed, and no bell.
-            until(lambda: state(coder) == "waiting", 20, "waiting", pane)
+            until(lambda: at_rest(coder), 20, "waiting, at rest", pane)
             seen, reviewed = len(outputs()), reviews()
             assert fleet.tell(project, label, f"ESC {cli} board").delivered
             until(lambda: answered(seen), 40, "the reviewed escalation ran", pane)
@@ -1054,7 +1064,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             restarted = fleet.restart(project, label, permission_mode="workspace:ask")
             assert restarted.resumed, restarted.notes
             coder, pane = restarted.started, restarted.started.pane_id
-            until(lambda: state(coder) == "waiting", 40, "waiting after the restart", pane)
+            until(lambda: at_rest(coder), 40, "waiting after the restart, at rest", pane)
             seen, reviewed = len(outputs()), reviews()
             asked = f"ESC sleep 8; {cli} note 'asked first'"
             assert fleet.tell(project, label, asked).delivered
@@ -1115,7 +1125,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
                 return "RUN " + shlex.join([sys.executable, "-c", code, db, value, row])
 
             def sandboxed(told: str, what: str, first: Any = None) -> None:
-                until(lambda: state(reviewer) == "waiting", 30, "waiting", reviewer.pane_id)
+                until(lambda: at_rest(reviewer), 30, "waiting, at rest", reviewer.pane_id)
                 seen = len(outputs())
                 assert fleet.tell(project, reviewer.label, told).delivered
                 until(lambda: answered(seen), 30, what, reviewer.pane_id)

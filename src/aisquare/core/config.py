@@ -819,6 +819,19 @@ class SnapshotSettings(BaseModel):
     ignore: list[str] = Field(default_factory=list)
 
 
+class CodeSettings(BaseModel):
+    """``[code]`` — the per-project symbol index behind ``aisquare code`` (#285).
+
+    ``enabled`` builds the index when a project is onboarded (``project onboard``,
+    ``--refresh``) and lets a session start refresh it in the background; ``false``
+    leaves ``aisquare code index`` as the only way to build one. ``max_file_kb``: a
+    file larger than this is not indexed (a generated bundle, a vendored blob).
+    """
+
+    enabled: bool = True
+    max_file_kb: int = 1024
+
+
 class PersonaImportSettings(BaseModel):
     """``[persona.import]`` — how ``aisquare persona import`` converts a source that is
     not already a skill (docs/plans/spawn-personas.md §3.9).
@@ -936,6 +949,7 @@ class AppConfig(BaseModel):
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
     experimental: ExperimentalSettings = Field(default_factory=ExperimentalSettings)
     persona: PersonaSettings = Field(default_factory=PersonaSettings)
+    code: CodeSettings = Field(default_factory=CodeSettings)
 
 
 def _dumped(model: BaseModel) -> dict[str, Any]:

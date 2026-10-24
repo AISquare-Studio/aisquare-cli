@@ -307,6 +307,12 @@ SEAMS: dict[str, Seam] = {
         EXCLUDED, "`node --version`, a string — the floor repomix declares"
     ),
     "aisquare/core/snapshot.py::_run_repomix": Seam(EXCLUDED, "repomix packs files; no model"),
+    "aisquare/core/code_index.py::_git_files": Seam(
+        EXCLUDED,
+        "`git ls-files -co --exclude-standard` for the symbol index's file list (#285), in "
+        "`git_env()`; no model",
+        strips_identity=True,
+    ),
     "aisquare/core/workspace.py::git_common_root": Seam(
         EXCLUDED, "`git rev-parse`, in `git_env()`", strips_identity=True
     ),

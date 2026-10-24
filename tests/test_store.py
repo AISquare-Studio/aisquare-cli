@@ -2788,7 +2788,7 @@ def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
 
 
 def _old_pack(project_id: str) -> Path:
-    """A codebase pack as a build up to 0.8 left one for ``project_id``: its files, and the
+    """A codebase pack as a build up to 0.9 left one for ``project_id``: its files, and the
     ``snapshot.json`` the v17 backfill reads as evidence."""
     pack = paths.project_data_dir(project_id) / "snapshot"
     pack.mkdir(parents=True, exist_ok=True)

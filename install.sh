@@ -1748,11 +1748,11 @@ DOCTOR_AMBER=""
 
 # The checks that SHOULD be amber when this run finishes, sorted.
 #
-# `brain` always. The others only for what the flags asked for. Until 0.9 a
+# `brain` always. The others only for what the flags asked for. Before #346 a
 # `snapshot` row was amber whenever no project was registered, and with the set
 # hardcoded to `brain`, a `--no-project` machine could NEVER reach §3.9.4's
 # "nothing to do" however current it was; that row went with the codebase
-# snapshot.
+# snapshot (#399).
 expected_amber() {
     # Alphabetical, to read the same way as doctor_amber's sorted output.
     _exp="$EXPECTED_AMBER"

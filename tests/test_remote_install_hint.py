@@ -51,7 +51,7 @@ entrypoints = [
     { name = "asq", install-path = "/home/me/.local/bin/asq", from = "aisquare-cli" },
 ]
 """
-"""What ``install.sh`` up to 0.8 left (``uv tool install --python 3.13 --with tiktoken
+"""What ``install.sh`` up to 0.9 left (``uv tool install --python 3.13 --with tiktoken
 aisquare-cli``), as uv 0.12.19 writes it: an upgraded machine still has this receipt."""
 
 

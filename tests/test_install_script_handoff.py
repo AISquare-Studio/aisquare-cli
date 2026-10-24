@@ -564,13 +564,27 @@ def test_help_documents_the_hand_off_and_its_opt_outs(machine: Machine) -> None:
 def test_an_interrupted_hand_off_removes_the_download(
     machine: Machine, signum: signal.Signals, status: int
 ) -> None:
-    """Ctrl-C reaches the whole process group; the parent's trap removes the file."""
+    """Ctrl-C reaches the whole process group; the parent's trap removes the file.
+
+    Started with SIGINT and SIGTERM at their defaults, as a terminal gives them.
+    A suite started as a background job (`pytest &` in a script) runs with
+    SIGINT IGNORED, POSIX's rule for an asynchronous list, and an ignored
+    disposition is inherited across exec; a non-interactive shell cannot trap a
+    signal ignored on entry, so the INT case would then grade the runner rather
+    than the script. Measured: it failed only when the suite ran under `&`.
+    """
     started = machine.root / "release-started"
     machine.serve_latest(reporting_release(body=f'touch "{started}"\nsleep 30\nexit 3'))
     machine.pypi(STAMP)
+    as_from_a_terminal = (
+        "import os, signal, sys\n"
+        "for signum in (signal.SIGINT, signal.SIGTERM):\n"
+        "    signal.signal(signum, signal.SIG_DFL)\n"
+        "os.execv(sys.argv[1], sys.argv[1:])\n"
+    )
 
     process = subprocess.Popen(
-        [SH, str(SCRIPT), "--yes"],
+        [sys.executable, "-c", as_from_a_terminal, SH, str(SCRIPT), "--yes"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,

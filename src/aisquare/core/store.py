@@ -59,6 +59,7 @@ from aisquare.models import (
     TraceDestination,
     TurnMetric,
     UsageSample,
+    UsageWindow,
 )
 
 _SCHEMA_V1 = """
@@ -1082,7 +1083,7 @@ _SCHEMA_V32 = ""
 # in :data:`_PRODUCTS`, added only where absent, and a row from before them keeps NULL,
 # which reads as no persona.
 _SCHEMA_V33 = ""
-# v34-v37 (#113): the coding-agent steps. That line stamped them 15-17 while it was in
+# v34-v38 (#113): the coding-agent steps. That line stamped them 15-17 while it was in
 # flight (the note above _SCHEMA_V15), then 26-29 once it took main's v25, then 33-36
 # once it took 0.8.1's 26-32; 0.8.2's line took v33 for the persona columns first, so
 # these come after it, renumbered again. Idempotent like every step from v15 on: the
@@ -1137,6 +1138,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS agent_account_alias ON agent_account (alias)
 CREATE UNIQUE INDEX IF NOT EXISTS agent_account_default ON agent_account (agent)
     WHERE is_default = 1;
 """
+# v38: every window a usage reading has (``claude_usage.windows``, the ``UsageWindow`` list as
+# JSON), so the five-minute cache serves an agent whose windows are not Claude Code's five
+# hours and week (a daily quota per model) what it read. The column is the whole step, so
+# the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps NULL, which
+# reads as its session and week columns say, as every row did.
+_SCHEMA_V38 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1176,6 +1183,7 @@ _MIGRATIONS = (
     _SCHEMA_V35,
     _SCHEMA_V36,
     _SCHEMA_V37,
+    _SCHEMA_V38,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1245,6 +1253,7 @@ _PRODUCTS: dict[int, _Products] = {
         (("team_meta", "updated_at", "INTEGER NOT NULL DEFAULT 0"),),
     ),
     36: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
+    37: _Products(columns=(("claude_usage", "windows", "TEXT"),)),
 }
 
 _PROJECT_COLUMNS = (
@@ -1314,7 +1323,7 @@ _SESSION_COLUMNS = (
 )
 _USAGE_COLUMNS = (
     "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at, "
-    "token_fingerprint"
+    "token_fingerprint, windows"
 )
 #: How long usage readings are kept — long enough for a weekly window's history.
 _USAGE_RETENTION = timedelta(days=7)
@@ -1883,7 +1892,19 @@ def _row_to_usage_sample(row: sqlite3.Row) -> UsageSample:
         week_percent=row["week_percent"],
         week_resets_at=_maybe_dt(row["week_resets_at"]),
         token_fingerprint=row["token_fingerprint"],
+        windows=_usage_windows(row["windows"]),
     )
+
+
+def _usage_windows(raw: str | None) -> tuple[UsageWindow, ...] | None:
+    """A sample's windows as v38 keeps them; ``None`` for a row from before (or one this
+    build cannot read), which its session and week columns describe."""
+    if raw is None:
+        return None
+    try:
+        return tuple(UsageWindow.model_validate(window) for window in json.loads(raw))
+    except (ValueError, TypeError):
+        return None
 
 
 def _row_to_task(row: sqlite3.Row) -> TeamTask:
@@ -5020,7 +5041,7 @@ class SqliteStore:
     def add_usage_sample(self, sample: UsageSample) -> None:
         """Record one reading and drop this slot's readings older than :data:`_USAGE_RETENTION`."""
         self._conn.execute(
-            f"INSERT INTO claude_usage ({_USAGE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO claude_usage ({_USAGE_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 sample.slot,
                 sample.fetched_at.isoformat(),
@@ -5029,6 +5050,9 @@ class SqliteStore:
                 sample.week_percent,
                 sample.week_resets_at.isoformat() if sample.week_resets_at else None,
                 sample.token_fingerprint,
+                None
+                if sample.windows is None
+                else json.dumps([w.model_dump(mode="json") for w in sample.windows]),
             ),
         )
         self._conn.execute(

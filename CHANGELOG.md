@@ -68,16 +68,21 @@ adapter.**
   names one a server pins.
 
 **Upgrading:**
-- The store migrates to schema v37 on first open, from 0.8.2's v32 (and from
+- The store migrates to schema v38 on first open, from 0.8.2's v32 (and from
   0.8.0's v25 through 0.8.1's seven steps first). v33 is the persona columns
-  (see Changed); this line's four steps come after it, and only add, but for one
+  (see Changed); this line's five steps come after it, and only add, but for one
   repair: v34 adds `team_session.agent`, `team_session.native_session_id` and
   `fleet_agent.agent` (rows Claude Code made are marked `claude-code`); v35 adds
   `team_meta.updated_at`, dated by a trigger on every write, for the
   launch-metadata cleanup; v36 repairs rows dated 0 by stores made from this
   branch while it was in review; v37 adds the `agent_account` table for Codex
   account slots, kept apart from `claude_account` so an older build never prunes
-  them. 0.8.2, 0.8.1 and 0.8.0 open a v37 store as it is. A store a build of
+  them; v38 adds `claude_usage.windows`, every window of a usage reading, so the
+  five-minute usage cache serves an agent whose windows are not a five-hour and
+  a weekly one what it read (a reading recorded before reads NULL there, its
+  session and week as they were). A store a build of this branch already took
+  to v37 gets v38 on its next open. 0.8.2, 0.8.1 and 0.8.0 open a v38 store as
+  it is. A store a build of
   this branch stamped before 0.8.2 was merged (v33-v36 for these steps) has no
   persona columns; its first open here adds them. One it stamped v26-v29 before
   0.8.1 was merged, without 0.8.1's v26-v29, gets those too (task numbers,

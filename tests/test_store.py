@@ -436,8 +436,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # agent's worktree (review of #259, round 15), v32 the board a fleet agent reads (round 25),
     # v33 the persona a session and a fleet agent run as (#201),
     # v34-v36 the coding-agent identity, team_meta dates and their repair (#113),
-    # v37 the arrangement of another agent's account slots (Codex accounts)
-    assert version == SCHEMA_VERSION == 37
+    # v37 the arrangement of another agent's account slots (Codex accounts),
+    # v38 every window of a usage reading (an agent's daily per-model quotas)
+    assert version == SCHEMA_VERSION == 38
 
 
 def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -> None:
@@ -1444,7 +1445,7 @@ _PERSONA_COLUMNS = {("column", "team_session.persona"), ("column", "fleet_agent.
 
 
 def _pr_113_steps() -> set[tuple[str, str]]:
-    """#113's v34 to v37 by name (the coding-agent steps, appended on main's v33): what a
+    """#113's v34 to v38 by name (the coding-agent steps, appended on main's v33): what a
     fresh store holds past main's ladder."""
     return _built(SCHEMA_VERSION) - _built(33)
 
@@ -1706,7 +1707,7 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     by it."""
     fresh = _built(SCHEMA_VERSION)
 
-    assert SCHEMA_VERSION == 37
+    assert SCHEMA_VERSION == 38
     ours = _pr_113_steps()
     assert fresh == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | ours
     for schema in _RC_V21_SCHEMAS:
@@ -1814,7 +1815,7 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
     _schema_again, rows_again = _contents(db)
     version, shape, notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 37, label
+    assert version == SCHEMA_VERSION == 38, label
     assert shape == _built(SCHEMA_VERSION), label
     assert notnull == {"team_session": 0, "fleet_agent": 0}, label
     assert old_session is not None and old_session.persona == persona, label
@@ -1824,12 +1825,51 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
     assert rows_again == rows, f"{label}: a second open changed a row"
 
 
+def test_a_v37_stores_usage_reading_reaches_v38_and_reads_as_its_session_and_week() -> None:
+    """v38 adds ``claude_usage.windows`` and nothing else (review r18 of #113, finding 11): a
+    reading recorded at v37 keeps its row, its windows read NULL, which is its session and
+    week as it was recorded, and a reading recorded now keeps every window it had."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.models import UsageSample, UsageWindow
+
+    db = _at_version(
+        37,
+        after="INSERT INTO claude_usage (slot, fetched_at, session_percent, "
+        "session_resets_at, week_percent, week_resets_at, token_fingerprint) VALUES "
+        "(2, '2026-10-24T10:00:00+00:00', 12.0, NULL, 40.0, NULL, 'fp');",
+    )
+    since = datetime(2026, 10, 24, tzinfo=UTC)
+
+    store = open_store()
+    try:
+        [old] = store.usage_samples(2, since=since)
+        daily = (
+            UsageWindow(name="pro daily", minutes=1440, used_percent=70.0),
+            UsageWindow(name="flash daily", minutes=1440, used_percent=10.0),
+        )
+        store.add_usage_sample(
+            UsageSample(slot=3, fetched_at=since + timedelta(hours=11), windows=daily)
+        )
+        [new] = store.usage_samples(3, since=since)
+    finally:
+        store.close()
+    version, shape, _notnull = _persona_shape(db)
+
+    assert version == SCHEMA_VERSION == 38
+    assert shape == _built(SCHEMA_VERSION)
+    assert shape - _built(37) == {("column", "claude_usage.windows")}
+    assert (old.session_percent, old.week_percent, old.token_fingerprint) == (12.0, 40.0, "fp")
+    assert old.windows is None, "a v37 row: its session and week are all it had"
+    assert new.windows == daily
+
+
 def test_a_fresh_store_is_built_with_the_persona_step() -> None:
     """No file at all: v1 to v33, the same shape as every cohort above reaches."""
     open_store().close()
     version, shape, notnull = _persona_shape(_db_path())
 
-    assert version == SCHEMA_VERSION == 37
+    assert version == SCHEMA_VERSION == 38
     assert shape == _built(SCHEMA_VERSION)
     assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
     assert notnull == {"team_session": 0, "fleet_agent": 0}

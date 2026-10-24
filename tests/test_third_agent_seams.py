@@ -39,7 +39,7 @@ from aisquare.models import ClaudeAccount, ClaudeUsage
 from aisquare.services import agents as agents_service
 from aisquare.services import first_run, lifecycle
 from tests.fake_agent import FakeAgentAdapter
-from tests.gemini_shaped_agent import GeminiShapedAdapter
+from tests.gemini_shaped_agent import GeminiShapedAccounts, GeminiShapedAdapter
 from tests.test_first_run import admitted
 from tests.test_lifecycle_uninstall import (  # noqa: F401  (fixtures: pytest finds them by name)
     Tool,
@@ -373,6 +373,80 @@ def test_every_window_it_reports_is_listed_by_name_and_all_agree_on_the_one_that
         two = ClaudeUsage(available=True, session_percent=12.0, week_percent=40.0)
         assert two.own_windows == () and two.limiting is not None
         assert two.limiting.name == "week"
+    finally:
+        unregister(adapter.id)
+
+
+class _AskedOverTheNetwork(GeminiShapedAccounts):
+    """Its accounts, as an agent whose usage is a request (``network_usage``): each reading
+    is taken now, and counted."""
+
+    network_usage = True
+
+    def __init__(self) -> None:
+        self.asked: list[int] = []
+
+    def usage(self, account: ClaudeAccount, *, now: Any, fetch: object) -> ClaudeUsage:
+        self.asked.append(account.slot)
+        reading = super().usage(account, now=now, fetch=fetch)
+        return reading.model_copy(update={"fetched_at": None})  # taken now, as a request is
+
+
+def test_a_network_reading_of_its_own_windows_is_cached_whole_and_has_a_doctor_row(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """r18 finding 11: the five-minute usage cache is keyed per agent and account by the
+    fingerprint its accounts slot answers (``login_fingerprint``), not by Claude Code's
+    credentials, and a sample keeps every window. An agent whose usage leaves the machine
+    is asked once for two of the Accounts page's ticks and an ``accounts usage``, each served
+    its daily per-model windows; and ``doctor --live`` has a headroom row for it."""
+    from datetime import UTC, datetime, timedelta
+
+    from aisquare.services import claude_accounts as accounts_service
+    from aisquare.services import diagnostics
+
+    adapter = GeminiShapedAdapter()
+    counted = _AskedOverTheNetwork()
+    adapter.accounts = counted
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        slot = _signed_in_slot(adapter)
+        tomorrow = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+        quotas = {"gemini-2.5-flash": 10, "gemini-2.5-pro": 70}
+        (slot.config_dir / ".gemini" / "quota.json").write_text(
+            json.dumps(
+                {
+                    "models": {
+                        model: {"used_percent": used, "resets_at": tomorrow}
+                        for model, used in quotas.items()
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        ticks = [accounts_service.cached_usage_with_trends([slot]) for _ in range(2)]
+        listed = runner.invoke(app, ["--json", "accounts", "usage"])
+
+        assert counted.asked == [slot.slot], "two ticks and a listing, one request"
+        for tick in ticks:
+            reading, _trend = tick[slot.slot]
+            assert [w.name for w in reading.windows] == [
+                "gemini-2.5-flash daily",
+                "gemini-2.5-pro daily",
+            ]
+            assert reading.limiting is not None and reading.limiting.used_percent == 70.0
+        assert listed.exit_code == 0, listed.output
+        usage = next(
+            row["usage"] for row in json.loads(listed.output) if row["account"]["slot"] == slot.slot
+        )
+        assert usage["limiting"]["name"] == "gemini-2.5-pro daily"
+
+        assert diagnostics._agent_account_headroom_check(adapter.id) is None, "--live only"
+        check = diagnostics._agent_account_headroom_check(adapter.id, live=True)
+        assert check is not None and check.name == f"{adapter.id}-account-headroom"
+        assert check.status.value == "ok" and "70%" in check.detail, check.detail
     finally:
         unregister(adapter.id)
 

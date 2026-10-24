@@ -503,7 +503,7 @@ class ClaudeUsage(BaseModel):
 
 
 class UsageSample(BaseModel):
-    """One reading of an account's two windows, kept so a rate can be computed (#146).
+    """One reading of an account's windows, kept so a rate can be computed (#146).
 
     Written by ``services.claude_accounts``' recording readers whenever usage
     is fetched — the Accounts page's minute tick, ``accounts usage``, a headroom
@@ -521,6 +521,10 @@ class UsageSample(BaseModel):
     """Which token took the reading: a fingerprint of it (never the token), so the
     five-minute cache serves a reading only to the login that took it. ``None`` on a
     reading recorded before it was kept (schema v28)."""
+    windows: tuple[UsageWindow, ...] | None = None
+    """Every window of the reading (schema v38), so the cache serves an agent whose windows
+    are not a session and a week (a daily quota per model) what it read. ``None`` on a
+    reading recorded before it was kept: its session and week fields are all it had."""
 
 
 class UsageTrend(BaseModel):

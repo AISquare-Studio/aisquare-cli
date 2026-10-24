@@ -195,8 +195,9 @@ def doctor(
             # Only when a fleet role runs `auto` behind a configured proxy (#150);
             # offline — config, the store, the head of a few transcripts.
             *_optional(auto_mode.doctor_check()),
-            # Offline: another agent's usage is read from its own sessions (Codex's rollouts).
-            *_other_accounts_headroom_checks(),
+            # Offline: another agent's usage is read from its own sessions (Codex's rollouts);
+            # one whose usage leaves the machine, --live only, as Claude Code's.
+            *_other_accounts_headroom_checks(live),
             # Leaves the machine (one usage request per account), so --live only (#146).
             *_live_only(live, _claude_account_headroom_check),
             # One balance request per destination workspace (#143), so --live only.
@@ -2123,31 +2124,33 @@ def _claude_account_headroom_check() -> DoctorCheck | None:
     )
 
 
-def _other_accounts_headroom_checks() -> list[DoctorCheck]:
+def _other_accounts_headroom_checks(live: bool = False) -> list[DoctorCheck]:
     """:func:`_agent_account_headroom_check` for every other agent with account slots."""
     return [
         check
         for agent in claude_accounts_core.account_agents()
         if not claude_accounts_core.kind(agent).legacy_slots
-        and (check := _agent_account_headroom_check(agent)) is not None
+        and (check := _agent_account_headroom_check(agent, live=live)) is not None
     ]
 
 
-def _agent_account_headroom_check(agent: str) -> DoctorCheck | None:
-    """:func:`_claude_account_headroom_check` for an agent whose usage is read OFFLINE.
+def _agent_account_headroom_check(agent: str, *, live: bool = False) -> DoctorCheck | None:
+    """:func:`_claude_account_headroom_check` for another agent's accounts.
 
     Codex's windows come from the newest ``token_count`` its own sessions wrote
     (``core.codex_accounts``): no request leaves the machine, so this runs on
-    every ``doctor``, not only ``--live``. An account is as full as the fuller of
-    the windows it HAS (``headroom_percent(..., agent=...)``): a Codex plan can have
-    a weekly window and no five-hour one. ``None`` before ``context.db`` exists
-    (the arranged list reconciles through the store) and when no enabled account
-    of the agent is signed in.
+    every ``doctor``, not only ``--live``. An agent whose usage leaves the machine
+    (``network_usage``) is asked on ``--live`` only, as Claude Code's accounts are.
+    An account is as full as the fullest of the windows it HAS (``headroom_percent``):
+    a Codex plan can have a weekly window and no five-hour one, another agent a daily
+    one per model. ``None`` before ``context.db`` exists (the arranged list reconciles
+    through the store) and when no enabled account of the agent is signed in.
     """
     if not paths.db_path().exists():
         return None
+    network = claude_accounts_core.kind(agent).network_usage
     try:
-        if claude_accounts_core.kind(agent).network_usage:
+        if network and not live:
             return None  # leaves the machine: never on a plain doctor run
         accounts = [
             account
@@ -2180,13 +2183,22 @@ def _agent_account_headroom_check(agent: str) -> DoctorCheck | None:
     if unreadable:
         summary = (summary + " · " if summary else "") + "unreadable: " + "; ".join(unreadable)
     label = claude_accounts_core.agent_label(agent)
+    recorded = "" if network else ", as its newest session recorded it"
+    as_recorded = "" if network else " as each account's newest session recorded them"
     if measured and all(pct >= settings.switch_at for _, pct in measured):
         return _warn(
             name,
-            f"every {label} account has used {settings.switch_at}% or more of a window, as "
-            f"its newest session recorded it: {summary}",
+            f"every {label} account has used {settings.switch_at}% or more of a window"
+            f"{recorded}: {summary}",
             f"Add or sign in another account (aisquare accounts add --agent {agent}), or wait "
             "for a reset — a fleet spawned now has nowhere to switch to",
+        )
+    if not measured and network:
+        return _warn(
+            name,
+            f"no {label} account's usage could be read: {summary}",
+            "Open a session on the account (aisquare accounts run <slot>) to refresh its "
+            "login, then: aisquare accounts usage",
         )
     if not measured:
         return _warn(
@@ -2197,8 +2209,7 @@ def _agent_account_headroom_check(agent: str) -> DoctorCheck | None:
         )
     return _ok(
         name,
-        f"windows as each account's newest session recorded them, percent USED "
-        f"({settings.switch_at}% used is the line): {summary}",
+        f"windows{as_recorded}, percent USED ({settings.switch_at}% used is the line): {summary}",
     )
 
 

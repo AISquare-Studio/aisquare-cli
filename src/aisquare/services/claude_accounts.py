@@ -1104,22 +1104,35 @@ def _record_sample(
             week_percent=result.week_percent,
             week_resets_at=result.week_resets_at,
             token_fingerprint=_token_fingerprint(account),
+            windows=result.windows,
         )
     )
 
 
 def _token_fingerprint(account: ClaudeAccount, now: datetime | None = None) -> str | None:
-    """Which login a reading belongs to: the :func:`login_fingerprint` of the token
-    :func:`usage` would send, or ``None`` when it would send none — no credentials file,
-    or, given ``now``, a token already expired at ``now``.
+    """Which login a reading belongs to, the five-minute cache's key per agent and account:
+    for Claude Code, the :func:`login_fingerprint` of the token :func:`usage` would send,
+    ``None`` with none to send (no credentials, or, given ``now``, a token already expired
+    at ``now``); for another agent whose usage leaves the machine (``network_usage``), the
+    fingerprint its accounts slot answers (``AgentAccounts.login_fingerprint``). ``None``
+    for an agent whose usage is read from its own home (Codex's): read on every call, it
+    is never served from the cache.
 
     Read when the reading is recorded, a few milliseconds after the fetch sent it: a
     token swapped in between is a race no surface could act on.
     """
-    creds = core.credentials(account)
-    if creds is None or (now is not None and creds.expired(now)):
+    accounts = core.kind(account.agent)
+    if not accounts.network_usage:
         return None
-    return _login_digest(creds)
+    creds = core.credentials(account)
+    if creds is not None:
+        return None if now is not None and creds.expired(now) else _login_digest(creds)
+    if accounts.legacy_slots:
+        return None  # Claude Code's with no token to send
+    try:
+        return accounts.login_fingerprint(account)
+    except core.LoginUnreadable:
+        return None
 
 
 def usage_trend(
@@ -1346,20 +1359,23 @@ def _recorded_usage(
                 if not taken:
                     continue
                 newest = taken[-1]
-                resets = (newest.session_resets_at, newest.week_resets_at)
-                if any(when is not None and when <= now for when in resets):
-                    continue
-                found[account.slot] = ClaudeUsage(
-                    available=True,
-                    # A token's reading is the endpoint's: both windows, each read or not.
-                    windows=session_and_week(
+                # Every window it read (v38); a row from before, the endpoint's two, each
+                # read or not.
+                windows = (
+                    newest.windows
+                    if newest.windows is not None
+                    else session_and_week(
                         newest.session_percent,
                         newest.session_resets_at,
                         newest.week_percent,
                         newest.week_resets_at,
                         every=True,
-                    ),
-                    fetched_at=newest.fetched_at,
+                    )
+                )
+                if any(w.resets_at is not None and w.resets_at <= now for w in windows):
+                    continue
+                found[account.slot] = ClaudeUsage(
+                    available=True, windows=windows, fetched_at=newest.fetched_at
                 )
     except sqlite3.Error:
         return {}

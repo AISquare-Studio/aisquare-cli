@@ -534,3 +534,44 @@ def test_a_dead_row_no_listing_could_record_still_shows_its_exit_code(
     result = runner.invoke(app, ["fleet", "restart", "--all"])
     assert result.exit_code == 0, result.output
     assert f"was dead (exit {KILLED}), restarted" in ANSI.sub("", result.stdout)
+
+
+# --- final delta review of #274 (seq 1719), in #48 ------------------------------------
+
+
+@pytest.mark.parametrize("pane", ["vanished", "dead"])
+def test_a_fleet_stop_that_lands_mid_restart_is_never_undone(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    monkeypatch: pytest.MonkeyPatch,
+    pane: str,
+) -> None:
+    """m1: the owner's ``fleet stop`` ends the row between the restart's read and its own
+    look. The ended row came back from ``stop`` (a vanished pane) or ``_end_dead_rows`` (a
+    dead one) as it was, and the restart started the agent again over the stop. It is
+    refused, and nothing is started."""
+    coder = fleet.agents["alpha/coder-1"]
+    observe = fleet_service._observe_sockets
+    stopped: list[bool] = []
+
+    def the_owner_stops_it(*args: Any, **kwargs: Any) -> Any:
+        if not stopped:
+            stopped.append(True)
+            with store_session() as store:
+                store.end_fleet_agent(coder.id, exit_status=None, ended_by="stopped")
+        return observe(*args, **kwargs)
+
+    if pane == "vanished":
+        tmux.vanish(coder.pane_id)
+    else:
+        _kill(tmux, coder)
+    monkeypatch.setattr(fleet_service, "_observe_sockets", the_owner_stops_it)
+    monkeypatch.setattr(fleet_service, "_pane_alive", lambda agent: False)
+    spawned = len(tmux.spawned)
+
+    with pytest.raises(fleet_service.NoSuchAgent, match="stopped meanwhile"):
+        fleet_service.restart(fleet.alpha, coder.label, agent_id=coder.id)
+
+    assert stopped and len(tmux.spawned) == spawned, "nothing started over the stop"
+    assert _row(coder.id).ended_by == "stopped"
+    assert not [a for a in _live_rows(fleet.alpha) if a.label == coder.label]

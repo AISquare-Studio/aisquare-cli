@@ -5403,7 +5403,11 @@ def stop(
                 # `restart`'s, for a vanished pane whose row another reader (`reap`, a
                 # look) ended meanwhile: it is ended, and nothing of it is the stop's to
                 # remove. Marked stopped below, a respawn that then failed left an agent
-                # Restart all leaves (#274 delta review 2, m1 and m3).
+                # Restart all leaves (#274 delta review 2, m1 and m3). Not one the owner
+                # stopped meanwhile: handed back, the restart started it again over
+                # their `fleet stop` (final delta review, m1).
+                if ended.ended_by == "stopped":
+                    raise NoSuchAgent(f"{label} ({ended.id}) was stopped meanwhile") from None
                 return StopReceipt(ended, [])
             if _kill_lingering_window(store, project, ended):
                 return StopReceipt(store.mark_fleet_agent_stopped(ended.id), [])
@@ -7913,6 +7917,11 @@ def restart(
             # and wakes no manager either: it is the same agent coming back.
             tmux_session = session_name(current.codename) if current.codename else None
             ended = _end_dead_rows([agent], _observe_sockets([agent], tmux_session), nudge=False)
+            if ended and ended[0].ended_by == "stopped":
+                # Another reader's row, handed back as it is (`_end_dead_rows`): the owner
+                # stopped it meanwhile, and the restart is not to undo that (final delta
+                # review, m1).
+                raise NoSuchAgent(f"{label} ({agent.id}) was stopped meanwhile")
             if ended:
                 agent = ended[0]
             else:

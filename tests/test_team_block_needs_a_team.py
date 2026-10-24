@@ -351,17 +351,24 @@ def test_the_gate_asks_for_an_open_task_and_never_reads_the_board_s_tasks(
         assert store.has_team_task_in(current_project().id, {"done"})
 
 
-def test_a_pruned_solo_session_leaves_no_unbriefed_mark(runner: CliRunner, work_dir: Path) -> None:
-    """#45, n6: ``team prune`` ends a crashed or ghost session, which fires no SessionEnd, so
-    the mark that hook takes away outlived the row. The prune takes it too."""
+def test_a_solo_session_pruned_while_alive_is_still_briefed_when_a_team_forms(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """Final delta review, m2: ``team prune`` ends a session by idleness, so it may be alive.
+    #46 took its unbriefed mark with the row, and its next turn (which revives the row)
+    took the delta path for good: never the board or the protocol once a team formed. The
+    mark is kept, and the board comes once."""
     _team_on(runner)
     _start(runner, SOLO, work_dir)
-    with store_session() as store:
-        assert store.get_meta(team_service._unbriefed(SOLO)) is not None
     report = team_service.prune_sessions(older_than_minutes=0)
     assert [pruned.id for pruned in report.pruned] == [SOLO]
     with store_session() as store:
-        assert store.get_meta(team_service._unbriefed(SOLO)) is None
+        assert store.get_meta(team_service._unbriefed(SOLO)) is not None
+
+    _start(runner, OTHER, work_dir)  # a team forms; SOLO was alive all along
+    first = _prompt(runner, SOLO, work_dir)
+    assert "<aisquare-team>" in first and "You are team session cccc3333" in first
+    assert "<aisquare-team>" not in _prompt(runner, SOLO, work_dir), "once"
 
 
 # --- #48: a remote teammate over `aisquare serve` is a member (final review MAJOR-1) ----

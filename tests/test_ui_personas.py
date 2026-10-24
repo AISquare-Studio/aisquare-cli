@@ -1325,6 +1325,44 @@ def test_the_filter_narrows_every_section_and_agent_rows_carry_the_persona(
     ]
 
 
+def test_a_bind_made_with_account_reads_that_account_for_every_agent(
+    project: ProjectInfo, targets: list[FleetAgentStatus], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SMOKE8 #129: ``team bind --account N`` writes ``account``, never a home variable, and
+    a launch runs on it; the picker read only the env and said "this shell's account". The
+    row names the bound account for a Codex bind and a Claude Code one, by slot, alias or
+    email, and the account wins over a hand-written home as a launch's does."""
+    codex = ClaudeAccountStatus(
+        account=ClaudeAccount(
+            slot=3, config_dir=Path("/accounts/c3"), agent="codex", managed=True, alias="work"
+        ),
+        label="work",
+        identity=ClaudeIdentity(email="three@example.com"),
+        signed_in=True,
+    )
+    overview = accounts_service.overview()
+    overview.accounts.append(codex)
+    monkeypatch.setattr(accounts_service, "overview", lambda: overview)
+    settings_service.bind_role("manager", agent="codex", account="3")
+    settings_service.bind_role("captain", agent="codex", account="Work")
+    settings_service.bind_role("coder3", account="two@example.com")
+    settings_service.bind_role("coder4", account="2", env={"CLAUDE_CONFIG_DIR": "/x/.claude2"})
+    settings_service.bind_role("coder5", account="9")
+
+    async def scenario(pilot: Pilot[None], host: Host) -> dict[str, str]:
+        picker = host.screen
+        assert isinstance(picker, AttachTargetScreen)
+        return option_prompts(picker)
+
+    prompts = drive(scenario, dialog=picker_for(project, "new"))
+    assert prompts["bind:manager"] == "manager · codex · account 3 · three@example.com"
+    assert prompts["bind:captain"] == "captain · codex · account 3 · three@example.com"
+    assert prompts["bind:coder3"] == "coder3 · claude · account 2 · two@example.com"
+    assert prompts["bind:coder4"] == "coder4 · claude · account 2 · two@example.com"
+    assert prompts["bind:coder5"] == "coder5 · claude · account 9"
+    assert prompts["bind:tester1"] == "tester1 · claude · this shell's account"
+
+
 def test_choosing_an_agent_confirms_then_attaches_and_says_how_it_was_delivered(
     project: ProjectInfo,
     catalogue: dict[str, Path],

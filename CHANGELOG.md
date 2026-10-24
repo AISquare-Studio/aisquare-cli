@@ -925,6 +925,11 @@ adapter.**
   edited in the store showed a slot the agent was not on until its next restart.
 - The upgrade's hook refresh says *hooks already current* for a hooks file it
   left unchanged. It said *rewritten* for every one. Its JSON output is as before.
+- The Spawn dialog's *Start fresh* checkbox shows beside the *How* radios. The
+  radios stretched over the whole row and pushed it past the dialog's edge.
+- The target picker names the account a bind made with `team bind --account`
+  launches on. It read only the bind's environment and said *this shell's
+  account*.
 
 ## [0.8.2] - 2026-10-19
 

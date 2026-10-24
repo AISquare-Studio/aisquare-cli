@@ -58,6 +58,7 @@ from textual.worker import Worker, WorkerState
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core.agent_adapters import DEFAULT_AGENT, adapter_for_binary, adapters, get_adapter
 from aisquare.core.config import RoleLaunchProfile, load_config
+from aisquare.core.names import name_key
 from aisquare.models import AccountsOverview, ClaudeAccountStatus, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import settings as settings_service
@@ -170,22 +171,46 @@ def account_text(status: ClaudeAccountStatus, *, agent: bool = False) -> str:
     return " · ".join(parts)
 
 
-def bind_account(env: dict[str, str], statuses: Iterable[ClaudeAccountStatus] | None) -> str:
-    """Which account a bind's environment points at, from the home variable of the agent
-    whose slot it names (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``, …)."""
+def bind_account(profile: RoleLaunchProfile, statuses: Iterable[ClaudeAccountStatus] | None) -> str:
+    """Which account a bind launches on: its ``account`` (``team bind --account``, which a
+    launch resolves after ``env`` and so runs on), else the home variable of the agent
+    whose slot its environment names (``CLAUDE_CONFIG_DIR``, ``CODEX_HOME``, …)."""
+    listed = list(statuses or ())
+    if profile.account:
+        return _account_named(profile.account.strip(), profile.agent, listed)
     for agent in accounts_core.account_agents():
-        raw = env.get(accounts_core.kind(agent).home_env, "").strip()
+        raw = profile.env.get(accounts_core.kind(agent).home_env, "").strip()
         if not raw:
             continue
         directory = Path(os.path.expandvars(os.path.expanduser(raw)))
         slot = accounts_core.managed_slot(directory, agent)
         if slot is None:
             return directory.name or raw
-        for status in statuses or ():
-            if status.account.slot == slot and status.identity is not None:
-                return f"account {slot} · {status.identity.email}"
-        return f"account {slot}"
+        return _account_text(slot, listed)
     return "this shell's account"
+
+
+def _account_named(ref: str, agent: str | None, statuses: list[ClaudeAccountStatus]) -> str:
+    """``account 3 · me@example.com`` for a bind's ``account``: a slot, an alias or an
+    email, matched in the accounts already read as ``services.claude_accounts.resolve``
+    matches them (the bind's agent's first); ``account <ref>`` when none is."""
+    ordered = sorted(statuses, key=lambda status: status.account.agent != agent)
+    for status in ordered:
+        account, identity = status.account, status.identity
+        if (
+            (ref.isdigit() and account.slot == int(ref))
+            or (account.alias is not None and name_key(account.alias) == name_key(ref))
+            or (identity is not None and "@" in ref and identity.email.lower() == ref.lower())
+        ):
+            return _account_text(account.slot, statuses)
+    return f"account {ref}"
+
+
+def _account_text(slot: int, statuses: list[ClaudeAccountStatus]) -> str:
+    for status in statuses:
+        if status.account.slot == slot and status.identity is not None:
+            return f"account {slot} · {status.identity.email}"
+    return f"account {slot}"
 
 
 def bind_binary(profile: RoleLaunchProfile) -> str:
@@ -197,7 +222,7 @@ def bind_text(
     seat: str, profile: RoleLaunchProfile, statuses: Iterable[ClaudeAccountStatus] | None
 ) -> str:
     """``coder2 · claude2 · account 2 · me@example.com`` — seat, binary, account."""
-    return f"{seat} · {bind_binary(profile)} · {bind_account(profile.env, statuses)}"
+    return f"{seat} · {bind_binary(profile)} · {bind_account(profile, statuses)}"
 
 
 _BOX_CSS = """

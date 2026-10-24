@@ -240,19 +240,24 @@ who runs it.
      whether the briefing was `typed` into a waiting agent or, for a busy one,
      `noted`: recorded, to reach it privately with its next prompt.
    - **Binds** — the seats `aisquare team bind` pinned, with the binary and the
-     account each one's environment points at. Choosing one opens the Spawn
-     dialog with that seat as the role, its binary, and the persona filled in.
-   - **Accounts** — the Claude Code account slots. Choosing one opens the Spawn
-     dialog on that slot, with the persona.
+     account each one launches on: the account `team bind --account` named,
+     else the one its environment's home variable points at (`CLAUDE_CONFIG_DIR`,
+     `CODEX_HOME`). Choosing one opens the Spawn dialog with that seat as the
+     role, its binary, and the persona filled in.
+   - **Accounts** — every coding agent's account slots (Claude Code's and
+     Codex's, each named with its agent when both are listed). Choosing one
+     opens the Spawn dialog on that slot, with the persona.
 
    *Attach to existing* puts Agents first; *Attach to new* puts Binds, then
    Accounts, then Agents. The filter box narrows all three sections at once.
 
 Two buttons under the list make a target on the spot. **+ New bind** is `team
 bind` as a form — a seat (a role, a numbered seat such as `coder2`, or a name
-already bound), a binary that must be on your `PATH`, an account whose
-`CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` it fills in, more `KEY=VALUE` lines
-and extra args — and the list comes back with the new bind selected. **+ New
+already bound), the coding agent, a binary that must be on your `PATH`, one of
+that agent's accounts whose environment it fills in (`CLAUDE_CONFIG_DIR` and
+`CLAUDE_CODE_TMPDIR` for a Claude Code slot, `CODEX_HOME` for a Codex one), more
+`KEY=VALUE` lines and extra args — and the list comes back with the new bind
+selected. **+ New
 account** takes you to the Accounts page and starts its sign-in for a new slot;
 come back to the Personas tab when it has signed in.
 

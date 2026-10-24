@@ -377,7 +377,8 @@ aisquare captain gate status    # on or off, ready or why not, the open window
   that allowed it. An `unlock`'s audit masks the code, in the arguments and
   in your words. Every other tool's audit masks a code in your words too,
   since one can be said alongside another command ("unlock 123 456 and stop
-  coder-1").
+  coder-1"): run together, spaced, dashed, or joined to a word by a dash
+  ("code-123456"). A date or a longer number stays as you said it.
 - **The secret** is `$AISQUARE_HOME/captain/gate.secret`, mode 0600, written
   by `aisquare captain gate enroll`. `--replace` makes a new one: the old
   authenticator entry stops working and any open window closes. The captain

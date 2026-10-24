@@ -1044,6 +1044,9 @@ def _printable_name(key: str) -> str:
 _WINDOWS_PATH = re.compile(r"""^(["']?)([A-Za-z]:\\[^"'\r\n]*)\1$""")
 """A paste that is one Windows path, ``C:\\…``, bare or in one pair of quotes."""
 WSLPATH_TIMEOUT = 2.0
+WSLPATH_WORKER = "terminal-wslpath"
+"""The worker a pasted Windows path is converted in: ``wslpath`` may take its whole
+timeout, which the UI thread must not wait out."""
 
 
 def wsl_path(text: str, *, under_wsl: bool | None = None) -> str:
@@ -2911,15 +2914,36 @@ class TerminalPane(Widget, can_focus=True):
     def paste_text(self, text: str) -> bool:
         """``text`` into the agent as one bracketed paste: this pane's own paste, and the
         shell's for a paste no focused widget took (#288). A lone Windows path under WSL
-        becomes its Linux path first (:func:`wsl_path`). False when there is no pane."""
+        becomes its Linux path first (:func:`wsl_path`), in a worker, and is pasted when
+        ``wslpath`` answers (#340's review). False when there is no pane."""
         if self.pane_id is None or self.server is None:
             return False
+        if _WINDOWS_PATH.match(text.strip()) is not None and in_wsl(os.environ):
+            self.run_worker(
+                partial(self._paste_converted, text),
+                name=WSLPATH_WORKER,
+                group=WSLPATH_WORKER,
+                thread=True,
+                exit_on_error=False,
+            )
+            return True
+        self._paste_now(text)
+        return True
+
+    def _paste_converted(self, text: str) -> None:
+        """In :data:`WSLPATH_WORKER`: ``text`` through ``wslpath``, then pasted on the UI
+        thread."""
+        converted = wsl_path(text, under_wsl=True)
+        self.app.call_from_thread(self._paste_now, converted)
+
+    def _paste_now(self, text: str) -> None:
+        if self.pane_id is None or self.server is None:
+            return  # the pane let go of its agent while wslpath ran
         self.scrollback = 0
         if self.text_selection is not None:
             self._clear_own_selection()  # input into the agent: the highlight is stale (rule 3)
-        self._forward("paste", wsl_path(text))
+        self._forward("paste", text)
         self._input_arrived()
-        return True
 
     async def _on_click(self, event: events.Click) -> None:
         """Focus the pane; a double click selects the word under the pointer.

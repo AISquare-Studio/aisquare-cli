@@ -155,3 +155,42 @@ def test_a_codex_agent_the_fleet_reads_working_is_typed_into_at_its_empty_prompt
     message = refused(lambda: actions.paste("alpha", "coder-1", "again"))
     assert message.startswith("refused: coder-1 is working"), message
     assert codex.typed == []
+
+
+# The captain's full control on Codex (#274, 17626009's pins): its approval view answered,
+# and a paste submitted there, with no words of the owner's, as at Claude Code's chooser.
+
+
+@pytest.mark.parametrize("call", ["press yes", "approve_prompt", "unblock"])
+def test_the_captain_approves_a_codex_approval_with_no_owner_words(
+    alpha: ProjectInfo, codex: Pane, call: str
+) -> None:
+    codex.screen = list(APPROVAL)
+    codex.answers = {"1": list(IDLE)}
+    target = {"project": "alpha", "label": "coder-1"}
+    if call == "press yes":
+        ok(actions.press("alpha", "coder-1", "yes", utterance=""))
+    else:
+        ok(actions.act(call, target, utterance=""))
+    assert codex.keys == [("1",)], "its 1. Yes, proceed, pressed"
+    assert suite.audit(alpha.id)[-1]["ok"] is True
+
+
+@pytest.mark.parametrize("key", ["enter", "1", "2", "esc"])
+def test_the_captain_presses_any_answering_key_at_a_codex_approval_with_no_owner_words(
+    alpha: ProjectInfo, codex: Pane, key: str
+) -> None:
+    codex.screen = list(APPROVAL)
+    codex.answers = {name: list(IDLE) for name in ("Enter", "1", "2", "Escape")}
+    ok(actions.press("alpha", "coder-1", key, utterance=""))
+    assert codex.keys == [(actions.KEYS[key],)]
+
+
+def test_the_captain_submits_a_paste_into_a_codex_approval_with_no_owner_words(
+    alpha: ProjectInfo, codex: Pane
+) -> None:
+    codex.screen = list(APPROVAL)
+    codex.answers = {"Enter": list(IDLE)}
+    result = ok(actions.paste("alpha", "coder-1", "go on", submit=True, utterance=""))
+    assert codex.typed == [("paste", "go on"), ("keys", "Enter")]
+    assert result["submitted"] is True

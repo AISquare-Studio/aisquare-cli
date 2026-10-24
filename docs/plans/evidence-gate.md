@@ -141,8 +141,10 @@ nonignored files, file by file.
   self-ignored one too; not one inside an ignored directory, which git never
   reads), `.git/info/exclude` and `core.excludesFile`. A symlink is hashed as its
   in-checkout target, file or directory, walked by the same rules as a checkout
-  without git, links inside included; a link to the checkout or a directory
-  holding it counts by its text.
+  without git, links inside included; a linked file counts by its content even
+  in a generated directory; a loop, or a link to the checkout or a directory
+  holding it, counts by its text. Under a linked directory ignored files count,
+  so check output goes in a gitignored directory no link reaches.
 - Each file's change time (mtime on Windows) is kept before and after a run,
   nested repositories included, so a change put back before the run ended still
   refuses it.

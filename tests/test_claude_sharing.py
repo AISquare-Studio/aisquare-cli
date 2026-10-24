@@ -854,7 +854,28 @@ def test_an_entry_linked_elsewhere_is_refused_and_left_alone(
     [refused] = [c for c in service.enable_share(["agents"], now=NOW) if c.account.slot == 2]
 
     assert refused.outcome == "refused" and "not ours to replace" in (refused.detail or "")
-    assert os.readlink(second.config_dir / "agents") == str(theirs)
+    assert f"links to {theirs} " in (refused.detail or "")
+    # Still linked there: by realpath, since Windows reads a link back as ``\\?\C:\...``.
+    entry = second.config_dir / "agents"
+    assert sharing._is_link(entry) and os.path.realpath(entry) == os.path.realpath(theirs)
+
+
+def test_a_refusal_names_the_link_as_written_without_windows_prefix(
+    skilled: tuple[ClaudeAccount, ...], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows reads a link back with its extended-length prefix (run 40073711742): the
+    refusal names the path as the operator wrote it."""
+    _plain, second, _third = skilled
+    theirs = tmp_path / "someone-elses-agents"
+    theirs.mkdir()
+    (second.config_dir / "agents").symlink_to(theirs, target_is_directory=True)
+    real_readlink = os.readlink
+    monkeypatch.setattr(os, "readlink", lambda path: "\\\\?\\" + real_readlink(path))
+
+    [refused] = [c for c in service.enable_share(["agents"], now=NOW) if c.account.slot == 2]
+
+    assert refused.outcome == "refused"
+    assert f"links to {theirs} — not ours to replace" in (refused.detail or ""), refused.detail
 
 
 def test_on_windows_a_directory_is_a_junction_when_a_symlink_needs_a_privilege(

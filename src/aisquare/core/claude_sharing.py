@@ -536,6 +536,12 @@ def part_state(config_dir: Path, part: SharePart, source_dir: Path) -> PartState
     return "own" if os.path.lexists(entry) else "none"
 
 
+def _written_target(link: Path) -> str:
+    """Where ``link`` points, as written: Windows reads a link back with the extended-length
+    ``\\\\?\\`` prefix (``\\\\?\\C:\\Users\\...``), which no operator typed."""
+    return os.readlink(link).removeprefix("\\\\?\\")
+
+
 def _is_link(path: Path) -> bool:
     """A symlink, or on Windows a junction (which ``islink`` does not see)."""
     if os.path.islink(path):
@@ -562,7 +568,9 @@ def link_part(config_dir: Path, part: SharePart, source_dir: Path, *, now: datet
     if state == "shared":
         return None
     if state == "elsewhere":
-        raise SharingError(f"its {entry.name} links to {os.readlink(entry)} — not ours to replace")
+        raise SharingError(
+            f"its {entry.name} links to {_written_target(entry)} — not ours to replace"
+        )
     is_dir = LINKED_PARTS[part][1]
     if is_dir:
         source.mkdir(parents=True, exist_ok=True)

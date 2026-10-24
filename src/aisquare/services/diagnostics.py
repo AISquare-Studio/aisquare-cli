@@ -3030,9 +3030,13 @@ def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
         with store_session() as store:
             project = active_project(store, cwd)
         found = code_index.status(project.id, current_head=snapshot_core.head_sha(project.root))
+        building = code_index.building(project.id)
     except Exception as exc:  # diagnostics must never crash
         return _ok(name, f"not evaluated ({exc})")
-    if not found.exists:
+    unfinished = not found.exists or found.built_at is None  # a first build not yet committed
+    if unfinished and building:
+        return _ok(name, "building in the background (agents grep until it is ready)")
+    if unfinished:
         return _ok(name, "none yet — `aisquare code index` builds one (agents grep without it)")
     parsers = ", ".join(f"{parser} {count}" for parser, count in sorted(found.parsers.items()))
     detail = f"{found.symbols} symbols in {found.files} files ({parsers}), built {found.built_at}"
@@ -3041,6 +3045,8 @@ def _check_code_index(cwd: Path | None = None) -> DoctorCheck:
     if found.not_indexed:
         missing = ", ".join(f"{lang} {n}" for lang, n in sorted(found.not_indexed.items()))
         detail += f"; not indexed: {missing}"
+    if building:
+        detail += "; a refresh is running"
     return _ok(name, detail)
 
 

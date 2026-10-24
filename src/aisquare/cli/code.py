@@ -14,7 +14,7 @@ import typer
 
 from aisquare.cli.common import fail
 from aisquare.core import code_index
-from aisquare.core.console import stdout_console
+from aisquare.core.console import stderr_console, stdout_console
 from aisquare.core.state import get_state
 from aisquare.services import code as code_service
 
@@ -34,6 +34,15 @@ def _symbol_line(symbol: code_index.Symbol) -> str:
     return f"{symbol.path}:{symbol.line}  {symbol.kind:<8} {symbol.signature}"
 
 
+def _first_build_note() -> None:
+    """Say so on stderr when a query builds the index first (a first one takes a while)."""
+    if get_state().json_output or not code_service.settings().enabled:
+        return
+    project_id = code_service.project_here().id
+    if not code_index.ready(project_id) and not code_index.building(project_id):
+        stderr_console().print("no code index yet: building it first", markup=False)
+
+
 def _or_fail(exc: code_service.CodeIndexError) -> None:
     fail(str(exc), error="no_index" if "no code index" in str(exc) else "index_busy")
 
@@ -50,6 +59,7 @@ def find_command(
     """Where NAME is defined: exact, case-insensitive, prefix, then by name part."""
     if kind is not None and kind not in KINDS:
         raise typer.BadParameter(f"one of {', '.join(KINDS)}", param_hint="--kind")
+    _first_build_note()
     try:
         found = code_service.find_symbols(name, kind=kind, limit=limit)
     except code_service.CodeIndexError as exc:
@@ -72,6 +82,7 @@ def refs_command(
     limit: Annotated[int, typer.Option("--limit", min=1, help="At most this many.")] = 50,
 ) -> None:
     """Every use of NAME: calls, attribute reads, type annotations."""
+    _first_build_note()
     try:
         found = code_service.find_refs(name, limit=limit)
         definitions = code_service.find_symbols(name, limit=limit) if defs else []
@@ -106,6 +117,7 @@ def similar_command(
     limit: Annotated[int, typer.Option("--limit", min=1, help="At most this many.")] = 10,
 ) -> None:
     """Definitions whose names share parts with TARGET: run it before writing a helper."""
+    _first_build_note()
     try:
         anchor, found = code_service.find_similar(target, limit=limit)
     except code_service.CodeIndexError as exc:
@@ -144,10 +156,14 @@ def index_command(
     if show_status:
         found = code_service.index_status()
         if as_json:
-            typer.echo(json.dumps(found.as_json()))
+            building = code_index.building(code_service.project_here().id)
+            typer.echo(json.dumps({**found.as_json(), "building": building}))
             return
-        if not found.exists:
-            _print(f"no code index yet — build it: {code_service.INDEX_COMMAND}")
+        if not found.exists or found.built_at is None:  # none, or a first build uncommitted
+            if code_index.building(code_service.project_here().id):
+                _print("the code index is building in the background — ask again in a moment")
+            else:
+                _print(f"no code index yet — build it: {code_service.INDEX_COMMAND}")
             return
         parsers = ", ".join(f"{p} {n}" for p, n in sorted(found.parsers.items()))
         _print(f"{found.files} files, {found.symbols} symbols, {found.refs} refs ({parsers})")

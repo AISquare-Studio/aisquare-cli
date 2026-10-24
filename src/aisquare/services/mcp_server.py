@@ -485,7 +485,7 @@ def build_server() -> MCPServer:
     # The symbol index's tool (#285), only where it has something to answer: a tool
     # every call of which says "no index" is noise in every client's tool list.
     with contextlib.suppress(Exception):
-        if code_index.exists(code_service.project_here().id):
+        if code_index.ready(code_service.project_here().id):
             server.add_tool(code_lookup)
 
     exact_error_results(server)

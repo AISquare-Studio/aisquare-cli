@@ -832,6 +832,19 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+#: The detached start of an index build (#285), as written, for the tests of it:
+#: ``no_detached_code_index_build`` replaces it for every other test.
+REAL_START_CODE_INDEX = hooks_service.start_code_index
+
+
+@pytest.fixture(autouse=True)
+def no_detached_code_index_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No ``init`` or ``project onboard`` in the suite starts a detached ``aisquare code
+    index``: it would run in a session of its own that outlives the test. A test that wants
+    an index builds one (``code_service.build_index``)."""
+    monkeypatch.setattr(hooks_service, "start_code_index", lambda _project, *, full=False: None)
+
+
 #: The session-start refresh of the symbol index (#285), as written, for the tests of it:
 #: ``no_detached_code_refresh`` replaces it for every other test.
 REAL_REFRESH_CODE_INDEX = hooks_service._refresh_code_index

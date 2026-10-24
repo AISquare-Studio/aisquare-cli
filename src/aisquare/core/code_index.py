@@ -264,6 +264,31 @@ def exists(project_id: str) -> bool:
     return index_path(project_id).is_file()
 
 
+def ready(project_id: str) -> bool:
+    """Whether a finished build is there to answer from. The file alone is not one: a build
+    writes in one transaction, so during a first build a reader finds the file empty."""
+    try:
+        with _connect(project_id, create=False) as conn:
+            return _meta(conn, "built_at") is not None
+    except (FileNotFoundError, sqlite3.DatabaseError):
+        return False
+
+
+def building(project_id: str) -> bool:
+    """Whether a build holds this project's lock now: one ``onboard`` started detached, or
+    a refresh. Asks the lock once and lets it go; ``False`` on anything it cannot read."""
+    lock = code_dir(project_id) / "build.lock"
+    if not lock.is_file():
+        return False
+    try:
+        with locking.holding(lock, wait_s=0):
+            return False
+    except TimeoutError:
+        return True
+    except OSError:
+        return False
+
+
 @contextlib.contextmanager
 def _connect(project_id: str, *, create: bool) -> Iterator[sqlite3.Connection]:
     path = index_path(project_id)
@@ -614,10 +639,15 @@ def _build(
             full = True
         report = BuildReport(full=full)
         if full:
-            conn.executescript(
-                "DELETE FROM file; DELETE FROM symbol; DELETE FROM ref; "
-                "INSERT INTO symbol_fts (symbol_fts) VALUES ('delete-all');"
-            )
+            # In the build's one transaction, never executescript (which commits at once):
+            # a reader keeps the last index until the new one is committed (review of #385).
+            for statement in (
+                "DELETE FROM file",
+                "DELETE FROM symbol",
+                "DELETE FROM ref",
+                "INSERT INTO symbol_fts (symbol_fts) VALUES ('delete-all')",
+            ):
+                conn.execute(statement)
         known = {
             row[0]: (row[1], row[2], row[3], row[4])
             for row in conn.execute("SELECT path, sha256, size, mtime_ns, parser FROM file")

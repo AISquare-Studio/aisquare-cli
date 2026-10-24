@@ -102,6 +102,28 @@ def test_python_definitions_with_kinds_qualnames_signatures_and_arity(repo: Path
     assert stop.signature == "async def stop(self)"
 
 
+def test_a_full_rebuild_keeps_the_last_index_readable_until_it_commits(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #385: a full build cleared its tables with ``executescript``, which commits
+    at once, so for the whole rebuild (onboard --refresh, now detached) every reader found
+    an empty index still stamped with the last ``built_at``: "no definition", exit 0."""
+    code_index.build("p", repo)
+    real_listed = code_index.listed_files
+    seen_mid_build: list[int] = []
+
+    def listed_then_asked(root: Path, ignore: Any = ()) -> list[str]:
+        seen_mid_build.append(len(code_index.find("p", "spawn_agent")))  # its own connection
+        assert code_index.ready("p")
+        return real_listed(root, ignore)
+
+    monkeypatch.setattr(code_index, "listed_files", listed_then_asked)
+    code_index.build("p", repo, full=True)
+
+    assert seen_mid_build == [1], "the reader saw the cleared tables"
+    assert len(code_index.find("p", "spawn_agent")) == 1
+
+
 def test_refs_list_every_use_by_path_and_line(repo: Path) -> None:
     code_index.build("p", repo)
     uses = [(r.path, r.line) for r in code_index.refs("p", "_now")]

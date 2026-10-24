@@ -14,6 +14,7 @@ window is crossed by moving ``autostop``'s clock, never by sleeping.
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -400,7 +401,9 @@ def test_reap_finished_dry_run_lists_candidates_with_reasons_and_stops_none(
 
 def test_dry_run_alone_is_refused(tmux: FakeTmux, project: ProjectInfo) -> None:
     result = CliRunner().invoke(app, ["fleet", "reap", "--dry-run", "--project", project.id])
-    assert result.exit_code == 2 and "--dry-run goes with --finished" in result.output
+    # Read as a person reads it: Rich colours the usage box and wraps it to the terminal.
+    plain = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).replace("│", " ").split())
+    assert result.exit_code == 2 and "--dry-run goes with --finished" in plain, plain
 
 
 # --- (c) a refused spawn makes room ---------------------------------------------------------

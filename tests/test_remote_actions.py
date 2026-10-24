@@ -1062,6 +1062,7 @@ def test_stop_stops_the_pinned_row_and_audits_what_it_did(
         "agent": receipts.stop.agent.model_dump(mode="json"),
         "claims_released": ["tsk_1"],
         "release_failed": None,
+        "marked_only": False,
         "project": project.id,
     }
     assert phone.audit() == [

@@ -578,8 +578,15 @@ def test_sockets_watching_one_pane_share_its_capture(
             for ws in (first, second):
                 _until(ws, "remote")
                 ws.send_text(json.dumps({"subscribe": "coder-1"}))
-            # Both sockets have asked for the pane: of the cache, or of tmux itself.
-            _wait_for(lambda: sum(k.startswith("pane:") for k in asked) >= 2 or len(captured) >= 2)
+            # Both sockets have asked for the pane, of the cache, and the pool thread is in
+            # the capture; or both asked tmux itself. Asked alone was not enough: a slow
+            # runner read while_held before the pool thread entered panes(), so [] (seq 249).
+            _wait_for(
+                lambda: (
+                    (sum(k.startswith("pane:") for k in asked) >= 2 and len(captured) >= 1)
+                    or len(captured) >= 2
+                )
+            )
             while_held = list(captured)
         finally:
             release.set()

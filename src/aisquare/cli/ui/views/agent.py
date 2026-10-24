@@ -2,8 +2,8 @@
 
 The info line (:func:`info_line`) is the one the Manager tab shows too: who the
 agent is, its state, the account it runs on with that account's session use, the
-model and effort it runs, and its pane — one builder, so the two never drift
-apart again. It is a one-line :class:`rich.text.Text` built from a
+model and effort it runs, its pane, and the persona it runs as — one builder, so the
+two never drift apart again. It is a one-line :class:`rich.text.Text` built from a
 :class:`FleetAgentStatus`; every field is DATA and is appended as text, never as
 markup, so a label or a model name with brackets in it reaches the screen intact
 (tests/test_console_markup.py's rule). The shell calls
@@ -40,10 +40,12 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.ui.click_guard import GuardedButton
 from aisquare.cli.ui.sidebar import (
+    BADGE_KEEP,
     ROLE_ICON,
     STATE_CHIP,
     STOP_STATES,
     StopAgent,
+    persona_badge,
     session_percent_text,
 )
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
@@ -102,11 +104,12 @@ def info_line(
     *,
     width: int | None = None,
 ) -> Text:
-    """``🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4`` — one agent at a glance.
+    """``🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4 · skeptic`` — one agent
+    at a glance.
 
     The Agent view's header and the Manager tab's first line, both:
     ``<icon> <label>  <chip> <state>[(exit)]  <account> · <pct>%  <model> <effort>  [detail]
-    <pane id>``. The role icon and the label; the state chip (``💤 exited(N)`` once it
+    <pane id>[ · <persona>]``. The role icon and the label; the state chip (``💤 exited(N)`` once it
     ended); the account (:func:`account_text`, its NAME alone — no ``#slot``) with its
     five-hour window percent USED from ``usage`` (slot → percent, the slow headroom read's
     ``session_by_slot``); the model and the effort the session reported
@@ -119,6 +122,12 @@ def info_line(
     state — in a 90-column terminal the Agent view's line gets about 38 cells, and a model
     name before them pushed them off. The detail last but the pane id: it has no bound (the
     folder-trust prompt's names a command and a path), so it is what gives way first.
+
+    The persona (``sidebar.persona_badge``, the sidebar row's own) comes last, and is the
+    first thing a narrow row drops (the owner's decision D4 on #267's m1): with ``width``, a
+    badge that does not fit is cut, and dropped once fewer than :data:`BADGE_KEEP` cells
+    are left for it, as a sidebar row cuts and drops its own, so a line never ends in a
+    bare ``·``; a line that does not fit even without it drops it whole.
 
     ``width`` is the row's, once it has one (:class:`InfoLine`). A line wider than it gives
     way in its LABEL first, as the sidebar's rows do: the label is ellipsised so that
@@ -133,13 +142,23 @@ def info_line(
     """
     label = Text(status.agent.label, style=LABEL_STYLE)
     text, essential = _info_line(status, label, labels, usage)
-    if width is not None and text.cell_len > width:
-        # The label's room: the row, less what must stay whole after it, less one cell for
-        # the ``…`` that cuts the rest — the pane id always follows.
-        room = width - 1 - (essential - label.cell_len)
-        if label.cell_len > room:
-            label.truncate(max(room, LABEL_KEEP + 1), overflow="ellipsis")
-            text, _ = _info_line(status, label, labels, usage)
+    badge = persona_badge(status)
+    if width is None or text.cell_len + badge.cell_len <= width:
+        text.append_text(badge)
+        return text
+    if text.cell_len <= width:  # the persona alone does not fit: cut it, or drop it
+        left = width - text.cell_len
+        if badge and left >= BADGE_KEEP:
+            badge.truncate(left, overflow="ellipsis")
+            text.append_text(badge)
+        return text
+    # Too wide without the persona too: it is gone already, and the label gives way next.
+    # The label's room: the row, less what must stay whole after it, less one cell for the
+    # ``…`` that cuts the rest — the pane id always follows.
+    room = width - 1 - (essential - label.cell_len)
+    if label.cell_len > room:
+        label.truncate(max(room, LABEL_KEEP + 1), overflow="ellipsis")
+        text, _ = _info_line(status, label, labels, usage)
     return text
 
 

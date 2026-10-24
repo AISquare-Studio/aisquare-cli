@@ -4,9 +4,10 @@
 JSON object per line; the one that matters is ``{"msg": "started tunnel", "name":
 "command_line", "addr": "http://127.0.0.1:<port>", "url": "https://…"}``. Everything
 else is noise or an error (``{"lvl": "eror", "err": "…"}``), and an error about the
-authtoken is the one a first-time user hits, so it gets its own hint. The binary is the
-human's job (PLAN §7); when it is absent this module returns a sentence that says how to
-get it — it never raises into the TUI.
+authtoken is the one a first-time user hits, so it gets its own hint. Since #34 the agent
+is bundled (``ngrok_sdk``: the official SDK, in this process), and this binary is the
+fallback of an install the SDK cannot be imported from; when it is absent too, this module
+returns a sentence that says so — it never raises into the TUI.
 
 ``--inspect=false`` turns off ngrok's traffic inspector. Left on, the agent keeps
 every request and answer on its local web interface (``127.0.0.1:4040``), which
@@ -68,7 +69,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from aisquare.core import paths
@@ -76,15 +77,18 @@ from aisquare.core.atomic import write_replacing
 from aisquare.core.config import decode_by_bom
 from aisquare.core.injection import sanitise_text
 
+AUTHTOKEN_FROM = "https://dashboard.ngrok.com/get-started/your-authtoken"
+"""Where a free ngrok account's token is: what Settings → Remote links to."""
 INSTALL_HINT = (
-    "ngrok is not installed. Install it: https://ngrok.com/download "
-    "(macOS: brew install ngrok · Linux: snap install ngrok, or unzip the binary "
-    "onto your PATH), then add your authtoken: ngrok config add-authtoken <token> "
-    "(from https://dashboard.ngrok.com/get-started/your-authtoken)."
+    "ngrok is missing from this install (a damaged one: the bundled ngrok is gone and none is "
+    "on PATH), so a phone cannot reach Remote yet"
 )
+"""Why there is no tunnel when neither the bundled ngrok nor one on PATH can be had: only a
+damaged install, since the SDK is a core dependency (#34). No command to run: the line beside
+it in Settings repairs nothing a sentence could."""
 AUTHTOKEN_HINT = (
-    "ngrok needs an authtoken: run  ngrok config add-authtoken <token>  "
-    "(from https://dashboard.ngrok.com/get-started/your-authtoken) and turn Remote on again."
+    "ngrok needs your token: paste it once in Settings → Remote "
+    f"(a free one: {AUTHTOKEN_FROM}) and turn Remote on again."
 )
 TOO_OLD_HINT = (
     "this ngrok is too old for --url (the static domain in AISQUARE_REMOTE_NGROK_URL) — "
@@ -387,7 +391,9 @@ def api_off_configs(
     try:
         text = decode_by_bom(own.read_bytes(), errors="replace")
     except FileNotFoundError:
-        if not environ.get("NGROK_AUTHTOKEN"):
+        from aisquare.services.ngrok_sdk import saved_token
+
+        if not environ.get("NGROK_AUTHTOKEN") and saved_token() is None:
             return None
         version, first = "2", []
     except OSError:
@@ -604,6 +610,26 @@ def ngrok_command(
     return command
 
 
+class Tunnel(Protocol):
+    """What the R panel's controller holds of a tunnel: :class:`NgrokTunnel` (the binary) and
+    ``ngrok_sdk.SdkTunnel`` (the bundled SDK) alike."""
+
+    port: int
+    public_url: str | None
+    error: str | None
+    on_announce: Callable[[str], None] | None
+    static_host: str | None
+
+    def start_tunnel(self) -> str | None: ...
+    def wait_for_url(self, timeout: float = 15.0) -> str | None: ...
+    def stop_tunnel(self) -> None: ...
+    def signal_now(self) -> None: ...
+    @property
+    def running(self) -> bool: ...
+    @property
+    def api_warning(self) -> str | None: ...
+
+
 class NgrokTunnel:
     """One ngrok subprocess: ``start_tunnel`` spawns it, ``stop_tunnel`` ends it.
 
@@ -729,8 +755,12 @@ class NgrokTunnel:
         fleet UI holds, and by :func:`popen_tied` unless a test hands its own ``popen``: so
         it ends with this process, however that ends.
         """
+        from aisquare.services.ngrok_sdk import saved_token_environment
+
+        signed_in = saved_token_environment()  # the token pasted in Settings, where none is set
         return self._popen(
             command,
+            **({} if signed_in is None else {"env": signed_in}),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

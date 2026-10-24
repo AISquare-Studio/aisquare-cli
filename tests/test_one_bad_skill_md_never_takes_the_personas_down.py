@@ -237,9 +237,9 @@ def test_launch_spawn_and_a_restart_step_past_the_directory_holding_the_date(
     tempo = cli_suite._skill(_project_layer(repo), "tempo", description="A steady tempo.")
     _dated(_project_layer(repo), "x")
 
-    launch_cli._check_persona("careful", project)  # nothing to refuse
+    launch_cli._check_persona("careful", core.project_root(repo))  # nothing to refuse
     with pytest.raises(typer.Exit) as launch_refused:
-        launch_cli._check_persona("x", project)
+        launch_cli._check_persona("x", core.project_root(repo))
     with pytest.raises(fleet_service.FleetError) as spawn_refused:
         fleet_service.spawn(project, "coder", label="coder-x", persona="x")
     kept = fleet_service.spawn(project, "coder", label="coder-kept", persona="careful").agent

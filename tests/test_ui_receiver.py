@@ -215,6 +215,36 @@ def test_open_spawn_with_no_project_takes_the_one_selected_in_the_sidebar(
 
 @UNIX_SOCKETS
 @pytest.mark.needs_captain
+def test_open_spawn_with_a_home_coder_selected_takes_the_home_project(
+    tmp_path: Path, script: Script, ui_path: Path
+) -> None:
+    """Delta review of #274, m3: ``_selected_project`` refused "the captain is selected" for
+    any row on the home's board. Added on purpose (D5), the home is a project with agents of
+    its own, and a coder there names it as any agent names its project."""
+    from aisquare.core.store import store_session
+
+    home = fleet(tmp_path, script)
+    with store_session() as store:
+        store.onboard_project(home, explicit=True)
+    coder = status(home.id, "coder-9", "coder", "working")
+    script[home.id] = [*script[home.id], coder]
+
+    async def body(pilot: Pilot[None]) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+        app = fleet_app(pilot)
+        await ui_suite.refreshed(app)
+        selected = await send(pilot, ui_path, "select_agent", coder.agent.id)
+        reply = await send(pilot, ui_path, "open_spawn")
+        dialog = app.screen
+        return selected, reply, dialog.project.id if isinstance(dialog, SpawnDialog) else None
+
+    selected, reply, project_id = drive(body)
+    assert selected["ok"] is True, selected
+    assert reply["ok"] is True, reply
+    assert project_id == home.id
+
+
+@UNIX_SOCKETS
+@pytest.mark.needs_captain
 def test_open_stop_opens_the_stop_dialog_for_that_agent_and_stops_nothing(
     tmp_path: Path, script: Script, ui_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

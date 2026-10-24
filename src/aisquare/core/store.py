@@ -1558,10 +1558,10 @@ class ContextStore(Protocol):
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord: ...
     def delete_claude_account(self, slot: int) -> bool: ...
     def delete_claude_accounts(self, slots: Sequence[int]) -> int: ...
-    def set_claude_account_default(self, slot: int | None) -> None: ...
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
     def order_claude_accounts(self, slots: Sequence[int]) -> None: ...
+    def promote_retired_claude_account_default(self) -> int | None: ...
     # Usage readings (v16, #146): the history behind "how fast is this window filling".
     def add_usage_sample(self, sample: UsageSample) -> None: ...
     def usage_samples(self, slot: int, *, since: datetime) -> list[UsageSample]: ...
@@ -4637,7 +4637,7 @@ class SqliteStore:
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord:
         """Register ``slot`` at the END of the order, or refresh a known slot's directory.
 
-        The arrangement of a known slot — alias, position, default, disabled —
+        The arrangement of a known slot — alias, position, disabled —
         is never touched by an upsert: a sync that re-reads the directories
         must not reorder what the operator arranged. New slots queue at the
         end because "the account I just added" is the one most safely ranked
@@ -4659,10 +4659,8 @@ class SqliteStore:
     def delete_claude_account(self, slot: int) -> bool:
         """Forget a slot's arrangement; True when there was one.
 
-        A default that named this slot goes with the row — the partial index
-        keeps "one default" true, and a default pointing at nothing is exactly
-        the state a removal must not leave behind (the next ``add`` reuses the
-        number, and a stale default would silently adopt the newcomer).
+        Its rank goes with the row and the order closes up, so the next ``add``,
+        which reuses the number, queues at the end rather than inheriting a place.
         """
         return self.delete_claude_accounts([slot]) == 1
 
@@ -4683,24 +4681,6 @@ class SqliteStore:
         else:
             self._conn.commit()
         return deleted
-
-    def set_claude_account_default(self, slot: int | None) -> None:
-        """Make ``slot`` the one default (``None`` clears it). Unknown slot → ``KeyError``.
-
-        Two statements in one transaction: clear, then set. The partial unique
-        index would otherwise refuse the second default before the first was
-        cleared, and a clear that committed alone would leave NO default if
-        the set then failed — which is a worse state than the one asked for.
-        """
-        self._conn.execute("UPDATE claude_account SET is_default = 0 WHERE is_default = 1")
-        if slot is not None:
-            cursor = self._conn.execute(
-                "UPDATE claude_account SET is_default = 1 WHERE slot = ?", (slot,)
-            )
-            if cursor.rowcount != 1:
-                self._conn.rollback()
-                raise KeyError(slot)
-        self._conn.commit()
 
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None:
         """Name a slot (``None`` unnames it). A taken alias raises ``sqlite3.IntegrityError``."""
@@ -4739,6 +4719,36 @@ class SqliteStore:
                 "UPDATE claude_account SET position = ? WHERE slot = ?", (position, slot)
             )
         self._conn.commit()
+
+    def promote_retired_claude_account_default(self) -> int | None:
+        """Move the slot the retired ``is_default`` flag names to rank 1 and clear the flag.
+
+        The machine default IS rank 1 of the order (#8 on the board), so a flag an
+        older build set is folded into the order: that slot goes to the top, the
+        others keep their order behind it, renumbered 1..n, and the flag is cleared
+        — so no launch changes account on upgrade. Keyed on the DATA, not on a schema
+        version: a store any line carried past whatever version a step would have had
+        still holds the flag, and is promoted on its next read all the same. Clearing
+        it makes this idempotent, and lets a later reorder stand. One transaction;
+        the slot moved, or ``None`` when no flag was set. The column and its index
+        stay (dropping a column is a table rebuild, and an older build reading this
+        store still expects it).
+        """
+        row = self._conn.execute(
+            "SELECT slot FROM claude_account WHERE is_default = 1 LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        promoted = int(row[0])
+        current = [record.slot for record in self.claude_accounts()]
+        order = [promoted, *(slot for slot in current if slot != promoted)]
+        for position, slot in enumerate(order, start=1):
+            self._conn.execute(
+                "UPDATE claude_account SET position = ? WHERE slot = ?", (position, slot)
+            )
+        self._conn.execute("UPDATE claude_account SET is_default = 0 WHERE is_default = 1")
+        self._conn.commit()
+        return promoted
 
     # --- usage readings (v16, #146) ------------------------------------------------------------
 

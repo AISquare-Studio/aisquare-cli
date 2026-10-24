@@ -788,10 +788,12 @@ opens when one can reach you, and *Cancel* stops the wait — and *Sign out*
 revokes the session exactly as `aisquare logout` does. A token supplied through
 `AISQUARE_TOKEN` is shown as such and cannot be signed out from here.
 
-**Claude Code** is below it: a table, one aligned row per account — ★ for the
-default, the slot, its name, who is signed in, the plan, the five-hour and
-seven-day windows (a bar and the percent **used**), a status with **Log in**
-beside it when a login is due, then when each window resets. A value too long for its column ends in `…` (hover it for the whole
+**Claude Code** is below it: a table, one aligned row per account in priority
+order — **↑**/**↓** first, then the slot, its name, who is signed in, the
+five-hour and seven-day windows (a bar and the percent **used**, or why there is
+no reading: `not signed in`, `⚠ token expired`, the reason the usage could not
+be read) with **Log in** beside them when a login is due, when each window
+resets, and the plan last. A value too long for its column ends in `…` (hover it for the whole
 text); on a narrow page the table scrolls sideways as one, header included.
 Slot **1** is the plain `claude` of your machine (whatever `CLAUDE_CONFIG_DIR`
 was in the shell you started `asq` from, `~/.claude` otherwise). Every other
@@ -806,8 +808,8 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   pane closes by itself. Close the pane without signing in, or press *Cancel
   sign-in*, and the empty slot is discarded.
 - **Log in** on a row does the same for a slot that has no login, or whose
-  token is missing, expired or rejected (slot 1 included) — the status beside
-  it says which. Type `/login` if Claude Code does not prompt you; the pane
+  token is missing, expired or rejected (slot 1 included) — the usage cells
+  beside it say which. Type `/login` if Claude Code does not prompt you; the pane
   waits for a *fresh* login, not the stale one on disk, then closes, and the
   row reads its usage again.
 - **Remove** forgets a slot the CLI owns. Its directory is renamed beside
@@ -828,25 +830,28 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   documented API. A try that fails with nothing to say about the login (the
   endpoint unreachable, an HTTP 5xx) keeps the account's figure on its row while
   that figure is under five minutes old, and the line says the try failed. With
-  no such figure, the row's status says why (`usage: HTTP 503 …`). A token the
+  no such figure, the row's usage cells say why (`HTTP 503 …`; hover for the whole
+  reason, and for the pace of the session window when there is one). A token the
   endpoint refuses shows at once (`⚠ token rejected`), and an expired one says
   so (`⚠ token expired`). Nothing else on the page is affected. On macOS the
   token is read from the login Keychain, from the item Claude Code keeps for
   each account (plain and every managed slot), and from `.credentials.json` when
   there is no item. A locked Keychain, or one that refuses aisquare, is said on
-  the row (`usage: the login Keychain is locked — unlock it …`) rather than
+  the row (`the login Keychain is locked — unlock it …`) rather than
   offered a Log in. It is not asked again by itself (a locked Keychain's unlock
   dialog would come back every tick): opening the page, **↻ Refresh usage** or
   a Log in asks it again. A reset reads as a
   distance and a clock time — `resets in 3h 10m (18:00)`, `resets in 2d 4h (Tue
   02:00)` — the same string on the page and in `aisquare accounts usage`, so a
   weekly window six days out never looks like tonight.
-- **Default**, **↑**/**↓** and **Disable** arrange the accounts. The row with
-  the ★ is the **machine default**: what a launch runs on when nothing more
-  specific says. The arrows set the **priority order** — the order the rows are
-  listed in, and the order a headroom-based pick will try them in. *Disable*
-  keeps a slot out of every automatic choice (its row says `disabled`) while
-  `--account <slot>` still reaches it by hand; *Enable* puts it back.
+- **↑**/**↓** and **Disable** arrange the accounts. The arrows set the
+  **priority order** — the order the rows are listed in, and the order a
+  headroom-based pick will try them in. Its first enabled, signed-in account is
+  the **machine default**: what a launch runs on when nothing more specific
+  says. There is no separate default to pick — move an account to the top to
+  make it the default. *Disable* keeps a slot out of every automatic choice (its
+  name is dimmed and the button reads *Enable*) while `--account <slot>` still
+  reaches it by hand; *Enable* puts it back.
 - **Rename in place**: double-click an account's name (or press Enter or F2
   on its row) and type. Enter or clicking away saves, Esc cancels, an empty
   name goes back to `account N` / `plain claude`. The name is any text up to 64
@@ -861,9 +866,11 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   command line, then the role's binding (the **account** select beside each
   role in *⚙ Settings ▸ App settings*, or `aisquare team bind <role> --account`), then the
   project's default (`aisquare accounts default <slot> --project .`), then the
-  machine default, which with one login only is whatever `claude` the shell
-  already has — exactly what it ran on before any of this existed; with several,
-  the one with room comes before it (*Headroom*, below). The
+  machine default — the first enabled, signed-in account in priority order;
+  with several, the one with room comes before it (*Headroom*, below). With no
+  account signed in, a launch runs on whatever `claude` the shell already has,
+  exactly as before any of this existed — and so does a role whose binding sets
+  `CLAUDE_CONFIG_DIR` by hand (`team bind <role> --env`): rank 1 never overrides it. The
   agent's info line and `fleet ls` name the account it was resolved to, and its
   sidebar row shows the slot (`#2`).
 - **Headroom.** By default — `[accounts] pick = "headroom"`, *launches pick* in
@@ -963,7 +970,7 @@ aisquare accounts usage                # the windows, per signed-in account; --r
 aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
 aisquare launch coder --account 2      # a board role on account 2
 aisquare fleet spawn coder --account 2 # a fleet agent on account 2
-aisquare accounts default 2            # the machine default — what a launch runs on when nothing else says
+aisquare accounts default 2            # the machine default: moves slot 2 to rank 1 (= accounts move 2 top)
 aisquare accounts default 3 --project . # this project's default (codename, name, id prefix, or . for here)
 aisquare accounts default 1 --role coder # coders run on the plain claude (= team bind coder --account 1)
 aisquare accounts default              # the three levels, as they stand

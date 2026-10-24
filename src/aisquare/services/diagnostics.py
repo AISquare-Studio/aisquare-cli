@@ -1374,10 +1374,10 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
 
 
 def _arranges_an_account() -> bool:
-    """Whether anything the default checks report on was set: a binding or a default.
+    """Whether anything the default checks report on was set: a binding or a project default.
 
-    A role binding (``config.toml``), a project default (a project setting) or a
-    machine default (a registry row, slot 1's included). The store is read raw
+    A role binding (``config.toml``) or a project default (a project setting); the
+    machine default is rank 1 of the order, never "set" (#8). The store is read raw
     and only when ``context.db`` exists: ``store.claude_accounts`` does not
     reconcile, so deciding writes nothing. A file or a store that cannot be read
     is the ``config`` or ``database`` line's to report, so it arranges nothing here.
@@ -1388,9 +1388,7 @@ def _arranges_an_account() -> bool:
         if not paths.db_path().exists():
             return False
         with store_session() as store:
-            if store.project_settings(claude_accounts_service.PROJECT_ACCOUNT_KEY):
-                return True
-            return any(record.is_default for record in store.claude_accounts())
+            return bool(store.project_settings(claude_accounts_service.PROJECT_ACCOUNT_KEY))
     except Exception:
         return False
 
@@ -1910,13 +1908,12 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
 
     Reads the registry only when ``context.db`` already exists — a doctor run
     must not create the store (``tests/test_doctor_does_not_create_state.py``)
-    — and says nothing at all when no default, project default or role binding
-    has ever been set, so a machine that never arranged its accounts keeps the
-    doctor output it had. What it warns about is the class #145 exists for: a
-    default that is not signed in or is disabled launches Claude Code's login
-    screen (or the next rung down) instead of the account the operator meant,
-    and a binding or project default naming a removed slot refuses every
-    launch of that role or project with `unknown_account`.
+    — and says nothing at all when no project default or role binding has ever
+    been set, so a machine that never arranged its accounts keeps the doctor
+    output it had. What it warns about is the class #145 exists for: a binding or
+    project default naming a removed slot refuses every launch of that role or
+    project with `unknown_account`. The machine default under them is said too:
+    the first enabled, signed-in account in priority order (#8), or none.
     """
     if not paths.db_path().exists():
         return []
@@ -1940,33 +1937,24 @@ def _claude_account_default_checks() -> list[DoctorCheck]:
             )
         ]
     by_slot = {account.slot: account for account in accounts}
-    default = next((account for account in accounts if account.is_default), None)
-    if default is None and not per_project and not bindings:
+    if not per_project and not bindings:
         return []
     checks: list[DoctorCheck] = []
-    if default is not None:
+    default = claude_accounts_service.preferred_account(accounts)
+    if default is None:
+        checks.append(
+            _warn(
+                "claude-account-default",
+                "no enabled account is signed in, so a launch nothing else names runs on "
+                "whatever claude the shell has",
+                "aisquare accounts run <slot> and sign in, or: aisquare accounts enable <slot>",
+            )
+        )
+    else:
         label = f"slot {default.slot} ({claude_accounts_core.label(default)})"
-        if default.disabled:
-            checks.append(
-                _warn(
-                    "claude-account-default",
-                    f"the machine default is {label} and it is disabled — launches skip it",
-                    f"aisquare accounts enable {default.slot}, or pick another: "
-                    "aisquare accounts default <slot>",
-                )
-            )
-        elif not claude_accounts_core.signed_in(default):
-            checks.append(
-                _warn(
-                    "claude-account-default",
-                    f"the machine default is {label} but it is not signed in — a launch "
-                    "would open Claude Code's login instead of the account you meant",
-                    f"aisquare accounts run {default.slot} and sign in, or pick another: "
-                    "aisquare accounts default <slot>",
-                )
-            )
-        else:
-            checks.append(_ok("claude-account-default", f"machine default: {label}"))
+        checks.append(
+            _ok("claude-account-default", f"machine default: {label}, rank {default.position}")
+        )
     dangling: list[str] = []
     for project_id, raw in per_project.items():
         if not raw.isdigit() or int(raw) not in by_slot:

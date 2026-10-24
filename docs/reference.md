@@ -61,8 +61,10 @@ aisquare
 │                   (--usage and usage read a five-minute cache; --refresh reads now)
 │                   remove <slot>            — Claude Code accounts the CLI owns (docs/fleet.md)
 │                   default [<slot|alias|email>] [--project P] [--role R] [--clear]
+│                     (machine level: an alias of `move <slot> top` — rank 1 IS the default)
 │                   alias <slot> <name> [--clear] · order <slot>… · move <slot> up|down|top|bottom
-│                   disable <slot> · enable <slot>   — the default, the order, the names
+│                   disable <slot> · enable <slot>   — the order (its first enabled, signed-in
+│                     account is the machine default), the project defaults, the names
 │                   usage also shows the pace (≈ N min to the limit) — see [accounts] in config
 ├── team            on · status · focus <text> · role <name> · log [-n N] · distill [--all]
 │                   spawn <role> [--exec] [--probe/--no-probe] [--refresh]

@@ -152,7 +152,7 @@ def overview() -> AccountsOverview:
     """The install plus every slot in priority order, offline. Usage is a separate, slower question.
 
     "Offline" still holds: the registry is a local SQLite read. A store that
-    cannot be opened costs the ARRANGEMENT (order, aliases, the default badge)
+    cannot be opened costs the ARRANGEMENT (order, aliases, disabled flags)
     and never the listing — see :func:`list_accounts`.
     """
     return AccountsOverview(
@@ -179,7 +179,7 @@ def overview() -> AccountsOverview:
 PROJECT_ACCOUNT_KEY = "claude_account"
 """The ``project_setting`` key holding a project's default account (a slot number)."""
 
-ChoiceSource = Literal["flag", "role binding", "project default", "headroom", "machine default"]
+ChoiceSource = Literal["flag", "role binding", "project default", "headroom", "preferred"]
 
 
 class AccountsUnreadable(AccountsError):
@@ -196,10 +196,9 @@ class AccountsUnreadable(AccountsError):
 class AccountChoice:
     """What :func:`choose` decided: an account and WHY, or no decision at all.
 
-    ``account is None`` means nothing chose — no flag, no binding, no project or
-    machine default — and the caller must leave the launch environment exactly
-    as it found it. That is the pre-#145 behaviour, byte for byte, and it is the
-    case every machine that never ran ``accounts default`` is in. It is
+    ``account is None`` means nothing chose — no flag, no binding, no project
+    default and no enabled, signed-in account to prefer — and the caller must
+    leave the launch environment exactly as it found it. It is
     deliberately distinct from "slot 1 was chosen": an EXPLICIT slot 1 restores
     this shell's own variables over a role binding's (``core.apply_launch_env``),
     which a silent default must never do to a binding someone wrote by hand.
@@ -212,11 +211,15 @@ class AccountChoice:
     the launch line's dim notes, never a reason to refuse."""
 
     def describe(self) -> str:
-        """``account 2`` for a flag; ``work · machine default`` when a default decided."""
+        """``account 2`` for a flag; ``work · preferred (rank 1)`` when the order decided."""
         if self.account is None:
             return ""
         name = core.label(self.account)
-        return name if self.source == "flag" else f"{name} · {self.source}"
+        if self.source == "flag":
+            return name
+        if self.source == "preferred":
+            return f"{name} · preferred (rank {self.account.position})"
+        return f"{name} · {self.source}"
 
 
 def _arranged(store: ContextStore) -> list[ClaudeAccount]:
@@ -226,6 +229,8 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
     slots and dropped for vanished ones, so the table can never describe an
     account that is not there.
     """
+    # A machine default an older build set becomes rank 1, once (#8 on the board).
+    store.promote_retired_claude_account_default()
     on_disk = {account.slot: account for account in core.list_accounts()}
     rows: dict[int, ClaudeAccountRecord] = {
         record.slot: record for record in store.claude_accounts()
@@ -245,7 +250,6 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
             update={
                 "alias": record.alias,
                 "position": record.position,
-                "is_default": record.is_default,
                 "disabled": record.disabled,
             }
         )
@@ -296,7 +300,7 @@ def _read_for_handover() -> tuple[list[ClaudeAccount] | None, str | None]:
 
 
 def list_accounts() -> list[ClaudeAccount]:
-    """The accounts in priority order, each carrying its alias, rank, default and disabled flags.
+    """The accounts in priority order, each carrying its alias, rank and disabled flag.
 
     Fails open to ``core.list_accounts()`` — slot order, no arrangement — when
     the store cannot be opened, so the Accounts page and ``accounts list`` keep
@@ -426,7 +430,10 @@ def choose(
         --account <ref>            the flag (a slot, alias or email)
         team bind <role> --account the role's binding
         accounts default --project the project's default
-        accounts default           the machine default
+        accounts order / move      the preferred account: the first enabled,
+                                   signed-in one in priority order (rank 1) —
+                                   unless the role's binding sets
+                                   CLAUDE_CONFIG_DIR by hand, which keeps it
         (nothing)                  the launch environment is left untouched
 
     ``launch``, ``fleet spawn`` and App settings all ask here and nowhere
@@ -443,10 +450,10 @@ def choose(
     that cannot be read costs its rung and leaves a note, never the launch.
 
     One rung is optional (#146): with ``[accounts] pick = "headroom"`` — or
-    ``spread=True``, which a hand-over passes — the machine default gives way to
+    ``spread=True``, which a hand-over passes — the preferred account gives way to
     :func:`headroom_choice`, the account with room in both of its windows,
     ``exclude`` naming the slot a hand-over is leaving. When no account's usage
-    can be read, the machine default decides exactly as before. A launch reads
+    can be read, the preferred account decides exactly as before. A launch reads
     usage through the cache, a minute deep (:data:`PICK_MAX_AGE_SECONDS`); a
     hand-over (``spread=True``) reads it live.
 
@@ -530,20 +537,60 @@ def choose(
         notes.extend(more)
         if picked is not None:
             return AccountChoice(picked, "headroom", notes)
-    default = next((a for a in accounts if a.is_default), None)
-    if default is not None:
-        if default.disabled:
-            notes.append(f"{core.label(default)} (machine default) is disabled — skipped")
-        elif default.slot in skip:
-            # Said like the two rungs above: skipped in silence, a hand-over that
-            # found nothing was refused with no word that the last rung named the
-            # account being left (review of #205, fourth round).
-            notes.append(
-                f"{core.label(default)} (machine default) is the account being left — skipped"
-            )
-        else:
-            return AccountChoice(default, "machine default", notes)
+    if _binding_names_a_directory(role):
+        # The preferred rung is a SILENT default: it must not restore this shell's
+        # variables over a `team bind <role> --env CLAUDE_CONFIG_DIR=…` someone wrote
+        # by hand, which is what applying slot 1 does (core.apply_launch_env). That
+        # binding launched on its own directory before rank 1 was the default, and
+        # still does (review of #406, M1). A flag, an account binding, a project
+        # default or a headroom pick still win over it, as they always did.
+        return AccountChoice(None, None, notes)
+    preferred = preferred_account(accounts, skip, notes)
+    if preferred is not None:
+        return AccountChoice(preferred, "preferred", notes)
     return AccountChoice(None, None, notes)
+
+
+def _binding_names_a_directory(role: str | None) -> bool:
+    """Whether ``role``'s binding sets Claude Code's directory itself (``env`` or ``env_files``).
+
+    An unreadable config names nothing: the binding is not applied either, so the
+    preferred rung is all that is left to decide (``harness.resolve_profile``).
+    """
+    if role is None:
+        return False
+    try:
+        profile = load_config().team.profiles.get(role)
+    except Exception:  # a broken config.toml costs the binding, never the launch
+        return False
+    if profile is None:
+        return False
+    return any(var in profile.env or var in profile.env_files for var in core.LAUNCH_VARS)
+
+
+def preferred_account(
+    accounts: Sequence[ClaudeAccount], skip: Iterable[int] = (), notes: list[str] | None = None
+) -> ClaudeAccount | None:
+    """The machine default: the first enabled, signed-in account in priority order.
+
+    There is no separate default to pick (#8 on the board): rank 1 IS the
+    default, and an account that cannot run a launch — disabled, or with no
+    login — hands the place to the next. One in ``skip`` (the account a
+    hand-over is leaving) is passed over with a note, said as the rungs above
+    say it (review of #205, fourth round).
+    """
+    for account in accounts:
+        if account.disabled or not core.signed_in(account):
+            continue
+        if account.slot in skip:
+            if notes is not None:
+                notes.append(
+                    f"{core.label(account)} (preferred, rank {account.position}) is the "
+                    "account being left — skipped"
+                )
+            continue
+        return account
+    return None
 
 
 # --- arranging: the writers ---------------------------------------------------------------------
@@ -555,12 +602,19 @@ def choose(
 
 
 def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> ClaudeAccount | None:
-    """Make ``ref`` the machine default — or ``project``'s — and return it; ``None`` clears.
+    """Make ``ref`` ``project``'s default and return it (``None`` clears) — or, with no
+    project, move ``ref`` to rank 1, which is what the machine default is.
 
     A project default is stored as the SLOT NUMBER, resolved now: the project
     table is ours, and a number cannot go stale the way a typed alias could.
-    ``remove`` clears every project default that names the slot it removes.
+    ``remove`` clears every project default that names the slot it removes. The
+    machine's cannot be cleared: some account is always first in the order.
     """
+    if project is None and ref is None:
+        raise AccountsError(
+            "the machine default is rank 1 of the priority order and cannot be cleared — "
+            "reorder instead: aisquare accounts move <slot|alias|email> top"
+        )
     account = resolve(ref) if ref is not None else None
     if account is not None and account.disabled:
         # Accepted silently, the default was a rung `choose` skipped on every
@@ -583,8 +637,8 @@ def set_default(ref: str | None, *, project: ProjectInfo | None = None) -> Claud
                     # add --project` there. Clearing that choice adds nothing.
                     store.onboard_project(project)
                     store.set_project_setting(project.id, PROJECT_ACCOUNT_KEY, str(account.slot))
-            else:
-                store.set_claude_account_default(account.slot if account else None)
+            elif account is not None:
+                store.order_claude_accounts([account.slot])
     except KeyError as exc:
         raise NoSuchAccount(_vanished(account)) from exc
     except sqlite3.Error as exc:
@@ -616,7 +670,9 @@ def project_default(project: ProjectInfo) -> ClaudeAccount | None:
 
 
 def machine_default() -> ClaudeAccount | None:
-    return next((a for a in list_accounts() if a.is_default), None)
+    """What a launch runs under when nothing more specific says: :func:`preferred_account`."""
+    accounts, note = _read_arranged()
+    return None if note is not None else preferred_account(accounts)
 
 
 def set_alias(ref: str, alias: str | None) -> ClaudeAccount:
@@ -842,7 +898,7 @@ def usage(
 # `switch_at`; failing that, the one with the most room. Best effort at
 # every step, because the endpoint is undocumented (§5): an account that does
 # not answer is skipped with a note, and when none answers the caller's next
-# rung (the machine default) decides exactly as it did before #146.
+# rung (the preferred account, rank 1) decides exactly as it did before #146.
 
 TREND_WINDOW = timedelta(minutes=60)
 """How far back `usage_trend` looks for the reading it rates against."""

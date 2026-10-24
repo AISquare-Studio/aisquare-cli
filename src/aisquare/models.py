@@ -240,8 +240,8 @@ class ClaudeAccount(BaseModel):
     # --- what the REGISTRY says about the slot (``claude_account`` in the store) ---
     #
     # The directories stay the record of WHICH accounts exist and who is signed in
-    # (core.claude_accounts). These four fields are the operator's ARRANGEMENT of
-    # them — a name, an order, a choice — which no directory can carry, so they
+    # (core.claude_accounts). These three fields are the operator's ARRANGEMENT of
+    # them — a name, an order, a veto — which no directory can carry, so they
     # live in SQLite and are folded onto the account by
     # ``services.claude_accounts.list_accounts``. A ``ClaudeAccount`` built by the
     # core alone has the defaults below, which read as "no arrangement": that is
@@ -250,10 +250,8 @@ class ClaudeAccount(BaseModel):
     """The operator's name for the slot (``work``, ``personal``), unique; ``None`` when unnamed."""
     position: int | None = None
     """Its rank in the priority order, 1 first; ``None`` before the registry has seen it."""
-    is_default: bool = False
-    """The machine default — what a launch runs under when nothing more specific says."""
     disabled: bool = False
-    """Never chosen automatically (default, priority, headroom); still usable by name."""
+    """Never chosen automatically (priority, headroom); still usable by name."""
 
 
 class ClaudeAccountRecord(BaseModel):
@@ -270,6 +268,8 @@ class ClaudeAccountRecord(BaseModel):
     alias: str | None = None
     position: int
     is_default: bool = False
+    """The retired machine-default flag: rank 1 is the default (#8 on the board), and the
+    registry's read promotes a slot still flagged to rank 1 and clears it."""
     disabled: bool = False
     created_at: datetime
 

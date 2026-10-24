@@ -13086,7 +13086,6 @@ def test_spawn_resolves_the_default_account_and_records_the_slot_on_the_row(
     """#145: the window gets the RESOLVED `--account <slot>`, the caller's environment travels
     with it, and the row says which account the agent draws on."""
     from aisquare.core import claude_accounts as accounts_core
-    from aisquare.services import claude_accounts as accounts_service
     from aisquare.services import settings as settings_service
 
     accounts_core.create_account()  # slot 2, under the isolated AISQUARE_HOME
@@ -13098,7 +13097,11 @@ def test_spawn_resolves_the_default_account_and_records_the_slot_on_the_row(
     plain_env = tmux.spawned[-1]["env"]
     assert isinstance(plain_env, dict) and "AISQUARE_HOME" not in plain_env
 
-    accounts_service.set_default("2")
+    from tests.test_claude_accounts import _sign_in
+
+    second = accounts_core.find_account(2)
+    assert second is not None
+    _sign_in(second, "two@example.com")  # rank 2, the first signed in: the machine default
     chosen = fleet_service.spawn(project, "tester")
     command, env = _command(tmux), tmux.spawned[-1]["env"]
     assert isinstance(env, dict)
@@ -13369,7 +13372,8 @@ def test_a_switch_that_finds_nothing_says_the_default_was_the_account_being_left
     from tests.test_usage_aware_accounts import _Usage
 
     _two_slots_with_usage(monkeypatch, work=95, personal=10)
-    accounts_service.set_default("2")
+    accounts_service.set_default("2")  # rank 1: the machine default (#8 on the board)
+    accounts_service.set_disabled("3", True)  # so nothing after it can take the place
     agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
     _with_transcript(agent, None)
     monkeypatch.setattr(accounts_service, "_http_get", _Usage({}))  # every token rejected
@@ -13378,8 +13382,8 @@ def test_a_switch_that_finds_nothing_says_the_default_was_the_account_being_left
         fleet_service.switch(project, agent.label)
 
     said = str(refused.value)
-    assert "account 2 (machine default) is the account being left — skipped" in said
-    assert "no account's usage could be read" in said
+    assert "account 2 (preferred, rank 1) is the account being left — skipped" in said
+    assert "no enabled, signed-in account to pick from" in said
     assert agent.pane_id not in tmux.killed  # refused before anything was stopped
 
 

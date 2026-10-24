@@ -355,6 +355,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *Spawn* is disabled, so the reason is never folded out of sight. The box sizes to what
   it shows instead of 92% of the terminal, and scrolls between its docked header and
   buttons once Advanced is open on a short one. What a spawn sends is unchanged.
+- **Rank 1 is the machine default.** There is no separate default account any
+  more: the account a launch runs on when nothing more specific says (no
+  `--account`, role binding, project default or headroom pick) is the first
+  enabled, signed-in account in the priority order. `aisquare accounts default
+  <ref>` at machine level now moves that account to rank 1 (an alias of `accounts
+  move <ref> top`, said in its help), and `accounts default --clear` without
+  `--project`/`--role` is refused — some account is always first. Project
+  defaults and role bindings are unchanged. A launch line reads `[work ·
+  preferred (rank 1)]` where it read `[work · machine default]`. `accounts
+  list` / `accounts usage` lose the `*` default mark and the "no default account"
+  hint (the first row is the preferred one), and the account JSON loses
+  `is_default`. The **Accounts** page loses the ★ column, the *Default* button
+  and the status column: **↑**/**↓** are the first columns of each row, before
+  `#`, the plan is the last, and why a row has no usage (not signed in, a token
+  to renew, the reason the usage could not be read) reads in its session/week
+  used cells, the whole text and the session's pace in their tooltips.
+  **Upgrade note:** a machine default set by an older build moves to rank 1 on
+  the registry's next read, the others keeping their order behind it, and the
+  retired `is_default` flag is cleared (the column stays, unread). It is keyed on
+  the flag, not on a schema version, so a store already carried past any version
+  is promoted too, once. No schema step. A machine that never set a default and
+  has accounts signed in now launches on its rank-1 one; a `team bind <role>
+  --env CLAUDE_CONFIG_DIR=…` written by hand still wins over it, as before.
 - The store migrates to schema v35 on first open, from 0.8.2's v32, in three steps: v35
   adds two tables, `usage_session` and `usage_turn`, for `aisquare metrics tokens`. v34
   adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,

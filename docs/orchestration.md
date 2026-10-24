@@ -392,11 +392,12 @@ a sign-in.
 
 **Choosing one.** Several accounts are only useful if a launch knows which to
 run on, so an account can be the **default**, have a **name**, and sit in a
-**priority order** — arranged from the Accounts page (★ *Default*, ↑/↓,
-*Disable*) or from the command line:
+**priority order** — arranged from the Accounts page (↑/↓, *Disable*) or from
+the command line. The machine default is the first enabled, signed-in account in
+that order (rank 1); there is no separate default to keep in step with it:
 
 ```sh
-aisquare accounts default 2               # the machine default: every launch runs on slot 2
+aisquare accounts default 2               # the machine default: slot 2 moves to rank 1 (= move 2 top)
 aisquare accounts default 3 --project .   # …except this project, which runs on slot 3
 aisquare accounts default 1 --role coder  # …and coders, who run on the plain claude
 aisquare accounts default                 # show the three levels as they stand
@@ -414,10 +415,10 @@ the role's binding, then the project's default, then the account with room
 of those set it runs on whatever `claude` the shell already has, exactly as
 before, so a machine that never added an account notices nothing. One
 resolver answers for every surface, so the fleet UI and a hand-typed launch can
-never disagree about which login an agent gets; `accounts list` stars the
-default and lists the slots in priority order; `doctor` warns when the default is
-not signed in or is disabled, and when a binding names an account the machine no
-longer has.
+never disagree about which login an agent gets; `accounts list` lists the slots
+in priority order, the first enabled, signed-in one being the default (no mark of
+its own); `doctor` names that default, warns when no enabled account is signed
+in, and when a binding names an account the machine no longer has.
 
 **Spending several accounts.** With more than one login the interesting
 questions are *where is there room* and *what happens when one runs out*. Both

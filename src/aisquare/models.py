@@ -885,6 +885,11 @@ class TokenSummary(BaseModel):
     median_tool_calls_before_edit: int | None = None
     prices_as_of: str = ""
     prices_source: str = ""
+    """The list ``prices_as_of`` dates: the one agent's whose table priced these sessions'
+    models, else the default agent's (Claude Code's, as before #113's lane 274-L2)."""
+    price_lists: list[dict[str, str]] = Field(default_factory=list)
+    """Every agent's price list that priced a model here (``AgentAdapter.price_table``):
+    ``agent`` (its label), ``as_of`` and ``source``; a mixed team's has one per agent."""
 
 
 TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]

@@ -1579,16 +1579,6 @@ def test_the_instruction_files_are_the_config_dirs_then_the_projects_up_the_chai
     assert any(path.parent == cwd.resolve() for path in project), "cwd's own is loaded"
 
 
-def test_the_merges_claude_only_gate_agrees_with_the_slot_that_replaces_it(
-    adapter: AgentAdapter, tmp_path: Path
-) -> None:
-    """``capabilities.transcript_usage`` (the #274 merge's gate, until lane 274-L2) beside the
-    slot that replaces it: an agent whose usage the shared code records answers
-    ``transcript_reader.usage``."""
-    if adapter.capabilities.transcript_usage:
-        assert _reader(adapter).usage(tmp_path / "none.jsonl", None) is not None
-
-
 def test_the_session_start_leaves_out_what_the_agents_own_instruction_files_hold(
     adapter: AgentAdapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

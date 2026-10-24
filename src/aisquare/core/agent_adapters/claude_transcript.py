@@ -148,7 +148,7 @@ class ClaudeTranscript:
         return (*(AnswerKey(str(n), (str(n),)) for n in range(1, options + 1)), *keys)
 
     def usage(self, file: Path, state: str | None) -> UsageScan:
-        """Main's ``core.usage.scan``, read in :mod:`claude_usage`."""
+        """Main's ``core.usage.scan``, moved to :mod:`claude_usage`."""
         from aisquare.core.agent_adapters import claude_usage
 
         return claude_usage.usage(file, state)

@@ -8,7 +8,7 @@ at the agent's own table (``AgentAdapter.price_table``), counts the tool calls
 (:meth:`Tally.tool`) and the tokens spent before the first edit, and hands back the delta with
 the state to pass next time (:meth:`Tally.scan`). A file that shrank was rewritten: it is read
 again from its start, and only what is newer than the newest record read before counts, as
-``core.usage.scan`` reads one. Nothing here raises on what a file holds, and nothing reads a
+``claude_usage.scan`` reads one. Nothing here raises on what a file holds, and nothing reads a
 whole file twice.
 """
 
@@ -30,7 +30,7 @@ from aisquare.core.usage import AISQUARE_MARKERS, ModelUsage, Usage
 RECENT = 512
 
 #: ``aisquare repo …`` as a COMMAND: the program word at the start of the line or after a
-#: shell separator, bare or by path (``core.usage``'s rule, for any agent's shell tool).
+#: shell separator, bare or by path (``claude_usage``'s rule, for any agent's shell tool).
 _LOOKUP_COMMAND = re.compile(
     r"(?:^|[;&|(`]|\$\()\s*(?:\w+=\S*\s+)*(?:\S*/)?(?:aisquare|asq)(?:\.exe)?\s+repo\b"
 )

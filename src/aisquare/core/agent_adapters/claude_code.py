@@ -207,7 +207,6 @@ class ClaudeCodeAdapter:
         own_doctor_check=True,
         model_proxy=True,
         model_ladders=True,
-        transcript_usage=True,
         legacy_fleet_args=True,
         value_options=frozenset(
             {
@@ -253,7 +252,8 @@ class ClaudeCodeAdapter:
 
     @property
     def transcript_reader(self) -> AgentTranscript:
-        # Read when Remote asks, never on a hook: the reader and rich's cell widths load then.
+        # Loaded when asked: by Remote, and at a turn's end for its token usage (`usage`), where
+        # the reader and rich's cell widths cost a Stop hook about 5 ms.
         from aisquare.core.agent_adapters.claude_transcript import ClaudeTranscript
 
         return ClaudeTranscript()

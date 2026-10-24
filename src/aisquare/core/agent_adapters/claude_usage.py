@@ -1,7 +1,7 @@
 """Claude Code's token usage, read off its session JSONL INCREMENTALLY: its answer to
 ``AgentTranscript.usage`` (:func:`usage`), and main's ``core.usage.scan`` and ``ScanState``
-(#274), copied here unchanged; lane 274-L2 of #113 moves the shared code onto this slot and
-deletes the original. The neutral ``Usage`` and ``ModelUsage`` stay in ``core.usage``.
+(#274), moved here unchanged by lane 274-L2 of #113, which put the shared record on this
+slot. The neutral ``Usage`` and ``ModelUsage`` stay in ``core.usage``.
 
 The transcript is the only exact record there is: every API request Claude
 Code makes leaves an ``assistant`` entry carrying the request's
@@ -61,10 +61,6 @@ from aisquare.core.usage import AISQUARE_MARKERS, ModelUsage, Usage
 #: The tools whose first call ends a session's exploration: the agent has found
 #: where to change and is changing it.
 EDIT_TOOLS = frozenset({"Edit", "Write", "NotebookEdit", "MultiEdit"})
-
-#: The tool that starts a subagent: ``Task`` in Claude Code's tool list, ``Agent``
-#: in the calls it writes to the transcript (2.1.309, measured).
-SUBAGENT_TOOLS = frozenset({"Task", "Agent"})
 
 #: The hook events whose output Claude Code puts in front of the model. The
 #: others' stdout is bookkeeping (``Stop``'s is a decision, read apart below).

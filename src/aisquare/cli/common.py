@@ -862,7 +862,11 @@ def emit_token_summary(summary: TokenSummary) -> None:
         "cost-weighted = input + 1.25 x cache write + 0.1 x cache read + output at the "
         "model's output/input price ratio"
     )
-    console.print(f"prices as of {summary.prices_as_of}: {summary.prices_source}")
+    for listed in summary.price_lists or [
+        {"agent": "", "as_of": summary.prices_as_of, "source": summary.prices_source}
+    ]:
+        whose = f"{listed['agent']} " if listed["agent"] else ""
+        console.print(f"{whose}prices as of {listed['as_of']}: {listed['source']}")
     if summary.unpriced_models:
         console.print(
             f"⚠ {summary.unpriced_tokens:,} tokens on unpriced models "

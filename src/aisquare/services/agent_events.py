@@ -139,9 +139,10 @@ def _dispatch(
     # The account a session runs under, where the hook names its home (else the services
     # read it off the transcript path).
     account = str(config_dir) if adapter.capabilities.hook_names_home else None
-    # The transcript a turn's token usage is read off, for an agent whose transcript carries
-    # it as `core.usage` reads it (#346); none for any other.
-    usage = event.transcript_path if adapter.capabilities.transcript_usage else None
+    # The transcript a turn's token usage is read off, by the agent's own reader
+    # (`AgentTranscript.usage`; #346, SCOPE #113 274 L2), which records nothing for an agent
+    # whose transcript holds no token record.
+    usage = event.transcript_path
     notice = (
         _usage_limit(adapter, event, session_id)
         if adapter.capabilities.limits_in_transcript
@@ -158,9 +159,12 @@ def _dispatch(
             message=f"{adapter.label} hit its {notice.window} limit",
             notice=notice,
             hand_over=event.kind != "session_end",
+            transcript_path=usage,
+            cwd=cwd,
+            agent=adapter.id,
         )
         if event.kind == "session_end":
-            hooks.session_ended(cwd, session_id=session_id, transcript_path=usage)
+            hooks.session_ended(cwd, session_id=session_id, transcript_path=usage, agent=adapter.id)
             metrics.close_turn(session_id)
         return None
     if event.kind == "session_start":
@@ -204,6 +208,7 @@ def _dispatch(
             model=event.model,
             effort=event.effort,
             transcript_path=usage,
+            agent=adapter.id,
         )
         _deliver_owed_nudge(_nudge_owed_after(adapter, session_id))
         if decision is None:
@@ -216,7 +221,9 @@ def _dispatch(
                 )
         return decision.reason
     if event.kind == "session_end":
-        hooks.session_ended(cwd, session_id=session_id, reason=event.reason, transcript_path=usage)
+        hooks.session_ended(
+            cwd, session_id=session_id, reason=event.reason, transcript_path=usage, agent=adapter.id
+        )
         metrics.close_turn(session_id)
     elif event.kind == "turn_failed":
         hooks.turn_failed(
@@ -226,6 +233,7 @@ def _dispatch(
             details=event.details,
             transcript_path=usage,
             cwd=cwd,
+            agent=adapter.id,
         )
     elif event.kind in {"attention", "notification"}:
         hooks.needs_attention(

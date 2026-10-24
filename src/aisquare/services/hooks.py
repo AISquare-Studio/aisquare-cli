@@ -268,6 +268,7 @@ def session_ended(
     session_id: str | None = None,
     reason: str | None = None,
     transcript_path: str | None = None,
+    agent: str | None = None,
 ) -> None:
     """Retire the session from the orchestrator and, unless it is a fleet agent's
     ``/clear`` (``reason``), release its claims — see ``team.hook_session_end``.
@@ -281,7 +282,7 @@ def session_ended(
         team_service.hook_session_end(session_id, cwd, reason=reason)
     finally:
         metrics_service.record_usage(
-            session_id, transcript_path, cwd, trigger="session_end", ended=True
+            session_id, transcript_path, cwd, trigger="session_end", ended=True, agent=agent
         )
 
 
@@ -293,6 +294,7 @@ def turn_stopped(
     model: str | None = None,
     effort: str | None = None,
     transcript_path: str | None = None,
+    agent: str | None = None,
 ) -> team_service.StopDecision | None:
     """Mark the session as waiting for input, and close this turn's metrics row.
 
@@ -301,7 +303,7 @@ def turn_stopped(
     (docs/plans/fleet-tui.md §7.3). Everyone else: ``None``, as before.
 
     The turn's token usage is read off ``transcript_path`` from where the last
-    record stopped, and lands on the row ``close_turn`` closed.
+    record stopped, by ``agent``'s reader, and lands on the row ``close_turn`` closed.
     """
     if session_id is None:
         return None
@@ -318,7 +320,7 @@ def turn_stopped(
         # errors too.
         trace_id = metrics_service.close_turn(session_id)
         metrics_service.record_usage(
-            session_id, transcript_path, cwd, trigger="stop", trace_id=trace_id
+            session_id, transcript_path, cwd, trigger="stop", trace_id=trace_id, agent=agent
         )
     # Last, and it swallows its own errors too: auto-mode refusals in the
     # transcript's tail put the row in attention with one board line (#150).
@@ -350,6 +352,7 @@ def turn_failed(
     hand_over: bool = True,
     transcript_path: str | None = None,
     cwd: Path | None = None,
+    agent: str | None = None,
 ) -> None:
     """The turn ended on an API error (Claude Code's ``StopFailure``), not a Stop (#146).
 
@@ -393,7 +396,12 @@ def turn_failed(
     finally:
         trace_id = metrics_service.close_turn(session_id)
         metrics_service.record_usage(
-            session_id, transcript_path, cwd, trigger="stop_failure", trace_id=trace_id
+            session_id,
+            transcript_path,
+            cwd,
+            trigger="stop_failure",
+            trace_id=trace_id,
+            agent=agent,
         )
     if failure is not None and failure.limited and not failure.already_limited and hand_over:
         # A re-fire for the same window (Claude Code does that) is not a second

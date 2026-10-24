@@ -30,6 +30,7 @@ experiment never measured.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
@@ -211,11 +212,15 @@ def record_usage(
     trigger: UsageTrigger,
     trace_id: str | None = None,
     ended: bool = False,
+    agent: str | None = None,
 ) -> TurnUsage | None:
     """Read what the session's transcript added since the last record, and store it.
 
     Called by the Stop, StopFailure and SessionEnd hooks. Reads only the bytes
-    appended since the session's previous record (``core.usage.scan``), writes
+    appended since the session's previous record, through the reader of the session's
+    ``agent`` (``AgentTranscript.usage``, the default agent's when none is named: Claude
+    Code's session JSONL, Codex's rollout), priced off its own list; an agent whose
+    transcript holds no token record records nothing (SCOPE #113 274, L2). Writes
     one turn row for them and folds them into the session's row, and fills the
     ``metric`` row the turn closed (``trace_id``) with the counts it was
     waiting for. Returns the turn row, or ``None`` when there was nothing new,
@@ -226,7 +231,13 @@ def record_usage(
         return None
     try:
         return _record_usage(
-            session_id, Path(transcript_path), cwd, trigger=trigger, trace_id=trace_id, ended=ended
+            session_id,
+            Path(transcript_path),
+            cwd,
+            trigger=trigger,
+            trace_id=trace_id,
+            ended=ended,
+            agent=agent,
         )
     except Exception as exc:  # never disrupt the session for a metrics write
         _log_failure(f"usage not recorded for {session_id} ({trigger})", exc)
@@ -241,9 +252,17 @@ def _record_usage(
     trigger: UsageTrigger,
     trace_id: str | None,
     ended: bool,
+    agent: str | None,
 ) -> TurnUsage | None:
-    # Lazy: services.project imports the store layer this module is imported by.
+    # Lazy: services.project imports the store layer this module is imported by, and the
+    # adapters load only for a record.
+    from aisquare.core.agent_adapters import recorded_adapter
     from aisquare.services import project as project_service
+
+    adapter = recorded_adapter(agent)
+    reader = adapter.transcript_reader if adapter is not None else None
+    if reader is None:
+        return None  # an agent this install does not know, or no reader: nothing is read
 
     now = datetime.now(tz=UTC)
     with store_session() as store:
@@ -257,10 +276,12 @@ def _record_usage(
             project_id = project.id
         else:
             project_id = existing.project_id
-        state = usage_core.ScanState.parse(existing.state if existing else None)
         began = time.perf_counter()
-        delta, state = usage_core.scan(transcript, state)
+        scan = reader.usage(transcript, existing.state if existing else None)
         scan_ms = (time.perf_counter() - began) * 1000
+        if scan is None:
+            return None  # no token record in this agent's transcript: never a 0-token row
+        delta = scan.delta
         if delta.is_empty() and not ended and existing is not None:
             return None
         total = usage_core.Usage.from_dict(existing.usage) if existing else usage_core.Usage()
@@ -272,8 +293,8 @@ def _record_usage(
             session_id=session_id,
             project_id=project_id,
             transcript_path=str(transcript),
-            state=state.to_json(),
-            usage={**total.to_dict(), "first_edit": state.first_edit()},
+            state=scan.state,
+            usage={**total.to_dict(), "first_edit": scan.first_edit.as_dict()},
             turns=turns,
             total_tokens=session_totals.total,
             weighted=session_totals.weighted,
@@ -397,4 +418,22 @@ def summarize_tokens(
     if before_tokens:
         summary.median_tokens_before_edit = int(median(before_tokens))
         summary.median_tool_calls_before_edit = int(median(before_calls))
+    summary.price_lists = _price_lists(name for name, model in total.models.items() if model.priced)
+    if len(summary.price_lists) == 1:
+        [only] = summary.price_lists
+        summary.prices_as_of, summary.prices_source = only["as_of"], only["source"]
     return summary
+
+
+def _price_lists(models: Iterable[str]) -> list[dict[str, str]]:
+    """The price list of every agent whose table prices one of ``models``, in adapter order:
+    each agent's reader priced its own models off it (``AgentAdapter.price_table``)."""
+    from aisquare.core.agent_adapters import adapters
+
+    names = list(models)
+    lists: list[dict[str, str]] = []
+    for adapter in adapters():
+        table = adapter.price_table
+        if table is not None and any(table.canonical(name) in table.prices for name in names):
+            lists.append({"agent": adapter.label, "as_of": table.as_of, "source": table.source})
+    return lists

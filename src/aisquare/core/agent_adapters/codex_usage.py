@@ -90,7 +90,7 @@ def usage(file: Path, state: str | None) -> UsageScan:
     return tally.scan(found)
 
 
-def _text(value: object) -> str | None:
+def _string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
@@ -99,7 +99,7 @@ def _count(value: object) -> int:
 
 
 def _turn(payload: Mapping[str, Any], tally: Tally) -> None:
-    turn, model = _text(payload.get("turn_id")), _text(payload.get("model"))
+    turn, model = _string(payload.get("turn_id")), _string(payload.get("model"))
     if turn is not None and model is not None:
         tally.turns.pop(turn, None)
         tally.turns[turn] = model  # last: the newest turn's model is the fallback
@@ -117,11 +117,11 @@ def _response(payload: Mapping[str, Any], tally: Tally, found: Usage) -> None:
         cache_read=cached,
         output=_count(raw.get("output_tokens")),
     )
-    turn = _text(payload.get("turn_id"))
+    turn = _string(payload.get("turn_id"))
     model = (tally.turns.get(turn) if turn is not None else None) or next(
         reversed(tally.turns.values()), UNKNOWN_MODEL
     )
-    response = _text(payload.get("response_id"))
+    response = _string(payload.get("response_id"))
     thread = payload.get("thread_token_usage")
     running = _count(thread.get("total_tokens")) if isinstance(thread, dict) else 0
     key = f"{response}:{running}" if response is not None else None
@@ -148,7 +148,7 @@ def _item(payload: Mapping[str, Any], tally: Tally, found: Usage) -> None:
 
 def _call(payload: Mapping[str, Any], tally: Tally, found: Usage) -> None:
     name = _call_name(payload)
-    namespace = _text(payload.get("namespace"))
+    namespace = _string(payload.get("namespace"))
     if namespace is not None and namespace != _OWN_NAMESPACE:
         name = f"{namespace}__{name}"
     server = namespace.removeprefix("mcp__") if namespace and namespace.startswith("mcp__") else ""

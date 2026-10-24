@@ -27,14 +27,16 @@ from collections.abc import Mapping, Sequence
 from typing import ClassVar, Self
 
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.geometry import Region
+from textual.message import Message
 from textual.widgets import Button, Static, TabbedContent, TabPane
 from textual.worker import Worker, WorkerState
 
 from aisquare.cli.ui.board import BoardPanel
+from aisquare.cli.ui.sidebar import CUSTOM_ROLE_ICON, ROLE_ICON, STATE_CHIP
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.cli.ui.views.agent import InfoLine, SlotLabels, shown_pane
 from aisquare.cli.ui.views.explainability import ExplainabilityView
@@ -87,6 +89,65 @@ def no_manager_text(
     return text
 
 
+TEAM_STRIP_TAIL = "  · board for detail"
+"""What ends the team strip: where the detail is, a click away."""
+
+
+def team_strip_text(agents: Sequence[FleetAgentStatus]) -> Text | None:
+    """``🔨 2▶  🧪 1⏸  👀 1🔔  · board for detail`` — the team under the manager (#287, 2b).
+
+    Each live agent but the manager, counted per role and, within a role, per state: the
+    role's icon, then each state's count and chip in the sidebar's colours, roles in the
+    sidebar's order and a role it has no icon for by its name, after them. Rows that ended
+    (#138 keeps one while its window stands) are not the team. ``None`` when nobody but the
+    manager runs: the strip is hidden then. Pure: it reads the frame it is handed.
+    """
+    counts: dict[str, dict[str, int]] = {}
+    for status in agents:
+        agent = status.agent
+        if agent.ended_at is not None or agent.label == fleet_service.MANAGER_LABEL:
+            continue
+        by_state = counts.setdefault(agent.role, {})
+        by_state[status.state] = by_state.get(status.state, 0) + 1
+    if not counts:
+        return None
+    role_order = {role: place for place, role in enumerate(ROLE_ICON)}
+    state_order = {state: place for place, state in enumerate(STATE_CHIP)}
+    roles = sorted(counts, key=lambda role: (role_order.get(role, len(role_order)), role))
+    text = Text(no_wrap=True, overflow="ellipsis")
+    for index, role in enumerate(roles):
+        if index:
+            text.append("  ")
+        icon = ROLE_ICON.get(role)
+        text.append(f"{icon} " if icon is not None else f"{CUSTOM_ROLE_ICON} {role} ")
+        by_state = counts[role]
+        shown = sorted(by_state, key=lambda state: state_order.get(state, len(state_order)))
+        for place, state in enumerate(shown):
+            chip, style = STATE_CHIP.get(state, STATE_CHIP["unknown"])
+            text.append(" " if place else "")
+            text.append(f"{by_state[state]}{chip}", style=style)
+    text.append(TEAM_STRIP_TAIL, style="dim")
+    return text
+
+
+class TeamStrip(Static):
+    """The team strip (:func:`team_strip_text`): a click on it opens the Board tab.
+
+    One row, cut at its end with ``…`` where it does not fit: word-wrapped, its one row
+    hid the rest a whole word at a time and unmarked (review of #359)."""
+
+    DEFAULT_CSS = """
+    TeamStrip { text-wrap: nowrap; text-overflow: ellipsis; }
+    """
+
+    class Opened(Message):
+        """The strip was clicked: show the board, where each agent's detail is."""
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.post_message(self.Opened())
+
+
 def manager_status(agents: Sequence[FleetAgentStatus]) -> FleetAgentStatus | None:
     """The live manager among ``agents``, if any."""
     for status in agents:
@@ -120,6 +181,7 @@ class ManagerTab(Vertical):
     ManagerTab #manager-header { height: auto; padding: 0 1; }
     ManagerTab #manager-header.-info { text-wrap: nowrap; text-overflow: ellipsis; }
     ManagerTab #manager-hint { height: auto; padding: 0 1; }
+    ManagerTab #team-strip { height: 1; padding: 0 1; }
     ManagerTab #start-manager { margin: 1 1; }
     ManagerTab #manager-pane { height: 1fr; }
     """
@@ -143,6 +205,9 @@ class ManagerTab(Vertical):
 
     def compose(self) -> ComposeResult:
         yield InfoLine(id="manager-header")
+        strip = TeamStrip(id="team-strip")
+        strip.display = False
+        yield strip
         hint = Static(Text(MANAGER_HINT, style="dim"), id="manager-hint")
         hint.display = False
         yield hint
@@ -170,6 +235,14 @@ class ManagerTab(Vertical):
         if self.status is not None and self.is_mounted:
             header = self.query_one("#manager-header", InfoLine)
             header.show_line(self.status, self.labels.labels, self.usage)
+
+    def show_team(self, agents: Sequence[FleetAgentStatus]) -> None:
+        """The team strip for the shell's frame: hidden while nobody but the manager runs."""
+        strip = self.query_one("#team-strip", TeamStrip)
+        text = team_strip_text(agents)
+        strip.display = text is not None
+        if text is not None:
+            strip.update(text)
 
     def refresh_from_service(self) -> None:
         """Ask the fleet service who the manager is (the standalone path)."""
@@ -374,7 +447,9 @@ class ProjectView(TabbedContent):
         if not tabs:
             self._pending = list(agents)
             return
-        tabs.first().show(manager_status(agents), exited=exited_manager(agents))
+        tab = tabs.first()
+        tab.show(manager_status(agents), exited=exited_manager(agents))
+        tab.show_team(agents)
         for settings in self.query(SettingsView):
             settings.show_agents(agents)
 
@@ -387,6 +462,11 @@ class ProjectView(TabbedContent):
         if self._pending is not None:
             pending, self._pending = self._pending, None
             self.refresh_status(pending)
+
+    @on(TeamStrip.Opened)
+    def _open_board(self) -> None:
+        """The team strip was clicked: the board has each agent's detail."""
+        self.active = "tab-board"
 
     @on(TabbedContent.TabActivated, pane="#tab-personas")
     def reload_personas(self) -> None:

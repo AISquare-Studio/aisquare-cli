@@ -325,13 +325,20 @@ aisquare persona import --from-dir ./team-skills --no-llm
 aisquare --json persona import --from-dir ./team-skills --yes
 ```
 
-Name several sources, or `--from-dir DIR` for every skill directory and file in
-`DIR` (hidden ones aside, by name), and each goes through the same import, in
-turn. One refusal does not stop the rest. The receipt is one table, SOURCE ·
-NAME · ENGINE · OUTCOME, with each refusal's code and reason on its row and a
-count on stderr; `--json` prints a list, one object per source, with `outcome`
-`imported` or `refused` and, for a refusal, its `error` and `message`. The exit is
-0 when every source was imported and 1 when any was refused. `--name` names one
+Name several sources, or `--from-dir DIR` for the personas in `DIR` (hidden
+entries aside, by name), and each goes through the same import, in turn.
+`--from-dir` reads a skill directory (one holding `SKILL.md`), a `SKILL.md`, and a
+Markdown or text file (`.md`, `.markdown`, `.txt`), and skips everything else
+without running an engine on it: a README, LICENSE, CHANGELOG or other repository
+file, a directory with no `SKILL.md`, a script. Text no skill parser recognises
+goes to an engine, so a README beside your skills used to be converted like a
+persona and spend its tokens. A source you name yourself is read whatever it is.
+One refusal does not stop the rest. The receipt is one table, SOURCE · NAME ·
+ENGINE · OUTCOME, with each refusal's code and reason, and each skip's reason, on
+its row and a count on stderr; `--json` prints a list, one object per source, with
+`outcome` `imported`, `refused` or `skipped` and, for a refusal, its `error` and
+`message` (a skip has a `message` and no `error`). The exit is 0 when nothing was
+refused and 1 when any was. `-` (stdin) can be named once. `--name` names one
 persona, so it is refused with more than one source. Without a terminal, an
 engine's draft is kept and its row reads `needs_confirmation` unless you pass
 `--yes`, as for one source. One source alone prints and exits as it always did.

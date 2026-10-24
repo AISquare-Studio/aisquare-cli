@@ -641,3 +641,71 @@ def test_the_page_lists_the_sessions_on_this_machine(
         "Sessions on this machine",
         "plain claude · handmade · /scratch · claude-opus-5-5 · ctx 34% · 5h 42% · 2m ago",
     ], listed
+
+
+def test_adopt_a_conversation_picks_from_the_list_and_adopts_the_one_chosen(
+    no_network: dict[str, Any], clock: Clock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#290's asq half: *Adopt a conversation…* under Sessions on this machine lists
+    ``fleet adopt --list`` (read off the UI thread); one a claude still holds cannot be
+    picked, and Enter on another adopts it in a worker, the page saying as what."""
+    from textual.widgets import OptionList
+
+    from aisquare.cli.ui.adopt_picker import AdoptPicker
+    from aisquare.models import AdoptableConversation, FleetAgent
+    from aisquare.services import adopt as adopt_service
+    from aisquare.services import fleet as fleet_service
+
+    def conversation(session: str, *, held: int | None = None) -> AdoptableConversation:
+        return AdoptableConversation(
+            session_id=session,
+            transcript_path=f"/c/projects/-w/{session}.jsonl",
+            slot=2,
+            account="work",
+            cwd="/w",
+            project_id="prj_w",
+            last_activity=clock() - timedelta(hours=2),
+            first_prompt="fix the login bug",
+            held_by=held,
+        )
+
+    listed = [conversation("aaaaaaaa-1", held=4242), conversation("bbbbbbbb-2")]
+    adopted: list[str] = []
+
+    def adopt(ref: str, **_: Any) -> fleet_service.SpawnReceipt:
+        adopted.append(ref)
+        agent = FleetAgent(
+            id="agt_1",
+            project_id="prj_w",
+            label="coder-1",
+            role="coder",
+            pane_id="%1",
+            cwd=Path("/w"),
+            created_at=clock(),
+            session_id=ref,
+        )
+        return fleet_service.SpawnReceipt(agent=agent, asked_label=None, tmux_session="asq-w")
+
+    monkeypatch.setattr(adopt_service, "recent", lambda limit=10: listed)
+    monkeypatch.setattr(adopt_service, "adopt", adopt)
+    no_network["usage"] = lambda account: ClaudeUsage(available=True, fetched_at=clock())
+    frame = _signed_in(2, tmp_path, "tok-two")
+
+    async def go(pilot: Pilot[None]) -> tuple[list[bool], str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        view.query_one("#sessions-adopt", Button).press()
+        await settle_until(app, lambda: isinstance(app.screen, AdoptPicker))
+        options = app.screen.query_one("#adoptlist", OptionList)
+        disabled = [options.get_option_at_index(i).disabled for i in range(options.option_count)]
+        options.highlighted = 1
+        await pilot.press("enter")
+        await settle_until(
+            app, lambda: "adopted" in shown(view.query_one("#accounts-notice", Static))
+        )
+        return disabled, shown(view.query_one("#accounts-notice", Static))
+
+    disabled, notice = drive(go, overview=frame)
+    assert disabled == [True, False], "the held one cannot be picked"
+    assert adopted == ["bbbbbbbb-2"]
+    assert notice.startswith("✓ adopted bbbbbbbb as coder-1"), notice

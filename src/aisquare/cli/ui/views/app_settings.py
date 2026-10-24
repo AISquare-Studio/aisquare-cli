@@ -318,21 +318,21 @@ class AppSettingsView(Vertical):
     AppSettingsView #app-settings-tabs TabPane { height: 1fr; padding: 0; }
     AppSettingsView .tab-body { height: 1fr; }
     AppSettingsView .row { height: auto; margin-bottom: 1; }
-    AppSettingsView .row Label { width: 24; padding-top: 1; }
+    AppSettingsView .row Label { width: 1fr; max-width: 24; padding-top: 1; }
     AppSettingsView .row Select { width: 26; }
-    AppSettingsView .row .account-select { width: 40; margin-left: 2; }
     AppSettingsView .row Input { width: 26; }
     AppSettingsView .row Switch { margin-left: 1; }
-    AppSettingsView .row .worktree-label { width: 10; margin-left: 2; }
-    AppSettingsView .row .persona-label { width: 9; margin-left: 2; }
-    AppSettingsView .row .persona-select { width: 20; }
+    AppSettingsView .role { height: auto; margin-bottom: 1; }
+    AppSettingsView .role .row { margin-bottom: 0; }
+    AppSettingsView .role .row .role-field { padding-left: 2; }
+    AppSettingsView .row .account-select { width: 1fr; min-width: 26; max-width: 40; }
     AppSettingsView #settings-personas-unavailable { display: none; color: $warning; height: auto; }
     AppSettingsView #settings-personas-unavailable.shown { display: block; }
     AppSettingsView .section {
         margin-top: 1; height: 1; text-wrap: nowrap; text-overflow: ellipsis;
     }
     AppSettingsView .row.preference { margin-bottom: 0; }
-    AppSettingsView .row .preference-label { width: 32; }
+    AppSettingsView .row .preference-label { width: 32; max-width: 32; }
     AppSettingsView .about { color: $text-muted; height: auto; margin-bottom: 1; }
     AppSettingsView .advanced { margin-top: 1; padding: 0; border: none; }
     AppSettingsView .advanced > Contents { padding: 0 0 0 1; }
@@ -544,34 +544,41 @@ class AppSettingsView(Vertical):
         )
         for role in self._roles:
             settings = self.fleet.roles.get(role, FleetRoleSettings())
-            with Horizontal(classes="row"):
-                # Not markup: role names are free TOML keys, `qa[x]` showed as `qa` and
-                # `a[/b]c` raised MarkupError out of the render (review of #259, round 23).
-                yield Label(role, markup=False)
-                yield Select(
-                    permission_options(settings.permission_mode),
-                    value=settings.permission_mode,
-                    allow_blank=False,
-                    id=role_widget_id("perm", role),
-                )
-                yield Label("worktree", classes="worktree-label")
-                yield Switch(settings.worktree, id=role_widget_id("worktree", role))
-                yield Label("persona", classes="persona-label")
-                yield Select(
-                    persona_options(settings.persona, self._persona_names),
-                    value=settings.persona or NO_PERSONA,
-                    allow_blank=False,
-                    id=role_widget_id("persona", role),
-                    classes="persona-select",
-                )
-                bound = self._account_bindings.get(role)
-                yield Select(
-                    account_options(self._accounts, bound),
-                    value=bound or NO_ACCOUNT,
-                    allow_blank=False,
-                    id=role_widget_id("acct", role),
-                    classes="account-select",
-                )
+            # One label and one field a line, as every other row: on one line the role's
+            # four fields were 146 columns, cut at the tab's edge at any usual width, and
+            # at 80x24 the permission select's arrow went with them (#302; #44, m4).
+            with Vertical(classes="role"):
+                with Horizontal(classes="row"):
+                    # Not markup: role names are free TOML keys, `qa[x]` showed as `qa` and
+                    # `a[/b]c` raised MarkupError out of the render (review of #259, round 23).
+                    yield Label(role, markup=False)
+                    yield Select(
+                        permission_options(settings.permission_mode),
+                        value=settings.permission_mode,
+                        allow_blank=False,
+                        id=role_widget_id("perm", role),
+                    )
+                with Horizontal(classes="row"):
+                    yield Label("worktree", classes="role-field")
+                    yield Switch(settings.worktree, id=role_widget_id("worktree", role))
+                with Horizontal(classes="row"):
+                    yield Label("persona", classes="role-field")
+                    yield Select(
+                        persona_options(settings.persona, self._persona_names),
+                        value=settings.persona or NO_PERSONA,
+                        allow_blank=False,
+                        id=role_widget_id("persona", role),
+                    )
+                with Horizontal(classes="row"):
+                    yield Label("account", classes="role-field")
+                    bound = self._account_bindings.get(role)
+                    yield Select(
+                        account_options(self._accounts, bound),
+                        value=bound or NO_ACCOUNT,
+                        allow_blank=False,
+                        id=role_widget_id("acct", role),
+                        classes="account-select",
+                    )
 
     def _compose_fleet(self) -> ComposeResult:
         yield Static(section_title(*self.FLEET_SECTION), classes="section")

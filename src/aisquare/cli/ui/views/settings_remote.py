@@ -248,7 +248,9 @@ class RemoteSection(Vertical):
             yield Static("", id="settings-remote-qr")
             yield Static("", id="settings-remote-password")
         with Collapsible(title="Advanced", collapsed=True, id="settings-remote-advanced"):
-            with Horizontal(classes="remote-adv-row"):
+            # One above the other: side by side they ran two columns past the tab at 80x24
+            # once the opened fold brought the scrollbar (#44, m4).
+            with Vertical(classes="remote-adv-row"):
                 yield Button("Change ngrok token", id="settings-remote-change-token", compact=True)
                 yield Button("Regenerate password", id="settings-remote-regen", compact=True)
             with Vertical(classes="remote-adv-row"):

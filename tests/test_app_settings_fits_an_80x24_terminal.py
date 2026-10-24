@@ -9,17 +9,29 @@ line now, and the tab body takes the rest.
 Folded (#41), the Agent settings tab opens on the Captain box and the first of how
 launches pick an account, whole, with no scrolling; its *Advanced*, opened and scrolled to
 the roles, still shows as many whole role rows as main's single scroll did.
+
+And every row ends inside its tab (#44, m4): a label of 24 columns and a field of 26 ran
+to column 82 of a tab that ends at 79, so each select's arrow was cut off, and a role's
+four fields on one line ran to 146. The label column gives way now, and a role takes one
+line per field.
 """
 
 from __future__ import annotations
 
+from textual.containers import Horizontal
 from textual.geometry import Region
 from textual.pilot import Pilot
 from textual.widget import Widget
 from textual.widgets import Button, Collapsible, Static, Switch, TabbedContent
 
 from aisquare.cli.ui.sidebar import AppSettingsSelected
-from aisquare.cli.ui.views.app_settings import AGENT_ADVANCED, PREFERENCES_TAB, AppSettingsView
+from aisquare.cli.ui.views.app_settings import (
+    AGENT_ADVANCED,
+    AGENT_TAB,
+    PREFERENCES_TAB,
+    REMOTE_TAB,
+    AppSettingsView,
+)
 from aisquare.core.config import load_config
 from tests.test_ui_shell import drive, fleet_app, settle
 from tests.test_ui_shell import no_real_tmux as _no_real_tmux
@@ -47,8 +59,7 @@ def test_at_80x24_the_tabs_keep_mains_rows_and_the_preference_is_on_screen() -> 
         view = app.query_one(AppSettingsView)
         agent = app.query_one("#agent-settings")
         seen: dict[str, object] = {
-            # Rows, as main's measure is: a select past a row's right edge is #302's own
-            # layout at this width, the same in every row.
+            # Rows, as main's measure is; how far right each reaches is the test below.
             "in view": [
                 _whole(app.query_one(wid), agent.region)
                 for wid in ("#captain-toggle", "#captain-toggle-about")
@@ -86,3 +97,65 @@ def test_at_80x24_the_tabs_keep_mains_rows_and_the_preference_is_on_screen() -> 
     assert seen["switch"] is True and seen["hint"] is True, seen
     assert seen["scrolled"] == 0
     assert load_config().ui.always_show_project_path is True, "Save was reached and saved"
+
+
+def _shown(widget: Widget, body: Widget) -> bool:
+    """Whether ``widget`` is laid out in ``body``: neither it nor anything between them is
+    hidden, as a closed fold's contents are."""
+    node: Widget | None = widget
+    while node is not None and node is not body:
+        if not node.display:
+            return False
+        node = node.parent if isinstance(node.parent, Widget) else None
+    return node is body
+
+
+TABS = {
+    AGENT_TAB: "#agent-settings",
+    PREFERENCES_TAB: "#user-preferences",
+    REMOTE_TAB: "#remote-settings",
+}
+
+
+def test_at_80x24_every_row_of_every_tab_ends_inside_the_tab_folded_and_unfolded() -> None:
+    """Each row (a ``Horizontal``) of each tab, with its folds closed as it opens and then
+    all opened, is scrolled to and every part of it shown is inside the tab's body, left
+    to right: no select arrow, field or switch cut off at the edge (#44, m4)."""
+
+    async def go(pilot: Pilot[None]) -> tuple[dict[str, int], list[str]]:
+        app = fleet_app(pilot)
+        app.post_message(AppSettingsSelected())
+        await settle(app)
+        rows: dict[str, int] = {}
+        cut: list[str] = []
+        for tab, body_id in TABS.items():
+            app.query_one("#app-settings-tabs", TabbedContent).active = tab
+            await settle(app)
+            body = app.query_one(body_id)
+            for folded in (True, False):
+                if not folded:
+                    for fold in body.query(Collapsible):
+                        fold.collapsed = False
+                    await settle(app)
+                shown = [row for row in body.query(Horizontal) if _shown(row, body)]
+                rows[f"{tab} {'folded' if folded else 'unfolded'}"] = len(shown)
+                for row in shown:
+                    row.scroll_visible(animate=False, top=True)
+                    await settle(app)
+                    port = body.scrollable_content_region
+                    for part in row.children:
+                        if not part.display or part.region.area == 0:
+                            continue
+                        if part.region.x < port.x or part.region.right > port.right:
+                            name = part.id or f"{type(part).__name__} in {row.id or 'a row'}"
+                            cut.append(
+                                f"{tab}: {name} spans {part.region.x}..{part.region.right},"
+                                f" the tab {port.x}..{port.right}"
+                            )
+        return rows, cut
+
+    rows, cut = drive(go, size=(80, 24))
+    assert cut == []
+    # Measured, not vacuous: the folds hide most rows, and opened they are all there.
+    assert rows[f"{AGENT_TAB} unfolded"] > rows[f"{AGENT_TAB} folded"] >= 3, rows
+    assert rows[f"{PREFERENCES_TAB} folded"] >= 1 and rows[f"{REMOTE_TAB} unfolded"] >= 1, rows

@@ -393,8 +393,11 @@ def test_bracketed_labels_and_model_names_render_literally() -> None:
 CODEX_SLOT = 5
 
 
-def _codex_slot(home: Path) -> ClaudeAccount:
-    """A Codex slot whose one session recorded 42 % of its five-hour window (M9)."""
+def _codex_slot(
+    home: Path, *, percent: float = 42.0, minutes: int = 300, slot: int = CODEX_SLOT
+) -> ClaudeAccount:
+    """A Codex slot whose one session recorded 42 % of its five-hour window (M9): ``percent``
+    of one window of ``minutes``, its plan's only one, in ``slot``."""
     rollout = home / "sessions" / "2026" / "10" / "23" / "rollout-2026-10-23T15-52-00-a.jsonl"
     rollout.parent.mkdir(parents=True, exist_ok=True)
     resets = int((datetime.now(tz=UTC) + timedelta(hours=2)).timestamp())
@@ -409,8 +412,8 @@ def _codex_slot(home: Path) -> ClaudeAccount:
                 "rate_limits": {
                     "limit_id": "codex",
                     "primary": {
-                        "used_percent": 42.0,
-                        "window_minutes": 300,
+                        "used_percent": percent,
+                        "window_minutes": minutes,
                         "resets_at": resets,
                     },
                     "secondary": None,
@@ -419,7 +422,7 @@ def _codex_slot(home: Path) -> ClaudeAccount:
         },
     ]
     rollout.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
-    return ClaudeAccount(slot=CODEX_SLOT, config_dir=home, managed=True, agent="codex")
+    return ClaudeAccount(slot=slot, config_dir=home, managed=True, agent="codex")
 
 
 def _codex_turn(tmp_path: Path) -> AgentEvent:
@@ -479,6 +482,36 @@ def test_a_codex_rows_line_and_sidebar_figure_come_from_its_own_readings(tmp_pat
     # Control: Claude Code's summary alone — what the line read before — has no figure for it.
     alone = info_line(status, {CODEX_SLOT: "codex-1"}, claude.limit_by_slot).plain
     assert "codex-1  gpt-5.5-codex high" in alone and "42%" not in alone
+
+
+def test_a_codex_account_with_a_week_alone_counts_by_it_and_reads_limited_when_spent(
+    tmp_path: Path,
+) -> None:
+    """A Codex plan with one weekly window and no five-hour one (measured on a business plan)
+    is usable in the sidebar's Codex headroom by its week: counted in ``● Nx codex``, in the
+    dot's colour and as ``#slot·NN%`` (skipped before S6, as the CHANGELOG now says: review
+    r18 of #113, finding 8). A week it has spent is no room: the dot is the empty one and
+    its figure is 100 %, red."""
+    from aisquare.cli.ui.sidebar import TIMES, AgentHeadroom, headroom_dot, status_line_text
+    from aisquare.models import WEEK_WINDOW
+
+    week = 7 * 24 * 60
+    room = _codex_slot(tmp_path / "codex-5", percent=30.0, minutes=week)
+    spent = _codex_slot(tmp_path / "codex-6", percent=100.0, minutes=week, slot=6)
+    readings = {account.slot: accounts_service.usage(account) for account in (room, spent)}
+    assert [w.name for w in readings[room.slot].windows] == [WEEK_WINDOW], "its week alone"
+
+    both = accounts_service.fleet_headroom([room, spent], readings)
+    assert (both.usable, both.limit_by_slot) == (2, {room.slot: 30.0, spent.slot: 100.0})
+    assert both.percent_left == 35.0 and both.level == "fair"
+    line = status_line_text(True, None, more=[AgentHeadroom("codex", both)]).plain
+    assert f"● 2{TIMES} codex" in line, line
+    assert agent_row_text(_codex_status(_codex_turn(tmp_path)), 30.0).plain.endswith("#5·30%")
+
+    limited = accounts_service.fleet_headroom([spent], {spent.slot: readings[spent.slot]})
+    assert (limited.usable, limited.percent_left, limited.level) == (1, 0.0, "empty")
+    assert headroom_dot(limited) == ("💀", ""), "spent, not unread"
+    assert used_percent_text(limited.limit_by_slot[spent.slot]).style == RED
 
 
 def test_the_sidebar_and_the_info_line_show_a_codex_rows_figure_beside_claudes(

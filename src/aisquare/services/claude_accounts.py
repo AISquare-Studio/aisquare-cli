@@ -1625,7 +1625,8 @@ def fleet_headroom(
     The formula, as the help screen quotes it:
 
     - an account is **usable** when it is enabled and has a readable reading
-      (signed in, token accepted, the five-hour window read);
+      (signed in, token accepted, its shortest window read: Claude Code's five hours, the
+      week of a Codex plan with no five-hour window);
     - its share **left** is ``100 - max(session % used, week % used)``, over every window
       it has — the window that limits it decides, as it does for a pick
       (:func:`headroom_percent`);

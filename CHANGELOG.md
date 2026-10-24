@@ -36,9 +36,13 @@ adapter.**
   as the windows its plan has, and its telemetry and screen by its own readers.
 - The sidebar's `#slot·%` and the agent info line show the account's window
   that limits it: its five-hour figure, unless its week is fuller, which the
-  headroom pick already ranked it by. An agent with no automatic reviewer of
-  its own runs the built-in `workspace:auto` as `workspace:ask`, and its
-  spawn's receipt says so.
+  headroom pick already ranked it by. A Codex account whose plan has a weekly
+  window alone (a business plan) now counts in the sidebar's Codex headroom by
+  that week: in the `Nx codex` count, the dot's colour and its agents'
+  `#slot·NN%`. Before, it was left out of all three. A week it has spent is no
+  room: its dot is the empty one and its figure reads 100 %. An agent with no
+  automatic reviewer of its own runs the built-in `workspace:auto` as
+  `workspace:ask`, and its spawn's receipt says so.
 - The captain reads each agent's pane by that agent's own screens. On a Codex
   agent, `paste` and `press` at its folder-trust dialog are refused (*trust this
   folder first*): before, read with Claude Code's shapes, it showed no prompt,

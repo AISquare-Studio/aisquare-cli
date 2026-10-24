@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +16,11 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.core import code_index
+from aisquare.core import code_index, locking
 from aisquare.core.config import load_config, save_config
 from aisquare.services import code as code_service
+from aisquare.services import hooks as hooks_service
+from tests.conftest import REAL_START_CODE_INDEX
 
 SOURCE = """\
 def parse_duration(text):
@@ -53,15 +56,51 @@ def _json(runner: CliRunner, *args: str) -> dict[str, Any]:
     return loaded
 
 
-def test_every_query_before_an_index_says_how_to_build_one(
+def test_a_query_before_an_index_builds_one_unless_code_is_off(
     runner: CliRunner, checkout: Path
 ) -> None:
+    """Onboard's build is detached, so the first query may come before it: it builds the
+    index then. With ``[code] enabled`` off, every query says how to build one."""
+    config = load_config()
+    config.code.enabled = False
+    save_config(config)
     for args in (["find", "x"], ["refs", "x"], ["similar", "x"]):
         result = runner.invoke(app, ["--json", "code", *args])
         assert result.exit_code == 1
         error = json.loads(result.output)
         assert error["error"] == "no_index"
     assert _json(runner, "index", "--status")["exists"] is False
+
+    config.code.enabled = True
+    save_config(config)
+    found = _json(runner, "find", "parse_window")
+    assert [s["name"] for s in found["symbols"]] == ["parse_window"]
+    assert _json(runner, "index", "--status")["exists"] is True
+
+
+def test_a_query_while_the_first_build_runs_says_so(runner: CliRunner, checkout: Path) -> None:
+    """A first build writes in one transaction: until it commits, the file is there and
+    empty. A query then is not answered from it ("no definition"), and doctor says why."""
+    from aisquare.core import paths
+    from aisquare.services import diagnostics
+
+    paths.ensure_home()
+    project = code_service.project_here()
+    with code_index._connect(project.id, create=True):
+        pass  # the file as a first build leaves it before its commit
+    with locking.holding(code_index.code_dir(project.id) / "build.lock", wait_s=0):
+        result = runner.invoke(app, ["--json", "code", "find", "parse_window"])
+        row = diagnostics._check_code_index(checkout)
+        status = runner.invoke(app, ["code", "index", "--status"])
+    assert "building in the background" in status.output
+    assert result.exit_code == 1
+    assert json.loads(result.output)["error"] == "index_busy"
+    assert row.detail.startswith("building in the background")
+    assert not code_index.ready(project.id)
+
+    found = _json(runner, "find", "parse_window")
+    assert [s["name"] for s in found["symbols"]] == ["parse_window"], "built once it is free"
+    assert code_index.ready(project.id)
 
 
 def test_index_then_find_refs_and_similar_answer_in_json(runner: CliRunner, checkout: Path) -> None:
@@ -137,16 +176,64 @@ def test_the_doctor_row_is_ok_with_or_without_an_index(checkout: Path) -> None:
     paths.ensure_home()
     row = diagnostics._check_code_index(checkout)
     assert row.status.value == "ok" and "aisquare code index" in row.detail
+    lock = code_index.code_dir(code_service.project_here().id) / "build.lock"
+    lock.parent.mkdir(parents=True)
+    with locking.holding(lock, wait_s=0):
+        row = diagnostics._check_code_index(checkout)
+    assert row.status.value == "ok" and row.detail.startswith("building in the background")
     code_service.build_index()
     row = diagnostics._check_code_index(checkout)
     assert row.status.value == "ok" and row.detail.startswith("4 symbols in 1 files (ast-")
+    assert "refresh is running" not in row.detail
+    with locking.holding(lock, wait_s=0):
+        row = diagnostics._check_code_index(checkout)
+    assert row.detail.endswith("; a refresh is running")
 
 
-def test_onboard_builds_the_index_unless_code_is_off(runner: CliRunner, checkout: Path) -> None:
+SLOW_BUILD_S = 6.0
+
+
+def test_onboard_returns_while_a_slow_index_build_runs(
+    runner: CliRunner, checkout: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#327 built the index inline: an onboard (and ``init``) of a large checkout waited
+    for a full index, and every test that onboarded paid for one. The build is started
+    detached, as the session-start refresh is, and the onboard returns at once."""
+    monkeypatch.setattr(hooks_service, "start_code_index", REAL_START_CODE_INDEX)
+    started: list[tuple[list[str], Path | None]] = []
+    monkeypatch.setattr(
+        hooks_service, "_detach", lambda argv, *, cwd=None: started.append((argv, cwd))
+    )
+
+    def slow_build(*_args: object, **_kwargs: object) -> code_index.BuildReport:
+        time.sleep(SLOW_BUILD_S)
+        raise AssertionError("onboard built the index inline")
+
+    monkeypatch.setattr(code_index, "build", slow_build)
+
+    began = time.monotonic()
+    result = runner.invoke(app, ["--json", "project", "onboard"])
+    took = time.monotonic() - began
+
+    assert result.exit_code == 0, result.output
+    assert took < SLOW_BUILD_S / 2, f"onboard took {took:.1f}s with a {SLOW_BUILD_S}s build"
+    assert json.loads(result.output)["code_index"].startswith("building in the background")
+    [(argv, cwd)] = started
+    assert argv[-3:] == ["--quiet", "code", "index"] and cwd == checkout.resolve()
+
+
+def test_onboard_starts_the_index_unless_code_is_off(
+    runner: CliRunner, checkout: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[bool] = []
+    monkeypatch.setattr(
+        hooks_service, "start_code_index", lambda _project, *, full=False: started.append(full)
+    )
     result = runner.invoke(app, ["--json", "project", "onboard"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["code_index"].startswith("4 symbols in 1 files")
-    assert code_index.exists(code_service.project_here().id)
+    assert json.loads(result.output)["code_index"].startswith("building in the background")
+    runner.invoke(app, ["--json", "project", "onboard", "--refresh"])
+    assert started == [False, True], "--refresh rebuilds from nothing"
 
     config = load_config()
     config.code.enabled = False

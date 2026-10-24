@@ -447,10 +447,24 @@ def _refresh_code_index(project: ProjectInfo) -> None:
                 return
         except FileNotFoundError:
             pass
-        stamp.touch()
-        _detach(selfcli.argv_for(["--quiet", "code", "index"]), cwd=project.root)
+        start_code_index(project)
     except Exception:  # an index is optional; a session start never fails for it
         return
+
+
+def start_code_index(project: ProjectInfo, *, full: bool = False) -> None:
+    """Start ``aisquare code index`` (``--full``: from nothing) detached in ``project``'s root.
+
+    How ``onboard`` and ``init`` build the index too, never inline: a first index of a
+    large checkout takes minutes, and the onboard returns at once (``doctor`` says while it
+    builds). Touches the refresh stamp, so a session start right after starts no second
+    build. Raises ``OSError`` when the worker cannot be started.
+    """
+    stamp = code_index.code_dir(project.id) / "refreshed"
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.touch()
+    argv = ["--quiet", "code", "index", *(["--full"] if full else [])]
+    _detach(selfcli.argv_for(argv), cwd=project.root)
 
 
 def _detach(argv: list[str], *, cwd: Path | None = None) -> None:

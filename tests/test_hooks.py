@@ -511,9 +511,10 @@ def test_the_directive_names_the_code_commands_only_where_there_is_an_index(
 def test_a_session_start_refreshes_the_index_detached_and_at_most_once_a_minute(
     work_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tests.conftest import REAL_REFRESH_CODE_INDEX
+    from tests.conftest import REAL_REFRESH_CODE_INDEX, REAL_START_CODE_INDEX
 
     started: list[tuple[list[str], Path | None]] = []
+    monkeypatch.setattr(hooks_service, "start_code_index", REAL_START_CODE_INDEX)
     monkeypatch.setattr(
         hooks_service, "_detach", lambda argv, *, cwd=None: started.append((argv, cwd))
     )

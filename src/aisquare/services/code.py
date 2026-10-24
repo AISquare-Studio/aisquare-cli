@@ -69,9 +69,14 @@ def index_status(project: ProjectInfo | None = None) -> code_index.IndexStatus:
 
 
 def _indexed(project: ProjectInfo | None) -> ProjectInfo:
+    """The project to ask, its index built first when there is none yet and ``[code]
+    enabled`` (onboard's own build is detached, so a first query may come before it)."""
     target = project or project_here()
-    if not code_index.exists(target.id):
+    if code_index.ready(target.id):
+        return target
+    if not settings().enabled:
         raise CodeIndexError(f"no code index for {target.root} yet — build it: {INDEX_COMMAND}")
+    build_index(target)
     return target
 
 

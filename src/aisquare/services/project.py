@@ -1025,21 +1025,20 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
 
 
 def _ensure_code_index(project: ProjectInfo, *, refresh: bool) -> str | None:
-    """Build or refresh the symbol index (#285), as one line for the report; ``None`` when
-    ``[code] enabled`` is off. Incremental unless ``refresh``; never fails the onboard."""
+    """Start building or refreshing the symbol index (#285) detached, as one line for the
+    report; ``None`` when ``[code] enabled`` is off. Never inline: a first index of a large
+    checkout takes minutes, and the onboard (and ``init``) returns at once. Incremental
+    unless ``refresh``; never fails the onboard."""
     from aisquare.services import code as code_service  # lazy: onboard imports this module
+    from aisquare.services import hooks as hooks_service  # lazy: hooks imports this module
 
     if not code_service.settings().enabled:
         return None
     try:
-        built = code_service.build_index(project, full=refresh)
+        hooks_service.start_code_index(project, full=refresh)
     except Exception as exc:  # an index is optional; the onboard is not
-        return f"not built ({exc}) — retry with `aisquare code index`"
-    line = f"{built.symbols} symbols in {built.files} files ({built.seconds:.1f}s)"
-    if built.not_indexed:
-        missing = ", ".join(f"{lang} {n}" for lang, n in sorted(built.not_indexed.items()))
-        line += f"; not indexed: {missing}"
-    return line
+        return f"not started ({exc}) — build it with `aisquare code index`"
+    return "building in the background — `aisquare code index --status` says when it is ready"
 
 
 def snapshot_settings() -> SnapshotSettings:

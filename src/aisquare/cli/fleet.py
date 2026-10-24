@@ -420,6 +420,14 @@ def switch(
         str | None,
         typer.Option("--reason", help="Why (recorded on the board), e.g. 'session limit'."),
     ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Move an agent the usage-limit hand-over moved minutes ago (refused "
+            "without it: one switch per limit).",
+        ),
+    ] = False,
     project: ProjectRef = None,
     as_session: SessionRef = None,
 ) -> None:
@@ -429,7 +437,9 @@ def switch(
     target account. With its transcript on disk the replacement resumes the
     same session (`claude --resume <transcript>`); otherwise, or with --fresh,
     it starts new with a hand-off prompt from the board. The manager runs this
-    with `--as <its session>` when an agent shows `⏳ limited`.
+    with `--as <its session>` when the usage-limit hand-over could not
+    (`handover_failed`). An agent that hand-over moved minutes ago is refused
+    without --force: one switch per limit.
     """
     target = _project(project)
     try:
@@ -441,6 +451,7 @@ def switch(
             reason=reason,
             spawned_by=as_session or "user",
             ack_wait=fleet_service.settings().prompt_ack_seconds,
+            force=force,
         )
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)

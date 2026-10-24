@@ -3215,7 +3215,9 @@ def spawn(
     # ladder names and the machine does not have refuses the spawn now, with
     # the rung named, rather than starting a window that dies on its first line.
     try:
-        choice = claude_accounts_service.choose(account, role=role, project=project)
+        # The family the agent will run, for the pick's per-family weeks (#277).
+        family = harness.launch_family(role, [*role_config.extra_args, *agent_args])
+        choice = claude_accounts_service.choose(account, role=role, project=project, family=family)
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc
 
@@ -6967,8 +6969,15 @@ def switch(
     agent_id: str | None = None,
     before_stop: Callable[[], None] | None = None,
     ack_wait: float = 0.0,
+    force: bool = False,
 ) -> SwitchReceipt:
     """Move a running agent to another Claude account — the hand-over of #146.
+
+    One switch per limit (#277): a row the automatic hand-over spawned less than
+    ``hooks.HANDOVER_COOLDOWN`` ago is refused without ``force`` — the hand-over has
+    just moved it, and a manager woken by the same limit moved the replacement again.
+    The pick knows the agent's model family (its session's model), so an account
+    whose week for that family is spent is no target.
 
     The target is ``to`` (a slot, alias or email) or, without it, HEADROOM
     FIRST among the enabled, signed-in accounts that are NOT the one the agent
@@ -7035,6 +7044,11 @@ def switch(
             # own row, and its take-back wrote a stale state over the second's mark
             # (review of #163, round 2).
             raise _in_hand_over(project, "switch", label)
+        if not (automatic or force):
+            from aisquare.services import hooks  # lazy, as `_team()`: kept off the import path
+
+            if (refusal := hooks.fresh_replacement_refusal(agent, now=_now())) is not None:
+                raise FleetError(refusal)  # one switch per limit (#277)
         # `spawn`'s refusal for the task (done, dropped, gone from the board), asked
         # before anything is stopped, as `restart` asks it. After the stop it left the
         # agent stopped and nothing started: a row spawned before rule 3 still names
@@ -7072,6 +7086,7 @@ def switch(
             project=project,
             exclude=() if current is None else (current,),
             automatic=automatic,
+            family=harness.model_family(session.model if session is not None else None),
         )
     except claude_accounts_service.NoSuchAccount as exc:
         raise FleetError(str(exc)) from exc

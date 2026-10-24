@@ -489,12 +489,15 @@ def test_the_wake_kinds_are_the_plans() -> None:
         "result",
         "question",
         "agent_exited",
-        # #146: an agent parked on a usage limit, and the hand-over that moved one.
+        # #146: an agent parked on a usage limit. Since #277 a hand-over that moved one
+        # (`switched`) is news, not a decision, and one that could not is `handover_failed`;
+        # a limit the hand-over is already moving is `limited_handing_over`, no wake kind.
         "limited",
-        "switched",
+        "handover_failed",
         # P0-W1a (#122): an agent whose first message never started a turn.
         "prompt_unsent",
     } == team_service.MANAGER_WAKE_KINDS
+    assert team_service.LIMITED_HANDING_OVER not in team_service.MANAGER_WAKE_KINDS
 
 
 @pytest.mark.parametrize("kind", sorted(team_service.MANAGER_WAKE_KINDS))

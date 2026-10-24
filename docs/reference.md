@@ -13,7 +13,7 @@ removes exactly them):
 | `Stop` | mark the session waiting; renew its task leases |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |
-| `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and wakes the manager, and with `[accounts] on_limit = "switch"` a fleet agent is handed to another account ([accounts](orchestration.md#several-accounts-one-team)); any other error marks it `waiting`, with a feed line naming the error |
+| `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and remembers the limit on the account until that reset, so no pick by headroom sends an agent back to it before then; with `[accounts] on_limit = "switch"` a fleet agent is handed to another account, the line is a `limited_handing_over` event that wakes nobody, and a hand-over that cannot go ahead posts `handover_failed`, which wakes the manager; without a hand-over coming, `limited` wakes it ([accounts](orchestration.md#several-accounts-one-team)); any other error marks it `waiting`, with a feed line naming the error |
 
 `SessionStart` and `UserPromptSubmit` get `"timeout": 120` (seconds): Claude
 Code stops a hook after 60 seconds by default, and these two can wait that
@@ -128,6 +128,13 @@ list` prints every key. The ones that need more than their name:
 
 | Key | Default | What it does |
 | --- | --- | --- |
+| `accounts.pick` | `headroom` | how a launch picks an account when nothing names one: `headroom` (the first under `switch_at`) or `default` (the machine default) |
+| `accounts.switch_at` | `85` | percent USED of the fuller window (and, for an agent of that family, its family week) at which an account counts as full |
+| `accounts.prefer` | `priority` | of the accounts under `switch_at`, `priority` takes the first in order; `reset-soonest` takes the one whose week resets first |
+| `accounts.on_limit` | `switch` | on a usage limit, `switch` hands a fleet agent to another account; `wait` leaves it parked |
+| `accounts.wait_if_reset_within_minutes` | `15` | with `switch`, wait instead when the limit lifts this soon |
+| `accounts.share_trust` | `true` | copy a folder's trust into the account a launch runs on |
+| `accounts.share_settings` | `false` | keep every managed account's `settings.json` a link to the plain claude's |
 | `capture.enabled` | `true` | `false`: the `UserPromptSubmit` hook stores no prompt (`aisquare log` stays empty) and spools none for Explainability. The turn's metrics row (no text), the teammate delta and the CI experiment, if you turned it on, carry on. A config that cannot be read records no prompt either, with one line on stderr. |
 | `fleet.first_prompt` | `argv` | how an agent's first message reaches it: `argv` gives a Claude Code agent its message on its command line and types it for any other binary; `type` types it for every agent ([fleet](fleet.md#the-first-message)). |
 | `fleet.prompt_ack_seconds` | `45` | how long `fleet spawn`, `restart` and `switch` wait for the agent's first turn to start, and how long a listing gives it before the agent reads `attention`: "first prompt not taken". |

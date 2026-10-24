@@ -140,14 +140,28 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
         "question",
         "agent_exited",
         # #146: an agent parked on a usage limit needs a decision (switch it, or
-        # wait), and the hand-over that moved one is news the manager acts on.
+        # wait) — unless the automatic hand-over is moving it, which is its own kind,
+        # `LIMITED_HANDING_OVER`, and no wake (#277). A hand-over that moved one is
+        # news, not a decision: `switched` arrives with the next delta. One that could
+        # not is the manager's to act on: `handover_failed`.
         "limited",
-        "switched",
+        "handover_failed",
         # P0-W1a (#122): an agent whose first message never started a turn sits idle
         # until someone tells it again or restarts it.
         "prompt_unsent",
     }
 )
+
+#: The kind of the usage-limit line when the automatic hand-over is about to move the agent
+#: (``on_limit = "switch"``): the manager has nothing to do, so it is no wake kind. Woken by
+#: a ``limited`` line, a manager following its cycle switched the agent too — once the
+#: hand-over had finished, it moved the replacement again (#277). Its own KIND, not a
+#: phrase in the text: a reworded line must not change who is woken (review of #304).
+LIMITED_HANDING_OVER = "limited_handing_over"
+#: Every kind a usage-limit line is written as, for the readers that show one.
+LIMITED_KINDS: frozenset[str] = frozenset({"limited", LIMITED_HANDING_OVER})
+#: What that line says of the hand-over.
+HANDING_OVER_SAID = "moving it to another account automatically"
 
 #: Event kinds written for the HUMAN board only: the 🔔 transition and a Claude
 #: Code notification's feed line (#153). They never reach a teammate's prompt
@@ -2476,6 +2490,7 @@ def hook_stop_failure(
     error: str | None,
     message: str | None,
     details: str | None,
+    handing_over: bool = False,
 ) -> TurnFailure | None:
     """The turn ended on an API error — Claude Code's ``StopFailure`` (#146).
 
@@ -2494,6 +2509,12 @@ def hook_stop_failure(
     ``waiting``, unless ``fleet switch`` has marked it :data:`HANDOVER_STATE` —
     with a ``turn_failed`` feed line naming it, so the board does not show a
     session as mid-turn for thirty minutes because its turn died.
+
+    ``handing_over`` is the hook's decision (``services.hooks.turn_failed``) that the
+    automatic hand-over will move this agent: the ``limited`` line then says so
+    (:data:`HANDING_OVER_SAID`) instead of naming ``fleet switch``, and no manager is
+    nudged — one limit, one switch (#277). A hand-over that then fails says so with
+    ``handover_failed`` (:func:`hook_handover_failed`), which does wake it.
     """
     if not orchestrator.team_enabled():
         return None
@@ -2534,24 +2555,27 @@ def hook_stop_failure(
             # The row just read names the manager's project (`_nudge_target`'s rule); asked
             # again there, the same row was read twice (review of #259, round 25, 8/10).
             manager = (
-                agent.project_id
+                None
+                if handing_over
+                else agent.project_id
                 if agent is not None
                 else _nudge_target(store, None, session.project_id)
             )
             _emit(
                 store,
                 session.project_id,
-                "limited",
+                LIMITED_HANDING_OVER if handing_over else "limited",
                 _limited_text(
                     label,
                     text,
                     notice,
                     project=store.get_project(agent.project_id) if agent is not None else None,
+                    handing_over=handing_over,
                 ),
                 session_id=session.id,
             )
         refreshed = store.get_session(session.id) or session
-    if manager is not None:  # not already limited
+    if manager is not None:  # not already limited, and no hand-over coming
         # After the row says limited, never before, and outside the `with`
         # (it opens its own connection): path 2 types into a WAITING manager;
         # a working one reads the event on its next delta or its own Stop. The manager of
@@ -2603,9 +2627,11 @@ def _limited_text(
     notice: claude_accounts_core.LimitNotice | None,
     *,
     project: ProjectInfo | None,
+    handing_over: bool = False,
 ) -> str:
     """The feed line: what stopped, when it lifts, and the one command that moves it — for a
-    fleet agent, whose ``project`` the command names (review of #259, round 21)."""
+    fleet agent, whose ``project`` the command names (review of #259, round 21). With the
+    automatic hand-over coming (``handing_over``), no command: the fleet moves it (#277)."""
     if notice is None:
         head = f"{label} is rate limited: {message}"
     else:
@@ -2613,12 +2639,36 @@ def _limited_text(
         if notice.resets_at is not None:
             # The one formatter (#152; review of #205, finding 9).
             head += f" · resets {claude_accounts_core.format_reset(notice.resets_at, now=_now())}"
-    if project is not None:
+    if handing_over:
+        head += f' — {HANDING_OVER_SAID} (`on_limit = "switch"`)'
+    elif project is not None:
         head += (
             f" — `{project_service.fleet_command('switch', project, label)}` moves it to the "
             "account with the most headroom (or wait for the reset)"
         )
     return head
+
+
+def hook_handover_failed(
+    project_id: str, text: str, *, session_id: str | None = None, label: str | None = None
+) -> None:
+    """The automatic hand-over could not move a limited agent: a ``handover_failed`` event
+    (a wake kind) naming ``fleet switch`` or the reset, and a waiting manager nudged, as a
+    ``limited`` line nudged it before the hand-over took that over (#277)."""
+    if not orchestrator.team_enabled():
+        return
+    with store_session() as store:
+        _emit(store, project_id, "handover_failed", text, session_id=session_id)
+        session = store.get_session(session_id) if session_id is not None else None
+        agent = store.fleet_agent_for_session(session_id) if session_id is not None else None
+        manager = (
+            agent.project_id
+            if agent is not None
+            else _nudge_target(store, None, session.project_id if session else project_id)
+        )
+    if manager is not None:
+        who = label or (short_id(session_id) if session_id else "an agent")
+        _nudge_manager(manager, reason=f"{who}: usage-limit hand-over failed", board=project_id)
 
 
 def hook_note(project_id: str, text: str, *, session_id: str | None = None) -> None:

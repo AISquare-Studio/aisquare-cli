@@ -867,15 +867,47 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   --live` ask the endpoint now. The first account in priority order under `switch_at`
   (85 % by default) is taken — or, when all are over it, the one with the most
   left. An account counts as full as the fuller of its two windows, so one
-  that has spent its week is not taken for an empty five hours. Usage is the
+  that has spent its week is not taken for an empty five hours. The endpoint's
+  per-family weeks count too, for an agent of that family: Claude Code's Opus
+  and Sonnet limits apply only to requests to that model family, so an account
+  whose Opus week is spent is no room for an Opus agent and still is for a
+  Sonnet one (the family is the session's model, or for a spawn its `--model`
+  or the role's ladder). A window the endpoint marks locked reads 100 % used.
+  `[accounts] prefer = "reset-soonest"` (*under the line, prefer* in App
+  settings) takes, of the accounts under `switch_at`, the one whose week resets
+  first, so an allowance is spent before it lapses; `priority`, the default,
+  takes the first in order (every `[accounts]` key:
+  [Configuration keys](reference.md#configuration-keys)). `accounts usage` shows
+  each week's reset and each family week beside it. Usage is the
   same best-effort endpoint as the bars, so an
   account that does not answer is skipped with a note and, when none answers,
   the machine default decides as before. Each reading is kept: the row's bar
   gains *≈ 40 min to the limit* once two readings of the same window exist.
+- **Limits are remembered.** Every usage limit an agent hits leaves a mark on
+  the account it was on until the reset the message named (*weekly limit ·
+  resets Mon 12:00am*), and every pick by headroom — a spawn with `pick =
+  "headroom"`, the automatic hand-over, a `fleet switch` without `--to` —
+  skips that account until then, saying so: *account 3 skipped — weekly
+  limit until Mon 00:00 (in 2d 4h), refused 10:42*. A hand-over or a `fleet
+  switch` without `--to` never takes a marked account, its fallback rungs (the
+  binding, the project default, the machine default) included: with nowhere
+  else to go it refuses, and `handover_failed` says when the agent's own limit
+  resets. A launch's choices are not second-guessed: `--account`, a role
+  binding, a project default and `pick = "default"` still name the account, and
+  when every account carries a mark a spawn falls to the machine default as it
+  does when no usage can be read. `--to` always names the account. A session or weekly limit
+  closes the account to every agent; an Opus or Sonnet limit to that family's.
+  The endpoint may read an account under the line while it refuses, so the
+  refusal is believed over the reading. A live reading that shows a family
+  week spent leaves the same mark (*read* instead of *refused*), because the
+  cache a spawn picks from keeps only the two shared windows.
 - **A usage limit.** When an agent's turn ends on one (Claude Code's
   `StopFailure` hook, `You've hit your session limit · resets 12:30am`), its
-  row turns **⏳ limited** with the reset time, a `limited` line goes on the
-  board naming `aisquare fleet switch <label>`, and the manager is woken. Claude
+  row turns **⏳ limited** with the reset time and a `limited` line goes on the
+  board. When the automatic hand-over (below) will move it, the line is a
+  `limited_handing_over` event that says *moving it to another account
+  automatically* and wakes nobody; otherwise it
+  names `aisquare fleet switch <label>` and the manager is woken. Claude
   Code's own wait-and-continue at the reset is left running. `fleet switch`
   stops the agent as `fleet stop` would and starts it again under the same
   label and task, in its worktree as it stands (the branch it was on, any
@@ -902,7 +934,12 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   is there to take it (with one account, `switch` is `wait`), in a worker
   detached from the agent's
   own hook; a hand-over that finds no headroom leaves the agent parked, its
-  own wait intact, and says so on the board. One that goes ahead says on the
+  own wait intact, and says so with a `handover_failed` event naming `fleet
+  switch` or the reset — that event, not `limited`, wakes the manager. One
+  limit moves an agent once: `fleet switch` refuses a replacement the hand-over
+  started within the last ten minutes (*moved 3 min ago by the usage-limit
+  hand-over; `--force` moves it again*), and a successful `switched` is news on
+  the next delta, not a wake-up. One that goes ahead says on the
   board what it could not do (a first line it could not type, claims it could
   not move) in a note beside `switched`, and `switched` itself says whether
   the replacement's first line reached it. `doctor` lists parked agents; `doctor --live` warns when every account
@@ -968,6 +1005,7 @@ aisquare accounts move 3 top           # up · down · top · bottom
 aisquare accounts disable 3            # out of automatic selection; enable puts it back
 aisquare config set accounts.pick default      # spawns stay on the machine default (headroom is the default)
 aisquare config set accounts.on_limit wait     # an agent that hits its limit stays parked (switch is the default)
+aisquare config set accounts.prefer reset-soonest # under the line, the week that ends first (priority is the default)
 aisquare accounts trust                # trust this folder on every account (its repository, in a checkout)
 aisquare accounts trust --sync         # every folder any account trusts, trusted on all of them
 aisquare config set accounts.share_trust false # launches stop copying a folder's trust (on by default)
@@ -981,6 +1019,7 @@ aisquare fleet restart manager         # an exited (or stuck) agent, back under 
                                        # binary, permission mode, arguments and account (#144)
 aisquare fleet restart coder-auth --permission-mode acceptEdits   # …another mode; later restarts keep it
 aisquare fleet switch coder-auth --to personal --fresh   # a named account; a new session + hand-off
+aisquare fleet switch coder-auth --force # again, minutes after the usage-limit hand-over moved it
 ```
 
 `add` and `run` hand the terminal to Claude Code, so they have no `--json`

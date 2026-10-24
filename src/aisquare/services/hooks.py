@@ -19,14 +19,17 @@ default agent does.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aisquare.core import insights, paths, selfcli
+from aisquare.core import claude_accounts as claude_accounts_core
+from aisquare.core import insights, orchestrator, paths, selfcli
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import spawn as spawn_core
 from aisquare.core.config import load_config
@@ -34,7 +37,7 @@ from aisquare.core.injection import build_block
 from aisquare.core.store import store_session
 from aisquare.core.version import DISTRIBUTION, __version__
 from aisquare.core.workspace import active_project
-from aisquare.models import ProjectInfo
+from aisquare.models import FleetAgent, ProjectInfo, TeamSession
 from aisquare.services import auto_mode, ci_augment, install_route
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
@@ -261,35 +264,80 @@ def turn_failed(
     :func:`hand_over`), and the hook returns at once. A hand-over that cannot
     find headroom leaves the agent limited, its own wait intact, and says so on
     the board — which is the ``wait`` behaviour, and correct.
+
+    One switch per limit (#277): whether the hand-over will run is decided BEFORE the
+    board write (:func:`_plan_hand_over`), so the ``limited`` line can say the fleet is
+    moving the agent and wake no manager; woken, a manager following its cycle switched
+    the replacement again. Every ``rate_limit`` also leaves a limit mark on the account
+    the agent was on (``claude_accounts.remember_limit``), so no pick sends an agent back
+    to it before the reset it named.
     """
     if session_id is None:
         return
+    plan = _plan_hand_over(session_id, error=error, message=message)
     try:
         failure = team_service.hook_stop_failure(
-            session_id, error=error, message=message, details=details
+            session_id,
+            error=error,
+            message=message,
+            details=details,
+            handing_over=plan is not None and plan.go,
         )
     finally:
         metrics_service.close_turn(session_id)
-    if failure is not None and failure.limited and not failure.already_limited:
-        # A re-fire for the same window (Claude Code does that) is not a second
-        # hand-over: the first worker is at work, or has already moved the agent.
-        _hand_over_if_configured(failure)
+    # A re-fire for the same window (Claude Code does that) is not a second
+    # hand-over: the first worker is at work, or has already moved the agent.
+    if plan is not None and failure is not None and failure.limited and not failure.already_limited:
+        _hand_over_if_configured(failure, plan)
 
 
-def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
-    settings = claude_accounts_service.accounts_settings()
-    if settings.on_limit != "switch":
-        return
-    session = failure.session
+@dataclass(frozen=True)
+class _HandOverPlan:
+    """What :func:`_plan_hand_over` decided for one ``rate_limit``: ``go`` starts the worker;
+    otherwise ``wait_note`` (a reset within the wait window) goes on the board."""
+
+    agent: FleetAgent
+    go: bool
+    wait_note: str | None = None
+
+
+def _plan_hand_over(
+    session_id: str, *, error: str | None, message: str | None
+) -> _HandOverPlan | None:
+    """Whether a ``rate_limit`` on ``session_id`` will be handed over — asked before the board
+    write, so the ``limited`` line can say so — and the limit mark it leaves either way.
+
+    ``None`` for anything that is not a fresh limit on a fleet agent: another error, a
+    session already ``limited`` or mid-hand-over (a re-fire), a hand-typed session (the
+    operator's to move). A plan with ``go`` False is ``on_limit = "wait"``, a reset close
+    enough to wait for, or no other account to go to.
+    """
+    if (error or "").strip() != "rate_limit" or not orchestrator.team_enabled():
+        return None
+    notice = claude_accounts_core.parse_limit_notice(message, now=datetime.now(tz=UTC))
     with store_session() as store:
+        session = store.get_session(session_id)
+        if session is None:
+            return None
         # The row's own project, not the session's: under AISQUARE_TEAM_HUB the session is on
         # the hub's board and the row is in its spawn's project, and asked by the board, no
         # limited agent was ever handed over (review of #259, round 23).
         agent = store.fleet_agent_for_session(session.id)
         project = store.get_project(agent.project_id) if agent is not None else None
+    # As `fleet.switch` reads where the agent is, and Remote's scan asks the same.
+    leaving = claude_accounts_service.leaving_slot(
+        agent.account_slot if agent is not None else None, session.account
+    )
+    if notice is not None:
+        claude_accounts_service.remember_limit(leaving, notice.window, notice.resets_at)
     if agent is None or project is None:
-        return  # a hand-typed session is the operator's to move
-    resets_at = failure.notice.resets_at if failure.notice is not None else None
+        return None  # a hand-typed session is the operator's to move
+    if session.state in ("limited", team_service.HANDOVER_STATE):
+        return None  # a re-fire: `hook_stop_failure` writes nothing new either
+    settings = claude_accounts_service.accounts_settings()
+    if settings.on_limit != "switch":
+        return _HandOverPlan(agent, go=False)
+    resets_at = notice.resets_at if notice is not None else None
     if resets_at is not None:
         wait = timedelta(minutes=settings.wait_if_reset_within_minutes)
         if resets_at - datetime.now(tz=UTC) <= wait:
@@ -299,18 +347,23 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
             # of it changes a wait (review of #259, round 16). The note is true on one
             # account too — `on_limit = "switch"` is what is not done — and comes only with
             # a limit this close to its reset.
-            team_service.hook_note(
-                session.project_id,
-                f"{agent.label}: usage limit lifts within {settings.wait_if_reset_within_minutes} "
-                "min — waiting for the reset instead of switching",
-                session_id=session.id,
+            return _HandOverPlan(
+                agent,
+                go=False,
+                wait_note=f"{agent.label}: usage limit lifts within "
+                f"{settings.wait_if_reset_within_minutes} min — waiting for the reset instead "
+                "of switching",
             )
-            return
-    # As `fleet.switch` reads where the agent is, and Remote's scan asks the same.
-    leaving = claude_accounts_service.leaving_slot(agent.account_slot, session.account)
-    if not claude_accounts_service.somewhere_to_hand_over(leaving):
-        # One account: `wait`, with no board note on every limit that it is. A registry
-        # that cannot be read is no answer, and goes on to the worker, which says so.
+    # One account: `wait`, with no board note on every limit that it is. A registry
+    # that cannot be read is no answer, and goes on to the worker, which says so.
+    return _HandOverPlan(agent, go=claude_accounts_service.somewhere_to_hand_over(leaving))
+
+
+def _hand_over_if_configured(failure: team_service.TurnFailure, plan: _HandOverPlan) -> None:
+    session = failure.session
+    if plan.wait_note is not None:
+        team_service.hook_note(session.project_id, plan.wait_note, session_id=session.id)
+    if not plan.go:
         return
     window = failure.notice.window if failure.notice is not None else "usage"
     argv = selfcli.argv_for(
@@ -319,10 +372,11 @@ def _hand_over_if_configured(failure: team_service.TurnFailure) -> None:
     try:
         _detach(argv)
     except OSError as exc:
-        team_service.hook_note(
+        team_service.hook_handover_failed(
             session.project_id,
-            f"{agent.label}: not switched — could not start the hand-over worker ({exc})",
+            f"{plan.agent.label}: not switched — could not start the hand-over worker ({exc})",
             session_id=session.id,
+            label=plan.agent.label,
         )
 
 
@@ -357,6 +411,32 @@ HANDOVER_SPAWNER = "usage-limit"
 HANDOVER_COOLDOWN = timedelta(minutes=10)
 """How soon after a ``switched`` event the same label may be handed over again by the
 automatic path: a cap on the ping-pong a wrong reading could otherwise drive."""
+
+
+def _own_reset(session: TeamSession) -> str:
+    """``; its own limit resets in 2d 4h (Mon 00:00)`` — the other answer to a hand-over that
+    failed, beside the ``fleet switch`` it names (#277); ``""`` when the limit named none."""
+    if session.limit_resets_at is None:
+        return ""
+    return f"; its own limit resets {claude_accounts_core.format_reset(session.limit_resets_at)}"
+
+
+def fresh_replacement_refusal(agent: FleetAgent, *, now: datetime | None = None) -> str | None:
+    """Why ``fleet switch`` refuses ``agent`` without ``--force``, or ``None`` (#277): it is a
+    replacement the automatic hand-over spawned less than :data:`HANDOVER_COOLDOWN` ago.
+
+    One limit, one switch: a manager woken by the same limit used to switch the replacement
+    the hand-over had just started. Here, beside the cooldown it shares with the automatic
+    path's own brake (:func:`hand_over`), rather than in ``services/fleet.py``.
+    """
+    since = (now or datetime.now(tz=UTC)) - agent.created_at
+    if agent.spawned_by != HANDOVER_SPAWNER or since >= HANDOVER_COOLDOWN:
+        return None
+    minutes = max(1, int(since.total_seconds() // 60))
+    return (
+        f"{agent.label!r} was moved {minutes} min ago by the usage-limit hand-over; "
+        "`--force` moves it again"
+    )
 
 
 def hand_over(session_id: str, *, reason: str | None = None) -> None:
@@ -402,11 +482,14 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
     # was spawned by one: its age is the cooldown clock, no event lookup needed.
     since = datetime.now(tz=UTC) - agent.created_at
     if agent.spawned_by == HANDOVER_SPAWNER and since < HANDOVER_COOLDOWN:
-        team_service.hook_note(
+        team_service.hook_handover_failed(
             session.project_id,
             f"{agent.label}: not switched — moved {max(1, int(since.total_seconds() // 60))} "
-            "min ago; waiting for the reset instead",
+            "min ago; waiting for the reset instead — "
+            f"`{project_service.fleet_command('switch', project, agent.label)} --force` "
+            f"moves it again{_own_reset(session)}",
             session_id=session.id,
+            label=agent.label,
         )
         return
     # Lazy: services.fleet imports this module's neighbours; a cycle at import
@@ -418,10 +501,30 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
             project, agent.label, reason=reason, spawned_by=HANDOVER_SPAWNER, automatic=True
         )
     except fleet_service.FleetError as exc:
-        team_service.hook_note(
-            session.project_id, f"{agent.label}: not switched — {exc}", session_id=session.id
+        # The manager's to act on (#277): the refusal names `fleet switch` or the reset.
+        team_service.hook_handover_failed(
+            session.project_id,
+            f"{agent.label}: not switched — {exc}{_own_reset(session)}",
+            session_id=session.id,
+            label=agent.label,
         )
         return
+    except Exception as exc:
+        # Anything else — a locked store, a tmux error, a bug. The `limited` line woke
+        # nobody because this worker was coming, and its stderr is DEVNULL (`_detach`), so
+        # unsaid here the agent sat parked until the reset (review of #304, finding 1). Said
+        # best effort, then raised for the CLI wrapper to fail open as before.
+        with contextlib.suppress(Exception):
+            team_service.hook_handover_failed(
+                session.project_id,
+                f"{agent.label}: not switched — hand-over worker failed "
+                f"({type(exc).__name__}: {exc}); "
+                f"`{project_service.fleet_command('switch', project, agent.label)}` moves it "
+                f"by hand{_own_reset(session)}",
+                session_id=session.id,
+                label=agent.label,
+            )
+        raise
     if receipt.failures:
         team_service.hook_note(
             session.project_id,

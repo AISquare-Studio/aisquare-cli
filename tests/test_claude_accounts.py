@@ -564,6 +564,38 @@ def test_usage_reads_the_two_windows_out_of_the_w0_shape_and_ignores_the_rest(
     assert usage.week_resets_at == datetime(2026, 10, 27, 3, 0, 0, 412000, tzinfo=UTC)
 
 
+def test_usage_reads_the_family_weeks_the_limits_and_a_lock_and_ignores_unknown_keys(
+    fake_home: Path,
+) -> None:
+    """P0-W3 (#277): only ``five_hour`` and ``seven_day`` were read. The per-family weeks
+    (``seven_day_opus``, ``seven_day_sonnet``), ``limits[]`` and a window's ``locked_reason``
+    were dropped, so an account whose Opus week was spent read as room for an Opus agent."""
+    account = core.create_account()
+    _sign_in(account, "two@example.com")
+    body = json.loads(json.dumps(LIVE_USAGE))
+    body["seven_day_opus"] = {"utilization": 100.0, "resets_at": "2026-09-12T00:00:00+00:00"}
+    body["seven_day_sonnet"] = {"utilization": 20.0, "resets_at": None, "locked_reason": "x"}
+    body["seven_day_oauth_apps"] = None  # a null window is no reading
+    body["limits"] = [
+        {"kind": "session", "percent": 3, "severity": "normal"},
+        {"kind": "weekly", "percent": 41, "severity": "warning"},
+        {"kind": "something_new", "percent": 99},
+        "not a limit",
+    ]
+    body["extra_usage"] = {"is_enabled": False}
+
+    usage = service.usage(account, now=NOW, fetch=_Fetch(body=body))
+
+    assert usage.available
+    assert usage.session_percent == 3.0
+    assert usage.week_percent == 41.0  # the fuller of the window and the limit
+    assert usage.family_week_percent == {"opus": 100.0, "sonnet": 100.0}  # sonnet: locked
+    assert usage.family_week_resets_at == {"opus": datetime(2026, 9, 12, tzinfo=UTC)}
+    # The recorded payload, whose Opus week is null, reads as it always has.
+    plain = service.usage(account, now=NOW, fetch=_Fetch())
+    assert (plain.session_percent, plain.week_percent, plain.family_week_percent) == (3.0, 7.0, {})
+
+
 @pytest.mark.parametrize(
     ("fetch", "expected"),
     [
@@ -1237,3 +1269,21 @@ def test_a_slot_this_user_cannot_enter_is_no_slot_and_raises_nothing(tmp_path: P
         (root / "4").chmod(0o700)
 
     assert found == [2]
+
+
+def test_accounts_usage_shows_each_family_week_beside_the_week() -> None:
+    """P0-W3 (#277): a family week binds that family alone, so the table names it."""
+    from aisquare.cli.accounts import _usage_cells
+    from aisquare.models import ClaudeUsage
+
+    reading = ClaudeUsage(
+        available=True,
+        session_percent=10.0,
+        week_percent=20.0,
+        week_resets_at=NOW + timedelta(days=2),
+        family_week_percent={"opus": 100.0},
+        family_week_resets_at={"opus": NOW + timedelta(days=1)},
+    )
+    _session, week = _usage_cells(reading, now=NOW)
+    assert week.startswith("20% · resets in 2d")
+    assert " · opus 100% resets in 1d" in week

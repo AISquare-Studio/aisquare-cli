@@ -1149,12 +1149,14 @@ integration.
 
 ### The files
 
-A new terminal agent touches these nine files, and no other: no shared module names an
-agent, compares with an agent's id or constant, or asks a binary's name
+A new terminal agent's adapter touches these nine files, and no other: no shared module names
+an agent, compares with an agent's id or constant, or asks a binary's name
 (`tests/test_no_agent_literals.py`), and `tests/test_third_agent_seams.py` holds it with the
 Gemini-shaped synthetic agent (`tests/gemini_shaped_agent.py`, registered in tests alone),
 whose launch, hooks, transcript tail and pages, usage and info line, uninstall and Welcome
-run through the shared code: every file that names it is one of the nine.
+run through the shared code: every file that names it is one of the nine, or of an optional
+route below (the same test scans `src`, `tests`, `docs`, `.github`, `plugins`, the
+marketplaces and every file at the top of the repository).
 
 | # | File | What |
 |---|------|------|
@@ -1164,8 +1166,20 @@ run through the shared code: every file that names it is one of the nine.
 | 4 | `tests/test_adapter_contract.py` | Its row in `EXPECTED_PERMISSIONS` (a coder's and a reviewer's flags), in `EXPECTED_HEADLESS` and `RECORDED_HEADLESS` (its headless call's session and hook switches, and an answer it gave), and in `EXPECTED_TOOLS_OFF` (what leaves its tools-only session no built-in tool). |
 | 4a | `tests/fixtures/agent_transcripts/<id>.json` | `moments`: its transcript as it stood at a permission prompt, a question, an interruption and a turn ended on a question (`records`, or the first `lines` of a recorded session file beside it), with what `transcript_reader` must read of each. |
 | 4b | `tests/fixtures/agent_screens/<id>.json` | With a `screen` whose `dialog_on_screen` or `screen_prompt` is set only: `dialogs`, its screens at each dialog of its own (`rows`, as `capture-pane -p` gives them) with the `words` `dialog_on_screen` must read of each and, optionally, the `prompt` (`[shape, yes_key, no_key]`) `screen_prompt` must, and `not_dialogs`, screens with none (its empty prompt, a draft, a turn), each with `"ready": true` where `ready_on_screen` (or its default) reads it ready for a typed line; a `modal` on either, where given, is what `modal_on_screen` (or its default) must name on it (`null`: nothing). |
-| 5 | `tests/test_<agent>_native.py`, `tests/run_<agent>_native.py` | The opt-in test against the real binary (`AISQUARE_TEST_<AGENT>=1`), as `test_codex_native.py` and its CI job do for Codex. |
+| 5 | `tests/test_<agent>_native.py`, `tests/run_<agent>_native.py` | The opt-in test against the real binary (`AISQUARE_TEST_<AGENT>=1`), as `test_codex_native.py` does for Codex; its CI job is an optional route, below. |
 | 6 | `docs/coding-agents.md` | Its setup and native settings. |
+
+### Optional routes
+
+An agent that takes one of these routes touches that route's files besides the nine, and
+nothing else. The Gemini-shaped agent takes none.
+
+| Route | Files |
+|-------|-------|
+| Its live suite in CI | `.github/workflows/ci.yml`: one job that runs `python -m tests.run_<agent>_native` on a pinned version (Codex's `codex:` job). |
+| A plugin (`plugin`, an `AgentPlugin`) | `plugins/<agent>/` (its manifest, its hooks and its copy of the hook launcher); its marketplace, `.agents/plugins/marketplace.json` or `.claude-plugin/marketplace.json`, the one its agent reads; its hook script's line in `.gitattributes`; its install check in `.github/workflows/install.yml`; its tests, `tests/test_<agent>_plugin.py` and `tests/test_<agent>_plugin_route.py`; and its page, `docs/<agent>-plugin.md`. |
+| Installed with aisquare (`install.sh --agent <id>`) | `install.sh`, `install.ps1`, their cell in `.github/workflows/install.yml` and `docs/install.md`. |
+| Named in the prose | `README.md` (the agents it names) and `CHANGELOG.md` (its entry). |
 
 Nothing else, and no new `aisquare hook` subcommand. Its launch is its slots' answers, each a
 `LaunchPart` of arguments, environment and settings for its own settings layer

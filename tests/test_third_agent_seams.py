@@ -661,6 +661,27 @@ COUNTERPARTS: dict[str, str | None] = {
     "docs/coding-agents.md": "docs/coding-agents.md",
 }
 NAMES_IT = re.compile(r"gemini[-_]shaped|GeminiShaped", re.IGNORECASE)
+#: The files of the guide's "Optional routes" table: an agent that takes a route (its live
+#: suite in CI, a plugin, aisquare's shell installers, a mention in the prose) touches them
+#: besides the nine, and no other file may name it.
+OPTIONAL = (
+    ".github/workflows/ci.yml",
+    "plugins/<agent>/",
+    ".agents/plugins/marketplace.json",
+    ".claude-plugin/marketplace.json",
+    ".gitattributes",
+    ".github/workflows/install.yml",
+    "tests/test_<agent>_plugin.py",
+    "tests/test_<agent>_plugin_route.py",
+    "docs/<agent>-plugin.md",
+    "install.sh",
+    "install.ps1",
+    "docs/install.md",
+    "README.md",
+    "CHANGELOG.md",
+)
+#: Where a file naming an agent is looked for: beside these, every file at the top.
+SCANNED = ("src", "tests", "docs", ".github", "plugins", ".agents", ".claude-plugin")
 
 
 def _guide_files() -> list[str]:
@@ -671,26 +692,40 @@ def _guide_files() -> list[str]:
     return [path for row in rows for path in re.findall(r"`([^`]+)`", row.split("|")[2])]
 
 
-def _files_naming_it() -> set[str]:
-    """Every file under ``src``, ``tests``, ``docs`` and the top of the repository that names
-    the Gemini-shaped agent, by path relative to the repository."""
+def _guide_optional() -> list[str]:
+    """The files the guide's "Optional routes" table lists, in its order, each once: each path
+    in a code span of its Files column."""
+    guide = (ROOT / "docs" / "coding-agents.md").read_text("utf-8")
+    table = guide.split("### Optional routes", 1)[1].split("\n\n|", 1)[1].split("\n\n", 1)[0]
+    rows = [row for row in ("|" + table).splitlines()[2:] if row.startswith("| ")]
+    spans = [span for row in rows for span in re.findall(r"`([^`]+)`", row.split("|")[2])]
+    paths = [span for span in spans if " " not in span and ("/" in span or "." in span)]
+    return list(dict.fromkeys(paths))
+
+
+def _optional(path: str) -> bool:
+    """Whether ``path`` is a file of an optional route (:data:`OPTIONAL`, ``<agent>`` any name
+    and a folder all it holds)."""
+    from fnmatch import fnmatchcase
+
+    patterns = [re.sub(r"<[a-z]+>", "*", route) for route in OPTIONAL]
+    return any(fnmatchcase(path, f"{p}*" if p.endswith("/") else p) for p in patterns)
+
+
+def _files_naming_it(root: Path = ROOT) -> set[str]:
+    """Every file under :data:`SCANNED` and at the top of the repository ``root`` that names
+    the Gemini-shaped agent, by path relative to it."""
     found: set[str] = set()
-    for top in (ROOT / "src", ROOT / "tests", ROOT / "docs"):
-        for path in top.rglob("*"):
-            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
-                try:
-                    text = path.read_text("utf-8")
-                except (UnicodeDecodeError, OSError):
-                    continue
-                if NAMES_IT.search(text):
-                    found.add(path.relative_to(ROOT).as_posix())
-    found |= {
-        path.name
-        for path in ROOT.iterdir()
-        if path.is_file()
-        and path.suffix in {".md", ".toml"}
-        and NAMES_IT.search(path.read_text("utf-8"))
-    }
+    paths = [path for top in SCANNED for path in (root / top).rglob("*")]
+    for path in [*paths, *root.iterdir()]:
+        if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+            continue
+        try:
+            text = path.read_text("utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if NAMES_IT.search(text):
+            found.add(path.relative_to(root).as_posix())
     return found
 
 
@@ -702,6 +737,39 @@ def test_a_new_agent_touches_the_nine_files_the_guide_lists() -> None:
     listed = _guide_files()
     assert listed == list(COUNTERPARTS), listed
     assert len(listed) == 9
+    assert _guide_optional() == list(OPTIONAL), _guide_optional()
     named = _files_naming_it()
     assert not {path for path in named if path.startswith("src/")}, named
-    assert named == {own for own in COUNTERPARTS.values() if own is not None}, named
+    own = {path for path in named if not _optional(path)}
+    assert own == {path for path in COUNTERPARTS.values() if path is not None}, named
+    assert not named - own, "it takes no optional route"
+
+
+def test_the_files_that_name_it_are_looked_for_in_ci_the_plugins_and_the_top_too(
+    tmp_path: Path,
+) -> None:
+    """Review r18 of #113, findings 12 and 16: "touches these nine files, and no other" was
+    false for an agent with a plugin route or a CI job, and the check scanned only ``src``,
+    ``tests``, ``docs`` and the top's ``.md`` and ``.toml``, never ``.github`` or
+    ``plugins``. It finds the agent named there and in any file at the top, and of those only
+    an optional route's are allowed."""
+    planted = {
+        ".github/workflows/ci.yml": True,
+        ".github/workflows/install.yml": True,
+        ".github/dependabot.yml": False,
+        "plugins/gemini-shaped/hooks/hooks.json": True,
+        ".agents/plugins/marketplace.json": True,
+        ".gitattributes": True,
+        "install.sh": True,
+        "Makefile": False,
+    }
+    for name in planted:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("run the gemini-shaped agent\n", encoding="utf-8")
+
+    named = _files_naming_it(tmp_path)
+
+    assert named == set(planted), named
+    assert {path for path in named if not _optional(path)} == {
+        path for path, allowed in planted.items() if not allowed
+    }

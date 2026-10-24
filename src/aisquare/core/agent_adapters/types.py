@@ -1261,8 +1261,9 @@ class AgentAdapter(Protocol):
         """The instruction files a session of config dir ``home`` started in ``cwd`` loads, in
         the order it loads them: its config dir's, then its project's along ``cwd``'s chain,
         each chosen as the agent chooses among a folder's files by what is on disk (Codex's
-        ``AGENTS.override.md`` over its ``AGENTS.md``), a file not there listed where the agent
-        would read one there (it loads nothing): what a session's start leaves out of the
+        ``AGENTS.override.md`` over its ``AGENTS.md``, so only a file there is listed), or every
+        one of a fixed set, a file not there listed where the agent would read one (Claude
+        Code's; it loads nothing from it): what a session's start leaves out of the
         context it injects, a preference such a file holds already. ``cwd`` ``None``: the
         config dir's alone, every one it may read there in its precedence, read or not
         (``capabilities.first_context_file_only``), which ``agents connect`` imports and the

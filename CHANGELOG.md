@@ -782,7 +782,8 @@ adapter.**
   *Spawn* is disabled, so the reason is never folded out of sight. The box sizes to what
   it shows instead of 92% of the terminal, and scrolls between its docked header and
   buttons once Advanced is open on a short one. What a spawn sends is unchanged.
-- The store migrates to schema v35 on first open, from 0.8.2's v32, in three steps: v35
+- Main's three store steps after 0.8.2's v32, the first of the v40 migration under
+  **Upgrading**: v35
   adds two tables, `usage_session` and `usage_turn`, for `aisquare metrics tokens`. v34
   adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,
   `died` otherwise; NULL on a row from before it, read by its exit status, #38). The

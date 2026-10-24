@@ -88,7 +88,11 @@ def watch(
         )
         return
     if once:
-        _print_tick(watch_service.Watcher().tick())
+        try:
+            looked = watch_service.Watcher().tick()
+        except TimeoutError:  # a running watcher's tick holds the state lock
+            fail("another look is running; try again in a moment", error="busy")
+        _print_tick(looked)
         return
     try:
         watch_service.run(

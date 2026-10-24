@@ -237,7 +237,11 @@ def test_a_dropped_child_does_not_hold_the_origin_open(tree: dict[str, ProjectIn
     team_service.finish_task(kept.id, session_ref=API_CODER)
     assert _events(tree["hq"], "linked_all_done") == []
     team_service.drop_task(dropped.id, session_ref=HQ_MANAGER)
-    assert len(_events(tree["hq"], "linked_all_done")) == 1
+    [closed] = _events(tree["hq"], "linked_all_done")
+    # Not "are done": one was dropped, and the line the parent's manager acts on says so.
+    assert f"all 2 tasks delegated from #{origin.number} are closed (1 done, 1 dropped)" in (
+        closed.text
+    ), closed.text
 
 
 def test_delegating_to_a_project_this_board_does_not_parent_is_refused(

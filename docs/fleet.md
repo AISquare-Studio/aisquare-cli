@@ -2550,7 +2550,9 @@ whether one runs and how long ago it last looked, and `aisquare doctor`'s `fleet
 row says the same, and warns when a running watcher has not looked for three intervals.
 `--stop` ends it, and so does a `fleet shutdown` that leaves no agent live on the
 machine: it watches every project, so one project's shutdown leaves it running.
-`--once` looks once, delivers and exits, which suits a cron line.
+`--once` looks once, delivers and exits, which suits a cron line. Beside a running
+watcher's look it waits a moment, then exits 1 with `busy` (`{"error": "busy"}` under
+`--json`) rather than deliver the same news twice.
 
 ## Troubleshooting
 

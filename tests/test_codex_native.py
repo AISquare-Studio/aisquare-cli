@@ -1361,7 +1361,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             )
             server.shutdown()
             thread.join(timeout=2)
-            shutil.rmtree(outside, ignore_errors=True)
+            _remove_home(outside)
 
 
 class _AtItsLimit(BaseHTTPRequestHandler):
@@ -1590,6 +1590,32 @@ def _stop_app_servers(*homes: Path) -> None:
         if any(program.startswith(f"{home}{os.sep}") for home in homes):
             with contextlib.suppress(OSError):
                 os.kill(int(entry.name), signal.SIGTERM)
+
+
+def _remove_home(outside: Path, seconds: float = 20) -> None:
+    """Remove a test's home under ``/var/tmp`` once nothing runs in it any more. Codex's exit
+    hooks and the store brokers its launches started run on for a moment after the tmux
+    server is killed, with ``AISQUARE_HOME`` under ``outside``; on a loaded machine one wrote
+    there after the removal and made the home again (``h/cache``, ``h/log``,
+    ``h/context.db``; gate 3 of #113). At most ``seconds`` are waited."""
+    proc, named = Path("/proc"), f"AISQUARE_HOME={outside}{os.sep}".encode()
+    deadline = time.monotonic() + seconds
+    while proc.is_dir() and time.monotonic() < deadline:
+        running = False
+        for entry in proc.iterdir():
+            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+                continue
+            try:
+                environ = (entry / "environ").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if any(item.startswith(named) for item in environ):
+                running = True
+                break
+        if not running:
+            break
+        time.sleep(0.2)
+    shutil.rmtree(outside, ignore_errors=True)
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
@@ -2166,7 +2192,7 @@ def test_real_codex_fleet_from_before_launch_records_and_rows_its_sandbox_rewrot
             subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
             server.shutdown()
             thread.join(timeout=2)
-            shutil.rmtree(outside, ignore_errors=True)
+            _remove_home(outside)
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
@@ -2363,7 +2389,7 @@ def test_real_codex_under_a_hub_in_a_worktree_reaches_its_board_and_leaves_no_pl
             subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
             server.shutdown()
             thread.join(timeout=2)
-            shutil.rmtree(outside, ignore_errors=True)
+            _remove_home(outside)
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
@@ -2466,7 +2492,7 @@ def test_real_codex_in_a_direnv_project_keeps_its_pythonpath_and_aisquare_import
             subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
             server.shutdown()
             thread.join(timeout=2)
-            shutil.rmtree(outside, ignore_errors=True)
+            _remove_home(outside)
 
 
 @pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
@@ -2513,7 +2539,7 @@ def test_real_fleet_refuses_a_codex_agent_given_a_directory_inside_the_aisquare_
         assert not [a for a in fleet.list_agents(project) if a.agent.label == "ad2"]
     finally:
         subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
-        shutil.rmtree(outside, ignore_errors=True)
+        _remove_home(outside)
 
 
 class _Asking(BaseHTTPRequestHandler):
@@ -2765,7 +2791,7 @@ def test_real_codex_approval_and_question_are_answered_from_the_remote_page(
             subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True, check=False)
             server.shutdown()
             thread.join(timeout=2)
-            shutil.rmtree(outside, ignore_errors=True)
+            _remove_home(outside)
 
 
 class _Remembered(_AtItsLimit):

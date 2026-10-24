@@ -2436,6 +2436,11 @@ def _turn_end_delivery(
     # note addressed to it is no board update: it is handed that and nothing else, or a
     # `fleet tell` to a busy cold reviewer never reached it (sync #365, W2's check).
     reads, relevant = _board_reading(store, me)
+    if not reads:
+        # Asked IN the query, before its LIMIT: kept after it, a note behind a page of
+        # others never reached a cold reviewer, whose prompts read no board at all (review
+        # of #365, round 2).
+        relevant = Relevance(names=tuple(sorted(to)), decisions=False)
     return _wakeup(
         store,
         me,

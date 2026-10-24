@@ -482,3 +482,24 @@ def test_turn_end_delivery_reads_the_board_through_the_agents_board_context(
 
     assert decision is not None and "please look at #361 next" in decision.reason
     assert ("PASS #12: verified" in decision.reason) is verdict_shown, decision.reason
+
+
+def test_a_note_to_a_cold_reviewer_behind_a_page_of_others_still_reaches_it(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #365, round 2: under ``none`` the addressed notes are asked for in the
+    query. Filtered after its page (31 events), a note behind 40 other verdicts never woke
+    the reviewer, and its prompts read no board, so the note was lost."""
+    reviewer = fleet_service.spawn(project, "reviewer", worktree=False).agent
+    assert reviewer.session_id is not None
+    _session(project, reviewer.session_id, "reviewer")
+    other = _session(project, "eeee5555-0000-0000-0000-000000000000", "coder")
+    for n in range(40):
+        team_service.add_note(f"PASS #{n}: verified", kind="result", session_ref=other.id)
+    _note(project, "please look at #361 next", to=reviewer.label)
+    monkeypatch.setenv("AISQUARE_BOARD_CONTEXT", "none")
+
+    decision = team_service.hook_stop(reviewer.session_id, project.root)
+
+    assert decision is not None and "please look at #361 next" in decision.reason
+    assert "PASS #" not in decision.reason

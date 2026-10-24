@@ -300,6 +300,34 @@ def test_a_tell_never_types_into_a_draft_and_says_so(
     assert [(n.text, n.to_role) for n in notes] == [("rebase onto main first", coder.label)]
 
 
+def test_a_draft_typed_between_the_guard_and_the_paste_is_never_sent(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #337: the guard read an empty box, a human typed before the paste landed, and
+    the box read ``half a thought <our text>``. The render check never saw our text alone,
+    ran out, and fell through to Enter, which sent the human's draft with ours. Now nothing
+    is pressed: the human's words stay in the box, and the tell is filed as a note."""
+    coder = _waiting(tmux, project, role="coder")
+    human = "half a thought"
+    real_paste = tmux.paste
+
+    def paste_after_a_human(pane_id: str, text: str) -> None:
+        real_paste(pane_id, text)
+        tmux.screens[pane_id] = _box(f"{human} {text}")  # their keys landed first
+
+    monkeypatch.setattr(tmux, "paste", paste_after_a_human)
+    told = fleet_service.tell(project, coder.label, "rebase onto main first")
+
+    assert told.typed == "no"
+    assert "a draft is in its input box" in told.how and "note" in told.how
+    assert tmux.typed == [(coder.pane_id, "paste", "rebase onto main first")], "no Enter"
+    shown = claude_screen.composer_text(tmux.screens[coder.pane_id])
+    assert shown == f"{human} rebase onto main first", "the human's draft is intact"
+    with store_session() as store:
+        notes = [e for e in store.events_since(project.id, 0, limit=200) if e.kind == "note"]
+    assert [(n.text, n.to_role) for n in notes] == [("rebase onto main first", coder.label)]
+
+
 def test_a_tell_to_an_idle_agent_types_and_is_acknowledged(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

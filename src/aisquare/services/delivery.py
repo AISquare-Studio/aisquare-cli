@@ -233,8 +233,9 @@ class Delivered:
     presses: int
     """How many times Enter was pressed: 1, or more when the first one was swallowed."""
     refused: str | None = None
-    """Why nothing was typed at all: a human's draft in the input box, or a human typing in
-    the pane (:func:`draft_guard`). ``told`` then says it too, as ``no``."""
+    """Why nothing was sent: a human's draft in the input box, or a human typing in the pane
+    (:func:`draft_guard`), and nothing was typed; or a draft that landed beside the paste,
+    and no Enter was pressed. ``told`` then says it too, as ``no``."""
 
 
 def holds(composer: str | None, text: str) -> bool:
@@ -295,7 +296,9 @@ def deliver_typed(
 
     1. Paste (bracketed, as every paste is).
     2. Render check: read the box every :data:`RENDER_POLL`, up to :data:`RENDER_WAIT`,
-       until it holds the text (:func:`holds`).
+       until it holds the text (:func:`holds`). A box that by then holds something else —
+       a human typed between the guard and the paste — is never pressed: the delivery is
+       ``refused``, as by the guard (a tell is filed as a note, a nudge waits).
     3. :data:`ENTER_GAP`, then Enter as its own tmux call.
     4. Acknowledge: ``acked()`` (the agent's ``UserPromptSubmit``), asked every
        :data:`ACK_POLL`. With no ``acked`` (an agent without hooks), the box no longer
@@ -327,8 +330,13 @@ def deliver_typed(
         return Delivered(pasted, None, 0)
     if reads_box:
         deadline = monotonic() + RENDER_WAIT
-        while not holds(screen.composer_text(_box(server, pane_id) or []), text):
+        while not holds(shown := screen.composer_text(_box(server, pane_id) or []), text):
             if monotonic() >= deadline:
+                if shown:
+                    # A human typed between the guard and the paste: their keys sit beside
+                    # ours, and Enter would send both (review of #337). Nothing is pressed.
+                    why = "a draft is in its input box"
+                    return Delivered(TellResult("no", why), None, 0, refused=why)
                 break
             sleep(RENDER_POLL)
     sleep(ENTER_GAP)

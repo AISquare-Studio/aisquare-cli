@@ -1374,6 +1374,7 @@ def action_stop(body: dict[str, Any]) -> tuple[dict[str, object], str]:
         "agent": receipt.agent.model_dump(mode="json"),
         "claims_released": released,
         "release_failed": receipt.release_failed,
+        "marked_only": receipt.marked_only,  # ended already: only recorded as stopped (n4)
         "project": target.id,
     }
     summary = f"{audit_start} dismissed={action_yes_no(dismissed)} released={len(released)}"

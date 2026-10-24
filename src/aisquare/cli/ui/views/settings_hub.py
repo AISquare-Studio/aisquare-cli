@@ -1,9 +1,11 @@
 """The Settings hub: what *⚙ Settings* in the sidebar opens.
 
-Three links, each a button with one line saying what is behind it — *App
-settings* (the machine-wide settings, ``views.app_settings``), *Accounts* (the
-AISquare sign-in and the Claude Code accounts, ``views.accounts``) and *Doctor*
-(the checks, which opening it runs). A link posts the message the app routes;
+Five links, each a button with one line saying what is behind it — *App
+settings* (the machine-wide settings, ``views.app_settings``), *Remote control* and
+*Captain* (App settings again, on its *Remote* tab and on the *Agent settings* tab the
+captain's box tops: one obvious way in to each, #41), *Accounts* (the AISquare sign-in
+and the Claude Code accounts, ``views.accounts``) and *Doctor* (the checks, which
+opening it runs). A link posts the message the app routes;
 the pages it opens keep *⚙ Settings* highlighted in the sidebar. ↑/↓ move between
 the links, Enter or a click opens one.
 
@@ -11,6 +13,9 @@ Under them, *Fleet*: *Restart all…* and *Stop all…*, for every running agent
 project (``views.fleet_bulk``). Each asks first, in a dialog that lists who. The action
 then runs off the UI thread, with a toast per agent as it is done and one that sums it
 up. Both buttons are greyed while it runs.
+
+Remote control and the Captain box were sections of this page (#33). They live in App
+settings' tabs now, in its format, where the owner placed them (#41).
 """
 
 from __future__ import annotations
@@ -22,7 +27,7 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import Button, Static
 from textual.worker import Worker, WorkerState
@@ -36,6 +41,7 @@ from aisquare.cli.ui.sidebar import (
     doctor_badge,
 )
 from aisquare.cli.ui.views.agent import AgentRestarted
+from aisquare.cli.ui.views.app_settings import AGENT_TAB, REMOTE_TAB
 from aisquare.cli.ui.views.fleet_bulk import BULK_WORKER, ConfirmBulk, named, summary_text
 from aisquare.services import fleet as fleet_service
 
@@ -43,8 +49,10 @@ LINKS: tuple[tuple[str, str, str], ...] = (
     (
         "app-settings",
         "App settings",
-        "the machine-wide settings: roles, the fleet, accounts' rules",
+        "agent settings (roles, the fleet, accounts' rules) and your preferences",
     ),
+    ("remote", "Remote control", "the fleet on your phone: a link, its QR code and a password"),
+    ("captain", "Captain", "the experimental captain, on or off (App settings ▸ Agent settings)"),
     ("accounts", "Accounts", "the AISquare sign-in and the Claude Code accounts"),
     ("doctor", "Doctor", "the checks — they run when the page opens"),
 )
@@ -61,7 +69,7 @@ FLEET_ABOUT = (
 )
 
 
-class SettingsHubView(Vertical):
+class SettingsHubView(VerticalScroll, can_focus=False):
     """Settings: a title, then one link per :data:`LINKS` with what it opens."""
 
     DEFAULT_CSS = """
@@ -118,6 +126,8 @@ class SettingsHubView(Vertical):
         stem = (event.button.id or "").removeprefix("hub-")
         message: Message | None = {
             "app-settings": AppSettingsSelected(),
+            "remote": AppSettingsSelected(REMOTE_TAB),
+            "captain": AppSettingsSelected(AGENT_TAB),
             "accounts": AccountsSelected(),
             "doctor": DoctorSelected(None),
         }.get(stem)

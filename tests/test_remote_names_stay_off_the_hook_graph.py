@@ -33,9 +33,11 @@ REMOTE = (
     "services/remote_",
     "services/transcript.py",
     "services/ngrok_tunnel.py",
+    "services/ngrok_sdk.py",
     "cli/remote.py",
     "cli/ui/remote_control.py",
     "cli/ui/views/remote.py",
+    "cli/ui/views/settings_remote.py",
 )
 
 #: Remote names that may stay shared: ``Runtime.token``, which no hook-path code

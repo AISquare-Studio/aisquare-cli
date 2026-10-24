@@ -75,7 +75,10 @@ for a project the owner added and never used, the pack is the only mark.
 - only a directory named `snapshot`, directly in a project's data directory, and only
   while it resolves to one inside `projects/`; a symlink is never followed out of the
   home, and `brain/` and the explainability key beside it are never touched;
-- best effort: what cannot be deleted stays, and the open goes on;
+- best effort: what cannot be deleted stays, and the open goes on, and so does a
+  `projects/` it cannot list or resolve (`RuntimeError` too: Python 3.11 and 3.12 raise
+  it for a symlink loop; review of #399, pinned by
+  `test_a_projects_dir_the_cleanup_cannot_read_never_breaks_the_open`);
 - a marker, `cache/old-packs-removed`, records that it ran, so a later open costs one
   stat. `cache/` is disposable: run again, the cleanup finds nothing to delete.
 
@@ -92,8 +95,10 @@ own any more.
   one fact per marker in `_ECOSYSTEM_MARKERS`, a plain second run seeds nothing, and
   `--refresh` reads the markers again and adds only facts that are new. It starts no
   process but the `git rev-parse` that finds the root (pinned by
-  `test_onboard_and_refresh_seed_facts_and_start_nothing_but_git`). With nothing new it
-  prints `✓ onboarded — no new project facts to seed`.
+  `test_onboard_and_refresh_seed_facts_and_start_nothing_but_git`). A plain run on a
+  project already onboarded prints `✓ already onboarded; --refresh reads the markers
+  again`, since it read none; a run that read them and found nothing new prints
+  `✓ onboarded — no new project facts to seed`.
 - **`[snapshot]` in `config.toml`** keeps loading, since unknown keys are ignored. An
   unknown section is otherwise kept by a save (`_keep_unknown`), because a newer build may
   read it; `snapshot` is in `RETIRED_SECTIONS`, so the next save drops it. Until then
@@ -156,8 +161,23 @@ own any more.
   and `CLAUDE_CONFIG_DIR`. The survey reports it, and the extra is current when Node is
   at the floor and the MCP is registered (or `--no-agent`).
 - The banner's "Written to" names `~/.claude.json` for a run that will register it.
-- `expected_amber` drops the packer's row and `snapshot`. The edits stay in the Node step,
-  the packer's lines and their summary and plan lines, away from #59's pin lines.
+- **The installed release's rows stay expected** (`RELEASE_ERA_AMBER`: `repomix`,
+  `snapshot`, `tiktoken`), whatever the flags, until a release without them is the latest
+  on PyPI. The script installs that release, and its doctor still has them: `repomix`
+  goes amber with a Node below 22 or no npm, which the script no longer upgrades
+  unasked, and 0.8.2's `snapshot` with no project or no Node to pack with. Review of #399
+  (cycle 1, MAJOR 1) measured `--yes` on Debian 12's own Node 18 exiting 2 on `repomix`.
+  The summary names them in one line, and the short-circuit's reason says so.
+  `tests/install/release-cell.sh`, a job of its own in `install.yml`, installs the
+  release from PyPI onto Debian 12's Node 18 and npm with `--yes` and no extra, and
+  asserts exit 0, Node untouched, and a `--no-system-deps` re-run with nothing to do;
+  every other cell grades this tree's wheel and could not see it.
+- The extra is current only with npx too, so a Node 22 without npm no longer
+  short-circuits past `_ensure_npx`, and an npm that does not install warns where it
+  happened and counts as the extra not installing (exit 2). `--with` named twice
+  chooses once. The prompt's default is pinned at no.
+- The edits stay in the Node step, the extras, the packer's lines and their summary and
+  plan lines, away from #59's pin lines.
 - The container cells pass `--with chrome-devtools` on run 1, so the Node install paths
   keep their coverage on the five distributions. Every matrix cell runs `--no-agent`, so
   none registers anything, and run 1 asserts that; the one cell with Claude Code installed
@@ -202,6 +222,8 @@ own any more.
   `AISQUARE_HOME` and `TMUX_TMPDIR`.
 - `shellcheck --shell=sh`, `shfmt -i 4 -ci -d`, `dash -n` and `busybox ash -n` over
   `install.sh` and the cells; `tests/test_install_script_*.py`.
+- `install.yml`'s `release-old-node` job: the latest release from PyPI onto Debian 12's
+  Node 18, `--yes`, no extra, exits 0.
 - `aisquare doctor` with no Node on PATH, in a throwaway home: nothing amber names Node.
 - A v16 store with only a pack as evidence, opened by this build in a throwaway
   `AISQUARE_HOME`: the project is listed, and its `snapshot/` is gone.
@@ -209,8 +231,10 @@ own any more.
 ## Follow-ups
 
 - Drop `--with tiktoken` from `install.sh` (its comment above `install_cli` says why it
-  stays), the cells' run 4 and Remote's fallback hint, once a release without the
-  `tiktoken` doctor row is the latest on PyPI.
+  stays), the cells' run 4, Remote's fallback hint and `docs/install.md`'s by-hand line,
+  and `RELEASE_ERA_AMBER` with it, once a release without those doctor rows is the
+  latest on PyPI. That is the first release that ships this script, so it goes on that
+  release PR's checklist.
 - The decks still say session start hands over the project's prompt history; #346 removed
   that line too. Left for the owner, with the generator's templates.
 - `install.sh`'s short-circuit does not look at the project: a current machine set up with

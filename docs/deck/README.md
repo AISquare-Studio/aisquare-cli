@@ -6,6 +6,9 @@ the terminal captures and the three typefaces are all inside it — so it opens
 from `file://`, from a locked-down laptop, or in three years, and looks the same.
 Open one in a browser; there is nothing to build and nothing to serve.
 
+> **The PDFs are stale until rebuilt:** they still sell the codebase snapshot and list
+> Node in the one-liner (#399). Send or print the HTML until then.
+
 | | Read it | Send it | What it is |
 | --- | --- | --- | --- |
 | **One-pager** | [`aisquare-one-pager.html`](aisquare-one-pager.html) | [`.pdf`](aisquare-one-pager.pdf) — 1 page, A3 landscape | The leave-behind. Claim, the loop, one capture, eight assurances, roadmap, the ask. |

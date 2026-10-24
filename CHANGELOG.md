@@ -24,12 +24,16 @@ adapter.**
   [the parity matrix](docs/coding-agents.md#parity-with-claude-code).
 - [Adding a terminal agent](docs/coding-agents.md#adding-a-terminal-agent):
   one adapter file and one registration line, held to a conformance suite
-  that a synthetic third agent passes. A new agent touches nine files, and the
-  suite asserts it: no shared module decides by an agent's name or a binary's,
-  and an agent whose only seams are its variables and settings files (as Gemini
-  CLI's are) is launched through a settings layer of its own, its transcript
-  read where a later line completes a record, its usage read as the windows its
-  plan has, and its telemetry and screen by its own readers.
+  that a synthetic third agent passes. A new agent's adapter touches nine files
+  (one with a plugin, a CI job of its own or a route in the shell installers
+  touches that route's files too, which the guide lists), and the suite asserts
+  it: no shared module decides by an agent's name or a binary's, or spells its
+  binary, variables, files or flags, all read off the adapters; and an agent
+  whose only seams are its variables and settings files (as Gemini CLI's are) is
+  launched through a settings layer of its own above the operator's settings,
+  handed the session id it is given in its own flag, its transcript read where a
+  later line completes a record (on whichever page that line is), its usage read
+  as the windows its plan has, and its telemetry and screen by its own readers.
 - The sidebar's `#slot·%` and the agent info line show the account's window
   that limits it: its five-hour figure, unless its week is fuller, which the
   headroom pick already ranked it by. An agent with no automatic reviewer of
@@ -534,8 +538,10 @@ adapter.**
   repository's (the fleet's worktrees, the CI turn snapshot's `stash create` from
   the agent's hooks); and gbrain, which a brokered `recall` and a note's distill
   run, starts in its brain's home, not the tree. A fleet Codex window starts with
-  `check_for_update_on_startup=false` unless the operator sets it: its `Update
-  available` dialog, whose first choice an Enter picks, runs `npm install -g`.
+  `check_for_update_on_startup=false` unless the operator sets it, or the
+  administrator's `/etc/codex/managed_config.toml` does, which the launch then
+  says: its `Update available` dialog, whose first choice an Enter picks, runs
+  `npm install -g`.
   The doctor's `sandbox-hooks` row warns of an agent that sandboxes its tools whose
   hooks still run the console script (connected by a build before the `-E` form);
   `agents connect` and an upgrade's refresh write that form. Unmeasured, and so not
@@ -616,7 +622,8 @@ adapter.**
   would show it. It is kept out of the shells Codex's tools run in
   (`shell_environment_policy.exclude`, with your own patterns kept), so no app
   you run there sends it on. An exporter you configured in the account home the
-  launch runs on is kept and AISquare stands down. So is your own value of that
+  launch runs on, or your administrator set in `/etc/codex/managed_config.toml`,
+  is kept and AISquare stands down. So is your own value of that
   variable, or your own `-c shell_environment_policy…`, and native tracing is
   then off for the launch.
 - `aisquare upgrade` re-connects Codex's hooks in every connected Codex home and

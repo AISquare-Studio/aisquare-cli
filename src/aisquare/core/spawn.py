@@ -92,6 +92,8 @@ narrowing their environment would be change without a reason:
     user's own tmux, and ``ps`` for this process's ancestors: whether the session
     is remote. Strings, no model.
   * ``cli/watch.py::action_open_transcript`` — a pager/viewer on a file.
+  * ``cli/ui/terminal.py::wsl_path`` — ``wslpath -u`` on a Windows path pasted into a
+    pane under WSL (#288). A path converter, no model.
   * ``core/paths.py::restrict_to_owner`` — ``icacls``, locking the
     credentials file to this account on Windows. A permissions tool, not a
     model process; it is also the seam that guards the API key, so an
@@ -314,6 +316,9 @@ SEAMS: dict[str, Seam] = {
     ),
     "aisquare/cli/watch.py::action_open_transcript": Seam(
         EXCLUDED, "a pager/viewer on a transcript file"
+    ),
+    "aisquare/cli/ui/terminal.py::wsl_path": Seam(
+        EXCLUDED, "`wslpath -u` on a Windows path pasted into a pane under WSL; no model"
     ),
     "aisquare/core/paths.py::restrict_to_owner": Seam(
         EXCLUDED, "`icacls` — locks the credentials file to this account; no model"

@@ -43,6 +43,15 @@ aisquare why                       # explain the last injection
 aisquare log                       # your captured prompt history, per project
 ```
 
+`context search` finds the entries that hold any of the words you give it, each
+as a prefix (`lint` finds `linting`), in any script (`вход`, `ログイン`). Every
+word is a word: `AND`, `OR`, `NOT` and `NEAR` are searched for, never read as
+search operators, and punctuation only separates words. Words are split as the
+index splits them (SQLite FTS5's `unicode61`), which in scripts written with
+combining vowel signs, such as Devanagari, is at each sign: `हिन्दी` finds an
+entry holding it, along with any other entry holding a word that starts with
+one of its pieces.
+
 Prompts are recorded only in a project you added (`aisquare project onboard`,
 `init`, Welcome or `+` in `asq`, a fleet spawn): a hooked session anywhere else
 keeps nothing. `[projects] capture = true` records them in every directory, as

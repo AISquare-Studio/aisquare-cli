@@ -51,6 +51,7 @@ IMPLEMENTED: set[tuple[str, ...]] = {
             "actions",
         )
     ),
+    *(("captain", "gate", verb) for verb in ("enroll", "unlock", "lock", "status")),
     ("login",),
     ("logout",),
     ("whoami",),

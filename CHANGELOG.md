@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+**Upgrading:**
+- **A task title with words outside ASCII now has a different key** (#270):
+  `Fix вход` was keyed `fix` and is now `fix-вход`. No store migration is
+  needed. Re-adding a title exactly as a task already on the board has it still
+  answers "already tracked (idempotent)", found under its old key. A task added
+  before the upgrade under a title with *no* ASCII letters was keyed `task` and
+  is not looked up this way: re-adding its title adds a new task beside it, and
+  the old one can be dropped. Every ASCII title keys exactly as before. A task
+  added before the upgrade keeps its old key both ways: with `Fix вход` stored as
+  `fix`, a later `task add "Fix"` still answers with it. Drop and re-add such a
+  task to give it its new key.
+
 ### Added
 
 - **A fleet across two machines, the interim way**
@@ -35,7 +47,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/plans/captain.md`; the acceptance runbook in
   `docs/runbooks/captain-acceptance.md`). One Claude Code session per home, on
   the home board, with no tool but its own **Actions server** (`aisquare captain
-  serve --stdio`): 24 fixed tools, one `captain_action` audit event per call
+  serve --stdio`): 26 fixed tools, one `captain_action` audit event per call
   carrying the owner's words and the effect's receipt; `stop`, `spawn` and
   `restart` act only when the owner's words name the agent, its role or its
   project; otherwise the tool's refusal is its one-sentence question itself
@@ -89,6 +101,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never added as a project, and `project prune` and doctor's captured row leave it
   alone (Fixed, below). Every other role, fleet row and board, and the store
   (schema v33), are the same either way.
+- **The captain's owner gate** (#216). While the captain is on, the tools that act
+  as the owner — `press`, `paste`, `stop`, `spawn`, `restart`, `wololo`,
+  `attach_persona` and `act` — refuse outside an act-as-owner window. A code from
+  the owner's authenticator app opens one for 15 minutes. Say it to the captain
+  (its new `unlock` tool; `lock` closes the window), or type
+  `aisquare captain gate unlock <code>`. Reads, `tell`, the manager ask, notes,
+  tasks and the `bt` brake never need a code.
+  - The codes are RFC 6238 TOTP: 30-second steps, one step of drift either side,
+    and no code accepted twice. Three wrong codes in a row lock code entry for five
+    minutes (RFC 4226's throttle), audited on the home board. Each further lock
+    with no correct code between doubles the last, up to 24 hours.
+  - The window's id joins each gated call's `captain_action` event. Every audit
+    masks a code in the owner's words, and `unlock`'s masks it in its arguments.
+  - `aisquare captain gate enroll` writes the secret (mode 0600) and prints the QR.
+    `gate status` says whether the gate applies and why not.
+  - pyotp comes with the new `gate` extra (`pip install 'aisquare-cli[gate]'`),
+    never core. Without it, or before enrolment, the gate stays shut and says how
+    to fix it.
+  - `[captain] gate = false` turns the gate off. `docs/captain.md` says why a
+    spoken code can be overheard.
 - **The persona rides the system prompt too, and a replay keeps it.** For Claude
   Code the launch appends the persona block to the default system prompt
   (`--append-system-prompt-file`, a file under `~/.aisquare/cache/persona-prompts/`;
@@ -134,6 +166,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   untouched, rather than closing over a stop that did not happen. A stop that
   worked toasts `✓ stopped <label> (<id>)`, re-reads the fleet, and leaves the
   stopped agent's view for the project's.
+- **A file dropped on `asq` reaches the agent on screen** (#288). A terminal hands
+  a drop to `asq` as a paste, and a paste went only to the widget with the keyboard,
+  so a screenshot dropped while the sidebar had it reached no agent. A paste no
+  focused widget takes now goes to the one live pane on screen, which takes the
+  keyboard too; with none, one toast says "nothing to paste into — open an agent
+  first", and a text field or a dialog keeps its own pastes. Under WSL, a paste that is
+  one Windows path of an existing file becomes its Linux path (`wslpath -u`).
+  `AISQUARE_PASTE_LOG=<file>` records each paste's length, first 80 characters and
+  focused widget, for checking what a terminal sends. `docs/fleet.md` has an
+  "Images" paragraph on the three ways an image reaches Claude Code.
 - **Attach a persona in two steps, from `asq`.** The Personas tab's *Attach to
   existing* / *Attach to new* open one **target picker**: this project's running
   **Agents** (each with the persona it runs), the **Binds** `aisquare team bind`
@@ -324,6 +366,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   line: a binding whose `CLAUDE_CONFIG_DIR` has no aisquare hooks (its sessions
   never reach the board) or whose `CLAUDE_CODE_TMPDIR` cannot be written warns,
   with the fix; with no such binding the line is absent.
+- **Edit a persona in your own editor, in the fleet UI** (#212). In the Personas tab,
+  *Edit* opens `$VISUAL`, `$EDITOR` or `vi` on the `SKILL.md`, in a pane in place,
+  as the Accounts page hosts a sign-in (the #272 `TerminalPane`). The editor runs
+  in a window on the fleet's tmux server and works on a copy. Save and quit, and
+  the copy is checked and saved through the same writer as `persona edit`, and
+  the list re-reads. A copy you didn't change writes nothing, so the provenance
+  sidecar stays as it was. Text that does not parse is not saved: the dialog says
+  why, and *Reopen editor* opens the same copy again. Without tmux, or with no
+  editor to run, the text box editor opens as before. A bundled persona still
+  opens read-only there, with *Save as…*.
 
 ### Changed
 - **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and
@@ -372,6 +424,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Two tasks whose titles have no ASCII letters are two tasks** (#270). A
+  task's key, which makes `task add` idempotent, kept only `[a-z0-9]` from the
+  title, so `Исправить вход` and `Добавить тесты` both keyed `task`, and the
+  second add answered "already tracked" with the first. The key is now the
+  title's own letters, digits and marks in any script, NFKC-normalised and
+  casefolded (`исправить-вход`, `修复登录`, `हिन्दी-परीक्षण`). A title of
+  emoji alone is keyed by a hash of it. See Upgrading.
 - **`project forget` and `project prune` never move or write the active-project
   pin** (#271). With no pin, the project your working directory is in counted as
   the active one, so forgetting it from inside, or a prune that dropped it,
@@ -450,6 +509,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reads in the background and only repaints on the UI thread: with four projects
   of three agents each, a tick holds the UI for about 2 ms, where it held it for
   about 117 ms.
+- **`aisquare context search AND` no longer crashes, and a word in any script
+  is found** (#269). The query passed each word to SQLite FTS5 as a bareword,
+  so an upper-case `AND`, `OR` or `NOT` was read as an operator and the search
+  ended in `fts5: syntax error near "AND"`, exit 1. It kept only `[A-Za-z0-9]`
+  too, so `вход` or `ログイン` left nothing to search for and found no entry,
+  though the index had stored them. Each word is now a quoted FTS5 string: a
+  keyword is a word to find like any other ("No entries match 'AND'.", exit 0),
+  and words are Unicode letters and digits, split as the index splits them.
 - **No agent label is longer than 24 characters, and the manager is told the
   limit** (#291). A label a live agent held at 24 characters was suffixed to 26
   (`coder-authentication-ref-2`), and a role bound with `team bind` whose name

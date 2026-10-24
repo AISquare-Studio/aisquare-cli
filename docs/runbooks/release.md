@@ -2,24 +2,27 @@
 
 **What this is.** What happens when a GitHub Release is published, so the
 person cutting it knows what not to do by hand. The steps that are still
-manual are at the bottom.
+manual follow it, in order.
 
 ## Publishing the release does all of this
 
 `.github/workflows/publish.yml` runs on `release: published`:
 
 1. **build**: the sdist and the wheel, at the version in `pyproject.toml`.
-2. **publish**: uploads them to PyPI by Trusted Publishing.
-3. **installers** (from 0.9.0 on): `.github/workflows/installers.yml`, which
-   - stamps `install.sh` and `install.ps1` to the release with
-     `scripts/stamp_installers.py`. It refuses a tag that is not
-     `pyproject.toml`'s version;
-   - checks the stamped copies: shellcheck, shfmt, `dash -n` and BusyBox
-     `ash -n`, the install.sh test suites run on the stamped copy, and
-     PowerShell's parser and PSScriptAnalyzer for `install.ps1`;
-   - waits until PyPI serves the version (`pip download`, up to ten minutes),
-     so no installer is attached before the version it pins can be installed;
-   - attaches both files to the release with `gh release upload --clobber`.
+2. **precheck** (from 0.9.0 on): `.github/workflows/installers-check.yml`,
+   which stamps `install.sh` and `install.ps1` to the release with
+   `scripts/stamp_installers.py` and checks the stamped copies, all before
+   anything reaches PyPI:
+   - the tag must be `v` plus `pyproject.toml`'s version;
+   - shellcheck, shfmt, `dash -n` and BusyBox `ash -n` on `install.sh`, and the
+     install.sh test suites run on the stamped copy;
+   - PowerShell's parser and PSScriptAnalyzer on `install.ps1`.
+3. **publish**: uploads the build to PyPI by Trusted Publishing, only once
+   **build** and **precheck** have both passed.
+4. **installers**: `.github/workflows/installers.yml` stamps the same files
+   again, waits until PyPI serves the version (`pip download`, up to ten
+   minutes) so no installer is attached before the version it pins can be
+   installed, and attaches both with `gh release upload --clobber`.
 
 **Do not attach `install.sh` or `install.ps1` by hand.** The job does it, and
 `--clobber` means a rerun replaces whatever is there.
@@ -34,28 +37,42 @@ After it, these URLs work:
 The versioned copy installs exactly X.Y.Z unless the user passes `--version`.
 The latest URL follows GitHub's "Latest" release, so a **pre-release** or a
 release published with *Set as the latest release* unticked does not move it.
-The copies on `main` are unstamped and install the latest release from PyPI.
+From the moment the release is published until **installers** finishes, the
+latest URLs answer 404: GitHub already calls the new release the latest, and it
+has no assets yet. The copies on `main` are unstamped and install the latest
+release from PyPI.
 
-## Still by hand
+## Still by hand, in order
 
-- Bump `version` in `pyproject.toml`, and tag `v` plus that version. The
-  installers job fails on any other tag, after PyPI already has the version, so
-  check this before publishing.
-- Write the release notes.
-- If the **installers** job fails, do not delete and recreate the release:
-  PyPI will not take the same version twice. If PyPI was only slow, **re-run the
-  failed job** from the Actions page. A re-run checks out the tag again, so if a
-  check found a real fault, fix it on a branch cut from the tag and run
-  *Release installers* from that branch with the release's tag and **upload**
-  ticked.
+1. Bump `version` in `pyproject.toml` (and the other pins the release commit
+   moves), and merge the release PR.
+2. **Dry-run the checks on `main`, before publishing anything.** Actions →
+   *Release installers (check)* → *Run workflow*, on `main`, with the new tag
+   (for example `v0.9.0`). It stamps and runs every check **precheck** will run,
+   and attaches nothing; the tag does not have to exist yet. Green here means the
+   release's **precheck** will be green too. For the first release that carries
+   the workflow, this is also its first live run.
+3. Tag `v` plus that version and publish the release, with release notes.
+4. If **precheck** fails, nothing has reached PyPI: fix the cause, delete the
+   release and its tag, and publish again.
+5. If **installers** fails, do not delete and recreate the release: PyPI will
+   not take the same version twice. If PyPI was only slow, **re-run the failed
+   job** from the Actions page. A re-run checks out the tag again, so if
+   something else broke, fix it on a branch cut from the tag and run *Release
+   installers* from that branch with the release's tag and **upload** ticked.
 
-## A dry run
+## Running the workflows by hand
 
-Once `installers.yml` is on `main` (GitHub only offers *Run workflow* for a
-workflow the default branch has): Actions → *Release installers* → *Run
-workflow*, on the branch to test, with a tag equal to that branch's
-`pyproject.toml` version and **upload** left off. It stamps and checks everything, waits for that version on PyPI (so use one that
-is already published), and attaches nothing. Locally, the stamp alone is:
+GitHub offers *Run workflow* only for a workflow the default branch has, so
+both work this way once they are on `main`:
+
+- *Release installers (check)*: every check, on any branch whose
+  `pyproject.toml` version is the tag's. Attaches nothing.
+- *Release installers*: stamps, waits for that version on PyPI, and attaches
+  only with **upload** ticked. Without it, it is a dry run, and its PyPI wait
+  fails for a version not published yet, as it should.
+
+Locally, the stamp alone is:
 
 ```text
 python scripts/stamp_installers.py --tag vX.Y.Z --out /tmp/installers

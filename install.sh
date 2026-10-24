@@ -97,10 +97,11 @@ PROJECT_DIR=""
 # latest release. A release asset (releases/download/vX.Y.Z/install.sh) has this
 # set to its own version by scripts/stamp_installers.py, so that URL installs
 # exactly that version. Either way --version V and AISQUARE_INSTALL_VERSION=V
-# still win, and `--version latest` drops the pin. Keep it ONE line: the stamper
-# replaces this exact text and refuses a file where it is missing or doubled.
+# still win, and `--version latest` or an empty AISQUARE_INSTALL_VERSION= drops
+# the pin (no colon below: set-but-empty is a choice, not "unset"). Keep it ONE
+# line: the stamper replaces this exact text and refuses it missing or doubled.
 STAMPED_VERSION=""
-PIN_VERSION=${AISQUARE_INSTALL_VERSION:-$STAMPED_VERSION}
+PIN_VERSION=${AISQUARE_INSTALL_VERSION-$STAMPED_VERSION}
 PYTHON_VERSION="$DEFAULT_PYTHON"
 DRY_RUN=0
 VERBOSE=0

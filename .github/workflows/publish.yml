@@ -4,8 +4,11 @@ name: Publish to PyPI
 # Triggered when a GitHub Release is published. The version that ships is whatever
 # is in pyproject.toml, so bump it before tagging the release.
 #
-# After the publish succeeds, `installers` attaches install.sh and install.ps1 to
-# the release, stamped to its version (installers.yml has the URLs and checks).
+# After the build, `precheck` stamps install.sh and install.ps1 to the release
+# and checks them (installers-check.yml), and the publish waits for it: a wrong
+# tag or a stamp that fails a check stops the release before PyPI, which cannot
+# take a version back. After the publish, `installers` attaches the stamped files
+# once PyPI serves the version (installers.yml has the URLs).
 on:
   release:
     types: [published]
@@ -31,9 +34,16 @@ jobs:
           name: dist
           path: dist/
 
+  precheck:
+    name: Check the stamped installers
+    needs: build
+    uses: ./.github/workflows/installers-check.yml
+    with:
+      tag: ${{ github.event.release.tag_name }}
+
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [build, precheck]
     runs-on: ubuntu-latest
     permissions:
       id-token: write # OIDC token for Trusted Publishing

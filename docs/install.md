@@ -10,10 +10,10 @@ One line. It works out what your machine already has, installs only what is
 missing, and ends by offering to open the UI:
 
 ```sh
-curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh
 ```
 
-That is the latest release. Every release from 0.9.0 on carries its own
+That installs the latest release. Every release from 0.9.0 on carries its own
 `install.sh` and `install.ps1`, which install exactly that version, so to pin
 one, put its tag in the URL:
 
@@ -22,9 +22,9 @@ curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.
 ```
 
 `--version V` (or `AISQUARE_INSTALL_VERSION=V`) still overrides the version a
-script was released with, and `--version latest` drops it. The copy on `main`,
-`https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh`,
-installs the latest release too.
+script was released with, and `--version latest` drops it. The newest release's
+copy is also at `https://github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.sh`; it can answer 404 for a few minutes right
+after a release, before its installers are attached.
 
 macOS, Linux and WSL2. It installs [uv](https://docs.astral.sh/uv/), a Python
 3.13 for the CLI alone, `aisquare-cli`, tmux, gh, git, Node and
@@ -36,7 +36,7 @@ On **Windows**, everything runs inside WSL2 — the UI gives each agent a real
 tmux pane and Windows has no tmux. This does both steps for you, in PowerShell:
 
 ```text
-irm https://github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.ps1 | iex
+irm https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.ps1 | iex
 ```
 
 A release's own `install.ps1` pins the same way:
@@ -49,7 +49,7 @@ Fair. Read it first, or skip it entirely — nothing here needs it.
 
 ```sh
 # See exactly what it would do, and run none of it:
-curl -fsSL https://github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh -o install.sh
 less install.sh
 sh install.sh --dry-run
 ```

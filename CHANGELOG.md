@@ -10,7 +10,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 **The captain: an experimental voice-and-text agent that runs every project's fleet
 for you, off until you turn it on. Personas: run any agent as someone. Remote control
-works with nothing to install. Restart all brings back agents that died, the agent
+needs nothing more installed. Restart all brings back agents that died, the agent
 pane keeps up with your typing, and every release now carries its own installer.**
 
 ### Added
@@ -19,11 +19,14 @@ pane keeps up with your typing, and every release now carries its own installer.
   carries `install.sh` and `install.ps1` stamped to its own version, so
   `https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.sh`
   installs exactly 0.9.0 and `…/releases/latest/download/install.sh` the latest.
-  `publish.yml` attaches them after the PyPI publish, once PyPI serves the
-  version (`.github/workflows/installers.yml`, `scripts/stamp_installers.py`).
-  `--version V` still overrides a stamped pin, and `--version latest` drops it.
-  The README, `docs/install.md` and the repair command `asq upgrade` prints now
-  give the latest-release URL; the copies on `main` keep working.
+  `publish.yml` stamps and checks them before the PyPI publish
+  (`installers-check.yml`), and attaches them after it, once PyPI serves the
+  version (`installers.yml`; the stamp is `scripts/stamp_installers.py`).
+  `--version V` still overrides a stamped pin, and `--version latest` or an empty
+  `AISQUARE_INSTALL_VERSION=` drops it. A stamped copy's header and `--help` give
+  its own URL. The default one-liner is unchanged: the copy on `main`, which
+  installs the latest release, in the README, `docs/install.md` and the repair
+  command `aisquare upgrade` prints. `docs/install.md` shows how to pin.
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]
   [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
   read only the bytes the session's transcript gained since the last record, plus its

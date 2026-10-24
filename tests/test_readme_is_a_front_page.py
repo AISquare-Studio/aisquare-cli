@@ -244,7 +244,14 @@ def test_every_repo_link_in_the_readme_resolves() -> None:
     # Counted a second, independent way: a plain substring count of each URL
     # form. If either half of _REPO_URL goes blind, the regex reads fewer links
     # than the text plainly holds.
-    written = text.count(_BLOB + "/") + text.count(_RAW + "/") + text.count(_RELEASE)
+    # Only the release URLs the pattern reads (an asset, latest or by tag): a link
+    # to /releases or /releases/tag/vX is a page, not a file to resolve.
+    written = (
+        text.count(_BLOB + "/")
+        + text.count(_RAW + "/")
+        + text.count(_RELEASE + "latest/download/")
+        + text.count(_RELEASE + "download/v")
+    )
     assert written and len(links) >= written, (
         f"the README holds {written} links into this repo but only {len(links)} were "
         "read — the URL pattern went blind, so the check below is vacuous"

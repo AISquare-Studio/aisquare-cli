@@ -10,12 +10,10 @@ name: Release installers
 # keep installing the latest release.
 #
 # publish.yml calls this after the PyPI publish job succeeds, with upload: true.
-# Run by hand (Actions > Release installers > Run workflow) it is a DRY RUN
-# unless `upload` is ticked: it stamps and checks, and attaches nothing. The
-# tag has to equal pyproject.toml's version at the ref it runs on.
-#
-# The stamping is scripts/stamp_installers.py, so the tests run exactly what
-# this runs (tests/test_stamp_installers.py).
+# Every check of the stamped files already ran before that publish, in
+# installers-check.yml (publish.yml's `precheck`), on this same tag's checkout;
+# this re-stamps (which re-checks the tag), waits for PyPI, and uploads. Run by
+# hand it is a DRY RUN unless `upload` is ticked.
 
 on:
   workflow_call:
@@ -46,7 +44,7 @@ permissions:
 
 jobs:
   installers:
-    name: Stamp, check and attach install.sh and install.ps1
+    name: Attach install.sh and install.ps1
     runs-on: ubuntu-latest
     permissions:
       contents: write # gh release upload
@@ -56,8 +54,6 @@ jobs:
       TAG: ${{ inputs.tag }}
       OUT: dist-installers
     steps:
-      # The default ref: the release's tag when publish.yml calls this, the
-      # chosen branch or tag on a manual run.
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
@@ -65,61 +61,7 @@ jobs:
           python-version: "3.13"
 
       - name: Stamp
-        # Refuses a tag that is not pyproject.toml's version, and a stamp line
-        # that is missing or doubled.
         run: python scripts/stamp_installers.py --tag "$TAG" --out "$OUT"
-
-      - name: Check the stamped install.sh
-        # The static half of install.yml, on the file being uploaded.
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck dash busybox
-          SHFMT=v3.10.0
-          curl -fsSL -o /tmp/shfmt \
-            "https://github.com/mvdan/sh/releases/download/${SHFMT}/shfmt_${SHFMT}_linux_amd64"
-          chmod +x /tmp/shfmt
-          sudo mv /tmp/shfmt /usr/local/bin/shfmt
-          shellcheck --shell=sh "$OUT/install.sh"
-          shfmt -i 4 -ci -d "$OUT/install.sh"
-          dash -n "$OUT/install.sh"
-          busybox ash -n "$OUT/install.sh"
-          test -x "$OUT/install.sh"
-          echo "## Stamped for $TAG" >>"$GITHUB_STEP_SUMMARY"
-          echo '```diff' >>"$GITHUB_STEP_SUMMARY"
-          diff -u install.sh "$OUT/install.sh" >>"$GITHUB_STEP_SUMMARY" || true
-          diff -u install.ps1 "$OUT/install.ps1" >>"$GITHUB_STEP_SUMMARY" || true
-          echo '```' >>"$GITHUB_STEP_SUMMARY"
-
-      - name: The install.sh suites, on the stamped copy
-        # /bin/sh is dash on this runner, as in install.yml's static job.
-        env:
-          AISQUARE_TEST_INSTALL_SH: ${{ github.workspace }}/dist-installers/install.sh
-        run: |
-          python -m pip install --upgrade pip >/dev/null
-          pip install -e ".[dev]" >/dev/null
-          pytest -ra tests/test_install_script_is_posix.py \
-            tests/test_install_script_functions.py tests/test_stamp_installers.py
-
-      - name: Check the stamped install.ps1
-        shell: pwsh
-        run: |
-          $path = Resolve-Path "$env:OUT/install.ps1"
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            $path, [ref]$null, [ref]$errors) | Out-Null
-          if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Host $_.Message }; exit 1 }
-          # Pinned and configured as in install.yml's powershell job.
-          Install-Module PSScriptAnalyzer -RequiredVersion 1.22.0 -Force `
-            -Scope CurrentUser -SkipPublisherCheck
-          Import-Module PSScriptAnalyzer
-          $found = Invoke-ScriptAnalyzer -Path $path `
-            -Severity Error,Warning -ExcludeRule PSAvoidUsingWriteHost
-          if ($found) { $found | Format-Table -AutoSize | Out-String | Write-Host; exit 1 }
-          $want = "releases/download/$env:TAG/install.sh"
-          if (-not (Select-String -Path $path -SimpleMatch $want -Quiet)) {
-            Write-Host "the stamped install.ps1 does not fetch $want"; exit 1
-          }
-          Write-Host "install.ps1: parses, analyses clean, fetches $want"
 
       - name: Wait until PyPI serves the version
         # So nobody fetches an installer pinned to a version pip cannot get yet.

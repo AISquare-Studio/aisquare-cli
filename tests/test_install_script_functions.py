@@ -98,10 +98,6 @@ def sh(
         environment["PATH"] = path
     if env:
         environment.update(env)
-    # An empty pin means "unpinned". On a stamped copy (see SCRIPT) "" falls back
-    # to the stamped version, so it is said the way that copy understands too.
-    if environment["AISQUARE_INSTALL_VERSION"] == "":
-        environment["AISQUARE_INSTALL_VERSION"] = "latest"
     return subprocess.run(
         [SH, "-c", f'. "{SCRIPT}"\n{snippet}\n'],
         capture_output=True,
@@ -990,8 +986,7 @@ def _piped_into_sh_with_a_terminal(
             "HOME": str(home),
             "NO_COLOR": "1",
             "AISQUARE_INSTALL_LIB": "0",
-            # `latest`, not "": "" falls back to a stamped copy's pin (see SCRIPT).
-            "AISQUARE_INSTALL_VERSION": "latest",
+            "AISQUARE_INSTALL_VERSION": "",
         }
     )
 

@@ -195,6 +195,24 @@ def test_search_no_matches_message(runner: CliRunner) -> None:
     assert "No entries match" in result.stdout
 
 
+@pytest.mark.parametrize("word", ["AND", "OR", "NOT", "NEAR"])
+def test_search_for_an_fts5_keyword_finds_nothing_and_exits_0(runner: CliRunner, word: str) -> None:
+    """#269: `context search AND` ended in a traceback, `fts5: syntax error near "AND"`, and
+    exit 1."""
+    _add(runner, "something", "--user")
+    result = runner.invoke(app, ["context", "search", word])
+    assert result.exit_code == 0, result.output
+    assert f"No entries match '{word}'." in result.stdout
+
+
+def test_search_finds_a_word_in_another_script(runner: CliRunner) -> None:
+    """#269: `remember --user "вход через SSO"` then `context search вход` said no entries."""
+    _add(runner, "вход через SSO", "--user")
+    result = runner.invoke(app, ["--json", "context", "search", "вход"])
+    assert result.exit_code == 0, result.output
+    assert [e["text"] for e in _json(result.stdout)] == ["вход через SSO"]
+
+
 def test_promote_moves_entry_to_user_pool(runner: CliRunner) -> None:
     entry_id = _add(runner, "promote me", "--project")
     result = runner.invoke(app, ["context", "promote", entry_id])

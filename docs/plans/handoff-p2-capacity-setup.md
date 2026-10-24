@@ -836,3 +836,108 @@ replacing tmux or a browser UI; per-agent RSS learning; #96's env rung (size S, 
 `core/config.py:51-52`, :658-660 and :737-738 still say there is no per-key variable, and the captain
 added the one-off `AISQUARE_EXPERIMENTAL_CAPTAIN`, `core/experimental.py:33`); adopting existing
 Claude dirs (P3).
+
+---
+
+## Results (2026-10-24)
+
+Every live run was at **reduced scale** (owner decision 2026-10-23): at most 5 Claude
+sessions, at most 30 minutes, a scratch `AISQUARE_HOME` and a scratch tmux socket, never
+the real `asq` socket, `~/.aisquare` or a working fleet. A measurement that needs a working
+day or a week of a real fleet is deferred to the post-main live run (list below).
+
+| Workstream | PRs | Scale | Before | After |
+| --- | --- | --- | --- | --- |
+| W1a memory-aware admission, seat budget, test gate | #323 | `headroom()` on macOS 26, 21 calls | no admission against the machine | the check costs p50 **7.3 ms**, max 8.3 ms per spawn (two `sysctl`, one `vm_stat`; Linux reads two `/proc` files). The working-day baseline is deferred |
+| W1b finished workers stop | #368, #376 | by construction; tests | a finished worker held its seat until someone stopped it | its seat is back after `auto_stop_idle_minutes` (5) plus the 5 s settle; it is never stopped while someone types in its pane. Idle seat-minutes per day are deferred |
+| W2 `aisquare watch` | #377, #387 | tests | each manager watched with its own turns (the WS-0 baseline made 3 Monitor calls in 10.5 min) | one non-AI process; a manager wakes on new items only. Manager input per day over a week is deferred |
+| W3 `asq` tick cost | #329, #348 | `w3bench`: a real tmux server on a scratch socket, 3 `sleep` panes per agent project, medians of 15, one Mac | 50 projects (10 with 3 agents): read **200.8 ms**, 51 store sessions and 20 tmux processes; UI thread 14.9 ms | read **10.8 ms**, 1 store session, 1 tmux process; UI thread **4.3 ms** for an unchanged frame, 6.5 ms when every status changes |
+| W4 stale `ANTHROPIC_BASE_URL`, root post off the launch path | #321, #356 | `wire_session` against a local stub gateway, 11 launches each | pre-exec p50 **309.4 ms** at a 0.3 s gateway, **1507.7 ms** at 1.5 s | p50 **2.9 ms** and **3.5 ms**: the root is posted by a detached worker |
+| W5 symbol index, `aisquare code` | #327, #385 | builds on one Mac; 10 headless `claude -p` sessions (2.1.309), 5 lookup tasks, ≤ 4 at a time | onboard of this repo **9.47 s / 5.64 s** (index inline, ~3.4 s) | full build 3.9 s (510 files), one-file refresh 0.03 s; onboard **2.42–2.57 s**, the index built in the background. Live: Grep+Glob **15 → 10**, input tokens 539,654 → 646,644 (+20%, one run per cell, mostly one task): owner call 7 |
+| W5x snapshot `index.json` one entry per line | #328 | 4 headless sessions on #282's over-budget fixture | — | no measurable change at this scale: no agent read the index whole on either side; the failure mode is gone |
+| W6 parent manager over a group | #381, #387 | tests | a parent heard a child on its next look at that board | the routed line lands in the child's own write; the parent's nudge follows after the commit plus the 5 s debounce. Latency and routed events per day are deferred |
+| W7 accounts share state; cross-account resume | #360, #379, #386 | the plain claude and slots 2 and 4 in a scratch repo, 9 short turns plus the 2 e2e tests (2.1.309) | — | a session resumed on another account keeps its id and what was said (`ZEBRA-7`), its turns on the original transcript; a memory saved on one account answers on another with sharing on (`PELICAN-42`) and not without (`UNKNOWN`) |
+| CI, the suite indexing its own checkout | #384 | CI runners | rc/p2's check legs **61–87 min** after #327 | **20 min** (the lean check of #384); a pytest step now fails at 45 min (75 on Windows, 90 ambient) |
+
+**Not built in this train, and why.** W6's escalation timing (needs-you and the captain
+treat a member's question as the owner's only when the parent's manager is down or after
+`escalate_after_minutes`): it changes the phone's classifier and the captain's queue, and no
+acceptance criterion asks for it (owner call 33). W5's phase B (#92) is the next train's
+(owner call 22).
+
+### Owner calls
+
+The owner approves the train on these. Each row is one call: the default this train built
+(the handoff's proposal where it had one), the PR that built it, and how to flip it.
+"Code" means no key turns it: flipping it is a change in a later PR.
+
+| # | Call | Default taken | Where | How to flip |
+| --- | --- | --- | --- | --- |
+| 1 | `min_free_mb` default | **2048**: a box with under 2 GB available refuses spawns | #323 | `aisquare config set fleet.min_free_mb 0` |
+| 2 | The seat budget counts managers | yes; the captain is excluded; `max_agents_total = 0` (no budget) | #323 | `fleet.max_agents_total` |
+| 3 | The per-project refusal's `--json` code | `capacity_project` (was `fleet_error`) | #323 | Code |
+| 4 | Unknown headroom (an OS it cannot read) | admits, with a receipt note | #323 | Code |
+| 5 | `fleet gate` runs `CMD` as a child | `subprocess.run`, its exit code passed on (same on POSIX and Windows) | #323 | Code |
+| 6 | `auto_stop_finished` default | **on**, coders excluded | #368 | `fleet.auto_stop_finished false`; coders through `fleet.auto_stop_roles` |
+| 7 | A worker spawned for a task | never kept for queued work: it stops after its one verdict | #368 | Code |
+| 8 | `aisquare watch` starts | opt-in: nothing starts it, `asq` included | #377 | Code |
+| 9 | The watcher reads GitHub | off (`[watch] github = false`): it leaves the machine | #377 | `aisquare config set watch.github true` |
+| 10 | Detail files hold pane excerpts | local, mode 600, no redaction applied; the board line never carries them | #377 | Code |
+| 11 | Reviews are re-read on `updated_at`, not only on a new head | an approval does not change the head | #377 | Code |
+| 12 | `watch` is not a `MANAGER_WAKE_KINDS` kind | the line is addressed to the manager, which wakes it | #377 | Code |
+| 13 | `mouse on` in the fleet's tmux | a plain drag in `fleet attach` is tmux's selection; Shift/Option selects in the terminal | #329 | Code |
+| 14 | `pane_clipboard` | off | #329 | `aisquare config set fleet.pane_clipboard on` |
+| 15 | A collapsed group's hidden member | its dead pane is ended when the group is unfolded or listed, not by the tick | #329 | Code (a follow-up can check hidden rows against the tick's one window list) |
+| 16 | `doctor --fix` and tracing | turns tracing on only with `--target` (#51 said "`--fix` wires it") | #321 | Code |
+| 17 | `reset` writes Claude Code's `settings.json` | only what is ours, on `--yes`, a backup kept, under Claude Code's lock | #321, #356 | Code |
+| 18 | The shipped default `http://127.0.0.1:9090` counts as ours | flagged with tracing off; `reset` removes it | #321 | Code |
+| 19 | A root the gateway refuses after the detached post | the agent has started on `traceparent`; the reason goes to the root log; `doctor --live` catches 409/401 ahead | #321 | Code |
+| 20 | tree-sitter | an optional extra, `aisquare-cli[code]`, on the grammars' own wheels (nothing downloaded); TS/TSX/JS in phase A | #327 | Code (`ast` only would drop the extra) |
+| 21 | `code_lookup` MCP tool | registered only once a project's index has finished building | #327, #385 | Code |
+| 22 | Phase B (#92) | the next train | #327 | — |
+| 23 | `code.enabled` default | **true**: `init` and `onboard` build the index in the background | #327, #385 | `aisquare config set code.enabled false` |
+| 24 | The session-start refresh | throttled by time (once a minute per project), not by HEAD or dirtiness | #327 | Code |
+| 25 | Which checkout the index covers | the project's root checkout; a worktree coder queries the main checkout's index | #327 | Code |
+| 26 | The directive's two `aisquare code` lines | kept, though the live sample shows no token saving (Grep/Glob fell a third) | #327 | Code (the index and commands stay without it) |
+| 27 | A query with no index yet | builds it inline, saying so; beside a background build it fails fast with `index_busy` | #385 | Code |
+| 28 | The snapshot index's format | one JSON array, one entry per line, still `index.json` (not JSONL) | #328 | Code |
+| 29 | W6's linkage columns amend #140's "no group id in board tables" | the three `project_group` columns and the two `team_task` origin columns (schema 36) | #381 | — |
+| 30 | What routes up by default | questions to the manager, the parent or nobody, `task_blocked`, `result`, delegated tasks' status changes | #381 | `aisquare project group route <group> --kinds …` / `--pattern` / `--off` |
+| 31 | The storm guard | one routed line per child per 60 s, the rest folded into a count; a question, a blocked task and `--to parent` never folded | #381 | Code |
+| 32 | The subtree-pause refusal | only under a parent; a person's own spawn on a paused board still goes ahead | #381 | Code |
+| 33 | Escalation timing (`escalate_after_minutes`) | not built; the cycle's `--to parent` escalation is | #381 | a follow-up |
+| 34 | Routing depth | one level: a `routed` line on a parent that is a member elsewhere does not route again | #381 | Code |
+| 35 | `[accounts] share` default | empty: nothing written into an account's directory until asked | #360 | `aisquare accounts share --enable <parts>` |
+| 36 | The shared memory directory's key | Claude Code's own project key (the cwd), so each fleet worktree has its own memory | #360 | Code |
+| 37 | The memory `--settings` | on every launch, the plain claude's included; stands down for an operator's own `--settings` | #360 | Code |
+| 38 | Linked parts | move-then-link; a slot's own entries copied into the plain claude's (never over one), and they stay there after `--disable` | #360, #379 | Code |
+| 39 | `plugins` sharing | experimental: listed, not recommended | #360 | — |
+
+### Deferred to the post-main live run (owner decision 2026-10-23)
+
+1. W1a's baseline and after: capped minutes per project and memory at each spawn over a
+   working day on a scratch fleet with two projects (`admission.jsonl` is the instrument).
+2. W1b's idle seat-minutes per day (`ended_at` minus the session's last `result` or
+   `task_done`).
+3. W2's manager input tokens per manager per day and Monitor calls over a week, and the
+   scan's wall time at 5 and 20 projects.
+4. W5's lookup tasks at a larger sample: this train's one run per cell is noise-bound.
+5. W6's child-to-parent latency, and routed events and escalations per day, on a scratch
+   group of three members and a parent.
+6. W7's switches per day, same-session resume against a fresh hand-off, and memory files
+   per project across slots.
+
+### Release checklist, as done
+
+- Version: the next minor after P0 and P1 (0.9.x), coordinated at release. The store
+  schema step is **36** (P0's 34, P1's 35), presence-checked; the config file stays at
+  version 3 (every new key has a default, and the file is written sparse).
+- CHANGELOG `[Unreleased]`: one entry per workstream, in the house voice, naming its issue.
+- New keys: in `docs/reference.md`'s configuration table and `docs/fleet.md`'s
+  *To the release with capacity and setup* (Upgrading), which is the migration note.
+- Store: one migration (W6); the code index is its own database.
+- Owner calls before tagging: 1, 6, 13, 16 and 20 above, as the checklist named them;
+  `aisquare watch` and account sharing ship opt-in (8, 35).
+- Dependencies: no new core dependency. `aisquare-cli[code]` is a new optional extra;
+  `uv.lock` matches `pyproject.toml` (CI's `lock` job).
+- `make check` on 3.11–3.13 and Windows: the train PR's full matrix.

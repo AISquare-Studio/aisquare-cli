@@ -8,7 +8,7 @@ glance first, the unbounded detail last but the pane id:
 ``🔨 coder-auth  ▶ working  dev · 87%  claude-opus-5-5 high  %4``. The account is its NAME (no
 ``#slot``) and the figure beside it the five-hour window, percent USED, never the weekly one.
 The sidebar's rows say ``#<slot>·<pct>%`` with the same colours, from the same helper
-(:func:`~aisquare.cli.ui.sidebar.session_percent_text`).
+(:func:`~aisquare.cli.ui.sidebar.used_percent_text`).
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from aisquare.cli.ui.sidebar import (
     RED,
     YELLOW,
     agent_row_text,
-    session_percent_text,
+    used_percent_text,
 )
 from aisquare.cli.ui.views.agent import info_line
 from aisquare.core.agent_adapters import get_adapter
@@ -233,16 +233,20 @@ def test_with_no_slot_the_sessions_account_alone_and_with_neither_no_account() -
     assert neither == "🔨 coder-auth  ▶ working  claude-opus-5-5 high  %4"
 
 
-def test_the_figure_is_the_session_window_never_the_weekly_one() -> None:
-    """The figure comes from the headroom read's ``session_by_slot``: an account that has
-    spent most of its week but little of its five hours reads its five hours."""
+def test_the_figure_is_the_window_that_limits() -> None:
+    """The figure comes from the headroom read's ``limit_by_slot``, the window that limits
+    the account (S6 of SCOPE #113 0.8.2): one that has spent most of its week but little of
+    its five hours reads its week, as the pick ranks it, and one whose five hours are the
+    fuller reads them."""
     account = ClaudeAccount(slot=3, config_dir=Path("/accounts/3"))
     reading = ClaudeUsage(available=True, session_percent=12.0, week_percent=95.0, fetched_at=NOW)
     summary = accounts_service.fleet_headroom([account], {3: reading})
-    assert summary.session_by_slot == {3: 12.0}
-    assert summary.left_by_slot == {3: 5.0}  # the pick still ranks on the fuller window
-    line = info_line(_status(), LABELS, summary.session_by_slot).plain
-    assert "dev · 12%" in line and "95" not in line and "88" not in line
+    assert summary.limit_by_slot == {3: 95.0}
+    assert summary.left_by_slot == {3: 5.0}  # the pick ranks on the same window
+    line = info_line(_status(), LABELS, summary.limit_by_slot).plain
+    assert "dev · 95%" in line and "12" not in line
+    fresh_week = ClaudeUsage(available=True, session_percent=42.0, week_percent=10.0)
+    assert accounts_service.fleet_headroom([account], {3: fresh_week}).limit_by_slot == {3: 42.0}
 
 
 @pytest.mark.parametrize(
@@ -261,7 +265,7 @@ def test_the_figure_is_the_session_window_never_the_weekly_one() -> None:
 def test_the_session_figure_is_green_then_yellow_from_70_then_red_from_90(
     percent: float, shown: str, colour: str
 ) -> None:
-    figure = session_percent_text(percent)
+    figure = used_percent_text(percent)
     assert (figure.plain, str(figure.style)) == (shown, colour)
     # The same figure, the same colour, in both places it is shown.
     assert _style_of(info_line(_status(), LABELS, {3: percent}), shown) == colour
@@ -383,7 +387,7 @@ def test_bracketed_labels_and_model_names_render_literally() -> None:
 # (``token_count.rate_limits``, measured on 0.162.1 as 42 % of a 300-minute window, M9). The
 # readings below are those fixtures, read through the code that reads them in the app:
 # ``CodexAdapter.decode_event`` for the model and effort of the turn, the Codex accounts'
-# ``usage`` and ``fleet_headroom`` for the slot's figure, and ``session_by_slot`` for the one
+# ``usage`` and ``fleet_headroom`` for the slot's figure, and ``limit_by_slot`` for the one
 # map every agent's slots share with Claude Code's.
 
 CODEX_SLOT = 5
@@ -466,14 +470,14 @@ def test_a_codex_rows_line_and_sidebar_figure_come_from_its_own_readings(tmp_pat
         {2: ClaudeUsage(available=True, session_percent=87.0, week_percent=10.0)},
     )
     # One map for every agent's slots: Claude Code's summary first, as the app reads them.
-    usage = accounts_service.session_by_slot([claude, codex])
+    usage = accounts_service.limit_by_slot([claude, codex])
     assert usage == {2: 87.0, CODEX_SLOT: 42.0}
     status = _codex_status(_codex_turn(tmp_path))
     line = info_line(status, {CODEX_SLOT: "codex-1"}, usage)
     assert line.plain == "🔨 coder-1  codex  ▶ working  codex-1 · 42%  gpt-5.5-codex high  %7"
     assert agent_row_text(status, usage.get(CODEX_SLOT)).plain.endswith("▶ #5·42%")
     # Control: Claude Code's summary alone — what the line read before — has no figure for it.
-    alone = info_line(status, {CODEX_SLOT: "codex-1"}, claude.session_by_slot).plain
+    alone = info_line(status, {CODEX_SLOT: "codex-1"}, claude.limit_by_slot).plain
     assert "codex-1  gpt-5.5-codex high" in alone and "42%" not in alone
 
 

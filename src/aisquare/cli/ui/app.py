@@ -859,8 +859,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         """Read the headroom once the next accounts frame lands: the first frame at start,
         and the one after the Accounts page changed something (``AccountsChanged``)."""
         self.session_usage: dict[int, float] = {}
-        """Slot → five-hour window percent USED from the last headroom read
-        (``HeadroomSummary.session_by_slot``): what the agent rows and info lines show. It
+        """Slot → its window that limits, percent USED, from the last headroom read
+        (``HeadroomSummary.limit_by_slot``): what the agent rows and info lines show. It
         is the slow read's, handed on when it lands — the two-second tick reads no usage."""
         self.escape_key = escape_key or fleet_service.settings().escape_key
         self.snapshot: FleetSnapshot | None = None
@@ -1499,7 +1499,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             # slots; the views never read usage themselves, and the two-second tick never asks
             # for it. Asked of the switcher that holds the views, as `_forget_views` does,
             # whatever screen is on top (review of #267, 2).
-            self.session_usage = accounts_service.session_by_slot(s for _, s, _ in result)
+            self.session_usage = accounts_service.limit_by_slot(s for _, s, _ in result)
             content = self.content
             for view in content.query(AgentView):
                 view.show_usage(self.session_usage)

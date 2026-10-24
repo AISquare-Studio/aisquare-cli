@@ -2166,10 +2166,7 @@ def _agent_account_headroom_check(agent: str) -> DoctorCheck | None:
     measured = [
         (account, percent)
         for account in accounts
-        if (
-            percent := claude_accounts_service.headroom_percent(readings[account.slot], agent=agent)
-        )
-        is not None
+        if (percent := claude_accounts_service.headroom_percent(readings[account.slot])) is not None
     ]
     unreadable = [
         f"{claude_accounts_core.label(account)}: {readings[account.slot].reason or 'no reading'}"

@@ -44,7 +44,7 @@ from aisquare.cli.ui.sidebar import (
     STATE_CHIP,
     STOP_STATES,
     StopAgent,
-    session_percent_text,
+    used_percent_text,
 )
 from aisquare.cli.ui.terminal import PANE_GONE, TerminalPane
 from aisquare.core.agent_adapters import recorded_adapter
@@ -110,7 +110,7 @@ def info_line(
     <pane id>``. The role icon and the label; the state chip (``💤 exited(N)`` once it
     ended); the account (:func:`account_text`, its NAME alone — no ``#slot``) with its
     five-hour window percent USED from ``usage`` (slot → percent, the slow headroom read's
-    ``session_by_slot``); the model and the effort the session reported
+    ``limit_by_slot``); the model and the effort the session reported
     (``TeamSession.effort``, left out while unknown); the state's detail; and the pane id.
     No role word, task, working directory or tmux command: the sidebar row says the role,
     and the attach command is the Settings tab's.
@@ -172,7 +172,7 @@ def _info_line(
         percent = (usage or {}).get(slot) if slot is not None else None
         if percent is not None:
             text.append(" · ", style="dim")
-            text.append_text(session_percent_text(percent))
+            text.append_text(used_percent_text(percent))
     essential = text.cell_len
     if session is not None and session.model:
         text.append(SEPARATOR)

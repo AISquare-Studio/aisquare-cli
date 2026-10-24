@@ -69,6 +69,7 @@ from aisquare.core.spawn import untraced_env
 from aisquare.core.store import ContextStore, store_session
 from aisquare.core.tmux import TmuxServer, WindowInfo
 from aisquare.models import (
+    SESSION_WINDOW,
     AccountsOverview,
     ClaudeAccount,
     ClaudeAccountRecord,
@@ -81,6 +82,7 @@ from aisquare.models import (
     ProjectInfo,
     UsageSample,
     UsageTrend,
+    session_and_week,
 )
 from aisquare.services import agents as agents_service
 from aisquare.services import install_route
@@ -1348,10 +1350,14 @@ def _recorded_usage(
                     continue
                 found[account.slot] = ClaudeUsage(
                     available=True,
-                    session_percent=newest.session_percent,
-                    session_resets_at=newest.session_resets_at,
-                    week_percent=newest.week_percent,
-                    week_resets_at=newest.week_resets_at,
+                    # A token's reading is the endpoint's: both windows, each read or not.
+                    windows=session_and_week(
+                        newest.session_percent,
+                        newest.session_resets_at,
+                        newest.week_percent,
+                        newest.week_resets_at,
+                        every=True,
+                    ),
                     fetched_at=newest.fetched_at,
                 )
     except sqlite3.Error:
@@ -1535,32 +1541,24 @@ def describe_age(fetched_at: datetime, *, now: datetime | None = None) -> str:
     return f"{minutes // 60}h ago"
 
 
-def headroom_percent(reading: ClaudeUsage, *, agent: str = AGENT) -> float | None:
-    """How full an account reads for a pick: the FULLER of its two windows, or ``None``.
+def headroom_percent(reading: ClaudeUsage) -> float | None:
+    """How full an account reads for a pick: the window that limits it, or ``None``
+    (``ClaudeUsage.ranked_percent``).
 
-    A weekly limit refuses requests exactly as a five-hour one does, and an
-    account that has spent its week builds no five-hour usage, so its
-    five-hour window reads near 0 % once that window rolls over. Ranked on the
-    five-hour window alone it was the account with the most room: the
-    automatic hand-over moved an agent that had just hit its weekly limit back
-    onto an account that had hit its own, the first request was refused, and
-    the hand-over cooldown then kept the agent parked until a reset days away
-    (final review of #203, accounts F1). ``None`` when the five-hour window was
-    not read, which the pick skips as it always has; the seven-day window only
-    ever makes an account read fuller.
-
-    Another agent's account is as full as the fuller of the windows it HAS: a
-    Codex plan can have a weekly window and no five-hour one (measured on a
-    business plan), and skipping it would leave such an account out of every pick.
+    The FULLEST of the windows it has, percent used. A weekly limit refuses requests
+    exactly as a five-hour one does, and an account that has spent its week builds no
+    five-hour usage, so its five-hour window reads near 0 % once that window rolls over.
+    Ranked on the five-hour window alone it was the account with the most room: the
+    automatic hand-over moved an agent that had just hit its weekly limit back onto an
+    account that had hit its own, the first request was refused, and the hand-over
+    cooldown then kept the agent parked until a reset days away (final review of #203,
+    accounts F1). The windows are the ones its plan HAS: a Codex plan can have a weekly
+    window and no five-hour one (measured on a business plan), an agent of daily
+    per-model quotas a window per model. ``None`` while its shortest window went unread
+    (Claude Code's endpoint answering without the five-hour one), which the pick skips as
+    it always has.
     """
-    if agent != AGENT and reading.available:
-        windows = [p for p in (reading.session_percent, reading.week_percent) if p is not None]
-        return max(windows) if windows else None
-    if not reading.available or reading.session_percent is None:
-        return None
-    if reading.week_percent is None:
-        return reading.session_percent
-    return max(reading.session_percent, reading.week_percent)
+    return reading.ranked_percent
 
 
 def describe_headroom(account: ClaudeAccount, reading: ClaudeUsage) -> str:
@@ -1569,26 +1567,25 @@ def describe_headroom(account: ClaudeAccount, reading: ClaudeUsage) -> str:
 
     Every figure says USED, and what is left is spelled out beside it: an agent
     read a bare ``40%`` as the room remaining and rationed an account that had
-    plenty. The five-hour figure leads, as it does on the page; the weekly one
-    is named only when it is what ranks the account, so a note never shows a
+    plenty. The shortest window's figure leads, as it does on the page, named unless it is
+    the five-hour ``session`` (``account 2 week 30% used`` for a plan with a week alone);
+    the window that limits is named only when it is another one, so a note never shows a
     low number beside an account the pick passed over without saying why.
     """
     name = core.label(account)
-    session = reading.session_percent
-    if session is None:
-        week_only = reading.week_percent
-        if account.agent != AGENT and week_only is not None:
-            left = percent_left(reading, agent=account.agent)
-            spare = "" if left is None else f" ({left:.0f}% left)"
-            return f"{name} week {week_only:.0f}% used{spare}"
+    first = reading.windows[0] if reading.windows else None
+    if first is None or first.used_percent is None or headroom_percent(reading) is None:
         return name
-    left = percent_left(reading, agent=account.agent)
+    left = percent_left(reading)
     spare = "" if left is None else f"{left:.0f}% left"
-    week = reading.week_percent
-    if week is not None and week > session:
-        detail = f"week {week:.0f}% used" + (f", {spare}" if spare else "")
-        return f"{name} {session:.0f}% used ({detail})"
-    return f"{name} {session:.0f}% used" + (f" ({spare})" if spare else "")
+    lead = "" if first.name == SESSION_WINDOW else f"{first.name} "
+    limiting = reading.limiting
+    if limiting is not None and limiting != first and limiting.used_percent != first.used_percent:
+        detail = f"{limiting.name} {limiting.used_percent:.0f}% used" + (
+            f", {spare}" if spare else ""
+        )
+        return f"{name} {lead}{first.used_percent:.0f}% used ({detail})"
+    return f"{name} {lead}{first.used_percent:.0f}% used" + (f" ({spare})" if spare else "")
 
 
 HEADROOM_GOOD_ABOVE = 50.0
@@ -1599,11 +1596,10 @@ HEADROOM_LOW_FROM = 5.0
 """From this share left up to :data:`HEADROOM_FAIR_FROM`, ``low``; over 0 below it, ``critical``."""
 
 
-def percent_left(reading: ClaudeUsage, *, agent: str = AGENT) -> float | None:
-    """The share of an account LEFT for a pick: ``100 - max(session used, week used)``, 0-100.
-
-    ``agent`` is the account's, as :func:`headroom_percent` reads it."""
-    used = headroom_percent(reading, agent=agent)
+def percent_left(reading: ClaudeUsage) -> float | None:
+    """The share of an account LEFT for a pick: ``100 -`` the window that limits it, 0-100
+    (:func:`headroom_percent`)."""
+    used = headroom_percent(reading)
     return None if used is None else min(100.0, max(0.0, 100.0 - used))
 
 
@@ -1629,14 +1625,16 @@ def fleet_headroom(
 
     - an account is **usable** when it is enabled and has a readable reading
       (signed in, token accepted, the five-hour window read);
-    - its share **left** is ``100 - max(session % used, week % used)`` — the
-      fuller window decides, as it does for a pick (:func:`headroom_percent`);
+    - its share **left** is ``100 - max(session % used, week % used)``, over every window
+      it has — the window that limits it decides, as it does for a pick
+      (:func:`headroom_percent`);
     - the fleet's **percent left** is the mean of ``left`` over the usable
       accounts, and **usable** is how many there are;
     - **needs login** counts the accounts whose token has expired or was
       rejected (``ClaudeUsage.needs_login``);
-    - **session by slot** is each usable account's five-hour window, percent
-      USED, as read — what the agent rows show beside an agent's account;
+    - **limit by slot** is each usable account's window that limits, percent USED,
+      as read (``ClaudeUsage.limiting``: the five-hour one unless another is fuller) —
+      what the agent rows and the info line show beside an agent's account;
     - the **level**: ``good`` over 50 % left, ``fair`` 25-50 %, ``low`` 5-25 %,
       ``critical`` under 5 % (but above 0), ``empty`` at 0 % or with no usable
       account, ``unknown`` while no enabled account has been read yet.
@@ -1653,15 +1651,15 @@ def fleet_headroom(
     if not read:
         return HeadroomSummary(level="unknown")
     left_by_slot: dict[int, float] = {}
-    session_by_slot: dict[int, float] = {}
+    used_by_slot: dict[int, float] = {}
     taken: list[datetime] = []
     for account in enabled:
         reading = readings.get(account.slot)
-        left = percent_left(reading, agent=account.agent) if reading is not None else None
-        if reading is None or left is None or reading.session_percent is None:
+        used = headroom_percent(reading) if reading is not None else None
+        if reading is None or used is None:
             continue
-        left_by_slot[account.slot] = left
-        session_by_slot[account.slot] = reading.session_percent
+        left_by_slot[account.slot] = min(100.0, max(0.0, 100.0 - used))
+        used_by_slot[account.slot] = used
         if reading.fetched_at is not None:
             taken.append(reading.fetched_at)
     if not left_by_slot:
@@ -1673,18 +1671,19 @@ def fleet_headroom(
         usable=len(left_by_slot),
         needs_login=needs_login,
         left_by_slot=left_by_slot,
-        session_by_slot=session_by_slot,
+        limit_by_slot=used_by_slot,
         fetched_at=min(taken, default=None),
     )
 
 
-def session_by_slot(summaries: Iterable[HeadroomSummary]) -> dict[int, float]:
-    """Slot → five-hour window percent USED across every agent's summary, as the agent rows
-    and info lines show it: one :func:`fleet_headroom` per agent (a Codex account's room is
-    nothing to a Claude Code agent), and slots are one ladder, so no two agents share one."""
+def limit_by_slot(summaries: Iterable[HeadroomSummary]) -> dict[int, float]:
+    """Slot → its window that limits, percent USED, across every agent's summary, as the
+    agent rows and info lines show it: one :func:`fleet_headroom` per agent (a Codex
+    account's room is nothing to a Claude Code agent), and slots are one ladder, so no two
+    agents share one."""
     union: dict[int, float] = {}
     for summary in summaries:
-        union.update(summary.session_by_slot)
+        union.update(summary.limit_by_slot)
     return union
 
 
@@ -1779,7 +1778,7 @@ def headroom_choice(
     notes: list[str] = []
     for account in candidates:
         reading = readings[account.slot]
-        percent = headroom_percent(reading, agent=account.agent)
+        percent = headroom_percent(reading)
         if percent is not None:
             measured.append((account, percent))
         else:

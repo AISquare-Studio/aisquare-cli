@@ -105,7 +105,8 @@
   "accounts": {
     "login": {
       ".gemini/oauth_creds.json": "{\"access_token\": \"a-one\", \"refresh_token\": \"r-one\", \"expiry_date\": 1798761600000}",
-      ".gemini/google_accounts.json": "{\"active\": \"one@example.com\", \"old\": []}"
+      ".gemini/google_accounts.json": "{\"active\": \"one@example.com\", \"old\": []}",
+      ".gemini/quota.json": "{\"models\": {\"gemini-2.5-flash\": {\"used_percent\": 10, \"resets_at\": \"2026-10-25T00:00:00+00:00\"}, \"gemini-2.5-pro\": {\"used_percent\": 70, \"resets_at\": \"2026-10-25T00:00:00+00:00\"}}, \"recorded_at\": \"2026-10-24T09:00:00+00:00\"}"
     },
     "relogin": {
       ".gemini/oauth_creds.json": "{\"access_token\": \"a-two\", \"refresh_token\": \"r-two\", \"expiry_date\": 1798761600000}"

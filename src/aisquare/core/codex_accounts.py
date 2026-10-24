@@ -51,7 +51,14 @@ from typing import Any
 from aisquare.core import paths
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice, LoginUnreadable
 from aisquare.core.codex_sharing import CodexFolderTrust
-from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
+from aisquare.models import (
+    SESSION_WINDOW,
+    WEEK_WINDOW,
+    ClaudeAccount,
+    ClaudeIdentity,
+    ClaudeUsage,
+    UsageWindow,
+)
 
 AGENT = "codex"
 HOME_VAR = "CODEX_HOME"
@@ -441,16 +448,16 @@ def usage(account: ClaudeAccount, *, now: datetime | None = None) -> ClaudeUsage
             return 0.0, None
         return window.percent, window.resets_at
 
-    session_percent, session_resets = read(session)
-    week_percent, week_resets = read(week)
-    return ClaudeUsage(
-        available=True,
-        session_percent=session_percent,
-        session_resets_at=session_resets,
-        week_percent=week_percent,
-        week_resets_at=week_resets,
-        fetched_at=recorded_at,
-    )
+    windows = []
+    for name, window in ((SESSION_WINDOW, session), (WEEK_WINDOW, week)):
+        if window is not None:  # the windows its plan HAS: a business plan's week alone
+            percent, resets = read(window)
+            windows.append(
+                UsageWindow(
+                    name=name, minutes=window.minutes, used_percent=percent, resets_at=resets
+                )
+            )
+    return ClaudeUsage(available=True, windows=tuple(windows), fetched_at=recorded_at)
 
 
 # --- a limit, from the end of the session's rollout --------------------------------------------

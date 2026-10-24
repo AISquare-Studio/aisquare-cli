@@ -302,7 +302,7 @@ class ManagerTab(Vertical):
 class ProjectView(TabbedContent):
     """One project: its manager's pane first, then the board, AISquare and settings.
 
-    ``usage`` is the shell's last per-slot session use (``HeadroomSummary.session_by_slot``),
+    ``usage`` is the shell's last per-slot session use (``HeadroomSummary.limit_by_slot``),
     so a view opened between two headroom reads shows the figure at once.
     """
 

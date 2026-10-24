@@ -1726,3 +1726,41 @@ def test_the_accounts_commands_name_an_agents_slots_in_its_own_words(
     assert cleared.exit_code == 0, cleared.output
     assert (f"cleared for {adapter.label}" in cleared.output) is not slot.legacy_slots
     assert f"no {slot.noun} account in slot 99" in missing.output
+
+
+def test_a_reading_is_its_windows_and_the_one_that_limits_ranks_it() -> None:
+    """S6: an account's usage is its windows (``ClaudeUsage.windows``, shortest first), each
+    named and of its own length, with Claude Code's ``session`` and ``week`` as views of
+    them; the pick, the agent rows and the info line go by the one that limits (the fullest
+    read), and a reading whose shortest window went unread ranks nowhere."""
+    from aisquare.models import ClaudeUsage, UsageWindow
+
+    claude = ClaudeUsage(available=True, session_percent=12.0, week_percent=95.0)
+    assert [(w.name, w.minutes) for w in claude.windows] == [("session", 300), ("week", 10080)]
+    assert (claude.session_percent, claude.week_percent) == (12.0, 95.0)
+    assert claude.limiting == claude.windows[1] and claude.ranked_percent == 95.0
+    unread = ClaudeUsage(
+        available=True,
+        windows=(
+            UsageWindow(name="session", minutes=300),
+            UsageWindow(name="week", minutes=10080, used_percent=30),
+        ),
+    )
+    assert unread.ranked_percent is None and unread.week_percent == 30
+    daily = ClaudeUsage(
+        available=True,
+        windows=(
+            UsageWindow(name="pro daily", minutes=1440, used_percent=70.0),
+            UsageWindow(name="flash daily", minutes=1440, used_percent=10.0),
+        ),
+    )
+    assert (daily.session_percent, daily.week_percent) == (None, None)
+    assert daily.ranked_percent == 70.0
+    account = ClaudeAccount(slot=5, config_dir=Path("/accounts/5"), agent="gemini-shaped")
+    assert accounts_service.describe_headroom(account, daily) == (
+        "account 5 pro daily 70% used (30% left)"
+    )
+    summary = accounts_service.fleet_headroom([account], {5: daily})
+    assert summary.limit_by_slot == {5: 70.0} and summary.left_by_slot == {5: 30.0}
+    dumped = ClaudeUsage.model_validate(claude.model_dump(mode="json"))
+    assert dumped == claude and claude.model_dump()["session_used_percent"] == 12.0

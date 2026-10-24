@@ -471,7 +471,7 @@ def session_use(*by_slot: tuple[int, float]) -> Callable[..., HeadroomSummary]:
     """A headroom read answering ``by_slot`` as each account's five-hour window USED."""
 
     def read(accounts: Sequence[ClaudeAccount] | None) -> HeadroomSummary:
-        return HeadroomSummary(level="good", percent_left=50.0, session_by_slot=dict(by_slot))
+        return HeadroomSummary(level="good", percent_left=50.0, limit_by_slot=dict(by_slot))
 
     return read
 
@@ -552,7 +552,7 @@ def test_the_session_use_rides_the_slow_headroom_read_never_the_tick(
     tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Acceptance (e): the figures on the rows and the info lines are the headroom read's
-    (``HeadroomSummary.session_by_slot``), handed to the widgets when it lands. Ticks of the
+    (``HeadroomSummary.limit_by_slot``), handed to the widgets when it lands. Ticks of the
     two-second clock read no usage, and any other usage read is recorded — not raised: every
     usage read runs in a thread worker that does not exit on error, where a raise only marks
     the worker failed (review of #267, 3). A view opened between two reads shows the last

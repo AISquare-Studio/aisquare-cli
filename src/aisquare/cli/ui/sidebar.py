@@ -259,8 +259,8 @@ def agent_row_text(
     """``🧭 manager       ⏸ #1·42% · skeptic`` — icon, label, state chip, the account's slot
     and the session use on it, exit status when exited, persona.
 
-    ``#<slot>`` is ``FleetAgent.account_slot`` and ``percent`` that account's five-hour
-    window, percent USED (:func:`session_percent_text`); with no percent the slot alone,
+    ``#<slot>`` is ``FleetAgent.account_slot`` and ``percent`` that account's window that
+    limits, percent USED (:func:`used_percent_text`); with no percent the slot alone,
     with no slot neither. An exited row shows ``💤 exited(N)`` instead: it no longer draws
     on the account, and at the default width the two did not fit beside each other.
 
@@ -288,7 +288,7 @@ def agent_row_text(
     elif agent.account_slot is not None:
         tail.append(f" #{agent.account_slot}" + ("·" if percent is not None else ""), style="dim")
         if percent is not None:
-            tail.append_text(session_percent_text(percent))
+            tail.append_text(used_percent_text(percent))
     persona = agent.persona or (status.session.persona if status.session is not None else None)
     badge = Text(f" · {persona}", style="dim") if persona else Text()
     label = Text(agent.label)
@@ -368,18 +368,19 @@ HEADROOM_DOT: dict[str, tuple[str, str]] = {
 5-25 % orange-red, under 5 % red, nothing left a skull, not read yet grey."""
 
 SESSION_WARN_FROM = 70
-"""From this share of an account's five-hour window USED, its figure is yellow."""
+"""From this share of an account's window that limits USED, its figure is yellow."""
 SESSION_HIGH_FROM = 90
 """From this share USED, red: the account is close to its session limit."""
 
 
-def session_percent_text(percent: float) -> Text:
-    """``42%`` — an account's five-hour window, percent USED, in the colour of how close it is.
+def used_percent_text(percent: float) -> Text:
+    """``42%`` — an account's window that limits, percent USED, in the colour of how close it is.
 
     Green below :data:`SESSION_WARN_FROM`, yellow up to :data:`SESSION_HIGH_FROM`, red from
     there: the one format the sidebar's agent rows and the agent info line share. The
-    colour is the shown figure's, so ``70%`` is never green for a 69.6 read. The SESSION
-    window only (``HeadroomSummary.session_by_slot``), never the weekly one.
+    colour is the shown figure's, so ``70%`` is never green for a 69.6 read. The window
+    that limits (``HeadroomSummary.limit_by_slot``): the five-hour one unless the week, or
+    another window of the agent's, is fuller.
     """
     shown = round(percent)
     colour = RED if shown >= SESSION_HIGH_FROM else YELLOW if shown >= SESSION_WARN_FROM else GREEN
@@ -1370,8 +1371,8 @@ class Sidebar(Vertical):
         self.more_headroom: tuple[AgentHeadroom, ...] = ()
         """Every other agent's accounts the status line shows, each on its own line."""
         self.session_usage: Mapping[int, float] = {}
-        """Slot → its five-hour window, percent USED, from the last headroom read: the
-        ``#N·NN%`` on the agent rows (``HeadroomSummary.session_by_slot``)."""
+        """Slot → its window that limits, percent USED, from the last headroom read: the
+        ``#N·NN%`` on the agent rows (``HeadroomSummary.limit_by_slot``)."""
         self._prev_states: dict[str, str] = {}
         self._cursor_key: str | None = None
         self.last_frame: tuple[list[ProjectInfo], dict[str, list[FleetAgentStatus]]] | None = None
@@ -1813,7 +1814,7 @@ class Sidebar(Vertical):
         self.headroom_name = name or default_binary()
         self.more_headroom = tuple(more)
         self._paint_status()
-        usage = accounts_service.session_by_slot([headroom, *(m.headroom for m in more)])
+        usage = accounts_service.limit_by_slot([headroom, *(m.headroom for m in more)])
         if usage != self.session_usage:
             self.session_usage = usage
             for row in self.query(AgentRow):

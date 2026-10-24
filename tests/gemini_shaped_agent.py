@@ -68,7 +68,7 @@ from aisquare.core.agent_adapters.types import (
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
 from aisquare.core.shell_line import command_line
-from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
+from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage, UsageWindow
 
 AGENT = "gemini-shaped"
 HOME_ENV = "GEMINI_CLI_HOME"
@@ -84,6 +84,9 @@ EVENTS: dict[str, EventKind] = {
 }
 #: The aisquare extension, as ``gemini extensions install`` names it.
 EXTENSION = "aisquare"
+#: Where its sessions record the day's quotas, per model, in its config dir.
+QUOTA = "quota.json"
+DAY_MINUTES = 24 * 60
 #: ``-r``/``--resume``, ``-m``/``--model`` and the rest that take a value (cli-reference.md).
 VALUE_OPTIONS = frozenset(
     {
@@ -106,6 +109,13 @@ VALUE_OPTIONS = frozenset(
 
 def _milliseconds(seconds: int) -> int:
     return seconds * 1000
+
+
+def _when(value: object) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
 
 
 class GeminiShapedTranscript:
@@ -334,7 +344,27 @@ class GeminiShapedAccounts:
         return "ok" if self.signed_in(account) else "missing"
 
     def usage(self, account: ClaudeAccount, *, now: datetime | None, fetch: object) -> ClaudeUsage:
-        return ClaudeUsage(available=False, reason="its quotas are per day per model")
+        """Its quotas are per day per model (docs/resources/quota-and-pricing.md): one window
+        of a day for each model, from ``quota.json`` in its config dir (``{"models": {model:
+        {"used_percent", "resets_at"}}, "recorded_at"}``, a stand-in for the real CLI, which
+        documents no local quota file). Read offline, as Codex's are."""
+        data = self._read(account, QUOTA) or {}
+        models = data.get("models")
+        if not isinstance(models, dict) or not models:
+            return ClaudeUsage(available=False, reason="no session has recorded its quotas yet")
+        windows = tuple(
+            UsageWindow(
+                name=f"{model} daily",
+                minutes=DAY_MINUTES,
+                used_percent=float(quota["used_percent"]),
+                resets_at=_when(quota.get("resets_at")),
+            )
+            for model, quota in models.items()
+            if isinstance(quota, dict) and isinstance(quota.get("used_percent"), int | float)
+        )
+        return ClaudeUsage(
+            available=bool(windows), windows=windows, fetched_at=_when(data.get("recorded_at"))
+        )
 
     def limit_from_transcript(
         self, path: Path, *, now: datetime | None = None

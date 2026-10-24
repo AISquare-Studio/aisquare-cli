@@ -90,7 +90,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from aisquare.core import claude_sharing, paths
 from aisquare.core.names import name_flaw, name_key
 from aisquare.core.version import __version__
-from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
+from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage, session_and_week
 
 if TYPE_CHECKING:
     from aisquare.core.agent_adapters.types import AgentAccounts, UsageFetch
@@ -1429,10 +1429,10 @@ def endpoint_usage(
         )
     return ClaudeUsage(
         available=True,
-        session_percent=session_percent,
-        session_resets_at=session_resets,
-        week_percent=week_percent,
-        week_resets_at=week_resets,
+        # Both windows, each read or not: one the endpoint answered without went unread.
+        windows=session_and_week(
+            session_percent, session_resets, week_percent, week_resets, every=True
+        ),
         fetched_at=now,
     )
 

@@ -218,3 +218,56 @@ def test_first_run_finds_connects_and_reads_it_as_the_one_agent_here(
 
     agents_service.connect(third.id, home)
     assert first_run.probe_fleet(which=on_path(third.binary)).connected
+
+
+# --- usage: windows of its own -------------------------------------------------------------
+
+
+def test_its_daily_per_model_quotas_are_its_usage_and_the_info_line_shows_the_one_that_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S6: the Gemini-shaped agent's usage is one window of a day per model, read offline
+    from its slot; the headroom read ranks the slot by the model nearest its quota, and the
+    agent's info line shows that figure, with no shared file naming it."""
+    from datetime import UTC, datetime
+
+    from aisquare.cli.ui.views.agent import info_line
+    from aisquare.models import FleetAgent, FleetAgentStatus
+    from aisquare.services import claude_accounts as accounts_service
+
+    adapter = GeminiShapedAdapter()
+    monkeypatch.delenv(adapter.home_env, raising=False)
+    register(adapter)
+    try:
+        slot = accounts_core.create_account(adapter.id)
+        for name, text in json.loads((FIXTURES / f"{adapter.id}.json").read_text("utf-8"))[
+            "accounts"
+        ]["login"].items():
+            (slot.config_dir / name).parent.mkdir(parents=True, exist_ok=True)
+            (slot.config_dir / name).write_text(text, encoding="utf-8")
+
+        reading = adapter.accounts.usage(slot, now=None, fetch=None)
+        summary = accounts_service.read_fleet_headroom(agent=adapter.id)
+
+        assert [w.name for w in reading.windows] == [
+            "gemini-2.5-flash daily",
+            "gemini-2.5-pro daily",
+        ]
+        assert reading.limiting is not None and reading.limiting.name == "gemini-2.5-pro daily"
+        assert summary.limit_by_slot == {slot.slot: 70.0} and summary.usable == 1
+        row = FleetAgent(
+            id="agt_g",
+            project_id="prj_g",
+            label="coder-1",
+            role="coder",
+            binary=adapter.binary,
+            agent=adapter.id,
+            pane_id="%7",
+            cwd=Path("/w"),
+            account_slot=slot.slot,
+            created_at=datetime.now(UTC),
+        )
+        line = info_line(FleetAgentStatus(agent=row, state="waiting"), None, summary.limit_by_slot)
+        assert f"{accounts_core.label(slot)} · 70%" in line.plain, line.plain
+    finally:
+        unregister(adapter.id)

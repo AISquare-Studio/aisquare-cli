@@ -13,7 +13,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 _SIGNAL_TEXT = re.compile(r"^([a-z0-9][a-z0-9._-]*): (\S+)(?: \(was (\S+)\))?$")
 """The anchored serialization of a signal event's text: ``name: value`` with
@@ -310,19 +310,78 @@ def _left(used: float | None) -> float | None:
     return None if used is None else min(100.0, max(0.0, 100.0 - used))
 
 
-class ClaudeUsage(BaseModel):
-    """One account's rate-limit windows, as Claude Code's own ``/usage`` reads them.
+SESSION_WINDOW = "session"
+"""The shorter of the two windows Claude Code's ``/usage`` reads (five hours) and Codex's
+primary rate limit: what the Accounts page's ``session`` columns show."""
+WEEK_WINDOW = "week"
+"""The longer (seven days), and Codex's secondary: the Accounts page's ``week`` columns."""
+SESSION_MINUTES = 5 * 60
+WEEK_MINUTES = 7 * 24 * 60
 
-    A Codex account's come from the newest ``token_count`` its sessions recorded
-    (``core.codex_accounts.usage``): the shorter window is ``session``, the longer
-    ``week``, and ``fetched_at`` is when that session recorded it.
+
+class UsageWindow(BaseModel):
+    """One rate-limit window of an account (``ClaudeUsage.windows``): what it is called, how
+    long it is, how much of it is USED (0-100, ``None`` where it went unread) and when it
+    resets. Claude Code's are the five-hour ``session`` and the seven-day ``week``; an agent
+    of daily per-model quotas has one per model (``pro daily``, 1440 minutes)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    minutes: int | None = None
+    used_percent: float | None = None
+    resets_at: datetime | None = None
+
+
+def session_and_week(
+    session_percent: float | None,
+    session_resets_at: datetime | None,
+    week_percent: float | None,
+    week_resets_at: datetime | None,
+    *,
+    every: bool = False,
+) -> tuple[UsageWindow, ...]:
+    """The :data:`SESSION_WINDOW` and :data:`WEEK_WINDOW` of a reading in those four fields,
+    each only where it says something (a percent, or a reset), or both with ``every``: a
+    reading that asks for both (Claude Code's endpoint) and got neither of one has that one
+    unread."""
+    windows = (
+        UsageWindow(
+            name=SESSION_WINDOW,
+            minutes=SESSION_MINUTES,
+            used_percent=session_percent,
+            resets_at=session_resets_at,
+        ),
+        UsageWindow(
+            name=WEEK_WINDOW,
+            minutes=WEEK_MINUTES,
+            used_percent=week_percent,
+            resets_at=week_resets_at,
+        ),
+    )
+    return tuple(
+        window
+        for window in windows
+        if every or window.used_percent is not None or window.resets_at is not None
+    )
+
+
+class ClaudeUsage(BaseModel):
+    """One account's rate-limit windows (:attr:`windows`), as its agent's own reader takes
+    them: Claude Code's ``/usage`` endpoint, a Codex account's newest ``token_count`` its
+    sessions recorded (``core.codex_accounts.usage``: the shorter window is ``session``,
+    the longer ``week``, and ``fetched_at`` is when that session recorded it), an agent of
+    daily per-model quotas one window per model.
 
     Every percentage here is percent USED (0-100), never the share left: 40
     means 40 % used and 60 % left. An agent on a fresh install read the bare
     ``session_percent`` as what remained and rationed an account that was
     nearly empty, so the JSON carries both sides under names that say which:
     ``*_used_percent`` and ``*_left_percent`` (``session_percent`` and
-    ``week_percent`` stay, for the readers that already know them).
+    ``week_percent`` stay, for the readers that already know them). They are views of
+    :attr:`windows`: the window of that name's, ``None`` where the reading has none. A
+    reading given those fields instead of ``windows`` holds the windows they say
+    (:func:`session_and_week`).
     """
 
     available: bool
@@ -331,18 +390,82 @@ class ClaudeUsage(BaseModel):
     needs_login: bool = False
     """Signed in, but the stored token has expired or was rejected: a session on the
     account refreshes it. False for every other reason nothing could be read."""
-    session_percent: float | None = None
-    """The rolling five-hour window: percent USED (0-100)."""
-    session_resets_at: datetime | None = None
-    week_percent: float | None = None
-    """The rolling seven-day window: percent USED (0-100)."""
-    week_resets_at: datetime | None = None
+    windows: tuple[UsageWindow, ...] = ()
+    """The account's windows, shortest first: those its plan has, each read or not."""
     fetched_at: datetime | None = None
     """When the reading was taken — or, when nothing could be read, when that was found out."""
     last_failed_at: datetime | None = None
     """When a later try to read failed without replacing this reading: an unreachable
     endpoint or an HTTP error after it, while it is still within the five-minute cache.
     The figure stands; the line that says how old it is says the try failed too."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _session_and_week(cls, data: Any) -> Any:
+        """``session_percent=``/``week_percent=`` (and their resets), as every reading was
+        given before :attr:`windows`, are those windows."""
+        named = ("session_percent", "session_resets_at", "week_percent", "week_resets_at")
+        if not isinstance(data, dict) or not any(key in data for key in named):
+            return data
+        data = dict(data)
+        given = [data.pop(key, None) for key in named]
+        data.setdefault("windows", session_and_week(*given))
+        return data
+
+    @model_validator(mode="after")
+    def _shortest_first(self) -> ClaudeUsage:
+        ordered = tuple(sorted(self.windows, key=lambda w: (w.minutes is None, w.minutes or 0)))
+        if ordered != self.windows:
+            object.__setattr__(self, "windows", ordered)
+        return self
+
+    def window(self, name: str) -> UsageWindow | None:
+        """The window called ``name``, or ``None`` when the reading has none."""
+        return next((window for window in self.windows if window.name == name), None)
+
+    @property
+    def limiting(self) -> UsageWindow | None:
+        """The window that limits: the most used of those read (the shorter on a tie), or
+        ``None`` with none read. What the agent rows, the info line and a pick go by: a
+        weekly or a daily limit refuses requests exactly as a five-hour one does."""
+        read = [window for window in self.windows if window.used_percent is not None]
+        return max(read, key=lambda window: window.used_percent or 0.0, default=None)
+
+    @property
+    def ranked_percent(self) -> float | None:
+        """How full the account reads for a pick: :attr:`limiting`'s percent USED, or
+        ``None`` while its shortest window went unread (a reading Claude Code's endpoint
+        answered without its five-hour window, which the pick skips as it always has)."""
+        if not self.available or not self.windows or self.windows[0].used_percent is None:
+            return None
+        limiting = self.limiting
+        return None if limiting is None else limiting.used_percent
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def session_percent(self) -> float | None:
+        """The rolling five-hour window: percent USED (0-100)."""
+        window = self.window(SESSION_WINDOW)
+        return None if window is None else window.used_percent
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def session_resets_at(self) -> datetime | None:
+        window = self.window(SESSION_WINDOW)
+        return None if window is None else window.resets_at
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def week_percent(self) -> float | None:
+        """The rolling seven-day window: percent USED (0-100)."""
+        window = self.window(WEEK_WINDOW)
+        return None if window is None else window.used_percent
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def week_resets_at(self) -> datetime | None:
+        window = self.window(WEEK_WINDOW)
+        return None if window is None else window.resets_at
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -422,10 +545,11 @@ class HeadroomSummary(BaseModel):
     needs_login: int = 0
     """Signed-in accounts whose token has expired or was rejected: a session on each fixes it."""
     left_by_slot: dict[int, float] = Field(default_factory=dict)
-    """Each usable account's share LEFT, ``100 - max(session used, week used)``."""
-    session_by_slot: dict[int, float] = Field(default_factory=dict)
-    """Each usable account's five-hour window, percent USED — never the weekly one: what
-    the sidebar's agent rows and the agent info line show beside an agent's account."""
+    """Each usable account's share LEFT, ``100 -`` its window that limits."""
+    limit_by_slot: dict[int, float] = Field(default_factory=dict)
+    """Each usable account's window that limits (``ClaudeUsage.limiting``: the five-hour one
+    unless another, the week, a model's daily quota, is fuller), percent USED: what the
+    sidebar's agent rows and the agent info line show beside an agent's account."""
     fetched_at: datetime | None = None
     """The OLDEST reading behind the figure: the summary is no staler than this."""
 

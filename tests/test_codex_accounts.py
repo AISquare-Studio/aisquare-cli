@@ -307,7 +307,7 @@ def test_usage_is_the_newest_rollouts_token_count_with_windows_by_length(home: P
         int((NOW + timedelta(hours=2)).timestamp()), tz=UTC
     )
     assert reading.fetched_at == newest  # when the session recorded it
-    assert service.headroom_percent(reading, agent="codex") == 40.0
+    assert service.headroom_percent(reading) == 40.0
 
 
 def test_a_weekly_only_plan_and_a_window_that_has_reset_since(home: Path) -> None:
@@ -315,9 +315,11 @@ def test_a_weekly_only_plan_and_a_window_that_has_reset_since(home: Path) -> Non
     _rollout(slot.config_dir, [_token_count(NOW, _window(30, 10080, NOW + timedelta(days=2)))])
     weekly = service.usage(slot, now=NOW)
     assert (weekly.session_percent, weekly.week_percent) == (None, 30.0)
-    # Claude's rule skips a reading without the five-hour window; Codex's ranks what it has.
-    assert service.headroom_percent(weekly) is None
-    assert service.headroom_percent(weekly, agent="codex") == 30.0
+    # Its plan has a week alone, which the pick ranks it by (``ClaudeUsage.windows``): only a
+    # reading whose shortest window went unread (Claude's endpoint without its five hours)
+    # is skipped.
+    assert [w.name for w in weekly.windows] == ["week"]
+    assert service.headroom_percent(weekly) == 30.0
     assert service.describe_headroom(slot, weekly) == "account 2 week 30% used (70% left)"
 
     later = NOW + timedelta(days=3)  # the window reset; nobody has used this home since

@@ -121,7 +121,6 @@ BASELINE: dict[str, dict[Shape, int]] = {
     "core/config.py": {"flag": 3},
     "core/harness.py": {"env": 30, "flag": 5},
     "core/spawn.py": {"env": 1},
-    "services/claude_accounts.py": {"decide_named": 2},
     "services/diagnostics.py": {"env": 1, "dir": 3},
     "services/explainability.py": {"env": 4, "flag": 4},
     "services/native_telemetry.py": {"binary": 1, "dir": 2},

@@ -89,6 +89,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, NoReturn
 
+from aisquare.core.agent_adapters.types import screen_of
 from aisquare.core.atomic import Replacement, replacement, write_replacing
 from aisquare.core.locking import acquire, open_lock_file, unlock
 from aisquare.core.paths import (
@@ -2465,7 +2466,7 @@ def remote_one_press_exit(
     key, name = _key_said(keys[at]), adapter.label
     if at > 0:
         said = f"the keys before the {key} may leave {label} at {name}'s empty prompt"
-    elif capabilities.idle_on_screen is None and not capabilities.idle_prompt_mark:
+    elif not screen_of(adapter).reads_empty_prompt:
         said = f"{label}'s screen does not say whether {name} is at its empty prompt"
     else:
         try:

@@ -29,6 +29,7 @@ from aisquare.core.agent_adapters.types import (
     PermissionIntent,
     SkillDirs,
     WriteScope,
+    screen_of,
     store_dir,
 )
 from aisquare.core.config import (
@@ -901,7 +902,7 @@ def test_codexs_trust_dialog_is_the_owners_and_its_approval_a_chooser_on_1_and_e
     screens = json.loads(
         (Path(__file__).parent / "fixtures" / "agent_screens" / "codex.json").read_text("utf-8")
     )
-    read = CODEX.capabilities.screen_prompt
+    read = screen_of(CODEX).screen_prompt
     assert read is not None
     assert {shown["what"] for shown in screens["dialogs"]} == set(CODEX_PROMPTS)
     wholes = {}

@@ -27,6 +27,7 @@ import pytest
 
 from aisquare.core import agents, selfcli
 from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters.types import screen_of
 from aisquare.core.config import load_config, save_config
 from aisquare.core.store import store_session
 from aisquare.core.tmux import TmuxError, TmuxServer
@@ -203,7 +204,7 @@ def test_real_claude_code_keeps_its_folder_trust_dialog_and_gets_the_spawn_promp
         pane = native.listed()[0].pane_id
         screen = native.screen
         native.until(lambda: "trust this folder" in screen(pane), 30, "the dialog", pane)
-        mark = get_adapter("claude-code").capabilities.start_dialog_mark
+        mark = screen_of(get_adapter("claude-code")).start_dialog_mark
         assert mark and mark in screen(pane), "the mark a start's dialogs show"
         time.sleep(3)  # well past the agent's start: the old rule typed by now
         assert started() == [], "no hook fires at the dialog"

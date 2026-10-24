@@ -15,6 +15,7 @@ from aisquare.core import harness
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
+    AgentScreen,
     AgentTranscript,
     BadEffortError,
     EventKind,
@@ -497,6 +498,13 @@ class CodexAdapter:
     key_spellings: Mapping[str, str] = MappingProxyType({"S-Enter": "C-j"})
     accounts = CodexAccounts()
     plugin = CodexPlugin()
+    screen: AgentScreen | None = AgentScreen(
+        idle_prompt_mark=IDLE_PROMPT_MARK,
+        idle_on_screen=idle_on_screen,
+        working_on_screen=working_on_screen,
+        dialog_on_screen=dialog_on_screen,
+        screen_prompt=screen_prompt,
+    )
     capabilities = AgentCapabilities(
         approves_for_me=True,
         launch_inputs=(".codex", ".agents"),
@@ -518,16 +526,11 @@ class CodexAdapter:
         limits_in_transcript=True,
         native_telemetry=True,
         positional_prompt=True,
-        idle_prompt_mark=IDLE_PROMPT_MARK,
-        idle_on_screen=idle_on_screen,
         one_press_exits=frozenset({"C-c", "C-d"}),
-        dialog_on_screen=dialog_on_screen,
-        screen_prompt=screen_prompt,
         first_context_file_only=True,
         sandbox_permissions=True,
         sandboxes_tools=True,
         redraws_while_asking=True,
-        working_on_screen=working_on_screen,
         tool_shell_env="CODEX_THREAD_ID",
         # `RUN env` in a `codex exec` tool shell: 0.162.1 set these beside CODEX_THREAD_ID and
         # CODEX_HOME, 0.164.0 (npm) CODEX_TOOL_CALL_ID and its two package variables too.

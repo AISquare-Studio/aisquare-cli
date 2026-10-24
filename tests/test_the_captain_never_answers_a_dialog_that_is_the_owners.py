@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters.types import screen_of
 from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo
 from aisquare.services.captain import actions
@@ -51,7 +52,7 @@ def _idle(agent: str) -> list[str]:
 
 
 def _shape(agent: str, rows: list[str]) -> str:
-    read = get_adapter(agent).capabilities.screen_prompt
+    read = screen_of(get_adapter(agent)).screen_prompt
     assert read is not None
     prompt = read(rows)
     assert prompt is not None
@@ -102,7 +103,7 @@ def test_a_chooser_or_a_yes_no_line_stays_the_captains_to_answer(
     """The control: ``press no`` at a chooser or a ``[y/N]`` line sends its no."""
     agent = request.node.callspec.params["pane"]
     pane.screen = list(rows)
-    read = get_adapter(agent).capabilities.screen_prompt
+    read = screen_of(get_adapter(agent)).screen_prompt
     assert read is not None
     prompt = read(rows)
     assert prompt is not None and prompt.no_key is not None

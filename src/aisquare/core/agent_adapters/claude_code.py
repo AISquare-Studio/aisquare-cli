@@ -16,6 +16,7 @@ from aisquare.core.agent_adapters.claude_screen import (
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     AgentEvent,
+    AgentScreen,
     AgentTranscript,
     BadEffortError,
     EventKind,
@@ -131,6 +132,13 @@ class ClaudeCodeAdapter:
     key_spellings: Mapping[str, str] = MappingProxyType({})
     accounts = ClaudeCodeAccounts()
     plugin = ClaudeCodePlugin()
+    screen: AgentScreen | None = AgentScreen(
+        start_dialog_mark="Enter to confirm",
+        screen_prompt=prompt_showing,
+        ready_on_screen=box_idle,
+        prompt_on_screen=box_drawn,
+        modal_on_screen=modal_showing,
+    )
     capabilities = AgentCapabilities(
         launch_inputs=(".claude", ".mcp.json"),
         hooks=(
@@ -147,11 +155,6 @@ class ClaudeCodeAdapter:
         ambient_first_run=True,
         reads_pane_readiness=True,
         starts_at_its_prompt=True,
-        start_dialog_mark="Enter to confirm",
-        screen_prompt=prompt_showing,
-        ready_on_screen=box_idle,
-        prompt_on_screen=box_drawn,
-        modal_on_screen=modal_showing,
         resumes_across_homes=True,
         pid_env="CLAUDE_PID",
         exports_home_env=False,

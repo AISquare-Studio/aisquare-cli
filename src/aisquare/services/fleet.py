@@ -70,6 +70,7 @@ from aisquare.core.agent_adapters.types import (
     ForkArgs,
     PermissionIntent,
     option_values,
+    screen_of,
     stepped_down,
 )
 from aisquare.core.config import (
@@ -3354,7 +3355,7 @@ def _working_on_screen(
     :func:`_redraws_while_asking`) running a turn unblocked
     (``AgentCapabilities.working_on_screen``); ``False`` when it cannot be read."""
     adapter = recorded_adapter(agent.agent)
-    working = adapter.capabilities.working_on_screen if adapter is not None else None
+    working = screen_of(adapter).working_on_screen if adapter is not None else None
     if working is None or screen is None:
         return False
     rows = screen()
@@ -3398,7 +3399,7 @@ with this. ``remote_needs`` keys Claude Code's card on it."""
 
 AT_A_DIALOG = "at a dialog of its own"
 """How an agent reads at any other dialog it opens before its first hook, which its adapter
-reads off its screen (``capabilities.dialog_on_screen``: Codex's hook review, its ``Working
+reads off its screen (``AgentScreen.dialog_on_screen``: Codex's hook review, its ``Working
 directory · fork``): ``attention``, its detail this and the dialog's words
 (:func:`_with_trust_prompts`)."""
 
@@ -3460,7 +3461,7 @@ def _start_dialog(agent: FleetAgent, pane: PlacedPane) -> str | None:
     or the ``Working directory · fork`` a bare ``codex fork`` opened read a healthy
     ``waiting … no hooks`` (SMOKE8 of #113)."""
     adapter = recorded_adapter(agent.agent) if agent.agent is not None else None
-    read = adapter.capabilities.dialog_on_screen if adapter is not None else None
+    read = screen_of(adapter).dialog_on_screen if adapter is not None else None
     try:
         lines = pane.screen() if read is not None else pane.captured()
     except TmuxError:
@@ -3470,7 +3471,7 @@ def _start_dialog(agent: FleetAgent, pane: PlacedPane) -> str | None:
     words = read(lines)
     if words is None:
         return None
-    prompt = adapter.capabilities.screen_prompt
+    prompt = screen_of(adapter).screen_prompt
     if prompt is not None and (asked := prompt(lines)) is not None and asked.shape == "trust":
         return trust_prompt_detail(agent.cwd)
     return f"{AT_A_DIALOG}: {words}"
@@ -3497,15 +3498,15 @@ def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None
     if agent.ended_at is not None or status.held or status.state not in ("waiting", "working"):
         return False
     adapter = recorded_adapter(agent.agent) if agent.agent is not None else None
-    reads = adapter is not None and adapter.capabilities.dialog_on_screen is not None
-    if adapter is not None and adapter.capabilities.start_dialog_mark is None and not reads:
+    reads = adapter is not None and screen_of(adapter).dialog_on_screen is not None
+    if adapter is not None and screen_of(adapter).start_dialog_mark is None and not reads:
         # This is Claude Code's question (`claude_sharing.shows_trust_prompt`), and an agent
         # with no mark under such a dialog, and none it reads off its screen, is not captured
         # on every listing for it.
         return False
     if session is None:
         named = adapter_for_binary(agent.binary)
-        asks = named is not None and named.capabilities.start_dialog_mark is not None
+        asks = named is not None and screen_of(named).start_dialog_mark is not None
         return reads or agent.session_id is not None or asks
     return session.last_seen_at < agent.created_at
 
@@ -5919,7 +5920,7 @@ def _type_prompt(
 
     Otherwise ready means the pane's foreground process is no longer our launcher (or it
     has produced scrollback), and no dialog of the agent's before its start is on its
-    screen (``capabilities.start_dialog_mark``). Past :data:`PROMPT_TIMEOUT` a SINGLE-LINE prompt
+    screen (``AgentScreen.start_dialog_mark``). Past :data:`PROMPT_TIMEOUT` a SINGLE-LINE prompt
     is typed anyway and the receipt says so — a slow start must not turn into a
     hang, and one line sits harmlessly in the pty's input buffer until the
     agent reads it.
@@ -6137,7 +6138,7 @@ def _type_at_its_start(
     account had not trusted (each account slot keeps its own) exited the agent.
 
     Past :data:`PROMPT_TIMEOUT` it waits on only while no such dialog is on its screen
-    (``capabilities.start_dialog_mark``), up to :data:`START_TIMEOUT`: a start that just
+    (``AgentScreen.start_dialog_mark``), up to :data:`START_TIMEOUT`: a start that just
     takes long, on a slow machine, is typed into once it comes, as the line restart,
     switch and the unattended hand-over type must be, or the replacement idles at its
     prompt (review r4 of #113, finding 8). A dialog is the human's to answer. With no
@@ -6239,14 +6240,14 @@ def _started_by_its_hook(record: launch_seal.LaunchRecord) -> bool:
 
 def _at_a_start_dialog(pane: PlacedPane, adapter: AgentAdapter | None) -> bool:
     """Whether the screen of ``pane`` shows a dialog its agent puts up before its start,
-    where an Enter answers it for the human (``capabilities.start_dialog_mark``): the
+    where an Enter answers it for the human (``AgentScreen.start_dialog_mark``): the
     dialog's own row, its last line on the screen, starts with the mark (Claude Code's
     ``Enter to confirm · Esc to cancel``). Not the phrase anywhere on the screen: the agent's
     own output shows it as soon as it opens a file or a conversation that does — this
     repository's tests and docs, a ``--continue`` — and every ``tell`` became a note, a
     spawn's prompt held back (review r5 of #113, finding 8). A screen tmux will not give
     shows none; never raises."""
-    mark = adapter.capabilities.start_dialog_mark if adapter is not None else None
+    mark = screen_of(adapter).start_dialog_mark if adapter is not None else None
     if not mark:
         return False
     try:
@@ -6741,7 +6742,7 @@ def tell(
     board seeing its start — the board on, the row naming its session; for one it
     cannot see (the board off, ``--continue``, a wrapper the board does not join) the
     rule above stands, provided no dialog of the agent's is on its screen
-    (``capabilities.start_dialog_mark``). Every such ``tell`` had been a note, and with
+    (``AgentScreen.start_dialog_mark``). Every such ``tell`` had been a note, and with
     the board off a ``FleetError`` (review r4 of #113, finding 3). Started means seen
     since THIS launch, as its own hook wrote it in the launch record
     (:func:`_started_by_its_hook`): a resumed replacement keeps its session's id, whose
@@ -6844,7 +6845,7 @@ def tell(
             gone = _socket_gone(pane)
             if gone is not None:
                 return TellResult("no", noted(gone, agent))
-            if adapter is None or not adapter.capabilities.idle_prompt_mark:
+            if adapter is None or not screen_of(adapter).idle_prompt_mark:
                 return TellResult("no", noted("no confirmed waiting native session", agent))
             if status.state == "waiting" and _hooks_fresh(session, _now()):
                 # Its hooks say waiting, its screen does not: a dialog of the agent's
@@ -7041,7 +7042,7 @@ def _at_its_prompt(
     there when it reads ``waiting``. Another is there when its own hooks freshly say
     ``waiting`` — and when they say nothing fresh (none fire before its first prompt, as
     Codex's do not), when its pane is quiet (``waiting``) — and, for an agent with an
-    empty-prompt mark (``capabilities.idle_prompt_mark``), the last line on its screen is
+    empty-prompt mark (``AgentScreen.idle_prompt_mark``), the last line on its screen is
     at that prompt (:func:`_idle_screen`), however fresh its hooks. Quiet alone is not
     enough: Codex's folder-trust and hook-review dialogs print nothing either, and an
     Enter there answers them for the human (``enter continue`` on the folder's). Nor are
@@ -7055,7 +7056,7 @@ def _at_its_prompt(
     adapter = recorded_adapter(agent.agent)
     if adapter is not None and adapter.capabilities.reads_pane_readiness:
         return True
-    mark = adapter.capabilities.idle_prompt_mark if adapter is not None else None
+    mark = screen_of(adapter).idle_prompt_mark if adapter is not None else None
     if _hooks_fresh(session, now):
         if session is None or session.state != "waiting":
             return False
@@ -7072,12 +7073,12 @@ def _at_its_prompt(
 
 def _idle_screen(adapter: AgentAdapter, screen: Sequence[str]) -> bool:
     """Whether ``screen`` shows ``adapter``'s agent at its empty prompt: its own reading
-    (``capabilities.idle_on_screen``), else its last line starting with its empty-prompt
-    mark (``capabilities.idle_prompt_mark``)."""
-    idle = adapter.capabilities.idle_on_screen
+    (``AgentScreen.idle_on_screen``), else its last line starting with its empty-prompt
+    mark (``AgentScreen.idle_prompt_mark``)."""
+    idle = screen_of(adapter).idle_on_screen
     if idle is not None:
         return idle(screen)
-    mark = adapter.capabilities.idle_prompt_mark
+    mark = screen_of(adapter).idle_prompt_mark
     last = next((line.strip() for line in reversed(screen) if line.strip()), "")
     return bool(mark) and last.startswith(mark or "")
 
@@ -7689,7 +7690,7 @@ def _exit_withheld(pane: PlacedPane, agent: FleetAgent) -> str | None:
     """Why :func:`_stop_row` types no exit command into ``agent``'s pane, or ``None`` to
     type it.
 
-    An agent with an empty-prompt mark (``capabilities.idle_prompt_mark``) whose screen
+    An agent with an empty-prompt mark (``AgentScreen.idle_prompt_mark``) whose screen
     does not show it at that prompt (:func:`_idle_screen`) is showing something its Enter
     answers: a dialog of its own — Codex's ``Switch to gpt-6-luna for lower credit
     usage?`` after a turn near its limit, where ``/exit`` and its Enter picked the cheaper
@@ -7700,7 +7701,7 @@ def _exit_withheld(pane: PlacedPane, agent: FleetAgent) -> str | None:
     raises.
     """
     adapter = recorded_adapter(agent.agent)
-    mark = adapter.capabilities.idle_prompt_mark if adapter is not None else None
+    mark = screen_of(adapter).idle_prompt_mark if adapter is not None else None
     if adapter is None or not mark:
         return None
     try:

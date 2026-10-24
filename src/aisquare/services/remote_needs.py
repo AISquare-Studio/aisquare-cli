@@ -56,6 +56,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from aisquare.core.agent_adapters.types import screen_of
 from aisquare.models import (
     CLOSED_STATUSES,
     FleetAgent,
@@ -373,7 +374,7 @@ class AgentNow:
     included, and dismissed ones too: a dismissal hides a card, it does not close a dialog."""
     screen: tuple[str, ...] | None = None
     """The rows the agent's pane shows, read for an agent whose adapter tells its empty
-    prompt from its screen (``capabilities.idle_on_screen`` or ``idle_prompt_mark``:
+    prompt from its screen (``AgentScreen.idle_on_screen`` or ``idle_prompt_mark``:
     Codex's), whose pane is its own; ``None`` for any other (:func:`_needs_screen_drawn`)."""
     screen_unread: bool = False
     """Such an agent's screen, which tmux would not show: nothing here says whether it sits
@@ -482,7 +483,7 @@ class NeedsSources:
     (:func:`_needs_screen_read`).
     Asked only of an agent with more than one call pending, whose prompt on screen may be
     any of them (:func:`_needs_on_screen`), and of one whose adapter reads its own dialogs off
-    its screen (``capabilities.dialog_on_screen``: Codex's) with no call pending and no bell:
+    its screen (``AgentScreen.dialog_on_screen``: Codex's) with no call pending and no bell:
     every scan, since none of those dialogs fires a hook (:func:`_needs_screen_dialog`)."""
     hands_over: Callable[[int | None, str | None], bool] = _needs_hands_over_anywhere
     """Whether ``on_limit = "switch"`` hands an agent leaving the given slot over: an
@@ -917,11 +918,11 @@ start is often answered by the human who spawned the agent from the UI, at its w
 
 def _needs_dialog_reader(agent: FleetAgent) -> Callable[[Sequence[str]], str | None] | None:
     """How the agent's adapter reads a dialog of its own off its screen
-    (``capabilities.dialog_on_screen``: Codex's); ``None`` for one that reads none."""
+    (``AgentScreen.dialog_on_screen``: Codex's); ``None`` for one that reads none."""
     from aisquare.core.agent_adapters import recorded_adapter
 
     adapter = recorded_adapter(agent.agent)
-    return None if adapter is None else adapter.capabilities.dialog_on_screen
+    return None if adapter is None else screen_of(adapter).dialog_on_screen
 
 
 def _needs_on_its_screen(status: FleetAgentStatus) -> bool:
@@ -941,7 +942,7 @@ def _needs_on_its_screen(status: FleetAgentStatus) -> bool:
 def _needs_screen_dialog(
     agent: FleetAgent, screen: Callable[[], Sequence[str] | None] | None
 ) -> str | None:
-    """What a dialog of the agent's own on its screen asks (``capabilities.dialog_on_screen``),
+    """What a dialog of the agent's own on its screen asks (``AgentScreen.dialog_on_screen``),
     read without the escapes the scan's capture keeps (:data:`_ESCAPES`); ``None`` for an
     agent whose adapter reads no dialog off its screen, which is then not read, and for a
     screen this derivation was not given, could not read, or shows no dialog on."""
@@ -1077,7 +1078,7 @@ def needs_from_agent(
        notice too, once a dialog is drawn (:func:`_needs_drawn_dialog`), named after the
        question or the plan and what the dialog shows, before its notice and after alike;
     5a. no pending tool and no attention, and the agent's screen shows a dialog of its own,
-       read by its adapter (``capabilities.dialog_on_screen``) → ``permission``, the
+       read by its adapter (``AgentScreen.dialog_on_screen``) → ``permission``, the
        dialog's card (:func:`_needs_screen_dialog_item`): one that fires no hook, which the
        board never hears of, as Codex's folder trust, hook review, ``Switch to
        gpt-6-luna for lower credit usage?`` after a turn's ``Stop`` and ``Implement this
@@ -3534,21 +3535,19 @@ def _needs_nothing_said(tail: TranscriptTail, agent: FleetAgent) -> bool:
 
 def _needs_screen_reader(status: FleetAgentStatus) -> AgentAdapter | None:
     """The adapter of ``status``'s row when it reads the agent's empty prompt off its screen
-    (``capabilities.idle_on_screen`` or ``idle_prompt_mark``: Codex's), else ``None``."""
+    (``AgentScreen.idle_on_screen`` or ``idle_prompt_mark``: Codex's), else ``None``."""
     from aisquare.core.agent_adapters import recorded_adapter
 
     adapter = recorded_adapter(status.agent.agent)
     if adapter is None:
         return None
-    capabilities = adapter.capabilities
-    readable = capabilities.idle_on_screen is not None or bool(capabilities.idle_prompt_mark)
-    return adapter if readable else None
+    return adapter if screen_of(adapter).reads_empty_prompt else None
 
 
 def _needs_screen_drawn(snap: AgentNow) -> bool | None:
     """Whether the agent's screen (:attr:`AgentNow.screen`) shows something drawn over its
     empty prompt, where a typed line and its Enter would answer it: ``True`` for a screen
-    neither at that prompt nor running a turn (``capabilities.working_on_screen``),
+    neither at that prompt nor running a turn (``AgentScreen.working_on_screen``),
     ``False`` for its empty prompt in a quiet pane (``fleet._idle_screen``), and ``None``
     where the screen does not settle it: none was read, or a turn is on it.
 
@@ -3567,13 +3566,13 @@ def _needs_screen_drawn(snap: AgentNow) -> bool | None:
         return None
     if fleet_service._idle_screen(adapter, snap.screen):
         return False if snap.pane_quiet is True else None
-    working = adapter.capabilities.working_on_screen
+    working = screen_of(adapter).working_on_screen
     return None if working is not None and working(snap.screen) else True
 
 
 def needs_screen_at_rest(snap: AgentNow) -> bool:
     """Whether the agent's screen shows its empty prompt with no turn on it, its pane quiet or
-    not: an adapter that reads both off its screen (``capabilities.idle_on_screen`` or
+    not: an adapter that reads both off its screen (``AgentScreen.idle_on_screen`` or
     ``idle_prompt_mark``, and ``working_on_screen``: Codex's), and a screen read.
 
     Interrupt & tell sends its Escape for a turn to stop, and there is none here. Sent
@@ -3587,7 +3586,7 @@ def needs_screen_at_rest(snap: AgentNow) -> bool:
     if snap.screen is None or status is None or not snap.pane_is_agent:
         return False
     adapter = _needs_screen_reader(status)
-    working = None if adapter is None else adapter.capabilities.working_on_screen
+    working = None if adapter is None else screen_of(adapter).working_on_screen
     if adapter is None or working is None:
         return False
     return fleet_service._idle_screen(adapter, snap.screen) and not working(snap.screen)
@@ -3675,8 +3674,8 @@ def _needs_screen_says(status: FleetAgentStatus) -> bool:
 
     adapter = recorded_adapter(status.agent.agent)
     return adapter is not None and (
-        adapter.capabilities.working_on_screen is not None
-        or adapter.capabilities.idle_on_screen is not None
+        screen_of(adapter).working_on_screen is not None
+        or screen_of(adapter).idle_on_screen is not None
     )
 
 
@@ -3695,7 +3694,7 @@ def _needs_undrawn(status: FleetAgentStatus, rows: Sequence[str]) -> bool:
     if adapter is None:
         return False
     plain = [_ESCAPES.sub("", row) for row in rows]
-    working, idle = adapter.capabilities.working_on_screen, adapter.capabilities.idle_on_screen
+    working, idle = screen_of(adapter).working_on_screen, screen_of(adapter).idle_on_screen
     return (working is not None and working(plain)) or (idle is not None and idle(plain))
 
 

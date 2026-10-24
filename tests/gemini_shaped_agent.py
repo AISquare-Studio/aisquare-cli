@@ -43,6 +43,7 @@ from aisquare.core.agent_adapters.types import (
     GENERIC_HOOK,
     AgentCapabilities,
     AgentEvent,
+    AgentScreen,
     AgentTranscript,
     AnswerKey,
     AnswerKind,
@@ -464,6 +465,7 @@ class GeminiShapedAdapter:
     plugin = None
     telemetry_reader: TelemetryReader | None = GeminiShapedTelemetry()
     transcript_reader: AgentTranscript | None = GeminiShapedTranscript()
+    screen: AgentScreen | None = None  # its screens are unmeasured: none is read
     capabilities = AgentCapabilities(
         launch_inputs=(CONFIG, ".agents"),
         hooks=tuple(

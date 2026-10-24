@@ -30,7 +30,7 @@ import pytest
 
 from aisquare.core import agents, launch_seal, outbox, selfcli
 from aisquare.core.agent_adapters import codex_config, get_adapter
-from aisquare.core.agent_adapters.types import screen_ready, store_dir, store_read_only
+from aisquare.core.agent_adapters.types import screen_of, store_dir, store_read_only
 from aisquare.core.config import load_config, save_config
 from aisquare.core.entries import new_entry
 from aisquare.core.store import SqliteStore, store_session
@@ -857,7 +857,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             def state(agent: Any) -> str:
                 return fleet.status_of(agent).state
 
-            capabilities = get_adapter("codex").capabilities
+            codex_screen = screen_of(get_adapter("codex"))
 
             def at_rest(agent: Any) -> bool:
                 """Waiting, and at its empty prompt with no turn on its screen, its pane quiet
@@ -869,7 +869,7 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
                 facts = srv.pane_facts(agent.pane_id)
                 output = None if facts is None else facts.last_output
                 quiet = output is not None and datetime.now(UTC) - output > timedelta(seconds=2)
-                return state(agent) == "waiting" and screen_ready(capabilities, rows) and quiet
+                return state(agent) == "waiting" and codex_screen.ready(rows) and quiet
 
             seen = len(outputs())
             coder = fleet.spawn(
@@ -3386,8 +3386,8 @@ def test_real_codex_after_a_pad_esc_takes_interrupt_and_tell_and_opens_no_transc
                 # Its Stop hook says waiting before the turn is over on screen, and an Esc then
                 # stops the turn instead: the pad's Esc goes once Codex is at rest, as a human
                 # sees it, its status line gone and its pane quiet.
-                capabilities = get_adapter("codex").capabilities
-                idle, working = capabilities.idle_on_screen, capabilities.working_on_screen
+                read = screen_of(get_adapter("codex"))
+                idle, working = read.idle_on_screen, read.working_on_screen
                 assert idle is not None and working is not None
 
                 def at_rest() -> bool:

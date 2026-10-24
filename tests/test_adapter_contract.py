@@ -14,7 +14,7 @@ its hooks off, and the files of a home that keeps aisquare's MCP server: ``lasti
 :data:`EXPECTED_PERMISSIONS`, and its transcript at four moments
 (``tests/fixtures/agent_transcripts/<id>.json``: a permission prompt up, a question, an
 interruption, a turn ended on a question) for its ``transcript_reader``; and with
-``capabilities.dialog_on_screen`` or ``screen_prompt``, its screens
+``AgentScreen.dialog_on_screen`` or ``screen_prompt``, its screens
 (``tests/fixtures/agent_screens/<id>.json``: each dialog of its own with the words it reads
 and, where it says, the prompt, and screens that show none).
 """
@@ -60,6 +60,7 @@ from aisquare.core.agent_adapters.types import (
     WriteScope,
     executable_name,
     hook_args,
+    screen_of,
     store_dir,
     store_read_only,
     trusted_by,
@@ -1117,7 +1118,7 @@ def test_the_hand_over_dismisses_a_dialog_with_the_fake_agents_own_key(
     agent = fleet_service.spawn(team_project(tmp_path), "coder", agent="fake-agent").agent
     # Its screen read as Codex's is (an empty-prompt mark), at a dialog its own key closes.
     monkeypatch.setattr(
-        fake_agent, "capabilities", replace(fake_agent.capabilities, idle_prompt_mark="fake>")
+        fake_agent, "screen", replace(screen_of(fake_agent), idle_prompt_mark="fake>")
     )
     tmux.screens[agent.pane_id] = ["Really quit? [y/N]"]
     send_keys = tmux.send_keys
@@ -1362,8 +1363,8 @@ def _screens(adapter: AgentAdapter) -> dict[str, Any] | None:
     ``screen_prompt``, where a ``prompt`` says), and screens with none. ``None`` for an
     adapter that reads neither off its screen, which brings none."""
     path = SCREENS / f"{adapter.id}.json"
-    capabilities = adapter.capabilities
-    if capabilities.dialog_on_screen is None and capabilities.screen_prompt is None:
+    screen = screen_of(adapter)
+    if screen.dialog_on_screen is None and screen.screen_prompt is None:
         assert not path.exists(), f"{adapter.id} reads nothing off its screen: {path.name}"
         return None
     assert path.is_file(), f"add {path.relative_to(SCREENS.parents[1])} for {adapter.id}"
@@ -1373,10 +1374,10 @@ def _screens(adapter: AgentAdapter) -> dict[str, Any] | None:
 
 
 def test_an_agent_reads_its_own_dialogs_off_its_screen(adapter: AgentAdapter) -> None:
-    """``capabilities.dialog_on_screen`` on the agent's recorded screens: each dialog's words,
+    """``AgentScreen.dialog_on_screen`` on the agent's recorded screens: each dialog's words,
     and ``None`` for a screen with no dialog on it (its empty prompt, a draft, a turn)."""
     screens = _screens(adapter)
-    read = adapter.capabilities.dialog_on_screen
+    read = screen_of(adapter).dialog_on_screen
     if screens is None or read is None:
         return
     for shown in screens["dialogs"]:
@@ -1417,7 +1418,7 @@ def test_a_dialog_no_hook_reports_is_a_card_naming_no_agent_with_no_quick_answer
         )
 
     screens = _screens(adapter)
-    if screens is None or adapter.capabilities.dialog_on_screen is None:
+    if screens is None or screen_of(adapter).dialog_on_screen is None:
         assert cards(None) == []
         return
     for shown in screens["dialogs"]:
@@ -1433,7 +1434,7 @@ def test_a_dialog_no_hook_reports_is_a_card_naming_no_agent_with_no_quick_answer
 def test_a_prompt_on_the_agents_screen_is_read_with_keys_a_phone_may_send(
     adapter: AgentAdapter,
 ) -> None:
-    """``capabilities.screen_prompt`` (the captain's press and paste ask it of the pane's own
+    """``AgentScreen.screen_prompt`` (the captain's press and paste ask it of the pane's own
     agent) on the agent's recorded screens: every dialog of its own is a prompt, a ``trust``
     or ``dialog`` one with no keys (the owner's to answer) and a ``chooser`` or ``yn`` one with
     its No, each key one a quick answer may send; ``None`` on every screen with none; and the
@@ -1441,7 +1442,7 @@ def test_a_prompt_on_the_agents_screen_is_read_with_keys_a_phone_may_send(
     from aisquare.core.agent_adapters.types import ScreenShape
     from aisquare.services import remote_needs
 
-    read = adapter.capabilities.screen_prompt
+    read = screen_of(adapter).screen_prompt
     screens = _screens(adapter)
     if read is None or screens is None:
         return
@@ -1462,101 +1463,95 @@ def test_a_prompt_on_the_agents_screen_is_read_with_keys_a_phone_may_send(
 
 
 def test_a_line_is_typed_only_where_the_agents_screen_reads_ready(adapter: AgentAdapter) -> None:
-    """``screen_ready`` (``capabilities.ready_on_screen``, else its default; the captain's
+    """``screen_ready`` (``AgentScreen.ready_on_screen``, else its default; the captain's
     word over a ``working`` read) on the agent's recorded screens: no dialog of its own is
     ready, and of the screens with none, exactly those marked ``ready`` are (Claude Code's
     idle box with a finished turn above it, not one mid-turn; Codex's empty composer, not
     a turn running nor a draft)."""
-    from aisquare.core.agent_adapters.types import screen_ready
 
     screens = _screens(adapter)
     if screens is None:
-        assert not screen_ready(adapter.capabilities, ["$ "])
+        assert not screen_of(adapter).ready(["$ "])
         return
     for shown in screens["dialogs"]:
-        assert not screen_ready(adapter.capabilities, shown["rows"]), shown["what"]
+        assert not screen_of(adapter).ready(shown["rows"]), shown["what"]
     for shown in screens["not_dialogs"]:
-        ready = screen_ready(adapter.capabilities, shown["rows"])
+        ready = screen_of(adapter).ready(shown["rows"])
         assert ready is shown.get("ready", False), shown["what"]
 
 
 def test_a_screen_ready_for_a_line_shows_its_prompt_drawn(adapter: AgentAdapter) -> None:
-    """``screen_drawn`` (``capabilities.prompt_on_screen``, else its empty prompt; what a
+    """``screen_drawn`` (``AgentScreen.prompt_on_screen``, else its empty prompt; what a
     waiting captain's line needs, review r17 of #113, finding 1) on the agent's recorded
     screens: every screen ready for a line shows its prompt drawn, and no dialog of its own
     does."""
-    from aisquare.core.agent_adapters.types import screen_drawn, screen_ready
-
     screens = _screens(adapter)
     if screens is None:
-        assert not screen_drawn(adapter.capabilities, ["$ "])
+        assert not screen_of(adapter).drawn(["$ "])
         return
     for shown in screens["dialogs"]:
-        assert not screen_drawn(adapter.capabilities, shown["rows"]), shown["what"]
+        assert not screen_of(adapter).drawn(shown["rows"]), shown["what"]
     for shown in screens["not_dialogs"]:
-        if screen_ready(adapter.capabilities, shown["rows"]):
-            assert screen_drawn(adapter.capabilities, shown["rows"]), shown["what"]
+        if screen_of(adapter).ready(shown["rows"]):
+            assert screen_of(adapter).drawn(shown["rows"]), shown["what"]
 
 
 def test_an_agent_that_declares_no_ready_screen_is_ready_at_its_empty_prompt_alone() -> None:
     """The default an adapter gets with no ``ready_on_screen`` (the fake's): its empty prompt
     (``idle_on_screen``, else ``idle_prompt_mark`` starting its last line) with no turn
     running on it (``working_on_screen``), and never ready with none of them declared."""
-    from aisquare.core.agent_adapters.types import screen_ready
 
-    plain = FakeAgentAdapter().capabilities
+    plain = screen_of(FakeAgentAdapter())
     assert plain.ready_on_screen is None
     idle, busy, draft = ["done", "fake> "], ["running it", "fake> "], ["fake> ?? deploy it"]
-    assert not any(screen_ready(plain, rows) for rows in (idle, busy, draft))
+    assert not any(plain.ready(rows) for rows in (idle, busy, draft))
     marked = replace(plain, idle_prompt_mark="fake>")
-    assert screen_ready(marked, idle) and screen_ready(marked, draft), "the mark alone"
+    assert marked.ready(idle) and marked.ready(draft), "the mark alone"
     read = replace(
         marked,
         idle_on_screen=lambda rows: rows[-1].strip() == "fake>",
         working_on_screen=lambda rows: "running it" in rows,
     )
-    assert screen_ready(read, idle) and not screen_ready(read, draft), "its own reading"
-    assert not screen_ready(read, busy), "a turn running on it"
+    assert read.ready(idle) and not read.ready(draft), "its own reading"
+    assert not read.ready(busy), "a turn running on it"
 
 
 def test_what_a_line_must_not_go_into_is_named_on_the_agents_screen(adapter: AgentAdapter) -> None:
-    """``screen_modal`` (``capabilities.modal_on_screen``, else its default; what the
+    """``screen_modal`` (``AgentScreen.modal_on_screen``, else its default; what the
     captain's ``say`` refuses by name) on the agent's recorded screens: each dialog of its own
     is named, as its ``modal`` says where it says (Claude Code's ``[y/N]`` line is a prompt to
     answer, not a dialog to refuse), and a screen with none names one only where its
     ``modal`` does (Claude Code's rating survey over its box, its model picker)."""
-    from aisquare.core.agent_adapters.types import screen_modal
 
     screens = _screens(adapter)
     if screens is None:
-        assert screen_modal(adapter.capabilities, ["$ "]) is None
+        assert screen_of(adapter).modal(["$ "]) is None
         return
     for shown in screens["dialogs"]:
-        said = screen_modal(adapter.capabilities, shown["rows"])
+        said = screen_of(adapter).modal(shown["rows"])
         if "modal" in shown:
             assert said == shown["modal"], shown["what"]
         else:
             assert said, f"{adapter.id} names nothing on {shown['what']}"
     for shown in screens["not_dialogs"]:
-        assert screen_modal(adapter.capabilities, shown["rows"]) == shown.get("modal")
+        assert screen_of(adapter).modal(shown["rows"]) == shown.get("modal")
 
 
 def test_an_agent_that_declares_no_modal_screen_names_its_dialogs_by_their_words() -> None:
     """The default an adapter gets with no ``modal_on_screen`` (the fake's): the words of a
     dialog of its own (``dialog_on_screen``), a dialog whose words are off screen named as
     one, else its prompt's question (``screen_prompt``), and nothing with neither."""
-    from aisquare.core.agent_adapters.types import screen_modal
 
-    plain = FakeAgentAdapter().capabilities
+    plain = screen_of(FakeAgentAdapter())
     assert plain.modal_on_screen is None
     asking, scrolled = ["?? Allow shell: make deploy", "(y/n)"], ["  make deploy", "(y/n)"]
-    assert screen_modal(plain, asking) == "Allow shell: make deploy"
-    assert screen_modal(plain, scrolled) == "a dialog of its own"
-    assert screen_modal(plain, ["fake> "]) is None
+    assert plain.modal(asking) == "Allow shell: make deploy"
+    assert plain.modal(scrolled) == "a dialog of its own"
+    assert plain.modal(["fake> "]) is None
     prompts = replace(plain, dialog_on_screen=None)
-    assert screen_modal(prompts, asking) == "Allow shell: make deploy", "its prompt's question"
-    assert screen_modal(prompts, ["fake> "]) is None
-    assert screen_modal(replace(prompts, screen_prompt=None), asking) is None
+    assert prompts.modal(asking) == "Allow shell: make deploy", "its prompt's question"
+    assert prompts.modal(["fake> "]) is None
+    assert replace(prompts, screen_prompt=None).modal(asking) is None
 
 
 def test_the_default_binary_is_the_default_agents_own(
@@ -1889,3 +1884,90 @@ def test_a_transcripts_records_are_its_lines_newest_first_each_at_its_offset(
         {"type": "x", "n": 2},
         {"type": "x", "n": 1},
     ]
+
+
+def test_the_screen_is_one_optional_reader_of_nine_parts() -> None:
+    """``AgentAdapter.screen``: the screen-reading capabilities are one ``AgentScreen``, each
+    of its nine parts optional, and none of them on ``AgentCapabilities`` any more."""
+    from dataclasses import fields
+
+    from aisquare.core.agent_adapters.types import AgentCapabilities, AgentScreen
+
+    parts = {
+        "idle_prompt_mark",
+        "idle_on_screen",
+        "working_on_screen",
+        "dialog_on_screen",
+        "start_dialog_mark",
+        "screen_prompt",
+        "ready_on_screen",
+        "modal_on_screen",
+        "prompt_on_screen",
+    }
+    assert {f.name for f in fields(AgentScreen)} == parts
+    assert all(f.default is None for f in fields(AgentScreen))
+    assert not parts & {f.name for f in fields(AgentCapabilities)}
+
+
+def test_an_agent_that_declares_no_drawn_prompt_reads_it_off_its_empty_prompt() -> None:
+    """The default an adapter gets with no ``prompt_on_screen`` (the fake's): its empty prompt
+    (``idle_on_screen``, else ``idle_prompt_mark``), a turn running at it or not."""
+    plain = screen_of(FakeAgentAdapter())
+    assert plain.prompt_on_screen is None and not plain.drawn(["done", "fake> "])
+    marked = replace(plain, idle_prompt_mark="fake>")
+    assert marked.drawn(["running it", "fake> "]), "busy, its prompt still drawn"
+    assert not marked.drawn(["?? Allow shell: make deploy", "(y/n)"])
+
+
+def test_an_agent_with_no_screen_still_runs_and_is_never_typed_into_on_its_screens_word(
+    gemini_shaped: GeminiShapedAdapter,
+) -> None:
+    """An adapter that declares no screen (the Gemini-shaped one: its screens are unmeasured)
+    reads as ``NO_SCREEN``: never at its prompt, never ready, nothing drawn, nothing modal,
+    no empty prompt Remote could read; the fleet's own readers take it so."""
+    from aisquare.core.agent_adapters.types import NO_SCREEN
+
+    assert gemini_shaped.screen is None and screen_of(gemini_shaped) is NO_SCREEN
+    rows = ["> ", "? for shortcuts"]
+    screen = screen_of(gemini_shaped)
+    assert not (screen.at_empty_prompt(rows) or screen.ready(rows) or screen.drawn(rows))
+    assert screen.modal(rows) is None and not screen.reads_empty_prompt
+    assert not fleet_service._idle_screen(gemini_shaped, rows)
+
+
+def test_the_guide_names_every_member_of_the_protocol() -> None:
+    """docs/coding-agents.md, "Adding a terminal agent", names every member of the adapter
+    protocol's classes (an inline code span holds it), so a slot added is a slot documented:
+    the guide-vs-code check the lanes ran by hand, kept."""
+    import ast
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    tree = ast.parse((root / "src/aisquare/core/agent_adapters/types.py").read_text("utf-8"))
+    guide = (root / "docs/coding-agents.md").read_text("utf-8")
+    spans = re.findall(r"`([^`\n]+)`", guide)
+    named = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", " ".join(spans)))
+    classes = {
+        "AgentAdapter",
+        "AgentCapabilities",
+        "AgentScreen",
+        "AgentAccounts",
+        "AgentTranscript",
+        "TelemetryReader",
+        "AgentPlugin",
+        "FolderTrust",
+        "LaunchPart",
+        "PermissionArgs",
+    }
+    missing = []
+    for node in tree.body:
+        if not (isinstance(node, ast.ClassDef) and node.name in classes):
+            continue
+        members = [node.name]
+        for item in node.body:
+            if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                members.append(item.target.id)
+            elif isinstance(item, ast.FunctionDef) and not item.name.startswith("_"):
+                members.append(item.name)
+        missing += [member for member in members if member not in named]
+    assert not missing, f"name these in docs/coding-agents.md: {missing}"

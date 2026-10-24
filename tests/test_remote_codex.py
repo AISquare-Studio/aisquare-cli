@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from aisquare.core.agent_adapters import get_adapter
+from aisquare.core.agent_adapters.types import screen_of
 from aisquare.core.config import ExplainabilitySettings, ExplainabilityTarget, load_config
 from aisquare.core.config import save_config as save_config_file
 from aisquare.core.store import SqliteStore, store_session
@@ -689,7 +690,7 @@ def test_codex_reads_its_prompt_after_one_esc_as_its_empty_prompt(
     its alternate screen, and in place of its footer under ``--no-alt-screen``, until the
     next key; a line typed there and its Enter went to the provider as a prompt. A second
     Esc opens its transcript. No hint is drawn over a draft."""
-    read = CODEX.capabilities.idle_on_screen
+    read = screen_of(CODEX).idle_on_screen
     assert read is not None and read(screen) is idle
 
 

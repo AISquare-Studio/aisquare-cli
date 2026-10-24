@@ -225,27 +225,6 @@ class AgentCapabilities:
     A session that starts (not a compaction) is then ``waiting`` until a prompt says
     otherwise, and one that has not started is not typed into. Codex's fires with its
     first prompt."""
-    idle_prompt_mark: str | None = None
-    """What starts the last line of the agent's screen while it sits at an EMPTY prompt
-    (Codex's footer ``? for shortcuts``, measured on 0.162.1; text in the prompt replaces
-    it, and a turn redraws the pane every second, the footer kept below an empty
-    composer). For an agent without :attr:`reads_pane_readiness` whose hooks say nothing
-    fresh — none fire before its first prompt — a pane quiet for ``ACTIVITY_WINDOW`` that
-    shows it is at its prompt, so ``fleet tell`` and the manager's nudge type there; the
-    agent's folder-trust and hook-review dialogs are as quiet and show no such line. And
-    the line is asked for even when its hooks freshly say waiting, by them and by ``fleet
-    stop``'s ``/exit``: Codex opens dialogs of its own after a turn's ``Stop`` (``Switch
-    to gpt-6-luna for lower credit usage?``, past a turn near its limit), where an Enter
-    picks for the human."""
-    start_dialog_mark: str | None = None
-    """What starts the last line of the agent's screen while a dialog it puts up before its
-    start holds it for the human, where an Enter answers it: Claude Code's ``Enter to
-    confirm``, the row under its folder-trust and MCP-server dialogs alike, the folder's
-    defaulting to ``No, exit`` (measured on 2.1.300); the phrase elsewhere on the screen is
-    the agent's output. A spawn's prompt for an agent whose start the board sees
-    (:attr:`starts_at_its_prompt`) waits past ``PROMPT_TIMEOUT`` while none is on screen;
-    one the board cannot see start (``--continue``, the board off) is not typed while one
-    is, nor is ``fleet tell``."""
     resumes_across_homes: bool = False
     """A session resumes from another config dir (Claude Code finds a transcript by its
     absolute path), so ``fleet switch`` to another account resumes it; otherwise the
@@ -325,28 +304,12 @@ class AgentCapabilities:
     """The agent's UI keeps redrawing while it waits on the human (Codex's approval view,
     every second, the screen unchanged: 0.162.1), so output in its pane answers nothing:
     an ``attention`` row holds until one of its hooks moves the row, or
-    :attr:`working_on_screen` says its screen shows a turn running
+    ``AgentScreen.working_on_screen`` says its screen shows a turn running
     (``services.fleet._derive``). Claude Code's prompt sits still until it is answered."""
-    working_on_screen: Callable[[Sequence[str]], bool] | None = None
-    """Whether the agent's screen (its visible rows) shows a turn running unblocked:
-    Codex's status line ``• Working (12s • esc to interrupt)`` where Codex draws it,
-    measured on 0.162.1, which its approval view replaces until the human answers and
-    which is back the moment they do. The answer's first hook is the approved command's
-    PostToolUse, which fires only when the command finishes, so without it an approved
-    12-minute command read ``attention`` throughout."""
-    idle_on_screen: Callable[[Sequence[str]], bool] | None = None
-    """Whether the agent's screen (its visible rows) shows it at its EMPTY prompt with
-    nothing drawn over it, where a typed line and its Enter land as a prompt: read in
-    place of :attr:`idle_prompt_mark` alone, which an agent may draw only in one of its
-    layouts (Codex's ``? for shortcuts``, absent under ``--no-alt-screen``, measured on
-    0.162.1). Remote's agent actions read the agent's screen by it too: a quiet pane at
-    that prompt is at rest, and anything else drawn over the prompt (a dialog, a draft) is
-    one they refuse to type into or ``/exit`` through (``services.remote_needs.
-    _needs_screen_drawn``)."""
     one_press_exits: frozenset[str] = frozenset()
     """The keys, as tmux names them once :attr:`AgentAdapter.key_spellings` has spelled them,
     that end the agent with ONE press while its screen shows its empty prompt
-    (:attr:`idle_on_screen`, else :attr:`idle_prompt_mark`): Codex's ``C-c`` and ``C-d``
+    (``AgentScreen.at_empty_prompt``): Codex's ``C-c`` and ``C-d``
     (measured on 0.162.1, after a turn and after one Esc as on a fresh start; ``C-d`` with a
     turn running too, where ``C-c`` opens its ``Cancel task`` / ``Exit`` choice instead;
     neither over a draft). Remote's ``send-keys`` refuses such a key, unless the sender
@@ -354,53 +317,6 @@ class AgentCapabilities:
     (``services.remote_server.remote_one_press_exit``), as it refuses every agent a second
     ``C-c`` or ``C-d`` within 3 s. Empty for an agent that asks for a second press first:
     Claude Code says ``Press Ctrl-C again to exit``, and the same of Ctrl-D (2.1.304)."""
-    dialog_on_screen: Callable[[Sequence[str]], str | None] | None = None
-    """What a dialog of the agent's own on its screen (its visible rows, as plain text) asks:
-    the words right above its options, ``""`` when none are on screen, and ``None`` for a
-    screen with no such dialog on it: its empty prompt, a turn running, a draft in its
-    composer, its transcript browser. Codex's folder-trust and hook-review dialogs before its
-    first prompt, its ``Switch to gpt-6-luna for lower credit usage?`` after a turn's
-    ``Stop`` and ``Implement this plan?`` after a Plan-mode turn's, fire no hook (measured
-    on 0.162.1), so the board never hears of them: Remote's needs-you scan reads the screen
-    of such an agent with no call pending and no bell, and makes a card of the dialog it
-    shows (``services.remote_needs._needs_screen_dialog_item``). ``None`` here for an agent
-    whose dialogs each reach the board through a hook (Claude Code's ``Notification``): its
-    screen is not read for one."""
-    screen_prompt: Callable[[Sequence[str]], ScreenPrompt | None] | None = None
-    """The prompt at the bottom of the agent's screen (its visible rows, as ``capture-pane``
-    gives them), read by its structure, or ``None`` for a screen with none
-    (:class:`ScreenPrompt`): what the captain asks of the pane's own agent before it presses
-    a key there (``press yes`` sends ``yes_key``) or pastes a line (refused at a ``trust``
-    prompt, whose answer is the owner's). Claude Code's input box, chooser and trust dialog
-    (``claude_screen.prompt_showing``); Codex's dialogs as ``dialog_on_screen`` reads them,
-    its approval a chooser. ``None`` here for an agent whose screen is not read for one."""
-    ready_on_screen: Callable[[Sequence[str]], bool] | None = None
-    """Whether the agent's screen (its visible rows) shows its prompt drawn, with no turn
-    running at it and nothing drawn over it, so a line typed there and its Enter land as a
-    prompt (a draft may sit in it): the captain's evidence that a pane the fleet still reads
-    ``working`` is ready (a fresh Claude Code reads working until its first ``Stop``), for
-    its ``say`` and its ``press`` and ``paste`` (:func:`screen_ready`). Claude Code's input
-    box drawn and idle (``claude_screen.box_idle``). ``None`` takes the agent's empty prompt
-    (:attr:`idle_on_screen`, else :attr:`idle_prompt_mark` on its last line) with no turn
-    running on it (:attr:`working_on_screen`): Codex's. Remote never reads it, its own
-    reads being :attr:`idle_on_screen`'s."""
-    prompt_on_screen: Callable[[Sequence[str]], bool] | None = None
-    """Whether the agent's screen (its visible rows) shows its prompt drawn, a turn running
-    at it or not: the captain's evidence for a line to a captain the fleet reads
-    ``waiting`` (:func:`screen_drawn`), whose own last reply is what sits above its prompt.
-    Read there as :attr:`ready_on_screen`, a reply that quoted a busy footer (``esc to
-    interrupt``) kept every ``say`` out for its whole wait (review r17 of #113, finding 1).
-    Claude Code's input box drawn (``claude_screen.box_drawn``). ``None`` takes the agent's
-    empty prompt (:attr:`idle_on_screen`, else :attr:`idle_prompt_mark` on its last line),
-    which a turn running keeps: Codex's."""
-    modal_on_screen: Callable[[Sequence[str]], str | None] | None = None
-    """What the agent's screen (its visible rows) shows that a typed line must not go into,
-    in the owner's words, or ``None`` for a screen a line may go into: what the captain's
-    ``say`` refuses before it types, naming it (:func:`screen_modal`). Claude Code's
-    ``claude_screen.modal_showing``: its chooser and trust dialog, the session-rating survey
-    just above its box, and any other dialog with an Enter or Esc footer and no box. ``None``
-    takes :attr:`dialog_on_screen`'s words (Codex's), else :attr:`screen_prompt`'s
-    question."""
     hookless_through: str | None = None
     """The last aisquare release that writes none of this agent's hooks (Codex's 0.8.2): an
     upgrade or a move back to it, or to one before it, leaves the agent's hooks as they are
@@ -415,50 +331,162 @@ class AgentCapabilities:
     switch_options: frozenset[str] = frozenset()
 
 
-def screen_ready(capabilities: AgentCapabilities, rows: Sequence[str]) -> bool:
-    """Whether ``rows``, an agent's screen, show it ready for a typed line: its
-    :attr:`~AgentCapabilities.ready_on_screen`, else its empty prompt (``idle_on_screen``,
-    else ``idle_prompt_mark`` starting its last line) with no turn running on it
-    (``working_on_screen``); ``False`` for an agent that reads none of them off its screen."""
-    if capabilities.ready_on_screen is not None:
-        return capabilities.ready_on_screen(rows)
-    working = capabilities.working_on_screen
-    return _empty_prompt(capabilities, rows) and not (working is not None and working(rows))
+@dataclass(frozen=True)
+class AgentScreen:
+    """How the agent's screen is read (its visible rows, as ``capture-pane -p`` gives them):
+    the one optional reader of :attr:`AgentAdapter.screen`, each of its parts optional too.
+    What the fleet, Remote and the captain ask of a pane goes through it: the agent's empty
+    prompt, a turn running, a dialog of its own and the words it asks, a prompt with the
+    keys that answer it, a dialog before its start; and, derived from those where the agent
+    declares nothing more of its own, whether a line typed there lands as a prompt
+    (:meth:`ready`), whether its prompt is drawn at all (:meth:`drawn`) and what a line must
+    not go into (:meth:`modal`). An adapter with no screen (``None``) reads as
+    :data:`NO_SCREEN`: never at its prompt, never ready, nothing drawn over it.
+    """
+
+    idle_prompt_mark: str | None = None
+    """What starts the last line of the agent's screen while it sits at an EMPTY prompt
+    (Codex's footer ``? for shortcuts``, measured on 0.162.1; text in the prompt replaces
+    it, and a turn redraws the pane every second, the footer kept below an empty
+    composer). For an agent without :attr:`reads_pane_readiness` whose hooks say nothing
+    fresh — none fire before its first prompt — a pane quiet for ``ACTIVITY_WINDOW`` that
+    shows it is at its prompt, so ``fleet tell`` and the manager's nudge type there; the
+    agent's folder-trust and hook-review dialogs are as quiet and show no such line. And
+    the line is asked for even when its hooks freshly say waiting, by them and by ``fleet
+    stop``'s ``/exit``: Codex opens dialogs of its own after a turn's ``Stop`` (``Switch
+    to gpt-6-luna for lower credit usage?``, past a turn near its limit), where an Enter
+    picks for the human."""
+    idle_on_screen: Callable[[Sequence[str]], bool] | None = None
+    """Whether the agent's screen (its visible rows) shows it at its EMPTY prompt with
+    nothing drawn over it, where a typed line and its Enter land as a prompt: read in
+    place of :attr:`idle_prompt_mark` alone, which an agent may draw only in one of its
+    layouts (Codex's ``? for shortcuts``, absent under ``--no-alt-screen``, measured on
+    0.162.1). Remote's agent actions read the agent's screen by it too: a quiet pane at
+    that prompt is at rest, and anything else drawn over the prompt (a dialog, a draft) is
+    one they refuse to type into or ``/exit`` through (``services.remote_needs.
+    _needs_screen_drawn``)."""
+    working_on_screen: Callable[[Sequence[str]], bool] | None = None
+    """Whether the agent's screen (its visible rows) shows a turn running unblocked:
+    Codex's status line ``• Working (12s • esc to interrupt)`` where Codex draws it,
+    measured on 0.162.1, which its approval view replaces until the human answers and
+    which is back the moment they do. The answer's first hook is the approved command's
+    PostToolUse, which fires only when the command finishes, so without it an approved
+    12-minute command read ``attention`` throughout."""
+    dialog_on_screen: Callable[[Sequence[str]], str | None] | None = None
+    """What a dialog of the agent's own on its screen (its visible rows, as plain text) asks:
+    the words right above its options, ``""`` when none are on screen, and ``None`` for a
+    screen with no such dialog on it: its empty prompt, a turn running, a draft in its
+    composer, its transcript browser. Codex's folder-trust and hook-review dialogs before its
+    first prompt, its ``Switch to gpt-6-luna for lower credit usage?`` after a turn's
+    ``Stop`` and ``Implement this plan?`` after a Plan-mode turn's, fire no hook (measured
+    on 0.162.1), so the board never hears of them: Remote's needs-you scan reads the screen
+    of such an agent with no call pending and no bell, and makes a card of the dialog it
+    shows (``services.remote_needs._needs_screen_dialog_item``). ``None`` here for an agent
+    whose dialogs each reach the board through a hook (Claude Code's ``Notification``): its
+    screen is not read for one."""
+    start_dialog_mark: str | None = None
+    """What starts the last line of the agent's screen while a dialog it puts up before its
+    start holds it for the human, where an Enter answers it: Claude Code's ``Enter to
+    confirm``, the row under its folder-trust and MCP-server dialogs alike, the folder's
+    defaulting to ``No, exit`` (measured on 2.1.300); the phrase elsewhere on the screen is
+    the agent's output. A spawn's prompt for an agent whose start the board sees
+    (:attr:`starts_at_its_prompt`) waits past ``PROMPT_TIMEOUT`` while none is on screen;
+    one the board cannot see start (``--continue``, the board off) is not typed while one
+    is, nor is ``fleet tell``."""
+    screen_prompt: Callable[[Sequence[str]], ScreenPrompt | None] | None = None
+    """The prompt at the bottom of the agent's screen (its visible rows, as ``capture-pane``
+    gives them), read by its structure, or ``None`` for a screen with none
+    (:class:`ScreenPrompt`): what the captain asks of the pane's own agent before it presses
+    a key there (``press yes`` sends ``yes_key``) or pastes a line (refused at a ``trust``
+    prompt, whose answer is the owner's). Claude Code's input box, chooser and trust dialog
+    (``claude_screen.prompt_showing``); Codex's dialogs as ``dialog_on_screen`` reads them,
+    its approval a chooser. ``None`` here for an agent whose screen is not read for one."""
+    ready_on_screen: Callable[[Sequence[str]], bool] | None = None
+    """Whether the agent's screen (its visible rows) shows its prompt drawn, with no turn
+    running at it and nothing drawn over it, so a line typed there and its Enter land as a
+    prompt (a draft may sit in it): the captain's evidence that a pane the fleet still reads
+    ``working`` is ready (a fresh Claude Code reads working until its first ``Stop``), for
+    its ``say`` and its ``press`` and ``paste`` (:meth:`ready`). Claude Code's input
+    box drawn and idle (``claude_screen.box_idle``). ``None`` takes the agent's empty prompt
+    (:attr:`idle_on_screen`, else :attr:`idle_prompt_mark` on its last line) with no turn
+    running on it (:attr:`working_on_screen`): Codex's. Remote never reads it, its own
+    reads being :attr:`idle_on_screen`'s."""
+    prompt_on_screen: Callable[[Sequence[str]], bool] | None = None
+    """Whether the agent's screen (its visible rows) shows its prompt drawn, a turn running
+    at it or not: the captain's evidence for a line to a captain the fleet reads
+    ``waiting`` (:meth:`drawn`), whose own last reply is what sits above its prompt.
+    Read there as :attr:`ready_on_screen`, a reply that quoted a busy footer (``esc to
+    interrupt``) kept every ``say`` out for its whole wait (review r17 of #113, finding 1).
+    Claude Code's input box drawn (``claude_screen.box_drawn``). ``None`` takes the agent's
+    empty prompt (:attr:`idle_on_screen`, else :attr:`idle_prompt_mark` on its last line),
+    which a turn running keeps: Codex's."""
+    modal_on_screen: Callable[[Sequence[str]], str | None] | None = None
+    """What the agent's screen (its visible rows) shows that a typed line must not go into,
+    in the owner's words, or ``None`` for a screen a line may go into: what the captain's
+    ``say`` refuses before it types, naming it (:meth:`modal`). Claude Code's
+    ``claude_screen.modal_showing``: its chooser and trust dialog, the session-rating survey
+    just above its box, and any other dialog with an Enter or Esc footer and no box. ``None``
+    takes :attr:`dialog_on_screen`'s words (Codex's), else :attr:`screen_prompt`'s
+    question."""
+
+    def at_empty_prompt(self, rows: Sequence[str]) -> bool:
+        """Whether ``rows`` show the agent at its EMPTY prompt: :attr:`idle_on_screen`, else
+        :attr:`idle_prompt_mark` starting its last line; ``False`` with neither."""
+        if self.idle_on_screen is not None:
+            return self.idle_on_screen(rows)
+        mark = self.idle_prompt_mark
+        last = next((row.strip() for row in reversed(rows) if row.strip()), "")
+        return bool(mark) and last.startswith(mark or "")
+
+    @property
+    def reads_empty_prompt(self) -> bool:
+        """Whether its empty prompt is read off its screen at all (:attr:`idle_on_screen` or
+        :attr:`idle_prompt_mark`): Remote's agent actions read a pane by it, and only by it."""
+        return self.idle_on_screen is not None or bool(self.idle_prompt_mark)
+
+    def ready(self, rows: Sequence[str]) -> bool:
+        """Whether ``rows`` show it ready for a typed line: its :attr:`ready_on_screen`, else
+        its empty prompt (:meth:`at_empty_prompt`) with no turn running on it
+        (:attr:`working_on_screen`); ``False`` for an agent that reads none of them."""
+        if self.ready_on_screen is not None:
+            return self.ready_on_screen(rows)
+        working = self.working_on_screen
+        return self.at_empty_prompt(rows) and not (working is not None and working(rows))
+
+    def drawn(self, rows: Sequence[str]) -> bool:
+        """Whether ``rows`` show its prompt drawn, a turn running at it or not: its
+        :attr:`prompt_on_screen`, else its empty prompt (:meth:`at_empty_prompt`); ``False``
+        for an agent that reads none of them."""
+        if self.prompt_on_screen is not None:
+            return self.prompt_on_screen(rows)
+        return self.at_empty_prompt(rows)
+
+    def modal(self, rows: Sequence[str]) -> str | None:
+        """What ``rows`` show that a typed line must not go into, in the owner's words: its
+        :attr:`modal_on_screen`, else the words of a dialog of its own
+        (:attr:`dialog_on_screen`; ``a dialog of its own`` when none are on screen), else the
+        question of its prompt (:attr:`screen_prompt`); ``None`` for a screen a line may go
+        into, or for an agent that reads none of them."""
+        if self.modal_on_screen is not None:
+            return self.modal_on_screen(rows)
+        if self.dialog_on_screen is not None:
+            words = self.dialog_on_screen(rows)
+            return None if words is None else words or "a dialog of its own"
+        if self.screen_prompt is not None:
+            prompt = self.screen_prompt(rows)
+            return None if prompt is None else prompt.question
+        return None
 
 
-def screen_drawn(capabilities: AgentCapabilities, rows: Sequence[str]) -> bool:
-    """Whether ``rows``, an agent's screen, show its prompt drawn, a turn running at it or
-    not: its :attr:`~AgentCapabilities.prompt_on_screen`, else its empty prompt
-    (``idle_on_screen``, else ``idle_prompt_mark`` starting its last line); ``False`` for an
-    agent that reads none of them off its screen."""
-    if capabilities.prompt_on_screen is not None:
-        return capabilities.prompt_on_screen(rows)
-    return _empty_prompt(capabilities, rows)
+NO_SCREEN = AgentScreen()
+"""The screen of an agent whose adapter reads none (:attr:`AgentAdapter.screen` ``None``)."""
 
 
-def _empty_prompt(capabilities: AgentCapabilities, rows: Sequence[str]) -> bool:
-    if capabilities.idle_on_screen is not None:
-        return capabilities.idle_on_screen(rows)
-    mark = capabilities.idle_prompt_mark
-    last = next((row.strip() for row in reversed(rows) if row.strip()), "")
-    return bool(mark) and last.startswith(mark or "")
-
-
-def screen_modal(capabilities: AgentCapabilities, rows: Sequence[str]) -> str | None:
-    """What ``rows``, an agent's screen, show that a typed line must not go into, in the
-    owner's words: its :attr:`~AgentCapabilities.modal_on_screen`, else the words of a
-    dialog of its own (``dialog_on_screen``; ``a dialog of its own`` when none are on
-    screen), else the question of its prompt (``screen_prompt``); ``None`` for a screen a
-    line may go into, or for an agent that reads none of them off its screen."""
-    if capabilities.modal_on_screen is not None:
-        return capabilities.modal_on_screen(rows)
-    if capabilities.dialog_on_screen is not None:
-        words = capabilities.dialog_on_screen(rows)
-        return None if words is None else words or "a dialog of its own"
-    if capabilities.screen_prompt is not None:
-        prompt = capabilities.screen_prompt(rows)
-        return None if prompt is None else prompt.question
-    return None
+def screen_of(adapter: AgentAdapter | None) -> AgentScreen:
+    """``adapter``'s :attr:`~AgentAdapter.screen`, :data:`NO_SCREEN` where it has none (or
+    for no adapter at all)."""
+    screen = adapter.screen if adapter is not None else None
+    return NO_SCREEN if screen is None else screen
 
 
 # --- events: one vocabulary for every agent's lifecycle hooks -----------------------------
@@ -953,6 +981,9 @@ class AgentAdapter(Protocol):
     Remote's key pad send instead (``core.keys.translate``, ``services.remote_server.
     remote_keys_spelled``): Codex submits on ``S-Enter`` and takes ``C-j`` as its newline.
     Empty where every key means what tmux names it."""
+    screen: AgentScreen | None
+    """How its screen is read (:class:`AgentScreen`); ``None`` for an agent whose screen is
+    not read, which the shared code reads as :data:`NO_SCREEN` (:func:`screen_of`)."""
 
     @property
     def accounts(self) -> AgentAccounts | None:

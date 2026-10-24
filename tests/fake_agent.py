@@ -38,6 +38,7 @@ from aisquare.core.agent_adapters.types import (
     GENERIC_HOOK,
     AgentCapabilities,
     AgentEvent,
+    AgentScreen,
     AgentTranscript,
     AnswerKey,
     AnswerKind,
@@ -365,6 +366,10 @@ class FakeAgentAdapter:
     plugin = None
     telemetry_reader: TelemetryReader | None = None
     transcript_reader: AgentTranscript | None = FakeTranscript()
+    screen: AgentScreen | None = AgentScreen(
+        dialog_on_screen=dialog_on_screen,
+        screen_prompt=screen_prompt,
+    )
     capabilities = AgentCapabilities(
         approves_for_me=True,
         launch_inputs=(".fakeagent",),
@@ -378,8 +383,6 @@ class FakeAgentAdapter:
         # Its end of input ends it, as a shell's does; its Ctrl-C only clears the line. Its
         # empty prompt is not read off its screen, so Remote asks before every Ctrl-D.
         one_press_exits=frozenset({"C-d"}),
-        dialog_on_screen=dialog_on_screen,
-        screen_prompt=screen_prompt,
         value_options=frozenset(
             {
                 "--model",

@@ -38,7 +38,7 @@ from aisquare.cli.ui.views.app_settings import launch_line
 from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import harness, launch_seal
 from aisquare.core.agent_adapters import get_adapter
-from aisquare.core.agent_adapters.types import AgentAdapter, prepare_store, store_dir
+from aisquare.core.agent_adapters.types import AgentAdapter, prepare_store, screen_of, store_dir
 from aisquare.core.config import (
     REVIEWER_ARGS,
     AgentModelDefault,
@@ -1515,7 +1515,7 @@ def test_codex_reads_working_off_its_status_line_only_where_codex_draws_it(
     working, and the approval view sits under the transcript: the words in the command
     awaiting approval, or in output on screen, cleared the bell while the human had not
     answered. Only the row right above the composer counts (0.162.1, measured)."""
-    read = CODEX.capabilities.working_on_screen
+    read = screen_of(CODEX).working_on_screen
     assert read is not None and read(screen) is working
 
 
@@ -1558,7 +1558,7 @@ def test_codex_reads_idle_only_at_its_empty_prompt_in_either_screen(
     """Measured on 0.162.1: ``? for shortcuts`` ends the alternate screen at an empty
     prompt, and the inline layout never draws it; there the empty composer's placeholder,
     the footer alone under it, is the prompt. A dialog or a draft is neither."""
-    read = CODEX.capabilities.idle_on_screen
+    read = screen_of(CODEX).idle_on_screen
     assert read is not None and read(screen) is idle
 
 
@@ -1601,7 +1601,7 @@ def test_codex_reads_working_through_both_frames_of_its_blinking_spinner(
     window gets only from a spawner that had ``COLORTERM``. After an approval, the row of
     a headless, SSH or cron spawn flipped between working and attention on alternate
     reads: the bell came back, and ``tell`` alternated between typing and a note."""
-    read = CODEX.capabilities.working_on_screen
+    read = screen_of(CODEX).working_on_screen
     filled = [row.replace("◦", "•", 1) for row in BLINKED]
     assert read is not None and read(BLINKED) and read(filled)
     codex, _ = codex_agent

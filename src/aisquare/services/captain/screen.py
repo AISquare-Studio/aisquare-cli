@@ -7,11 +7,11 @@ Two parsers of the same screen could disagree on one pane — ``say`` refusing w
 
 Each question goes to the agent of the pane's OWN row, as its launch record places it
 (``fleet.placed_row``: its agent the record's, never the store's column), through its
-adapter's capabilities: ``screen_prompt`` (a prompt at the bottom of the screen, and the
-keys that answer it), ``ready_on_screen`` (a typed line lands as a prompt there,
-``types.screen_ready``), ``prompt_on_screen`` (its prompt drawn, busy or not,
-``types.screen_drawn``) and ``modal_on_screen`` (what a typed line must not go into,
-``types.screen_modal``). Claude Code's are ``core.agent_adapters.claude_screen``'s: its
+adapter's screen (``AgentAdapter.screen``, a ``types.AgentScreen``): ``screen_prompt`` (a
+prompt at the bottom of the screen, and the keys that answer it), ``ready`` (a typed line
+lands as a prompt there: its ``ready_on_screen``, else its default), ``drawn`` (its prompt
+drawn, busy or not: ``prompt_on_screen``) and ``modal`` (what a typed line must not go into:
+``modal_on_screen``). Claude Code's are ``core.agent_adapters.claude_screen``'s: its
 input box, chooser, trust dialog and rating survey. Codex's are its own dialogs: its
 folder trust, the owner's; its approval view, a chooser on ``1`` and Esc; its empty
 composer. Read with another agent's shapes, a Codex pane at its folder-trust dialog
@@ -27,13 +27,7 @@ import re
 from collections.abc import Sequence
 
 from aisquare.core.agent_adapters import recorded_adapter
-from aisquare.core.agent_adapters.types import (
-    AgentCapabilities,
-    ScreenPrompt,
-    screen_drawn,
-    screen_modal,
-    screen_ready,
-)
+from aisquare.core.agent_adapters.types import AgentScreen, ScreenPrompt, screen_of
 from aisquare.models import FleetAgent
 
 PANE_ESCAPES = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])")
@@ -50,44 +44,44 @@ def strip_escapes(lines: Sequence[str]) -> list[str]:
     return rows
 
 
-def _capabilities(agent: FleetAgent) -> AgentCapabilities | None:
-    """What ``agent``'s own agent reads off its screen; ``None`` for one this install does
-    not know."""
+def _screen(agent: FleetAgent) -> AgentScreen | None:
+    """How ``agent``'s own agent reads its screen (``AgentAdapter.screen``, its defaults where
+    it declares none); ``None`` for one this install does not know."""
     adapter = recorded_adapter(agent.agent)
-    return adapter.capabilities if adapter is not None else None
+    return screen_of(adapter) if adapter is not None else None
 
 
 def reads_prompts(agent: FleetAgent) -> bool:
-    """Whether ``agent``'s screen is read for a prompt (``capabilities.screen_prompt``): where
+    """Whether ``agent``'s screen is read for a prompt (``AgentScreen.screen_prompt``): where
     it is not, nothing can tell its folder-trust dialog from its prompt."""
-    capabilities = _capabilities(agent)
-    return capabilities is not None and capabilities.screen_prompt is not None
+    screen = _screen(agent)
+    return screen is not None and screen.screen_prompt is not None
 
 
 def prompt_showing(agent: FleetAgent, lines: Sequence[str]) -> ScreenPrompt | None:
     """The prompt at the bottom of ``agent``'s pane (``lines``, as captured), read by its own
     agent, or ``None``."""
-    capabilities = _capabilities(agent)
-    read = capabilities.screen_prompt if capabilities is not None else None
+    screen = _screen(agent)
+    read = screen.screen_prompt if screen is not None else None
     return read(strip_escapes(lines)) if read is not None else None
 
 
 def ready(agent: FleetAgent, lines: Sequence[str]) -> bool:
     """Whether ``agent``'s pane shows its prompt drawn with no turn running at it, so a typed
-    line lands as a prompt (``types.screen_ready``)."""
-    capabilities = _capabilities(agent)
-    return capabilities is not None and screen_ready(capabilities, strip_escapes(lines))
+    line lands as a prompt (``AgentScreen.ready``)."""
+    screen = _screen(agent)
+    return screen is not None and screen.ready(strip_escapes(lines))
 
 
 def drawn(agent: FleetAgent, lines: Sequence[str]) -> bool:
     """Whether ``agent``'s pane shows its prompt drawn, a turn running at it or not
-    (``types.screen_drawn``)."""
-    capabilities = _capabilities(agent)
-    return capabilities is not None and screen_drawn(capabilities, strip_escapes(lines))
+    (``AgentScreen.drawn``)."""
+    screen = _screen(agent)
+    return screen is not None and screen.drawn(strip_escapes(lines))
 
 
 def modal_showing(agent: FleetAgent, lines: Sequence[str]) -> str | None:
     """What ``agent``'s pane shows that text must not be typed into, in the owner's words
-    (``types.screen_modal``), or ``None``."""
-    capabilities = _capabilities(agent)
-    return screen_modal(capabilities, strip_escapes(lines)) if capabilities else None
+    (``AgentScreen.modal``), or ``None``."""
+    screen = _screen(agent)
+    return screen.modal(strip_escapes(lines)) if screen is not None else None

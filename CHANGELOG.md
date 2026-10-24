@@ -166,6 +166,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   untouched, rather than closing over a stop that did not happen. A stop that
   worked toasts `✓ stopped <label> (<id>)`, re-reads the fleet, and leaves the
   stopped agent's view for the project's.
+- **A file dropped on `asq` reaches the agent on screen** (#288). A terminal hands
+  a drop to `asq` as a paste, and a paste went only to the widget with the keyboard,
+  so a screenshot dropped while the sidebar had it reached no agent. A paste no
+  focused widget takes now goes to the one live pane on screen, which takes the
+  keyboard too; with none, one toast says "nothing to paste into — open an agent
+  first", and a text field or a dialog keeps its own pastes. Under WSL, a paste that is
+  one Windows path of an existing file becomes its Linux path (`wslpath -u`).
+  `AISQUARE_PASTE_LOG=<file>` records each paste's length, first 80 characters and
+  focused widget, for checking what a terminal sends. `docs/fleet.md` has an
+  "Images" paragraph on the three ways an image reaches Claude Code.
 - **Attach a persona in two steps, from `asq`.** The Personas tab's *Attach to
   existing* / *Attach to new* open one **target picker**: this project's running
   **Agents** (each with the persona it runs), the **Binds** `aisquare team bind`

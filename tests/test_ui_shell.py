@@ -22,6 +22,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator, Sequence
@@ -90,7 +91,7 @@ from aisquare.core.config import load_config, save_config
 from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import update_state
 from aisquare.core.store import ContextStore, SqliteStore, store_session
-from aisquare.core.tmux import Completed
+from aisquare.core.tmux import Completed, TmuxServer
 from aisquare.models import (
     CheckStatus,
     ClaudeAccount,
@@ -6413,3 +6414,164 @@ def test_the_settings_tab_follows_a_rename_made_on_the_card_or_in_a_shell(
     assert out["cleared"] == (("", "project settings — alpha"), None), (
         "a blank Save clears a nickname set elsewhere"
     )
+
+
+# --- a paste no focused widget took goes to the one live pane (#288) ------------------------
+
+
+class PasteRecordingPane(TerminalPane):
+    """A live pane on the test's socket whose ``_forward`` records instead of sending."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "%9", server=TmuxServer(PRIVATE_SOCKET, binary=sys.executable), id="paste-pane"
+        )
+        self.forwarded: list[tuple[str, str | bytes]] = []
+
+    def _forward(self, kind: Any, value: str | bytes) -> bool:
+        self.forwarded.append((kind, value))
+        return True
+
+
+def test_a_paste_the_sidebar_got_reaches_the_one_live_pane_and_focuses_it(
+    tmp_path: Path, script: Script
+) -> None:
+    """#288: a terminal hands a dropped file over as a paste, and Textual gives a paste to
+    the focused widget alone. With the sidebar focused, a screenshot dropped on `asq`
+    reached no agent; it goes to the pane on screen now, which takes the keyboard."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[list[tuple[str, str | bytes]], bool, bool]:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        app.sidebar.focus()
+        await pilot.pause()
+        was_sidebar = app.focused is app.sidebar
+        app.post_message(events.Paste("/tmp/shot.png"))
+        await settle(app)
+        return pane.forwarded, was_sidebar, app.focused is pane
+
+    forwarded, was_sidebar, focused = drive(go)
+    assert was_sidebar, "the premise: the sidebar had the keyboard"
+    assert forwarded == [("paste", "/tmp/shot.png")]
+    assert focused, "the pane took the keyboard with it"
+
+
+def test_a_paste_with_no_live_pane_on_screen_is_one_toast_and_no_tmux_call(
+    tmp_path: Path, script: Script, no_real_tmux: list[tuple[str, ...]]
+) -> None:
+    seed(tmp_path, ("prj_a", "alpha", None))
+    toasts: list[str] = []
+
+    async def go(pilot: Pilot[None]) -> list[tuple[str, ...]]:
+        app = fleet_app(pilot)
+        real_notify = app.notify
+
+        def notify(message: str, **kwargs: Any) -> None:
+            toasts.append(message)
+            real_notify(message, **kwargs)
+
+        app.notify = notify  # type: ignore[method-assign]
+        app.sidebar.focus()
+        await pilot.pause()
+        before = list(no_real_tmux)
+        app.post_message(events.Paste("/tmp/shot.png"))
+        await settle(app)
+        return no_real_tmux[len(before) :]
+
+    tmux_calls = drive(go)
+    assert toasts == ["nothing to paste into — open an agent first"]
+    assert not any("paste" in " ".join(argv) or "buffer" in " ".join(argv) for argv in tmux_calls)
+
+
+def test_a_paste_into_a_dialogs_input_never_reaches_a_pane_and_nothing_passes_a_dialog(
+    tmp_path: Path, script: Script
+) -> None:
+    """The Spawn dialog's label keeps its own paste; and with the dialog open, a paste its
+    focused widget did not take is not handed to the pane behind it."""
+    from textual.widgets import Button, Input
+
+    from aisquare.cli.ui.spawn import SpawnDialog
+
+    [project] = seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[tuple[str, str | bytes]]]:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        app.push_screen(SpawnDialog(project, accounts=None))
+        await settle(app)
+        label = app.screen.query_one("#spawn-label", Input)
+        label.value = ""
+        label.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("coder-pasted"))
+        await settle(app)
+        app.screen.query_one("#spawn-cancel", Button).focus()
+        await pilot.pause()
+        app.post_message(events.Paste("/tmp/shot.png"))
+        await settle(app)
+        return label.value, pane.forwarded
+
+    value, forwarded = drive(go)
+    assert value == "coder-pasted"
+    assert forwarded == []
+
+
+def test_a_paste_a_text_area_took_is_not_sent_to_the_pane_as_well(
+    tmp_path: Path, script: Script
+) -> None:
+    """Textual's ``TextArea`` inserts a paste without stopping it, so it bubbles on to the
+    shell: a text area on the main screen must not have its paste typed into the agent too."""
+    from textual.widgets import TextArea
+
+    seed(tmp_path, ("prj_a", "alpha", None))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, list[tuple[str, str | bytes]]]:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        area = TextArea(id="paste-area")
+        await app.screen.mount(area)
+        area.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("a note"))
+        await settle(app)
+        return area.text, pane.forwarded
+
+    text, forwarded = drive(go)
+    assert text == "a note"
+    assert forwarded == []
+
+
+def test_the_paste_log_records_each_paste_where_it_lands_only_when_asked(
+    tmp_path: Path, script: Script, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#288's reproduction matrix is filled from what a terminal sends on a drop: with
+    `AISQUARE_PASTE_LOG` naming a file, each paste adds its length, its head and the
+    widget that had the keyboard. Without it, nothing is written."""
+    seed(tmp_path, ("prj_a", "alpha", None))
+    log = tmp_path / "paste.log"
+
+    async def go(pilot: Pilot[None]) -> None:
+        app = fleet_app(pilot)
+        pane = PasteRecordingPane()
+        await app.content.add_content(pane, set_current=True)
+        app.sidebar.focus()
+        await pilot.pause()
+        app.post_message(events.Paste("/tmp/shot.png"))  # the router's: the sidebar had it
+        await settle(app)
+        app.post_message(events.Paste("again"))  # the pane's own: it has the keyboard now
+        await settle(app)
+
+    drive(go)
+    unasked = log.exists()
+    monkeypatch.setenv("AISQUARE_PASTE_LOG", str(log))
+    drive(go)
+
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert not unasked, "off by default: a paste may be a secret"
+    assert len(lines) == 2, lines
+    assert "focused=Sidebar" in lines[0] and "len=13 head='/tmp/shot.png'" in lines[0]
+    assert "focused=PasteRecordingPane#paste-pane" in lines[1] and "len=5" in lines[1]

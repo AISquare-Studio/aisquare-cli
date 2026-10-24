@@ -54,7 +54,7 @@ from textual.notifications import SeverityLevel
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import ContentSwitcher, Footer, Static
+from textual.widgets import ContentSwitcher, Footer, Static, TextArea
 from textual.worker import Worker, WorkerState, WorkType
 from textual.worker_manager import WorkerManager
 
@@ -102,7 +102,7 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.spawn import SpawnCompleted, SpawnDialog
 from aisquare.cli.ui.stop import StopAgentScreen
-from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane
+from aisquare.cli.ui.terminal import EscapeToSidebar, SelectionHost, TerminalPane, log_paste
 from aisquare.cli.ui.theme import ThemePicker, restore_theme, theme_autosave
 from aisquare.cli.ui.ticks import while_running
 from aisquare.cli.ui.views.accounts import (
@@ -2151,6 +2151,34 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 await self.action_welcome()
         for view in views:
             await view.remove()
+
+    def on_paste(self, event: events.Paste) -> None:
+        """A paste no focused widget took (#288): into the one live pane on screen.
+
+        Textual hands a paste to the focused widget alone, and a terminal hands a dropped
+        file over as a paste, so a file dropped while the sidebar had the keyboard reached
+        no agent. Here, on the main screen, it goes to the one live ``TerminalPane`` on
+        screen (an agent, the manager, a sign-in), which takes the keyboard too; with none,
+        or more than one, it goes nowhere and one toast says so. An input or a dialog
+        keeps its own paste: it stops the event, or is a screen of its own; a text area
+        takes it without stopping it, so it is named here.
+        """
+        log_paste(event.text, self.focused)
+        if self.screen is not self.screen_stack[0]:
+            return  # a dialog is open: what it did not take is not the pane's behind it
+        if isinstance(self.focused, TextArea):
+            return  # it took the paste; the event bubbled on all the same
+        live = [
+            pane
+            for pane in self.screen.query(TerminalPane)
+            if pane.pane_id is not None and pane.is_on_screen
+        ]
+        if len(live) != 1:
+            self.notify("nothing to paste into — open an agent first", timeout=4)
+            return
+        (pane,) = live
+        pane.focus()
+        pane.paste_text(event.text)
 
     def on_spawn_agent(self, event: SpawnAgent) -> None:
         """The sidebar's spawn-agent row: the Spawn dialog for THAT row's project."""

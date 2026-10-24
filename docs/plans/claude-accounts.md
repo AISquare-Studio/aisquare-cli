@@ -129,6 +129,21 @@ The UI fetches once a minute while the page is on screen and never elsewhere;
 reaches the endpoint (`tests/test_no_network_on_the_primary_path.py` still
 holds).
 
+Read since #277 (2026-10-23): the per-family weeks go into
+`ClaudeUsage.family_week_percent` / `family_week_resets_at`, keyed by family. Where
+the endpoint really sends them (P0-W0, Claude Code 2.1.309) is `limits[]`: an entry
+of kind `weekly_scoped` whose `scope.model.display_name` names the model ("Fable",
+"Opus"), mapped to its family by `core.harness.model_family` (P0-W3c). A top-level
+`seven_day_<family>` window is read too, for a known family only: in W0's payloads
+every one was null, and `seven_day_breakdown`-style keys are `seven_day_*` dicts
+that are no window. Each other `limits[]` entry (`kind`, `percent`) is folded into
+the window of its kind (`session`/`five_hour`, `weekly_all`/`weekly`/`seven_day`)
+as the fuller figure; a
+window with a non-null `locked_reason` reads 100 % used. Unknown keys and entries
+of an unknown shape are ignored. The usage cache (`claude_usage`) keeps the two
+shared windows only, so a live reading that shows a family week spent leaves a
+limit mark (§10) for the picks that read the cache.
+
 ## 6. Surface
 
 - `aisquare accounts` → `list [--usage]` (bare group lists), `add`, `run <slot>
@@ -340,12 +355,54 @@ for the long ones.
   resets), `claude-account-headroom` (`--live`, every window against
   `switch_at`; warns when all are over the line or none can be read).
 
-**Unverified, and said so.** Resuming a transcript written under one
-`CLAUDE_CONFIG_DIR` from another. The path form is documented and the id is
-kept, but this machine holds one login, so the cross-account leg has not been
-run; a resume that fails leaves a pane whose error is visible, and `--fresh` is
-the documented way around it. Copying transcripts between config directories
-was not done, per the issue.
+**One switch per limit, per-family weeks, the refusal memory (#277, 2026-10-23).**
+
+- `headroom_percent(reading, family)` adds the agent's family week to the two
+  shared windows. The family is `core.harness.model_family` of the session's
+  model for a switch, and `launch_family` (an explicit `--model`, else the role's
+  ladder resolved without probing) for a spawn.
+- Every `rate_limit` StopFailure writes `account_limit:<slot>:<window>` in
+  `team_meta` — `{"until", "at", "how"}`, the window as the message named it
+  (`session`, `weekly`, `opus`, `sonnet`) — on the slot the agent was on
+  (`leaving_slot`). `headroom_choice` skips a candidate whose `session` or
+  `weekly` mark, or the agent's family mark, is still in the future, without
+  reading it, and says so: *account 3 skipped — weekly limit until Mon 00:00
+  (in 2d 4h), refused 10:42*. No migration; a mark past its reset is not read.
+  A 429 that names no reset leaves no mark.
+- `hooks.turn_failed` decides whether the hand-over will run BEFORE the board
+  write (`_plan_hand_over`) and passes `handing_over` to `hook_stop_failure`: the
+  line is then its own kind, `limited_handing_over` (no wake kind; the Remote
+  reads it as `limited`), says *moving it to another account automatically
+  (`on_limit = "switch"`)*, names no `fleet switch` and nudges no manager. The
+  worker's refusals (the cooldown, no account under the line, a worker that would
+  not start, and any exception the worker dies on) are `handover_failed`, a wake
+  kind that nudges a waiting manager; a hand-over already in flight stays a plain
+  note, since that worker's own outcome follows. `switched` is no longer a wake
+  kind: a completed move needs no decision.
+- `fleet.switch` refuses, without `force` (`fleet switch --force`), a row the
+  automatic hand-over spawned less than `HANDOVER_COOLDOWN` (10 min) ago
+  (`hooks.fresh_replacement_refusal`, beside the cooldown).
+- The headroom rung reads the marks, and so does `choose_for_handover`'s
+  fallback: a hand-over or a switch without `--to` never lands on a marked
+  account through the binding, project default or machine default rung, and
+  `handover_failed` names the agent's own reset. A launch's `--account`, role
+  binding, project default and `pick = "default"` are choices someone made and are
+  not second-guessed; when every candidate is marked, a spawn falls to the machine
+  default as it does when no usage can be read (owner call 6).
+- `[accounts] prefer = "priority" | "reset-soonest"`: with `reset-soonest`,
+  `headroom_choice` takes, of the candidates under `switch_at`, the one whose
+  `week_resets_at` is earliest (none last; priority breaks ties). Spawn picks and
+  hand-overs both.
+
+**Verified on 2026-10-23 (P0-W0).** Resuming a transcript written under one
+`CLAUDE_CONFIG_DIR` from another works on Claude Code 2.1.309 and 2.1.223: the
+session keeps its id and its history, and a prompt passed with the resume runs
+(`docs/plans/handoff-p0-reliability.md`, "W0 results" §2). Claude Code keeps
+appending to the ORIGINAL file under the first account's `projects/`; nothing is
+written under the second. Its `SessionStart` hook is handed a `transcript_path`
+under the second account that is never created, which the fleet now records as
+the real one (P0-W3b). Copying transcripts between config directories was not
+done, per the issue.
 
 ## 11. The macOS Keychain (2026-10-15)
 

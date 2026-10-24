@@ -88,6 +88,11 @@ ON_LIMIT_MODES: tuple[tuple[str, str], ...] = (
     ("switch to the account with headroom", "switch"),
 )
 """``[accounts] on_limit``: what the fleet does when an agent's turn ends on a usage limit."""
+PREFER_MODES: tuple[tuple[str, str], ...] = (
+    ("the first in priority order", "priority"),
+    ("the week that resets soonest", "reset-soonest"),
+)
+"""``[accounts] prefer`` (#277): which account under ``switch_at`` a pick takes."""
 _ID_KEPT = re.compile(r"[A-Za-z0-9-]")
 """The characters of a role name its widget ids keep as they are (:func:`widget_suffix`)."""
 ACCOUNTS_WORKER = "app-settings-accounts"
@@ -99,7 +104,7 @@ _INPUTS = (
     "accounts-switch-at",
     "accounts-wait-minutes",
 )
-_SELECTS = ("accounts-pick", "accounts-on-limit")
+_SELECTS = ("accounts-pick", "accounts-on-limit", "accounts-prefer")
 """The form's fields beside the per-role rows, by id: what :meth:`AppSettingsView._changed`
 compares with what they showed when the form was read."""
 _ACCOUNT_SWITCHES = {
@@ -455,6 +460,11 @@ class AppSettingsView(VerticalScroll):
             yield Label("switch at (% used)")
             yield Input(value=str(self.accounts.switch_at), type="integer", id="accounts-switch-at")
         with Horizontal(classes="row"):
+            yield Label("under the line, prefer")
+            yield Select(
+                PREFER_MODES, value=self.accounts.prefer, allow_blank=False, id="accounts-prefer"
+            )
+        with Horizontal(classes="row"):
             yield Label("on a usage limit")
             yield Select(
                 ON_LIMIT_MODES,
@@ -547,6 +557,7 @@ class AppSettingsView(VerticalScroll):
         self.query_one("#accounts-pick", Select).value = self.accounts.pick
         self.query_one("#accounts-switch-at", Input).value = str(self.accounts.switch_at)
         self.query_one("#accounts-on-limit", Select).value = self.accounts.on_limit
+        self.query_one("#accounts-prefer", Select).value = self.accounts.prefer
         self.query_one("#accounts-wait-minutes", Input).value = str(
             self.accounts.wait_if_reset_within_minutes
         )
@@ -631,7 +642,11 @@ class AppSettingsView(VerticalScroll):
             "switch_at": switch_at,
             "wait_if_reset_within_minutes": wait_minutes,
         }
-        for wid, key in (("accounts-pick", "pick"), ("accounts-on-limit", "on_limit")):
+        for wid, key in (
+            ("accounts-pick", "pick"),
+            ("accounts-on-limit", "on_limit"),
+            ("accounts-prefer", "prefer"),
+        ):
             value = self.query_one(f"#{wid}", Select).value
             if wid in changed and isinstance(value, str):
                 update[key] = value

@@ -227,6 +227,15 @@ def _until(connection: Any, kind: str) -> dict[str, Any]:
     raise AssertionError(f"no {kind!r} frame in 50 frames")
 
 
+def _first_of(connection: Any, kinds: set[str]) -> dict[str, Any]:
+    """The first frame of any of ``kinds``, past the others: for a test of which comes first."""
+    for _ in range(50):
+        frame = json.loads(_text(connection))
+        if frame["t"] in kinds:
+            return dict(frame)
+    raise AssertionError(f"none of {sorted(kinds)} in 50 frames")
+
+
 def _authed(client: TestClient) -> Iterator[Any]:
     with client.websocket_connect("/ws") as connection:
         connection.send_text(json.dumps({"t": "auth", "token": TOKEN}))
@@ -1212,7 +1221,16 @@ def test_the_pages_own_mode_switch_is_not_bounced_back_by_the_key_poll() -> None
 
 
 def test_switching_modes_flushes_an_open_utterance_and_the_hello_says_which_mode() -> None:
-    harness = Harness(canned="half a sentence", mode="listen")
+    # The flushed turn is held until the mode frame has been seen: S1 (coderp) is that the
+    # switch does not wait behind it. Left to the scheduler, a reply that beat the mode frame
+    # was read past (py3.13 on rc/p0's run 40032253943), and accepting either order no longer
+    # caught a mode frame that waited (review of #347).
+    released = threading.Event()
+
+    def hold() -> None:
+        released.wait(5.0)
+
+    harness = Harness(canned="half a sentence", mode="listen", deliveries=Deliveries(during=hold))
     with TestClient(harness.app) as client, client.websocket_connect("/ws") as connection:
         connection.send_text(json.dumps({"t": "auth", "token": TOKEN}))
         hello = json.loads(_text(connection))
@@ -1224,9 +1242,11 @@ def test_switching_modes_flushes_an_open_utterance_and_the_hello_says_which_mode
         connection.send_text(json.dumps({"t": "mode", "mode": "focus"}))
         final = _until(connection, "stt")
         assert final["text"] == "half a sentence" and final["final"]
-        # The switch lands at once (coderp's S1): the mode frame does not wait behind the
-        # flushed utterance's turn, which answers after it.
-        assert _until(connection, "mode") == {"t": "mode", "mode": "focus", "listening": False}
+        first = _first_of(connection, {"mode", "reply"})
+        assert first == {"t": "mode", "mode": "focus", "listening": False}, (
+            "the switch waited behind the flushed utterance's turn"
+        )
+        released.set()
         _until(connection, "reply")
         connection.send_text(json.dumps({"t": "mode", "mode": "sideways"}))
         assert _until(connection, "error")["code"] == "bad_message"

@@ -563,7 +563,10 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     assert read.status_code == 200 and took < 1.0, f"the read waited {took:.2f} s"
     assert [status for status, _ in answers] == [409] * taps and tmux.sent == []
     slowest = max(elapsed for _, elapsed in answers)
-    assert slowest < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.0, slowest
+    # One lock wait each, plus scheduling. The regression this guards, taps serialised on a
+    # shared pool, costs at least two waits (2 x 2 s); +1.0 missed by 7 ms on a loaded CI
+    # runner (#329's run 40013797813), so the slack is 1.5 s: still under a second wait.
+    assert slowest < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.5, slowest
 
 
 def test_keys_queued_behind_actions_holding_every_write_thread_are_not_typed_as_one_ends(

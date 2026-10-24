@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from aisquare.core import paths
 from aisquare.core import store as store_module
 from aisquare.core.ids import new_entry_id
 from aisquare.core.store import (
@@ -2683,8 +2684,6 @@ def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
 ) -> None:
     """Rows with context entries, a codename, linked repos, board activity, a fleet
     agent or a snapshot on disk become onboarded; captured-only rows stay hidden."""
-    from aisquare.core import snapshot as snapshot_core
-
     rows = [
         ("prj_entries", "/w/entries"),
         ("prj_named", "/w/named"),
@@ -2730,8 +2729,7 @@ def test_the_v17_migration_adopts_the_rows_already_used_on_purpose(
     )
     _at_version(16, after=after)
     for with_snapshot in ("prj_snap", "prj_gone_used"):  # forget keeps the snapshot
-        snapshot_core.meta_path(with_snapshot).parent.mkdir(parents=True, exist_ok=True)
-        snapshot_core.meta_path(with_snapshot).write_text("{}", encoding="utf-8")
+        _old_pack(with_snapshot)
 
     store = open_store()
     try:
@@ -2760,8 +2758,6 @@ def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
     migration, which rolls back only on ``sqlite3.Error``, so the open failed with a raw
     traceback and the write transaction left open, on every command until the directory
     was readable again (review of #203). It is no evidence: the row stays captured."""
-    from aisquare.core import snapshot as snapshot_core
-
     after = "".join(
         "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
         f"('{pid}', '/w/{pid}', '{pid}', '[]', '2026-09-01T00:00:00+00:00');\n"
@@ -2769,13 +2765,12 @@ def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
     )
     _at_version(16, after=after)
     for pid in ("prj_locked", "prj_snap"):
-        snapshot_core.meta_path(pid).parent.mkdir(parents=True, exist_ok=True)
-        snapshot_core.meta_path(pid).write_text("{}", encoding="utf-8")
-    locked = snapshot_core.snapshot_dir("prj_locked")
+        _old_pack(pid)
+    locked = paths.project_data_dir("prj_locked") / "snapshot"
     locked.chmod(0o000)
     try:
         try:
-            snapshot_core.exists("prj_locked")
+            (locked / "snapshot.json").exists()
         except PermissionError:
             pass
         else:
@@ -2790,6 +2785,74 @@ def test_an_unreadable_snapshot_is_no_evidence_and_the_store_still_opens(
         locked.chmod(0o700)
     assert shown == {"prj_snap"}, "a readable snapshot still adopts its row"
     assert everything == {"prj_snap", "prj_locked"}, "the unreadable one stays captured"
+
+
+def _old_pack(project_id: str) -> Path:
+    """The codebase pack a build up to 0.8 left for ``project_id``, as it wrote it."""
+    pack = paths.project_data_dir(project_id) / "snapshot"
+    pack.mkdir(parents=True, exist_ok=True)
+    for name in ("pack.repomix.xml", "skeleton.repomix.xml", "index.json"):
+        (pack / name).write_text("", encoding="utf-8")
+    (pack / "snapshot.json").write_text("{}", encoding="utf-8")
+    return pack
+
+
+def test_a_pack_is_the_evidence_first_and_deleted_after(isolated_home: Path) -> None:
+    """A store from 0.6 or older, upgraded straight to this build: the only mark of a
+    project the owner added is its pack. The v17 backfill must read it before the open
+    deletes it, or the project vanishes from ``project list`` and the fleet. Then the
+    pack goes, and the ``brain/`` beside it stays."""
+    after = (
+        "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
+        "('prj_packed', '/w/packed', 'packed', '[]', '2026-09-01T00:00:00+00:00');\n"
+    )
+    _at_version(16, after=after)
+    pack = _old_pack("prj_packed")
+    brain = paths.project_data_dir("prj_packed") / "brain"
+    brain.mkdir()
+    (brain / "page.md").write_text("kept", encoding="utf-8")
+
+    with store_session() as store:
+        shown = {p.id for p in store.list_projects()}
+    assert shown == {"prj_packed"}, "the pack adopted its row before it was deleted"
+    assert not pack.exists()
+    assert (brain / "page.md").read_text(encoding="utf-8") == "kept"
+
+
+def test_old_packs_go_once_and_nothing_outside_projects_is_followed(
+    isolated_home: Path, tmp_path: Path
+) -> None:
+    """Every project's ``snapshot/`` goes on the first open, and only that: not a file of
+    that name, not a symlink's target, not a pack reached through a project directory
+    that is a symlink out of the home. A pack written after that open stays: the cleanup
+    ran, and records it."""
+    first = _old_pack("prj_a")
+    second = _old_pack("prj_b")
+    (paths.project_data_dir("prj_b") / "explainability-key").write_text("k", encoding="utf-8")
+    (paths.project_data_dir("prj_file")).mkdir(parents=True)
+    (paths.project_data_dir("prj_file") / "snapshot").write_text("not ours", encoding="utf-8")
+    outside = tmp_path / "elsewhere"
+    (outside / "snapshot").mkdir(parents=True)
+    (outside / "snapshot" / "keep.txt").write_text("keep", encoding="utf-8")
+    try:
+        paths.project_data_dir("prj_link").mkdir(parents=True)
+        (paths.project_data_dir("prj_link") / "snapshot").symlink_to(outside / "snapshot")
+        paths.project_data_dir("prj_out").symlink_to(outside)
+    except OSError:
+        pytest.skip("this filesystem cannot make symlinks")
+
+    with store_session():
+        pass
+    assert not first.exists() and not second.exists()
+    assert (paths.project_data_dir("prj_b") / "explainability-key").exists()
+    assert (paths.project_data_dir("prj_file") / "snapshot").read_text(encoding="utf-8")
+    assert (outside / "snapshot" / "keep.txt").exists(), "never followed out of the home"
+    assert (paths.project_data_dir("prj_link") / "snapshot").is_symlink()
+
+    again = _old_pack("prj_a")
+    with store_session():
+        pass
+    assert again.exists(), "it ran once"
 
 
 # --- the reads a poller makes every few seconds (remote's needs scan) -------------------------

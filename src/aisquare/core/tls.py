@@ -78,15 +78,42 @@ def trust_source() -> str:
     return _cached()[1]
 
 
+def is_https(request: Any) -> bool:
+    """Whether ``request`` (a URL or a ``urllib.request.Request``) is an ``https://`` one."""
+    url = request if isinstance(request, str) else getattr(request, "full_url", "")
+    return str(url).lower().startswith("https:")
+
+
 def urlopen(request: Any, *, timeout: float) -> Any:
     """``urllib.request.urlopen`` with :func:`ssl_context`: the way this package opens a URL.
+
+    The context goes to an ``https://`` request only: built for a plain ``http://`` one
+    (the explainability proxy's ``/health`` on loopback), an ``SSL_CERT_FILE`` that will
+    not load failed a call that never speaks TLS (review of #403, M2).
 
     Looked up on ``urllib.request`` at call time, so a test that replaces
     ``urllib.request.urlopen`` still intercepts it.
     """
     import urllib.request
 
+    if not is_https(request):
+        return urllib.request.urlopen(request, timeout=timeout)
     return urllib.request.urlopen(request, timeout=timeout, context=ssl_context())
+
+
+def https_handler() -> Any:
+    """A ``urllib.request.HTTPSHandler`` for ``build_opener`` that verifies through
+    :func:`ssl_context`, built at its first ``https://`` request rather than here: an
+    opener that also carries ``http://`` requests is not broken by a bundle that will not
+    load, and building the opener costs no context."""
+    import http.client
+    import urllib.request
+
+    class _Verified(urllib.request.HTTPSHandler):
+        def https_open(self, req: Any) -> Any:
+            return self.do_open(http.client.HTTPSConnection, req, context=ssl_context())
+
+    return _Verified()
 
 
 def cert_failure(exc: BaseException) -> bool:
@@ -99,12 +126,42 @@ def cert_failure(exc: BaseException) -> bool:
     )
 
 
-def handshake(host: str, *, port: int = 443, timeout: float = 10.0) -> None:
-    """One verified TLS handshake to ``host``, nothing sent: raises as ``urlopen`` would."""
-    import socket
+def https_proxy(host: str) -> str | None:
+    """The ``HTTPS_PROXY`` a request to ``host`` goes through, as ``urlopen`` picks it
+    (``NO_PROXY`` honoured), or ``None`` for a direct connection."""
+    import urllib.request
 
-    with (
-        socket.create_connection((host, port), timeout=timeout) as raw,
-        ssl_context().wrap_socket(raw, server_hostname=host),
-    ):
-        pass
+    proxy = urllib.request.getproxies().get("https")
+    if not proxy or urllib.request.proxy_bypass(host):
+        return None
+    return str(proxy)
+
+
+def handshake(host: str, *, port: int = 443, timeout: float = 10.0) -> None:
+    """One verified TLS handshake to ``host``, nothing sent: raises as ``urlopen`` would.
+
+    Through ``HTTPS_PROXY`` when one applies, by ``CONNECT``, as every request of this
+    package goes: direct, a machine that may only leave through its proxy failed here
+    while its usage reads worked (review of #403).
+    """
+    import base64
+    import http.client
+    from urllib.parse import unquote, urlsplit
+
+    proxy = https_proxy(host)
+    if proxy is None:
+        connection = http.client.HTTPSConnection(host, port, timeout=timeout, context=ssl_context())
+    else:
+        parts = urlsplit(proxy if "://" in proxy else f"http://{proxy}")
+        connection = http.client.HTTPSConnection(
+            parts.hostname or "", parts.port or 80, timeout=timeout, context=ssl_context()
+        )
+        headers = {}
+        if parts.username:
+            secret = f"{unquote(parts.username)}:{unquote(parts.password or '')}"
+            headers["Proxy-Authorization"] = "Basic " + base64.b64encode(secret.encode()).decode()
+        connection.set_tunnel(host, port, headers=headers)
+    try:
+        connection.connect()
+    finally:
+        connection.close()

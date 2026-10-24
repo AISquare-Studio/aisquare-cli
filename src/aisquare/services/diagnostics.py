@@ -1857,6 +1857,11 @@ def _check_tls() -> DoctorCheck:
         source = tls.trust_source()
     except OSError as exc:  # SSL_CERT_FILE / SSL_CERT_DIR named something unloadable
         return _fail("tls", f"the CA bundle could not be loaded: {exc}", tls.CERT_FIX)
+    proxy = tls.https_proxy(_TLS_PROBE_HOST)
+    via = ""
+    if proxy:  # host:port only: a proxy URL may carry credentials, which no row prints
+        where = urlsplit(proxy if "://" in proxy else f"http://{proxy}")
+        via = f" through the proxy {where.hostname}:{where.port or 80}"
     try:
         tls.handshake(_TLS_PROBE_HOST)
     except OSError as exc:
@@ -1868,10 +1873,10 @@ def _check_tls() -> DoctorCheck:
             )
         return _warn(
             "tls",
-            f"could not reach {_TLS_PROBE_HOST} to check TLS ({type(exc).__name__}: {exc})",
+            f"could not reach {_TLS_PROBE_HOST}{via} to check TLS ({type(exc).__name__}: {exc})",
             "check the network or proxy; usage reads need https://api.anthropic.com",
         )
-    return _ok("tls", f"{_TLS_PROBE_HOST} verified against {source}")
+    return _ok("tls", f"{_TLS_PROBE_HOST}{via} verified against {source}")
 
 
 def _claude_account_headroom_check() -> DoctorCheck | None:

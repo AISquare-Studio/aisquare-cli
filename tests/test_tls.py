@@ -12,6 +12,7 @@ that CA as its bundle, must pass it. Nothing here leaves the machine.
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import ssl
 import sys
@@ -294,49 +295,91 @@ def test_only_a_certificate_failure_gets_the_tls_reason(
 # --------------------------------------------------------------------------- the guard
 
 
+#: Names that open a URL or build or weaken a TLS context. Matched as a NAME, however it
+#: was reached — ``urllib.request.urlopen``, ``ur.urlopen`` after ``import urllib.request
+#: as ur``, ``request.urlopen`` after ``from urllib import request``, or a bare
+#: ``urlopen`` imported under any alias — so an alias is no way around the guard
+#: (review of #403, M1). ``tls.urlopen`` is the one attribute spelling allowed.
+_OPENS = {"urlopen", "urlretrieve"}
+_BUILDS_CONTEXT = {"SSLContext", "create_default_context", "_create_unverified_context"}
+_UNVERIFIED = {"CERT_NONE"}
+#: Modules a forbidden name may not be imported from (``from aisquare.core.tls import
+#: urlopen`` is the shared one, and allowed).
+_STDLIB_TLS = {"urllib", "urllib.request", "ssl", "_ssl"}
+
+
+def _is_tls_call(node: ast.AST, attr: str) -> bool:
+    """``tls.<attr>(...)``."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == attr
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "tls"
+    )
+
+
 def _violations(path: Path) -> list[str]:
-    """Every way ``path`` could open HTTPS without :func:`aisquare.core.tls.ssl_context`."""
+    """Every way ``path`` could open HTTPS without :func:`aisquare.core.tls.ssl_context`,
+    or turn verification off."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     found: list[str] = []
 
     def through_tls(node: ast.Call) -> bool:
-        for keyword in node.keywords:
-            value = keyword.value
-            if (
-                keyword.arg == "context"
-                and isinstance(value, ast.Call)
-                and isinstance(value.func, ast.Attribute)
-                and value.func.attr == "ssl_context"
-                and isinstance(value.func.value, ast.Name)
-                and value.func.value.id == "tls"
-            ):
-                return True
-        return False
+        return any(
+            keyword.arg == "context" and _is_tls_call(keyword.value, "ssl_context")
+            for keyword in node.keywords
+        )
+
+    def false_hostname_check(target: ast.AST, value: ast.AST) -> bool:
+        return (
+            isinstance(target, ast.Attribute)
+            and target.attr == "check_hostname"
+            and isinstance(value, ast.Constant)
+            and value.value is False
+        )
 
     for node in ast.walk(tree):
         where = f"{path.name}:{getattr(node, 'lineno', '?')}"
-        if isinstance(node, ast.ImportFrom) and node.module == "urllib.request":
-            if any(alias.name == "urlopen" for alias in node.names):
-                found.append(f"{where} imports urllib.request.urlopen")
-        elif isinstance(node, ast.Attribute) and node.attr == "urlopen":
-            if isinstance(node.value, ast.Attribute) and node.value.attr == "request":
-                found.append(f"{where} calls urllib.request.urlopen")
-        elif isinstance(node, ast.Attribute) and node.attr in {
-            "create_default_context",
-            "_create_unverified_context",
-        }:
+        if isinstance(node, ast.ImportFrom) and node.module in _STDLIB_TLS:
+            for alias in node.names:
+                if alias.name == "*" or alias.name in _OPENS | _BUILDS_CONTEXT | _UNVERIFIED:
+                    found.append(f"{where} imports {node.module}.{alias.name}")
+        elif isinstance(node, ast.Attribute) and node.attr in _OPENS:
+            if not (isinstance(node.value, ast.Name) and node.value.id == "tls"):
+                found.append(f"{where} opens a URL with {node.attr}, not tls.urlopen")
+        elif isinstance(node, ast.Attribute) and node.attr in _BUILDS_CONTEXT:
             found.append(f"{where} builds its own SSL context ({node.attr})")
+        elif isinstance(node, (ast.Attribute, ast.Name)) and (
+            getattr(node, "attr", None) in _UNVERIFIED or getattr(node, "id", None) in _UNVERIFIED
+        ):
+            found.append(f"{where} turns certificate verification off (CERT_NONE)")
+        elif isinstance(node, ast.Assign) and any(
+            false_hostname_check(target, node.value) for target in node.targets
+        ):
+            found.append(f"{where} turns hostname checking off (check_hostname = False)")
         elif isinstance(node, ast.Call):
             name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if any(
+                keyword.arg == "check_hostname"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value is False
+                for keyword in node.keywords
+            ):
+                found.append(f"{where} turns hostname checking off (check_hostname=False)")
             if name in {"HTTPSConnection", "HTTPSHandler"} and not through_tls(node):
                 found.append(f"{where} {name} without context=tls.ssl_context()")
             if name == "build_opener" and not any(
-                isinstance(arg, ast.Call)
-                and (getattr(arg.func, "id", None) or getattr(arg.func, "attr", None))
-                == "HTTPSHandler"
+                _is_tls_call(arg, "https_handler")
+                or (
+                    isinstance(arg, ast.Call)
+                    and (getattr(arg.func, "attr", None) or getattr(arg.func, "id", None))
+                    == "HTTPSHandler"
+                    and through_tls(arg)
+                )
                 for arg in node.args
             ):
-                found.append(f"{where} build_opener without an HTTPSHandler")
+                found.append(f"{where} build_opener without tls.https_handler()")
     return found
 
 
@@ -346,26 +389,51 @@ def test_no_module_opens_https_without_the_shared_context() -> None:
     assert found == [], "\n".join(found)
 
 
-def test_the_guard_catches_each_way_around_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("from urllib.request import urlopen\n", "imports urllib.request.urlopen"),
+        ("from urllib.request import urlopen as fetch\n", "imports urllib.request.urlopen"),
+        ("from urllib.request import *\n", "imports urllib.request.*"),
+        ("import urllib.request\nurllib.request.urlopen('https://x')\n", "not tls.urlopen"),
+        ("import urllib.request as ur\nur.urlopen('https://x')\n", "not tls.urlopen"),
+        ("from urllib import request\nrequest.urlopen('https://x')\n", "not tls.urlopen"),
+        ("import urllib.request\nurllib.request.urlretrieve('https://x')\n", "urlretrieve"),
+        ("from urllib.request import urlretrieve\n", "imports urllib.request.urlretrieve"),
+        ("import ssl\nssl.create_default_context()\n", "builds its own SSL context"),
+        ("import ssl\nssl._create_unverified_context()\n", "builds its own SSL context"),
+        ("import ssl\nssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)\n", "builds its own SSL context"),
+        ("from ssl import SSLContext as S\n", "imports ssl.SSLContext"),
+        ("import ssl as s\nx = s.CERT_NONE\n", "CERT_NONE"),
+        ("from ssl import CERT_NONE\n", "imports ssl.CERT_NONE"),
+        ("context = make()\ncontext.check_hostname = False\n", "check_hostname = False"),
+        ("handler(check_hostname=False)\n", "check_hostname=False"),
+        ("import http.client\nhttp.client.HTTPSConnection('x')\n", "HTTPSConnection without"),
+        ("from urllib.request import build_opener\nbuild_opener()\n", "build_opener without"),
+    ],
+)
+def test_the_guard_catches_each_way_around_it(tmp_path: Path, source: str, expected: str) -> None:
     """The negative beside the positive: a guard that finds nothing must be able to."""
     bad = tmp_path / "probe.py"
-    sources = {
-        "from urllib.request import urlopen\n": "imports urllib.request.urlopen",
-        "import urllib.request\nurllib.request.urlopen('https://x')\n": "calls urllib",
-        "import ssl\nssl.create_default_context()\n": "builds its own SSL context",
-        "import http.client\nhttp.client.HTTPSConnection('x')\n": "HTTPSConnection without",
-        "from urllib.request import build_opener\nbuild_opener()\n": "build_opener without",
-    }
-    for source, expected in sources.items():
-        bad.write_text(source, encoding="utf-8")
-        [violation] = _violations(bad)
-        assert expected in violation, (source, violation)
-    bad.write_text(
-        "from aisquare.core import tls\nimport http.client\n"
-        "http.client.HTTPSConnection('x', context=tls.ssl_context())\n",
+    bad.write_text(source, encoding="utf-8")
+    [violation] = _violations(bad)
+    assert expected in violation, (source, violation)
+
+
+def test_the_guard_passes_the_shared_spellings(tmp_path: Path) -> None:
+    good = tmp_path / "probe.py"
+    good.write_text(
+        "import http.client\n"
+        "from urllib.request import Request, build_opener\n"
+        "from aisquare.core import tls\n"
+        "from aisquare.core.tls import urlopen\n"
+        "http.client.HTTPSConnection('x', context=tls.ssl_context())\n"
+        "build_opener(tls.https_handler())\n"
+        "tls.urlopen(Request('https://x'), timeout=1)\n"
+        "urlopen('https://x', timeout=1)\n",
         encoding="utf-8",
     )
-    assert _violations(bad) == []
+    assert _violations(good) == []
 
 
 # --------------------------------------------------------------------------- doctor --live
@@ -416,3 +484,171 @@ def test_doctors_tls_row_is_live_only() -> None:
 
     source = Path(diagnostics.__file__).read_text(encoding="utf-8")
     assert "*_live_only(live, _check_tls)," in source
+
+
+# --------------------------------------------------------------------------- http stays http
+
+
+class _Health(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        body = json.dumps({"status": "ok"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args: Any) -> None:
+        pass
+
+
+@pytest.fixture
+def http_server() -> Iterator[str]:
+    """A plain ``http://`` server on loopback, as the explainability proxy is."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Health)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_bundle_that_will_not_load_fails_https_and_leaves_plain_http_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, http_server: str, https_server: _Server
+) -> None:
+    """Review of #403, M2: the context went to every call, so an ``SSL_CERT_FILE`` that will
+    not load failed a ``http://`` call that never speaks TLS — the explainability proxy's
+    ``/health`` said "[Errno 2] No such file" where main reached it."""
+    from aisquare.services import ci_client, explainability
+
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing.pem"))
+
+    with tls.urlopen(f"{http_server}/health", timeout=5) as response:
+        assert response.status == 200
+    exchanged = ci_client.exchange(f"{http_server}/health", method="GET", deadline_ms=5000)
+    assert exchanged.status == 200 and exchanged.reason is None
+    probe = explainability.probe_proxy(http_server)
+    assert "No such file" not in probe.reason  # it reached the server and read its answer
+    # The control: https is still refused, and says why, in each spelling.
+    with pytest.raises(OSError):
+        tls.urlopen(https_server.url, timeout=5)
+    refused = ci_client.exchange(https_server.url, method="GET", deadline_ms=5000)
+    assert refused.status is None and refused.reason is not None
+
+
+# --------------------------------------------------------------------------- elapsed_ms
+
+
+@pytest.mark.parametrize("scheme", ["https", "http"])
+def test_the_ci_exchange_builds_the_context_before_its_clock_and_only_for_https(
+    monkeypatch: pytest.MonkeyPatch, scheme: str
+) -> None:
+    """Review of #403: the trust store's first build (~15 ms against the stdlib's ~3 ms)
+    landed inside the exchange's ``elapsed_ms``, the latency the CI experiment measures."""
+    from aisquare.services import ci_client
+
+    events: list[tuple[str, float]] = []
+    monkeypatch.setattr(tls, "ssl_context", lambda: events.append(("context", 0.0)))
+
+    def exchange(url: str, *, started: float, **_: Any) -> Any:
+        events.append(("started", started))
+        return ci_client.Exchange(status=200, body="", elapsed_ms=0, reason=None, detail="")
+
+    monkeypatch.setattr(ci_client, "_blocking_exchange", exchange)
+    ci_client.exchange(f"{scheme}://ci.example/run", method="GET", deadline_ms=5000)
+
+    assert [name for name, _ in events] == (
+        ["context", "started"] if scheme == "https" else ["started"]
+    )
+
+
+# --------------------------------------------------------------------------- HTTPS_PROXY
+
+
+@pytest.fixture
+def connect_proxy() -> Iterator[tuple[str, list[str]]]:
+    """A one-purpose ``CONNECT`` proxy: tunnels each request, records each request line."""
+    import socket
+    import socketserver
+
+    seen: list[str] = []
+
+    class Tunnel(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = self.request.recv(4096)
+                if not chunk:
+                    return
+                head += chunk
+            line = head.split(b"\r\n", 1)[0].decode()
+            seen.append(line)
+            host, port = line.split()[1].rsplit(":", 1)
+            upstream = socket.create_connection((host, int(port)), timeout=5)
+            self.request.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+
+            def pump(src: socket.socket, dst: socket.socket) -> None:
+                try:
+                    while data := src.recv(65536):
+                        dst.sendall(data)
+                except OSError:
+                    pass
+                finally:
+                    for end in (src, dst):
+                        with contextlib.suppress(OSError):
+                            end.shutdown(socket.SHUT_RDWR)
+
+            back = threading.Thread(target=pump, args=(upstream, self.request), daemon=True)
+            back.start()
+            pump(self.request, upstream)
+            back.join(5)
+            upstream.close()
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Tunnel)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", seen
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_handshake_goes_through_https_proxy_as_requests_do(
+    monkeypatch: pytest.MonkeyPatch,
+    https_server: _Server,
+    connect_proxy: tuple[str, list[str]],
+) -> None:
+    """Review of #403: doctor's handshake went direct, so a machine that may only leave
+    through its proxy failed the row while its usage reads worked."""
+    proxy, seen = connect_proxy
+    _certifi_only(monkeypatch, https_server.ca_file)
+    port = int(https_server.url.split(":")[2].split("/")[0])
+    for name in ("HTTPS_PROXY", "https_proxy"):
+        monkeypatch.setenv(name, proxy)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert tls.https_proxy("127.0.0.1") == proxy
+    tls.handshake("127.0.0.1", port=port, timeout=5)
+    assert seen == [f"CONNECT 127.0.0.1:{port} HTTP/1.1"]
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")  # the control: bypassed, it goes direct
+    assert tls.https_proxy("127.0.0.1") is None
+    tls.handshake("127.0.0.1", port=port, timeout=5)
+    assert len(seen) == 1
+
+
+def test_doctors_tls_row_names_the_proxy_without_its_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aisquare.services import diagnostics
+
+    monkeypatch.setattr(tls, "https_proxy", lambda host: "http://me:hunter2@proxy.corp:3128")
+    monkeypatch.setattr(tls, "handshake", lambda host: None)
+    row = diagnostics._check_tls()
+    assert row.status.value == "ok" and "through the proxy proxy.corp:3128" in row.detail
+    assert "hunter2" not in row.detail and "me:" not in row.detail

@@ -41,6 +41,7 @@ the base install must stay unchanged and this path has to work without the
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
@@ -49,7 +50,7 @@ import urllib.error
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
-from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from aisquare.core import tls
 from aisquare.core.config import ExperimentSettings, load_config
@@ -253,6 +254,13 @@ def exchange(
     hook has already waited too long, and counting it would hide exactly the
     latency being measured.
     """
+    if tls.is_https(url):
+        # The context is built once per process (the OS trust store: ~15 ms against the
+        # stdlib's ~3 ms), before the clock: elapsed_ms measures the exchange, not this
+        # process's first TLS setup (review of #403). A bundle that will not load raises
+        # again inside the exchange, which maps it to a reason.
+        with contextlib.suppress(OSError):
+            tls.ssl_context()
     started = time.monotonic()
     deadline_s = max(deadline_ms, 1) / 1000.0
     box: list[Exchange] = []
@@ -322,8 +330,8 @@ class _NoRedirect(HTTPRedirectHandler):
 
 @lru_cache(maxsize=1)
 def _opener() -> Any:
-    """Built on first use, so importing this module builds no TLS context."""
-    return build_opener(_NoRedirect, HTTPSHandler(context=tls.ssl_context()))
+    """Built on first use; its handler builds the TLS context at the first https request."""
+    return build_opener(_NoRedirect, tls.https_handler())
 
 
 def urlopen(request: Request, timeout: float) -> Any:

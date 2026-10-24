@@ -294,9 +294,11 @@ def status(*, now: datetime | None = None) -> dict[str, object]:
     }
 
 
-_CODE = re.compile(r"(?<![\d-])\d(?:[\s-]?\d){5}(?![\d-])")
+_CODE = re.compile(r"(?<!\d)(?<!\d-)\d(?:[\s-]?\d){5}(?!\d)(?!-\d)")
 """Six digits on their own, run together, spaced or dashed as a code is said or typed
-("123456", "123 456", "1 2 3 4 5 6"). Not part of a longer number or a date."""
+("123456", "123 456", "1 2 3 4 5 6"), joined to a word or trailed by a dash too
+("code-123456", "123456-"). Not part of a longer number, a date or a dashed phone
+number: a digit, or a dash with a digit beyond it, on either side keeps it."""
 
 
 def redact(text: str) -> str:

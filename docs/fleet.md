@@ -2083,6 +2083,55 @@ older build opens a v34 store as it is, without migrating it down, and never rea
 three columns. It ignores the new config keys and types first messages as it always
 did.
 
+### To the release with the token diet (store schema 35, config version 3)
+
+**The store migrates itself on first open, from v34 to v35, in one step.** v35 adds two
+nullable columns, `team_event.actor` (who caused an event: a session, `user`,
+`usage-limit`, `auto-stop`) and `team_event.meta` (its details as JSON; an `agent_exited`
+carries its status, `--force`, the claims it released and why). They are checked for by
+presence and added only where absent. An event written before the step reads as no actor
+and no details; an old `agent_exited` is read from its text, so an upgrade wakes no
+manager for exits it had already seen.
+
+**The config file moves to version 3, once.** A reviewer whose `extra_args` are exactly
+0.8.2's default (`--disallowedTools=Edit Write NotebookEdit`) loses them, because that
+deny is the role's own now and every launch of a reviewer has it. Every other value you
+set stays as it was. New keys follow their defaults until you set them:
+
+| Key | Default | What it changes |
+| --- | --- | --- |
+| `[fleet] deny_tools` | the eight tools in [Tools and skills per role](#tools-and-skills-per-role) | Every role launches without them. `[]` gives them back. |
+| `[fleet.roles.<role>] skill_listing` | `full` for the manager, `names` for the others | How much of Claude Code's skill listing a role carries. |
+| `[fleet.roles.<role>] deny_tools` / `allow_tools` | `[]` | Tools one role also denies, or gets back. |
+| `[fleet.roles.<role>] board_context` | `none` for the reviewer, `all` for the others | What of the board an agent reads. |
+| `[fleet] quiet_compact_at` | `0` (off) | A manager's context size at which it is compacted at a quiet point. |
+| `[fleet] quiet_compact_delay` / `_cooldown` / `_state_max_age` / `_resume` | `45` s / `30` min / `20` min / `false` | The quiet compaction's timing. |
+| `[team] brief_blocks` / `brief_strict` | `["objective", "acceptance", "boundaries"]` / `false` | The blocks `task add` checks a contract for, and whether a missing one refuses the add. |
+
+**What you will notice.**
+
+- An agent restarted after the upgrade launches with the merged deny token, and its first
+  request is uncached once: the tool list is part of the cached prefix.
+- A manager wakes for decisions, not news: a clean exit, a switch or its own `fleet stop`
+  waits for its next wake. Updates arrive one line each; `aisquare team show <seq>` prints
+  one in full.
+- A reviewer reads no board by default. Set `fleet.roles.reviewer.board_context` to `all`
+  to give it the board back.
+- A manager starts from its start pack, not the board. Its cycle asks it to keep
+  `~/.aisquare/projects/<id>/manager/state.md`.
+- `task add` warns on stderr when a contract lacks `objective:`, `acceptance:` or
+  `boundaries:`.
+- `fleet spawn` passes the role's model ladder (`--model`, `--effort`), and a tester
+  spawned for a task verifies that one task and stops.
+
+**Moving back** with `aisquare upgrade --version <v>` is safe for the store: an older build
+opens a v35 store as it is, without migrating it down, and never reads the two columns.
+For the config, `upgrade --version` to 0.8.2 or earlier names each role that release would
+launch with tools this one denies, with the `config set` that keeps them denied there.
+0.8.1 and 0.8.2 read a version-3 file over their own defaults. An install that shares
+`~/.aisquare` without going through `aisquare upgrade` (a second tool install, a synced
+home) is not warned.
+
 ## Troubleshooting
 
 **An agent reads `attention`: "first prompt not taken".** Its first message

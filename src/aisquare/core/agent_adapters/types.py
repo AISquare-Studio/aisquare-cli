@@ -277,6 +277,11 @@ class AgentCapabilities:
     positional_prompt: bool = False
     """The first prompt is a positional argument (Codex); otherwise the fleet types it."""
     first_context_file_only: bool = False
+    approves_for_me: bool = False
+    """The agent has a reviewer of its own that decides what it may do without asking
+    (Claude Code's ``auto`` mode, Codex's ``--approve-for-me``), which ``auto`` approvals
+    map to; without one, :meth:`AgentAdapter.permission_args` runs ``auto`` as ``ask`` and
+    says so (:func:`stepped_down`)."""
     sandbox_permissions: bool = False
     """``fleet.roles.<role>.sandbox``/``approval_policy``/``approve_for_me`` apply."""
     launch_inputs: tuple[str, ...] = ()
@@ -525,7 +530,8 @@ class PermissionIntent:
     @classmethod
     def for_role(cls, role: str) -> PermissionIntent:
         """The built-in intent: a reviewer's seats are read-only, every role else
-        ``workspace:auto`` (the fleet's ``auto`` mode and Codex's ``--approve-for-me``)."""
+        ``workspace:auto`` (the fleet's ``auto`` mode and Codex's ``--approve-for-me``), which
+        an agent with no reviewer of its own runs as ``workspace:ask`` (:func:`stepped_down`)."""
         if harness.base_role(role) == "reviewer":
             return cls("read_only", "auto")
         return cls()
@@ -550,6 +556,30 @@ class PermissionIntent:
 
     def __str__(self) -> str:
         return f"{self.write}:{self.approvals}"
+
+
+@dataclass(frozen=True)
+class PermissionArgs:
+    """What :meth:`AgentAdapter.permission_args` answers for an intent: the native ``args``,
+    and ``notes`` a spawn's receipt says of how the intent was met (``auto`` run as ``ask``
+    by an agent with no reviewer of its own, :func:`stepped_down`)."""
+
+    args: tuple[str, ...]
+    notes: tuple[str, ...] = ()
+
+
+def stepped_down(
+    capabilities: AgentCapabilities, label: str, intent: PermissionIntent
+) -> tuple[PermissionIntent, tuple[str, ...]]:
+    """``intent`` as an agent without a reviewer of its own (``capabilities.approves_for_me``)
+    can run it: ``auto`` approvals become ``ask``, the human deciding what the reviewer would
+    have, with the note that says so; every other intent as it is. The built-in intent is
+    ``workspace:auto`` for every role but the reviewer's (:meth:`PermissionIntent.for_role`),
+    so such an agent is not refused for every role."""
+    if intent.approvals != "auto" or capabilities.approves_for_me:
+        return intent, ()
+    asked = PermissionIntent(intent.write, "ask")
+    return asked, (f"{label} has no reviewer of its own: {intent} runs as {asked}",)
 
 
 @dataclass(frozen=True)
@@ -969,10 +999,12 @@ class AgentAdapter(Protocol):
 
     def permission_args(
         self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
-    ) -> list[str]:
+    ) -> PermissionArgs:
         """The native flags for ``intent``, less what the ``native`` arguments the launch
         already carries settle (they win, as an explicit native flag always does), with
-        :meth:`store_access` for its write scope wherever its flags choose the sandbox.
+        :meth:`store_access` for its write scope wherever its flags choose the sandbox, and
+        the notes a receipt says of them (:class:`PermissionArgs`): an agent without
+        ``capabilities.approves_for_me`` runs ``auto`` as ``ask`` (:func:`stepped_down`).
         Raises ``ValueError`` for an intent the agent cannot express."""
         ...
 

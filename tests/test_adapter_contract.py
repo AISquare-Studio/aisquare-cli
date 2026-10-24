@@ -107,8 +107,8 @@ EXPECTED_PERMISSIONS: dict[str, dict[str, list[str]]] = {
         "coder": ["--write", "workspace", "--approvals", "auto", STORE],
         "reviewer": ["--write", "read_only", "--approvals", "auto", STORE],
     },
-    "gemini-shaped": {
-        "coder": ["--approval-mode", "auto_edit"],
+    "gemini-shaped": {  # no reviewer of its own: workspace:auto runs as workspace:ask
+        "coder": ["--approval-mode", "default"],
         "reviewer": ["--approval-mode", "plan"],
     },
 }
@@ -489,7 +489,7 @@ def test_launch_args_for_each_role(adapter: AgentAdapter, role: str) -> None:
     assert not labelled or args[-len(labelled) :] == labelled
     assert all(
         isinstance(arg, str)
-        for arg in adapter.permission_args(PermissionIntent.for_role(role), role)
+        for arg in adapter.permission_args(PermissionIntent.for_role(role), role).args
     )
     assert adapter.model_args(None, None) == []
     assert "chosen-model" in adapter.model_args("chosen-model", None)
@@ -501,7 +501,7 @@ def test_permission_intent_maps_every_combination(adapter: AgentAdapter) -> None
             intent = PermissionIntent(write, approvals)
             assert PermissionIntent.parse(str(intent)) == intent
             try:
-                args = adapter.permission_args(intent, "coder")
+                args = list(adapter.permission_args(intent, "coder").args)
             except ValueError as exc:
                 assert str(exc), "a refused intent says why"
                 continue
@@ -509,7 +509,7 @@ def test_permission_intent_maps_every_combination(adapter: AgentAdapter) -> None
     expected = EXPECTED_PERMISSIONS[adapter.id]
     for role, flags in expected.items():
         intent = PermissionIntent.for_role(role)
-        assert adapter.permission_args(intent, role) == _expected(adapter, intent, flags)
+        assert list(adapter.permission_args(intent, role).args) == _expected(adapter, intent, flags)
     assert expected["reviewer"] != expected["coder"], "the reviewer's seats are read-only"
     with pytest.raises(ValueError):
         PermissionIntent.parse("everything:yes")
@@ -572,7 +572,7 @@ def test_a_sandboxed_agent_has_the_store_read_only(adapter: AgentAdapter, tmp_pa
         for approvals in get_args(Approvals):
             intent = PermissionIntent(write, approvals)
             try:
-                args = adapter.permission_args(intent, "coder")
+                args = list(adapter.permission_args(intent, "coder").args)
             except ValueError:
                 continue
             assert _runs_within(adapter.store_access(write, store_dir()), args), intent
@@ -594,7 +594,9 @@ def test_an_agent_that_sandboxes_its_tools_declares_its_broker(
     for write in get_args(WriteScope):
         for approvals in get_args(Approvals):
             try:
-                args = adapter.permission_args(PermissionIntent(write, approvals), "coder")
+                args = list(
+                    adapter.permission_args(PermissionIntent(write, approvals), "coder").args
+                )
             except ValueError:
                 continue
             args = [*args, *adapter.store_access(write, store)]
@@ -624,7 +626,7 @@ def test_an_agent_that_sandboxes_its_tools_says_what_its_sandbox_may_write(
     workspace.mkdir()
     for write in get_args(WriteScope):
         try:
-            args = adapter.permission_args(PermissionIntent(write, "never"), "coder")
+            args = list(adapter.permission_args(PermissionIntent(write, "never"), "coder").args)
         except ValueError:
             continue
         args = [*args, *adapter.store_access(write, store)]
@@ -1764,3 +1766,29 @@ def test_a_reading_is_its_windows_and_the_one_that_limits_ranks_it() -> None:
     assert summary.limit_by_slot == {5: 70.0} and summary.left_by_slot == {5: 30.0}
     dumped = ClaudeUsage.model_validate(claude.model_dump(mode="json"))
     assert dumped == claude and claude.model_dump()["session_used_percent"] == 12.0
+
+
+def test_an_agent_without_a_reviewer_runs_auto_as_ask_and_the_receipt_says_so(
+    adapter: AgentAdapter,
+) -> None:
+    """S4: ``permission_args`` answers ``PermissionArgs(args, notes)``. An agent with no
+    reviewer of its own (``capabilities.approves_for_me`` False: the Gemini-shaped one, whose
+    ``auto_edit`` approves edits unreviewed) runs the built-in ``workspace:auto`` as
+    ``workspace:ask`` and its spawn's receipt says so, where it was refused for every role;
+    one with a reviewer maps ``auto`` to it and says nothing."""
+    for write in get_args(WriteScope):
+        auto, ask = PermissionIntent(write, "auto"), PermissionIntent(write, "ask")
+        try:
+            granted = adapter.permission_args(auto, "coder")
+        except ValueError:
+            continue
+        if adapter.capabilities.approves_for_me:
+            assert granted.notes == (), (adapter.id, write)
+        else:
+            assert granted.args == adapter.permission_args(ask, "coder").args, write
+            assert granted.notes == (
+                f"{adapter.label} has no reviewer of its own: {auto} runs as {ask}",
+            )
+    receipt: list[str] = []
+    fleet_service.permission_flags(adapter, "coder", "coder-1", FleetRoleSettings(), notes=receipt)
+    assert bool(receipt) is not adapter.capabilities.approves_for_me, receipt

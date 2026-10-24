@@ -55,6 +55,7 @@ from aisquare.core.agent_adapters.types import (
     InstallRoute,
     LastingInstall,
     NativeChoice,
+    PermissionArgs,
     PermissionIntent,
     SandboxWrites,
     SkillDirs,
@@ -64,6 +65,7 @@ from aisquare.core.agent_adapters.types import (
     package_version,
     payload_cwd,
     payload_text,
+    stepped_down,
 )
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
@@ -574,15 +576,24 @@ class GeminiShapedAdapter:
 
     def permission_args(
         self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
+    ) -> PermissionArgs:
+        """Its approval mode for the intent stepped down where it has no reviewer
+        (:func:`stepped_down`), with the note that says so."""
+        asked, notes = stepped_down(self.capabilities, self.label, intent)
+        return PermissionArgs(tuple(self._permission_flags(asked, role, native)), notes)
+
+    def _permission_flags(
+        self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
     ) -> list[str]:
-        """``--approval-mode``: ``plan`` read-only, ``yolo`` never asking, ``default`` asking,
-        and ``auto_edit`` for its own reviewer, which approves edits alone."""
+        """``--approval-mode``: ``plan`` read-only, ``yolo`` never asking, ``default`` asking.
+        It has no reviewer of its own (``auto_edit`` approves every edit, unreviewed), so
+        ``auto`` never reaches here: :meth:`permission_args` runs it as ``ask``."""
         if option_values(native, "--approval-mode") or "--yolo" in native or "-y" in native:
             return []
         if intent.write == "read_only":
             mode = "plan"
         else:
-            mode = {"ask": "default", "auto": "auto_edit", "never": "yolo"}[intent.approvals]
+            mode = {"ask": "default", "auto": "default", "never": "yolo"}[intent.approvals]
         return ["--approval-mode", mode]
 
     def store_access(self, write: WriteScope, store: Path) -> list[str]:
@@ -622,7 +633,7 @@ class GeminiShapedAdapter:
             if permission_mode
             else PermissionIntent.for_role(role)
         )
-        return self.permission_args(intent, role, native)
+        return list(self.permission_args(intent, role, native).args)
 
     def label_args(self, label: str) -> list[str]:
         return []  # its title is the CLI_TITLE variable, not a flag

@@ -151,8 +151,8 @@ def test_a_reviewer_stays_read_only_with_codexs_own_reviewer(role: str) -> None:
         *REVIEWED,
         *_store("read_only"),
     ]
-    assert codex.fleet_args(role, role, None) == codex.permission_args(
-        PermissionIntent.for_role(role), role
+    assert codex.fleet_args(role, role, None) == list(
+        codex.permission_args(PermissionIntent.for_role(role), role).args
     )
 
 
@@ -229,15 +229,15 @@ def test_the_launch_arguments_own_choices_are_not_given_twice(
 def test_ask_and_auto_pin_who_answers_unless_the_launch_says() -> None:
     """``ask`` is the human, ``auto`` Codex's reviewer, on a spawn, a restart and a resume
     alike (a resumed thread keeps its reviewer unless told: t8 smoke on 0.162.1)."""
-    ask = codex.permission_args(PermissionIntent("workspace", "ask"), "coder")
+    ask = list(codex.permission_args(PermissionIntent("workspace", "ask"), "coder").args)
     assert ask[:4] == ["--ask-for-approval", "on-request", *HUMAN]
-    auto = codex.permission_args(PermissionIntent("read_only", "auto"), "reviewer")
+    auto = list(codex.permission_args(PermissionIntent("read_only", "auto"), "reviewer").args)
     assert auto[:4] == ["--ask-for-approval", "on-request", *REVIEWED]
-    never = codex.permission_args(PermissionIntent("workspace", "never"), "coder")
+    never = codex.permission_args(PermissionIntent("workspace", "never"), "coder").args
     assert "approvals_reviewer" not in " ".join(never)
     mine = ["-c", 'approvals_reviewer="auto_review"']
     assert "user" not in " ".join(
-        codex.permission_args(PermissionIntent("workspace", "ask"), "coder", mine)
+        codex.permission_args(PermissionIntent("workspace", "ask"), "coder", mine).args
     )
 
 

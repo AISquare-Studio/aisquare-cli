@@ -49,6 +49,7 @@ from aisquare.core.agent_adapters.types import (
     InstallRoute,
     LastingInstall,
     NativeChoice,
+    PermissionArgs,
     PermissionIntent,
     SandboxWrites,
     ScreenPrompt,
@@ -356,6 +357,7 @@ class FakeAgentAdapter:
     plugin = None
     transcript_reader: AgentTranscript | None = FakeTranscript()
     capabilities = AgentCapabilities(
+        approves_for_me=True,
         launch_inputs=(".fakeagent",),
         hooks=tuple(
             HookSpec(event, GENERIC_HOOK, 30 if kind in {"session_start", "prompt"} else None)
@@ -528,6 +530,12 @@ class FakeAgentAdapter:
 
     def permission_args(
         self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
+    ) -> PermissionArgs:
+        """:meth:`_permission_flags`: it reviews ``auto`` itself (``approves_for_me``)."""
+        return PermissionArgs(tuple(self._permission_flags(intent, role, native)))
+
+    def _permission_flags(
+        self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
     ) -> list[str]:
         if "--write" in native or "--approvals" in native:
             return []
@@ -605,7 +613,7 @@ class FakeAgentAdapter:
             if permission_mode
             else PermissionIntent.for_role(role)
         )
-        return [*self.permission_args(intent, role), *self.label_args(label)]
+        return [*self.permission_args(intent, role).args, *self.label_args(label)]
 
     def label_args(self, label: str) -> list[str]:
         return ["--title", label]

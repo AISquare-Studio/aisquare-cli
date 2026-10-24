@@ -25,6 +25,7 @@ from aisquare.core.agent_adapters.types import (
     InstallRoute,
     LastingInstall,
     NativeChoice,
+    PermissionArgs,
     PermissionIntent,
     PluginInstall,
     SandboxWrites,
@@ -141,6 +142,7 @@ class ClaudeCodeAdapter:
             HookSpec("StopFailure", "stop-failure"),
         ),
         assigns_session_id=True,
+        approves_for_me=True,
         ambient_first_run=True,
         reads_pane_readiness=True,
         starts_at_its_prompt=True,
@@ -435,6 +437,12 @@ class ClaudeCodeAdapter:
         return (["--model", model] if model else []) + (["--effort", effort] if effort else [])
 
     def permission_args(
+        self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
+    ) -> PermissionArgs:
+        """:meth:`_permission_flags`: it reviews ``auto`` itself (``approves_for_me``)."""
+        return PermissionArgs(tuple(self._permission_flags(intent, role, native)))
+
+    def _permission_flags(
         self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
     ) -> list[str]:
         """``--permission-mode`` (``ask`` ``manual``, ``auto`` ``auto``, ``never``

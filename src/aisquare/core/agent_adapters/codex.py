@@ -24,6 +24,7 @@ from aisquare.core.agent_adapters.types import (
     InstallRoute,
     LastingInstall,
     NativeChoice,
+    PermissionArgs,
     PermissionIntent,
     PluginInstall,
     SandboxWrites,
@@ -492,6 +493,7 @@ class CodexAdapter:
     accounts = CodexAccounts()
     plugin = CodexPlugin()
     capabilities = AgentCapabilities(
+        approves_for_me=True,
         launch_inputs=(".codex", ".agents"),
         hooks=(
             HookSpec("SessionStart", "codex", 120),
@@ -998,7 +1000,7 @@ class CodexAdapter:
                 f"Codex approval policy must be {' or '.join(APPROVAL_POLICIES)}, not {approval!r}"
             )
         if approve_for_me is None and sandbox is None and approval is None:
-            return self.permission_args(PermissionIntent.for_role(role), role, native)
+            return list(self.permission_args(PermissionIntent.for_role(role), role, native).args)
         reviewer = harness.base_role(role) == "reviewer"
         native_sandbox, native_approval = _native_approvals(native)
         if approve_for_me:
@@ -1027,6 +1029,12 @@ class CodexAdapter:
         ]
 
     def permission_args(
+        self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
+    ) -> PermissionArgs:
+        """:meth:`_permission_flags`: it reviews ``auto`` itself (``approves_for_me``)."""
+        return PermissionArgs(tuple(self._permission_flags(intent, role, native)))
+
+    def _permission_flags(
         self, intent: PermissionIntent, role: str, native: Sequence[str] = ()
     ) -> list[str]:
         """The write scope is the sandbox, the approvals who answers what it does not

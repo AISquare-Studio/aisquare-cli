@@ -70,6 +70,7 @@ from aisquare.core.agent_adapters.types import (
     ForkArgs,
     PermissionIntent,
     option_values,
+    stepped_down,
 )
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
@@ -4371,6 +4372,7 @@ def spawn(
         sandbox=sandbox,
         approval_policy=approval_policy,
         native=arguments.argv,
+        notes=notes,
     )
     # WHICH ACCOUNT, decided here and carried into the window as an explicit
     # `--account <slot>` (#145). The one resolver `launch` itself uses — flag,
@@ -4939,9 +4941,12 @@ def permission_flags(
     sandbox: str | None = None,
     approval_policy: str | None = None,
     native: Sequence[str] = (),
+    notes: list[str] | None = None,
 ) -> tuple[list[str], str | None]:
     """The permission flags (and the label's) a spawn of ``role`` passes ``adapter``'s agent,
-    with the value its launch spec records (``LaunchSpec.permission_mode``).
+    with the value its launch spec records (``LaunchSpec.permission_mode``), and in ``notes``
+    what the receipt says of them (``PermissionArgs.notes``: an ``auto`` run as ``ask`` by
+    an agent with no reviewer of its own).
 
     One permission for every agent — the role's ``permission``, or ``WRITE:APPROVALS``
     as this spawn's (or a replayed) ``permission_mode`` — is the adapter's to map
@@ -4959,9 +4964,12 @@ def permission_flags(
     )
     if intent is not None:
         try:
-            flags = [*adapter.permission_args(intent, role, native), *adapter.label_args(label)]
+            granted = adapter.permission_args(intent, role, native)
         except ValueError as exc:
             raise FleetError(f"{adapter.label}: {exc}") from exc
+        flags = [*granted.args, *adapter.label_args(label)]
+        if notes is not None:
+            notes.extend(granted.notes)
         # Recorded as written, so a restart maps it again for whichever agent it starts.
         return flags, str(intent)
     mode = role_config.permission_mode if permission_mode is None else permission_mode
@@ -4969,29 +4977,38 @@ def permission_flags(
     # takes only an explicit one, in its own (a replay's "" is "none recorded": its default).
     native_mode = mode if adapter.capabilities.legacy_fleet_args else (permission_mode or None)
     sandboxed = adapter.capabilities.sandbox_permissions
+    chosen_sandbox = sandbox if sandbox is not None else role_config.sandbox if sandboxed else None
+    chosen_approval = (
+        approval_policy
+        if approval_policy is not None
+        else role_config.approval_policy
+        if sandboxed
+        else None
+    )
+    # A sandbox or a policy chosen for this spawn wins over the role's setting.
+    chosen_reviewer = (
+        role_config.approve_for_me
+        if sandboxed and sandbox is None and approval_policy is None and native_mode is None
+        else None
+    )
     try:
         flags = adapter.fleet_args(
             role,
             label,
             native_mode,
-            sandbox=sandbox if sandbox is not None else role_config.sandbox if sandboxed else None,
-            approval=(
-                approval_policy
-                if approval_policy is not None
-                else role_config.approval_policy
-                if sandboxed
-                else None
-            ),
-            # A sandbox or a policy chosen for this spawn wins over the role's setting.
-            approve_for_me=(
-                role_config.approve_for_me
-                if sandboxed and sandbox is None and approval_policy is None and native_mode is None
-                else None
-            ),
+            sandbox=chosen_sandbox,
+            approval=chosen_approval,
+            approve_for_me=chosen_reviewer,
             native=native,
         )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
+    chosen = (native_mode, chosen_sandbox, chosen_approval, chosen_reviewer)
+    if notes is not None and all(value is None for value in chosen):
+        # Nothing native chose: the agent ran the role's built-in intent, which a receipt
+        # names as it is run (``stepped_down``: ``auto`` as ``ask`` without a reviewer).
+        built_in = PermissionIntent.for_role(role)
+        notes.extend(stepped_down(adapter.capabilities, adapter.label, built_in)[1])
     return flags, native_mode
 
 

@@ -266,9 +266,10 @@ def _append_flags(
     text: Text, role: str, adapter: AgentAdapter, settings: FleetRoleSettings
 ) -> None:
     role_args = fleet_extra_args(adapter, settings.extra_args, settings.agent_args)
+    said: list[str] = []
     try:
         flags, _recorded = fleet_service.permission_flags(
-            adapter, role, role, settings, native=role_args
+            adapter, role, role, settings, native=role_args, notes=said
         )
     except fleet_service.FleetError as exc:
         text.append(f"{adapter.label}: refused at spawn — {exc}", style="red")
@@ -286,6 +287,8 @@ def _append_flags(
             "its broker)",
             style="dim",
         )
+    for note in said:  # what the spawn's receipt will say of them (an ``auto`` run as ``ask``)
+        text.append(f" · {note}", style="dim")
 
 
 def _without_store_access(adapter: AgentAdapter, flags: list[str]) -> tuple[list[str], str]:

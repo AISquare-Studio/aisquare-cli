@@ -47,7 +47,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from aisquare.core import paths
 from aisquare.core.config import (
@@ -56,6 +56,7 @@ from aisquare.core.config import (
     load_config,
     save_config,
 )
+from aisquare.core.tls import urlopen
 from aisquare.core.version import DISTRIBUTION
 from aisquare.models import (
     CheckStatus,

@@ -49,8 +49,9 @@ import urllib.error
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
+from aisquare.core import tls
 from aisquare.core.config import ExperimentSettings, load_config
 from aisquare.models import BriefingStatus, ClientReason, HookAction
 from aisquare.services.ci_contract import (
@@ -319,12 +320,15 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-_OPENER = build_opener(_NoRedirect)
+@lru_cache(maxsize=1)
+def _opener() -> Any:
+    """Built on first use, so importing this module builds no TLS context."""
+    return build_opener(_NoRedirect, HTTPSHandler(context=tls.ssl_context()))
 
 
 def urlopen(request: Request, timeout: float) -> Any:
-    """The one way this module opens a URL: the redirect-refusing opener."""
-    return _OPENER.open(request, timeout=timeout)
+    """The one way this module opens a URL: the redirect-refusing, verified opener."""
+    return _opener().open(request, timeout=timeout)
 
 
 def _blocking_exchange(

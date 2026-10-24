@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from aisquare.core import agents as agent_core
 from aisquare.core import brain as brain_core
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import experimental, harness, orchestrator, paths
+from aisquare.core import experimental, harness, orchestrator, paths, tls
 from aisquare.core import snapshot as snapshot_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import load_config
@@ -183,6 +183,9 @@ def doctor(
         # Only when a fleet role runs `auto` behind a configured proxy (#150);
         # offline — config, the store, the head of a few transcripts.
         *_optional(auto_mode.doctor_check()),
+        # One TLS handshake, nothing sent, so --live only. Before the headroom row,
+        # whose every reading fails the same way when this one does.
+        *_live_only(live, _check_tls),
         # Leaves the machine (one usage request per account), so --live only (#146).
         *_live_only(live, _claude_account_headroom_check),
         # One balance request per destination workspace (#143), so --live only.
@@ -1836,6 +1839,39 @@ def _claude_account_backoff_checks() -> list[DoctorCheck]:
             "usage less often (see docs/fleet.md)",
         )
     ]
+
+
+#: Where the usage reads (and the Claude Code they stand beside) go.
+_TLS_PROBE_HOST = "api.anthropic.com"
+
+
+def _check_tls() -> DoctorCheck:
+    """``--live`` only: a verified handshake to :data:`_TLS_PROBE_HOST` through ``core.tls``.
+
+    The row a python.org Python on macOS needed: there every usage read said
+    "could not reach the usage endpoint" while curl worked, because the
+    interpreter's own CA paths were empty. It names the trust source in use, so
+    a failure here says which store refused the certificate.
+    """
+    try:
+        source = tls.trust_source()
+    except OSError as exc:  # SSL_CERT_FILE / SSL_CERT_DIR named something unloadable
+        return _fail("tls", f"the CA bundle could not be loaded: {exc}", tls.CERT_FIX)
+    try:
+        tls.handshake(_TLS_PROBE_HOST)
+    except OSError as exc:
+        if tls.cert_failure(exc):
+            return _fail(
+                "tls",
+                f"{_TLS_PROBE_HOST}'s certificate did not verify against {source}: {exc}",
+                tls.CERT_FIX,
+            )
+        return _warn(
+            "tls",
+            f"could not reach {_TLS_PROBE_HOST} to check TLS ({type(exc).__name__}: {exc})",
+            "check the network or proxy; usage reads need https://api.anthropic.com",
+        )
+    return _ok("tls", f"{_TLS_PROBE_HOST} verified against {source}")
 
 
 def _claude_account_headroom_check() -> DoctorCheck | None:

@@ -2214,12 +2214,14 @@ def test_a_revoke_whose_answer_is_cut_short_keeps_that_key_owed_after_logout(
     real_urlopen = urllib.request.urlopen
     cut: list[str] = []
 
-    def first_revoke_cut_short(request: urllib.request.Request, timeout: float) -> Any:
+    def first_revoke_cut_short(
+        request: urllib.request.Request, timeout: float, **kwargs: Any
+    ) -> Any:
         # Raised where `response.read()` raises it: inside `_http`'s one `try`.
         if request.full_url.endswith("/revoke/") and not cut:
             cut.append(request.full_url)
             raise IncompleteRead(b'{"rev', expected=40)
-        return real_urlopen(request, timeout=timeout)
+        return real_urlopen(request, timeout=timeout, **kwargs)
 
     monkeypatch.setattr(urllib.request, "urlopen", first_revoke_cut_short)
     forgotten = dest.forget_minted_keys(signed_in)

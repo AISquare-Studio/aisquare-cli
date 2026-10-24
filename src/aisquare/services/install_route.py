@@ -525,7 +525,7 @@ def _instant(text: object) -> datetime | None:
 def open_url(request: Any, *, timeout: float) -> Any:
     """``urllib.request.urlopen``: the one network call in this module, behind a name a
     test can replace. Imported inside for the reason the module docstring gives."""
-    from urllib.request import urlopen
+    from aisquare.core.tls import urlopen
 
     return urlopen(request, timeout=timeout)
 

@@ -86,8 +86,10 @@ def test_off_a_declared_captain_that_loses_its_label_is_relabelled_as_any_role(
 
 
 def test_off_a_declared_captains_restart_and_hand_off_prompts_are_any_roles(
-    project: ProjectInfo, declared_captain: None
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, declared_captain: None
 ) -> None:
+    """On the fleet suite's ``FakeTmux`` and stand-in ``claude``, as the tests above: without
+    them its spawn asked the machine's own tmux, which Windows CI has none of (#51)."""
     agent = fleet_suite._coder(project).model_copy(update={"role": "captain"})
 
     resumed = fleet_service._restart_prompt(agent)

@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -419,14 +420,26 @@ def test_what_remote_needs_is_looked_at_off_the_ui_thread(
     assert field, "its answer painted: no token, so the field"
 
 
+@pytest.mark.parametrize("look", ["as it is", "slow"])
 def test_a_missing_ngrok_is_one_line_with_a_fix_in_the_app_never_a_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, look: str
 ) -> None:
-    """Only a damaged install, whose bundled ngrok cannot be imported, with none on PATH."""
+    """Only a damaged install, whose bundled ngrok cannot be imported, with none on PATH.
+
+    ``slow``: the look again answers as late as Windows CI's runner answered it (#51), where
+    the line was read before the answer came."""
     own_home(tmp_path, monkeypatch)
     monkeypatch.setitem(sys.modules, "ngrok", None)
     monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
     path_with(tmp_path)
+    if look == "slow":
+        needs = settings_remote.remote_needs
+
+        def slow() -> tuple[bool, bool, bool]:
+            time.sleep(0.3)
+            return needs()
+
+        monkeypatch.setattr(settings_remote, "remote_needs", slow)
     monkeypatch.setenv("NGROK_AUTHTOKEN", "a-token")
 
     async def go(pilot: Pilot[None]) -> tuple[bool, str, bool]:
@@ -435,7 +448,13 @@ def test_a_missing_ngrok_is_one_line_with_a_fix_in_the_app_never_a_command(
         said = said_in(section)
         path_with(tmp_path, "ngrok")  # what the fix brings back
         section.query_one("#settings-remote-ngrok-fix", Button).press()
-        await pilot.pause()
+        # The look again is on a worker (#274 m6): one pause was enough here, not on
+        # Windows CI's runner, which read the line before the answer came (#51).
+        await until(
+            pilot,
+            lambda: not displayed(section, "#settings-remote-ngrok-missing"),
+            what="the line gone once the fix brought ngrok back",
+        )
         return missing, said, displayed(section, "#settings-remote-ngrok-missing")
 
     missing, said, after = drive(go, tunnel=missing_ngrok)

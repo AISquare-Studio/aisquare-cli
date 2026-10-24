@@ -8,8 +8,11 @@ agent and its token were "the human's job". Now the four are core, ngrok is the 
 
 from __future__ import annotations
 
+import inspect
 import json
+import ntpath
 import os
+import posixpath
 import re
 import stat
 import subprocess
@@ -20,6 +23,7 @@ import time
 import tomllib
 from importlib import metadata
 from pathlib import Path
+from typing import Any
 
 import pytest
 from packaging.requirements import Requirement
@@ -83,40 +87,87 @@ def _core_closure() -> set[str]:
     return found
 
 
+def _installed(origin: str, site_packages: list[str], stdlib: list[str], pathmod: Any) -> bool:
+    """Whether ``origin`` is a module some distribution installed: under a site-packages
+    directory that holds none of the stdlib (``stdlib``: sysconfig's ``stdlib`` and
+    ``platstdlib``). On Windows, a Python that is no venv lists ``sys.prefix`` itself among
+    ``site.getsitepackages()``, and its stdlib is ``<prefix>\\Lib``: taken as an installed
+    directory, every stdlib module read as one no core distribution installed (#51).
+    ``pathmod`` is ``os.path``; a test hands in ``ntpath`` for a Windows-shaped run.
+    Embedded in the server test's subprocess, so it imports nothing."""
+
+    def norm(path: str) -> str:
+        return str(pathmod.normcase(pathmod.normpath(path)))
+
+    def under(child: str, parent: str) -> bool:
+        return child == parent or child.startswith(parent.rstrip(pathmod.sep) + pathmod.sep)
+
+    libs = [norm(lib) for lib in stdlib]
+    dirs = [norm(d) for d in site_packages]
+    where = norm(origin) if origin else ""
+    return any(under(where, d) for d in dirs if not any(under(lib, d) for lib in libs))
+
+
+_ONLY_CORE = """
+import json, os, site, sys, sysconfig, urllib.request
+from typing import Any
+from importlib.machinery import PathFinder
+allowed = set(json.loads(sys.argv[1]))
+site_packages = site.getsitepackages()
+stdlib = [sysconfig.get_path("stdlib"), sysconfig.get_path("platstdlib")]
+refused = []
+
+{installed}
+
+class OnlyCore:
+    # Refuses a module installed in site-packages by no core distribution.
+
+    def find_spec(self, name, path=None, target=None):
+        top = name.partition(".")[0]
+        if top in allowed or top == "aisquare" or "." in name:
+            return None
+        spec = PathFinder.find_spec(name, path)
+        origin = (spec and spec.origin) or ""
+        if not _installed(origin, site_packages, stdlib, os.path):
+            return None  # the stdlib's, a builtin, or nobody's
+        refused.append(top)
+        raise ModuleNotFoundError(f"{{top}} is no core dependency", name=top)
+
+sys.meta_path.insert(0, OnlyCore())
+"""
+
+
+def _run_on_core_alone(tmp_path: Path, body: str) -> subprocess.CompletedProcess[str]:
+    """``body`` in a process that can import no module outside a plain install's
+    distributions (:data:`_ONLY_CORE`); ``sys.argv[2]`` is a free port."""
+    from tests.test_remote_install_page import free_port
+
+    allowed = sorted(
+        top
+        for top, distributions in metadata.packages_distributions().items()
+        if {re.sub(r"[-_.]+", "-", d).lower() for d in distributions} & _core_closure()
+    )
+    script = _ONLY_CORE.format(installed=inspect.getsource(_installed)) + textwrap.dedent(body)
+    env = {**os.environ, "AISQUARE_HOME": str(tmp_path / "home"), "NO_PROXY": "*"}
+    return subprocess.run(
+        [sys.executable, "-P", "-c", script, json.dumps(allowed), str(free_port())],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+        cwd=tmp_path,
+    )
+
+
 def test_the_remote_server_imports_and_starts_on_the_core_dependencies_alone(
     tmp_path: Path,
 ) -> None:
     """In a process that can import no module outside a plain install's distributions (the
     dev extra's mcp brings starlette and uvicorn too, so this env alone proves nothing), the
     real server starts and serves the page, and the bundled ngrok imports."""
-    allowed = sorted(
-        top
-        for top, distributions in metadata.packages_distributions().items()
-        if {re.sub(r"[-_.]+", "-", d).lower() for d in distributions} & _core_closure()
-    )
-    script = textwrap.dedent(
+    done = _run_on_core_alone(
+        tmp_path,
         """
-        import json, site, sys, urllib.request
-        from importlib.machinery import PathFinder
-        allowed = set(json.loads(sys.argv[1]))
-        installed = tuple(site.getsitepackages())
-        refused = []
-
-        class OnlyCore:
-            # Refuses a module installed in site-packages by no core distribution.
-
-            def find_spec(self, name, path=None, target=None):
-                top = name.partition(".")[0]
-                if top in allowed or top == "aisquare" or "." in name:
-                    return None
-                spec = PathFinder.find_spec(name, path)
-                origin = (spec and spec.origin) or ""
-                if not origin.startswith(installed):
-                    return None  # the stdlib's, a builtin, or nobody's
-                refused.append(top)
-                raise ModuleNotFoundError(f"{top} is no core dependency", name=top)
-
-        sys.meta_path.insert(0, OnlyCore())
         from aisquare.services import ngrok_sdk, remote_server
 
         assert ngrok_sdk.sdk() is not None, "the bundled ngrok"
@@ -127,22 +178,52 @@ def test_the_remote_server_imports_and_starts_on_the_core_dependencies_alone(
                 print(json.dumps({"status": response.status, "refused": sorted(set(refused))}))
         finally:
             remote_server.stop_remote_server()
-        """
-    )
-    from tests.test_remote_install_page import free_port
-
-    env = {**os.environ, "AISQUARE_HOME": str(tmp_path / "home"), "NO_PROXY": "*"}
-    done = subprocess.run(
-        [sys.executable, "-P", "-c", script, json.dumps(allowed), str(free_port())],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env=env,
-        cwd=tmp_path,
+        """,
     )
     assert done.returncode == 0, done.stderr[-3000:]
     said = json.loads(done.stdout.strip().splitlines()[-1])
     assert said["status"] == 200, said
+
+
+def test_the_core_only_process_still_refuses_a_dev_only_package(tmp_path: Path) -> None:
+    """#51 narrowed what counts as installed: the guard above still bites. ``pytest`` is the
+    dev extra's, in this env's site-packages, and refused; the stdlib still imports."""
+    assert "pytest" not in _core_closure()
+    done = _run_on_core_alone(tmp_path, "import __future__, textwrap\nimport pytest\n")
+    assert done.returncode != 0
+    assert "pytest is no core dependency" in done.stderr, done.stderr[-3000:]
+
+
+@pytest.mark.parametrize(
+    ("origin", "installed"),
+    [
+        (r"C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\__future__.py", False),
+        (r"C:\hostedtoolcache\windows\Python\3.12.10\x64\DLLs\_socket.pyd", False),
+        (r"c:\HOSTEDTOOLCACHE\windows\python\3.12.10\x64\lib\json\__init__.py", False),
+        (r"C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\mcp\__init__.py", True),
+        (r"C:\hostedtoolcache\windows\Python\3.12.10\x64\lib\SITE-PACKAGES\yaml\__init__.py", True),
+        ("", False),
+    ],
+)
+def test_a_windows_pythons_own_prefix_is_not_an_installed_directory(
+    origin: str, installed: bool
+) -> None:
+    """#51: Windows CI's Python (no venv) lists ``sys.prefix`` among its site directories,
+    and its stdlib lives below it: ``__future__`` was refused as no core dependency. The
+    prefix holds the stdlib, so it is not one; its ``Lib\\site-packages`` is, in any case."""
+    prefix = r"C:\hostedtoolcache\windows\Python\3.12.10\x64"
+    site_packages = [prefix, prefix + r"\Lib\site-packages"]
+    stdlib = [prefix + r"\Lib", prefix + r"\Lib"]
+    assert _installed(origin, site_packages, stdlib, ntpath) is installed
+
+
+def test_a_posix_venvs_site_packages_is_installed_and_its_stdlib_is_not() -> None:
+    site_packages = ["/repo/.venv/lib/python3.13/site-packages"]
+    stdlib = ["/usr/lib/python3.13", "/repo/.venv/lib/python3.13"]
+    assert _installed(
+        "/repo/.venv/lib/python3.13/site-packages/mcp/__init__.py", site_packages, stdlib, posixpath
+    )
+    assert not _installed("/usr/lib/python3.13/__future__.py", site_packages, stdlib, posixpath)
 
 
 # --- the bundled ngrok --------------------------------------------------------------------

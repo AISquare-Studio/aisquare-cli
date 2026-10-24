@@ -1985,6 +1985,58 @@ from: a letter arriving within ~100 ms of a lone Escape is read as that chord,
 so pressing Esc and immediately typing `p` switches the model instead of
 typing the letter.
 
+### Long-lived managers: state file, start pack and quiet compaction
+
+A manager is the longest-lived session in a fleet, and every request it makes
+re-sends its whole context. Three things keep that context small.
+
+**The state file.** The manager's cycle asks it to keep its state in
+`~/.aisquare/projects/<project id>/manager/state.md`, at most 4,000 characters:
+goal, decisions, open items, next step. It rewrites the file when a plan step
+completes and before it stops. Scripts and rule text it reuses live in files,
+and it cites them by path rather than pasting them into a prompt.
+
+**The start pack.** At every `SessionStart` (startup, resume, `/clear`, a
+compaction) a manager gets its start pack instead of the plain board. The pack
+holds its state file (the first 8,000 characters, with its age), every open
+task on one line each (the board shows eight), the unanswered questions, the
+live agents with their task and account, how many wake events wait past its
+cursor, the project's `.aisquare/rules/*.md` by path and first line, and then
+the protocol and its cycle. It is never more than 20,000 characters: the task
+list takes what the rest leaves, and a last line says how many tasks did not
+fit.
+
+**Quiet-point compaction** is off by default (`fleet.quiet_compact_at = 0`).
+Set it to a token count (400,000 is a sensible first value) and a manager is
+compacted only at a quiet point. That is when its turn ends with no decision
+pending, it is not asking a question, it is not in plan mode, and it does not
+need the human. Its Stop hook then starts `aisquare hook compact-check` in the
+background. After `quiet_compact_delay` seconds the check asks everything again,
+and it types `/compact` only if all of these hold:
+
+- the row still reads `waiting` and its cursor has not moved;
+- no wake-class event is pending;
+- the context (the transcript's last request) is at least `quiet_compact_at`;
+- no quiet compaction ran within `quiet_compact_cooldown` minutes;
+- the state file is under `quiet_compact_state_max_age` minutes old and newer
+  than the last decision the manager was woken for;
+- the pane shows the manager idle at its prompt with an empty input box.
+
+A half-typed draft of yours is never sent. The line goes through the same
+verified delivery as a first message. The compaction's own `SessionStart`
+confirms it, and the row reads `waiting` afterwards, so a coder's
+`task review` still nudges it. If no compaction starts within 120 seconds, the
+board gets one human-only line and nothing is retried before the cooldown.
+Each refusal is kept, the newest, under `team_meta` key
+`compact-refused:<session>`. With `quiet_compact_resume = true` the manager
+is also given a one-line resume prompt after the compaction.
+
+Claude Code's own auto-compaction (about 967K tokens on 1M-context models)
+and idle compaction (after about 54 idle minutes at 200K tokens or more) are
+left as they are; aisquare never lowers them. Quiet compaction runs well
+before both, at a moment chosen by what the manager is doing, not by a
+threshold or a timer.
+
 ---
 
 ## Upgrading

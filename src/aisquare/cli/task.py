@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Annotated, get_args
 
 import typer
@@ -92,6 +93,22 @@ def add(
             "Printed to whoever claims the task.",
         ),
     ] = None,
+    detail_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--detail-file",
+            help="Read the contract from this file instead of --detail.",
+            dir_okay=False,
+        ),
+    ] = None,
+    rules: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--rules",
+            help="Rules files the contract cites, by name: testing,git -> "
+            ".aisquare/rules/testing.md, … A missing one refuses the add.",
+        ),
+    ] = None,
     role: Annotated[
         str | None, typer.Option("--role", help="Suggested owner role (advisory).")
     ] = None,
@@ -104,7 +121,31 @@ def add(
     ] = None,
     as_session: SessionRef = None,
 ) -> None:
-    """Add a shared task. Re-adding the same task is safe — you get the original."""
+    """Add a shared task. Re-adding the same task is safe — you get the original.
+
+    The contract is checked for ``[team] brief_blocks`` (objective:, acceptance:,
+    boundaries:): a missing block warns, or refuses under ``[team] brief_strict``."""
+    missing: list[str] = []
+    if detail is not None and detail_file is not None:
+        fail("give --detail or --detail-file, not both", error="invalid_brief", exit_code=2)
+    if detail_file is not None:
+        try:
+            detail = detail_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            fail(f"--detail-file {detail_file}: {exc}", error="invalid_brief", exit_code=2)
+    if detail is not None or rules:
+        try:
+            brief = team_service.build_brief(detail or "", rules=rules or [])
+        except team_service.BriefRefused as exc:
+            fail(str(exc), error="invalid_brief", exit_code=2)
+        detail, missing = brief.detail, brief.missing_blocks
+    if missing:
+        blocks = ", ".join(f"{block}:" for block in missing)
+        typer.echo(
+            f"aisquare: the contract has no {blocks} block — the claim prints the contract, "
+            "so say it there",
+            err=True,
+        )
     try:
         task, created = team_service.add_task(
             title, key=key, detail=detail, role=role, needs=needs, session_ref=as_session
@@ -122,6 +163,7 @@ def add(
     if get_state().json_output:
         payload = {"created": created, **task.model_dump(mode="json")}
         payload.update(delivery_fields(delivery))
+        payload["missing_blocks"] = missing
         typer.echo(json.dumps(payload))
     else:
         verb = "added" if created else "already tracked (idempotent)"

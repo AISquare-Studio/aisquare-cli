@@ -96,8 +96,12 @@ own any more.
   Doctor's browser tools row may still name `npx chrome-devtools-mcp`: it is green, and it
   is advice for a tool the user picks.
 - **tiktoken** counted pack tokens and nothing else, and it was never a dependency in
-  `pyproject.toml`, so `uv.lock` does not change. `install.sh` stops adding it, and
-  Remote's fallback install hint follows.
+  `pyproject.toml`, so `uv.lock` does not change. `install.sh` still adds it, on
+  purpose: the script installs the latest *release*, and a release up to 0.9.0 has a
+  `tiktoken` doctor row that goes amber without it on a machine with Node, which the
+  Node extra makes. The container matrix measured it: run 4 upgraded to the release,
+  its doctor called tiktoken unexpected, and the run exited 2. So `--with tiktoken`
+  stays, with a comment saying when to drop it, and Remote's fallback hint matches.
 - **The one-click fix** `project onboard --refresh` stays in `onboarding.KNOWN_FIXES`: a
   valid command, the only project-scoped one, whose UI path (disabled without a project)
   stays tested. No doctor row names it today; the tests' fixtures say they stand in for
@@ -167,6 +171,9 @@ own any more.
 
 ## Follow-ups
 
+- Drop `--with tiktoken` from `install.sh` (its comment above `install_cli` says why it
+  stays), the cells' run 4 and Remote's fallback hint, once a release without the
+  `tiktoken` doctor row is the latest on PyPI.
 - **Owner question:** should `install.sh`, when Node is chosen, also register the Chrome
   DevTools MCP (`claude mcp add -s user chrome-devtools npx chrome-devtools-mcp`)? It does
   not today, and #399 adds nothing.

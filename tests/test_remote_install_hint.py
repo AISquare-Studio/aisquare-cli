@@ -51,8 +51,8 @@ entrypoints = [
     { name = "asq", install-path = "/home/me/.local/bin/asq", from = "aisquare-cli" },
 ]
 """
-"""What ``install.sh`` up to 0.9 left (``uv tool install --python 3.13 --with tiktoken
-aisquare-cli``), as uv 0.12.19 writes it: an upgraded machine still has this receipt."""
+"""What ``install.sh`` leaves (``uv tool install --python 3.13 --with tiktoken aisquare-cli``),
+as uv 0.12.19 writes it."""
 
 
 def _installed(
@@ -218,7 +218,7 @@ def test_a_receipt_that_cannot_be_read_gets_the_command_install_sh_installs_with
 ) -> None:
     """Nothing to say again: the documented install's own command is the best left."""
     assert _uv_tool(monkeypatch, tmp_path, receipt) == (
-        f"uv tool install --python {PYTHON} aisquare-cli"
+        f"uv tool install --python {PYTHON} --with tiktoken aisquare-cli"
     )
 
 

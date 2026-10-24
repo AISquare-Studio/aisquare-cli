@@ -217,6 +217,23 @@ def test_it_never_uses_uv_tool_upgrade(lines: list[str]) -> None:
     )
 
 
+def test_the_upgrade_restates_the_tiktoken_extra(source: str) -> None:
+    """--force replaces the tool env, so `--with tiktoken` has to be re-stated.
+
+    Dropping it would leave a machine whose `tiktoken` doctor line went amber
+    only after an UPGRADE — the hardest kind of regression to attribute. This
+    tree has no such row (#399), but the script installs the latest RELEASE, and
+    every release up to 0.9.0 has it (the install.sh comment above install_cli).
+    """
+    upgrade = re.search(
+        r"uv tool install --force[^\n]*(\n\s+[^\n]*)*?\"\$_spec\"", source
+    ) or re.search(r"uv tool install --force.*", source)
+    assert upgrade, "no `uv tool install --force` invocation found"
+    assert "--with tiktoken" in upgrade.group(0), (
+        f"the upgrade command must re-state `--with tiktoken`: {upgrade.group(0)!r}"
+    )
+
+
 def test_init_is_never_called_with_reinit(lines: list[str]) -> None:
     """`--reinit` resets config.toml and discards `team bind` role bindings (§3.4).
 

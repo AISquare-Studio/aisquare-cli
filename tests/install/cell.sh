@@ -327,6 +327,12 @@ amber_again=$(amber_checks)
 # (tests/test_install_script_is_posix.py), but a guard on the TEXT cannot prove
 # the replacement works. This can.
 #
+# It also asserts `tiktoken` survives, because `--force` REPLACES the tool
+# environment: an upgrade that forgot to re-state `--with tiktoken` would move
+# the version, exit 0, and silently turn the `tiktoken` doctor line amber. This
+# tree has no such row any more (#399), but the release this run upgrades to
+# may, and with the Node run 1 installed it asks for tiktoken.
+#
 # PyPI is the target here, not the local wheel: "did it move to latest" needs a
 # latest to move to. Skipped when the published version happens to BE 0.5.0,
 # which would make the assertion vacuous.
@@ -356,7 +362,7 @@ else
     echo "pinning to $pinned, expecting the installer to reach $latest"
     # An EXACT PIN, deliberately — that is the shape `uv tool upgrade` refuses
     # to move, and installing without the pin would test nothing.
-    uv tool install --force --python 3.13 "aisquare-cli==$pinned" >/dev/null 2>&1 ||
+    uv tool install --force --python 3.13 --with tiktoken "aisquare-cli==$pinned" >/dev/null 2>&1 ||
         fail "could not stage the $pinned install"
     hash -r 2>/dev/null || true
     staged=$(aisquare --version | cut -d' ' -f2)
@@ -376,6 +382,16 @@ else
     [ "$moved" != "$pinned" ] || fail "the version did NOT move off the $pinned pin — this is exactly the \`uv tool upgrade\` silent no-op of section 3.9.1"
     [ "$moved" = "$latest" ] || fail "expected $latest after the upgrade, got $moved"
     head1 "upgrade: $pinned -> $moved"
+
+    # tiktoken, in the CLI's OWN environment. `--force` replaces that
+    # environment, so this is the assertion that keeps `--with tiktoken` in the
+    # upgrade command for as long as a release's doctor asks for it.
+    case "$(amber_checks)" in
+        *tiktoken*)
+            fail "tiktoken is amber after the upgrade — --with tiktoken was not re-stated (section 3.9.1)"
+            ;;
+    esac
+    head1 "tiktoken survived the --force upgrade"
 fi
 
 head1 "CELL PASSED: $ID ${VERSION_ID:-}"

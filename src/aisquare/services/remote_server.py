@@ -6436,7 +6436,7 @@ def _remote_uv_tool_hint(receipt: Path) -> str:
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError):
         tool, requirements = {}, None
     if not isinstance(requirements, list) or not requirements:
-        as_installed = ["--python", running, DISTRIBUTION]
+        as_installed = ["--python", running, "--with", "tiktoken", DISTRIBUTION]
         return " ".join(
             _remote_shell_word(word) for word in ["uv", "tool", "install", *as_installed]
         )

@@ -182,7 +182,7 @@ warn() {
 die() {
     printf '%serror%s %s\n' "$C_RED" "$C_RESET" "$*" >&2
     printf '%s\n' "Nothing was left half-installed on purpose: rerun this script, or" >&2
-    printf '%s\n' "install by hand with: uv tool install aisquare-cli" >&2
+    printf '%s\n' "install by hand with: uv tool install --with tiktoken aisquare-cli" >&2
     exit 1
 }
 
@@ -888,7 +888,7 @@ banner() {
     _bn_nl='
 '
     _plan=""
-    [ "$CLI_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Python $PYTHON_VERSION + $PYPI_PACKAGE (via uv, into its own venv)"
+    [ "$CLI_ACTION" = install ] && _plan="$_plan$_bn_nl  install  Python $PYTHON_VERSION + $PYPI_PACKAGE + tiktoken (via uv, into its own venv)"
     [ "$CLI_ACTION" = upgrade ] && _plan="$_plan$_bn_nl  upgrade  $PYPI_PACKAGE $CLI_VERSION -> ${LATEST_VERSION:-latest}"
     [ "$CLI_ACTION" = current ] && _plan="$_plan$_bn_nl  keep     $PYPI_PACKAGE $CLI_VERSION"
     [ -z "$UV_VERSION" ] && _plan="$_plan$_bn_nl  install  uv (the bootstrap: a static binary that brings its own Python)"
@@ -1017,8 +1017,15 @@ Open a new shell and rerun, or add it by hand:
 }
 
 # ---------------------------------------------------------------------------
-#  9  install_cli — Python + aisquare-cli (§3.9.1). FATAL.
+#  9  install_cli — Python + aisquare-cli + tiktoken (§3.9.1). FATAL.
 # ---------------------------------------------------------------------------
+
+# tiktoken STAYS, though this tree no longer uses it (#399). This script installs
+# the latest RELEASE, and every release up to 0.9.0 has a `tiktoken` doctor row
+# that goes amber without it on a machine with Node, which the Node extra makes.
+# Measured in the container matrix: run 4 upgraded to the release, its doctor
+# called tiktoken unexpected, and the run exited 2. Drop `--with tiktoken` here
+# once a release without that row is the latest on PyPI.
 
 install_cli() {
     _target=$INSTALL_TARGET
@@ -1032,11 +1039,11 @@ install_cli() {
             return 0
             ;;
         install)
-            step "Installing $PYPI_PACKAGE (Python $PYTHON_VERSION)"
+            step "Installing $PYPI_PACKAGE (Python $PYTHON_VERSION, with tiktoken)"
             # `uv tool install` with no version change is already a safe no-op —
             # measured: "`aisquare-cli` is already installed", exit 0 — so
             # --force is NOT used here. It is only for the upgrade path below.
-            if ! run uv tool install --python "$PYTHON_VERSION" "$_target"; then
+            if ! run uv tool install --python "$PYTHON_VERSION" --with tiktoken "$_target"; then
                 die "uv tool install $_target failed.
 Rerun with --verbose to see uv's own output."
             fi
@@ -1050,10 +1057,9 @@ Rerun with --verbose to see uv's own output."
             # exit code would report an upgrade that did not happen, which is
             # the precise failure this step exists to prevent.
             #
-            # `install --force … @latest` moves a pinned install and is
-            # deterministic regardless of how the existing install was made. It
-            # resolves from this command alone, so a `--with tiktoken` an older
-            # run of this script added goes: nothing counts pack tokens any more.
+            # `install --force … @latest` moves a pinned install, RE-STATES
+            # `--with tiktoken` so the extra cannot be silently dropped, and is
+            # deterministic regardless of how the existing install was made.
             if [ "$INSTALL_TARGET" != "$PYPI_PACKAGE" ]; then
                 # `@latest` is meaningless for a path, and appending it makes uv
                 # treat the whole thing as a package name.
@@ -1062,7 +1068,8 @@ Rerun with --verbose to see uv's own output."
                 _spec="$PYPI_PACKAGE@latest"
                 [ -n "$PIN_VERSION" ] && _spec="$PYPI_PACKAGE@$PIN_VERSION"
             fi
-            if ! run uv tool install --force --python "$PYTHON_VERSION" "$_spec"; then
+            if ! run uv tool install --force --python "$PYTHON_VERSION" \
+                --with tiktoken "$_spec"; then
                 die "uv tool install --force $_spec failed.
 The previous install is untouched. Rerun with --verbose for uv's output."
             fi

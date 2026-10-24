@@ -16,7 +16,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--no-system-deps` install no extra unless named. The extras are a list
   (`OPTIONAL_EXTRAS`), so more can be added the same way. A machine without Node is
   current, and the run exits 2 only when an extra you chose did not install. The script
-  registers no MCP server. It installs `aisquare-cli` without `--with tiktoken`.
+  registers no MCP server.
 
 ### Removed
 
@@ -36,10 +36,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **A `config.toml` with `[snapshot]` still loads.** Doctor's config row says the
     section is no longer read (green), and the next save drops it.
     `aisquare config get/set snapshot.*` answer `unknown config key`.
-  - **tiktoken** counted pack tokens and nothing else. The one-liner no longer adds it.
-    An install that has it (an older `install.sh`, or `--with tiktoken`) keeps a
-    harmless unused package: `aisquare upgrade` re-installs what the tool's receipt
-    names, and `uv tool install --force aisquare-cli` drops it.
+  - **tiktoken** counted pack tokens and nothing else, and this build never imports it.
+    The one-liner still adds it for now: it installs the latest release, and a release
+    up to 0.9.0 asks for tiktoken in doctor on a machine with Node. An install that has
+    it keeps a harmless unused package.
 
 ### Added
 

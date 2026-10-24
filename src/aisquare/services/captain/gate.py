@@ -294,11 +294,14 @@ def status(*, now: datetime | None = None) -> dict[str, object]:
     }
 
 
-_CODE = re.compile(r"(?<!\d)(?<!\d-)\d(?:[\s-]?\d){5}(?!\d)(?!-\d)")
+_CODE = re.compile(r"(?<![\w])(?<!\d-)\d(?:[\s-]?\d){5}(?![\w])(?!-\d)")
 """Six digits on their own, run together, spaced or dashed as a code is said or typed
-("123456", "123 456", "1 2 3 4 5 6"), joined to a word or trailed by a dash too
+("123456", "123 456", "1 2 3 4 5 6"), dash-joined to a word or trailed by a dash too
 ("code-123456", "123456-"). Not part of a longer number, a date or a dashed phone
-number: a digit, or a dash with a digit beyond it, on either side keeps it."""
+number: a digit, or a dash with a digit beyond it, on either side keeps it. Not inside an
+identifier either: a letter, digit or underscore touching it keeps it, so a task id, a
+session id or a SHA whose random part has six digits in a row reaches the audit whole
+(rc/p3's run 40073709259: wololo's audit read ``tsk_01m5pcq******pmfre…``)."""
 
 
 def redact(text: str) -> str:

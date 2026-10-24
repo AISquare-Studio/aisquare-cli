@@ -33,6 +33,7 @@ empty model as ``None``, so ``import_source`` — which owns the ladder — deci
 from __future__ import annotations
 
 import contextlib
+import os
 import shutil
 import threading
 from dataclasses import dataclass
@@ -756,7 +757,11 @@ EDITOR_POLL = 0.5
 def editor_unavailable() -> str | None:
     """Why Edit cannot open ``$EDITOR`` in a pane here, or ``None`` when it can. The text
     box editor (:class:`EditPersonaScreen`) stands in then: #212's "no tmux server or no
-    $EDITOR", where no editor is ``$VISUAL``/``$EDITOR``/``vi`` all missing."""
+    $EDITOR", where no editor is ``$VISUAL``/``$EDITOR``/``vi`` all missing. A host with no
+    uid (Windows outside WSL) has no tmux socket for the fleet's server
+    (``TmuxServer.socket_path``), even where a ``tmux`` is on PATH."""
+    if getattr(os, "getuid", None) is None:
+        return "the editor pane needs tmux, and the fleet's tmux needs a POSIX host"
     if shutil.which("tmux") is None:
         return "tmux is not installed"
     command = editor_command()

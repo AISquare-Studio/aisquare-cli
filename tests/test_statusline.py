@@ -185,7 +185,8 @@ def test_install_sets_ours_only_where_none_is_set_and_wrap_keeps_the_users(
     assert agent_core.install_statusline(empty).kind == "ours"
     assert agent_core.install_statusline(empty).kind == "ours"  # again: nothing to do
     command = _settings(empty)["statusLine"]["command"]
-    assert agent_core._split_command(command)[-1].endswith("asq-statusline")
+    program = agent_core._split_command(command)[-1].lower()
+    assert program.removesuffix(".exe").endswith("asq-statusline")  # Windows: …\asq-statusline.EXE
 
     refused = agent_core.install_statusline(theirs)
     assert (refused.kind, refused.theirs) == ("foreign", own["command"])

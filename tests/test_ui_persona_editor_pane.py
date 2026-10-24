@@ -53,6 +53,11 @@ from tests.ui_workers import settle_until_held
 __all__ = ["catalogue", "project", "repo"]  # fixtures, imported for this file's tests
 
 PRIVATE_SOCKET = f"asq-test-{os.getpid()}-persona-editor"
+needs_the_pane = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the editor pane is a tmux window, and the fleet's tmux needs a POSIX host; on "
+    "Windows Edit opens the text box (test_without_tmux_or_an_editor_edit_opens_…)",
+)
 PANE = "%9"
 
 
@@ -184,6 +189,7 @@ def _drafts() -> list[Path]:
     return sorted(folder.iterdir()) if folder.is_dir() else []
 
 
+@needs_the_pane
 def test_edit_runs_the_editor_in_a_pane_and_an_unchanged_draft_writes_nothing(
     catalogue: dict[str, Path],
     project: ProjectInfo,
@@ -244,6 +250,7 @@ def test_edit_runs_the_editor_in_a_pane_and_an_unchanged_draft_writes_nothing(
     assert _drafts() == [], "the draft is dropped"
 
 
+@needs_the_pane
 def test_an_edit_saves_through_the_service_and_bad_frontmatter_is_refused_then_reopened(
     catalogue: dict[str, Path],
     project: ProjectInfo,
@@ -298,6 +305,7 @@ def test_an_edit_saves_through_the_service_and_bad_frontmatter_is_refused_then_r
     assert _drafts() == []
 
 
+@needs_the_pane
 def test_an_editor_that_exits_non_zero_saves_nothing(
     catalogue: dict[str, Path],
     project: ProjectInfo,
@@ -326,6 +334,7 @@ def test_an_editor_that_exits_non_zero_saves_nothing(
     assert ("pair: the editor exited 3: nothing saved", "information") in notices
 
 
+@needs_the_pane
 def test_cancel_closes_the_editors_window_and_drops_the_draft(
     catalogue: dict[str, Path],
     project: ProjectInfo,
@@ -352,24 +361,29 @@ def test_cancel_closes_the_editors_window_and_drops_the_draft(
     assert skill.read_bytes() == original and _drafts() == []
 
 
-@pytest.mark.parametrize("missing", ["tmux", "editor"])
+@pytest.mark.parametrize("missing", ["tmux", "editor", "a posix host"])
 def test_without_tmux_or_an_editor_edit_opens_the_text_box_editor(
     missing: str,
     catalogue: dict[str, Path],
     project: ProjectInfo,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#212: the TextArea editor stays the fallback when there is no tmux or no editor
-    (``$VISUAL``, ``$EDITOR`` and ``vi`` all missing)."""
+    """#212: the TextArea editor stays the fallback when there is no tmux, no editor
+    (``$VISUAL``, ``$EDITOR`` and ``vi`` all missing), or no POSIX host: Windows has no uid,
+    so the fleet's tmux has no socket, even where a ``tmux`` is on PATH (as here)."""
     editor = Editor(monkeypatch)
     monkeypatch.delenv("VISUAL", raising=False)
+    if missing != "a posix host":  # the other two reasons are a POSIX host's, Windows' too
+        monkeypatch.setattr(os, "getuid", lambda: 1000, raising=False)
     if missing == "tmux":
         real_which = shutil.which
         monkeypatch.setattr(
             shutil, "which", lambda name, *a, **k: None if name == "tmux" else real_which(name)
         )
-    else:
+    elif missing == "editor":
         monkeypatch.setenv("EDITOR", "no-such-editor-anywhere")
+    else:
+        monkeypatch.delattr(os, "getuid", raising=False)
     reason = dialogs.editor_unavailable()
 
     async def scenario(pilot: Pilot[None], host: Host) -> str:
@@ -380,9 +394,11 @@ def test_without_tmux_or_an_editor_edit_opens_the_text_box_editor(
 
     assert drive(scenario, project=project) == "EditPersonaScreen"
     assert editor.opened == []
-    assert reason is not None and ("tmux" in reason if missing == "tmux" else "$EDITOR" in reason)
+    said = {"tmux": "not installed", "editor": "$EDITOR", "a posix host": "POSIX host"}
+    assert reason is not None and said[missing] in reason
 
 
+@needs_the_pane
 def test_a_window_that_will_not_open_hands_over_to_the_text_box_and_says_why(
     catalogue: dict[str, Path],
     project: ProjectInfo,

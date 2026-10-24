@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -51,7 +53,10 @@ def _transcript(
     age: float = 0.0,
 ) -> Path:
     """A transcript as Claude Code leaves one, enough of it for what adopt reads."""
-    path = account.config_dir / "projects" / str(cwd).replace("/", "-") / f"{session}.jsonl"
+    # Claude Code's folder name: every character but a letter or digit is a dash, so a
+    # Windows path (C:\Users\…) is one folder too, as the lookup's */*.jsonl expects.
+    slug = re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+    path = account.config_dir / "projects" / slug / f"{session}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     entries = [
         {"type": "user", "isMeta": True, "cwd": str(cwd), "message": {"content": "<caveat>"}},
@@ -123,6 +128,27 @@ def test_a_conversation_a_live_claude_holds_is_refused(
     no_processes.clear()
     registry.write_text(json.dumps({"pid": 999_999_999, "sessionId": SESSION}))
     assert adopt_service.adopt(SESSION).agent.session_id == SESSION
+
+
+def test_liveness_on_windows_asks_the_process_and_never_signals_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rc/p3's Windows leg: ``os.kill(pid, 0)`` is a CTRL_C_EVENT there, and adopt asking
+    after the test runner's own pid interrupted the suite. Windows asks the process."""
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append((pid, sig)))
+    monkeypatch.setattr(sys, "platform", "win32")
+    asked: list[int] = []
+
+    def query(pid: int) -> bool:
+        asked.append(pid)
+        return True
+
+    monkeypatch.setattr(adopt_service, "_alive_on_windows", query)
+
+    assert adopt_service._alive(os.getpid()) is True
+    assert adopt_service._alive(0) is False
+    assert (signalled, asked) == ([], [os.getpid()])
 
 
 def test_the_adopting_command_and_its_own_shell_and_claude_hold_nothing(tmp_path: Path) -> None:

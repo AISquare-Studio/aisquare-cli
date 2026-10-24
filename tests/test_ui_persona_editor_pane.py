@@ -373,6 +373,8 @@ def test_without_tmux_or_an_editor_edit_opens_the_text_box_editor(
     so the fleet's tmux has no socket, even where a ``tmux`` is on PATH (as here)."""
     editor = Editor(monkeypatch)
     monkeypatch.delenv("VISUAL", raising=False)
+    if missing != "a posix host":  # the other two reasons are a POSIX host's, Windows' too
+        monkeypatch.setattr(os, "getuid", lambda: 1000, raising=False)
     if missing == "tmux":
         real_which = shutil.which
         monkeypatch.setattr(

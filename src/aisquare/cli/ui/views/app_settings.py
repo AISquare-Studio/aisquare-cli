@@ -269,7 +269,9 @@ def _agent_choices() -> list[tuple[str, str]]:
     return [("Use default", ""), *((a.label, a.id) for a in adapters())]
 
 
-def _agent_options(current: str) -> list[tuple[Text, str]]:
+def agent_options(current: str) -> list[tuple[Text, str]]:
+    """The agent selects' options with ``current`` among them: the role rows', and the
+    captain's (``views.settings_captain``)."""
     return _options(current, _agent_choices())
 
 
@@ -720,7 +722,7 @@ class AppSettingsView(Vertical):
         with Horizontal(classes="row"):
             yield Label("user coding agent")
             yield Select(
-                _agent_options(config.agents.default or ""),
+                agent_options(config.agents.default or ""),
                 value=config.agents.default or "",
                 allow_blank=False,
                 id="default-agent",
@@ -746,7 +748,7 @@ class AppSettingsView(Vertical):
                     # `a[/b]c` raised MarkupError out of the render (review of #259, round 23).
                     yield Label(role, markup=False)
                     yield Select(
-                        _agent_options(binding.agent or ""),
+                        agent_options(binding.agent or ""),
                         value=binding.agent or "",
                         allow_blank=False,
                         id=role_widget_id("family", role),
@@ -1051,7 +1053,7 @@ class AppSettingsView(Vertical):
         self.fleet = config.fleet
         self.query_one("#settings-config-error", Static).update(Text(self._config_error))
         default_agent = self.query_one("#default-agent", Select)
-        default_agent.set_options(_agent_options(config.agents.default or ""))
+        default_agent.set_options(agent_options(config.agents.default or ""))
         default_agent.value = config.agents.default or ""
         self._roles = role_order(self.fleet)
         self._account_bindings = settings_service.role_account_bindings(config)

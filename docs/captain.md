@@ -363,12 +363,16 @@ composer): a freshly spawned agent reads working until its first reply.
 
 ## The captain on Codex
 
-Experimental, as the captain is. Bind the role to Codex:
+Experimental, as the captain is. Pick Codex as *captain's agent*, under the Captain box in
+*⚙ Settings ▸ App settings*, which saves at once, or bind the role to Codex by hand
+(`aisquare team bind captain --agent codex` writes the same):
 
 ```toml
 [team.profiles.captain]
 agent = "codex"
 ```
+
+A running captain keeps its agent until its next start or restart.
 
 The captain then starts on Codex as it does on Claude Code, from its brain
 folder, which is no git checkout, so Codex asks no folder trust. What keeps it to

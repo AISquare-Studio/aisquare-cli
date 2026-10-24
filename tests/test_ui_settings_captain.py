@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Button, Checkbox, Input, Static
+from textual.widgets import Button, Checkbox, Input, Select, Static
 
 from aisquare.cli.ui.receiver import ui_receiver
 from aisquare.cli.ui.sidebar import (
@@ -28,9 +28,9 @@ from aisquare.cli.ui.sidebar import (
 )
 from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.cli.ui.views.captain import WHAT_IS_UP
-from aisquare.cli.ui.views.settings_captain import ABOUT, CaptainToggle
+from aisquare.cli.ui.views.settings_captain import ABOUT, CaptainToggle, captain_agent
 from aisquare.core import experimental
-from aisquare.core.config import load_config, save_config
+from aisquare.core.config import RoleLaunchProfile, load_config, save_config
 from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services.captain import state as captain_state
@@ -151,6 +151,42 @@ def test_reset_all_and_reload_move_the_box_and_the_shell_with_the_file(
     assert ticked == (True, True, True)
     assert reset == (False, False, False), "the box, the switch, the ★: off with the file"
     assert reloaded == (True, True, True), "a shell's config set, after Reload"
+
+
+def test_the_captains_agent_is_chosen_beside_its_box_and_saved_at_once(
+    tmp_path: Path, script: Script, captain_off: None
+) -> None:
+    """SCOPE #113 274, L3: the captain on Codex was a TOML edit. *captain's agent* writes
+    ``[team.profiles.captain] agent`` as ``team bind captain --agent`` does, at once; *Use
+    default* clears it, and a profile left holding nothing goes. Reload follows the file."""
+    seed(tmp_path, ("prj_aaa", "alpha", "amber-otter"))
+
+    async def body(pilot: Pilot[None]) -> tuple[str, str | None, bool, str]:
+        app = fleet_app(pilot)
+        await refreshed(app)
+        toggle = await _settings(pilot)
+        select = toggle.query_one("#captain-agent", Select)
+        offered = {value for _label, value in select._options}
+        assert {"", "claude-code", "codex"} <= offered, offered
+        assert select.value == ""
+        select.value = "codex"
+        await settle_page(app)
+        chosen = load_config().team.profiles["captain"].agent
+        assert chosen is not None
+        select.value = ""
+        await settle_page(app)
+        cleared = "captain" in load_config().team.profiles
+        config = load_config()
+        config.team.profiles["captain"] = RoleLaunchProfile(agent="codex")  # `team bind`
+        save_config(config)
+        await pilot.click("#reload-settings")
+        await settle_page(app)
+        return str(select.value), chosen, cleared, captain_agent(load_config())
+
+    reloaded, chosen, cleared, on_file = drive(body)
+    assert chosen == "codex"
+    assert cleared is False, "Use default drops the profile it emptied"
+    assert reloaded == on_file == "codex", "Reload shows what a shell bound"
 
 
 def _in_section(row: AgentRow) -> bool:

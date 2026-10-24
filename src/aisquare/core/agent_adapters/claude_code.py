@@ -510,11 +510,14 @@ class ClaudeCodeAdapter:
             return None
         return [SYSTEM_PROMPT_FLAG, str(block)]
 
-    def headless_call(self, schema: Path, out: Path, model: str | None) -> list[str] | None:
+    def headless_call(
+        self, schema: Path, out: Path, model: str | None, *, home: Path, cwd: Path
+    ) -> list[str] | None:
         """``-p`` with ``--json-schema`` (the text of ``schema``, which it reads, ``OSError``
         when it cannot) and ``--output-format json``, isolated as the model probe is: no
-        tools, one turn, no session saved, no settings, no MCP servers. ``out`` is unused:
-        the answer is in the envelope it prints."""
+        tools, one turn, no session saved, no settings, no MCP servers (``--strict-mcp-config``
+        with none, so ``home`` and ``cwd`` are not read). ``out`` is unused: the answer is in
+        the envelope it prints."""
         text = schema.read_text(encoding="utf-8").strip()
         model_args = ["--model", model] if model else []
         return ["-p", *model_args, *_HEADLESS_HEAD, "--json-schema", text, *_HEADLESS_TAIL]

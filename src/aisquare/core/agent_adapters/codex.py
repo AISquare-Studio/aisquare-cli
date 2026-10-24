@@ -92,6 +92,12 @@ TOOL_FEATURES = (
 #: ``--disable worktrees`` leaves it in and ``enabled=false`` alone is refused ("invalid
 #: transport", the name being no layer's).
 TUI_TOOLS_SERVER = "codex_worktrees"
+#: Every tool feature switched off (:data:`TOOL_FEATURES`), and web search.
+_TOOLS_OFF = (
+    *(arg for feature in TOOL_FEATURES for arg in ("--disable", feature)),
+    "-c",
+    'web_search="disabled"',
+)
 #: A ``-c`` key splits on every dot, so an MCP server's name in one is a bare TOML key.
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 #: aisquare's Codex plugin (``plugins/codex``), by the name ``codex plugin add
@@ -858,17 +864,11 @@ class CodexAdapter:
         worktree tools beside the server's (SMOKE8 8b, 0.162.1 and 0.164.0)."""
         mine = (server, TUI_TOOLS_SERVER)
         others = [name for name in _mcp_servers(home, launch_args, cwd) if name not in mine]
-        for name in (server, *others):
-            if not _BARE_KEY.fullmatch(name):
-                raise ValueError(
-                    f"an MCP server's name in a Codex -c key is a bare key, not {name!r}"
-                )
-        table = f"mcp_servers.{server}"
+        table = f"mcp_servers.{_bare_key(server)}"
+        off = _servers_off(others)
         pairs = ", ".join(f"{json.dumps(name)} = {_toml_string(v)}" for name, v in env.items())
         return [
-            *(arg for feature in TOOL_FEATURES for arg in ("--disable", feature)),
-            "-c",
-            'web_search="disabled"',
+            *_TOOLS_OFF,
             "-c",
             f"{table}.command={_toml_string(command)}",
             "-c",
@@ -879,7 +879,7 @@ class CodexAdapter:
             f"{table}.env_vars=[{', '.join(map(_toml_string, inherit))}]",
             "-c",
             f'{table}.default_tools_approval_mode="approve"',
-            *(arg for name in others for arg in ("-c", f"mcp_servers.{name}.enabled=false")),
+            *off,
             "-c",
             f"mcp_servers.{TUI_TOOLS_SERVER}.command={_toml_string(command)}",
             "-c",
@@ -1287,14 +1287,27 @@ class CodexAdapter:
         value = f"{own.rstrip()}\n\n{text}" if own and own.strip() else text
         return ["-c", f"developer_instructions={_toml_string(value)}"]
 
-    def headless_call(self, schema: Path, out: Path, model: str | None) -> list[str] | None:
+    def headless_call(
+        self, schema: Path, out: Path, model: str | None, *, home: Path, cwd: Path
+    ) -> list[str] | None:
         """``exec --ephemeral --skip-git-repo-check --sandbox read-only -c features.hooks=false
-        --output-schema <schema> -o <out> [-m <model>] -``, measured on 0.162.1 with a
-        loopback provider: the request carries the schema as its strict ``json_schema``
-        text format, ``out`` holds the final JSON, no rollout is written, and ``-`` reads
-        the prompt from stdin. ``features.hooks=false`` because the hooks a manager slot
-        trusted fire under ``exec`` (``--ignore-user-config`` does not stop them), and with
-        it none did."""
+        <no tools> --output-schema <schema> -o <out> [-m <model>] -``, measured on 0.162.1
+        with a loopback provider: the request carries the schema as its strict
+        ``json_schema`` text format, ``out`` holds the final JSON, no rollout is written, and
+        ``-`` reads the prompt from stdin. ``features.hooks=false`` because the hooks a
+        manager slot trusted fire under ``exec`` (``--ignore-user-config`` does not stop
+        them), and with it none did.
+
+        No tools, as Claude Code's ``--tools ""`` call has none: its stdin frames an
+        untrusted source (review r17 of #113, finding 4). Every tool feature is off and web
+        search (:meth:`tools_only_args`' switches), and every MCP server the config layers
+        name for a session from ``home`` in ``cwd`` is switched off (:func:`_mcp_servers`,
+        :data:`TUI_TOOLS_SERVER` too where a layer names it). Measured on 0.162.1 and 0.164.0
+        with an MCP server in ``home``'s ``config.toml``: without them the request offered
+        ``exec_command``, the multi-agent and goal tools, ``web_search`` and the server's
+        tool; with them, ``request_user_input`` alone, which no feature switches off (M11).
+        ``ValueError`` for a server name that is not a bare TOML key, which a ``-c`` key
+        cannot hold."""
         return [
             "exec",
             "--ephemeral",
@@ -1303,6 +1316,8 @@ class CodexAdapter:
             "read-only",
             "-c",
             "features.hooks=false",
+            *_TOOLS_OFF,
+            *_servers_off(_mcp_servers(home, [], cwd)),
             "--output-schema",
             str(schema),
             "-o",
@@ -1474,6 +1489,21 @@ def _mcp_servers(home: Path, args: Sequence[str], cwd: Path) -> list[str]:
             if isinstance(servers, dict):
                 names.update(dict.fromkeys(servers))
     return list(names)
+
+
+def _bare_key(name: str) -> str:
+    """``name``, an MCP server's, which a ``-c`` key splits on every dot: ``ValueError`` for
+    one that is not a bare TOML key."""
+    if not _BARE_KEY.fullmatch(name):
+        raise ValueError(f"an MCP server's name in a Codex -c key is a bare key, not {name!r}")
+    return name
+
+
+def _servers_off(names: Sequence[str]) -> list[str]:
+    """``-c mcp_servers.<name>.enabled=false`` for each of ``names``, which must be ones a
+    config layer defines (Codex refuses its config over one no layer does, "invalid
+    transport"). ``ValueError`` for a name that is not a bare key (:func:`_bare_key`)."""
+    return [arg for name in names for arg in ("-c", f"mcp_servers.{_bare_key(name)}.enabled=false")]
 
 
 def _aimed(argv: list[str], home: Path) -> str:

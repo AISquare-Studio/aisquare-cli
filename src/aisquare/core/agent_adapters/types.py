@@ -1082,14 +1082,19 @@ class AgentAdapter(Protocol):
         agent's own order."""
         ...
 
-    def headless_call(self, schema: Path, out: Path, model: str | None) -> list[str] | None:
+    def headless_call(
+        self, schema: Path, out: Path, model: str | None, *, home: Path, cwd: Path
+    ) -> list[str] | None:
         """Arguments to the agent's binary for ONE headless turn whose answer is JSON that
         the JSON Schema in the file ``schema`` describes (``persona import --engine
         manager``), with ``model`` pinned where given: the instructions and the source go on
-        its stdin, it keeps no session, its hooks are off where a launch argument can say so,
-        and :meth:`headless_answer` reads its answer from what it printed or wrote to
-        ``out``. ``None`` for an agent without such a call: the engine ladder goes on to the
-        next engine. Run with the environment of the agent's manager account."""
+        its stdin, it keeps no session, it runs no tool and no MCP server (the source is
+        untrusted), not even one the config layers of a session from config dir ``home`` in
+        ``cwd`` name, its hooks are off where a launch argument can say so, and
+        :meth:`headless_answer` reads its answer from what it printed or wrote to ``out``.
+        ``None`` for an agent without such a call: the engine ladder goes on to the next
+        engine; ``ValueError`` for one whose tools cannot be switched off here. Run with the
+        environment of the agent's manager account, in ``cwd``."""
         ...
 
     def headless_answer(self, stdout: str, out: Path) -> object | None:

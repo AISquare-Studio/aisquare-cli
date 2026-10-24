@@ -354,7 +354,9 @@ The engines, tried in this order unless `--engine` picks one:
    with the environment stripped of any role, team or tracing identity. Claude
    Code runs `claude -p` with no tools and the answer's schema; Codex runs
    `codex exec --ephemeral --sandbox read-only -c features.hooks=false
-   --output-schema …` and the draft is read from its `-o` file. Claude Code
+   --output-schema …` with every tool feature, web search and the operator's
+   own MCP servers switched off, and the draft is read from its `-o` file. The
+   source is untrusted, so neither agent gets a tool to run. Claude Code
    rides the manager's model ladder; Codex runs its default unless a model is
    pinned for it.
 2. **api** — the Anthropic API through the official SDK, installed with

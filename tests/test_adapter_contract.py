@@ -872,7 +872,8 @@ def test_the_headless_call_holds_the_schema_keeps_no_session_and_reads_its_answe
     shape = {"type": "object", "properties": {"name": {"type": "string"}}}
     schema.write_text(json.dumps(shape), encoding="utf-8")
     out = tmp_path / "answer.json"
-    call = adapter.headless_call(schema, out, None)
+    home = _home(adapter, tmp_path)
+    call = adapter.headless_call(schema, out, None, home=home, cwd=tmp_path)
     if call is None:
         return  # no headless call: the engine ladder goes on to the next engine
     assert call and all(isinstance(arg, str) for arg in call)
@@ -886,7 +887,7 @@ def test_the_headless_call_holds_the_schema_keeps_no_session_and_reads_its_answe
     named = _named(call)
     for word in EXPECTED_HEADLESS[adapter.id]:
         assert word in named, f"{adapter.id}'s headless call lacks {word}"
-    pinned = adapter.headless_call(schema, out, "chosen-model")
+    pinned = adapter.headless_call(schema, out, "chosen-model", home=home, cwd=tmp_path)
     assert pinned is not None and "chosen-model" in pinned and "chosen-model" not in call
     recorded = RECORDED_HEADLESS[adapter.id]
     if recorded["out"] is not None:
@@ -895,6 +896,27 @@ def test_the_headless_call_holds_the_schema_keeps_no_session_and_reads_its_answe
     out.unlink(missing_ok=True)
     assert adapter.headless_answer("", out) is None
     assert adapter.headless_answer("not json", out) is None
+
+
+def test_the_headless_call_runs_no_tool_and_no_mcp_server_of_the_operators(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """Its stdin frames an untrusted source (``persona import https://…``), so the turn runs
+    with no built-in tool (:data:`EXPECTED_TOOLS_OFF`, the captain's switches: main's engine
+    ran Claude Code's ``--tools ""``) and none of the operator's MCP servers
+    (:data:`EXPECTED_OPERATOR_OFF`), none switched back on (review r17 of #113, finding 4)."""
+    schema = tmp_path / "persona-draft.schema.json"
+    schema.write_text('{"type": "object"}', encoding="utf-8")
+    home = _home(adapter, tmp_path)
+    _operator_server(adapter, home, tmp_path)
+    call = adapter.headless_call(schema, tmp_path / "answer.json", None, home=home, cwd=tmp_path)
+    if call is None:
+        return  # no headless call: the engine ladder goes on to the next engine
+    for switch in EXPECTED_TOOLS_OFF[adapter.id]:
+        assert _runs_within(switch, call), f"{adapter.id}'s headless call leaves a tool: {switch}"
+    off = EXPECTED_OPERATOR_OFF.get(adapter.id)
+    assert off is None or _runs_within(off, call), f"{adapter.id} loads the operator's server"
+    assert "--enable" not in call
 
 
 # --- account slots: a login's fingerprint, folder trust shared between accounts ---------------

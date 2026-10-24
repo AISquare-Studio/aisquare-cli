@@ -621,12 +621,18 @@ def test_codexs_headless_call_is_an_ephemeral_read_only_exec_with_its_hooks_off(
     ``--ephemeral`` no rollout is written; ``-`` reads the prompt from stdin; and the hooks
     a manager slot trusted fire under ``exec`` unless ``features.hooks=false``."""
     home = _home(tmp_path)
+    (home / "config.toml").write_text(
+        f'[mcp_servers.{TUI_TOOLS_SERVER}]\ncommand = "/opt/worktrees"\n', encoding="utf-8"
+    )
     schema, out = tmp_path / "s.json", tmp_path / "out.json"
-    call = codex.headless_call(schema, out, "gpt-5.5-codex")
+    call = codex.headless_call(schema, out, "gpt-5.5-codex", home=home, cwd=tmp_path)
     assert call == [
         "exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only",
-        "-c", "features.hooks=false", "--output-schema", str(schema), "-o", str(out),
-        "-m", "gpt-5.5-codex", "-",
+        "-c", "features.hooks=false",
+        *(arg for feature in TOOL_FEATURES for arg in ("--disable", feature)),
+        "-c", 'web_search="disabled"',
+        "-c", f"mcp_servers.{TUI_TOOLS_SERVER}.enabled=false",
+        "--output-schema", str(schema), "-o", str(out), "-m", "gpt-5.5-codex", "-",
     ]  # fmt: skip
     assert agents.hooks_switch("codex", home, call) is not None
     out.write_text("[1, 2]", encoding="utf-8")
@@ -646,7 +652,7 @@ def test_claude_codes_headless_answer_is_its_envelopes_structured_output(tmp_pat
     assert claude.headless_answer(json.dumps({"result": "prose"}), out) is None
     schema = tmp_path / "s.json"
     schema.write_text('{"type": "object"}\n', encoding="utf-8")
-    call = claude.headless_call(schema, out, None)
+    call = claude.headless_call(schema, out, None, home=tmp_path, cwd=tmp_path)
     assert call is not None and call[call.index("--json-schema") + 1] == '{"type": "object"}'
 
 

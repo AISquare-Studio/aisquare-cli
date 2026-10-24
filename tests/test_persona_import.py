@@ -684,6 +684,10 @@ def test_the_manager_engine_on_codex_runs_exec_and_reads_the_draft_from_its_outp
     stub = _codex_manager(monkeypatch, tmp_path)
     slot = accounts_core.create_account("codex")
     settings_service.bind_role("manager", account=str(slot.slot))
+    # The slot's own MCP server: switched off, as every tool is (review r17 of #113, 4).
+    (slot.config_dir / "config.toml").write_text(
+        '[mcp_servers.slots_own]\ncommand = "/opt/slots-own"\n', encoding="utf-8"
+    )
     runs = _Runs(_Completed(0))
     seen: list[dict[str, Any]] = []
 
@@ -703,6 +707,8 @@ def test_the_manager_engine_on_codex_runs_exec_and_reads_the_draft_from_its_outp
     assert argv[:3] == [str(stub), "exec", "--ephemeral"]
     assert "-p" not in argv and "--json-schema" not in argv, "no Claude Code flag reaches Codex"
     assert argv[argv.index("features.hooks=false") - 1] == "-c"
+    assert argv[argv.index("mcp_servers.slots_own.enabled=false") - 1] == "-c"
+    assert _flag(argv, "--disable") == "shell_tool"
     assert _flag(argv, "--sandbox") == "read-only"
     assert argv[-1] == "-", "the prompt is read from stdin"
     assert seen == [{"schema": persona_import.DRAFT_SCHEMA}]
@@ -776,6 +782,28 @@ def test_the_manager_engine_on_codex_takes_a_pinned_model_and_names_a_missing_an
     assert "manager engine: Codex gave no JSON answer" in str(caught.value)
 
 
+def test_a_codex_manager_whose_mcp_server_cannot_be_switched_off_runs_nothing(
+    engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server whose name a ``-c`` key cannot hold cannot be switched off, so the source is
+    never handed to a session that would load it: a reason for the ladder, in one line."""
+    _codex_manager(monkeypatch, tmp_path)
+    home = tmp_path / "plain-codex"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        '[mcp_servers."has.dot"]\ncommand = "/opt/x"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    runs = _runs(monkeypatch, _Completed(0, "", ""))
+
+    with pytest.raises(PersonaError) as caught:
+        _import(str(_notes(tmp_path)), engine="manager")
+
+    assert runs.calls == []
+    assert "manager engine: Codex's tools cannot be switched off" in str(caught.value)
+    assert "'has.dot'" in str(caught.value)
+
+
 def test_a_manager_whose_agent_has_no_headless_call_is_a_reason_for_the_ladder(
     engines: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -784,7 +812,9 @@ def test_a_manager_whose_agent_has_no_headless_call_is_a_reason_for_the_ladder(
     from tests.fake_agent import FakeAgentAdapter
 
     class _NoCall(FakeAgentAdapter):
-        def headless_call(self, schema: Path, out: Path, model: str | None) -> list[str] | None:
+        def headless_call(
+            self, schema: Path, out: Path, model: str | None, *, home: Path, cwd: Path
+        ) -> list[str] | None:
             return None
 
     fake = _NoCall()

@@ -216,8 +216,9 @@ adapter.**
     manager's account for that agent. With the manager bound to Codex it used to
     start `codex -p …`, which is Codex's `--profile`, and fail; it now runs
     `codex exec --ephemeral --skip-git-repo-check --sandbox read-only -c
-    features.hooks=false --output-schema <file> -o <file> -` and reads the
-    draft from `-o`. The answer's schema is the strict form (every field
+    features.hooks=false --output-schema <file> -o <file> -`, with every tool
+    feature, web search and the MCP servers its config names switched off (the
+    source is untrusted), and reads the draft from `-o`. The answer's schema is the strict form (every field
     required, no other), which Codex's strict structured output needs. An agent
     with no headless call is a reason for the ladder, which goes on to `api`.
 - **Stop an agent from `asq`.** The agent view's header gains a compact **Stop**

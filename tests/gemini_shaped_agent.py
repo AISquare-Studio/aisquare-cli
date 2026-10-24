@@ -609,7 +609,9 @@ class GeminiShapedAdapter:
         project = (repo / CONFIG / "skills", repo / ".agents" / "skills") if repo else ()
         return SkillDirs((home / "skills",), project)
 
-    def headless_call(self, schema: Path, out: Path, model: str | None) -> list[str] | None:
+    def headless_call(
+        self, schema: Path, out: Path, model: str | None, *, home: Path, cwd: Path
+    ) -> list[str] | None:
         return None  # no schema for its -p answer: the engine ladder goes on
 
     def headless_answer(self, stdout: str, out: Path) -> object | None:

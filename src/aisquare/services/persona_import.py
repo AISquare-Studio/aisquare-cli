@@ -144,7 +144,7 @@ def manager_model(selected: ResolvedAgent | None = None) -> str | None:
     return None if resolution is None else resolution.model or None
 
 
-def _manager_env(selected: ResolvedAgent) -> dict[str, str]:
+def _manager_env(selected: ResolvedAgent) -> tuple[dict[str, str], Path]:
     """The probe's environment — no role, no team, no model overrides, no tracing
     identity — plus the manager profile's own variables and the account the manager
     launches under, so the manager's account pays; the team switch is forced off again
@@ -158,7 +158,8 @@ def _manager_env(selected: ResolvedAgent) -> dict[str, str]:
     with ``--account 2`` imported on whatever login this shell had (review of #240, "also
     confirmed": the manager engine ignores the account binding). A binding to an account
     that does not exist, or is another agent's, is a reason for the ladder, as it stops a
-    launch."""
+    launch. With it, the config dir that environment runs the agent from: the account's,
+    else the one ``selected`` resolved."""
     from aisquare.core import claude_accounts as accounts_core
     from aisquare.services import claude_accounts as accounts_service
 
@@ -171,7 +172,7 @@ def _manager_env(selected: ResolvedAgent) -> dict[str, str]:
     if choice.account is not None:
         accounts_core.apply_launch_env(env, choice.account, shell=os.environ)
     env["AISQUARE_TEAM"] = "0"
-    return env
+    return env, choice.account.config_dir if choice.account is not None else selected.config_dir
 
 
 def draft_with_manager(
@@ -188,10 +189,10 @@ def draft_with_manager(
     read back from ``-o``. An agent without such a call is a reason for the ladder.
 
     Isolated like ``harness.probe_model``: it runs from the aisquare home (never the
-    caller's checkout), with no session saved, the agent's hooks off where a launch
-    argument can say so, and a stripped environment on the manager's account. The
-    instructions and the source go on stdin. Anything short of a structured draft is
-    :class:`EngineUnavailable`.
+    caller's checkout), with no session saved, no tool and no MCP server (the source is
+    untrusted), the agent's hooks off where a launch argument can say so, and a stripped
+    environment on the manager's account. The instructions and the source go on stdin.
+    Anything short of a structured draft is :class:`EngineUnavailable`.
     """
     size = len(source_text.encode("utf-8"))
     if size > MANAGER_SOURCE_MAX_BYTES:
@@ -203,7 +204,7 @@ def draft_with_manager(
     adapter = selected.adapter
     binary = selected.binary.binary
     model = manager_model(selected)
-    env = _manager_env(selected)
+    env, config_dir = _manager_env(selected)
     home = aisquare_home()
     try:
         home.mkdir(parents=True, exist_ok=True)
@@ -217,10 +218,14 @@ def draft_with_manager(
         out = Path(scratch) / "answer.json"
         try:
             schema.write_text(json.dumps(DRAFT_SCHEMA), encoding="utf-8")
-            call = adapter.headless_call(schema, out, model)
+            call = adapter.headless_call(schema, out, model, home=config_dir, cwd=home)
         except OSError as exc:
             raise EngineUnavailable(
                 f"manager engine: cannot write its schema ({exc.strerror or exc})"
+            ) from None
+        except ValueError as exc:
+            raise EngineUnavailable(
+                f"manager engine: {adapter.label}'s tools cannot be switched off ({exc})"
             ) from None
         if call is None:
             raise EngineUnavailable(f"manager engine: {adapter.label} has no headless call")

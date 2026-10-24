@@ -2397,7 +2397,7 @@ def _account_default_checks(agent: str) -> list[DoctorCheck]:
             )
     dangling: list[str] = []
     for project_id, raw in per_project.items():
-        if not raw.isdigit() or int(raw) not in by_slot:
+        if claude_accounts_core.slot_number(raw) not in by_slot:
             dangling.append(f"project {names.get(project_id, project_id)} → slot {raw}")
     for role, ref in bindings.items():
         try:

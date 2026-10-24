@@ -640,6 +640,72 @@ def test_a_calls_result_on_the_newer_page_reaches_the_page_its_call_is_on(
         unregister(adapter.id)
 
 
+# --- accounts: its plain slot by its number ------------------------------------------------
+
+
+def test_its_negative_plain_slot_is_named_by_its_number_wherever_a_slot_is(
+    third: AgentAdapter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    """r18 finding 1: Claude Code's plain slot is 1, Codex's 0 and the managed ladder runs from
+    2, so a third agent's plain slot is negative (the fake's -1, the Gemini-shaped one's -2).
+    It is named by that number as any slot is: by ``choose``, a project default, ``accounts
+    default`` and ``run``, ``team bind --account``, and a fleet spawn whose window's launch
+    is handed ``--account -2``; and no alias may read as it."""
+    from importlib import import_module
+    from unittest.mock import Mock
+
+    from aisquare.core.config import FleetRoleSettings, load_config, save_config
+    from aisquare.core.orchestrator import team_project
+    from aisquare.services import claude_accounts as accounts_service
+    from aisquare.services import fleet as fleet_service
+    from tests import fakebin
+    from tests.test_fleet_service import FakeTmux
+
+    assert third.accounts is not None
+    plain = accounts_core.default_account(agent=third.id)
+    plain.config_dir.mkdir(parents=True, exist_ok=True)
+    number = str(plain.slot)
+    assert plain.slot < 0, "0 and 1 are taken, 2 up is the managed ladder"
+    project = team_project(tmp_path)
+
+    with pytest.raises(ValueError, match="reads as a slot number"):
+        accounts_core.normalise_alias(number)  # an alias of its number would hide it
+    chosen = accounts_service.choose(number, agent=third.id).account
+    assert chosen is not None and (chosen.agent, chosen.slot) == (third.id, plain.slot)
+    accounts_service.set_default(number, project=project, agent=third.id)
+    found = accounts_service.project_default(project, agent=third.id)
+    assert found is not None and found.slot == plain.slot
+
+    defaulted = runner.invoke(app, ["accounts", "default", number])
+    assert defaulted.exit_code == 0, defaulted.output
+    found = accounts_service.machine_default(third.id)
+    assert found is not None and found.slot == plain.slot
+    bound = runner.invoke(app, ["team", "bind", "coder", "--agent", third.id, "--account", number])
+    assert bound.exit_code == 0, bound.output
+
+    bin_dir = tmp_path / "bin"
+    fakebin.executable_fake(bin_dir, third.binary, windows="set /p line=", posix="read line")
+    fakebin.prepend_to_path(bin_dir, monkeypatch)
+    execute = Mock()
+    monkeypatch.setattr(import_module("aisquare.cli.accounts"), "_exec", execute)
+    opened = runner.invoke(app, ["accounts", "run", number])
+    assert opened.exit_code == 0, opened.output
+    assert f"as {third.accounts.plain_label}" in opened.output, opened.output
+
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+    save_config(config)
+    tmux = FakeTmux()
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+    receipt = fleet_service.spawn(project, "coder", agent=third.id, account=number)
+    assert receipt.agent.account_slot == plain.slot
+    command = tmux.spawned[-1]["command"]
+    assert isinstance(command, list) and command[command.index("--account") + 1] == number
+    monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execute)
+    launched = runner.invoke(app, command[command.index("launch") :])
+    assert launched.exit_code == 0, launched.output
+
+
 # --- the files a new agent touches ---------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parents[1]

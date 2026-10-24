@@ -60,6 +60,9 @@ app = typer.Typer(
 SlotRef = Annotated[
     str, typer.Argument(help="Slot number, alias, or the email the slot is signed in as.")
 ]
+#: A command that takes a slot reads ``-2`` as one: an agent registered after Claude Code and
+#: Codex has a negative plain slot (``core.slot_number``), which click took for an option.
+SLOT_ARGS: dict[str, Any] = {"ignore_unknown_options": True}
 ProjectOpt = Annotated[
     str | None,
     typer.Option(
@@ -350,7 +353,7 @@ def list_(
         stdout_console().print(line)
 
 
-@app.command("usage")
+@app.command("usage", context_settings=SLOT_ARGS)
 def usage_(
     slot: Annotated[
         str | None,
@@ -529,7 +532,7 @@ def _show_defaults(project: ProjectInfo | None) -> None:
     )
 
 
-@app.command("default")
+@app.command("default", context_settings=SLOT_ARGS)
 def default(
     ref: Annotated[
         str | None,
@@ -636,7 +639,7 @@ def _set_role_default(role: str, ref: str | None, *, clear: bool) -> None:
         stdout_console().print(f"✓ role {role} launches on account {bound.account}", markup=False)
 
 
-@app.command("alias")
+@app.command("alias", context_settings=SLOT_ARGS)
 def alias(
     ref: SlotRef,
     name: Annotated[str | None, typer.Argument(help=f"The name: {core.ALIAS_HINT}")] = None,
@@ -675,7 +678,7 @@ def _emit_order(accounts: list[ClaudeAccount]) -> None:
         console.print(f"{mark} {account.position}. {_who(account)}{off}", markup=False)
 
 
-@app.command("order")
+@app.command("order", context_settings=SLOT_ARGS)
 def order(
     refs: Annotated[
         list[str],
@@ -690,7 +693,7 @@ def order(
     _emit_order(arranged)
 
 
-@app.command("move")
+@app.command("move", context_settings=SLOT_ARGS)
 def move(
     ref: SlotRef,
     direction: Annotated[str, typer.Argument(help="up, down, top or bottom")],
@@ -729,13 +732,13 @@ def _toggle(ref: str, *, disabled: bool) -> None:
         stdout_console().print(f"✓ {_who(account)} is enabled", markup=False)
 
 
-@app.command("disable")
+@app.command("disable", context_settings=SLOT_ARGS)
 def disable(ref: SlotRef) -> None:
     """Keep an account out of automatic selection; naming it with --account still works."""
     _toggle(ref, disabled=True)
 
 
-@app.command("enable")
+@app.command("enable", context_settings=SLOT_ARGS)
 def enable(ref: SlotRef) -> None:
     """Put an account back into automatic selection."""
     _toggle(ref, disabled=False)
@@ -823,7 +826,7 @@ def add(agent: AgentOpt = None) -> None:
     )
 
 
-@app.command("remove")
+@app.command("remove", context_settings=SLOT_ARGS)
 def remove(slot: SlotRef) -> None:
     """Forget a managed account: its directory is kept beside itself as <n>.removed-<stamp>."""
     account = _resolve(slot)

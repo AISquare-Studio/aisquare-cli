@@ -1569,6 +1569,8 @@ class AgentAccounts(Protocol):
     dir_name: str
     """The slots' parent under the aisquare home (``claude-accounts``, ``codex-accounts``)."""
     plain_slot: int
+    """The plain home's slot number: Claude Code's 1, Codex's 0, and a negative one for an agent
+    registered after them, since the managed ladder runs from 2 (``core.slot_number``)."""
     plain_label: str
     install_command: str
     network_usage: bool

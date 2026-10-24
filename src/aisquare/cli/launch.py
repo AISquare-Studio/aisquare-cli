@@ -509,7 +509,11 @@ def launch(
         except claude_accounts_service.NoSuchAccount as exc:
             message = str(exc)
             native = selected.adapter.capabilities.value_options
-            if _ACCOUNT_SHORT in native and account is not None and not account.isdigit():
+            if (
+                _ACCOUNT_SHORT in native
+                and account is not None
+                and claude_accounts_core.slot_number(account) is None
+            ):
                 message += (
                     f". launch's {_ACCOUNT_SHORT} is --account: for {selected.adapter.label}'s "
                     f"own {_ACCOUNT_SHORT}, pass {_ACCOUNT_SHORT} {account} after --"

@@ -198,7 +198,7 @@ def _account_named(ref: str, agent: str | None, statuses: list[ClaudeAccountStat
     for status in ordered:
         account, identity = status.account, status.identity
         if (
-            (ref.isdigit() and account.slot == int(ref))
+            account.slot == accounts_core.slot_number(ref)
             or (account.alias is not None and name_key(account.alias) == name_key(ref))
             or (identity is not None and "@" in ref and identity.email.lower() == ref.lower())
         ):

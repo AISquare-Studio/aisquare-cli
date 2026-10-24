@@ -359,7 +359,7 @@ def _read_registry(
             )
     except sqlite3.Error as exc:
         return core.list_accounts(), f"accounts registry unreadable ({exc})", None
-    return accounts, None, int(raw) if raw is not None and raw.isdigit() else None
+    return accounts, None, core.slot_number(raw) if raw is not None else None
 
 
 def _read_arranged() -> tuple[list[ClaudeAccount], str | None]:
@@ -486,8 +486,9 @@ def _find_in(
 ) -> ClaudeAccount:
     text = str(ref).strip()
     whose = _whose(agent, accounts)
-    if text.isdigit():
-        account = next((a for a in accounts if a.slot == int(text)), None)
+    number = core.slot_number(text)
+    if number is not None:
+        account = next((a for a in accounts if a.slot == number), None)
         if account is None:
             raise NoSuchAccount(f"no {whose} account in slot {text} — see: aisquare accounts")
         return account

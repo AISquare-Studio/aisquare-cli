@@ -362,6 +362,15 @@ def slot_name(slot: int) -> str:
     return default_label(slot)
 
 
+def slot_number(text: str) -> int | None:
+    """The slot ``text`` names by its number, ``None`` when it names none that way: digits, or a
+    minus and digits. Claude Code's plain slot is 1, Codex's 0 and the managed ladder runs from
+    :data:`FIRST_MANAGED_SLOT` up, so an agent registered after them has a negative plain slot
+    (``AgentAccounts.plain_slot``): ``--account -2`` names it, as ``--account 3`` slot 3."""
+    stripped = text.strip()
+    return int(stripped) if stripped.removeprefix("-").isdecimal() else None
+
+
 def _labelled_slot(name: str) -> int | None:
     """The slot whose :func:`default_label` ``name`` reads as, whatever its case, spacing and
     variation selectors (:func:`core.names.name_key`): ``account 3`` U+FE00 prints as slot 3's.
@@ -411,8 +420,10 @@ def normalise_alias(raw: str, *, slot: int | None = None) -> str:
         raise ValueError("an alias cannot be empty")
     if len(alias) > ALIAS_MAX:
         raise ValueError(f"{raw!r} is {len(alias)} characters — an alias is at most {ALIAS_MAX}")
-    if name_key(alias).isdigit():
-        raise ValueError(f"{raw!r} reads as a slot number — an alias cannot be only digits")
+    if name_key(alias).isdigit() or slot_number(name_key(alias)) is not None:
+        raise ValueError(
+            f"{raw!r} reads as a slot number — an alias cannot be only digits, signed or not"
+        )
     if "@" in alias:
         raise ValueError(f"{raw!r} reads as an email — an alias cannot contain '@'")
     flaw = name_flaw(alias)

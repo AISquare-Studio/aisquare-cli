@@ -89,7 +89,28 @@ WS-0 is the prerequisite and is not scored.
 | 5 | WS-5 #129 remainder | wall time and model price, not tokens | — | #129's estimates: 18–35 min per run from per-task verification, 5–8 min from xdist | latency | M | not scored |
 
 WS-0's baseline run (§1.7) turns the Impact column into token counts per manager-hour and
-per agent-hour. Re-rank in the release PR if the counts change the order. The waves below
+per agent-hour. Re-rank in the release PR if the counts change the order.
+
+**Re-scored from the reduced baseline run (WS-0, 2026-10-23; shape and caveats in §1.7).**
+The counts keep the order. Measured on 106 requests and 5,666,363 input tokens
+(97% cache reads), over 10.5 minutes:
+
+- **WS-1:** each request's prefix, the baseline, was 38,220–40,026 tokens per session.
+  WS-1's measured cut on the same Claude Code release (#311) is about 17k per request
+  in an interactive `/context` (26.9k → 9.9k for a coder), and 7.1k on a first request
+  under `-p`. Over these 106 requests that is about 0.75M–1.8M tokens, 13–32% of the
+  run's input. It is still the largest per-request saving: High.
+- **WS-2:** the manager took 4 wakes. They cost 346,949 input tokens, 17% of the
+  manager's 2.01M, and 2 of the 4 took no action. Two made no tool call at all; the
+  other two each ran `fleet tell`, a write. That holds under the board-read rule as
+  fixed in review (`team log`, `task next` without `--claim`, a read behind `cd`). 20 delta blocks (21,723 characters)
+  were carried for 311,384 characters across later requests. High.
+- **WS-3:** this fixture's skeleton is 715 tokens, below the read-first limit, so it
+  cost nothing here, by design. It stays Medium: none on small repos, severe on large
+  ones (WS-3's own runs).
+- **WS-4:** there was no compaction in 10 minutes. The manager's context was 54,441 on
+  average and 65,785 at peak, so this scale cannot measure WS-4. It stays High by
+  mechanism. The waves below
 follow dependencies, so WS-1 and WS-3 ship together in wave 1 whichever ranks first.
 
 ### 1.3 Recommended order
@@ -182,6 +203,29 @@ lands, a PR may use a throwaway script that applies the same definitions.
   baseline; each workstream re-runs the same script on its branch. WS-3 adds two fixture
   repos: one whose skeleton is between 25k tokens and `max_tokens`, and one over
   `max_tokens`.
+- **Baseline as run (2026-10-23, reduced scale by owner decision).** Base `f6110b62` (main
+  `09f48563` plus this handoff; no code change), Claude Code **2.1.309**, the default
+  logged-in account (Claude Team), Opus 5.5 for every role.
+  - Fleet: 1 manager, 2 coders and 1 reviewer, 4 agents, on a scratch `AISQUARE_HOME`
+    and a scratch tmux socket (`asqbl`). Claude Code ran with `--setting-sources
+    project,local` and a scratch `--settings` holding only the base's six hooks, so no
+    user hook and no `~/.aisquare` was touched.
+  - Work: a 5-file fixture repo (`textkit`, no remote) and 3 tasks. One task failed
+    review once.
+  - Time: 10.5 minutes of wall time, 18:02–18:13Z. That falls short of the two hours
+    and the gap past the cache TTL asked above; the full run happens once all four
+    trains are on main.
+  - Kickoff: the manager's goal was typed into its pane by hand. `fleet tell` filed it as
+    a note, because the board read the idle manager as `working` (#123, P0).
+  - Ledger: `aisquare --json metrics tokens --all` over that home, counts only, is
+    attached to the WS-0 PR. The store's `continuations:` key agrees with its 4 wakes.
+  - **Known gaps; do not compare against this run for them:**
+    - No request came after a gap longer than the cache TTL, so it shows no
+      cache-expiry wake.
+    - It has no compaction, so it is not a baseline for WS-4's quiet-point compaction
+      or its context sawtooth.
+    - WS-4 measures against the full run, or a manager run of its own long enough to
+      compact.
 
 ---
 
@@ -896,3 +940,74 @@ bills are "leaping from $20 or $100 a month … to $2,000 or even $5,000".
 - Per-plugin enable/disable per role (`enabledPlugins` via `--settings`); only the listing
   budget is in scope. Server-side API compaction or context editing: aisquare drives
   Claude Code sessions, not the Messages API.
+
+---
+
+## 10. Results (2026-10-24)
+
+Every live run was at **reduced scale** (owner decision 2026-10-23): at most 5 Claude
+sessions, at most 30 minutes, a scratch `AISQUARE_HOME` and a scratch tmux socket, never
+the real `asq` socket, `~/.aisquare` or a working fleet. Every count below is the §1.7
+method (`aisquare metrics tokens`) unless the row says otherwise. The full baseline run
+as written in §1.7 happens once, after all four trains are on `main`.
+
+| Workstream | PR | Scale | Before | After |
+| --- | --- | --- | --- | --- |
+| WS-0 ledger and baseline | #319 | 4 agents (1 manager, 2 coders, 1 reviewer), 3 tasks, 10.5 min, Claude Code 2.1.309, Opus 5.5, socket `asqbl` | — | **the baseline:** 106 requests, 5,666,363 input tokens (97% cache reads); first requests 38,220–40,026; the manager's 37 requests 2,014,301 tokens, 4 wakes (2 took no action) costing 346,949; 20 delta blocks (21,723 chars) carried for 311,384 chars; no compaction |
+| WS-1 lean role context | #311 | a real fleet coder, paired: 1 agent per side, 6 requests each, sockets `asqpb`/`asqpa`, 2.1.309 | first request **39,270** tokens; 244,320 over 6 requests; `/context` 26.9k (tools 21.6k, skills 2.5k) | first request **19,315** (−19,955 on every request, −51%); 124,520 over 6 requests; `/context` 9.9k (tools 7.4k, skills 100). Over the baseline's 106 requests: about −1.8M to −2.1M (32–37%) |
+| WS-2 wake and delta diet | #336, #365 | replay, counts only, on a copy of the WS-0 baseline store | 19 wake-class events (the old `MANAGER_WAKE_KINDS`) | **16 (−16%)**: the run's 3 clean `agent_exited` are now info. The ≥ 80% target is **not demonstrated at this scale** (owner call 9). Every update is one line of ≤ 160 chars, the rest one `team show` away |
+| WS-3 over-budget snapshot | #299 | 12 headless `claude -p` sessions, ≤ 4 at a time, ≤ 10 min each, 2.1.309 | the skeleton read from line 1 in 2 of 2 `between` runs; context at end 44,493 · 44,257 | read from line 1 in **0 of 2**; context at end **26,331 · 26,096**. The read-first limit is 12,000 tokens, not the handoff's 25,000: one default Read held 14,163 (owner call 10) |
+| WS-4 manager hygiene | #361 | start pack: a read-only copy of a live fleet's store, rendered in a scratch home; `/compact`: 1 `claude` (2.1.310), socket `asqws4probe`, ~3 min | the board: 6,810 chars showing **8** of 22 open tasks, and a fresh manager re-read the open contracts (53,771 chars) | the start pack: 8,010 chars with **all 22**. A pasted `/compact <instructions>` compacts on one Enter and fires only SessionStart(`compact`), same session id. Quiet compaction **ships off**; manager input per hour with it on is not measured (deferred) |
+| WS-5ab per-task verification, model ladder | #338 | tests | testers raced for the review pool; `fleet spawn` ignored the ladder | one tester per task at its review, which stops after its verdict; `fleet spawn` runs `--model`/`--effort` from the cached probe. Not a token item; no live run |
+| WS-5d xdist (landed via P0) | #309 | CI runners | `Test (pytest)` 42–56 min per Linux leg | 16–22 min with `-n auto` (P0's Results) |
+
+**Not built in this train, and why.** WS-4's optional M2 (`PostCompact` → `aisquare hook
+post-compact`): the ledger reads compactions from the transcript's `compact_boundary`. The
+inbox-socket tier stays with P0's follow-up.
+
+### Owner calls
+
+The owner approves the train on these. Each row is one call: the default this train built
+(the handoff's proposal where it had one), the PR that built it, and how to flip it.
+"Code" means no key turns it: flipping it is a change in a later PR.
+
+| # | Call | Default taken | Where | How to flip |
+| --- | --- | --- | --- | --- |
+| 1 | Q1: the eight unused tools are denied for every role, the manager included | `[fleet] deny_tools` = Artifact, ArtifactComments, Workflow, ReportFindings, ShareOnboardingGuide, PushNotification, ScheduleWakeup, SendFeedback; Workflow kept at `ultracode` effort | #311 | `deny_tools = []` in `[fleet]`, or a role's `allow_tools` |
+| 2 | Q2: how much of the skill listing a role carries | `names` for workers, `full` for the manager; `names` is `skillListingMaxDescChars: 1` | #311 | `[fleet.roles.<role>] skill_listing = "full"` (or `"off"`) |
+| 3 | Q3: `extra_args` stays fleet-only | not unified into `launch` | #311 | Code |
+| 4 | The config file moves to version 3 | a reviewer whose `extra_args` are exactly 0.8.2's default loses them (the deny is the role's own) | #311 | Code; `upgrade --version` to ≤ 0.8.2 names the `config set` that keeps the deny there |
+| 5 | Q4: which exits wake the manager | a failed, killed or lost exit, one that released a claim, or a hand-over that did not start; a clean exit is news | #336 | Code |
+| 6 | Q5: what of the board each role reads | `board_context = "none"` for the reviewer, `"all"` for the others; a manager always reads all | #336 | `[fleet.roles.<role>] board_context = "all" \| "relevant" \| "none"`, or `fleet spawn --board-context` |
+| 7 | Under `none`, a note addressed to the agent still reaches it at its turn's end, nothing else of the board | asked in the query, before its limit | #365 (manager decision) | Code |
+| 8 | The captain's and the phone's stops act as `user`; `fleet stop --as` with an unknown session keeps the string as the actor | as built | #336 | Code |
+| 9 | Merge WS-2 below its ≥ 80% wake-reduction target | 19 → 16 (−16%) on the 10-minute baseline; the full-scale run after `main` (manager decision seq 1435) | #336 | — |
+| 10 | The skeleton's read-first limit | 12,000 tokens (one default Read held 14,163), not 25,000; one constant in `services/hooks.py` | #299 | Code |
+| 11 | Q8: quiet-point compaction | **off** (`quiet_compact_at = 0`) | #361 | `aisquare config set fleet.quiet_compact_at 400000` |
+| 12 | Q9: a contract missing a brief block | warns | #361 | `aisquare config set team.brief_strict true` |
+| 13 | Q10: a resume prompt after a quiet compaction | off | #361 | `aisquare config set fleet.quiet_compact_resume true` |
+| 14 | The state file's one limit | 4,000 chars, which the start pack quotes in full (not the handoff's 8,000 clip) | #361 | Code |
+| 15 | Where the state file lives | per fleet project, `~/.aisquare/projects/<id>/manager/state.md` | #361 | Code |
+| 16 | Q11: per-task verification and the spawn ladder | built (b) rather than deleting the dead path; the model is recorded in `LaunchSpec`, so a restart never drifts | #338 | Code; arguments that name a model or effort are the caller's |
+| 17 | A tester spawned for a task stops after its one verdict | as built; the pool tester still repeats | #338 | Code |
+
+### Deferred to the post-main live run (owner decision 2026-10-23)
+
+1. The full baseline run of §1.7: one manager, two coders, a tester and a reviewer, five
+   tasks, at least two hours, with a gap past the cache TTL; every workstream's
+   before/after re-counted against it.
+2. WS-2's wake reduction at that scale, against the ≥ 80% target (owner call 9).
+3. WS-4 with `quiet_compact_at` set: manager input tokens per manager-hour, the context
+   sawtooth, compactions by trigger, and tokens read in a new manager's first 30 minutes.
+4. WS-5ab's minutes per run from per-task verification (#129's 18–35 min estimate).
+
+### Release checklist (§8), as done
+
+- Version: the minor bump with P0's, coordinated at release. The store schema step is
+  **35** (reserved for P1; P0's W1a took 34), and the config step is 3.
+- CHANGELOG `[Unreleased]`: one entry per workstream, in the house voice (this PR).
+- Migration notes: `docs/fleet.md` "Upgrading", *To the release with the token diet*.
+- Rollout defaults: as in owner calls 1, 2, 6 and 11; each flips with the line given.
+- Docs: `docs/fleet.md`, `docs/orchestration.md`, `docs/reference.md` and this handoff
+  were updated by each workstream's PR; README unchanged.
+- Measured numbers: the Results table above.

@@ -295,7 +295,9 @@ def test_a_shorter_project_name_is_never_read_into_the_longer_one(
     """The other way round stays an order: alpha is not what "alpha-omega" names."""
     omega = _onboard(tmp_path, "alpha-omega")
     ok(actions.stop("alpha-omega", "coder-1", confirm=True, utterance=utterance))
-    assert fleet_rec.calls == [("stop", {"project": omega.id, "label": "coder-1", "force": False})]
+    assert fleet_rec.calls == [
+        ("stop", {"project": omega.id, "label": "coder-1", "force": False, "actor": "user"})
+    ]
 
 
 def test_a_hyphenated_name_no_project_carries_is_not_this_project_either(
@@ -320,7 +322,7 @@ def test_a_longer_label_is_another_agent_never_this_one(
     assert fleet_rec.calls == [], "nothing stopped"
     ok(_stop("stop coder-1-2", "coder-1-2"))
     assert fleet_rec.calls == [
-        ("stop", {"project": alpha.id, "label": "coder-1-2", "force": False})
+        ("stop", {"project": alpha.id, "label": "coder-1-2", "force": False, "actor": "user"})
     ]
 
 
@@ -363,7 +365,9 @@ def test_the_agent_named_with_its_project_is_confirmed_as_before(
     alpha: ProjectInfo, agents: dict[str, FleetAgent], fleet_rec: Fleet
 ) -> None:
     ok(_stop("Stop coder-1 in alpha"))
-    assert fleet_rec.calls == [("stop", {"project": alpha.id, "label": "coder-1", "force": False})]
+    assert fleet_rec.calls == [
+        ("stop", {"project": alpha.id, "label": "coder-1", "force": False, "actor": "user"})
+    ]
 
 
 def test_a_label_said_with_a_space_is_still_that_label(

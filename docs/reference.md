@@ -10,7 +10,7 @@ removes exactly them):
 | --- | --- |
 | `SessionStart` | inject orientation: snapshot pointers, context, team briefing; mark the session `waiting` (it sits at its prompt until one is typed), except after a compaction, which keeps what the turn said |
 | `UserPromptSubmit` | record the prompt in a project you added (anywhere, with `[projects] capture` on), unless `capture.enabled` is off; deliver the teammate delta; heartbeat, which stamps the session's last prompt and marks its fleet agent's first message taken ([fleet](fleet.md#the-first-message)) |
-| `Stop` | mark the session waiting; renew its task leases; keep a manager going on fresh board decisions, and any other agent on the notes addressed to it ([fleet](fleet.md#fleet-tell)) |
+| `Stop` | mark the session waiting; renew its task leases; keep a manager going on fresh board decisions, and any other agent on the notes addressed to it ([fleet](fleet.md#fleet-tell)); for a fleet manager with `fleet.quiet_compact_at` set, start the hidden `aisquare hook compact-check` worker ([fleet](fleet.md#long-lived-managers-state-file-start-pack-and-quiet-compaction)); for a fleet worker that may have finished, start the hidden `aisquare hook auto-stop` check ([fleet](fleet.md#capacity)) |
 | `Notification` | flag **NEEDS YOU** when a prompt needs a human (permission, elicitation); other notices are feed lines, the idle notice nothing |
 | `SessionEnd` | release claims, mark the session gone, final distill |
 | `StopFailure` | the turn ended on an API error: a usage limit (`rate_limit`) marks the session `limited` with its reset time and remembers the limit on the account until that reset, so no pick by headroom sends an agent back to it before then; with `[accounts] on_limit = "switch"` a fleet agent is handed to another account, the line is a `limited_handing_over` event that wakes nobody, and a hand-over that cannot go ahead posts `handover_failed`, which wakes the manager; without a hand-over coming, `limited` wakes it ([accounts](orchestration.md#several-accounts-one-team)); any other error marks it `waiting`, with a feed line naming the error |
@@ -31,11 +31,23 @@ concurrency-tested against racing parallel sessions):
 ├── fleet-tmux.conf  # the fleet's private tmux server config (regenerated, not yours)
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
-├── projects/     # per-project data — snapshot/ (Repomix pack), brain/ (gbrain)
+├── projects/     # per-project data — snapshot/ (Repomix pack), code/ (symbol index), brain/ (gbrain)
 ├── cache/        # disposable (e.g. last_injection.json; statusline/: one record per Claude Code
 │                 #   session carrying asq-statusline, kept a day, and fleet.json, the figure it prints)
 └── log/          # capture and diagnostic logs
 ```
+
+Every `[fleet]` key, with its default, is in
+[fleet.md](fleet.md#permission-modes-and-every-default-you-can-change). The keys that
+decide which Claude Code tools and how much of the skill listing a role launches with,
+wherever it starts ([Tools and skills per role](fleet.md#tools-and-skills-per-role)):
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `fleet.deny_tools` | the eight tools no role uses | denied for every role |
+| `fleet.roles.<role>.deny_tools` | `[]` | denied for this role too |
+| `fleet.roles.<role>.allow_tools` | `[]` | taken back out, safety list included; never a `--disallowedTools` on the line |
+| `fleet.roles.<role>.skill_listing` | `full` for manager, `names` for the rest | `full`, `names` (descriptions cut) or `off` (`Skill` denied) |
 
 Ids everywhere are time-sortable and prefix-addressable (git-style: any
 unambiguous prefix works). Every command takes a global `--json` flag for
@@ -56,6 +68,9 @@ aisquare
 ├── project (workspace)  info · list · switch · link · onboard [--refresh] · forget <id|path> [--purge]
 │                   rename <nickname> [--clear]   — what the sidebar and the lists call it
 │                   prune [--missing] [--worktrees] [--purge] [--yes]
+├── code            find <name> [--kind K] [--limit N] · refs <name> [--defs] [--limit N]
+│                   similar <name|path:line> [--limit N] · index [--full] [--status]
+│                   — the project's symbol index (docs/memory.md#symbol-index; [code] enabled, max_file_kb)
 ├── agents          scan · list · status [name] · connect <name> · disconnect <name>
 │                                                  [--config-dir DIR]
 ├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot] [--summary]
@@ -73,7 +88,8 @@ aisquare
 │                                 [--effort LEVEL] · harness
 │                   bind <role> [--bin CMD] [--env KEY=VALUE]… [--arg A]…
 │                               [--unset KEY] [--account A] [--clear-account] [--clear]
-├── task            add · list · show · next [--role R] [--status S] [--claim]
+│                   show <seq>   — one board event in full (author, actor, task, details)
+├── task            add · list · show · next [--role R] [--status S] [--claim] [--task T]
 │                   claim · review [--note] · reopen --reason · done [--note]
 │                   block --reason · drop · release        (all with [--as SESSION])
 │                   a task is its id, or 12 / #12 — its number on the caller's board
@@ -90,8 +106,9 @@ aisquare
 │                   install-page <dist>   — the fleet on your phone (docs/remote.md)
 ├── fleet           spawn <role> [--label L] [--task ID] [--worktree/--no-worktree]
 │                             [--permission-mode M] [--bin B] [--prompt TEXT] [--account SLOT]
-│                             [-- agent args]
-│                   ls [--all] · status · tell <label> <text> · stop <label> [--force]
+│                             [--board-context all|relevant|none] [-- agent args]
+│                   ls [--all] · status · tell <label> <text>
+│                   stop <label> [--force] [--as SESSION]
 │                   restart <label> [--fresh] [--permission-mode M]
 │                   switch <label> [--to A] [--fresh] [--reason R]
 │                   shutdown [--all] [--yes] [--force] [--forget] · attach
@@ -105,6 +122,7 @@ aisquare
 ├── config          list [--overrides] · get <key> · set <key> <value> · reset [--yes]
 │                   redaction <off|standard|strict>
 └── metrics         show · list  [-n N] [--session S] [--project P | --all]   (CI test bed; hidden)
+                    tokens [--session S] [--since 2h] [--role R] [--project P | --all]   (tokens per session, from transcripts)
 ```
 
 Everything `aisquare --help` lists is implemented. Roadmap commands are
@@ -143,13 +161,28 @@ list` prints every key. The ones that need more than their name:
 | `accounts.share_settings` | `false` | keep every managed account's `settings.json` a link to the plain claude's |
 | `capture.enabled` | `true` | `false`: the `UserPromptSubmit` hook stores no prompt (`aisquare log` stays empty) and spools none for Explainability. The turn's metrics row (no text), the teammate delta and the CI experiment, if you turned it on, carry on. A config that cannot be read records no prompt either, with one line on stderr. |
 | `fleet.busy_quiet_seconds` | `30` | how long an agent's pane may print nothing while the board says `working` before its screen is checked once: Claude Code idle at its prompt reads `waiting` (*idle (the board said working)*), as after a turn ended with Esc, which fires no hook. A pane that is busy is never captured. |
+| `fleet.auto_stop_finished` | `true` | stop a finished worker of a role in `auto_stop_roles` by itself, `actor` auto-stop, waking nobody ([fleet](fleet.md#capacity)). |
+| `fleet.auto_stop_idle_minutes` | `5` | how long a finished worker sits idle before it is stopped. |
+| `fleet.auto_stop_roles` | `["tester", "reviewer", "validator", "ui-tester"]` | the roles auto-stop may stop; add `"coder"` to opt in. Never a manager or the captain. |
 | `fleet.first_prompt` | `argv` | how an agent's first message reaches it: `argv` gives a Claude Code agent its message on its command line and types it for any other binary; `type` types it for every agent ([fleet](fleet.md#the-first-message)). |
 | `fleet.prompt_ack_seconds` | `45` | how long `fleet spawn`, `restart` and `switch` wait for the agent's first turn to start, and how long a listing gives it before the agent reads `attention`: "first prompt not taken". |
 | `fleet.draft_quiet_seconds` | `10` | how long a key typed into an agent's pane in `asq` keeps every fleet write — a nudge, a tell, a typed first message, the Remote's paste — out of that pane. A draft in its input box holds them off for as long as it stays. |
 | `fleet.roles.<role>.remote_control` | `false` | start the role's Claude Code sessions with Claude Code's own Remote Control, titled `<project> · <label>`, so claude.ai/code and the Claude app can continue them ([remote](remote.md#claude-codes-own-remote-control)); `fleet spawn --remote-control` / `--no-remote-control` overrides it per spawn, and a restart keeps the choice |
 | `fleet.deliver_notes_at_turn_end` | `true` | an agent other than the manager is handed the notes addressed to its label or role when its turn ends, instead of at its next prompt ([fleet](fleet.md#fleet-tell)). |
+| `fleet.quiet_compact_at` | `0` | a manager's context size, in tokens, at which it is compacted at a quiet point; `0` is off ([fleet](fleet.md#long-lived-managers-state-file-start-pack-and-quiet-compaction)). |
+| `fleet.quiet_compact_delay` | `45` | seconds after a manager's quiet Stop before its compaction is checked again and typed. |
+| `fleet.quiet_compact_cooldown` | `30` | minutes after a quiet compaction (or one that did not start) before another. |
+| `fleet.quiet_compact_state_max_age` | `20` | minutes: a manager whose state file is older is not compacted. |
+| `fleet.quiet_compact_resume` | `false` | `true`: after a quiet compaction, type a one-line resume prompt into the manager. |
 | `projects.capture` | `false` | `true`: every directory a hooked session runs in gets a row, as 0.8.0 did; off, only a project you added records anything ([fleet](fleet.md#naming)). |
+| `watch.interval_seconds` | `60` | how often `aisquare watch` looks ([fleet](fleet.md#watching-the-fleet)). |
+| `watch.github` | `false` | `true`: `aisquare watch` and the captain's queue read each project's GitHub pull requests through `gh api`, with ETags. |
+| `watch.github_every_seconds` | `120` | how often the watcher asks GitHub. |
+| `watch.auto_stop` | `true` | each look also stops the workers that have finished ([fleet](fleet.md#capacity)). |
+| `watch.sources` | `{}` | the operator's own commands, `[watch.sources.<name>] command = [...]`, `every_seconds = 300`, each printing JSON lines `{"id", "project", "kind", "summary"}`. |
 | `redaction.level` | `standard` | how much is scrubbed from what leaves the machine: `off`, `standard` or `strict` ([Explainability](connecting-your-agents-to-explainability.md)). |
+| `team.brief_blocks` | `["objective", "acceptance", "boundaries"]` | the blocks a task contract must carry as `<label>:`; `task add` warns about a missing one ([orchestration](orchestration.md#tasks-idempotent-atomic-dependency-aware)). |
+| `team.brief_strict` | `false` | `true`: `task add` refuses a contract that is missing a block (exit 2). |
 
 ## Architecture
 

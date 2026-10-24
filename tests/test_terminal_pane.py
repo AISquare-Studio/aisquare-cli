@@ -5517,6 +5517,7 @@ def test_agent_view_stop_says_a_release_the_store_refused(
         force: bool = False,
         grace: float = 5.0,
         agent_id: str | None = None,
+        actor: str | None = None,
     ) -> fleet_service.StopReceipt:
         # The full signature: the dialog reads ``grace`` off it to word its question.
         return fleet_service.StopReceipt(working.agent, [], refused)

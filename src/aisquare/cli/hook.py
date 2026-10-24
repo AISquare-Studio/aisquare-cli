@@ -193,6 +193,8 @@ def stop() -> None:
             _cwd(payload),
             session_id=_str(payload, "session_id"),
             stop_hook_active=_flag(payload, "stop_hook_active"),
+            last_message=_str(payload, "last_assistant_message"),
+            permission_mode=_str(payload, "permission_mode"),
         )
     except ManagerWakeupError as exc:  # the row is right; only the wake-up was lost
         _cost_of_failing_open("stop", exc.cause, cost=_COST["manager-wakeup"])
@@ -252,6 +254,47 @@ def hand_over(
         hooks_service.hand_over(session_id, reason=reason)
     except Exception as exc:  # the board carries the refusal; nothing else to disrupt
         _cost_of_failing_open("hand-over", exc, cost="the limited agent was not moved")
+        return
+
+
+@app.command("auto-stop", hidden=True)
+def auto_stop(
+    session_id: Annotated[str, typer.Argument(help="The worker's session id.")],
+    after: Annotated[float, typer.Option("--after", help="Seconds to wait first.")],
+    token: Annotated[str, typer.Option("--token", help="The token its Stop wrote.")],
+) -> None:
+    """The detached half of an auto-stop (no output; started by ``stop``).
+
+    Not a Claude Code hook: ``stop`` starts this in a worker of its own session for a fleet
+    worker that may have finished (P2-W1b, #283). It waits, asks again, and stops the agent
+    only if a later turn has not superseded it and it has still finished. Silent like every
+    hook; the stop is an ``agent_exited`` on the board, ``actor=auto-stop``.
+    """
+    try:
+        hooks_service.auto_stop(session_id, after=after, token=token)
+    except Exception as exc:  # nothing else to disrupt: the agent was not touched
+        _cost_of_failing_open("auto-stop", exc, cost="the finished worker was not stopped")
+        return
+
+
+@app.command("compact-check", hidden=True)
+def compact_check(
+    session_id: Annotated[str, typer.Argument(help="The manager's session id.")],
+    cursor: Annotated[int, typer.Option("--cursor", help="Its board cursor when its turn ended.")],
+    token: Annotated[str, typer.Option("--token", help="The arm token its Stop wrote.")],
+) -> None:
+    """The detached half of a quiet compaction (no output; started by ``stop``).
+
+    Not a Claude Code hook: ``stop`` starts this in a worker of its own session for a
+    manager whose turn ended quietly (P1 WS-4, #281). It waits, asks every condition again,
+    and types ``/compact`` only into an idle prompt with an empty input box. Silent like
+    every hook; a refusal is kept in ``team_meta``, a compaction that never came is a board
+    line.
+    """
+    try:
+        hooks_service.compact_check(session_id, cursor=cursor, token=token)
+    except Exception as exc:  # nothing else to disrupt: the manager was not touched
+        _cost_of_failing_open("compact-check", exc, cost="the manager was not compacted")
         return
 
 

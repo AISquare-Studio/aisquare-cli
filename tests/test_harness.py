@@ -242,7 +242,7 @@ def test_the_manager_stops_and_reaps_finished_agents_and_everyone_else_cleans_up
     manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
     assert (
         "An agent whose task is done, with no queued task that fits it: "
-        "`aisquare fleet stop <label>`, then `aisquare fleet reap`"
+        "`aisquare fleet stop <label> --as abcd1234`, then `aisquare fleet reap`"
     ) in manager
     assert "removes the agent's worktree once its work is pushed" in manager
     assert manager.index("`aisquare fleet reap` again") < manager.index('"READY:')
@@ -281,7 +281,7 @@ def test_the_boards_cycles_name_their_project_in_every_fleet_command() -> None:
 
     manager = cycle("manager")
     assert (
-        "`aisquare fleet stop --project calm-otter <label>`, then "
+        "`aisquare fleet stop --project calm-otter <label> --as abcd1234`, then "
         "`aisquare fleet reap --project calm-otter`"
     ) in manager
     verbs = re.findall(r"aisquare fleet (\S+)( --project calm-otter)?", manager)
@@ -290,7 +290,7 @@ def test_the_boards_cycles_name_their_project_in_every_fleet_command() -> None:
     assert {verb for verb, _named in scoped} == {"spawn", "tell", "switch", "stop", "reap"}
     assert all(named for _verb, named in scoped), verbs
     assert "`aisquare fleet adopt --list`" in manager
-    assert "`aisquare fleet spawn --project calm-otter tester`" in manager
+    assert "`aisquare fleet spawn --project calm-otter tester --task <id> --as abcd1234`" in manager
     assert "`fleet spawn " not in manager, "the short forms name it too"
     coder = cycle("coder")
     assert "`aisquare fleet reap --project calm-otter` removes that." in coder

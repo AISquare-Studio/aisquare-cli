@@ -15,6 +15,7 @@ from aisquare.core.store import (
     SCHEMA_VERSION,
     AmbiguousIdError,
     ContextStore,
+    GroupSettings,
     is_corrupt_error,
     open_store,
     store_session,
@@ -472,8 +473,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v29 a task's number on its board, v30 its unique index, v31 the branch of a fleet
     # agent's worktree (review of #259, round 15), v32 the board a fleet agent reads (round 25),
     # v33 the persona a session and a fleet agent run as (#201), v34 a fleet agent's first
-    # message and a session's last prompt (P0-W1a, #122)
-    assert version == SCHEMA_VERSION == 34
+    # message and a session's last prompt (P0-W1a, #122), v35 who caused a board event and
+    # its details (P1 WS-2, #279)
+    assert version == SCHEMA_VERSION == 36
 
 
 def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -> None:
@@ -1302,6 +1304,16 @@ _FIRST_PROMPT_COLUMNS = {
     ("column", "fleet_agent.first_prompt_at"),
 }
 """v34's products (P0-W1a): no dump of an older store holds them, every store reaches them."""
+#: P1 WS-2's step (#279, v35): who caused a board event, and its details.
+_EVENT_ACTOR_COLUMNS = {("column", "team_event.actor"), ("column", "team_event.meta")}
+#: v36 (P2-W6, #199): a group's parent, rules and cap; a task's origin.
+_PARENT_COLUMNS = {
+    ("column", "project_group.parent_project_id"),
+    ("column", "project_group.route"),
+    ("column", "project_group.max_agents"),
+    ("column", "team_task.origin_task_id"),
+    ("column", "team_task.origin_project_id"),
+}
 # Main's v22 to v24 by name: SQLite's automatic index for the primary key is left out.
 _MAINS_STEPS_PAST_21 = {
     ("table", "pending_revocation"),
@@ -1491,7 +1503,13 @@ def test_mains_v24_store_gains_the_persona_columns_and_keeps_every_row() -> None
     finally:
         raw.close()
     assert (version, missing) == (SCHEMA_VERSION, [])
-    assert shape == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | _FIRST_PROMPT_COLUMNS
+    assert shape == (
+        _replayed_shape("main_v32_fresh.sql")
+        | _PERSONA_COLUMNS
+        | _FIRST_PROMPT_COLUMNS
+        | _EVENT_ACTOR_COLUMNS
+        | _PARENT_COLUMNS
+    )
     assert shape == _built(SCHEMA_VERSION), "not the schema a fresh store has"
     assert after == before, "a row the store held changed on a column it had"
     assert agent is not None and (agent.persona, agent.account_slot) == (None, 1)
@@ -1559,13 +1577,13 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     by it."""
     fresh = _built(SCHEMA_VERSION)
 
-    assert SCHEMA_VERSION == 34
-    v34 = _FIRST_PROMPT_COLUMNS
-    assert fresh == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | v34
+    assert SCHEMA_VERSION == 36
+    later = _FIRST_PROMPT_COLUMNS | _EVENT_ACTOR_COLUMNS | _PARENT_COLUMNS  # v34, v35, v36
+    assert fresh == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | later
     for schema in _RC_V21_SCHEMAS:
-        steps = _MAINS_STEPS_PAST_21 | _mains_steps_past_24() | v34
+        steps = _MAINS_STEPS_PAST_21 | _mains_steps_past_24() | later
         assert fresh == _replayed_shape(schema) | steps
-    assert fresh == _replayed_shape("rc_v24_fresh.sql") | _mains_steps_past_24() | v34
+    assert fresh == _replayed_shape("rc_v24_fresh.sql") | _mains_steps_past_24() | later
     open_store().close()
     raw = sqlite3.connect(str(_db_path()))
     try:
@@ -1666,7 +1684,7 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
     _schema_again, rows_again = _contents(db)
     version, shape, notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 34, label
+    assert version == SCHEMA_VERSION == 36, label
     assert shape == _built(SCHEMA_VERSION), label
     assert notnull == {"team_session": 0, "fleet_agent": 0}, label
     assert old_session is not None and old_session.persona == persona, label
@@ -1681,7 +1699,7 @@ def test_a_fresh_store_is_built_with_the_persona_step() -> None:
     open_store().close()
     version, shape, notnull = _persona_shape(_db_path())
 
-    assert version == SCHEMA_VERSION == 34
+    assert version == SCHEMA_VERSION == 36
     assert shape == _built(SCHEMA_VERSION)
     assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
     assert notnull == {"team_session": 0, "fleet_agent": 0}
@@ -3300,3 +3318,91 @@ def test_fleet_manager_board_is_the_newest_manager_rows_a_live_one_first() -> No
         assert store.fleet_manager_board(PROJECT.id) == "prj_hub", "the newest, stopped"
         store.upsert_fleet_agent(row(0, "manager", "prj_m"))
         assert store.fleet_manager_board(PROJECT.id) == "prj_m", "a live one first"
+
+
+def test_a_store_another_line_stamped_v34_gains_w1a_and_ws2_columns_by_presence() -> None:
+    """The manager's cross-workspace rule (board seq 1104): another line (feat/token-savings)
+    stamps its own v34 with tables of its own and none of P0-W1a's or P1 WS-2's columns. The
+    version alone would skip both steps; the presence pass adds all five, and its tables stay."""
+    with store_session():
+        pass  # a fresh store, at this build's version
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        for table, column in (
+            ("team_session", "prompted_at"),
+            ("fleet_agent", "first_prompt"),
+            ("fleet_agent", "first_prompt_at"),
+            ("team_event", "actor"),
+            ("team_event", "meta"),
+        ):
+            raw.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        raw.execute("CREATE TABLE usage_session (id TEXT PRIMARY KEY)")  # the other line's
+        raw.execute("INSERT INTO usage_session VALUES ('kept')")
+        for table, column in (
+            ("project_group", "parent_project_id"),
+            ("project_group", "route"),
+            ("project_group", "max_agents"),
+            ("team_task", "origin_task_id"),
+            ("team_task", "origin_project_id"),
+        ):
+            raw.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        raw.execute("PRAGMA user_version = 34")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with store_session():
+        pass
+
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        columns = {
+            table: {row[1] for row in raw.execute(f"PRAGMA table_info({table})")}
+            for table in ("team_session", "fleet_agent", "team_event")
+        }
+        assert {"prompted_at"} <= columns["team_session"]
+        assert {"first_prompt", "first_prompt_at"} <= columns["fleet_agent"]
+        assert {"actor", "meta"} <= columns["team_event"]
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 36
+        assert raw.execute("SELECT id FROM usage_session").fetchall() == [("kept",)]
+    finally:
+        raw.close()
+
+
+def test_a_store_another_line_stamped_v35_gains_the_parent_columns_by_presence() -> None:
+    """P2-W6 (#199): a store another line carried to v35 with none of v36's columns gains
+    all five, and a group and a task it held keep their rows."""
+    with store_session() as store:
+        group = store.create_project_group("app")
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        for table, column in (
+            ("project_group", "parent_project_id"),
+            ("project_group", "route"),
+            ("project_group", "max_agents"),
+            ("team_task", "origin_task_id"),
+            ("team_task", "origin_project_id"),
+        ):
+            raw.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        raw.execute("PRAGMA user_version = 35")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with store_session() as store:
+        settings = store.group_settings(group.id)
+        kept = store.get_project_group(group.id)
+
+    raw = sqlite3.connect(str(_db_path()))
+    try:
+        columns = {
+            table: {row[1] for row in raw.execute(f"PRAGMA table_info({table})")}
+            for table in ("project_group", "team_task")
+        }
+        assert {"parent_project_id", "route", "max_agents"} <= columns["project_group"]
+        assert {"origin_task_id", "origin_project_id"} <= columns["team_task"]
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 36
+    finally:
+        raw.close()
+    assert kept is not None and kept.name == "app"
+    assert settings == GroupSettings(group_id=group.id), "no parent, no rules, no cap"

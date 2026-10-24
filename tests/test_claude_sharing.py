@@ -854,7 +854,28 @@ def test_an_entry_linked_elsewhere_is_refused_and_left_alone(
     [refused] = [c for c in service.enable_share(["agents"], now=NOW) if c.account.slot == 2]
 
     assert refused.outcome == "refused" and "not ours to replace" in (refused.detail or "")
-    assert os.readlink(second.config_dir / "agents") == str(theirs)
+    assert f"links to {theirs} " in (refused.detail or "")
+    # Still linked there: by realpath, since Windows reads a link back as ``\\?\C:\...``.
+    entry = second.config_dir / "agents"
+    assert sharing._is_link(entry) and os.path.realpath(entry) == os.path.realpath(theirs)
+
+
+def test_a_refusal_names_the_link_as_written_without_windows_prefix(
+    skilled: tuple[ClaudeAccount, ...], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows reads a link back with its extended-length prefix (run 40073711742): the
+    refusal names the path as the operator wrote it."""
+    _plain, second, _third = skilled
+    theirs = tmp_path / "someone-elses-agents"
+    theirs.mkdir()
+    (second.config_dir / "agents").symlink_to(theirs, target_is_directory=True)
+    real_readlink = os.readlink
+    monkeypatch.setattr(os, "readlink", lambda path: "\\\\?\\" + real_readlink(path))
+
+    [refused] = [c for c in service.enable_share(["agents"], now=NOW) if c.account.slot == 2]
+
+    assert refused.outcome == "refused"
+    assert f"links to {theirs} — not ours to replace" in (refused.detail or ""), refused.detail
 
 
 def test_on_windows_a_directory_is_a_junction_when_a_symlink_needs_a_privilege(
@@ -918,14 +939,24 @@ def test_memory_on_every_launch_carries_the_shared_directory_for_its_project(
         result = runner.invoke(app, ["launch", "coder", "--account", slot])
         assert result.exit_code == 0, result.output
         argv = launched["argv"]
+        assert argv.count("--settings") == 1, "one --settings for every key aisquare sets"
         settings = json.loads(argv[argv.index("--settings") + 1])
         want = service.shared_memory_root() / sharing.memory_key(Path.cwd())
-        assert settings == {"autoMemoryDirectory": str(want)}
+        # The coder's skill listing (P1 WS-1) and the shared memory (P2-W7), both: the
+        # memory stood down on the role's own --settings, so no coder shared any (sync #367).
+        assert settings == {"skillListingMaxDescChars": 1, "autoMemoryDirectory": str(want)}
         assert sharing.memory_key(Path.cwd()).endswith("-work-repo")
-    # The operator's own --settings wins, and the launch says why memory is not shared.
+    # The operator's own --settings wins over both, and the launch says why.
     result = runner.invoke(app, ["launch", "coder", "--account", "3", "--settings", "{}"])
     assert launched["argv"].count("--settings") == 1
+    assert launched["argv"][launched["argv"].index("--settings") + 1] == "{}"
     assert "its own --settings wins" in result.stderr
+    # A manager keeps the full skill listing: its --settings is the memory's alone.
+    result = runner.invoke(app, ["launch", "manager", "--account", "3"])
+    assert result.exit_code == 0, result.output
+    argv = launched["argv"]
+    assert argv.count("--settings") == 1
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"autoMemoryDirectory": str(want)}
 
 
 def test_memory_off_adds_nothing_to_a_launch(
@@ -937,6 +968,11 @@ def test_memory_off_adds_nothing_to_a_launch(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     runner.invoke(app, ["launch", "coder", "--account", "3"])
+    argv = launched["argv"]
+    # The coder's own skill listing (P1 WS-1) and nothing of the memory's.
+    assert argv.count("--settings") == 1
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"skillListingMaxDescChars": 1}
+    runner.invoke(app, ["launch", "manager", "--account", "3"])
     assert "--settings" not in launched["argv"]
 
 
@@ -1016,3 +1052,64 @@ def test_the_doctor_row_warns_on_a_part_a_slot_does_not_share_and_a_linked_proje
     assert row is not None and row.status.value == "warn"
     assert "slot 3 has no skills linked yet" in row.detail
     assert "slot 2's projects/ is a symlink" in row.detail
+
+
+# --- review of #360's minors -------------------------------------------------------------
+
+
+@pytest.mark.skipif(not can_symlink(), reason="needs symlinks")
+def test_sharing_a_part_the_plain_claude_has_none_of_keeps_the_slots_own_in_sight(
+    tmp_path: Path,
+) -> None:
+    """Linked to an empty skills/ the plain claude was given, a slot's own skills vanished
+    from it. What the slot has and the plain claude lacks goes there first, never over an
+    entry it has; the slot's own copy is kept beside as before."""
+    plain, slot = tmp_path / "plain", tmp_path / "slot"
+    (slot / "skills" / "deploy").mkdir(parents=True)
+    (slot / "skills" / "deploy" / "SKILL.md").write_text("mine\n")
+    (slot / "skills" / "review").mkdir()
+    (slot / "skills" / "review" / "SKILL.md").write_text("slot's review\n")
+    (plain / "skills" / "review").mkdir(parents=True)
+    (plain / "skills" / "review" / "SKILL.md").write_text("plain's review\n")
+
+    kept = sharing.link_part(slot, "skills", plain, now=NOW)
+
+    seen = slot / "skills"
+    assert (seen / "deploy" / "SKILL.md").read_text() == "mine\n", "the slot's own, in sight"
+    assert (seen / "review" / "SKILL.md").read_text() == "plain's review\n", "never over it"
+    assert kept is not None and (kept / "review" / "SKILL.md").read_text() == "slot's review\n"
+
+
+def test_a_differing_note_is_kept_under_a_name_that_stays_markdown(tmp_path: Path) -> None:
+    """The fallback was ``note.slotb.md-2``, which no longer reads as a .md, and the note
+    named the first candidate, not the file written."""
+    target, a, b = tmp_path / "shared", tmp_path / "a", tmp_path / "b"
+    for directory, body in ((a, "one\n"), (b, "two\n")):
+        directory.mkdir()
+        (directory / "note.md").write_text(body)
+    target.mkdir()
+    (target / "note.md").write_text("zero\n")
+    (target / "note.slotb.md").write_text("an older different copy\n")
+
+    notes = sharing.merge_memory([("slota", a), ("slotb", b)], target)
+
+    assert (target / "note.slota.md").read_text() == "one\n"
+    assert (target / "note.slotb-2.md").read_text() == "two\n"
+    assert ("slotb", "note.md differed: kept as note.slotb-2.md") in notes
+    assert sharing.merge_memory([("slotb", b)], target) == [], "the same bytes: kept once"
+
+
+def test_merging_memory_md_keeps_its_blank_lines(tmp_path: Path) -> None:
+    target, a, b = tmp_path / "shared", tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (a / "MEMORY.md").write_text("# Index\n\n- [one](one.md)\n\n- [two](two.md)\n")
+    (b / "MEMORY.md").write_text("# Index\n\n- [two](two.md)\n\n## Later\n\n- [three](three.md)\n")
+
+    sharing.merge_memory([("a", a), ("b", b)], target)
+
+    # The first index whole, blank lines and all; then what the second adds, its own blank
+    # lines kept between its new lines.
+    assert (target / "MEMORY.md").read_text() == (
+        "# Index\n\n- [one](one.md)\n\n- [two](two.md)\n## Later\n\n- [three](three.md)\n"
+    )

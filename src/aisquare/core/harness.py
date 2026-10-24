@@ -82,6 +82,31 @@ MODEL_FAMILIES: dict[str, str] = {
 }
 
 
+def model_family(model: str | None) -> str | None:
+    """The family a model id or alias belongs to (``claude-opus-5-5`` → ``opus``), or ``None``.
+
+    What a usage pick keys a per-family weekly window on (``services.claude_accounts``):
+    such a limit applies only to requests to that family (#277).
+    """
+    if not model:
+        return None
+    lowered = model.lower()
+    return next((family for family in MODEL_FAMILIES.values() if family in lowered), None)
+
+
+def launch_family(role: str, args: Sequence[str] = ()) -> str | None:
+    """The family a launch of ``role`` will run: its ``--model`` when ``args`` name one, else
+    the role's ladder as resolved WITHOUT probing (a cached verdict, or the first rung) —
+    a pick must not wait 150 s on a probe, and a wrong guess only costs the family window."""
+    for index, arg in enumerate(args):
+        if arg == "--model" and index + 1 < len(args):
+            return model_family(args[index + 1])
+        if arg.startswith("--model="):
+            return model_family(arg.partition("=")[2])
+    resolution = resolve_model(role, probe=False)
+    return model_family(resolution.model) if resolution is not None else None
+
+
 #: The effort scale, weakest first — the levels ``claude --effort`` accepts.
 #: (An unknown value is silently ignored by the CLI, so values are validated here.)
 EFFORT_SCALE: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
@@ -1059,6 +1084,7 @@ def _role_cycle_core(
             "acceptance · boundaries>\"`, `--needs` for ordering; the coder's claim prints the",
             "contract, so put it in `--detail`, not the prompt. Help comes only from",
             f"`{spawn} coder --label coder-<purpose> --task <id> --as {sid}` —",
+            "`--task` delivers the task; add `--prompt` only for extra instructions —",
             f"one per parallelisable task, within the agent cap; `{spawn} tester` once work",
             f'reaches review — `{spawn} ui-tester --prompt "<branch or worktree to check +',
             'the URL to open>"` for tasks titled "UI: …", which it verifies in a real browser',
@@ -1067,11 +1093,13 @@ def _role_cycle_core(
             "once every task is done. Board updates reach you every turn: reopen with reasons,",
             f'`{fleet("tell")} <label> "…"` to steer, re-spec or split what bounces. Spawn',
             f"nothing while the `{paused}` signal is set. An agent that hits its Claude usage",
-            f"limit shows `limited` on the board and wakes you: `{fleet('switch')} <label>",
-            f"--as {sid}` moves it to the account with the most headroom and resumes its session;",
-            "if nothing has headroom, leave it — it continues by itself at the reset the event",
-            "names. Usage figures are the share USED (40% used = 60% left); headroom is what",
-            "is left. An agent whose task is done, with no queued task that fits it:",
+            'limit shows `limited` on the board. With `on_limit = "switch"` (the default) the',
+            "fleet moves a limited agent itself; act on `handover_failed`, not on `limited`:",
+            f"`{fleet('switch')} <label> --as {sid}` moves it to the account with the most",
+            "headroom and resumes its session; if nothing has headroom, leave it — it continues",
+            "by itself at the reset the event names. Usage figures are the share USED",
+            "(40% used = 60% left); headroom is what is left. An agent whose task is done,",
+            "with no queued task that fits it:",
             f"`{fleet('stop')} <label>`, then `{fleet('reap')}` — it records the exit",
             "and removes the agent's worktree once its work is pushed. When the validator's",
             f"gate is PASS: `{fleet('reap')}` again, then",

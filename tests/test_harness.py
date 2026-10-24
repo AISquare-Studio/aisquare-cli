@@ -1651,3 +1651,14 @@ def test_the_coder_cycle_names_task_show_and_the_manager_puts_the_contract_in_de
     assert "the coder's claim prints the contract, so put it in `--detail`, not the prompt" in (
         manager
     )
+
+
+def test_the_manager_acts_on_a_failed_hand_over_not_on_a_limit() -> None:
+    """P0-W3 (#277): the cycle told the manager to `fleet switch` every `limited` agent while
+    `on_limit = "switch"` moved it already, so one limit moved an agent twice."""
+    manager = " ".join(harness.role_cycle("manager", "abcd1234", fleet=unscoped))
+    assert (
+        'With `on_limit = "switch"` (the default) the fleet moves a limited agent itself; '
+        "act on `handover_failed`, not on `limited`:"
+    ) in manager
+    assert "`aisquare fleet switch <label> --as abcd1234`" in manager

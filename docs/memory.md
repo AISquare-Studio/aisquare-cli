@@ -48,6 +48,12 @@ Prompts are recorded only in a project you added (`aisquare project onboard`,
 keeps nothing. `[projects] capture = true` records them in every directory, as
 0.8.0 did ([fleet](fleet.md#naming)).
 
+`aisquare config set capture.enabled false` stops recording prompts
+everywhere: `aisquare log` stays empty and nothing is spooled for
+Explainability. Teammate updates still arrive, and each turn still gets its
+metrics row, without the text. A config file that cannot be read records no
+prompt either, and says so on stderr.
+
 The **active project** is whichever repo contains your working directory, or
 the one you pin with `aisquare project switch <name>`. Everything —
 context, snapshots, prompt history, team state — scopes to it consistently.
@@ -82,7 +88,10 @@ Repomix into three artifacts under `~/.aisquare/projects/<id>/snapshot/`: a
 **full pack** (every file), a **skeleton** (structure + signatures — the
 cheap thing agents orient from), and a **per-file index** (char offsets +
 token counts, so an agent can open one file's slice of the pack instead of
-all of it). Re-run with `--refresh` after big changes.
+all of it). The index, `index.json`, is a JSON array with one file per line, so
+a Grep for a path returns that file's line and a Read can page it; a skeleton
+is kept only beside the pack it was made with. Re-run with `--refresh` after big
+changes.
 
 The session-start directive says "read this FIRST" only of a skeleton (the
 pack when there is no skeleton) of at most 12 000 tokens, as the snapshot

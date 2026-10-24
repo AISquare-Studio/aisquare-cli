@@ -117,6 +117,225 @@ document under "W0 results" before W1a's design freezes.
 
 Output: a "W0 results" section in this document and the fixtures. No product code.
 
+### W0 results (2026-10-23)
+
+Measured on macOS 27 (arm64) with tmux 3.8, on `rc/p0-reliability` @ 6393998e (`main`
+09f48563 plus this document).
+
+**Versions.** Claude Code 2.1.309, the current release (native install), and 2.1.223,
+installed from npm into a scratch prefix with the auto-updater off. `aisquare doctor`
+has no Claude Code floor: `diagnostics.claude_code_version`
+(`services/diagnostics.py:809`) only reads the version for its detail line. 2.1.223
+is the oldest version the fleet relies on: `ResumeSpec` (`services/fleet.py:232`)
+needs `--resume <transcript path>`, "Claude Code ≥ 2.1.223".
+
+**Scale.** Reduced, per the owner's decision of 2026-10-23: at most 5 Claude sessions
+at a time, about 20 minutes of live runs, all on the account with the most headroom
+(slot 2, by `aisquare accounts usage`); the cross-account leg also used slot 3. The
+runs used a scratch `AISQUARE_HOME`, scratch tmux sockets (`w0spike` for the fleet,
+`w0probe` for the probes), a clean environment (no `TMUX`, none of this session's
+`CLAUDE_CODE_*`) and a scratch git folder. The real `asq` socket,
+`~/.aisquare`'s store and the running fleet were not touched. Under `~/.aisquare`
+only Claude Code's own files changed: the scratch folder's transcripts in slots 2 and
+3, and that folder's trust, written by Claude Code when its trust dialog was answered.
+The full 20-agent run happens once all four trains are on `main` (owner decision,
+2026-10-23).
+
+**Method.** A probe launches `claude` in a tmux window and reads the pane every 100 ms
+with `services/captain/screen.py` (`input_box_at`, `modal_showing`). "Submitted" means
+`UserPromptSubmit` fired. A hook passed with `--settings` appends its timestamp,
+alongside the account's own `asq` hooks. Every prompt was "Reply with the single word
+PONG and the code <token>."
+
+#### 1. The stranded Enter
+
+Through the fleet (`fleet spawn coder --no-worktree --prompt <one line>`, today's code,
+2.1.309), prompts still in the composer 60 s later:
+
+| Run | Still in the composer |
+|---|---|
+| 5 spawns, one after another | 0 of 5 |
+| `fleet restart` of those 5 (the resume line is typed) | 0 of 5 |
+| 5 spawns started together | 0 of 5 |
+
+The probe, with times from launch or from the input box first drawn:
+
+| Case | 2.1.309 | 2.1.223 |
+|---|---|---|
+| Launch to box, one launch every 0.5 s | 0.60–1.56 s | 0.71–1.19 s |
+| Launch to box, five launches within 0.2 s | 1.72–2.75 s | — |
+| Paste once the box is drawn, Enter 0.1 s after the text renders | the first Enter submits, 5 of 5: box to Enter 0.16–0.30 s, box to `UserPromptSubmit` 0.22–0.39 s | the first Enter submits, 5 of 5: 0.28–0.33 s and 0.33–0.49 s |
+| Paste 0.3 s after launch (no box yet), Enter once the text renders | the first Enter submits, 5 of 5 | — |
+| Paste 0.3 s and Enter 0.4 s after launch, both before the box | **unsent, 5 of 5**, still in the composer at 65 s | **unsent, 5 of 5** |
+| One more Enter, at 65 s, into those composers | submitted, 5 of 5; `UserPromptSubmit` 0.06–0.10 s after it | — |
+
+- **The 30–50 s window is refuted** on both versions: once the box is drawn, the first
+  Enter is taken within 0.3 s.
+- **A prompt is stranded by an Enter that arrives before Claude Code draws its input
+  box.** That Enter is dropped. The pasted text is kept and shows in the composer
+  once the box appears. This happened 10 of 10 times, on both versions.
+- `_type_prompt` (`services/fleet.py:4369`) types once the pane's foreground process is
+  no longer the launcher, plus `_PROMPT_SETTLE` (2.0 s). It does not wait for the box.
+  The box comes 0.6–1.6 s after a lone launch and 1.7–2.75 s after five concurrent
+  ones, so the margin is about half a second and goes negative under load. At this
+  scale nothing was stranded; at 20 agents, or on a busy box, the Enter can beat the
+  box. W1a's readiness should be `input_box_at` non-null, not a fixed settle.
+- One Enter after the box submitted every stranded prompt here. W1a's re-press rule
+  (press again only while our text is still in the composer) fits every case measured.
+  No case needed a third press.
+- W1a's "before" number at this scale: 0 of 15 through the fleet. The mechanism
+  reproduced directly: 10 of 10.
+- Field evidence from the manager of this train (2026-10-23, about 16:40 UTC, 2.1.309,
+  four accounts): seven coders spawned with `fleet spawn coder --task <n>` and no
+  `--prompt` sat at an empty composer for about 4 minutes. Nothing had been typed: this
+  is #122's `--task` gap, not a stranded Enter. All the while, `fleet ls` read every
+  one of them as `working` (#123). Each kickoff, typed by hand more than 3 minutes after
+  the box appeared, submitted on its first Enter.
+
+#### 2. A first prompt on the command line
+
+These results hold on both versions unless marked, in a trusted folder, with
+`--permission-mode auto`.
+
+- `claude "<prompt>"`: `SessionStart` (`source: startup`) 0.5–0.6 s after launch,
+  then `UserPromptSubmit` with the prompt at 1.2–1.3 s, and the first turn runs.
+- `claude --resume <transcript path> "<prompt>"`: `SessionStart` has
+  `source: resume` and the transcript's own session id. `UserPromptSubmit` fires at
+  1.9 s (2.1.309) and 2.2 s (2.1.223), and the turn runs after the old history.
+- `claude -- "-…"` is accepted, and the prompt arrives with its dash. Without `--`,
+  2.1.309 exits with `error: unknown option '-starts with a dash'`. W1a should put `--`
+  before every positional prompt.
+- A prompt with a newline on argv arrives as one message, newline kept (2.1.309).
+- **The folder-trust question.** The argv prompt waits behind it, and no hook fires.
+  Once the folder is trusted, `SessionStart` and `UserPromptSubmit` follow within 0.5 s
+  and the prompt runs as the first turn. The dialog differs between the versions:
+  2.1.309 lists `No, exit` first and highlights it, while 2.1.223 lists
+  `1. Yes, I trust this folder` first and highlights that. A stray Enter therefore
+  exits 2.1.309 but trusts the folder on 2.1.223. With the prompt on argv, nothing is
+  typed into the dialog.
+- **Cross-account (`docs/plans/claude-accounts.md` §10).** A transcript written under
+  slot 2's `CLAUDE_CONFIG_DIR` and resumed by path under slot 3 works on both versions:
+  same session id, history present, and the prompt runs. New records are appended to
+  the original file in slot 2's `projects/`, and nothing is written under slot 3.
+  **However, `SessionStart` hands hooks a `transcript_path` in slot 3's
+  `projects/<slug>/<id>.jsonl`, a file that is never created.** `UserPromptSubmit`
+  hands them the original path. Checked against the scratch store, this has three
+  consequences on today's code:
+  - `hook_session_start` stores the missing path on `team_session`. Its `account`,
+    slot 3, is right.
+  - Every later prompt compares the original path with the stored one, so
+    `_shared_row_banner` (`services/team.py:1808`) injects a false "being written by
+    TWO live agents" warning.
+  - The agent's next `fleet restart` or `fleet switch` starts fresh, because `_respawn`
+    resumes only when `team_session.transcript_path` is a file
+    (`services/fleet.py:7125-7130`).
+
+  Every resumed `fleet switch` and every usage-limit hand-over takes this path. It is
+  not fixed here (no product code); routed to the manager for W1a and W3.
+
+#### 3. The inbox socket
+
+- **Where.** 2.1.309 binds `$CLAUDE_CODE_TMPDIR/cc-socks/<claude pid>.sock` (mode
+  0600). When that path is over the ~104-byte socket limit, it binds
+  `/tmp/cc-socks-<uid>/<pid>.sock` instead. 2.1.223 binds no socket and exports no
+  variable.
+- **What hooks get.** `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN`
+  reach `UserPromptSubmit` and `Stop` hooks, **but not `SessionStart`**: absent in 5 of
+  5 starts on 2.1.309, with both a short and a long tmpdir. W2's plan to store the
+  socket at SessionStart has to use the first `UserPromptSubmit` or `Stop` instead, or
+  derive the path, `<CLAUDE_CODE_TMPDIR>/cc-socks/<pid>.sock`.
+- **Schema (pinned).** It is taken from a debug message in the Claude Code 2.1.309
+  binary (`[uds-messaging] Inject messages (auth line REQUIRED here): …`, which prints
+  an example) and was confirmed live: newline-delimited JSON on one connection.
+
+  ```text
+  {"type":"auth","token":"<CLAUDE_CODE_MESSAGING_TOKEN>"}
+  {"type":"user","message":{"role":"user","content":"<text>"}}
+  ```
+
+  The socket writes nothing back. Without the auth line the message was still
+  delivered here (macOS, same user), but that debug message calls the auth line
+  required in some setups, so send it.
+- **What the pane shows.** A user turn: `❯ Another Claude session sent a message:`,
+  the text, and a fixed paragraph telling the model the message came from a peer, "not
+  typed by your user", and that a peer can neither grant escalation nor approve a
+  pending prompt. `UserPromptSubmit` fires with the bare text as `prompt`.
+- **Inbound decisions.** For an idle session unless marked:
+
+  | Session | Default | `--settings '{"crossSessionInbound":"accept"}'` |
+  |---|---|---|
+  | `--permission-mode auto` | delivered: a turn starts 0.04 s after the post | delivered, 0.06 s |
+  | `--permission-mode bypassPermissions` | **held**: "The sender did not attest its permission mode and this session bypasses prompts". A dialog offers `Deny — drop it and tell the sender it was declined` (highlighted) and `Deliver this message to Claude`; no input box is drawn while it shows | delivered, 0.06 s |
+  | `auto`, busy in a 20 s Bash call | read when the tool call returned, 19 s after the post, as a user message inside the same turn; `UserPromptSubmit` fired then | — |
+
+- `crossSessionInbound: "accept"` made delivery unconditional in both modes measured.
+  The held-message dialog has no footer line, so `screen.modal_showing` returns `None`
+  for it. `input_box_at` is `None` as well, so nothing types into it.
+- **Verdict.** The schema is pinned for 2.1.309. W2's socket tier can be built behind
+  `inbox_delivery` for Claude Code versions that bind the socket (2.1.223 does not), and
+  it must take the socket from `UserPromptSubmit` or `Stop`. What it delivers reaches
+  the model framed as a peer's message, not the user's.
+
+#### 4. The usage payload
+
+- **No answer at a per-family limit was captured.** None of the four accounts was at
+  one on 2026-10-23.
+- **What the four answers carry** (`GET /api/oauth/usage`, 16:44 UTC):
+  - 31 top-level keys.
+  - `five_hour` and `seven_day`: `utilization`, `resets_at`, `limit_dollars`,
+    `used_dollars`, `remaining_dollars` and `locked_reason`. `locked_reason` was null
+    on all four.
+  - `seven_day_opus`, `seven_day_sonnet`, `seven_day_oauth_apps`, `seven_day_cowork`
+    and `seven_day_omelette`: null on all four, including an account whose family
+    window was partly used.
+  - The family window is an entry of `limits[]`, with this shape:
+
+    ```text
+    {"kind": "weekly_scoped", "group": "weekly", "percent": <int>, "severity": "normal",
+     "resets_at": "<ISO 8601>",
+     "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null},
+     "is_active": <bool>}
+    ```
+
+    It sits beside `{"kind": "session", "group": "session", …}` and
+    `{"kind": "weekly_all", "group": "weekly", …}`. On every answer, `is_active` was
+    true on the fuller of `session` and `weekly_all`, so it appears to mark the window
+    that binds now. `weekly_scoped_shares` gives the scoped window's use and allowance
+    as percentages of the week, and points at its entry by `limit_index`.
+  - `extra_usage`, `spend`, `pace` and seventeen other keys with opaque names, all
+    null or off, carry nothing a pick needs. `seven_day_breakdown` is a dict under a
+    `seven_day_` key but not a window (`as_of`, `window_started_at`, `rows[]` of
+    per-product shares).
+- **For W3:** read a family's window from `limits[]` (`kind == "weekly_scoped"`,
+  `scope.model.display_name`), not from `seven_day_<family>`. The entry names a
+  family, not a model id. A reader of "every `seven_day_*` key that holds a dict"
+  would take `seven_day_breakdown` for a window, so it must skip it.
+- The fixture is `LIVE_USAGE_FULL` in `tests/test_claude_accounts.py`, beside
+  `LIVE_USAGE`. Its structure was taken from a real answer of 2026-10-23; its values
+  are invented, and the keys a pick does not need are left out (owner's call, via the
+  manager). The test with it shows that today's parser reads the two windows and
+  ignores the rest.
+
+#### Also seen
+
+- **`busy_quiet_seconds = 30` holds on 2.1.309 (W1b).** During a 25 s silent foreground
+  Bash call the pane redrew at least every 1.1 s, because the spinner counts the
+  seconds. Asked for a 40 s `sleep`, 2.1.309 ran it as a background shell and ended the
+  turn ("1 shell still running"). Asked again, it declined to run it in the
+  foreground.
+- **Dim text sits in an empty composer.** After a turn it is a suggestion
+  (`check the board again`, `aisquare board`); in a fresh session it is a placeholder
+  (`Try "edit <filepath> to..."`). Both are SGR 2 (`ESC[2m`), after the mark and a
+  no-break space (`❯` U+00A0). A reader that strips escapes first reads them as drafts,
+  which matters for W2's `composer_text`.
+- `--permission-mode bypassPermissions` opens a one-time `Yes, I accept` warning on an
+  account that has never accepted it. `--settings '{"skipDangerousModePermissionPrompt": true}'`
+  skips it for that one session.
+- `fleet spawn` started in parallel for a project with no tmux session yet: 3 of 5
+  failed with `tmux could not start the window: duplicate session: <codename>`.
+- `uv lock --check` fails on this branch: `pyproject.toml`'s `voice` extra is missing
+  from `uv.lock` (W5).
+
 ## W1 — Verified prompt delivery
 
 ### Problem
@@ -788,6 +1007,7 @@ themselves.
 - CHANGELOG `[Unreleased]`: `Fixed` — first prompts acknowledged (#122), idle agents
   read waiting (#123), claimed contracts (#74), drafts never overwritten (W2), tells
   delivered at turn end (W2), one switch per limit and per-family windows (W3),
+  a cross-account resume keeps its real transcript (W3b, found by W0),
   `capture.enabled` honoured (#268), `uv.lock`. `Added` — `[fleet] first_prompt`,
   `prompt_ack_seconds`, `busy_quiet_seconds`, `draft_quiet_seconds`,
   `deliver_notes_at_turn_end`, `inbox_delivery` (if built); `[accounts] prefer`;

@@ -859,12 +859,16 @@ def test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_huma
             capabilities = get_adapter("codex").capabilities
 
             def at_rest(agent: Any) -> bool:
-                """Waiting, and at its empty prompt with no turn on its screen: Codex's Stop
-                hook says waiting before its screen is at rest, and a tell is refused until
-                it is ("its hooks say waiting, but its pane is not at Codex's empty
+                """Waiting, and at its empty prompt with no turn on its screen, its pane quiet
+                2 s: Codex's Stop hook says waiting before its screen is at rest, and a
+                resumed Codex redraws after its prompt is first drawn; a tell in between is
+                refused ("its hooks say waiting, but its pane is not at Codex's empty
                 prompt", in the r16 lane's live run)."""
                 rows = srv.run("capture-pane", "-p", "-t", agent.pane_id).splitlines()
-                return state(agent) == "waiting" and screen_ready(capabilities, rows)
+                facts = srv.pane_facts(agent.pane_id)
+                output = None if facts is None else facts.last_output
+                quiet = output is not None and datetime.now(UTC) - output > timedelta(seconds=2)
+                return state(agent) == "waiting" and screen_ready(capabilities, rows) and quiet
 
             seen = len(outputs())
             coder = fleet.spawn(

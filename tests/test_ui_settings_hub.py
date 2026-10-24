@@ -156,6 +156,32 @@ def test_settings_opens_the_hub_and_each_link_opens_its_page_under_settings() ->
     ]
 
 
+def test_app_settings_shown_again_reads_the_bindings_a_shell_wrote_meanwhile() -> None:
+    """The page is built once and kept: opened again from the hub, it showed the bindings
+    as they were when it was built, until ``asq`` restarted (review of #334)."""
+    from aisquare.services import settings as settings_service
+    from tests.test_ui_app_settings import _binding_shown
+
+    async def go(pilot: Pilot[None]) -> tuple[str | None, str | None]:
+        app = _app(pilot)
+
+        async def open_app_settings() -> None:
+            await pilot.click(app.query_one(SettingsRow))
+            await settle_page(app)
+            await pilot.click("#hub-app-settings")
+            await settle_page(app)
+
+        await open_app_settings()
+        before = _binding_shown(app, "coder")
+        settings_service.bind_role("coder", env={"GH_TOKEN": "x"})
+        await open_app_settings()
+        return before, _binding_shown(app, "coder")
+
+    before, after = _drive(go)
+    assert before is None
+    assert after is not None and "GH_TOKEN" in after
+
+
 def test_the_hubs_doctor_link_runs_the_checks() -> None:
     runs: list[int] = []
 

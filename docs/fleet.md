@@ -828,7 +828,10 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   token is missing, expired or rejected (slot 1 included) — the status beside
   it says which. Type `/login` if Claude Code does not prompt you; the pane
   waits for a *fresh* login, not the stale one on disk, then closes, and the
-  row reads its usage again.
+  row reads its usage again. `/login` typed in an agent's own fleet pane works
+  too: on macOS the login goes to the Keychain, which each slot is read from
+  (0.8.1, #263). Where the Keychain refuses the write, as in an SSH session,
+  Claude Code keeps it in the slot's `.credentials.json` (mode 0600) instead.
 - **Remove** forgets a slot the CLI owns. Its directory is renamed beside
   itself as `<n>.removed-<stamp>` — the login, the settings and the transcripts
   kept, never listed again, deletable by hand — and the number is free for the
@@ -1092,7 +1095,13 @@ form and `add` refuses outside an interactive terminal. `aisquare doctor` gains 
 `claude-accounts` line naming any slot that still needs a sign-in, a
 `claude-account-default` line when the default is not signed in or is disabled,
 and a `claude-account-bindings` line when a role or project names an account the
-machine no longer has. Accounts laid
+machine no longer has. A `role bindings` line checks every binding that points a
+role at another Claude Code directory: its `CLAUDE_CONFIG_DIR` must hold aisquare's
+hooks (the same "connected" Welcome asks), or its sessions never reach the board,
+and its `CLAUDE_CODE_TMPDIR` must be a writable directory. Each value is expanded as
+a launch expands it (`$VAR`, `~`). The line warns with the fix, quoted for your shell
+(`aisquare agents connect claude-code --config-dir <dir>`, or `aisquare team bind <role>
+--unset KEY`), and is absent when no binding sets either variable. Accounts laid
 out some other way — a wrapper, a proxy, a directory of your own — still bind
 to a role as a launch profile (`aisquare team bind coder1 --env …`, see
 [Several accounts, one team](orchestration.md#several-accounts-one-team)).
@@ -1255,7 +1264,27 @@ A role or a key your file leaves out takes its default above; a role the table
 above does not name gets `auto`, no worktree and no extra args. A config file that will not parse costs you the customisation and
 never the fleet: the defaults apply and nothing refuses.
 
-**Model, effort and binary per role stay where they already live** — one home
+**Role bindings are in App settings too** (#98). Its *role bindings* section lists
+every role `team bind` bound: its binary, its args, and its environment, with
+`CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` shown with their values and any other
+variable by name only, since a value may be a token.
+- *Edit* opens the bind form on the binding as `config.toml` holds it at that moment,
+  so a `team bind` run in a shell since is never written away. Each environment
+  value shows as `••••` until you turn on *Show values*. A value left masked is
+  saved as the one stored; type over it to change it. Its *Save* replaces the
+  binary, environment and args, which `team bind <role> --clear` followed by a
+  fresh `team bind` would also do. Variables bound to a file and the account stay
+  as they were.
+- *Unset key…* is `team bind <role> --unset KEY`.
+- *Clear* (it asks first) is `team bind <role> --clear`.
+- *+ New bind* makes one.
+
+Each of these writes at once, apart from the page's *Save*, through the same writer
+`team bind` uses. The section re-reads the file after each write, on *Reload*, and
+whenever the page is shown again, so a binding made in a shell shows without
+restarting `asq`.
+
+**Model and effort per role stay where they already live** — one home
 per concept: `aisquare team harness` (the ladder and the effort offsets),
 `aisquare team bind <role> --bin … --env … --arg …` (launch profiles),
 `AISQUARE_MODEL_<ROLE>`, `AISQUARE_EFFORT_<ROLE>` and `AISQUARE_BIN_<ROLE>` in

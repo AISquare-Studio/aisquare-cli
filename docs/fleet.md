@@ -871,6 +871,27 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   accounts usage --summary` prints `{"accounts": [...], "summary": {...}}`, the
   summary with `percent_left`, `week_percent_left`, `weeks_left`,
   `week_left_by_slot` and `week_resets_soonest`. Plain `--json` stays the list.
+- **Claude Code's status line** (#287, opt-in). `aisquare accounts statusline
+  --install` sets `asq-statusline` as the status line of every account (or
+  `--slot N`), in each one's `settings.json`, only where none is set. Inside
+  every session it prints one line, `acct 3 · 5h 42% · wk 61% · fleet 58% left
+  (3×) · ctx 34%`: the account's five-hour and weekly use, the fleet's share left
+  and the session's context, shortened from the end to fit. A status line you
+  set yourself is never replaced: `--install --wrap` keeps it and prints its line
+  first, and `--uninstall` (or `aisquare uninstall`) takes out only what aisquare
+  wrote, putting yours back as it was. `aisquare accounts statusline` alone says
+  what each account has. The status line runs on every message, so it imports
+  the standard library only. The windows show for a Pro or Max login after the
+  session's first answer; an API-key session shows the rest.
+- **Sessions on this machine.** Each session carrying the status line keeps a
+  record under `~/.aisquare/cache/statusline/`: its id, cwd, model, account and
+  the figures above, never a prompt, deleted after a day. `aisquare accounts
+  sessions [--since 15m] [--json]` lists every session that reported in the
+  window, hand-launched ones and ones outside any project included: account,
+  short session id, cwd, model, context, five-hour use, age, and the fleet label
+  when a fleet spawn started it. The Accounts page lists the same under the
+  accounts. The usage cache also takes each record's reading as a sample of
+  that account, so the usage endpoint is asked less often.
 - **Default**, **↑**/**↓** and **Disable** arrange the accounts. The row with
   the ★ is the **machine default**: what a launch runs on when nothing more
   specific says. The arrows set the **priority order** — the order the rows are
@@ -1031,6 +1052,9 @@ aisquare accounts run 2                # a plain Claude Code session on account 
 aisquare accounts run 2 --model opus   # arguments after the slot go to claude
 aisquare accounts usage                # the windows, per signed-in account, then the fleet's; --refresh reads now
 aisquare --json accounts usage --summary # {accounts, summary}: the list beside the fleet's aggregate
+aisquare accounts statusline --install # Claude Code's status line on every account, where none is set (--wrap keeps yours)
+aisquare accounts statusline --uninstall # takes out only aisquare's (a wrapped one goes back)
+aisquare accounts sessions --since 1h  # every session on this machine that reported in the last hour
 aisquare accounts remove 2             # the directory is kept as 2.removed-<stamp>
 aisquare launch coder --account 2      # a board role on account 2
 aisquare fleet spawn coder --account 2 # a fleet agent on account 2

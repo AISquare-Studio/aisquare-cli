@@ -56,7 +56,7 @@ from aisquare.services.fleet import (
     TellResult,
     Typed,
 )
-from tests.cli_tree import NEEDED_UNLESS, root_command
+from tests.cli_tree import NEEDED_UNLESS, _placeholder, root_command
 from tests.rendered import ANSI
 from tests.rendered import plain as _plain
 
@@ -1297,11 +1297,19 @@ def test_an_argument_needed_unless_a_flag_stands_in_is_refused_without_either(
     code; an entry the command no longer needs would fill a word it reads as something
     else."""
     argument, flag = NEEDED_UNLESS[path]
-    command = root_command().commands[path[0]].commands[path[1]]  # type: ignore[attr-defined]
+    command: Any = root_command()
+    for word in path:  # a path of any depth (`project group parent`)
+        command = command.commands[word]
     param = next(p for p in command.params if p.name == argument)
     assert not param.required and any(flag in p.opts for p in command.params)
 
-    result = runner.invoke(app, ["--json", *path])
+    # Every other required argument given (`project group parent <group>`), this one not.
+    others = [
+        _placeholder(p)
+        for p in command.params
+        if p.required and p.param_type_name == "argument" and p.name != argument
+    ]
+    result = runner.invoke(app, ["--json", *path, *others])
 
     assert result.exit_code == 2
     assert json.loads(result.stdout)["message"] == f"Missing argument '{argument}'."

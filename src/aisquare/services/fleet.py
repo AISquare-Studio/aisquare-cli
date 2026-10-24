@@ -3300,6 +3300,7 @@ def spawn(
             f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
             "or raise the limit in [fleet]",
         )
+    _refuse_by_group(project, spawned_by, admit=admit)
     # The machine's own limits (#283), after the project's: the fleet-wide budget and
     # the memory floor. Before the store opens below and before any window.
     # ``admit`` is False for a live 1:1 replacement (a restart of a running agent, a
@@ -4482,6 +4483,7 @@ def _write_row(
                 continue
             _verify_cap(store, stored, cap)
             _verify_budget(store, stored, total)
+            _verify_group_cap(store, stored)
             return stored
     raise FleetError(f"could not record {agent.label!r}: every label tried was taken")
 
@@ -4564,6 +4566,66 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
         "spawn took the last slot while this one was starting; stop one, or raise the "
         "limit in [fleet]"
     )
+
+
+def is_paused(project: ProjectInfo) -> bool:
+    """Whether ``project``'s ``fleet-paused`` signal reads on, on any board it lives on
+    (:func:`_pause_where_on`). A store that cannot be read says not paused."""
+    if not orchestrator.team_enabled():
+        return False
+    try:
+        with store_session() as store:
+            states = _team().board_signals_in(store)
+    except Exception:
+        return False
+    return bool(_pause_where_on(project, states))
+
+
+def _under_a_parent(project: ProjectInfo) -> bool:
+    """Whether ``project`` is in a parent relation (a member under a parent, or a parent):
+    the subtree a group pause covers. A project in none behaves as before."""
+    from aisquare.services import parent as parent_service
+
+    with store_session() as store:
+        return parent_service.parent_of(store, project.id) is not None or bool(
+            parent_service.groups_parented_by(store, project.id)
+        )
+
+
+def _refuse_by_group(project: ProjectInfo, spawned_by: str, *, admit: bool) -> None:
+    """P2-W6 (#199): an agent's spawn (``--as``) on a paused board under a parent is
+    refused, so a parent manager cannot restart what ``fleet pause --group`` paused; and a
+    spawn past its group's ``max_agents`` is refused (``capacity_group``), as admission
+    refuses past the budget. A person's spawn on a paused board goes ahead, as before; a 1:1
+    replacement (``admit`` False) takes the seat it frees."""
+    from aisquare.services import parent as parent_service
+
+    if (
+        spawned_by not in ("user", "usage-limit")
+        and _under_a_parent(project)
+        and is_paused(project)
+    ):
+        raise FleetError(
+            f"{_name(project)} is paused — an agent may not spawn there; "
+            f"`{project_service.fleet_command('resume', project)}` first"
+        )
+    if not admit:
+        return
+    with store_session() as store:
+        why = parent_service.cap_refusal(store, project.id)
+    if why is not None:
+        raise CapacityRefused("capacity_group", why)
+
+
+def _verify_group_cap(store: ContextStore, stored: FleetAgent) -> None:
+    """Back the row out if it is past its group's ``max_agents`` (P2-W6, #199): settled as
+    :func:`_verify_cap` settles the project's, over the group's members and parent."""
+    from aisquare.services import parent as parent_service  # lazy: it reads the store only
+
+    why = parent_service.over_cap(store, stored)
+    if why is not None:
+        store.end_fleet_agent(stored.id)
+        raise CapacityRefused("capacity_group", why)
 
 
 def _verify_budget(store: ContextStore, stored: FleetAgent, total: int) -> None:

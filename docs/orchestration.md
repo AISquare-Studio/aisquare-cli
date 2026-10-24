@@ -376,6 +376,48 @@ for it with Monitor or `sleep` loops, each of which is a turn that re-sends its 
 context. `aisquare watch --detach` runs one watcher for the fleet, and its `watch:` board
 lines wake the manager with counts and a file path ([fleet](fleet.md#watching-the-fleet)).
 
+### A manager over a group
+
+A manager hears only its own board. When one manager coordinates several projects, a
+project group (`aisquare project group …`) can name a **parent**: an ordinary project,
+outside the group, whose manager is the group's. The members' boards stay their own; what
+the group's rules choose is copied up as one line.
+
+```sh
+aisquare project group parent app hq              # hq's manager is app's parent (--clear)
+aisquare project group route app --kinds question,task_blocked,result,linked
+aisquare project group route app --pattern 'READY|BLOCKED'   # a matching note routes too
+aisquare project group cap app 6                  # live agents across members and parent
+aisquare note "which base?" --kind question --to parent       # from a member's agent
+aisquare task add "auth API" --project api --origin 12       # from the parent's manager
+```
+
+- **Routed lines.** A member's event the rules choose lands, in the member's own write, on
+  the parent's board as `routed from api#812 (question by coder-auth): which base? —
+  aisquare board --project api`, addressed to the parent's manager (so it wakes it), and
+  that manager is nudged. By default a group routes questions to the manager or the
+  parent, `task_blocked`, `result`, and every status change of a task delegated from the
+  parent; `--kinds` chooses, `--pattern` adds notes whose text matches, `--off` stops it,
+  and `--to parent` always routes. One child routes at most one line a minute: the rest
+  are folded into a count the child's next routed line carries (`+4 folded`). A question, a
+  blocked task and anything `--to parent` are never folded: they always route at once.
+- **Linked tasks.** `task add --project <member> --origin <task>` delegates a task from the
+  parent's board to a member's: the member's line shows `← hq#12`, the origin's
+  `→ 2 linked, 1 done`, a child's status changes route up, and when every child is
+  closed (at least one done; a dropped one does not hold the origin open),
+  `linked_all_done` asks the parent's manager to close the origin. It closes it itself.
+- **Escalation.** Under a parent, a member's manager asks the parent before the human
+  ("blocked twice" in its cycle names `--to parent`).
+- **Subtree pause and cap.** `aisquare fleet pause --group app` pauses every member and the
+  parent; under a parent an agent's own spawn on a paused board is refused. `project group
+  cap` counts the live agents across members and parent, as the fleet-wide budget does.
+- **Briefing.** The parent's manager is told its group in its start pack: the members,
+  whether each has a manager up, and the delegation verbs, in a few lines.
+
+A group without a parent behaves exactly as before. `AISQUARE_TEAM_HUB` is still the
+way one board serves several repositories; a parent is for several boards with a manager
+each.
+
 ### Tuning (environment variables)
 
 Orchestration has no config files — a handful of env knobs:

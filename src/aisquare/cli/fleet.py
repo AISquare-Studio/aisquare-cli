@@ -1503,32 +1503,65 @@ def gate(
     raise typer.Exit(code)
 
 
-@app.command("pause")
-def pause(project: ProjectRef = None, as_session: SessionRef = None) -> None:
-    """Pause the fleet: the manager spawns nothing until `resume`."""
-    target = _project(project)
+GroupRef = Annotated[
+    str | None,
+    typer.Option(
+        "--group",
+        help="Every project of this group and its parent (a project group with a parent).",
+    ),
+]
+
+
+def _group_targets(group: str) -> list[ProjectInfo]:
+    """The projects ``--group`` names: the group's members and its parent (P2-W6, #199)."""
+    from aisquare.core.store import store_session
+    from aisquare.services import parent as parent_service
+    from aisquare.services import project_groups as groups_service
+
+    with store_session() as store:
+        try:
+            found = groups_service.resolve_group(store, group)
+        except KeyError:
+            fail(f"no group matches '{group}'", error="not_found", ref=group)
+        return parent_service.group_projects(store, found.id)
+
+
+def _pause_or_resume(
+    project: str | None, group: str | None, as_session: str | None, *, on: bool
+) -> None:
+    if project is not None and group is not None:
+        fail("give a project or --group, not both", error="usage", exit_code=2)
+    targets = _group_targets(group) if group is not None else [_project(project)]
+    verb = fleet_service.pause if on else fleet_service.resume
     try:
-        fleet_service.pause(target, session_ref=as_session)
+        for target in targets:
+            verb(target, session_ref=as_session)
     except fleet_service.FleetError as exc:
         _fail_fleet(exc)
     if get_state().json_output:
-        typer.echo(json.dumps({"paused": True, **_project_json(target)}))
+        payload = [{"paused": on, **_project_json(t)} for t in targets]
+        typer.echo(json.dumps(payload[0] if group is None else payload))
         return
-    stdout_console().print(f"⏸ fleet paused for {_display_name(target)}", markup=False)
+    for target in targets:
+        mark, said = ("⏸", "paused") if on else ("▶", "resumed")
+        stdout_console().print(f"{mark} fleet {said} for {_display_name(target)}", markup=False)
+
+
+@app.command("pause")
+def pause(
+    project: ProjectRef = None, group: GroupRef = None, as_session: SessionRef = None
+) -> None:
+    """Pause the fleet: the manager spawns nothing until `resume`. `--group` pauses a group's
+    members and its parent at once, and an agent may not spawn on any of them."""
+    _pause_or_resume(project, group, as_session, on=True)
 
 
 @app.command("resume")
-def resume(project: ProjectRef = None, as_session: SessionRef = None) -> None:
-    """Resume a paused fleet."""
-    target = _project(project)
-    try:
-        fleet_service.resume(target, session_ref=as_session)
-    except fleet_service.FleetError as exc:
-        _fail_fleet(exc)
-    if get_state().json_output:
-        typer.echo(json.dumps({"paused": False, **_project_json(target)}))
-        return
-    stdout_console().print(f"▶ fleet resumed for {_display_name(target)}", markup=False)
+def resume(
+    project: ProjectRef = None, group: GroupRef = None, as_session: SessionRef = None
+) -> None:
+    """Resume a paused fleet (`--group`: a group's members and its parent)."""
+    _pause_or_resume(project, group, as_session, on=False)
 
 
 def not_interactive_reason() -> str | None:

@@ -91,8 +91,12 @@ def launch_identity(env: dict[str, str], selected: ResolvedAgent, hub: Path | No
     # its kind marks its tools' shells with (Codex's CODEX_THREAD_ID), inherited from
     # wherever this runs — a window of a tmux server a Codex tool started — would make
     # its own hooks read as a nested child's (`agent_sessions.own_process`).
-    if selected.adapter.capabilities.tool_shell_env is not None:
-        env.pop(selected.adapter.capabilities.tool_shell_env, None)
+    # The rest those shells get go too, the spawner's session's and sandbox's, never this
+    # agent's (`tool_shell_vars`: Codex's CODEX_SESSION_ID, CODEX_CI, …).
+    capabilities = selected.adapter.capabilities
+    for name in (capabilities.tool_shell_env, *capabilities.tool_shell_vars):
+        if name is not None:
+            env.pop(name, None)
     # Claude Code's CLAUDE_CONFIG_DIR stays as the shell or the binding wrote it.
     if selected.adapter.capabilities.exports_home_env:
         env[selected.adapter.home_env] = str(selected.config_dir)

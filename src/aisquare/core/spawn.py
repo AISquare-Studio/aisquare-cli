@@ -495,8 +495,10 @@ def git_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
 
 def agent_identity_env_vars() -> tuple[str, ...]:
     """Every registered agent's process-identity variables: the one it sets in its tools'
-    shells alone (``AgentCapabilities.tool_shell_env``, Codex's ``CODEX_THREAD_ID``) and the
-    one it hands each hook its pid in (``pid_env``, Claude Code's ``CLAUDE_PID``).
+    shells alone (``AgentCapabilities.tool_shell_env``, Codex's ``CODEX_THREAD_ID``), the
+    others those shells get for that one session or sandbox (``tool_shell_vars``: Codex's
+    ``CODEX_SESSION_ID``, ``CODEX_CI``, …) and the one it hands each hook its pid in
+    (``pid_env``, Claude Code's ``CLAUDE_PID``).
 
     Each says which agent process a shell is under. A tmux server started from inside an
     agent's tool shell pinned them for every window opened on it, and a ``codex`` started by
@@ -508,15 +510,43 @@ def agent_identity_env_vars() -> tuple[str, ...]:
     named = (
         name
         for adapter in adapters()
-        for name in (adapter.capabilities.tool_shell_env, adapter.capabilities.pid_env)
+        for name in (
+            adapter.capabilities.tool_shell_env,
+            adapter.capabilities.pid_env,
+            *adapter.capabilities.tool_shell_vars,
+        )
         if name
     )
     return tuple(dict.fromkeys(named))
 
 
+def tool_shell_homes(env: Mapping[str, str]) -> tuple[str, ...]:
+    """The config-dir variable (``AgentAdapter.home_env``) of every agent whose tool shell
+    ``env`` is: one holding a variable only its tools' shells are given
+    (``AgentCapabilities.tool_shell_env``, ``tool_shell_vars``). That home is the spawner's
+    own: a fleet server started from a Codex tool shell pinned its ``CODEX_HOME`` for every
+    window, while the one a slot's window runs under travels with that window
+    (``claude_accounts.carry_environment``) and the launch sets its agent's (SMOKE8 of
+    #113). Claude Code's hooks get its ``CLAUDE_PID``, its shells nothing of their own, so
+    its home is never one."""
+    from aisquare.core.agent_adapters import adapters
+
+    homes = (
+        adapter.home_env
+        for adapter in adapters()
+        if any(
+            env.get(name)
+            for name in (adapter.capabilities.tool_shell_env, *adapter.capabilities.tool_shell_vars)
+            if name
+        )
+    )
+    return tuple(dict.fromkeys(homes))
+
+
 def tmux_client_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
-    """What a tmux client runs with: :func:`untraced_env` less :data:`TEAM_ENV_VARS` and
-    every agent's process identity (:func:`agent_identity_env_vars`).
+    """What a tmux client runs with: :func:`untraced_env` less :data:`TEAM_ENV_VARS`, every
+    agent's process identity (:func:`agent_identity_env_vars`) and, from an agent's tool
+    shell, that agent's home (:func:`tool_shell_homes`).
 
     The client that finds no server starts one, and the server keeps that client's
     environment as its global one, so a server the fleet starts holds no team
@@ -524,5 +554,6 @@ def tmux_client_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
     as no one's persona (review of #201, F7). Nor the identity of the agent whose tool
     shell started it. The home (``AISQUARE_HOME``) stays: the windows need it.
     """
-    dropped = {*TEAM_ENV_VARS, *agent_identity_env_vars()}
-    return {k: v for k, v in untraced_env(base).items() if k not in dropped}
+    env = untraced_env(base)
+    dropped = {*TEAM_ENV_VARS, *agent_identity_env_vars(), *tool_shell_homes(env)}
+    return {k: v for k, v in env.items() if k not in dropped}

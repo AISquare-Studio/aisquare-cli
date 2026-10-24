@@ -244,6 +244,15 @@ class AgentCapabilities:
     belongs to a process one of those tools started (a nested ``codex exec``), never to
     the agent ``aisquare launch`` started, which clears it (``core.agent_sessions.
     own_process``; rule 1 of ``services.team``'s fleet-row section)."""
+    tool_shell_vars: tuple[str, ...] = ()
+    """Every other variable the agent sets in its tools' shells for that one session, call,
+    sandbox or install (Codex's ``CODEX_SESSION_ID``, ``CODEX_TOOL_CALL_ID``, ``CODEX_CI``,
+    ``CODEX_SANDBOX_NETWORK_DISABLED``, …): a tmux server started from such a shell pinned
+    them for every window opened on it, and each agent there inherited the spawner's
+    (SMOKE8 of #113). Stripped from every tmux client with :attr:`tool_shell_env`
+    (``core.spawn.agent_identity_env_vars``), and from the agent ``aisquare launch`` starts.
+    A shell holding any of them is that agent's tool shell, whose
+    :attr:`AgentAdapter.home_env` is the spawner's own (``core.spawn.tool_shell_homes``)."""
     exports_home_env: bool = True
     """A launch sets :attr:`AgentAdapter.home_env` to the config dir it resolved; Claude
     Code's ``CLAUDE_CONFIG_DIR`` stays as the shell or the binding wrote it."""

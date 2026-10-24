@@ -509,6 +509,19 @@ class CodexAdapter:
         redraws_while_asking=True,
         working_on_screen=working_on_screen,
         tool_shell_env="CODEX_THREAD_ID",
+        # `RUN env` in a `codex exec` tool shell: 0.162.1 set these beside CODEX_THREAD_ID and
+        # CODEX_HOME, 0.164.0 (npm) CODEX_TOOL_CALL_ID and its two package variables too.
+        tool_shell_vars=(
+            "CODEX_SESSION_ID",
+            "CODEX_TOOL_CALL_ID",
+            "CODEX_CI",
+            "CODEX_SANDBOX_NETWORK_DISABLED",
+            "CODEX_PERMISSION_PROFILE",
+            "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
+            "CODEX_VERSION",
+            "CODEX_MANAGED_BY_NPM",
+            "CODEX_MANAGED_PACKAGE_ROOT",
+        ),
         # `codex exec resume <id> -c developer_instructions=Y` kept the thread's first X
         # and dropped Y; a later resume without -c still carried X (0.162.1).
         resume_keeps_system_prompt=True,

@@ -789,6 +789,91 @@ def test_refresh_status_pushes_the_managers_state(project: ProjectInfo) -> None:
     assert "no live tmux session" in attach_after  # the coder has no session to attach to
 
 
+def _member(project: ProjectInfo, label: str, role: str, *, ended: bool = False) -> FleetAgent:
+    """A team member of ``role`` in the frame, with an id and pane of its own."""
+    return fake_agent(project, pane_id=f"%{len(label)}", label=label).model_copy(
+        update={
+            "id": f"agt_01test{label.replace('-', '')}",
+            "role": role,
+            "ended_at": datetime.now(tz=UTC) if ended else None,
+        }
+    )
+
+
+def test_the_team_strip_counts_each_role_by_state_and_hides_with_only_the_manager(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P3-W2b (#287): under the manager's info line, the team per role and state, from the
+    shell's frame alone: 2 coders working, 1 tester waiting, 1 reviewer in attention."""
+    manager = fake_agent(project, pane_id="%11")
+    frame = [
+        FleetAgentStatus(agent=manager, state="working"),
+        FleetAgentStatus(agent=_member(project, "coder-a", "coder"), state="working"),
+        FleetAgentStatus(agent=_member(project, "coder-b", "coder"), state="working"),
+        FleetAgentStatus(agent=_member(project, "tester-1", "tester"), state="waiting"),
+        FleetAgentStatus(agent=_member(project, "reviewer-1", "reviewer"), state="attention"),
+        # An ended row the listing keeps while its window stands (#138) is not the team.
+        FleetAgentStatus(agent=_member(project, "coder-old", "coder", ended=True), state="exited"),
+    ]
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, bool, bool]:
+        def no_read(*args: object, **kwargs: object) -> None:
+            raise AssertionError("the strip reads the frame it was handed, nothing else")
+
+        monkeypatch.setattr(fleet_service, "list_agents", no_read)
+        view = host.query_one(ProjectView)
+        view.refresh_status(frame)
+        await pilot.pause()
+        strip = host.query_one("#team-strip", Static)
+        team = (shown(strip), strip.display)
+        view.refresh_status(frame[:1])  # the manager alone
+        await pilot.pause()
+        return (*team, strip.display)
+
+    text, displayed, alone = drive(project, scenario)
+    assert text == "🔨 2▶  🧪 1⏸  👀 1🔔  · board for detail"
+    assert displayed is True
+    assert alone is False
+
+
+def test_the_team_strip_shows_each_state_of_a_role_and_a_role_it_has_no_icon_for(
+    project: ProjectInfo,
+) -> None:
+    frame = [
+        FleetAgentStatus(agent=_member(project, "coder-a", "coder"), state="working"),
+        FleetAgentStatus(agent=_member(project, "coder-b", "coder"), state="limited"),
+        FleetAgentStatus(agent=_member(project, "coder-c", "coder"), state="waiting"),
+        FleetAgentStatus(agent=_member(project, "docs-1", "docs-writer"), state="waiting"),
+    ]
+    text = project_view_module.team_strip_text(frame)
+    assert text is not None
+    assert text.plain == "🔨 1▶ 1⏸ 1⏳  🤖 docs-writer 1⏸  · board for detail"
+    assert project_view_module.team_strip_text(frame[:0]) is None
+
+
+def test_a_click_on_the_team_strip_opens_the_board_tab(project: ProjectInfo) -> None:
+    manager = fake_agent(project, pane_id="%11")
+    coder = _member(project, "coder-a", "coder")
+
+    async def scenario(pilot: Pilot[None], host: Host) -> tuple[str, str]:
+        view = host.query_one(ProjectView)
+        view.refresh_status(
+            [
+                FleetAgentStatus(agent=manager, state="working"),
+                FleetAgentStatus(agent=coder, state="working"),
+            ]
+        )
+        await pilot.pause()
+        before = view.active
+        await pilot.click("#team-strip")
+        await pilot.pause()
+        return before, view.active
+
+    before, after = drive(project, scenario)
+    assert before == "tab-manager"
+    assert after == "tab-board"
+
+
 def test_a_resize_after_the_manager_leaves_keeps_the_no_manager_text(
     project: ProjectInfo,
 ) -> None:

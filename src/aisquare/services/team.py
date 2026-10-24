@@ -670,22 +670,28 @@ def _record_delivery(event: TeamEvent, board: _Board) -> TeamEvent:
     return stored
 
 
-def session_account(transcript_path: str | None) -> str | None:
-    """Which agent config dir (account) a session runs under, or ``None``.
+def session_account(transcript_path: str | None, agent: str | None = None) -> str | None:
+    """Which agent config dir (account) a session of ``agent`` runs under, or ``None``: what
+    to read where its hook did not name it.
 
-    Derived from the transcript path in the hook payload
-    (``<config-dir>/projects/<slug>/<session>.jsonl``) rather than from
-    ``CLAUDE_CONFIG_DIR``: the variable only reaches us if the agent happens to
-    export it to hook subprocesses, whereas the transcript path is always in
-    the payload and names the directory unambiguously. Falls back to the
-    variable when the path has an unexpected shape.
+    An agent whose hook commands name their config dir (``capabilities.hook_names_home``:
+    Codex's ``--config-dir``) is not told its home otherwise, so nothing here guesses it from
+    the transcript. Any other agent's is derived from the transcript path in the hook
+    payload (``<config-dir>/projects/<slug>/<session>.jsonl``, Claude Code's) rather than
+    from its home variable (``CLAUDE_CONFIG_DIR``): the variable only reaches us if the
+    agent happens to export it to hook subprocesses, whereas the transcript path is always
+    in the payload and names the directory unambiguously. Falls back to the agent's home
+    variable (``AgentAdapter.home_env``) when the path has an unexpected shape.
     """
-    if transcript_path:
+    adapter = recorded_adapter(agent)
+    if adapter is None:
+        return None
+    if transcript_path and not adapter.capabilities.hook_names_home:
         path = Path(transcript_path)
         # …/<config-dir>/projects/<project-slug>/<session-id>.jsonl
         if len(path.parents) >= 3 and path.parents[1].name == "projects":
             return str(path.parents[2])
-    return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or None
+    return os.environ.get(adapter.home_env, "").strip() or None
 
 
 def slot_labels_via(store: ContextStore) -> Mapping[int, str]:
@@ -2057,7 +2063,7 @@ def hook_session_start(
                 cursor=store.latest_seq(project.id),
                 state="waiting" if at_its_prompt else "working",
                 transcript_path=transcript_path,
-                account=account or session_account(transcript_path),
+                account=account or session_account(transcript_path, agent),
                 model=model,
                 effort=effort,
                 # Recorded as ASKED, loadable or not (§3.7): this pane's fleet row
@@ -2160,7 +2166,7 @@ def hook_prompt_heartbeat(
                     last_seen_at=now,
                     cursor=store.latest_seq(project.id),
                     transcript_path=transcript_path,
-                    account=account or session_account(transcript_path),
+                    account=account or session_account(transcript_path, agent),
                     model=harness.clean_model_id(model),
                     effort=harness.clean_effort(effort),
                 )

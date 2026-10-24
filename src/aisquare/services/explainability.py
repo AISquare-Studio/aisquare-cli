@@ -75,7 +75,8 @@ from urllib.error import URLError
 from urllib.parse import SplitResult, urlsplit
 from urllib.request import urlopen
 
-from aisquare.core import harness, insights, outbox, paths, spawn
+from aisquare.core import insights, outbox, paths, spawn
+from aisquare.core.agent_adapters import adapter_for_binary, adapters
 from aisquare.core.atomic import write_replacing
 from aisquare.core.config import (
     AppConfig,
@@ -118,16 +119,15 @@ _SAFE_ROLE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 _PROBE_TIMEOUT_SECONDS = 1.5
 
-#: The ONE program verified to accept ``--session-id <uuid>`` (Claude Code
-#: 2.1.233) is the default agent's binary, which the note a refused pin names
-#: (``harness.default_binary``). WHETHER a binary is that program is
-#: ``harness.is_default_agent``, the single predicate this and the role's own
-#: ``default_args`` now share: the two gates ran 55 lines apart in the same
-#: launch, each with its own ``"claude"`` literal, and each missed ``claude.cmd``
-#: and a binding typed with a trailing slash. Since #57 a role can be bound to
-#: any executable, and an unknown flag kills the launch; every other binary
-#: joins through the hook seam instead, which needs no flag at all, so the
-#: narrow match costs nothing but a nicety.
+#: The programs verified to accept ``--session-id <uuid>`` are the agents whose
+#: session AISquare names at launch (``capabilities.assigns_session_id``: Claude
+#: Code 2.1.233), each known by its binary's name (``agent_adapters.
+#: adapter_for_binary``), the predicate this and the role's own ``default_args``
+#: share: the two gates ran 55 lines apart in the same launch, each with its own
+#: ``"claude"`` literal, and each missed ``claude.cmd`` and a binding typed with a
+#: trailing slash. Since #57 a role can be bound to any executable, and an unknown
+#: flag kills the launch; every other binary joins through the hook seam instead,
+#: which needs no flag at all, so the narrow match costs nothing but a nicety.
 
 #: Flags whose presence means the caller (or the human) already owns the
 #: session id, so we must read it rather than choose one.
@@ -410,10 +410,18 @@ def traced_by(env: Mapping[str, str] | None = None) -> tuple[str, str] | None:
 
 
 def accepts_session_id(binary: str) -> bool:
-    """Whether ``binary`` is one we may hand ``--session-id`` to."""
+    """Whether ``binary`` is one we may hand ``--session-id`` to: its name runs an agent whose
+    session AISquare names at launch (``capabilities.assigns_session_id``)."""
     if os.environ.get(_PIN_ENV_VAR, "").strip().lower() in _OFF_VALUES:
         return False
-    return harness.is_default_agent(binary)
+    adapter = adapter_for_binary(binary)
+    return adapter is not None and adapter.capabilities.assigns_session_id
+
+
+def _session_id_binaries() -> str:
+    """The binaries that take ``--session-id``, as a refused pin's note names them."""
+    named = [a.binary for a in adapters() if a.capabilities.assigns_session_id]
+    return " or ".join(named) or "an agent that takes one"
 
 
 def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
@@ -449,8 +457,15 @@ def plan_session_identity(binary: str, args: Sequence[str]) -> SessionIdentity:
             return SessionIdentity(None, note=f"{flag} resumes a session chosen at run time")
     if not accepts_session_id(binary):
         return SessionIdentity(
-            None, note=f"{os.path.basename(binary)!r} is not {harness.default_binary()}"
+            None, note=f"{os.path.basename(binary)!r} is not {_session_id_binaries()}"
         )
+    return minted_identity()
+
+
+def minted_identity() -> SessionIdentity:
+    """A fresh session id, handed to the agent as ``--session-id``: for an agent whose
+    session AISquare names at launch (``capabilities.assigns_session_id``), a fresh start or
+    a fork that names the new session itself (``ForkArgs.mints_id``)."""
     session_id = str(uuid.uuid4())
     return SessionIdentity(session_id, inject_args=(_SESSION_ID_FLAG, session_id))
 

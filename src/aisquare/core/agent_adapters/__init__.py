@@ -47,6 +47,15 @@ def recorded_adapter(name: str | None) -> AgentAdapter | None:
 
 
 def adapter_for_binary(binary: str) -> AgentAdapter | None:
+    """The adapter whose ``binary`` is ``binary``'s name (``types.executable_name``: the
+    basename, Windows shims included and a trailing separator tolerated), or ``None``: what
+    a launch's own flags for an agent go by (a role's ``default_args``, ``--session-id``).
+
+    **A wrapper script literally named ``claude`` is Claude Code**, deliberately:
+    ``~/bin/claude`` and ``/opt/wrap/claude`` are the shape operators actually use to add an
+    account or a flag to it, a wrapper is indistinguishable from the real thing from here,
+    and the cost of being wrong is one unknown flag on a program the operator named after
+    it. Anything else (``claude2``, ``claude-next``, ``aider``) is no agent's by name."""
     name = executable_name(binary)
     return next((adapter for adapter in adapters() if name == adapter.binary), None)
 

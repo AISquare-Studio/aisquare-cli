@@ -401,9 +401,16 @@ class ClaudeCodeAdapter:
             )
 
     def role_defaults(self, role: str, *, binary: str, args: Sequence[str]) -> harness.RoleDefaults:
-        """``RoleProfile.default_args`` (the ui-tester's ``--chrome``), for ``claude`` and
-        not a wrapper of another name (``harness.role_defaults``)."""
-        return harness.role_defaults(role, binary=binary, args=args)
+        """``RoleProfile.default_args`` (the ui-tester's ``--chrome``, ``harness.
+        profile_defaults``) for a binary whose name runs Claude Code (``adapter_for_binary``),
+        and none, with a note, for a wrapper of another name (``claude2``), which may be
+        another program and would reject them (``harness.withheld_defaults``)."""
+        from aisquare.core.agent_adapters import adapter_for_binary
+
+        runs = adapter_for_binary(binary)
+        if runs is None or runs.id != self.id:
+            return harness.withheld_defaults(role, binary, self.binary)
+        return harness.profile_defaults(role, args)
 
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         self.validate(model, effort)

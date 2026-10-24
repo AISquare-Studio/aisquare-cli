@@ -130,12 +130,11 @@ BASELINE: dict[str, dict[Shape, int]] = {
     "services/agent_launch.py": {"decide_named": 2},
     "services/claude_accounts.py": {"decide_named": 22, "binary": 1, "dir": 2},
     "services/diagnostics.py": {"decide_named": 5, "binary": 2, "env": 1, "dir": 3},
-    "services/explainability.py": {"decide_binary": 1, "env": 4, "flag": 4},
+    "services/explainability.py": {"env": 4, "flag": 4},
     "services/first_run.py": {"decide_named": 2},
-    "services/fleet.py": {"decide_named": 2, "decide_binary": 1, "flag": 1},
+    "services/fleet.py": {"decide_named": 2},
     "services/native_telemetry.py": {"binary": 1, "dir": 2},
     "services/store_broker.py": {"flag": 1},
-    "services/team.py": {"env": 1},
 }
 
 

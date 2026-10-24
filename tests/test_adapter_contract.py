@@ -1591,3 +1591,38 @@ def test_the_default_binary_is_the_default_agents_own(
     )
     assert row.binary == fake_agent.binary
     assert status_line_text(True, None).plain.endswith(fake_agent.binary)
+
+
+def test_a_binarys_flags_session_id_and_account_are_its_adapters(
+    adapter: AgentAdapter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Nothing shared decides by a binary's name (B1, B2, B10): a role's own flags are those
+    of the agent the binary's name runs (``adapter_for_binary``), a session id is minted for
+    it at launch exactly when it says it takes one (``capabilities.assigns_session_id``),
+    and a hook that did not name its account reads it off the transcript only for an agent
+    whose hooks are not told their home (``capabilities.hook_names_home``), else from its
+    own home variable."""
+    from aisquare.services import explainability
+    from aisquare.services import team as team_service
+
+    binary = f"/opt/bin/{adapter.binary}"
+    for role in harness.ROLE_PROFILES:
+        assert harness.role_defaults(role, binary=binary, args=[]) == adapter.role_defaults(
+            role, binary=binary, args=[]
+        ), role
+    wrapper = harness.role_defaults("ui-tester", binary=f"{binary}-next", args=[])
+    assert wrapper.args == [] and "withheld" in wrapper.notes[0]
+
+    monkeypatch.delenv(explainability._PIN_ENV_VAR, raising=False)
+    takes = adapter.capabilities.assigns_session_id
+    assert explainability.accepts_session_id(binary) is takes
+    planned = explainability.plan_session_identity(binary, [])
+    assert (planned.session_id is not None) is takes, planned.note
+    assert takes or adapter.binary in str(planned.note)
+
+    home = tmp_path / "home"
+    monkeypatch.setenv(adapter.home_env, str(home))
+    transcript = tmp_path / "dir" / "projects" / "slug" / "session.jsonl"
+    read = home if adapter.capabilities.hook_names_home else tmp_path / "dir"
+    assert team_service.session_account(str(transcript), adapter.id) == str(read)
+    assert team_service.session_account(None, adapter.id) == str(home)

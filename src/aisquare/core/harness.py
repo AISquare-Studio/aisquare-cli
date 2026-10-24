@@ -225,36 +225,57 @@ def _flag_present(args: Sequence[str], flag: str) -> bool:
 
 
 def role_defaults(role: str, *, binary: str, args: Sequence[str]) -> RoleDefaults:
-    """The role's :attr:`RoleProfile.default_args` this launch still needs.
+    """The flags ``role`` needs on ``binary``: the ``role_defaults`` of the agent the
+    binary's name runs (``agent_adapters.adapter_for_binary``; Claude Code's are the
+    role's :attr:`RoleProfile.default_args`, :func:`profile_defaults`). A wrapper by any
+    other name (``claude2``, ``claude-next``) may be another program and would reject
+    them, so it gets none, with a note (:func:`withheld_defaults`)."""
+    from aisquare.core.agent_adapters import adapter_for_binary  # lazy: they import us
 
-    Applied only when the agent is Claude Code (:func:`is_default_agent`) — a
-    wrapper or another agent has its own flags and would reject Claude Code's;
-    skipped for any flag already present in ``args`` (a binding, a fleet
-    ``extra_args``, the operator's own line) and for any flag whose ``--no-``
-    opt-out is present. So the fleet's ``aisquare launch ui-tester`` inside a
-    tmux window and an operator's ``ais-cli-ais ui-tester --chrome`` both end
-    with exactly one ``--chrome``, and ``--no-chrome`` anywhere wins.
+    adapter = adapter_for_binary(binary)
+    if adapter is None:
+        return withheld_defaults(role, binary, default_binary())
+    return adapter.role_defaults(role, binary=binary, args=args)
 
-    Only the BINARY gate produces a note. The other two withholdings are
-    already on screen — the flag or its opt-out is in the command the operator
-    typed — while this one happens inside a tmux window nobody watched, for a
-    binding made in another shell.
+
+def profile_defaults(role: str, args: Sequence[str]) -> RoleDefaults:
+    """The role's :attr:`RoleProfile.default_args` this launch still needs: Claude Code's
+    answer (``ClaudeCodeAdapter.role_defaults``), for a binary its name says it runs.
+
+    Skipped for any flag already present in ``args`` (a binding, a fleet ``extra_args``,
+    the operator's own line) and for any flag whose ``--no-`` opt-out is present. So the
+    fleet's ``aisquare launch ui-tester`` inside a tmux window and an operator's
+    ``ais-cli-ais ui-tester --chrome`` both end with exactly one ``--chrome``, and
+    ``--no-chrome`` anywhere wins.
     """
     profile = ROLE_PROFILES.get(base_role(role))
     if profile is None or not profile.default_args:
         return RoleDefaults()
-    if not is_default_agent(binary):
-        return RoleDefaults(
-            notes=[
-                f"{', '.join(profile.default_args)} withheld: "
-                f"{os.path.basename(binary)!r} is not {default_binary()}"
-            ]
-        )
     return RoleDefaults(
         args=[
             flag
             for flag in profile.default_args
             if not _flag_present(args, flag) and not _flag_present(args, _opt_out_of(flag))
+        ]
+    )
+
+
+def withheld_defaults(role: str, binary: str, runs: str) -> RoleDefaults:
+    """None of the role's :attr:`RoleProfile.default_args`, with the note that says why:
+    ``binary`` is not ``runs``, the binary whose flags they are.
+
+    Only this withholding produces a note. The other two (:func:`profile_defaults`) are
+    already on screen — the flag or its opt-out is in the command the operator typed —
+    while this one happens inside a tmux window nobody watched, for a binding made in
+    another shell.
+    """
+    profile = ROLE_PROFILES.get(base_role(role))
+    if profile is None or not profile.default_args:
+        return RoleDefaults()
+    return RoleDefaults(
+        notes=[
+            f"{', '.join(profile.default_args)} withheld: "
+            f"{os.path.basename(binary)!r} is not {runs}"
         ]
     )
 
@@ -1338,30 +1359,6 @@ def default_binary() -> str:
     from aisquare.core.agent_adapters import default_binary  # lazy: the adapters import us
 
     return default_binary()
-
-
-def is_default_agent(binary: str) -> bool:
-    """Whether ``binary`` is Claude Code, so Claude Code's flags apply to it.
-
-    ONE predicate, because two places decide it: the role's ``default_args``
-    here and ``--session-id`` pinning in ``explainability.accepts_session_id``,
-    which used to carry its own ``"claude"`` literal 55 lines away in the same
-    launch.
-
-    Matched on the basename with the Windows shims included and a trailing
-    separator tolerated — ``os.path.basename("claude/")`` is ``""``, so a
-    binding typed with a slash silently lost the role's flags.
-
-    **A wrapper script literally named ``claude`` is accepted**, deliberately:
-    ``~/bin/claude`` and ``/opt/wrap/claude`` are the shape operators actually
-    use to add an account or a flag to Claude Code, from here a wrapper is
-    indistinguishable from the real thing, and the cost of being wrong is one
-    unknown flag on a program the operator named after Claude Code. Anything
-    else — ``claude2``, ``claude-next``, ``aider`` — gets nothing.
-    """
-    from aisquare.core.agent_adapters.types import executable_name
-
-    return executable_name(binary) == default_binary()
 
 
 #: Per-role override, e.g. AISQUARE_BIN_CODER=claude2. Role names are upper-cased

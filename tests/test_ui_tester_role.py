@@ -36,6 +36,7 @@ from aisquare.cli.app import app
 from aisquare.cli.ui.sidebar import ROLE_ICON
 from aisquare.core import agents as agent_core
 from aisquare.core import harness
+from aisquare.core.agent_adapters import adapter_for_binary, get_adapter
 from aisquare.core.config import (
     AppConfig,
     ExplainabilitySettings,
@@ -222,8 +223,8 @@ def test_default_args_accept_a_wrapper_named_claude() -> None:
     operators use to add an account or a flag to Claude Code, and from here it
     is indistinguishable from the real thing."""
     assert _args("/opt/wrap/claude", []) == ["--chrome"]
-    assert harness.is_default_agent("~/bin/claude") is True
-    assert harness.is_default_agent("claude2") is False
+    assert adapter_for_binary("~/bin/claude") is get_adapter("claude-code")
+    assert adapter_for_binary("claude2") is None
 
 
 def test_default_args_never_duplicate_and_never_override_an_opt_out() -> None:
@@ -262,13 +263,16 @@ def test_a_withheld_flag_is_never_silent() -> None:
 
 def test_one_predicate_answers_the_binary_question_for_both_gates() -> None:
     """`role_defaults` and `--session-id` pinning ran 55 lines apart in the same
-    launch, each with its own `"claude"` literal and each missing the shims."""
+    launch, each with its own `"claude"` literal and each missing the shims. Both ask
+    the adapter the binary's name runs (`adapter_for_binary`), never the name."""
+    claude = get_adapter("claude-code")
     for binary in ("claude", "/usr/local/bin/claude", "claude.cmd", "/opt/wrap/claude"):
         assert explainability_service.accepts_session_id(binary) is True, binary
-        assert harness.is_default_agent(binary) is True, binary
+        assert adapter_for_binary(binary) is claude, binary
     for binary in ("claude2", "claude-next", "aider"):
         assert explainability_service.accepts_session_id(binary) is False, binary
-        assert harness.is_default_agent(binary) is False, binary
+        assert adapter_for_binary(binary) is None, binary
+    assert explainability_service.accepts_session_id("codex") is False, "it names its own"
 
 
 def test_roles_without_defaults_get_nothing() -> None:

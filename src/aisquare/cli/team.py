@@ -809,7 +809,7 @@ def harness_status() -> None:
                 # debugged that concluded the flag came from their alias — the
                 # confusion this feature exists to end. Declared, not resolved:
                 # `binary`/`binary_source` in this same row say whether the
-                # binary gate (`harness.is_default_agent`) will pass them on. The
+                # binary gate (`agent_adapters.adapter_for_binary`) will pass them on. The
                 # role's AGENT declares them: Codex's ui-tester has no `--chrome`.
                 "default_args": selected.adapter.role_defaults(
                     name, binary=selected.adapter.binary, args=[]

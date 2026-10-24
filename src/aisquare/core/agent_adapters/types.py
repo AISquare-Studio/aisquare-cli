@@ -163,7 +163,9 @@ class AgentCapabilities:
     hook_names_home: bool = False
     """The installed hook command names its config dir (``--config-dir``): the agent
     does not tell its hooks which home they run for. The dir is then the session's
-    account; otherwise the account is read off the transcript path."""
+    account; otherwise the account is read off the transcript path
+    (``<config dir>/projects/<slug>/<id>.jsonl``), else the agent's :attr:`AgentAdapter.
+    home_env` in the hook's environment (``services.team.session_account``)."""
     strict_hooks_file: bool = False
     """A hooks file whose ``hooks`` is not an object of arrays is refused, never
     rewritten (Codex's ``hooks.json``); Claude Code's ``settings.json`` reads it as none."""

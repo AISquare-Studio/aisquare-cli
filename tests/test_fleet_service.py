@@ -39,6 +39,7 @@ from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import claude_sharing, codenames, harness, launch_seal, locking, paths, selfcli
 from aisquare.core import store as core_store
 from aisquare.core import tmux as tmux_core
+from aisquare.core.agent_adapters import adapter_for_binary
 from aisquare.core.config import (
     REVIEWER_ARGS,
     FleetRoleSettings,
@@ -20400,7 +20401,7 @@ def test_an_agent_that_is_not_claude_code_is_never_asked_for_its_screen(
     as at the question when its screen held the words: ``fleet tell`` filed a note it
     never reads instead of typing, and Remote pushed a trust card for an agent at work."""
     agent = _coder(project, binary=sys.executable)  # another harness: no --session-id
-    assert agent.session_id is None and not harness.is_default_agent(agent.binary)
+    assert agent.session_id is None and adapter_for_binary(agent.binary) is None
     tmux.set_command(agent.pane_id, "aider")
     tmux.screens[agent.pane_id] = TRUST_SCREEN  # the question's words, as it reads them
     tmux.captured.clear()
@@ -20428,7 +20429,7 @@ def test_a_row_pinned_to_a_session_is_asked_for_its_screen_whatever_its_binary_i
     claude2 = _executable(tmp_path / "bin" / "claude2")
     pinned = "0b3c6a52-9f7e-4d0e-8a51-2f4c1d7e9b60"
     agent = _coder(project, binary=str(claude2), agent_args=["--session-id", pinned])
-    assert agent.session_id == pinned and not harness.is_default_agent(agent.binary)
+    assert agent.session_id == pinned and adapter_for_binary(agent.binary) is None
     tmux.set_command(agent.pane_id, "claude2")
     tmux.screens[agent.pane_id] = TRUST_SCREEN
 

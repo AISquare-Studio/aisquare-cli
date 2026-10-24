@@ -37,7 +37,6 @@ import sqlite3
 import subprocess
 import time
 import unicodedata
-import uuid
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
@@ -3487,8 +3486,9 @@ def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None
     Code: one with a session (only Claude Code's hooks write one), one started on a
     session id (only Claude Code is: minted for it by name, or named by its caller or a
     resume, as the ``claude2`` parallel install is — review of #259, round 15), or by its
-    binary's name (``harness.is_default_agent``, the predicate its flags and
-    ``--session-id`` go by). Another harness's agent fires no hook, ever, so its pane was
+    binary's name, when that names an agent with such a dialog (``adapter_for_binary``, by
+    which its flags and ``--session-id`` go too). Another harness's agent fires no hook,
+    ever, so its pane was
     captured on every listing — the sidebar's tick, Remote's scan, each action's
     ``status_of`` — and read as at the question when its screen held the words (round 14).
     """
@@ -3503,7 +3503,9 @@ def _maybe_at_trust_prompt(status: FleetAgentStatus, session: TeamSession | None
         # on every listing for it.
         return False
     if session is None:
-        return reads or agent.session_id is not None or harness.is_default_agent(agent.binary)
+        named = adapter_for_binary(agent.binary)
+        asks = named is not None and named.capabilities.start_dialog_mark is not None
+        return reads or agent.session_id is not None or asks
     return session.last_seen_at < agent.created_at
 
 
@@ -4445,16 +4447,14 @@ def spawn(
     if forked is not None and forked.mints_id:
         # A FORK (card tsk_01m3ns5a736s) by an agent the launch names (`ForkArgs.mints_id`,
         # Claude Code's `--resume <transcript> --fork-session`): the source's conversation
-        # under a NEW id, minted here and passed as `--session-id` (Claude Code takes the
-        # two together only when it forks), so the row joins the fork's own session. The
+        # under a NEW id, minted here as a fresh start's is (`minted_identity`, passed as
+        # `--session-id`: Claude Code takes the two together only when it forks), so the row
+        # joins the fork's own session. The
         # identity planner is not asked: it reads `--resume <path>` as the RESUMED id and
         # knows nothing of `--fork-session`. The fork's arguments come before the recorded
         # ones and are never recorded (`_without_session_choice`), so a restart of the fork
         # resumes the fork, never its source.
-        minted = str(uuid.uuid4())
-        identity = explainability_service.SessionIdentity(
-            minted, inject_args=("--session-id", minted)
-        )
+        identity = explainability_service.minted_identity()
     elif forked is not None:
         # A fork the agent names itself (Codex's `fork <id>`): a new thread, whose id its
         # first hook brings, as a fresh start's does.

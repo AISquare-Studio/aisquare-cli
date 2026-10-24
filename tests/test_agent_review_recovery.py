@@ -83,7 +83,6 @@ def test_native_windows_shims_launch_and_report_their_family(
 ) -> None:
     family = "claude-code" if "claude" in binary.lower() else "codex"
     assert agent_adapters.adapter_for_binary(binary) == agent_adapters.get_adapter(family)
-    assert harness.is_default_agent(binary) == (family == "claude-code")
     monkeypatch.setenv("AISQUARE_BIN_CODER", binary)
     execution = Mock()
     monkeypatch.setattr(import_module("aisquare.cli.launch"), "_exec", execution)

@@ -47,6 +47,7 @@ from aisquare.models import FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from tests import test_ui_spawn as spawn_suite
+from tests.fleet_fakes import list_agents_as
 from tests.test_ui_spawn import (
     Host,
     SpawnRecorder,
@@ -166,7 +167,7 @@ async def choose_new_account(
 @pytest.fixture
 def no_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     """The picker's Agents section reads ``list_agents``, which asks tmux: none listed."""
-    monkeypatch.setattr(fleet_service, "list_agents", lambda project, *, live_only=True: [])
+    list_agents_as(monkeypatch, lambda project, *, live_only=True: [])
 
 
 @pytest.fixture

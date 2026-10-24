@@ -850,6 +850,26 @@ def roomy_memory(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def no_detached_root_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No in-process test starts the detached worker that posts a Run's root (#129 e).
+
+    It runs in a session of its own and outlives the test, retrying a gateway the test
+    has already shut down. A test of the worker patches ``_start_root_worker`` itself; a
+    test of a traced launch patches ``_post_run_root``. Reaching this is a test that did
+    neither, and it fails loudly rather than leave a process behind.
+    """
+    from aisquare.services import explainability
+
+    def refuse(argv: list[str], key: bytes) -> None:
+        raise AssertionError(
+            "a test started a detached root worker: patch explainability._post_run_root "
+            f"or _start_root_worker ({' '.join(argv[-5:])})"
+        )
+
+    monkeypatch.setattr(explainability, "_start_root_worker", refuse)
+
+
+@pytest.fixture(autouse=True)
 def no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Never read the macOS Keychain of the machine the suite runs on.
 

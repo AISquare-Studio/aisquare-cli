@@ -1421,7 +1421,23 @@ def interactive_terminal() -> bool:
     return not_interactive_reason() is None
 
 
-def ui() -> None:
+def ui(
+    project: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--project",
+            "-P",
+            help="Show only this project (repeatable): codename, name or id prefix.",
+            metavar="PROJECT",
+        ),
+    ] = None,
+    group: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--group", help="Show only this group's projects (repeatable).", metavar="GROUP"
+        ),
+    ] = None,
+) -> None:
     """Open the fleet UI — every project, agent and session in one view."""
     if get_state().json_output:
         fail(
@@ -1438,6 +1454,10 @@ def ui() -> None:
             error="not_a_tty",
             detail=reason,
         )
+    try:
+        scope = fleet_service.ui_scope(project or (), group or ())
+    except fleet_service.FleetError as exc:
+        _fail_fleet(exc)
     from aisquare.cli.ui.app import run_ui  # lazy: textual is heavy and only the UI needs it
 
-    run_ui()
+    run_ui(scope=scope)

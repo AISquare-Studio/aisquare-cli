@@ -22,7 +22,7 @@ from aisquare.cli.ui.views.accounts import AccountsView
 from aisquare.cli.ui.views.remote import RemotePanel
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.models import HeadroomSummary
-from aisquare.services import fleet as fleet_service
+from tests.fleet_fakes import list_agents_as
 from tests.test_ui_accounts import _overview, _status
 from tests.test_ui_shell import seed
 from tests.ui_workers import settle_page
@@ -34,7 +34,7 @@ def test_a_tick_that_lands_while_asq_is_torn_down_raises_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seed(tmp_path, ("prj_a", "alpha", None))
-    monkeypatch.setattr(fleet_service, "list_agents", lambda project: [])
+    list_agents_as(monkeypatch, lambda project: [])
     callbacks: list[tuple[str, Callable[[], None]]] = []
     raised: list[str] = []
     real_close_all = FleetApp._close_all

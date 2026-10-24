@@ -508,6 +508,7 @@ _V1_DEFAULTS: dict[str, Any] = {
             "validator": {"permission_mode": "auto", "worktree": False, "extra_args": []},
             "ui-tester": {"permission_mode": "auto", "worktree": False, "extra_args": []},
         },
+        "pane_clipboard": "off",
     },
     "accounts": {
         "pick": "default",
@@ -640,6 +641,10 @@ class FleetSettings(BaseModel):
     min_free_mb: int = 2048
     test_gate_mb: int = 0
     test_gate_wait_minutes: int = 15
+    pane_clipboard: Literal["off", "on"] = "off"
+    """Whether a program in an agent's pane may set your clipboard (OSC 52, tmux's
+    ``set-clipboard``). Off by default: on, any program a pane runs can write it. Applies
+    to a server started after the change."""
 
 
 class SnapshotSettings(BaseModel):

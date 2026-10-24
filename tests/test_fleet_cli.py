@@ -34,6 +34,8 @@ from typer.testing import CliRunner
 
 from aisquare.cli import fleet as fleet_cli
 from aisquare.cli.app import app
+from aisquare.core.store import store_session
+from aisquare.core.workspace import project_id_for
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo, TeamSession, TeamTask
 from aisquare.services import fleet as fleet_service
 from aisquare.services import install_route
@@ -2122,7 +2124,7 @@ def ui_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     import aisquare.cli.ui.app as ui_app
 
     calls: list[str] = []
-    monkeypatch.setattr(ui_app, "run_ui", lambda: calls.append("run_ui"))
+    monkeypatch.setattr(ui_app, "run_ui", lambda **options: calls.append("run_ui"))
     return calls
 
 
@@ -2178,6 +2180,36 @@ def test_ui_runs_the_app_at_an_interactive_terminal(
     assert result.exit_code == 0, result.output
     assert ui_spy == ["run_ui"]
     assert result.output == ""
+
+
+def test_ui_project_and_group_scope_the_app_to_those_projects(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``ui --project a --project b --group g`` hands the app those projects' ids (#83)."""
+    import aisquare.cli.ui.app as ui_app
+
+    monkeypatch.setattr(fleet_cli, "interactive_terminal", lambda: True)
+    scopes: list[object] = []
+    monkeypatch.setattr(ui_app, "run_ui", lambda **options: scopes.append(options["scope"]))
+    with store_session() as store:
+        made = []
+        for name in ("alpha", "beta", "gamma", "delta"):
+            root = (tmp_path / name).resolve()
+            root.mkdir()
+            made.append(store.onboard_project(ProjectInfo(id=project_id_for(root), root=root)))
+        group = store.create_project_group("ops")
+        store.update_project_layout(made[3].id, group_id=group.id)
+
+    result = runner.invoke(app, ["ui", "--project", "alpha", "-P", "beta", "--group", "ops"])
+    assert result.exit_code == 0, result.output
+    assert scopes == [frozenset({made[0].id, made[1].id, made[3].id})]
+
+    scopes.clear()
+    assert runner.invoke(app, ["ui"]).exit_code == 0 and scopes == [None]
+
+    refused = runner.invoke(app, ["ui", "--group", "nope"])
+    assert refused.exit_code == 1 and "no project group named 'nope'" in _plain(refused.stderr)
+    assert scopes == [None]
 
 
 def test_ui_help_exists(runner: CliRunner) -> None:

@@ -178,6 +178,9 @@ def doctor(
         # on. On, doctor is as it was before the switch.
         *_optional(_captain_check()),
         *explainability_ops.checks(live=live, target_name=target, project_id=project_id),
+        # Beside the section whose leftovers it finds, and independent of it: a stale
+        # ANTHROPIC_BASE_URL kills a launch whether or not tracing or the team is on (#51).
+        _check_anthropic_routing(),
         # Only while a key the CLI minted is owed a revocation (#142); --live
         # tries each again first — one request per key, on the API that minted it.
         *_optional(_minted_keys_check(live)),
@@ -2240,6 +2243,48 @@ def _check_fleet_capacity() -> DoctorCheck:
             "memory, or change max_agents_total / min_free_mb in [fleet]",
         )
     return _ok(name, detail)
+
+
+def _check_anthropic_routing(server: explainability_ops.FleetServer | None = None) -> DoctorCheck:
+    """``anthropic routing``: a stale ``ANTHROPIC_BASE_URL`` wherever it hides (#51).
+
+    The scan (``explainability_ops.routing_sources``) reads this process, every Claude
+    settings file an agent here loads, the role bindings and their env files, and the
+    fleet tmux server. A leftover of ours (a proxy this machine configured, or our
+    identity headers, with tracing off or on another target) and a URL the agent cannot
+    parse warn, each named with its fix; the operator's own gateway is info. No header
+    value is ever shown. ``_check_harness`` saw the variable only in this process and
+    only with the team active for the cwd; this row asks neither.
+    """
+    name = "anthropic routing"
+    try:
+        sources = explainability_ops.routing_sources(server=server)
+    except Exception as exc:  # diagnostics must never crash
+        return _ok(name, f"not evaluated ({exc})")
+    stale = [source for source in sources if source.stale]
+    foreign = [source for source in sources if source.verdict == "foreign"]
+    if not stale:
+        if not foreign:
+            live = [source for source in sources if source.verdict == "ours-live"]
+            if live:
+                return _ok(name, f"the tracing proxy, set in {len(live)} place(s) while on")
+            return _ok(name, "no ANTHROPIC_BASE_URL set anywhere an agent here reads")
+        said = "; ".join(f"{s.base_url or 'headers only'} in {s.where}" for s in foreign)
+        return _ok(name, f"your own gateway, left as it is: {said}")
+    why = {"unparsable": "not a usable URL", "ours-stale": "a proxy of ours tracing is not using"}
+    said = "; ".join(
+        f"{s.where}: {s.base_url or 'our identity headers'} ({why[s.verdict]})" for s in stale
+    )
+    fixes = [explainability_ops.RESET_COMMAND] + [
+        s.fix for s in stale if s.kind == "process" or s.verdict == "unparsable"
+    ]
+    if all(s.verdict == "unparsable" for s in stale):
+        fixes.pop(0)  # reset removes only what is ours
+    return _warn(
+        name,
+        f"{said} — agents launched with it fail at their first model call once that proxy is gone",
+        "; ".join(dict.fromkeys(fixes)),
+    )
 
 
 def _check_fleet_server_env(

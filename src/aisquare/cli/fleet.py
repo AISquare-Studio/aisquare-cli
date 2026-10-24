@@ -1284,7 +1284,7 @@ def gate(
         int | None,
         typer.Option(
             "--min-free-mb",
-            help="Memory to wait for, in MB (default: [fleet] test_gate_mb, else min_free_mb).",
+            help="Memory to wait for, in MB (default: \\[fleet] test_gate_mb, else min_free_mb).",
         ),
     ] = None,
     wait: Annotated[

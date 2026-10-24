@@ -2239,8 +2239,8 @@ def _check_fleet_capacity() -> DoctorCheck:
         return _warn(
             name,
             detail,
-            "aisquare fleet capacity — stop an agent (`aisquare fleet stop <label>`), free "
-            "memory, or change max_agents_total / min_free_mb in [fleet]",
+            "aisquare fleet capacity lists the live agents — stop one, free memory, or "
+            "change max_agents_total / min_free_mb in [fleet]",
         )
     return _ok(name, detail)
 

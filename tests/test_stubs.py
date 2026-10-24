@@ -102,6 +102,8 @@ IMPLEMENTED: set[tuple[str, ...]] = {
     ("project", "group", "parent"),
     ("project", "group", "route"),
     ("project", "group", "cap"),
+    ("watch",),
+    ("watch", "show"),
     ("hook", "compact-check"),
     ("hook", "session-end"),
     ("hook", "stop"),

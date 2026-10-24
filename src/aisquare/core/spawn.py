@@ -261,6 +261,24 @@ SEAMS: dict[str, Seam] = {
         "a detached `aisquare team distill` of ours — a background worker is not an agent session",
         strips_identity=True,
     ),
+    "aisquare/services/github_prs.py::_run_gh": Seam(
+        EXCLUDED,
+        "`gh api` for `aisquare watch` and the captain queue's pull requests (P2-W2, #284). "
+        "No model process; run untraced",
+        strips_identity=True,
+    ),
+    "aisquare/services/github_prs.py::repo_of": Seam(
+        EXCLUDED,
+        "`git remote get-url origin`, to name a project's GitHub repository (P2-W2). No model "
+        "process; stripped, as every git seam is (`git_env()`)",
+        strips_identity=True,
+    ),
+    "aisquare/services/watch.py::_run_source": Seam(
+        EXCLUDED,
+        "an operator's `[watch.sources.<name>]` command (P2-W2, #284). It may run a model "
+        "(a `claude -p` one-shot), so it runs untraced and cannot inherit an identity",
+        strips_identity=True,
+    ),
     "aisquare/services/hooks.py::_detach": Seam(
         EXCLUDED,
         "a detached `aisquare hook hand-over` of ours (#146; review of #205, finding 1) — the "

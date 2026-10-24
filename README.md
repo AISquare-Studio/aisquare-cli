@@ -114,7 +114,8 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 - macOS, Linux, or Windows through WSL2.
 - Python 3.11+ if you install by hand (the one-liner brings its own 3.13).
 - [Claude Code](https://claude.com/claude-code) or
-  [Codex](https://learn.chatgpt.com/docs/codex/cli) (CLI 0.162.1 or newer) for
+  [Codex](https://learn.chatgpt.com/docs/codex/cli) (CLI 0.162.1 or newer;
+  tested on 0.162.1 and 0.164.0) for
   the agents, either or both, and tmux 3.2+ for the fleet.
 - Node 22+, optional, for the codebase snapshot each session starts from.
 

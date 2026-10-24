@@ -9,10 +9,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 **Codex beside Claude Code: the same memory, board, fleet, accounts, Welcome
 and doctor, each agent with its own hooks, flags and sign-in behind one
 adapter.**
-- Tested against Codex CLI 0.162.1. The CI job "Codex native integration
-  (0.162.1)" installs exactly that release and runs the native fixture on it;
-  older releases lack `--approve-for-me` and the hook trust review this relies
-  on. Claude Code stays the default agent and nothing changes for a machine
+- Tested against Codex CLI 0.164.0 and 0.162.1. The CI job "Codex native
+  integration (0.164.0)" installs exactly 0.164.0 and runs the native fixture
+  on it; the same live suite passes on 0.162.1, and the fixtures hold both
+  releases' recordings (`tests/fixtures/agent_transcripts/codex-0.164.0.jsonl`
+  beside 0.162.1's). Older releases lack `--approve-for-me` and the hook trust
+  review this relies on. Claude Code stays the default agent and nothing changes for a machine
   without Codex.
 - On a machine with Codex alone, every step has a Codex path:
   `install.sh --agent codex`, Welcome, a manager and two coders on Codex,

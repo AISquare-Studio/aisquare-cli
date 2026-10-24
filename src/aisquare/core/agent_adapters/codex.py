@@ -1,4 +1,4 @@
-"""Codex CLI 0.162.1 integration; native hooks keep the real terminal UI."""
+"""Codex CLI integration, tested on 0.164.0 and 0.162.1; native hooks keep the real terminal UI."""
 
 import json
 import os

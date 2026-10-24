@@ -5,8 +5,9 @@ the task board, claims, manager continuation, CI delivery, tmux, worktrees and t
 terminal UI are shared. An adapter supplies native hooks, config locations,
 model options, permission options and MCP configuration.
 
-Codex compatibility is tested against **CLI 0.162.1**. Use this version or a
-newer compatible release; older releases may lack the required hooks and flags
+Codex compatibility is tested against **CLI 0.164.0**, which CI installs, and
+**0.162.1**, whose live suite passes too. Use one of these or a newer compatible
+release; older releases may lack the required hooks and flags
 (`--approve-for-me`). What each Claude Code feature does on Codex, as observed
 live, is in [Parity with Claude Code](#parity-with-claude-code). Cursor
 remains a detection-only legacy entry. No Gemini or Antigravity adapter ships
@@ -238,6 +239,14 @@ store and the broker), SMOKE6 at `8b33c942` (36 of 37), whose one failure, a roo
 sandbox may write inside an install, was fixed in `8dd8a14f`, and SMOKE7 at `7e7e152e` (28 of
 28: Remote on a sandboxed Codex, its accounts, and the fleet and board with Codex, after the
 0.8.1 lanes). *SMOKEn (item)* is that run's item.
+
+Codex 0.164.0 was then measured the same way against 0.162.1: the full live
+suite (`tests/test_codex_native.py`, 16 cases) and the opt-in live captain, persona and
+broker cases pass on both; its hook payloads, the dialogs and prompts the adapter reads
+off its screen, the tools its requests offer and `codex features list` for every feature
+the adapter switches hold as on 0.162.1, and `check_for_update_on_startup=false` still
+keeps its update dialog shut. Its rollout adds fields the reader does not read. So
+"Codex 0.162.1, as observed" below holds for 0.164.0 too.
 
 The rows from *Persona in the system prompt* on are main's 0.8.2 features: each states the
 agent's adapter answer (the slots in [the protocol](#the-protocol)), measured on 0.162.1

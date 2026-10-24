@@ -19,9 +19,9 @@ macOS, Linux and WSL2. It installs [uv](https://docs.astral.sh/uv/), a Python
 ran it from and wires Claude Code's hooks. Running it again is a no-op: it
 reports what is current and installs nothing.
 
-Claude Code is the compatibility default. For Codex (CLI 0.162.1 or newer,
-the release CI tests), add `--agent codex` (`--agent both` for the two
-together):
+Claude Code is the compatibility default. For Codex (CLI 0.162.1 or newer;
+CI tests 0.164.0, and 0.162.1 is tested live too), add `--agent codex`
+(`--agent both` for the two together):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/AISquare-Studio/aisquare-cli/main/install.sh | sh -s -- --agent codex

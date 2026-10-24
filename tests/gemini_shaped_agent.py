@@ -71,6 +71,7 @@ from aisquare.core.agent_adapters.types import (
     SandboxWrites,
     SkillDirs,
     TelemetryReader,
+    UsageScan,
     WriteScope,
     config_home,
     merged_settings,
@@ -80,10 +81,12 @@ from aisquare.core.agent_adapters.types import (
     payload_text,
     stepped_down,
 )
+from aisquare.core.agent_adapters.usage_tally import Tally, is_lookup_command
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
-from aisquare.core.pricing import Price
+from aisquare.core.pricing import Price, RequestTokens
 from aisquare.core.shell_line import command_line
+from aisquare.core.usage import Usage
 from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage, UsageWindow
 
 AGENT = "gemini-shaped"
@@ -170,12 +173,26 @@ def _when(value: object) -> datetime | None:
         return None
 
 
+#: Its tools that edit a file (docs/tools): the first call of one ends exploration.
+EDIT_TOOLS = frozenset({"replace", "write_file"})
+
+
+def _count(tokens: Mapping[str, Any], key: str) -> int:
+    value = tokens.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
 class GeminiShapedTranscript:
     """Its session log, one record a line: ``{"type": "user"|"gemini"|"info"|"error",
     "content", "toolCalls": [{"id", "name", "args"}], "timestamp"}``, and a call's result in a
     later ``{"$patch": {"toolCalls": [{"id", "status", "result"}]}}`` line (:meth:`records`
     folds it into the call). Its permission dialog takes ``1`` for Allow once and Esc for
-    No; a question's options are picked by their numbers."""
+    No; a question's options are picked by their numbers. A ``gemini`` record names its
+    ``model`` and, under its ``id``, its ``tokens`` (``input``, its prompt; ``output``;
+    ``cached``, the prompt's cached part; ``thoughts``; ``tool``, the tool-use prompt;
+    ``total``), the same id appended again once they land, so the last line of an id holds
+    them (Gemini CLI's chatRecordingService.ts, SCOPE #113 main-274 A1). Billed, as its
+    pricing page reads: thoughts as output, the tool-use prompt as input."""
 
     speaker = "gemini"
 
@@ -280,6 +297,32 @@ class GeminiShapedTranscript:
             picks = tuple(AnswerKey(str(n), (str(n),)) for n in range(1, min(options, 9) + 1))
             return (*picks, AnswerKey("Cancel", ("Escape",)))
         return ()
+
+    def usage(self, file: Path, state: str | None) -> UsageScan:
+        tally = Tally.parse(state)
+        found = Usage()
+        for record in tally.read(file):
+            if record.get("type") != "gemini":
+                continue
+            raw = record.get("tokens")
+            if isinstance(raw, dict):
+                cached = _count(raw, "cached")
+                tokens = RequestTokens(
+                    input=max(0, _count(raw, "input") - cached) + _count(raw, "tool"),
+                    cache_read=cached,
+                    output=_count(raw, "output") + _count(raw, "thoughts"),
+                )
+                key = record.get("id") if isinstance(record.get("id"), str) else None
+                tally.request(found, PRICES, str(record.get("model", "")), key, tokens)
+            for call in _calls(record):
+                name = str(call.get("name", "tool"))
+                args = call.get("args")
+                command = args.get("command") if isinstance(args, dict) else None
+                lookup = isinstance(command, str) and is_lookup_command(command)
+                tally.tool(
+                    found, name, str(call.get("id")), edits=name in EDIT_TOOLS, lookup=lookup
+                )
+        return tally.scan(found)
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         said: list[str] = []

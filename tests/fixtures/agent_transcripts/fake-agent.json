@@ -114,5 +114,131 @@
         "last_text_end": "Ship it?"
       }
     }
-  }
+  },
+  "usage": [
+    {
+      "what": "its log's bills: a reply billed before its calls, the same bill written again as the reply grew, a long prompt on its dearer tier, its brief",
+      "records": [
+        {
+          "timestamp": "2026-10-24T10:00:00.000Z",
+          "kind": "brief",
+          "text": "<aisquare-context>be brief</aisquare-context>"
+        },
+        {
+          "timestamp": "2026-10-24T10:00:01.000Z",
+          "kind": "heard",
+          "text": "deploy it"
+        },
+        {
+          "timestamp": "2026-10-24T10:00:02.000Z",
+          "kind": "billed",
+          "id": "b1",
+          "model": "FAKE:swift",
+          "fresh": 400,
+          "reused": 600,
+          "out": 51
+        },
+        {
+          "timestamp": "2026-10-24T10:00:03.000Z",
+          "kind": "run",
+          "id": "r1",
+          "tool": "shell",
+          "args": {
+            "line": "make test"
+          }
+        },
+        {
+          "timestamp": "2026-10-24T10:00:04.000Z",
+          "kind": "ran",
+          "id": "r1",
+          "output": "ok"
+        },
+        {
+          "timestamp": "2026-10-24T10:00:05.000Z",
+          "kind": "billed",
+          "id": "b2",
+          "model": "fake:swift",
+          "fresh": 100,
+          "reused": 900,
+          "out": 20
+        },
+        {
+          "timestamp": "2026-10-24T10:00:06.000Z",
+          "kind": "run",
+          "id": "r2",
+          "tool": "patch",
+          "args": {
+            "file": "app.py"
+          }
+        },
+        {
+          "timestamp": "2026-10-24T10:00:07.000Z",
+          "kind": "ran",
+          "id": "r2",
+          "output": "patched"
+        },
+        {
+          "timestamp": "2026-10-24T10:00:08.000Z",
+          "kind": "billed",
+          "id": "b2",
+          "model": "fake:swift",
+          "fresh": 100,
+          "reused": 900,
+          "out": 30
+        },
+        {
+          "timestamp": "2026-10-24T10:00:09.000Z",
+          "kind": "billed",
+          "id": "b3",
+          "model": "fake:deep",
+          "fresh": 60000,
+          "reused": 0,
+          "out": 100
+        },
+        {
+          "timestamp": "2026-10-24T10:00:10.000Z",
+          "kind": "said",
+          "text": "deployed"
+        },
+        {
+          "timestamp": "2026-10-24T10:00:11.000Z",
+          "kind": "over"
+        }
+      ],
+      "expect": {
+        "models": {
+          "swift": {
+            "requests": 2,
+            "input": 500,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "cache_read": 1500,
+            "output": 81,
+            "priced": true,
+            "cost_usd": 0.001574
+          },
+          "deep": {
+            "requests": 1,
+            "input": 60000,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "cache_read": 0,
+            "output": 100,
+            "priced": true,
+            "cost_usd": 0.5445
+          }
+        },
+        "tools": {
+          "shell": 1,
+          "patch": 1
+        },
+        "injected_chars": 45,
+        "first_edit": {
+          "edited": true,
+          "tokens": 2071,
+          "tool_calls": 1
+        }
+      }
+    }
+  ]
 }

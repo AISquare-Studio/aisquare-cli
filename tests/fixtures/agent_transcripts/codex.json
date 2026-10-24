@@ -102,5 +102,84 @@
         }
       }
     }
+  ],
+  "usage": [
+    {
+      "what": "SCOPE #113 main-274's N1 on 0.164.0: `codex exec \"first turn hello\"`, then `codex exec resume <id> \"second turn\"`, request n answered with input 1000n (600n cached) and output 50+n (20+n reasoning), the default model gpt-6.1-sol",
+      "rollout": "codex-usage-0.164.0.jsonl",
+      "expect": {
+        "models": {
+          "gpt-6.1-sol": {
+            "requests": 2,
+            "input": 1200,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "cache_read": 1800,
+            "output": 103,
+            "priced": true,
+            "cost_usd": 0.00361
+          }
+        },
+        "tools": {},
+        "first_edit": {
+          "edited": false,
+          "tokens": 3103,
+          "tool_calls": 0
+        },
+        "thread_total": 3103
+      }
+    },
+    {
+      "what": "the same on 0.162.1",
+      "rollout": "codex-usage-0.162.1.jsonl",
+      "expect": {
+        "models": {
+          "gpt-6.1-sol": {
+            "requests": 2,
+            "input": 1200,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "cache_read": 1800,
+            "output": 103,
+            "priced": true,
+            "cost_usd": 0.00361
+          }
+        },
+        "tools": {},
+        "first_edit": {
+          "edited": false,
+          "tokens": 3103,
+          "tool_calls": 0
+        },
+        "thread_total": 3103
+      }
+    },
+    {
+      "what": "the moments' 0.164.0 rollout (codex-0.164.0.jsonl): eight responses of a loopback provider that names every one resp_local, on a model no table lists, with aisquare's SessionStart context as a developer message",
+      "rollout": "codex-0.164.0.jsonl",
+      "expect": {
+        "models": {
+          "local-fixture": {
+            "requests": 8,
+            "input": 152,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "cache_read": 0,
+            "output": 24,
+            "priced": false
+          }
+        },
+        "tools": {
+          "exec_command": 2,
+          "request_user_input": 1
+        },
+        "thread_total": 176,
+        "first_edit": {
+          "edited": false,
+          "tokens": 176,
+          "tool_calls": 3
+        }
+      }
+    }
   ]
 }

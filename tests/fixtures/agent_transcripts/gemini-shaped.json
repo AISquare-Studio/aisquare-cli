@@ -148,5 +148,117 @@
         "last_text_end": "Ship it?"
       }
     }
-  }
+  },
+  "usage": [
+    {
+      "what": "a reply appended again once its tokens landed (the last line of an id holds them), thoughts billed as output and the tool-use prompt as input, then an edit",
+      "records": [
+        {
+          "type": "user",
+          "content": "Ship it",
+          "timestamp": "2026-10-24T10:00:00.000Z"
+        },
+        {
+          "type": "gemini",
+          "id": "g1",
+          "model": "gemini-2.5-pro",
+          "content": "",
+          "toolCalls": [
+            {
+              "id": "call-1",
+              "name": "run_shell_command",
+              "args": {
+                "command": "aisquare repo map"
+              }
+            }
+          ],
+          "timestamp": "2026-10-24T10:00:01.000Z"
+        },
+        {
+          "type": "gemini",
+          "id": "g1",
+          "model": "gemini-2.5-pro",
+          "content": "",
+          "toolCalls": [
+            {
+              "id": "call-1",
+              "name": "run_shell_command",
+              "args": {
+                "command": "aisquare repo map"
+              }
+            }
+          ],
+          "tokens": {
+            "input": 1000,
+            "output": 40,
+            "cached": 600,
+            "thoughts": 20,
+            "tool": 10,
+            "total": 1070
+          },
+          "timestamp": "2026-10-24T10:00:02.000Z"
+        },
+        {
+          "$patch": {
+            "toolCalls": [
+              {
+                "id": "call-1",
+                "status": "success",
+                "result": "src/app.py"
+              }
+            ]
+          },
+          "timestamp": "2026-10-24T10:00:03.000Z"
+        },
+        {
+          "type": "gemini",
+          "id": "g2",
+          "model": "models/gemini-2.5-pro",
+          "content": "",
+          "toolCalls": [
+            {
+              "id": "call-2",
+              "name": "replace",
+              "args": {
+                "file_path": "src/app.py"
+              }
+            }
+          ],
+          "tokens": {
+            "input": 1200,
+            "output": 30,
+            "cached": 1000,
+            "thoughts": 0,
+            "tool": 0,
+            "total": 1230
+          },
+          "timestamp": "2026-10-24T10:00:04.000Z"
+        }
+      ],
+      "expect": {
+        "models": {
+          "gemini-2.5-pro": {
+            "requests": 2,
+            "input": 610,
+            "cache_write_5m": 0,
+            "cache_write_1h": 0,
+            "cache_read": 1600,
+            "output": 90,
+            "priced": true,
+            "cost_usd": 0.0018625
+          }
+        },
+        "tools": {
+          "run_shell_command": 1,
+          "replace": 1
+        },
+        "lookup_calls": 1,
+        "first_edit": {
+          "edited": true,
+          "tokens": 2300,
+          "tool_calls": 1
+        }
+      }
+    }
+  ]
 }

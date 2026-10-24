@@ -1434,6 +1434,113 @@ def test_a_request_is_priced_at_its_agents_own_list_price(adapter: AgentAdapter)
             assert table.cost_usd(name, wrote) is not None, name
 
 
+def _usage_moments(adapter: AgentAdapter) -> list[dict[str, Any]]:
+    """The adapter's recorded usage moments (``usage`` in its transcript fixture)."""
+    recorded = json.loads((TRANSCRIPTS / f"{adapter.id}.json").read_text(encoding="utf-8"))
+    moments: list[dict[str, Any]] = recorded.get("usage", [])
+    assert moments, f"add a usage moment to tests/fixtures/agent_transcripts/{adapter.id}.json"
+    return moments
+
+
+def _usage_lines(moment: dict[str, Any]) -> list[str]:
+    if "rollout" in moment:
+        rollout: str = moment["rollout"]
+        return (TRANSCRIPTS / rollout).read_text(encoding="utf-8").splitlines()
+    return [json.dumps(record) for record in moment["records"]]
+
+
+def _rounded(value: Any) -> Any:
+    """``value`` with every float to 9 places: a sum in another order is the same sum."""
+    if isinstance(value, float):
+        return round(value, 9)
+    if isinstance(value, dict):
+        return {key: _rounded(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rounded(item) for item in value]
+    return value
+
+
+def _usage_reader(adapter: AgentAdapter) -> Any:
+    reader = _reader(adapter)
+    probe = reader.usage(Path(os.devnull) / "none.jsonl", None)
+    if probe is None:
+        pytest.skip(f"{adapter.id}'s transcript holds no token record")
+    return reader
+
+
+def test_the_usage_reader_counts_each_recorded_request_once_by_model(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """``AgentTranscript.usage`` (C1 of SCOPE #113 main-274) on the agent's recorded usage
+    moments: each request's tokens once, by its model as the agent's table names it, priced
+    off that table (a model it lacks unpriced), the tool calls, the characters aisquare's
+    hooks injected and the first-edit figures; Codex's sum to the rollout's own
+    ``thread_token_usage``. A second scan with the state the first returned adds nothing."""
+    reader = _usage_reader(adapter)
+    for moment in _usage_moments(adapter):
+        expect, what = moment["expect"], moment["what"]
+        file = tmp_path / "session.jsonl"
+        file.write_text("".join(line + "\n" for line in _usage_lines(moment)), encoding="utf-8")
+        scan = reader.usage(file, None)
+        models = {name: usage.as_dict() for name, usage in scan.delta.models.items()}
+        assert set(models) == set(expect["models"]), what
+        for name, want in expect["models"].items():
+            got = models[name]
+            assert {key: got[key] for key in want if key != "cost_usd"} == {
+                key: value for key, value in want.items() if key != "cost_usd"
+            }, (what, name)
+            if "cost_usd" in want:
+                assert got["cost_usd"] == pytest.approx(want["cost_usd"]), (what, name)
+            if not want["priced"]:
+                assert got["cost_usd"] == 0 and got["weighted"] == 0, (what, name)
+        assert scan.delta.tools == expect["tools"], what
+        assert scan.delta.lookup_calls == expect.get("lookup_calls", 0), what
+        if "injected_chars" in expect:
+            assert scan.delta.injected_chars == expect["injected_chars"], what
+        if "thread_total" in expect:
+            assert scan.delta.totals().total == expect["thread_total"], what
+        first = scan.first_edit
+        assert (first.edited, first.tokens, first.tool_calls) == tuple(
+            expect["first_edit"][key] for key in ("edited", "tokens", "tool_calls")
+        ), what
+        assert first.as_dict()["edited"] is first.edited
+        again = reader.usage(file, scan.state)
+        assert again.delta.is_empty() and again.delta.totals().total == 0, what
+        assert again.first_edit == first, what
+
+
+def test_a_session_read_in_two_scans_adds_up_to_one_read_whole(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """The scan is incremental: a moment's first half read, then the rest appended and read
+    with the first scan's state, counts what one scan of the whole does, and a line still
+    being written (no newline yet) is left for the next scan. A file that cannot be read is
+    nothing, and so is a state that is not one of the reader's (read from the start)."""
+    reader = _usage_reader(adapter)
+    for moment in _usage_moments(adapter):
+        lines, what = _usage_lines(moment), moment["what"]
+        whole = tmp_path / "whole.jsonl"
+        whole.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+        expected = reader.usage(whole, None)
+        split = tmp_path / "split.jsonl"
+        cut = len(lines) // 2
+        split.write_text(
+            "".join(line + "\n" for line in lines[:cut]) + lines[cut][:7], encoding="utf-8"
+        )
+        first = reader.usage(split, None)
+        with split.open("a", encoding="utf-8") as handle:
+            handle.write(lines[cut][7:] + "\n" + "".join(line + "\n" for line in lines[cut + 1 :]))
+        second = reader.usage(split, first.state)
+        total = type(expected.delta)()
+        total.add(first.delta)
+        total.add(second.delta)
+        assert _rounded(total.to_dict()) == _rounded(expected.delta.to_dict()), what
+        assert second.first_edit == expected.first_edit, what
+        assert reader.usage(tmp_path / "missing.jsonl", None).delta.is_empty()
+        restarted = reader.usage(whole, "not a state").delta.to_dict()
+        assert _rounded(restarted) == _rounded(expected.delta.to_dict()), what
+
+
 # --- a dialog of the agent's own that only its screen shows, for Remote's needs-you cards ---
 
 
@@ -2046,6 +2153,8 @@ def test_the_guide_names_every_member_of_the_protocol() -> None:
         "SessionFlags",
         "Vocabulary",
         "PriceTable",
+        "UsageScan",
+        "FirstEdit",
     }
     missing = []
     for node in tree.body:

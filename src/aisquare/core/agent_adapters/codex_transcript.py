@@ -63,7 +63,7 @@ from aisquare.core.agent_adapters.transcripts import (
     speaker_line,
     wrap,
 )
-from aisquare.core.agent_adapters.types import AnswerKey, AnswerKind, CallAsk
+from aisquare.core.agent_adapters.types import AnswerKey, AnswerKind, CallAsk, UsageScan
 
 SPEAKER = "codex"
 
@@ -155,6 +155,12 @@ class CodexTranscript:
         if kind != "question":
             return keys
         return (*(AnswerKey(str(n), (str(n),)) for n in range(1, options + 1)), *keys)
+
+    def usage(self, file: Path, state: str | None) -> UsageScan:
+        """Its ``token_usage_record`` lines (:mod:`codex_usage`)."""
+        from aisquare.core.agent_adapters import codex_usage
+
+        return codex_usage.usage(file, state)
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         return _rollout_reply(file, since)

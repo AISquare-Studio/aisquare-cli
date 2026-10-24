@@ -296,6 +296,9 @@ def canonical_model(model: str) -> str:
     return _SNAPSHOT.sub("", model.strip().lower().rpartition("/")[2])
 
 
+PRICE_TABLE = PriceTable(PRICES_AS_OF, PRICES_SOURCE, PRICES, canonical_model)
+
+
 _EVENTS = {
     "SessionStart": "session_start",
     "UserPromptSubmit": "prompt",
@@ -677,9 +680,7 @@ class CodexAdapter:
 
         return CodexTelemetry()
 
-    price_table: PriceTable | None = PriceTable(
-        PRICES_AS_OF, PRICES_SOURCE, PRICES, canonical_model
-    )
+    price_table: PriceTable | None = PRICE_TABLE
 
     @property
     def transcript_reader(self) -> AgentTranscript:

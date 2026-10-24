@@ -3437,3 +3437,113 @@ def test_real_codex_after_a_pad_esc_takes_interrupt_and_tell_and_opens_no_transc
             provider.shutdown()
             thread.join(timeout=2)
             _stop_app_servers(native_home)
+
+
+class _Billed(BaseHTTPRequestHandler):
+    """SCOPE #113 main-274's N1 provider: request n answered ``ok-<n>`` as ``resp_<n>``, with
+    input 1000n (600n of it cached) and output 50+n (20+n of it reasoning)."""
+
+    served = 0
+
+    def do_POST(self) -> None:
+        self.rfile.read(int(self.headers["Content-Length"]))
+        if not self.path.endswith("/responses"):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+            return
+        type(self).served += 1
+        n = type(self).served
+        item = _message(f"ok-{n}")
+        response = {
+            "id": f"resp_{n}",
+            "object": "response",
+            "status": "completed",
+            "output": [item],
+            "usage": {
+                "input_tokens": 1000 * n,
+                "input_tokens_details": {"cached_tokens": 600 * n},
+                "output_tokens": 50 + n,
+                "output_tokens_details": {"reasoning_tokens": 20 + n},
+                "total_tokens": 1000 * n + 50 + n,
+            },
+        }
+        stream: list[dict[str, Any]] = [
+            {"type": "response.created", "response": {**response, "status": "in_progress"}},
+            {"type": "response.output_item.done", "output_index": 0, "item": item},
+            {"type": "response.completed", "response": response},
+        ]
+        data = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in stream).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@pytest.mark.skipif(os.environ.get("AISQUARE_TEST_CODEX") != "1", reason="opt-in native Codex test")
+def test_real_codex_usage_read_off_its_rollout_sums_to_its_threads_own_total(
+    tmp_path: Path,
+) -> None:
+    """The transcript slot's ``usage`` (274-L1, C1) over a real two-turn ``codex exec``
+    rollout: its tokens equal the rollout's own ``thread_token_usage`` (3103), each response
+    priced at the default model's list price, and a second scan with the state the first
+    returned adds nothing."""
+    binary = shutil.which("codex")
+    assert binary, "AISQUARE_TEST_CODEX requires an installed Codex"
+    native_home = tmp_path / "codex"
+    workspace = tmp_path / "workspace"
+    for made in (native_home, workspace):
+        made.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("OPENAI_", "CODEX_"))}
+    env["CODEX_HOME"] = str(native_home)
+    _Billed.served = 0
+    with ThreadingHTTPServer(("127.0.0.1", 0), _Billed) as provider:
+        thread = threading.Thread(target=provider.serve_forever, daemon=True)
+        thread.start()
+        try:
+            (native_home / "config.toml").write_text(
+                'model_provider = "local"\n[model_providers.local]\nname = "Local fixture"\n'
+                f'wire_api = "responses"\nbase_url = "http://127.0.0.1:{provider.server_port}/v1"\n'
+                "requires_openai_auth = false\n",
+                encoding="utf-8",
+            )
+
+            def run(*args: str) -> str:
+                done = subprocess.run(
+                    [binary, "exec", "--skip-git-repo-check", *args],
+                    cwd=workspace, env=env, capture_output=True, text=True, timeout=180,
+                    stdin=subprocess.DEVNULL,
+                )  # fmt: skip
+                assert done.returncode == 0, done.stdout + done.stderr
+                return done.stdout + done.stderr
+
+            said = re.search(r"session id: ([0-9a-f-]{36})", run("first turn hello"))
+            assert said, "codex exec named no session"
+            run("resume", said.group(1), "second turn")
+        finally:
+            provider.shutdown()
+            thread.join(timeout=2)
+            _stop_app_servers(native_home)
+    (rollout,) = native_home.glob("sessions/**/rollout-*.jsonl")
+    records = [
+        json.loads(line)["payload"]
+        for line in rollout.read_text(encoding="utf-8").splitlines()
+        if '"token_usage_record"' in line
+    ]
+    reader = get_adapter("codex").transcript_reader
+    assert reader is not None
+    scan = reader.usage(rollout, None)
+    assert scan is not None
+    totals = scan.delta.totals()
+    assert totals.total == records[-1]["thread_token_usage"]["total_tokens"] == 3103
+    table = get_adapter("codex").price_table
+    assert table is not None
+    (name,) = scan.delta.models
+    assert table.price_for(name) is not None, f"{name}, Codex's default model, is priced"
+    assert (totals.requests, totals.input, totals.cache_read, totals.output) == (2, 1200, 1800, 103)
+    again = reader.usage(rollout, scan.state)
+    assert again is not None and again.delta.is_empty()

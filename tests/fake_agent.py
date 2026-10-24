@@ -59,6 +59,7 @@ from aisquare.core.agent_adapters.types import (
     ScreenPrompt,
     SkillDirs,
     TelemetryReader,
+    UsageScan,
     WriteScope,
     config_home,
     option_occurrences,
@@ -68,9 +69,11 @@ from aisquare.core.agent_adapters.types import (
     store_dir,
     store_read_only,
 )
+from aisquare.core.agent_adapters.usage_tally import Tally, carries_context, trace
 from aisquare.core.claude_accounts import FailedTurn, LimitNotice
 from aisquare.core.claude_sharing import SharingError, TrustScope
-from aisquare.core.pricing import Price
+from aisquare.core.pricing import Price, RequestTokens
+from aisquare.core.usage import Usage
 from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
 
 #: Its native event names, each the kind it decodes to.
@@ -114,12 +117,24 @@ PRICES = PriceTable(
 )
 
 
+#: The tool it edits files with: its first call ends a session's exploration.
+EDIT_TOOL = "patch"
+
+
+def _tokens(record: Mapping[str, Any], key: str) -> int:
+    value = record.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
 class FakeTranscript:
     """Its log: one record a line, ``{"timestamp", "kind", …}`` — ``heard`` (the human's
     ``text``), ``said`` (its ``text``), ``run`` (a ``tool`` with ``args`` under an ``id``),
     ``pick`` (a question: ``title`` and ``choices``, under an ``id``), ``ran`` (the result of
     ``id``), ``halt`` (stopped by the human) and ``over`` (the turn's end). Its dialogs take
-    ``y``/``n``, and a choice is picked by moving down to it and confirming."""
+    ``y``/``n``, and a choice is picked by moving down to it and confirming. A reply's bill
+    comes before the calls it makes, a line of its own: ``billed`` (``model``, ``fresh``,
+    ``reused`` and ``out`` tokens under the reply's ``id``), written again, whole, as a
+    reply grows; ``brief`` is what aisquare's hooks handed it (its ``text``)."""
 
     speaker = "fake"
 
@@ -202,6 +217,29 @@ class FakeTranscript:
             )
             return (*picks, AnswerKey("Back", ("Escape",)))
         return ()
+
+    def usage(self, file: Path, state: str | None) -> UsageScan:
+        tally = Tally.parse(state)
+        found = Usage()
+        for record in tally.read(file):
+            kind = record.get("kind")
+            call = record.get("id") if isinstance(record.get("id"), str) else None
+            if kind == "billed":
+                tokens = RequestTokens(
+                    input=_tokens(record, "fresh"),
+                    cache_read=_tokens(record, "reused"),
+                    output=_tokens(record, "out"),
+                )
+                tally.request(found, PRICES, str(record.get("model", "")), call, tokens)
+            elif kind in ("run", "pick"):
+                tool = str(record.get("tool", "tool")) if kind == "run" else "pick"
+                tally.tool(found, tool, call, edits=tool == EDIT_TOOL)
+            elif kind == "ran":
+                found.tool_result_chars += len(str(record.get("output", "")))
+            elif kind == "brief" and carries_context(text := str(record.get("text", ""))):
+                found.injected_chars += len(text)
+                trace(found, "aisquare context in its brief")
+        return tally.scan(found)
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         # What it said since the newest thing it heard; a run or a pick answers with no words.

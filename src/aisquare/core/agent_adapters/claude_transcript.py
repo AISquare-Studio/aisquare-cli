@@ -47,7 +47,7 @@ from aisquare.core.agent_adapters.transcripts import (
     speaker_line,
     wrap,
 )
-from aisquare.core.agent_adapters.types import AnswerKey, AnswerKind, CallAsk
+from aisquare.core.agent_adapters.types import AnswerKey, AnswerKind, CallAsk, UsageScan
 
 SPEAKER = "claude"
 
@@ -146,6 +146,12 @@ class ClaudeTranscript:
         if kind != "question":
             return keys
         return (*(AnswerKey(str(n), (str(n),)) for n in range(1, options + 1)), *keys)
+
+    def usage(self, file: Path, state: str | None) -> UsageScan:
+        """Main's ``core.usage.scan``, read in :mod:`claude_usage`."""
+        from aisquare.core.agent_adapters import claude_usage
+
+        return claude_usage.usage(file, state)
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:
         return last_reply(file, since=since)

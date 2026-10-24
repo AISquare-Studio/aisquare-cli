@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from aisquare.core.claude_accounts import FailedTurn, LimitNotice
     from aisquare.core.claude_sharing import TrustScope
     from aisquare.core.pricing import Price, RequestTokens
+    from aisquare.core.usage import Usage
     from aisquare.models import ClaudeAccount, ClaudeIdentity, ClaudeUsage
 
 
@@ -887,6 +888,42 @@ class AnswerKey:
     keys: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class FirstEdit:
+    """A session's "before the first edit" figures, as its usage row reports them
+    (:attr:`UsageScan.first_edit`): whether it has made its first edit (Claude Code's
+    ``Edit``/``Write``/``NotebookEdit``/``MultiEdit``, Codex's ``apply_patch``), the raw and
+    cost-weighted tokens of every request up to and including the one that made it, and the
+    tool calls before it."""
+
+    edited: bool = False
+    tokens: int = 0
+    weighted: float = 0.0
+    tool_calls: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        """As ``usage_session.usage["first_edit"]`` stores them (``core.usage.ScanState``'s
+        ``first_edit()``)."""
+        return {
+            "edited": self.edited,
+            "tokens": self.tokens,
+            "weighted": self.weighted,
+            "tool_calls": self.tool_calls,
+        }
+
+
+@dataclass(frozen=True)
+class UsageScan:
+    """What one scan of a session's transcript found (:meth:`AgentTranscript.usage`): the
+    tokens, tool calls and traces of what was appended since the last (``delta``, a
+    ``core.usage.Usage``), the state to hand the next scan (``state``, the reader's own text,
+    stored as it is), and the session's first-edit figures so far (``first_edit``)."""
+
+    delta: Usage
+    state: str
+    first_edit: FirstEdit
+
+
 class AgentTranscript(Protocol):
     """One agent's session transcript (the path its hooks report, ``TeamSession.
     transcript_path``), read for Remote: the needs-you scan's facts
@@ -957,6 +994,19 @@ class AgentTranscript(Protocol):
         """The quick answers of a card of ``kind`` on this agent's dialog: for ``question``,
         first the key that picks each of its ``options`` (in their order; the card labels
         them), then the rest. ``()`` where the agent has no such dialog."""
+        ...
+
+    def usage(self, file: Path, state: str | None) -> UsageScan | None:
+        """What the transcript ``file`` (its hooks' ``transcript_path``) added since ``state``,
+        the last scan's (``None``: read it from the start): each model request's tokens once,
+        by model, priced off the agent's ``price_table``, the tool calls, the characters
+        aisquare's hooks put in front of the model and every sign aisquare reached the session
+        (:class:`UsageScan`). Reads only the complete lines appended since; a rewritten file
+        again from its start, counting what is newer than the last scan read; a second call
+        with the state the first returned adds nothing. What a Stop or a session's end records
+        (``services.metrics.record_usage``). ``None`` for an agent whose transcript holds no
+        token record, for which nothing is recorded (never a session of 0 tokens). Never
+        raises: a file that cannot be read, or a record it cannot, reads as nothing."""
         ...
 
     def reply_since(self, file: Path, since: datetime | None) -> str | None:

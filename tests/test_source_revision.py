@@ -16,8 +16,10 @@ import pytest
 from aisquare.core.source_revision import (
     GENERATED_DIRECTORIES,
     changed_paths,
+    moved_stamps,
     source_file_hashes,
     source_fingerprint,
+    source_state,
     source_unchanged,
 )
 
@@ -153,6 +155,23 @@ def test_a_new_changed_or_vanished_file_is_each_a_change(checkout: Path) -> None
     assert source_unchanged(recorded, source_file_hashes(checkout))
     (checkout / "other.py").unlink()
     assert changed_paths(recorded, source_file_hashes(checkout)) == ["other.py"]
+
+
+def test_a_link_to_a_directory_in_the_checkout_counts_what_is_in_it(checkout: Path) -> None:
+    """X3 for a directory: a link into an ignored directory is that directory's files."""
+    (checkout / ".git" / "info" / "exclude").write_text("hidden/\n")
+    (checkout / "hidden").mkdir()
+    (checkout / "hidden" / "impl.py").write_text("v = 1\n")
+    try:
+        (checkout / "tests").symlink_to("hidden", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks are not available here: {exc}")
+    recorded, stamps = source_state(checkout)
+    assert "tests" in recorded and "hidden/impl.py" not in recorded
+    (checkout / "hidden" / "impl.py").write_text("v = 2\n")
+    now, later = source_state(checkout)
+    assert changed_paths(recorded, now) == ["tests"]
+    assert "tests" in moved_stamps(stamps, later)
 
 
 def test_a_non_git_directory_is_walked_without_its_generated_directories(tmp_path: Path) -> None:

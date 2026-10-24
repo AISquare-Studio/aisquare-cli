@@ -138,6 +138,8 @@ def _render(view: BriefView) -> None:
                 f"      {_task_ref(proof.task_id, proof.task_number)} ({proof.task_status}) "
                 f"{proof.state}{kind}: {proof.reason}"
             )
+            if proof.command:
+                _out(f"        ran: {proof.command}")
         if not status.tasks:
             _out(f"      {status.reason}")
     for heading, values in (("Assumptions", brief.assumptions), ("Boundaries", brief.boundaries)):
@@ -413,17 +415,21 @@ def check(
         verdict = "PROVEN" if result.complete else "NOT PROVEN"
         against = f" against {result.source_root}" if result.source_root else ""
         _out(f"{brief.label} r{brief.revision} {brief.title}: {verdict}{against}")
+        expected = {r.id: r.check for r in brief.requirements}
         for status in result.requirements:
             label = status.state + (" (manual)" if status.manual and status.state == "pass" else "")
             _out(f"  {status.id} [{label}] {status.reason}")
+            if expected.get(status.id):
+                _out(f"      check: {expected[status.id]}")
             # Every linked task when there are several: a [missing] requirement listed
             # only the task that passed, never the one still missing (re-gate, n3).
             for proof in status.tasks:
+                ref = _task_ref(proof.task_id, proof.task_number)
                 if len(status.tasks) > 1 or proof.state != status.state:
-                    _out(
-                        f"      {_task_ref(proof.task_id, proof.task_number)} {proof.state}: "
-                        f"{proof.reason}"
-                    )
+                    _out(f"      {ref} {proof.state}: {proof.reason}")
+                # What backed the pass, beside the check the requirement expects.
+                if proof.command and proof.state == "pass":
+                    _out(f"      {ref} ran: {proof.command}")
         manual = [status.id for status in result.requirements if status.manual]
         if manual:
             _out(f"Manual evidence, for the validator to judge: {', '.join(manual)}")

@@ -894,6 +894,9 @@ class TaskProof(BaseModel):
     reason: str
     evidence_id: str | None = None
     kind: EvidenceKind | None = None
+    command: str | None = None
+    """The command whose report backs this check, as run: shown beside the requirement's
+    expected check, so a report of ``true`` cannot pass for ``pytest`` unseen."""
 
 
 class RequirementStatus(BaseModel):

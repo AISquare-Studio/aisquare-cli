@@ -70,6 +70,20 @@ such as `__pycache__`, `node_modules` and `.venv` counts. A pass needs that whol
 be identical before the run, after it, and now. Who wrote a file makes no difference:
 the check itself, another `asq exec` run, or you while the check ran.
 
+- **The ignore rules are source too.** Every `.gitignore` git reads counts, including
+  one that ignores itself, and so do `.git/info/exclude` and your `core.excludesFile`
+  (named `.git/core.excludesFile` in a reason). A new rule that hides a `conftest.py`
+  changes the identity.
+- **A symlink counts as what it points at** inside the checkout, a file or a whole
+  directory, even an ignored one. A link out of the checkout counts by its text.
+- **A change put back is still a change.** Each file's change time is kept before and
+  after the run (its modification time on Windows), so a file edited and restored
+  while the check ran, or a `git stash` and `git stash pop` in another shell, refuses
+  the run though the bytes are the same.
+- **Known limit:** a rename that changes only letter case (`calc.py` to `Calc.py`) on a
+  case-insensitive file system, as macOS and Windows have by default, is not seen. Git
+  does not see it either.
+
 **So check output goes in a gitignored directory, or outside the checkout.** Commit a
 `.gitignore` line such as `reports/` and point the check there:
 
@@ -85,7 +99,11 @@ source changed while it ran"). A recorded pass goes `stale` when any source file
 new, changed or gone since the check, such as an added `conftest.py`. Both name the
 first five files and say what to do: if the file is a check's own output, gitignore it,
 delete it, or have the check write it outside the checkout; if it is source, record a
-check of the source as it is now. A report taken with `--task` backs only that task;
+check of the source as it is now. In a checkout that is not a git repository, where
+gitignoring does nothing, the reason says to delete it or write it outside.
+
+`brief show` and `brief check` print the command a report pass ran (`ran: …`) under the
+requirement's expected check, so a pass backed by the wrong command is plain to see. A report taken with `--task` backs only that task;
 `--task` takes the task's number or id, as everywhere.
 
 A run of any exit status can back `--verdict fail`, but it must still be a report taken

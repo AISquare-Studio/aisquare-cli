@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -41,6 +42,7 @@ from aisquare.core.source_revision import (
     changed_paths,
     fingerprint_of,
     git_common_dir,
+    moved_stamps,
     source_file_hashes,
     source_root_for,
 )
@@ -306,7 +308,7 @@ def _source_stale(evidence: BriefEvidence, sources: _Sources) -> str | None:
             paths = changed_paths(saved.before, current)
             if not paths:
                 return None
-            return _changed(f"the source in {root} changed since the check ran", paths)
+            return _changed(f"the source in {root} changed since the check ran", paths, root=root)
         if fingerprint_of(current) == report.source_fingerprint_before:
             return None
         return f"the source in {root} changed since the check ran"
@@ -368,47 +370,59 @@ def _pass_refusals(
         cause = report.source_capture_error or "run it with `asq exec --project`"
         why.append(f"its source identity is unknown ({cause})")
         return why
+    root = report.source_root
     try:
-        current = source_file_hashes(Path(report.source_root))
+        current = source_file_hashes(Path(root))
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        why.append(f"the source in {report.source_root} cannot be read now ({exc})")
+        why.append(f"the source in {root} cannot be read now ({exc})")
         return why
     during: list[str] = []
     paths: list[str] = []
     if saved is not None:
         if saved.after is not None:
             during = changed_paths(saved.before, saved.after)
+        if saved.before_stamps is not None and saved.after_stamps is not None:
+            # Changed and put back before the command ended: same bytes, a moved stamp
+            # (tester's X5 on #14).
+            moved = moved_stamps(saved.before_stamps, saved.after_stamps)
+            during = sorted(set(during) | set(moved))
         paths = changed_paths(saved.before, current)
     if during:
         # Once, on the last changed-path reason: both firing said it twice (re-gate, n11).
-        why.append(_changed("the source changed while it ran", during, remedy=not paths))
+        why.append(_changed("the source changed while it ran", during, remedy=not paths, root=root))
     elif saved is None and report.source_fingerprint_before != report.source_fingerprint_after:
         why.append("the source changed while it ran")
     if paths:
-        since = f"the source in {report.source_root} has changed since it ran"
-        why.append(_changed(since, paths))
+        since = f"the source in {root} has changed since it ran"
+        why.append(_changed(since, paths, root=root))
     elif saved is None and fingerprint_of(current) != report.source_fingerprint_before:
         why.append(
-            f"the source in {report.source_root} has changed since it ran; its files were "
-            "not saved, so which one cannot be said. If a check's own output is in the "
-            "checkout, gitignore it, delete it, or write it outside the checkout"
+            f"the source in {root} has changed since it ran; its files were "
+            "not saved, so which one cannot be said. " + _remedy(root)
         )
     return why
 
 
-_REMEDY = (
-    "If that is a check's own output, gitignore it, delete it, or have the check write it "
-    "outside the checkout; if it is source, record a check of the source as it is now"
-)
+def _remedy(root: str) -> str:
+    """What to do about a changed path. Outside a git work tree nothing is ignored but
+    the generated directories, so "gitignore it" would do nothing there (tester on #14)."""
+    if _toplevel(Path(root)) is None:
+        fixes = "delete it, or have the check write it outside the checkout"
+    else:
+        fixes = "gitignore it, delete it, or have the check write it outside the checkout"
+    return (
+        f"If that is a check's own output, {fixes}; if it is source, record a check of the "
+        "source as it is now"
+    )
 
 
-def _changed(what: str, paths: Sequence[str], *, remedy: bool = True) -> str:
+def _changed(what: str, paths: Sequence[str], *, root: str, remedy: bool = True) -> str:
     """A changed-path reason that says what to do about it. Never only "run it again": a
     file a check writes into the checkout changes on every run, and running again
-    changes it again (the tester's finding on #12). ``remedy``
-    is left off a reason the same refusal ends with another one that carries it."""
+    changes it again (the tester's finding on #12). ``remedy`` is left off a reason the
+    same refusal ends with another one that carries it."""
     said = f"{what}: {_listed(paths)}"
-    return f"{said}. {_REMEDY}" if remedy else said
+    return f"{said}. {_remedy(root)}" if remedy else said
 
 
 def _listed(paths: Sequence[str], limit: int = 5) -> str:
@@ -542,6 +556,8 @@ def status_of(
                 # is not called manual evidence (re-gate, n7).
                 manual_without = latest.kind == "manual" and latest.artifact is None
                 proof.kind = None if manual_without else latest.kind
+                if latest.kind == "report" and sources is not None:
+                    proof.command = _command_of(latest.report_id)
                 if latest.requirement_revision != requirement.revision:
                     proof.state = "stale"
                     proof.reason = (
@@ -574,6 +590,16 @@ def status_of(
             )
         )
     return statuses
+
+
+def _command_of(report_id: str | None) -> str | None:
+    """The command a saved report ran, quoted as a shell would take it; None when the
+    report cannot be read (its proof then says why)."""
+    try:
+        argv = command_reports.load_report(report_id or "").argv
+    except (OSError, ValueError):
+        return None
+    return _clip(shlex.join(argv), 300)
 
 
 def show(ref: str, *, session_ref: str | None = None, cwd: Path | None = None) -> BriefView:
@@ -809,8 +835,11 @@ def session_requirements(
     rows = store.briefs(session.project_id)
     lines: list[str] = []
     linked_to: dict[str, str] = {}  # brief label → the first task of this session it links
-    linked_ids: dict[str, str] = {}  # brief label → that task's id
-    unproven: dict[str, str] = {}  # brief label → its first requirement not yet a pass
+    # (brief label, task id, requirement id) for the record hint: the first requirement
+    # not yet a pass, else the first one linked. Never a literal R1, which the task may
+    # not be linked to (tester's m7 on #14).
+    unproven: tuple[str, str, str] | None = None
+    first_linked: tuple[str, str, str] | None = None
     omitted = False
     # Room for the lines themselves: the frame (tags, the "more" and "record" lines,
     # their separators) is always reserved, so it can always be added. The record line
@@ -838,7 +867,6 @@ def session_requirements(
                 brief = _parse(row)
             except ValidationError:
                 linked_to.setdefault(f"B{row.number}", team.task_label(own_task))
-                linked_ids.setdefault(f"B{row.number}", own_task.id)
                 if not add(f"B{row.number} names #{own_task.number} but cannot be read here."):
                     omitted = True
                     break
@@ -847,7 +875,7 @@ def session_requirements(
             if not linked:
                 continue
             linked_to.setdefault(brief.label, team.task_label(own_task))
-            linked_ids.setdefault(brief.label, own_task.id)
+            first_linked = first_linked or (brief.label, own_task.id, linked[0].id)
             states = {s.id: s for s in status_of(_own_part(brief, linked, own_task.id), tasks)}
             header = (
                 f"{team.task_label(own_task)} is linked to {brief.label} r{brief.revision} "
@@ -859,8 +887,8 @@ def session_requirements(
             shown = 0
             for requirement in linked:
                 status = states[requirement.id]
-                if status.state != "pass":
-                    unproven.setdefault(brief.label, requirement.id)
+                if status.state != "pass" and unproven is None:
+                    unproven = (brief.label, own_task.id, requirement.id)
                 state = "pass, as recorded" if status.state == "pass" else status.state
                 line = f"  {requirement.id} [{state}] {_clip(requirement.text)}"
                 if requirement.check:
@@ -888,10 +916,10 @@ def session_requirements(
         return pointer if len(pointer) <= budget else ""
     if omitted:
         lines.append(_MORE)
-    first = next(iter(linked_to))
-    lines.append(
-        record_hint(session.project_id, linked_ids[first], first, unproven.get(first, "R1"))
-    )
+    named = unproven or first_linked
+    if named is not None:
+        label, task_id, requirement_id = named
+        lines.append(record_hint(session.project_id, task_id, label, requirement_id))
     return _OPEN + "\n".join(lines) + _CLOSE
 
 

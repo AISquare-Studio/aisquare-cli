@@ -20,6 +20,7 @@ import hashlib
 import os
 import stat
 import subprocess
+import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
@@ -166,13 +167,31 @@ def _refuse_home(root: Path) -> None:
         raise ValueError("source directory is the home directory; refusing to walk it")
 
 
+#: Labels for the ignore rules kept outside the work tree. Under ``.git/``, where no
+#: tracked or untracked path can be, so neither can be confused with a checkout file.
+INFO_EXCLUDE = ".git/info/exclude"
+EXCLUDES_FILE = ".git/core.excludesFile"
+
+
 def _names(root: Path) -> list[str]:
-    """Every source path under ``root``, relative, sorted."""
+    """Every source path under ``root``, relative, sorted.
+
+    In a git work tree that is every tracked file, every untracked one git does not
+    ignore, and every ``.gitignore`` git reads, ignored or not: an untracked
+    ``tests/.gitignore`` that ignores itself and a ``conftest.py`` must not hide both
+    (tester's X2 on #14). A ``.gitignore`` inside an ignored directory is never read by
+    git, and is not listed."""
     probe = _git(root, "rev-parse", "--show-toplevel", timeout=10)
     if probe.returncode == 0:
         tracked = _git_ls(root, "--cached")
         untracked = _git_ls(root, "--others", "--exclude-standard")
-        return sorted(set(tracked) | {name for name in untracked if not _generated(name)})
+        rules = [
+            name
+            for name in _git_ls(root, "--others", "--ignored", "--exclude-standard", "--directory")
+            if Path(name).name == ".gitignore" and not name.endswith("/")
+        ]
+        kept = {name for name in [*untracked, *rules] if not _generated(name)}
+        return sorted(set(tracked) | kept)
     names: list[str] = []
 
     def unreadable(error: OSError) -> None:
@@ -189,14 +208,90 @@ def _names(root: Path) -> list[str]:
     return sorted(names)
 
 
-def _iter_source_entries(root: Path) -> Iterator[tuple[str, str]]:
-    """Yield ``(relative path, content hash)`` for every source file under ``root``.
+def _rule_files(root: Path) -> list[tuple[str, Path]]:
+    """The ignore rules git applies to ``root`` from outside its work tree, as
+    ``(label, path)``: ``info/exclude`` and ``core.excludesFile`` (or its default), each
+    only where the file exists. Editing either changes what counts as source, so their
+    content is part of the identity (tester's X1 on #14). Empty outside git."""
+    probe = _git(root, "rev-parse", "--show-toplevel", timeout=10)
+    if probe.returncode != 0:
+        return []
+    found: list[tuple[str, Path]] = []
+    exclude = _git(root, "rev-parse", "--git-path", "info/exclude", timeout=10)
+    if exclude.returncode == 0 and (text := os.fsdecode(exclude.stdout.strip())):
+        found.append((INFO_EXCLUDE, root / text))
+    configured = _git(root, "config", "--path", "--get", "core.excludesFile", timeout=10)
+    if configured.returncode == 0 and (text := os.fsdecode(configured.stdout.strip())):
+        found.append((EXCLUDES_FILE, root / text))
+    elif configured.returncode == 1:  # unset: git's default
+        config = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+        found.append((EXCLUDES_FILE, Path(config) / "git" / "ignore"))
+    else:
+        raise ValueError(f"git could not read core.excludesFile in {root}")
+    return [(label, path) for label, path in found if path.is_file()]
+
+
+def _stamp(status: os.stat_result) -> str:
+    """When a file last changed in any way: its ctime, which neither a write that puts
+    the old bytes back nor ``touch``/``utime`` can restore (tester's X5 on #14). Windows
+    has no such time, and its mtime stands in."""
+    return str(status.st_mtime_ns if sys.platform == "win32" else status.st_ctime_ns)
+
+
+def _hash_file(path: Path, entry: hashlib._Hash) -> str:
+    """Add ``path``'s mode and bytes to ``entry``; its :func:`_stamp`. ValueError when it
+    cannot be read whole, or changed while it was read."""
+    try:
+        before = path.stat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"source is not a regular file: {path}")
+        entry.update(str(before.st_mode).encode() + b"\0")
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                entry.update(chunk)
+        after = path.stat()
+    except OSError as exc:
+        raise ValueError(f"cannot read source file {path}: {exc}") from None
+    if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
+        raise ValueError(f"source changed while checking: {path}")
+    return _stamp(after)
+
+
+def _hash_link(root: Path, path: Path, entry: hashlib._Hash) -> str:
+    """Add a symlink's text and, when it points inside the checkout, what it points at:
+    an untracked ``conftest.py`` linked to a file in an ignored directory is that file's
+    content, not the link's (tester's X3 on #14). A target outside the checkout counts
+    by its link text only. The stamp covers the link and every file hashed through it."""
+    stamps = [_stamp(path.lstat())]
+    entry.update(b"link\0" + os.fsencode(os.readlink(path)))
+    target = path.resolve()
+    if not target.is_relative_to(root) or not target.exists():
+        return ":".join(stamps)
+    if target.is_file():
+        entry.update(b"\0target\0")
+        stamps.append(_hash_file(target, entry))
+    elif target.is_dir():
+        for directory, dirs, files in os.walk(target, followlinks=False):
+            dirs.sort()
+            for filename in sorted(files):
+                inner = Path(directory) / filename
+                if inner.is_symlink():
+                    continue  # one level: a link inside counts as the directory's listing
+                entry.update(b"\0" + os.fsencode(str(inner.relative_to(target))) + b"\0")
+                stamps.append(_hash_file(inner, entry))
+    return hashlib.sha256(":".join(stamps).encode()).hexdigest()
+
+
+def _iter_source_entries(root: Path) -> Iterator[tuple[str, str, str | None]]:
+    """Yield ``(relative path, content hash, stamp)`` for every source file under
+    ``root``, then for each ignore-rules file outside it (:func:`_rule_files`).
 
     The one place the working set is enumerated and hashed, so the per-file map and the
-    combined fingerprint cannot disagree about what counts. Symlinks are hashed as
-    links, never followed out of the checkout. A submodule or nested repository adds its
-    recorded commit AND its own content, so an edit, a new file or a local commit inside
-    it changes the identity.
+    combined fingerprint cannot disagree about what counts. A symlink is hashed with
+    what it points at inside the checkout, never followed out of it. A submodule or
+    nested repository adds its recorded commit AND its own content, so an edit, a new
+    file or a local commit inside it changes the identity. The stamp (:func:`_stamp`)
+    is None for a path with no file to time: deleted, or a directory entry.
     """
     root = root.resolve()
     if not root.is_dir():
@@ -211,8 +306,12 @@ def _iter_source_entries(root: Path) -> Iterator[tuple[str, str]]:
             raise ValueError(f"source path escapes through a directory link: {path}")
         entry = hashlib.sha256()
         entry.update(os.fsencode(name) + b"\0")
+        stamp: str | None = None
         if path.is_symlink():
-            entry.update(b"link\0" + os.fsencode(os.readlink(path)))
+            try:
+                stamp = _hash_link(root, path, entry)
+            except OSError as exc:
+                raise ValueError(f"cannot read source link {path}: {exc}") from None
         elif not path.exists():
             entry.update(b"deleted\0")
         elif path.is_dir():
@@ -223,25 +322,36 @@ def _iter_source_entries(root: Path) -> Iterator[tuple[str, str]]:
             if (path / ".git").exists():
                 entry.update(b"nested\0" + source_fingerprint(path).encode())
         else:
-            try:
-                before = path.stat()
-                if not stat.S_ISREG(before.st_mode):
-                    raise ValueError(f"source is not a regular file: {path}")
-                entry.update(str(before.st_mode).encode() + b"\0")
-                with path.open("rb") as stream:
-                    while chunk := stream.read(1024 * 1024):
-                        entry.update(chunk)
-                after = path.stat()
-            except OSError as exc:
-                raise ValueError(f"cannot read source file {path}: {exc}") from None
-            if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
-                raise ValueError(f"source changed while checking: {path}")
-        yield name, entry.hexdigest()
+            stamp = _hash_file(path, entry)
+        yield name, entry.hexdigest(), stamp
+    for label, path in _rule_files(root):
+        entry = hashlib.sha256(os.fsencode(label) + b"\0")
+        stamp = _hash_file(path, entry)
+        yield label, entry.hexdigest(), stamp
+
+
+def source_state(root: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """``root``'s per-file content hashes, and the stamp of each path that has one: what
+    a report keeps before and after its command, so a change put back before the
+    command ended still shows (tester's X5 on #14)."""
+    files: dict[str, str] = {}
+    stamps: dict[str, str] = {}
+    for name, digest, stamp in _iter_source_entries(root):
+        files[name] = digest
+        if stamp is not None:
+            stamps[name] = stamp
+    return files, stamps
 
 
 def source_file_hashes(root: Path) -> dict[str, str]:
     """The per-file content hash of every source file under ``root``."""
-    return dict(_iter_source_entries(root))
+    return source_state(root)[0]
+
+
+def moved_stamps(before: Mapping[str, str], after: Mapping[str, str]) -> list[str]:
+    """The paths whose stamp moved between ``before`` and ``after``, sorted: each was
+    written, replaced or re-moded in between, whatever bytes it holds now."""
+    return sorted(name for name, stamp in before.items() if after.get(name, stamp) != stamp)
 
 
 def fingerprint_of(files: Mapping[str, str]) -> str:

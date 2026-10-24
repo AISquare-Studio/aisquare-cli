@@ -747,10 +747,10 @@ def test_a_child_that_exits_0_after_an_interrupt_still_records_it(tmp_path: Path
 
 
 def test_without_project_no_source_is_hashed(monkeypatch: pytest.MonkeyPatch) -> None:
-    def forbidden(root: Path) -> dict[str, str]:
+    def forbidden(root: Path) -> tuple[dict[str, str], dict[str, str]]:
         raise AssertionError("a source scan is opt-in")
 
-    monkeypatch.setattr(reports, "source_file_hashes", forbidden)
+    monkeypatch.setattr(reports, "source_state", forbidden)
     report = reports.run_command(python("print('normal')"))
     assert report.source_root is None and report.source_fingerprint_before is None
     assert report.source_fingerprint_after is None and report.source_capture_error is None
@@ -826,17 +826,17 @@ def test_a_capture_that_fails_after_the_command_is_unknown(
     root = tmp_path / "source"
     project_id = _registered_project(root)
     (root / "code.py").write_text("x\n")
-    from aisquare.core.source_revision import source_file_hashes as real
+    from aisquare.core.source_revision import source_state as real
 
     calls: list[Path] = []
 
-    def second_fails(path: Path) -> dict[str, str]:
+    def second_fails(path: Path) -> tuple[dict[str, str], dict[str, str]]:
         calls.append(path)
         if len(calls) > 1:
             raise ValueError("source changed while checking")
         return real(path)
 
-    monkeypatch.setattr(reports, "source_file_hashes", second_fails)
+    monkeypatch.setattr(reports, "source_state", second_fails)
     report = reports.run_command(python("print(1)"), cwd=root, project_id=project_id)
     assert report.source_fingerprint_before is not None
     assert report.source_fingerprint_after is None and not report.source_known

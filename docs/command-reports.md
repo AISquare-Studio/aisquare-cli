@@ -132,10 +132,18 @@ untracked nonignored file, kept file by file.
 - **Build output is left out.** Untracked files under `__pycache__`, `node_modules`,
   `.venv`, `venv`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox` and the like
   do not count. Tracked files count whatever directory they are in.
+- **Symlinks count as their targets.** A link to a file or directory inside the
+  checkout is hashed with what it points at; one pointing out of it, by its text.
+- **Change times are kept too.** Each file's change time (modification time on
+  Windows) is saved before and after, so a file changed and put back while the
+  command ran still shows. They are not part of the identity: a branch switch that
+  rewrites a file with the same bytes keeps it.
 - **Nested repositories count.** A submodule or nested repository adds its own
   files, not only the commit it records.
-- **Ignored files are left out.** Files git ignores do not count. Everything else
-  does, a file the command itself wrote included: `pytest --junitxml=report.xml`
+- **Ignored files are left out, the rules that ignore them are not.** Files git
+  ignores do not count, but every `.gitignore` git reads does (one that ignores itself
+  too), and so do `.git/info/exclude` and `core.excludesFile`. Everything else
+  counts, a file the command itself wrote included: `pytest --junitxml=report.xml`
   changes the identity, as an edit or a removal does. When a report backs brief
   evidence, the identity must be the same before, after and now, so write check
   output to a gitignored directory (`--junitxml=reports/a.xml` with `reports/` in

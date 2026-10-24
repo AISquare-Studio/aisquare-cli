@@ -12,6 +12,7 @@ with the whole session start tested against the 10,000-character hook cap.
 from __future__ import annotations
 
 import json
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -26,7 +27,7 @@ from typer.testing import CliRunner
 
 from aisquare.cli.app import app
 from aisquare.core.store import BriefChangedError, store_session
-from aisquare.models import TeamTask, WorkBrief
+from aisquare.models import RequirementStatus, TeamTask, WorkBrief
 from aisquare.services import briefs, team
 from aisquare.services import command_reports as reports
 from aisquare.services import fleet as fleet_service
@@ -300,6 +301,118 @@ def test_a_conftest_written_during_an_unrelated_run_stales_a_pass(repo: Path) ->
         team.finish_task(task.id)
 
 
+def test_a_change_put_back_before_the_run_ends_refuses_it(repo: Path) -> None:
+    """Tester's X5 on #14: app.py swapped to other bytes mid-run and back before the run
+    ended has the same content before and after, and was accepted at d8329003. Its
+    stamp moved, even with its mtime put back too."""
+    brief, task = _linked()
+    swap = (
+        "import os\n"
+        "st = os.stat('app.py'); good = open('app.py').read()\n"
+        "open('app.py', 'w').write('def answer():\\n    return 41\\n')\n"
+        "open('app.py', 'w').write(good)\n"
+        "os.utime('app.py', ns=(st.st_atime_ns, st.st_mtime_ns))\n"
+    )
+    report = _run(_py(swap), task=task)
+    saved = reports.load_source_files(report.id)
+    assert saved is not None and saved.before == saved.after, "the bytes were put back"
+    with pytest.raises(ValueError, match=r"the source changed while it ran: app\.py"):
+        _record(brief, task, report)
+    _record(brief, task, _run(_py("print('untouched')"), task=task))
+    assert _check(brief) == {"R1": "pass"}, "a run that only reads moves no stamp"
+
+
+def _passed_then(change: Any) -> RequirementStatus:
+    """A pass recorded, then ``change`` and a raising conftest.py: R1's standing."""
+    brief, task = _linked()
+    _record(brief, task, _run(_py("print('the check')"), task=task))
+    assert _check(brief) == {"R1": "pass"}
+    change()
+    return briefs.check(brief.id).requirements[0]
+
+
+def test_an_exclude_rule_that_hides_a_conftest_stales_a_pass(repo: Path) -> None:
+    """Tester's X1 on #14: a conftest.py hidden by .git/info/exclude was not source, so a
+    raising one read PROVEN. The exclude file's own content is in the identity."""
+
+    def hide() -> None:
+        with (repo / ".git" / "info" / "exclude").open("a") as rules:
+            rules.write("conftest.py\n")
+        (repo / "conftest.py").write_text("raise RuntimeError('collection fails now')\n")
+
+    status = _passed_then(hide)
+    assert status.state == "stale" and ".git/info/exclude" in status.reason, status.reason
+
+
+def test_a_global_excludes_file_is_part_of_the_identity(repo: Path, tmp_path: Path) -> None:
+    """X1's other source of rules: core.excludesFile."""
+    rules = tmp_path / "global-ignore"
+    rules.write_text("*.log\n")
+    _git(repo, "config", "core.excludesFile", str(rules))
+
+    def hide() -> None:
+        rules.write_text("*.log\nconftest.py\n")
+        (repo / "conftest.py").write_text("raise RuntimeError('collection fails now')\n")
+
+    status = _passed_then(hide)
+    assert status.state == "stale" and ".git/core.excludesFile" in status.reason, status.reason
+
+
+def test_a_gitignore_that_ignores_itself_still_counts(repo: Path) -> None:
+    """Tester's X2 on #14: an untracked tests/.gitignore listing itself and conftest.py
+    hid both, git status was empty, and a raising tests/conftest.py read PROVEN."""
+
+    def hide() -> None:
+        (repo / "tests").mkdir()
+        (repo / "tests" / ".gitignore").write_text(".gitignore\nconftest.py\n")
+        (repo / "tests" / "conftest.py").write_text("raise RuntimeError('collection')\n")
+
+    status = _passed_then(hide)
+    assert status.state == "stale" and "tests/.gitignore" in status.reason, status.reason
+
+
+def _symlink_or_skip(link: Path, target: str) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError as exc:  # Windows without the privilege
+        pytest.skip(f"symlinks are not available here: {exc}")
+
+
+def test_a_link_into_an_ignored_directory_is_hashed_by_its_target(repo: Path) -> None:
+    """Tester's X3 on #14: an untracked conftest.py linked to reports/impl.py, reports/
+    ignored, was hashed as its link text, so a raising impl.py read PROVEN."""
+    _ignore_reports(repo)
+    (repo / "reports").mkdir()
+    (repo / "reports" / "impl.py").write_text("VALUE = 1\n")
+    _symlink_or_skip(repo / "conftest.py", "reports/impl.py")
+
+    def break_target() -> None:
+        (repo / "reports" / "impl.py").write_text("raise RuntimeError('collection')\n")
+
+    status = _passed_then(break_target)
+    assert status.state == "stale" and "conftest.py" in status.reason, status.reason
+
+
+def test_in_a_checkout_without_git_the_remedy_does_not_say_gitignore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tester's nit on #14: outside git nothing but the generated directories is
+    ignored, so "gitignore it" does nothing there."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "app.py").write_text("x = 1\n")
+    monkeypatch.chdir(plain)
+    add_project(plain)
+    brief, task = _linked()
+    report = _run(_py("open('a.xml', 'w').write('<testsuite/>')"), task=task)
+    with pytest.raises(ValueError) as refused:
+        _record(brief, task, report)
+    said = str(refused.value)
+    assert "the source changed while it ran: a.xml" in said
+    assert "delete it" in said and "write it outside the checkout" in said
+    assert "gitignore" not in said, said
+
+
 def _broken_after(repo: Path, made_by_a_run: str, *, then: Any) -> dict[str, str]:
     """A path a saved run made, then ``then`` (commit it, say), a pass recorded after,
     and the path broken by hand: the brief's standing."""
@@ -559,6 +672,40 @@ def test_the_record_hint_names_the_first_requirement_not_proven(
     team.claim_task(task.id, session_ref=CODER)
     started = _start(monkeypatch, repo)
     assert f"asq brief evidence B1 R2 --task {task.id}" in started
+
+
+def test_the_session_hint_names_the_first_brief_with_a_requirement_not_proven(
+    monkeypatch: pytest.MonkeyPatch, repo: Path
+) -> None:
+    """Tester's m7 remainder on #14: the task's first brief (B1, linked to R2 only) was
+    all proven and its second (B2) was not, and the hint said `brief evidence B1 R1`:
+    a requirement the task is not linked to, on a brief with nothing left to prove."""
+    first = briefs.create("First", ["R one", "R two"])
+    second = briefs.create("Second", ["S one"])
+    task, _ = team.add_task("Both parts", role="coder")
+    briefs.link(first.id, task.id, ["R2"])
+    briefs.link(second.id, task.id, ["R1"])
+    _record(first, task, _run(_py("print('ok')"), task=task), req="R2")
+    _start(monkeypatch, repo)
+    team.claim_task(task.id, session_ref=CODER)
+    started = _start(monkeypatch, repo)
+    assert f"asq brief evidence B2 R1 --task {task.id}" in started, started
+    assert "B1 R1" not in started
+
+
+def test_show_and_check_print_the_command_that_backed_a_pass(runner: CliRunner) -> None:
+    """Tester's note on #14: a report of `true` backed a pass for a requirement whose
+    check is pytest, and nothing showed it. The command is shown beside the check."""
+    brief, task = _linked()
+    briefs.update(brief.id, checks={"R1": "pytest -q test_app.py"})
+    _record(brief, task, _run(_py("print('ok')"), task=task))
+    ran = f"ran: {shlex.join(_py('print(' + chr(39) + 'ok' + chr(39) + ')'))}"
+    shown = runner.invoke(app, ["brief", "show", "B1"]).stdout
+    assert "check: pytest -q test_app.py" in shown and ran in shown, shown
+    checked = runner.invoke(app, ["brief", "check", "B1"]).stdout
+    assert "check: pytest -q test_app.py" in checked and ran in checked, checked
+    proof = briefs.check(brief.id).requirements[0].tasks[0]
+    assert proof.command is not None and "print" in proof.command
 
 
 def test_a_finding_without_an_artifact_is_not_called_manual_in_show(

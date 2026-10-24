@@ -122,6 +122,15 @@ def git_common_dir(path: Path) -> Path | None:
     return (common if common.is_absolute() else path / common).resolve()
 
 
+def untracked_paths(root: Path) -> set[str] | None:
+    """The untracked, nonignored paths under ``root`` now, as the identity names them;
+    None when ``root`` is not in a git work tree. ValueError when git cannot list it."""
+    probe = _git(root, "rev-parse", "--show-toplevel", timeout=10)
+    if probe.returncode != 0:
+        return None
+    return set(_git_ls(root, "--others", "--exclude-standard"))
+
+
 def source_root_for(project_root: Path, cwd: Path | None = None) -> Path:
     """The checkout to fingerprint for a command run in ``cwd`` under ``project_root``.
 

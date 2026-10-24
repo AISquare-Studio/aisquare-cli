@@ -26,7 +26,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +43,7 @@ from aisquare.core.source_revision import (
     git_common_dir,
     source_file_hashes,
     source_root_for,
+    untracked_paths,
 )
 from aisquare.core.store import BriefRow, ContextStore, TaskTransition, store_session
 from aisquare.models import (
@@ -244,24 +245,45 @@ class _Sources:
     def __init__(self, override: Path | None = None) -> None:
         self.override = override
         self._files: dict[str, dict[str, str] | str] = {}
-        self._outputs: dict[str, set[str]] = {}
+        self._outputs_cache: dict[str, tuple[dict[str, set[str]], set[str]]] = {}
+        self._untracked: dict[str, set[str] | None] = {}
 
-    def outputs(self, *roots: str | None) -> set[str]:
-        """What checks themselves write in these checkouts: every path the run of ANY
-        saved ``--project`` report there created (its after minus its before), recorded
-        as evidence or not. Such a path never makes a pass stale, nor a run "changed
-        while it ran": one task's two checks each writing a report into the checkout
-        (``--junitxml=a.xml``, ``b.xml``) must not stale each other, and re-running one
-        rewrites its own file (manager's decision on #12, refining M2). An added
-        ``conftest.py`` is created by no run, so it still counts. Reports that cannot be
-        read add nothing: fewer paths ignored is the strict direction."""
-        found: set[str] = set()
-        for root in {r for r in roots if r}:
-            key = str(Path(root).resolve())
-            if key not in self._outputs:
-                self._outputs[key] = _created_in(key)
-            found |= self._outputs[key]
-        return found
+    def outputs(self, root: str, current: Mapping[str, str], *others: str | None) -> set[str]:
+        """The paths in checkout ``root`` that are check output now (manager's decision on
+        #12, final): a path counts only if it is UNTRACKED now and its CURRENT content is
+        what a saved ``--project`` run wrote there (its digest is that path's in some saved
+        run's after-identity, in ``root`` or in ``others``). For a checkout that is not a
+        git work tree, "untracked" is "created by a saved run" (in an after-identity and
+        not its before).
+
+        So a junit report each ``asq exec`` run rewrites stays output, and one check's
+        report never stales another's pass. But a file a run created and that was then
+        committed (a scaffold), a tracked file a run brought in (``git merge``), or one a
+        run created and someone then edited (``touch conftest.py``, then a raising one) is
+        source again, and changing it stales a pass. Reports that cannot be read add
+        nothing, the strict direction."""
+        key = str(Path(root).resolve())
+        roots = {key} | {str(Path(other).resolve()) for other in others if other}
+        written: dict[str, set[str]] = {}
+        created: set[str] = set()
+        for one in roots:
+            if one not in self._outputs_cache:
+                self._outputs_cache[one] = _written_in(one)
+            run_written, run_created = self._outputs_cache[one]
+            for path, digests in run_written.items():
+                written.setdefault(path, set()).update(digests)
+            created |= run_created
+        if key not in self._untracked:
+            try:
+                self._untracked[key] = untracked_paths(Path(key))
+            except ValueError:
+                self._untracked[key] = set()  # cannot tell: nothing is output
+        untracked = self._untracked[key]
+        eligible = untracked if untracked is not None else created
+        return {
+            path for path, digest in current.items()
+            if path in eligible and digest in written.get(path, ())
+        }  # fmt: skip
 
     def root(self, recorded: str | None) -> str | None:
         return str(self.override) if self.override is not None else recorded
@@ -320,7 +342,7 @@ def _source_stale(evidence: BriefEvidence, sources: _Sources) -> str | None:
         except ValueError as exc:
             return str(exc)
         if saved is not None:
-            made = _created(saved) | sources.outputs(report.source_root, root)
+            made = sources.outputs(root, current, report.source_root)
             paths = changed_paths(saved.before, current, output=made, ignore=made)
             if not paths:
                 return None
@@ -387,20 +409,18 @@ def _pass_refusals(
         cause = report.source_capture_error or "run it with `asq exec --project`"
         why.append(f"its source identity is unknown ({cause})")
         return why
-    made = (sources or _Sources()).outputs(report.source_root)
-    if saved is not None:
-        made |= _created(saved)
+    try:
+        current = source_file_hashes(Path(report.source_root))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        why.append(f"the source in {report.source_root} cannot be read now ({exc})")
+        return why
+    made = (sources or _Sources()).outputs(report.source_root, current)
     if saved is not None and saved.after is not None:
         during = changed_paths(saved.before, saved.after, ignore=made)
         if during:
             why.append(_changed("the source changed while it ran", during))
     elif report.source_fingerprint_before != report.source_fingerprint_after:
         why.append("the source changed while it ran")
-    try:
-        current = source_file_hashes(Path(report.source_root))
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        why.append(f"the source in {report.source_root} cannot be read now ({exc})")
-        return why
     if saved is not None:
         paths = changed_paths(saved.before, current, output=made, ignore=made)
         if paths:
@@ -427,13 +447,15 @@ def _changed(what: str, paths: Sequence[str]) -> str:
     )
 
 
-def _created_in(root: str) -> set[str]:
-    """Every path a saved ``--project`` report's run created in checkout ``root``."""
-    made: set[str] = set()
+def _written_in(root: str) -> tuple[dict[str, set[str]], set[str]]:
+    """What the saved ``--project`` runs in checkout ``root`` wrote: each path's digests
+    in their after-identities, and the paths they created (after minus before)."""
+    written: dict[str, set[str]] = {}
+    created: set[str] = set()
     try:
         saved_reports = command_reports.list_reports()
     except (OSError, ValueError):
-        return made
+        return written, created
     for report in saved_reports:
         if not report.source_files_saved or report.source_root is None:
             continue
@@ -443,9 +465,12 @@ def _created_in(root: str) -> set[str]:
             files = command_reports.load_source_files(report.id)
         except (OSError, ValueError):
             continue
-        if files is not None:
-            made |= _created(files)
-    return made
+        if files is None or files.after is None:
+            continue
+        for path, digest in files.after.items():
+            written.setdefault(path, set()).add(digest)
+        created |= _created(files)
+    return written, created
 
 
 def _created(saved: command_reports.SourceFiles) -> set[str]:

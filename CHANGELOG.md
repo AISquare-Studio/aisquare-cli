@@ -63,11 +63,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   --report ID` records a check backed by an `asq exec --project` report: a pass
   needs exit 0, no interruption, both streams whole, no launch error, a known
   source identity and the same identity before, after and now, compared file by
-  file in the report's own checkout. A path any saved `--project` run in that
-  checkout created is check output and never counts, so two checks writing their
-  own junit reports into the checkout do not stale each other; any other change
-  does, an added `conftest.py` included, and the reason names the first changed
-  files and says to delete, gitignore or write elsewhere a check's own output. `asq exec --task` takes the task's number or id, like every other
+  file in the report's own checkout. An untracked file holding exactly what a saved
+  `--project` run in that checkout wrote is check output and never counts, so two
+  checks writing their own junit reports into the checkout do not stale each other.
+  Any other change does: an added `conftest.py`, a file a run wrote that is now
+  tracked or was edited since, a report rewritten outside `asq exec`. The reason
+  names the first changed files and says to delete, gitignore or write elsewhere a
+  check's own output. `asq exec --task` takes the task's number or id, like every other
   `--task`, and a report taken with it backs only that task. Manual `--artifact`
   passes keep their checkout's whole-tree fingerprint.
   `aisquare brief check BRIEF [--source-root PATH]` re-checks every pass against

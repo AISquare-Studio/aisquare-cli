@@ -205,13 +205,29 @@ def test_a_file_added_since_the_check_stales_its_pass(repo: Path) -> None:
 
 
 def test_the_checks_own_output_never_stales_its_pass(repo: Path) -> None:
-    """The other half: a file the check itself wrote (a --junitxml report) is its output,
-    in its after map and not its before, and stays ignored however often it is read."""
+    """A file the check itself wrote (a --junitxml report) is its output, and stays so
+    when a later `asq exec` run rewrites it: untracked, and holding what a saved run
+    wrote there."""
     brief, task = _linked()
     report = _run(_py("open('junit.xml', 'w').write('<testsuite/>')"), task=task)
     _record(brief, task, report)
-    (repo / "junit.xml").write_text("<testsuite tests='2'/>")  # rewritten by the next run
+    _run(_py("open('junit.xml', 'w').write('<testsuite tests=\\'2\\'/>')"))  # the next run
     assert _check(brief) == {"R1": "pass"}
+
+
+def test_a_check_output_rewritten_outside_exec_reads_stale_with_the_remedies(
+    repo: Path,
+) -> None:
+    """Manager's decision on #12, final: output is only what a saved run wrote. The same
+    junit file rewritten by hand (or by a plain pytest outside asq exec) is not, and the
+    reason says what to do about it."""
+    brief, task = _linked()
+    _record(brief, task, _run(_py("open('junit.xml', 'w').write('<testsuite/>')"), task=task))
+    (repo / "junit.xml").write_text("<testsuite tests='2'/>")
+    status = briefs.check(brief.id).requirements[0]
+    assert status.state == "stale" and "junit.xml" in status.reason
+    for remedy in ("delete it", "gitignore it", "write it outside the checkout"):
+        assert remedy in status.reason, status.reason
 
 
 def _pytest_into(report_file: str) -> list[str]:
@@ -238,6 +254,69 @@ def test_two_checks_writing_reports_into_the_checkout_can_both_be_done(repo: Pat
 
     (repo / "conftest.py").write_text("raise RuntimeError('collection fails now')\n")
     assert _check(brief) == {"R1": "stale", "R2": "stale"}, "an added conftest.py still counts"
+
+
+def _broken_after(repo: Path, made_by_a_run: str, *, then: Any) -> dict[str, str]:
+    """A path a saved run made, then ``then`` (commit it, say), a pass recorded after,
+    and the path broken by hand: the brief's standing."""
+    brief, task = _linked()
+    then()
+    _record(brief, task, _run(_py("print('the check')"), task=task))
+    assert _check(brief) == {"R1": "pass"}
+    (repo / made_by_a_run).write_text("raise RuntimeError('broken')\n")
+    return _check(brief)
+
+
+def test_a_scaffold_a_run_wrote_and_that_was_committed_is_source(repo: Path) -> None:
+    """Tester's H1 on #12: a scaffold written through `asq exec`, then committed and
+    broken, read PROVEN at e7490c0c. Tracked now, it is source."""
+    _run(_py("open('helper.py', 'w').write('def help():\\n    return 1\\n')"))
+
+    def commit() -> None:
+        _git(repo, "add", "helper.py")
+        _git(repo, "commit", "-q", "-m", "the scaffold")
+
+    assert _broken_after(repo, "helper.py", then=commit) == {"R1": "stale"}
+
+
+def test_a_tracked_file_put_back_to_what_a_run_once_wrote_is_still_a_change(
+    repo: Path,
+) -> None:
+    """Why "untracked now" is half the rule: a scaffold a run wrote is committed and then
+    edited, and a pass is recorded on the edit. Putting the file back to the scaffold, the
+    exact bytes a saved run wrote, changes the source; tracked, it is no check's output."""
+    scaffold = "def help():\n    return 1\n"
+    _run(_py(f"open('helper.py', 'w').write({scaffold!r})"))
+    _git(repo, "add", "helper.py")
+    _git(repo, "commit", "-q", "-m", "the scaffold")
+    (repo / "helper.py").write_text("def help():\n    return 2\n")
+    _git(repo, "commit", "-q", "-am", "the edit")
+    brief, task = _linked()
+    _record(brief, task, _run(_py("print('the check')"), task=task))
+    (repo / "helper.py").write_text(scaffold)
+    assert _check(brief) == {"R1": "stale"}
+
+
+def test_a_tracked_file_a_run_brought_in_is_source(repo: Path) -> None:
+    """Tester's H2 on #12: `asq exec -- git merge feature` brought tracked feature.py,
+    which then read PROVEN when broken. Tracked now, it is source."""
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "feature.py").write_text("X = 1\n")
+    _git(repo, "add", "feature.py")
+    _git(repo, "commit", "-q", "-m", "feature")
+    _git(repo, "checkout", "-q", "-")
+    assert not (repo / "feature.py").exists()
+    _run(["git", "-c", "user.email=t@t.invalid", "-c", "user.name=t", "merge", "-q",
+          "--no-edit", "feature"])  # fmt: skip
+    assert (repo / "feature.py").exists()
+    assert _broken_after(repo, "feature.py", then=lambda: None) == {"R1": "stale"}
+
+
+def test_a_file_a_run_created_and_someone_then_edited_is_source(repo: Path) -> None:
+    """Tester's H3 on #12: `asq exec -- touch conftest.py`, then a raising conftest.py,
+    read PROVEN. Its content is no longer what a run wrote: it is source."""
+    _run(_py("open('conftest.py', 'w').close()"))
+    assert _broken_after(repo, "conftest.py", then=lambda: None) == {"R1": "stale"}
 
 
 def test_a_source_file_the_check_changes_is_named_with_the_three_remedies(repo: Path) -> None:

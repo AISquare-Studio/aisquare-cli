@@ -639,6 +639,85 @@ class MetricsSummary(BaseModel):
     measured yet" rather than as "no tokens were used"."""
 
 
+UsageTrigger = Literal["stop", "stop_failure", "session_end"]
+"""The hook that recorded a stretch of a session's usage."""
+
+
+class SessionUsage(BaseModel):
+    """What one agent session has spent so far, read off its transcript.
+
+    ``usage`` is ``core.usage.Usage`` as a dict (per-model tokens, tool calls by
+    name, tool-result characters, lookups, characters aisquare injected) plus
+    ``first_edit`` — the tokens and tool calls before the session's first
+    Edit/Write/NotebookEdit. ``state`` is the scan's position in the transcript,
+    opaque to every reader but ``services.metrics``.
+    """
+
+    session_id: str
+    project_id: str
+    transcript_path: str | None = None
+    state: str = "{}"
+    usage: dict[str, Any] = Field(default_factory=dict)
+    turns: int = 0
+    total_tokens: int = 0
+    weighted: float = 0.0
+    cost_usd: float = 0.0
+    started_at: datetime
+    updated_at: datetime
+    ended_at: datetime | None = None
+
+
+class TurnUsage(BaseModel):
+    """One Stop-delimited stretch of a session: what that turn added."""
+
+    id: str
+    session_id: str
+    project_id: str
+    trace_id: str | None = None
+    """The ``metric`` row this turn closed, when the prompt hook opened one."""
+    seq: int
+    trigger: UsageTrigger
+    recorded_at: datetime
+    usage: dict[str, Any] = Field(default_factory=dict)
+    total_tokens: int = 0
+    weighted: float = 0.0
+    cost_usd: float = 0.0
+    scan_ms: float | None = None
+    """How long reading the transcript took on the hook's path."""
+
+
+class TokenSummary(BaseModel):
+    """``aisquare metrics tokens``: what recorded sessions spent, summed on read."""
+
+    project_id: str | None = None
+    session_id: str | None = None
+    sessions: int = 0
+    turns: int = 0
+    requests: int = 0
+    input_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    weighted_tokens: float = 0.0
+    """Cost-weighted tokens over the PRICED models only (``core.pricing``)."""
+    cost_usd: float = 0.0
+    """List price over the priced models only."""
+    unpriced_models: list[str] = Field(default_factory=list)
+    unpriced_tokens: int = 0
+    models: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    tool_calls: int = 0
+    tools: dict[str, int] = Field(default_factory=dict)
+    tool_result_chars: int = 0
+    lookup_calls: int = 0
+    injected_chars: int = 0
+    sessions_with_edit: int = 0
+    median_tokens_before_edit: int | None = None
+    median_tool_calls_before_edit: int | None = None
+    prices_as_of: str = ""
+    prices_source: str = ""
+
+
 TaskStatus = Literal["todo", "doing", "review", "blocked", "done", "dropped"]
 """Lifecycle of a shared team task: todo → doing → review → done (or parked)."""
 
@@ -803,10 +882,10 @@ class OnboardReport(BaseModel):
     seeded: list[ContextEntry] = Field(default_factory=list)
     snapshot: Snapshot | None = None
     snapshot_note: str | None = None
-    """Why this run packed nothing, as ``init`` and ``onboard`` say it: off, or the
-    pack failed and why. ``None`` when a pack was made or reused. Set beside a
-    ``snapshot``, it is a ``--refresh`` that failed: that is the last pack, kept,
-    and agents still get it."""
+    """Why this run packed nothing, as ``onboard`` says it: off, or the pack failed
+    and why. ``None`` when a pack was made or reused, or not asked for (``init``).
+    Set beside a ``snapshot``, it is a ``--refresh`` that failed: that is the last
+    pack, kept."""
     warning: str | None = None
     """``project_service.HOME_WARNING`` when this onboarding made the aisquare home a
     project (D5), said once; else ``None``."""

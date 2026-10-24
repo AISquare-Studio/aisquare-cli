@@ -1882,6 +1882,13 @@ def hook_session_start(
     been activated — or the session was launched with ``AISQUARE_ROLE``,
     which activates it. With ``[projects] capture`` off, silent too in a project
     nobody added, role or not: ``launch`` adds its own (``team on``), a fleet spawn its.
+
+    Silent in a SOLO session too (:func:`_solo`): an active project — which starting
+    aisquare's MCP server makes one — with no role, no fleet row, no open task and no
+    other live session has nobody to coordinate with, and the board and protocol rode
+    every one of its requests. It is ON the board all the same, so the next session to
+    start sees it, and is marked unbriefed (:func:`_unbriefed`): its first prompt after
+    a team forms brings the board (:func:`hook_prompt_heartbeat`).
     """
     if not orchestrator.team_enabled():
         return ""
@@ -1892,11 +1899,13 @@ def hook_session_start(
         role = orchestrator.env_role()
         if not store.team_active(project.id) and role is None:
             return ""
+        known = store.get_session(session_id)
+        # Read before anything is written: it decides whether there is a team at all.
+        solo = _solo(store, project.id, session_id, role=role, known=known)
         # Only now, for the session row below: captured before the board was asked, every
         # session start in any directory took the store's write lock for nothing (review of
         # #259, round 18).
         project_service.capture(store, project)
-        known = store.get_session(session_id)
         now = _now()
         # Computed before upsert_session(), which overwrites transcript_path.
         collision = _shared_row_banner(known, transcript_path, now)
@@ -1934,6 +1943,11 @@ def hook_session_start(
             # compaction can come mid-turn, so it keeps what the turn said.
             store.touch_session(session.id, state="waiting")
             session = store.get_session(session.id) or session
+        if solo:
+            store.set_meta(_unbriefed(session.id), "1")
+            return collision
+        if known is not None:
+            store.delete_meta(_unbriefed(session.id))
         if experimental.captain_role(base_role(session.role)):
             # Bound like every fleet row (rule 1 of the fleet-row section), or a
             # `/clear` left the row on the ended id and `say` waited on a session that
@@ -1968,6 +1982,72 @@ def hook_session_start(
         )
 
 
+#: The task states that are work someone may pick up or is doing: a board holding one is
+#: a team to coordinate with, whoever else is on it.
+_OPEN_TASKS = frozenset({"todo", "doing", "review", "blocked"})
+
+
+def _unbriefed(session_id: str) -> str:
+    """The ``team_meta`` key that marks a session on the board that has not been shown the
+    board and protocol: it was solo when it came (:func:`_solo`). Removed when the board
+    is rendered for it, and when it ends."""
+    return f"unbriefed:{session_id}"
+
+
+def _solo(
+    store: ContextStore,
+    project_id: str,
+    session_id: str,
+    *,
+    role: str | None,
+    known: TeamSession | None,
+) -> bool:
+    """Whether a session starting on this board has nobody to coordinate with: no role
+    (in its environment or on its row), no fleet row, no persona asked, and no team
+    on the board (:func:`_has_team`; decision seq 435 of #4).
+
+    A role (a manager, a ``launch``-ed coder) or a fleet row is a team member by being
+    one, and is briefed as it always was. Fail-open: a read that fails is a team, so
+    the session gets today's board.
+    """
+    if role is not None or orchestrator.env_fleet_agent() is not None:
+        return False
+    if orchestrator.env_persona() is not None:
+        return False
+    if known is not None and base_role(known.role) != "unassigned":
+        return False
+    try:
+        return not _has_team(store, project_id, session_id)
+    except Exception:
+        _log.debug("could not tell whether session %s has a team", session_id, exc_info=True)
+        return False
+
+
+def _has_team(store: ContextStore, project_id: str, session_id: str | None) -> bool:
+    """Whether a session with no role and no fleet row has a team on this board: an open
+    task, a live fleet agent, or a live session (seen within :data:`_STALE_AFTER`, not
+    ended) other than the caller's own row. Three reads on indexed columns.
+
+    ``session_id`` is the caller's row where it is known (the hooks). Where it is not —
+    the MCP server, started by its client alongside SessionStart and before that hook
+    writes the row — ANY live session is a team: it may be a teammate, and the board is
+    the fail-safe answer. A session restarting beside its own not-yet-ended previous row
+    reads as a team for that reason.
+    """
+    if any(task.status in _OPEN_TASKS for task in store.team_tasks(project_id)):
+        return True
+    if store.fleet_agents(project_id, live_only=True):
+        return True
+    seen = store.team_sessions_seen_since(project_id, _now() - _STALE_AFTER)
+    return any(other.id != session_id and other.ended_at is None for other in seen)
+
+
+def board_has_team(store: ContextStore, project_id: str) -> bool:
+    """:func:`_has_team` for a caller that is not a session yet (the MCP server, started by
+    its client): its own row is not known, so any live session counts."""
+    return _has_team(store, project_id, None)
+
+
 def hook_prompt_heartbeat(
     session_id: str,
     cwd: Path | None,
@@ -1980,7 +2060,10 @@ def hook_prompt_heartbeat(
 
     A session unknown to the orchestrator but prompting inside an *active* project
     joins right here (the orchestrator may have been activated after it started) and
-    receives the full board + protocol instead of a delta.
+    receives the full board + protocol instead of a delta — unless it is solo
+    (:func:`_solo`): then it joins unbriefed and silent, as at session start. An
+    unbriefed session gets nothing until a team forms around it, and then the full
+    board, once.
     """
     if not orchestrator.team_enabled():
         return ""
@@ -1993,6 +2076,7 @@ def hook_prompt_heartbeat(
             role = orchestrator.env_role()
             if not store.team_active(project.id) and role is None:
                 return ""
+            solo = _solo(store, project.id, session_id, role=role, known=None)
             # Only now, as at session start: before the board was asked, every prompt of a
             # session on no board took the store's write lock again, for a directory
             # `capture_prompt` had captured already (review of #259, round 19).
@@ -2018,6 +2102,9 @@ def hook_prompt_heartbeat(
                     persona=asked_persona,
                 )
             )
+            if solo:
+                store.set_meta(_unbriefed(session.id), "1")
+                return ""
             # This door binds a fleet row too (an agent that started before the
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
@@ -2043,6 +2130,8 @@ def hook_prompt_heartbeat(
         # exactly as long as the two agents were quiet, which is when the
         # interleaved claims do their damage.
         collision = _shared_row_banner(session, transcript_path, _now())
+        if store.get_meta(_unbriefed(session.id)) is not None:
+            return collision + _brief_when_a_team_forms(store, session, cwd)
         # The fleet-row bind the start hook could not make is tried again here,
         # and the briefing it was owed comes with it (rule 2, second half).
         late = _late_assignment(store, session)
@@ -2086,6 +2175,38 @@ def hook_prompt_heartbeat(
             + briefing
             + _render_delta(shown, roles, truncated=truncated, board=board, numbers=numbers)
         )
+
+
+def _brief_when_a_team_forms(store: ContextStore, session: TeamSession, cwd: Path | None) -> str:
+    """An unbriefed session's prompt: nothing while it is still solo, the full board and
+    protocol, once, when a team has formed around it. Its cursor moves to the head of
+    the pipe either way, so what happened while it was alone is not replayed as a delta.
+    Fail-open: a read that fails is a team, so the board comes."""
+    lease = _now() + timedelta(minutes=orchestrator.lease_minutes())
+    store.renew_leases(session.id, lease)
+    head = store.latest_seq(session.project_id)
+    try:
+        alone = not _has_team(store, session.project_id, session.id)
+    except Exception:
+        _log.debug("could not tell whether session %s has a team", session.id, exc_info=True)
+        alone = False
+    store.touch_session(session.id, cursor=head, state="working")
+    if alone:
+        return ""
+    store.delete_meta(_unbriefed(session.id))
+    project = store.get_project(session.project_id) or orchestrator.team_project(cwd)
+    named = _hook_named_row(store)
+    assigned = _assignment(store, session.id, session.project_id, named=named)
+    return _render_board(
+        project,
+        store.team_sessions(session.project_id),
+        store.team_tasks(session.project_id),
+        _briefing_events(store, session.project_id),
+        me=session,
+        assigned=assigned,
+        labels=lambda: slot_labels_via(store),
+        fleet=_cycle_project(store, project, cwd, session.id, named=named),
+    )
 
 
 def hook_stop(
@@ -2580,6 +2701,7 @@ def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = 
         session = store.get_session(session_id)
         if session is None:
             return
+        store.delete_meta(_unbriefed(session.id))
         # No "left" feed event either way — the board's session panel is the
         # presence view. Released claims are real work signals and do go out;
         # a clear releases nothing, so it says nothing.

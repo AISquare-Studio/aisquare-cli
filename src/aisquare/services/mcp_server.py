@@ -408,8 +408,57 @@ def serve_token() -> str:
     return token
 
 
-def build_server() -> MCPServer:
-    """An ``MCPServer`` exposing the orchestrator tools."""
+#: What the server's instructions say where there is a team to coordinate with
+#: (:func:`_serves_a_team`), and to every HTTP client.
+TEAM_INSTRUCTIONS = (
+    "The shared task board and working memory of a team of coding-agent "
+    "sessions. Check team_board first; add work with task_add (idempotent); "
+    "claim before working (task_next with claim=true); report outcomes with "
+    "task_update and note_add. Every write's success names a seq receipt — "
+    "verify(receipt) re-proves it landed; team_log(by_session='me') reads "
+    "back your own recent writes; signal(name, value?) sets or reads named "
+    "board states with structured events — key on payload fields, not text."
+)
+
+#: What they say to a solo session: the tools are there, the protocol is not needed.
+SOLO_INSTRUCTIONS = "aisquare's shared task board (team_board) and saved project context."
+
+
+def _serves_a_team() -> bool:
+    """Whether the session this server starts for has a team: a role or a fleet row in
+    its environment, or, on an active board, an open task, a live fleet agent or ANY
+    live session (:func:`~aisquare.services.team.board_has_team`): the server has no
+    session id, so it cannot tell its own row from a teammate's, and counts it as one.
+    The instructions are read once, at the client's start, and rode every request of a
+    solo session for nothing.
+
+    Fail-open: any doubt, a read that fails included, is a team."""
+    from aisquare.core import orchestrator
+    from aisquare.core.store import store_session
+
+    if orchestrator.env_role() is not None or orchestrator.env_fleet_agent() is not None:
+        return True
+    try:
+        with store_session() as store:
+            project = orchestrator.team_project(None)
+            return store.team_active(project.id) and team_service.board_has_team(store, project.id)
+    except Exception:
+        _log.debug("could not tell whether this session has a team", exc_info=True)
+        return True
+
+
+def server_instructions(*, team: bool | None = None) -> str:
+    """The board's protocol when there is a team (``None``: ask), one line otherwise."""
+    if team is None:
+        team = _serves_a_team()
+    return TEAM_INSTRUCTIONS if team else SOLO_INSTRUCTIONS
+
+
+def build_server(*, team: bool | None = None) -> MCPServer:
+    """An ``MCPServer`` exposing the orchestrator tools.
+
+    ``team`` decides whether the instructions describe the board (:func:`server_instructions`);
+    ``None`` asks the store, as a stdio server started by a client does."""
     from mcp.server.mcpserver import MCPServer
 
     from aisquare.core.version import __version__
@@ -421,15 +470,7 @@ def build_server() -> MCPServer:
     server = MCPServer(
         "aisquare-team",
         version=__version__,
-        instructions=(
-            "The shared task board and working memory of a team of coding-agent "
-            "sessions. Check team_board first; add work with task_add (idempotent); "
-            "claim before working (task_next with claim=true); report outcomes with "
-            "task_update and note_add. Every write's success names a seq receipt — "
-            "verify(receipt) re-proves it landed; team_log(by_session='me') reads "
-            "back your own recent writes; signal(name, value?) sets or reads named "
-            "board states with structured events — key on payload fields, not text."
-        ),
+        instructions=server_instructions(team=team),
     )
     for tool in (
         team_board,
@@ -729,7 +770,7 @@ def run_http(*, bind: str, port: int) -> None:
     import uvicorn
 
     token = serve_token()
-    server = build_server()
+    server = build_server(team=True)  # remote clients join a board
     # mcp 2 moved transport settings off the server object. ``host`` goes to
     # the app factory, whose only use for it is deciding whether DNS-rebinding
     # protection auto-enables; the port is uvicorn's alone, which is what

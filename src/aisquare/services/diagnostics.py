@@ -2698,9 +2698,9 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
     if snapshot_core.is_the_homes(project.id):
         # The aisquare home, added as a project, is never packed: no fix to offer.
         return _ok("snapshot", snapshot_core.HOME_SKIPPED)
-    # A stored pack is what agents get even where nothing can pack any more (Node
-    # gone, or on PATH only for the installer's own run): it says so, rather than
-    # "ready" beside a repomix row that reads off.
+    # A stored pack stays on disk even where nothing can pack any more (Node gone,
+    # or on PATH only for the installer's own run): it says so, rather than "ready"
+    # beside a repomix row that reads off.
     if snap is not None and snap.status == "ready":
         return _ok(
             "snapshot",
@@ -2708,9 +2708,9 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
             + snapshot_core.unrefreshable_note(snap),
         )
     if snap is not None and snap.status == "skeleton_only":
-        # Usable: the session-start directive points agents at the skeleton and
-        # its index. No fix, deliberately — re-packing would not change it, and a
-        # fix here is the button that was pressed forever with a green tick.
+        # Usable, for whoever opens it: no agent is pointed at a pack. No fix,
+        # deliberately — re-packing would not change it, and a fix here is the
+        # button that was pressed forever with a green tick.
         return _ok(
             "snapshot",
             snapshot_core.skeleton_only_detail(snap) + snapshot_core.unrefreshable_note(snap),
@@ -2730,11 +2730,8 @@ def _check_snapshot(cwd: Path | None = None) -> DoctorCheck:
         # The fix is `--refresh` because a plain `onboard` only reloads this
         # verdict — which is how the line stayed a warning forever.
         return _warn("snapshot", snapshot_core.too_large_detail(snap), snapshot_core.REPACK_HINT)
-    return _warn(
-        "snapshot",
-        "no codebase snapshot for the active project",
-        "Pack one: aisquare project onboard",
-    )
+    # Nothing to fix: the pack is opt-in (`init` makes none) and no agent reads one.
+    return _ok("snapshot", "none — opt-in: aisquare project onboard packs one")
 
 
 def _check_brain(cwd: Path | None = None) -> DoctorCheck:

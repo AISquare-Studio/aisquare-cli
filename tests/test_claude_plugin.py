@@ -293,7 +293,6 @@ class Machine:
             f"printf '%s\\n' \"$*\" >> '{record}.calls'\n"
             f": > '{record}.argv'\n"
             f"for arg in \"$@\"; do printf '%s\\n' \"$arg\" >> '{record}.argv'; done\n"
-            f"printf '%s' \"${{AISQUARE_PLUGIN_UVX-unset}}\" > '{record}.uvx-named'\n"
             + refuse
             + f"'{shutil.which('cat')}' > '{record}.stdin'\n"
             + ("printf 'context from the cli\\n'\n" if prints else "")
@@ -337,11 +336,6 @@ class Machine:
         """The argv ``name`` was last run with, or ``None`` if it never ran."""
         record = self.log / f"{name}.argv"
         return record.read_text(encoding="utf-8").splitlines() if record.exists() else None
-
-    def uvx_named(self, name: str) -> str | None:
-        """The uvx the launcher named to ``name``'s last run (AISQUARE_PLUGIN_UVX)."""
-        record = self.log / f"{name}.uvx-named"
-        return record.read_text(encoding="utf-8") if record.exists() else None
 
     def calls(self, name: str) -> list[str]:
         """Every run of ``name``, its arguments space-joined, oldest first."""
@@ -938,18 +932,6 @@ def test_with_only_uv_it_runs_the_pinned_release(machine: Machine, uvx_in_local_
         "user-prompt-submit",
     ]
     assert machine.stdin_of("uvx") == b'{"prompt": "hi"}'
-    found = machine.home / ".local" / "bin" / "uvx" if uvx_in_local_bin else machine.bin / "uvx"
-    assert machine.uvx_named("uvx") == str(found), "named to aisquare, for its `aisquare log`"
-
-
-@posix_only
-def test_the_cli_is_named_no_uvx(machine: Machine) -> None:
-    """The control: an installed CLI is no uvx run, and is told of none."""
-    machine.fake("aisquare")
-
-    machine.run("session-start")
-
-    assert machine.uvx_named("aisquare") == "unset"
 
 
 @posix_only

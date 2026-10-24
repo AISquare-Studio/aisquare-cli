@@ -435,8 +435,8 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v29 a task's number on its board, v30 its unique index, v31 the branch of a fleet
     # agent's worktree (review of #259, round 15), v32 the board a fleet agent reads (round 25),
     # v33 the persona a session and a fleet agent run as (#201), v34 how a fleet agent's
-    # row ended, stopped or died (#38)
-    assert version == SCHEMA_VERSION == 34
+    # row ended, stopped or died (#38), v35 session token usage (#346, stamped v34 there)
+    assert version == SCHEMA_VERSION == 35
 
 
 def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -> None:
@@ -1261,6 +1261,47 @@ _RC_V21_SCHEMAS = ("rc_v21_owner_home.sql", "rc_v21_owner_asqui.sql", "rc_v21_fr
 _PERSONA_COLUMNS = {("column", "team_session.persona"), ("column", "fleet_agent.persona")}
 _ENDED_BY_COLUMN = {("column", "fleet_agent.ended_by")}
 """v34's product (#38), one step past the persona step on every shape."""
+#: v35 (token metrics, #346): the two usage tables and their indexes, on top of v34.
+_USAGE_STEP = {
+    ("table", "usage_session"),
+    ("index", "usage_session_project"),
+    ("table", "usage_turn"),
+    ("index", "usage_turn_session"),
+    *(
+        ("column", f"usage_session.{column}")
+        for column in (
+            "session_id",
+            "project_id",
+            "transcript_path",
+            "state",
+            "usage",
+            "turns",
+            "total_tokens",
+            "weighted",
+            "cost_usd",
+            "started_at",
+            "updated_at",
+            "ended_at",
+        )
+    ),
+    *(
+        ("column", f"usage_turn.{column}")
+        for column in (
+            "id",
+            "session_id",
+            "project_id",
+            "trace_id",
+            "seq",
+            "trigger",
+            "recorded_at",
+            "usage",
+            "total_tokens",
+            "weighted",
+            "cost_usd",
+            "scan_ms",
+        )
+    ),
+}
 # Main's v22 to v24 by name: SQLite's automatic index for the primary key is left out.
 _MAINS_STEPS_PAST_21 = {
     ("table", "pending_revocation"),
@@ -1450,7 +1491,9 @@ def test_mains_v24_store_gains_the_persona_columns_and_keeps_every_row() -> None
     finally:
         raw.close()
     assert (version, missing) == (SCHEMA_VERSION, [])
-    assert shape == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | _ENDED_BY_COLUMN
+    assert shape == (
+        _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | _ENDED_BY_COLUMN | _USAGE_STEP
+    )
     assert shape == _built(SCHEMA_VERSION), "not the schema a fresh store has"
     assert after == before, "a row the store held changed on a column it had"
     assert agent is not None and (agent.persona, agent.account_slot) == (None, 1)
@@ -1515,19 +1558,18 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     plus main's v22 to v32, and the RC's v24 plus main's v25 to v32, and nothing else. The
     persona columns are #201's v33, one step on main's v32 with an empty script and the two
     columns as its products, so a store that holds them already (the RC's) is not changed
-    by it."""
+    by it. v34 adds ``fleet_agent.ended_by`` (#38) on top, v35 the two token-usage tables
+    (#346), and nothing else."""
     fresh = _built(SCHEMA_VERSION)
+    persona = _built(33)
 
-    assert SCHEMA_VERSION == 34
-    assert fresh == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | _ENDED_BY_COLUMN
+    assert SCHEMA_VERSION == 35
+    assert fresh == persona | _ENDED_BY_COLUMN | _USAGE_STEP
+    assert _built(34) == persona | _ENDED_BY_COLUMN
+    assert persona == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS
     for schema in _RC_V21_SCHEMAS:
-        assert fresh == (
-            _replayed_shape(schema)
-            | _MAINS_STEPS_PAST_21
-            | _mains_steps_past_24()
-            | _ENDED_BY_COLUMN
-        )
-    assert fresh == _replayed_shape("rc_v24_fresh.sql") | _mains_steps_past_24() | _ENDED_BY_COLUMN
+        assert persona == _replayed_shape(schema) | _MAINS_STEPS_PAST_21 | _mains_steps_past_24()
+    assert persona == _replayed_shape("rc_v24_fresh.sql") | _mains_steps_past_24()
     open_store().close()
     raw = sqlite3.connect(str(_db_path()))
     try:
@@ -1628,7 +1670,7 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
     _schema_again, rows_again = _contents(db)
     version, shape, notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 34, label
+    assert version == SCHEMA_VERSION == 35, label
     assert shape == _built(SCHEMA_VERSION), label
     assert notnull == {"team_session": 0, "fleet_agent": 0}, label
     assert old_session is not None and old_session.persona == persona, label
@@ -1639,11 +1681,11 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
 
 
 def test_a_fresh_store_is_built_with_the_persona_step() -> None:
-    """No file at all: v1 to v34, the same shape as every cohort above reaches."""
+    """No file at all: v1 to v35, the same shape as every cohort above reaches."""
     open_store().close()
     version, shape, notnull = _persona_shape(_db_path())
 
-    assert version == SCHEMA_VERSION == 34
+    assert version == SCHEMA_VERSION == 35
     assert shape == _built(SCHEMA_VERSION)
     assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
     assert notnull == {"team_session": 0, "fleet_agent": 0}

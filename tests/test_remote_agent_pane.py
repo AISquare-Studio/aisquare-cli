@@ -605,8 +605,33 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     runtime = make_runtime()
     app = build_app(runtime, sources=_sources(), writes=live_writes(), dist_dir=tmp_path)
     taps = 36  # more than any default pool: min(32, CPUs + 4) threads
-    answers: list[tuple[int, float]] = []
+    answers: list[int] = []
     action = remote_agent_lock(project.id, "coder-1")
+    # Each key's wait is timed at the lock, from when its request reached the server. Timed
+    # at the client, it took in the 36 requests' dispatch and the 28 keys queued behind the
+    # write pool's 8 threads reading their row from the store before finding their wait
+    # spent: 3.3 s on a Windows runner, 29 s on two cores beside a disk being fsynced, and
+    # no key waited for the lock past its 2 s.
+    arrival: contextvars.ContextVar[float] = contextvars.ContextVar("arrival")
+    waits: list[float] = []
+    run_write = app.kit.kit_run_write
+
+    async def stamped(handler: Any, body: dict[str, Any], arrived: float, *rest: Any) -> Any:
+        arrival.set(arrived)  # the write thread runs in a copy of this context
+        return await run_write(handler, body, arrived, *rest)
+
+    class Timed:
+        def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+            try:
+                return action.acquire(blocking, timeout)
+            finally:
+                waits.append(time.monotonic() - arrival.get())
+
+        def release(self) -> None:
+            action.release()
+
+    monkeypatch.setattr(app.kit, "kit_run_write", stamped)
+    monkeypatch.setattr(remote_server, "remote_agent_lock", lambda project_id, label: Timed())
     assert action.acquire(blocking=False)
     try:
         with make_client(app) as client:
@@ -615,9 +640,8 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
             url = f"{base(runtime)}/api/send-keys"
 
             def tap() -> None:
-                sent = time.monotonic()
                 response = client.post(url, json={"agent": "coder-1", "keys": ["Down"]})
-                answers.append((response.status_code, time.monotonic() - sent))
+                answers.append(response.status_code)
 
             tappers = [threading.Thread(target=tap) for _ in range(taps)]
             for tapper in tappers:
@@ -631,9 +655,9 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     finally:
         action.release()
     assert read.status_code == 200 and took < 1.0, f"the read waited {took:.2f} s"
-    assert [status for status, _ in answers] == [409] * taps and tmux.sent == []
-    slowest = max(elapsed for _, elapsed in answers)
-    assert slowest < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.0, slowest
+    assert answers == [409] * taps and tmux.sent == []
+    # Waited from when a thread was free, the keys behind the first 8 waited a whole 2 s more.
+    assert waits and max(waits) < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.0, waits
 
 
 def test_keys_queued_behind_actions_holding_every_write_thread_are_not_typed_as_one_ends(

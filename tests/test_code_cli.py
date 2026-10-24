@@ -224,12 +224,10 @@ def test_onboard_returns_while_a_slow_index_build_runs(
     took = time.monotonic() - began
 
     assert result.exit_code == 0, result.output
-    # The build was never called inline, which no runner's speed changes. The time is a
-    # second witness: an inline build cannot return before the slow build's whole
-    # sleep, while the rest of an onboard took 3.1 s on a loaded CI runner (rc/p2 push
-    # run 40087282716), so half the sleep was a bound on the runner, not the change.
-    assert built == [], "onboard built the index inline"
-    assert took < SLOW_BUILD_S, f"onboard took {took:.1f}s with a {SLOW_BUILD_S}s build"
+    # The build was never called inline, which no runner's speed changes. No wall-clock
+    # bound: the rest of an onboard took 3.1 s on a loaded linux runner and 6.6 s on
+    # windows (rc/p2 push run 40087282716), so any bound measured the runner.
+    assert built == [], f"onboard built the index inline ({took:.1f}s)"
     assert json.loads(result.output)["code_index"].startswith("building in the background")
     [(argv, cwd)] = started
     assert argv[-3:] == ["--quiet", "code", "index"] and cwd == checkout.resolve()

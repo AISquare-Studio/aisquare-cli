@@ -131,7 +131,14 @@ def team_strip_text(agents: Sequence[FleetAgentStatus]) -> Text | None:
 
 
 class TeamStrip(Static):
-    """The team strip (:func:`team_strip_text`): a click on it opens the Board tab."""
+    """The team strip (:func:`team_strip_text`): a click on it opens the Board tab.
+
+    One row, cut at its end with ``…`` where it does not fit: word-wrapped, its one row
+    hid the rest a whole word at a time and unmarked (review of #359)."""
+
+    DEFAULT_CSS = """
+    TeamStrip { text-wrap: nowrap; text-overflow: ellipsis; }
+    """
 
     class Opened(Message):
         """The strip was clicked: show the board, where each agent's detail is."""

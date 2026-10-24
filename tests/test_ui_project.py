@@ -128,12 +128,13 @@ def drive(
     scenario: Callable[[Pilot[None], Host], Coroutine[Any, Any, T]],
     *,
     refresh_seconds: float = 60.0,
+    size: tuple[int, int] = (120, 50),
 ) -> T:
     """Run ``scenario`` against a mounted Project view and return what it observed."""
 
     async def run() -> T:
         host = Host(project, refresh_seconds=refresh_seconds)
-        async with host.run_test(size=(120, 50)) as pilot:
+        async with host.run_test(size=size) as pilot:
             await pilot.pause()
             return await scenario(pilot, host)
 
@@ -849,6 +850,29 @@ def test_the_team_strip_shows_each_state_of_a_role_and_a_role_it_has_no_icon_for
     assert text is not None
     assert text.plain == "🔨 1▶ 1⏸ 1⏳  🤖 docs-writer 1⏸  · board for detail"
     assert project_view_module.team_strip_text(frame[:0]) is None
+
+
+def test_a_narrow_team_strip_is_cut_at_its_end_with_an_ellipsis(project: ProjectInfo) -> None:
+    """Review of #359's walk: under 62 columns the strip word-wrapped and its one row hid
+    the rest, a whole word at a time and unmarked, so a role's counts vanished. One row,
+    cut at its end with an ellipsis."""
+    roles = ("coder", "tester", "reviewer", "validator", "docs-writer")
+    frame = [
+        FleetAgentStatus(agent=_member(project, f"{role}-1", role), state="working")
+        for role in roles
+    ]
+
+    async def scenario(pilot: Pilot[None], host: Host) -> list[str]:
+        host.query_one(ProjectView).refresh_status(frame)
+        await pilot.pause()
+        strip = host.query_one("#team-strip", Static)
+        # The whole row, padding included: the strip's content starts one cell in.
+        rows = strip.render_lines(Region(0, 0, strip.region.width, strip.region.height))
+        return ["".join(segment.text for segment in row).rstrip() for row in rows]
+
+    [row] = drive(project, scenario, size=(50, 30))
+    assert row.lstrip().startswith("🔨 1▶  🧪 1▶"), row
+    assert row.endswith("…"), row
 
 
 def test_a_click_on_the_team_strip_opens_the_board_tab(project: ProjectInfo) -> None:

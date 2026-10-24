@@ -285,20 +285,28 @@ def _hash_link(root: Path, path: Path, entry: hashlib._Hash, seen: set[Path]) ->
     content, not the link's (tester's X3 on #14). A linked directory is taken through
     :func:`_walk`, and links inside it the same way (Y5).
 
-    By its text only: a target outside the checkout, one under ``.git`` or a generated
-    directory, one already taken through this link (``seen``), and the checkout root or
+    By its text only: a loop, a target outside the checkout, a directory under ``.git``
+    or a generated directory (a FILE there is hashed like any other: P4), one already
+    taken through this link (``seen``), and the checkout root or
     any directory holding the link, whose files already count at their own paths: an
     empty commit must not stale a pass through ``loop -> .`` (Y4)."""
     stamps = [_change_stamp(path.lstat())]
     entry.update(b"link\0" + os.fsencode(os.readlink(path)))
-    target = path.resolve()
-    if (
-        not target.is_relative_to(root)
-        or not target.exists()
-        or path.parent.resolve().is_relative_to(target)
-        or _generated(str(target.relative_to(root)))
-        or target in seen
-    ):
+    try:
+        target = path.resolve()
+        skipped = (
+            not target.is_relative_to(root)
+            or not target.exists()
+            or path.parent.resolve().is_relative_to(target)
+            or (target.is_dir() and _generated(str(target.relative_to(root))))
+            or target in seen
+        )
+    except (OSError, RuntimeError):
+        # A link loop (`ln -s b a; ln -s a b`): Python before 3.13 raises RuntimeError
+        # from resolve(), and it crashed brief check (tester's P3 on #14). It points at
+        # nothing, so it counts by its text.
+        return stamps
+    if skipped:
         return stamps
     seen.add(target)
     if not target.is_dir():
@@ -349,7 +357,7 @@ def _iter_source_entries(root: Path) -> Iterator[tuple[str, str, dict[str, str]]
         else:
             try:
                 timed = _hash_entry(root, path, entry, set())
-            except OSError as exc:
+            except (OSError, RuntimeError) as exc:
                 raise ValueError(f"cannot read source {path}: {exc}") from None
             if timed:
                 stamps[name] = timed[0] if len(timed) == 1 else _combined(timed)

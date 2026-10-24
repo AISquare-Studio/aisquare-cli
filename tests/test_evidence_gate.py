@@ -483,6 +483,59 @@ def test_a_change_put_back_inside_a_nested_repository_refuses_the_run(repo: Path
         _record(brief, task, report)
 
 
+def test_a_symlink_loop_counts_by_its_text_and_crashes_nothing(repo: Path) -> None:
+    """Tester's P3 on #14: on Python 3.11 and 3.12 `ln -s b a; ln -s a b` made resolve()
+    raise RuntimeError, and brief check, brief show and task done crashed. A loop points
+    at nothing and counts by its text, on every Python."""
+    _symlink_or_skip(repo / "a", "b")
+    _symlink_or_skip(repo / "b", "a")
+    brief, task = _linked()
+    report = _run(_py("print('ok')"), task=task)
+    assert report.source_known, report.source_capture_error
+    _record(brief, task, report)
+    assert _check(brief) == {"R1": "pass"}
+    briefs.show(brief.id)
+    (repo / "c").symlink_to("d")
+    (repo / "d").symlink_to("c")
+    status = briefs.check(brief.id).requirements[0]
+    assert status.state == "stale" and "c, d" in status.reason, status.reason
+    with pytest.raises(briefs.TaskNotProven):
+        team.finish_task(task.id)
+
+
+def test_a_link_to_a_file_in_a_generated_directory_counts_its_content(repo: Path) -> None:
+    """Tester's P4 on #14: conftest.py -> .venv/c.py counted by its text only, since
+    .venv is generated, so a raising c.py read PROVEN. A linked FILE is hashed wherever
+    it is in the checkout; only a linked directory there is skipped."""
+    (repo / ".venv").mkdir()
+    (repo / ".venv" / "c.py").write_text("VALUE = 1\n")
+    _symlink_or_skip(repo / "conftest.py", ".venv/c.py")
+
+    def break_target() -> None:
+        (repo / ".venv" / "c.py").write_text("raise RuntimeError('collection')\n")
+
+    status = _passed_then(break_target)
+    assert status.state == "stale" and "conftest.py" in status.reason, status.reason
+
+
+def test_output_under_a_linked_directory_is_refused_with_why(repo: Path) -> None:
+    """Tester's P1 on #14: with tests_link -> tests, a check writing to the gitignored
+    tests/reports/ was refused "changed while it ran: tests_link", and the remedy said
+    "gitignore it" of a file already ignored. It now says what the link does."""
+    (repo / ".gitignore").write_text("reports/\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "ignore reports")
+    (repo / "tests").mkdir()
+    _symlink_or_skip(repo / "tests_link", "tests")
+    brief, task = _linked()
+    report = _run(_pytest_into("tests/reports/a.xml"), task=task)
+    with pytest.raises(ValueError) as refused:
+        _record(brief, task, report)
+    said = str(refused.value)
+    assert "the source changed while it ran: tests_link" in said
+    assert "tests_link links to a directory, and every file under it counts" in said, said
+
+
 def test_in_a_checkout_without_git_the_remedy_does_not_say_gitignore(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

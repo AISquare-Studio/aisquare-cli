@@ -421,7 +421,25 @@ def _changed(what: str, paths: Sequence[str], *, root: str, remedy: bool = True)
     changes it again (the tester's finding on #12). ``remedy`` is left off a reason the
     same refusal ends with another one that carries it."""
     said = f"{what}: {_listed(paths)}"
-    return f"{said}. {_remedy(root)}" if remedy else said
+    if not remedy:
+        return said
+    linked = [path for path in paths if _linked_directory(Path(root) / path)]
+    if not linked:
+        return f"{said}. {_remedy(root)}"
+    # Under a link, an ignored file still counts, so "gitignore it" cannot help there
+    # (tester's P1/P2 on #14).
+    return (
+        f"{said}. {_listed(linked)} links to a directory, and every file under it counts, "
+        "ignored or not: have the check write its output where no linked directory "
+        "reaches it, or remove the link. " + _remedy(root)
+    )
+
+
+def _linked_directory(path: Path) -> bool:
+    try:
+        return path.is_symlink() and path.is_dir()
+    except (OSError, RuntimeError):
+        return False
 
 
 def _listed(paths: Sequence[str], limit: int = 5) -> str:

@@ -174,6 +174,27 @@ def test_a_link_to_a_directory_in_the_checkout_counts_what_is_in_it(checkout: Pa
     assert "tests" in moved_stamps(stamps, later)
 
 
+def test_a_link_whose_resolve_raises_counts_by_its_text(
+    checkout: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P3 on #14, as Python 3.11 and 3.12 behave on any Python: resolve() on a link loop
+    raises RuntimeError. The identity is still taken, with the link by its text."""
+    try:
+        (checkout / "a").symlink_to("b")
+    except OSError as exc:
+        pytest.skip(f"symlinks are not available here: {exc}")
+    real = Path.resolve
+
+    def looping(self: Path, strict: bool = False) -> Path:
+        if self.name == "a":
+            raise RuntimeError(f"Symlink loop from {self}")
+        return real(self, strict)
+
+    monkeypatch.setattr(Path, "resolve", looping)
+    files, stamps = source_state(checkout)
+    assert "a" in files and "a" in stamps
+
+
 def test_a_non_git_directory_is_walked_without_its_generated_directories(tmp_path: Path) -> None:
     root = tmp_path / "plain"
     root.mkdir()

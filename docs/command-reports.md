@@ -134,8 +134,10 @@ untracked nonignored file, kept file by file.
   do not count. Tracked files count whatever directory they are in.
 - **Symlinks count as their targets.** A link to a file or directory inside the
   checkout is hashed with what it points at, links inside it the same way, and
-  generated directories skipped. A link pointing out of the checkout, or to the
-  checkout itself or a directory holding the link, counts by its text.
+  generated directories skipped; a linked file counts by its content even inside a
+  generated directory. Under a linked directory, ignored files count too. A link
+  pointing out of the checkout, a loop, or a link to the checkout itself or a
+  directory holding the link, counts by its text.
 - **Change times are kept too.** Each file's change time (modification time on
   Windows) is saved before and after, nested repositories included, so a file
   changed and put back while the command ran still shows. A file created and deleted
@@ -146,11 +148,11 @@ untracked nonignored file, kept file by file.
 - **Ignored files are left out, the rules that ignore them are not.** Files git
   ignores do not count, but every `.gitignore` git reads does (one that ignores itself
   too; not one inside an ignored directory, which git never reads), and so do
-  `.git/info/exclude` and `core.excludesFile`. Everything else
-  counts, a file the command itself wrote included: `pytest --junitxml=report.xml`
-  changes the identity, as an edit or a removal does. When a report backs brief
-  evidence, the identity must be the same before, after and now, so write check
-  output to a gitignored directory (`--junitxml=reports/a.xml` with `reports/` in
+  `.git/info/exclude` and `core.excludesFile`. Everything else counts, a file the
+  command itself wrote included: `pytest --junitxml=report.xml` changes the identity,
+  as an edit or a removal does. When a report backs brief evidence, the identity must
+  be the same before, after and now, so write check output to a gitignored directory
+  that no symlinked directory reaches (`--junitxml=reports/a.xml` with `reports/` in
   `.gitignore`) or outside the checkout ([work briefs](work-briefs.md)).
 - **A worktree is its own checkout.** A command run in a linked worktree is about that
   worktree's files, under the board's one project.

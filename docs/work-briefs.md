@@ -80,9 +80,15 @@ the check itself, another `asq exec` run, or you while the check ran.
   directory, even an ignored one, and so do links inside that directory. A linked
   directory is walked as a checkout without git is, so `.git` and generated
   directories such as `__pycache__` are skipped, and a FIFO or socket counts only as
-  being there. A link out of the checkout, or to the checkout itself or a directory
-  holding the link (`loop -> .`), counts by its text: those files already count at
-  their own paths.
+  being there. A link to a single file is hashed with that file wherever it is in the
+  checkout, a generated directory included (`conftest.py -> .venv/c.py`). A link out of
+  the checkout, a link loop, or a link to the checkout itself or a directory holding
+  the link (`loop -> .`), counts by its text: those files already count at their own
+  paths.
+- **Under a linked directory, ignored files count.** Through `tests_link -> tests`,
+  every file under `tests/` counts, gitignored or not, so a `.DS_Store` appearing there
+  stales a pass, and a check writing to an ignored `tests/reports/` is refused. The
+  reason says when a changed path is such a link.
 - **A change put back is still a change.** Each file's change time is kept before and
   after the run (its modification time on Windows), inside nested repositories and
   submodules too, so a file that existed before the run and was edited and restored
@@ -94,7 +100,8 @@ the check itself, another `asq exec` run, or you while the check ran.
   case-insensitive file system, as macOS and Windows have by default, is not seen
   either; git does not see it.
 
-**So check output goes in a gitignored directory, or outside the checkout.** Commit a
+**So check output goes in a gitignored directory, or outside the checkout.** The
+directory must not be reachable through a symlinked directory (see below). Commit a
 `.gitignore` line such as `reports/` and point the check there:
 
 ```sh

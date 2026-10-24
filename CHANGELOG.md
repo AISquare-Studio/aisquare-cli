@@ -17,7 +17,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   output at the model's output/input price ratio) and the list price in USD from a
   dated price table; a model the table does not have is reported apart, never guessed.
   Recording can never fail a hook: a failure is one line in `log/metrics.log`. On this
-  Mac the Stop hook's recording takes 1.5-3.3 ms at p95.
+  Mac the Stop hook's recording takes about 1.3-3.3 ms at p95 (33.7 ms on a Windows CI
+  runner); a Stop reads only the bytes appended since the last.
 
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in

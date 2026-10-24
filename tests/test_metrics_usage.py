@@ -238,19 +238,71 @@ def test_cost_from_usage_is_within_two_percent_of_claude_codes_total_cost(
     assert session.cost_usd == pytest.approx(_CLAUDE_CODE_TOTAL_COST_USD, rel=0.02)
 
 
-def test_the_stop_hooks_recording_stays_under_ten_milliseconds_p95(tmp_path: Path) -> None:
-    """Measured on the hook's own path: read the appended bytes, write both rows."""
+def _big_transcript(path: Path) -> None:
+    """About 5 MB of history before the turns under test: tool results and the
+    api-request blobs Claude Code writes beside each reply."""
+    filler = "x" * 4_000
+    with path.open("w", encoding="utf-8") as handle:
+        for n in range(600):
+            handle.write(json.dumps(_assistant(f"old{n}", "Read")) + "\n")
+            handle.write(json.dumps({"type": "api-request-blob", "blob": filler}) + "\n")
+    assert path.stat().st_size > 2_000_000
+
+
+def test_a_stop_reads_only_the_bytes_appended_since_the_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression that matters on the hook's path, held on bytes, not time: after
+    the first record a Stop seeks to where the last one stopped and reads exactly what
+    the turn appended, never the session's history again."""
+    from aisquare.core import usage as usage_core
+
     transcript = tmp_path / f"{SESSION}.jsonl"
-    transcript.touch()
+    _big_transcript(transcript)
+    assert metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
+    reads: list[tuple[int, int]] = []
+    real_read_from = usage_core._read_from
+
+    def counting(path: Path, start: int) -> tuple[list[bytes], int]:
+        lines, consumed = real_read_from(path, start)
+        if path == transcript:
+            reads.append((start, consumed))
+        return lines, consumed
+
+    monkeypatch.setattr(usage_core, "_read_from", counting)
+    for n in range(3):
+        before = transcript.stat().st_size
+        _append(transcript, _assistant(f"new{n}", "Read"), _assistant(f"new{n}", "Read"))
+        appended = transcript.stat().st_size - before
+        turn = metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
+        assert turn is not None and turn.usage["models"]["claude-sonnet-5-5"]["requests"] == 1
+        assert reads[-1] == (before, appended), "read from the last offset, the turn alone"
+    with store_session() as store:
+        session = store.session_usage(SESSION)
+    assert session is not None
+    assert json.loads(session.state)["offsets"][str(transcript)] == transcript.stat().st_size
+
+
+def test_the_stop_hooks_recording_has_no_lock_wait_in_it(tmp_path: Path) -> None:
+    """A budget, not a stopwatch (tests/budgets.py): it catches the catastrophic.
+
+    Measured p95 per Stop (scan the appended bytes, write both rows, behind a 5 MB
+    history): about 1.3 ms on a Mac, 33.7 ms on the windows-latest runner (CI run
+    40039412881). A full rescan of that history is only ~27 ms, so time cannot tell
+    one from a slow runner; the byte test above holds that. What time can catch is a
+    write that waits on the store's lock, whose busy timeout is 5 s: 0.5 s is over an
+    order of magnitude above every measured figure and an order below that wait."""
+    transcript = tmp_path / f"{SESSION}.jsonl"
+    _big_transcript(transcript)
+    metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
     timings: list[float] = []
-    for n in range(40):
+    for n in range(20):
         _append(transcript, _assistant(f"m{n}", "Read"), _assistant(f"m{n}", "Read"))
         began = time.perf_counter()
         metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
         timings.append(time.perf_counter() - began)
     with store_session() as store:
-        turns = store.turn_usages(SESSION)
-    assert len(turns) == 40
+        assert len(store.turn_usages(SESSION)) == 21
     timings.sort()
     p95 = timings[int(len(timings) * 0.95) - 1]
-    assert p95 < budget(0.010), f"p95 {p95 * 1000:.1f} ms"
+    assert p95 < budget(0.5), f"p95 {p95 * 1000:.1f} ms"

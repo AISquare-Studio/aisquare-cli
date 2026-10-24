@@ -62,6 +62,8 @@ from aisquare.core import memory as memory_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
+    LAST_ARGS_ONLY_DENY,
+    REVIEWER_ARGS,
     FleetRoleSettings,
     FleetSettings,
     load_config,
@@ -101,7 +103,14 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import auto_mode, delivery, explainability_ops
+from aisquare.services import (
+    auto_mode,
+    autostop,
+    delivery,
+    explainability_ops,
+    install_route,
+    pane_idle,
+)
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import project as project_service
@@ -2362,8 +2371,17 @@ def _derive(
     observed: bool,
     now: datetime,
     held: bool = False,
+    idle_box: Callable[[], bool] | None = None,
+    quiet: timedelta = timedelta(seconds=30),
 ) -> tuple[FleetAgentState, str | None]:
     """State from the board first, tmux second (§5.1) — with two honest exceptions.
+
+    And one check (#123): a fresh board ``working`` is trusted while the pane has
+    printed within ``quiet`` (``[fleet] busy_quiet_seconds``). Past that, ``idle_box``
+    (``services.pane_idle.box_idle_now``, one capture) is asked whether Claude Code sits
+    idle at its prompt — a turn ended with Esc fires no Stop — and an idle box reads
+    ``waiting``, "idle (the board said working)". Only rows in that state are captured;
+    without ``idle_box`` the row is trusted as before.
 
     A dead or vanished pane is a hard fact no board row can contradict: a
     process that has exited cannot be waiting, however recently its hooks
@@ -2431,6 +2449,15 @@ def _derive(
             if answered:
                 return "working", None
             return "attention", None
+        elif fresh and board_state == "working":
+            quiet_pane = (
+                observed
+                and pane is not None
+                and (pane.last_output is None or now - pane.last_output > quiet)
+            )
+            if quiet_pane and idle_box is not None and idle_box():
+                return "waiting", IDLE_SAID_WORKING
+            return "working", None
         elif fresh and board_state is not None:
             return board_state, None
     if not observed or pane is None:
@@ -2443,6 +2470,9 @@ def _derive(
     busy = pane.last_output is not None and now - pane.last_output <= ACTIVITY_WINDOW
     return ("working" if busy else "waiting"), hooks
 
+
+IDLE_SAID_WORKING = "idle (the board said working)"
+"""``_derive``'s detail for a ``working`` row whose quiet pane shows an idle prompt (#123)."""
 
 _LIMIT_GRACE = timedelta(minutes=10)
 """How long past its named reset a ``limited`` row is still believed (the reset
@@ -2643,7 +2673,16 @@ def _status(
     held = _held_by_another(agent, observed)
     observed = _own_view(agent, observed)
     pane = _pane_in(agent, observed) if observed is not None else None
-    state, detail = _derive(agent, session, pane, observed=observed is not None, now=now, held=held)
+    state, detail = _derive(
+        agent,
+        session,
+        pane,
+        observed=observed is not None,
+        now=now,
+        held=held,
+        idle_box=lambda: pane_idle.box_idle_now(server_of(agent, config), agent.pane_id),
+        quiet=timedelta(seconds=config.busy_quiet_seconds),
+    )
     return FleetAgentStatus(
         agent=agent,
         state=state,
@@ -3017,6 +3056,7 @@ def spawn(
     admit: bool = True,
     kickoff: bool = True,
     ack_wait: float = 0.0,
+    board_context: str | None = None,
 ) -> SpawnReceipt:
     """Start an agent for ``project`` in the fleet's tmux server and record it.
 
@@ -3034,6 +3074,9 @@ def spawn(
     this call waits for that (the CLI gives ``[fleet] prompt_ack_seconds``), said on the
     receipt as ``prompt_acked``. A replacement (:func:`_respawn`) and a fork pass their own
     first line and no kickoff.
+
+    ``board_context`` (``--board-context``) is what of the board it reads: the flag, else
+    the replayed spec's, else ``[fleet.roles.<role>] board_context`` (P1 WS-2, #279).
 
     ``spec`` REPLAYS a recorded launch (#144): the binary, permission mode,
     worktree choice and arguments come from what the agent was started with,
@@ -3184,6 +3227,12 @@ def spawn(
     _refuse_an_env_file_it_cannot_read(role)
     role_config = role_settings(role, config)
     chosen_persona = _chosen_persona(project, role, persona, role_config, notes)
+    reads = _board_context(role, board_context, spec, role_config)
+    if reads != role_config.board_context and role == MANAGER_LABEL and board_context is None:
+        notes.append(
+            f"fleet.roles.manager.board_context = {role_config.board_context!r} is ignored: "
+            "a manager reads the whole board"
+        )
     # A server that exited at the socket path left its rows live, and the server this spawn
     # starts there would hold them for good: they read lost from now on, in every project,
     # decided while the stale file still says so. And a socket path a running server lost
@@ -3243,7 +3292,7 @@ def spawn(
     # switch: `_respawn(takes_over=True)`): its own seat and memory are freed as it
     # starts, and refused after the stop, the agent was lost (review of #323).
     if admit and not experimental.captain_role(role):
-        notes.extend(_admit(config))
+        notes.extend(_admit_or_make_room(config))
     # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
     # 5/8), and the refusals above need neither.
     board, hub = (
@@ -3320,6 +3369,12 @@ def spawn(
     # adding today's would double them (or add ones the agent never had).
     role_args = [] if spec is not None else list(role_config.extra_args)
     extra = list(agent_args)
+    # The role's model and effort down its ladder (#129 b), as `team spawn` launches them:
+    # the fleet path never asked, so every agent ran on the account's default model.
+    # Recorded in the spec's own fields, not its arguments (the role's and the caller's),
+    # so a restart or switch starts the model it recorded.
+    ladder = _ladder(role, resolution.binary, [*role_args, *extra], spec)
+    model_flags = [] if ladder is None else ["--model", ladder[0], "--effort", ladder[1]]
     if replayed_args:
         # Filtered on the way OUT as well as on the way in: a spec written before
         # session choices were left out of it still holds them, and a board
@@ -3408,7 +3463,7 @@ def spawn(
         # path, so the command tmux carries and the row records never holds the text.
         prompt_file = delivery.write_prompt_file(agent_id, first)
         flags += [delivery.FIRST_PROMPT_FLAG, str(prompt_file)]
-    command = selfcli.argv_for(["launch", role, *flags, *role_args, *extra])
+    command = selfcli.argv_for(["launch", role, *flags, *role_args, *model_flags, *extra])
     env = {orchestrator.FLEET_AGENT_ENV_VAR: agent_id}
     if experimental.captain_role(role):
         # The launcher activates a board BEFORE it hands the agent its `-e` pairs,
@@ -3444,6 +3499,9 @@ def spawn(
     # that started the server gave every persona-less seat on it, and every replay of
     # one, its skeptic briefing (review of #201, F3).
     env[orchestrator.PERSONA_ENV_VAR] = chosen_persona or ""
+    # What of the board it reads, as this spawn resolved it: per window, like the persona,
+    # since the server's environment is whoever started it (P1 WS-2, #279).
+    env[orchestrator.BOARD_CONTEXT_ENV_VAR] = reads
     # The deployment override too, for the same reason: the tab resolves the
     # key's deployment, and shows the target, with THIS process's variable,
     # and the window's `launch` has to trace where the tab says. Blank for
@@ -3608,6 +3666,9 @@ def spawn(
                 command=list(command),
                 recorded_by=__version__,
                 hub=hub,
+                model=ladder[0] if ladder is not None else None,
+                effort=ladder[1] if ladder is not None else None,
+                board_context=reads,
             ),
             socket_path=socket_path,
             boot_id=tmux_core.boot_id(),
@@ -3839,13 +3900,23 @@ def _replayed_args(role: str, spec: LaunchSpec, config: FleetSettings) -> list[s
     alone (review of #257). Where it leads the list, as it does before the caller's own
     arguments (round 19), and unless today's ``config`` leads with it too, which says it
     was chosen (round 20). A spec recorded since then (``recorded_by``) is replayed as it
-    is, so a ``--restricted`` chosen in today's config survives a restart.
+    is, so a ``--restricted`` chosen in today's config survives a restart; less, from
+    0.8.0 to 0.8.2, the reviewer's default deny it leads with, now the role's own.
     """
     args = list(spec.extra_args)
-    if spec.recorded_by is None and role == "reviewer":
+    if role != "reviewer":
+        return args
+    if spec.recorded_by is None:
         return replacing_the_former_reviewer_default_first(
             args, role_settings(role, config).extra_args
         )
+    if install_route.is_newer(spec.recorded_by, LAST_ARGS_ONLY_DENY) is False and args[
+        : len(REVIEWER_ARGS)
+    ] == list(REVIEWER_ARGS):
+        # 0.8.0 to 0.8.2 recorded the reviewer's default `extra_args`, its deny, first. It
+        # is the role's own now (`harness.tool_policy`): replayed as a typed deny, it was
+        # one `allow_tools` could never hand back (review of #311).
+        args = args[len(REVIEWER_ARGS) :]
     return args
 
 
@@ -4564,6 +4635,27 @@ def _admit(config: FleetSettings) -> list[str]:
     if config.max_agents_total > 0 and live_total + 1 >= config.max_agents_total:
         _log_admission("admitted-at-budget", record)
     return notes
+
+
+def _admit_or_make_room(config: FleetSettings) -> list[str]:
+    """:func:`_admit`; refused, and with ``[fleet] auto_stop_finished`` on, stop the workers
+    that have finished on every project and ask once more (P2-W1b, #283). A seat a finished
+    tester still held was a refusal the manager then had to stop it for. Whatever was stopped
+    is said in the notes; refused again, the second refusal is the answer."""
+    try:
+        return _admit(config)
+    except CapacityRefused:
+        if not config.auto_stop_finished:
+            raise
+        stopped = [
+            item.verdict
+            for item in autostop.reap_finished(autostop.every_project())
+            if item.stopped
+        ]
+        if not stopped:
+            raise
+    made = ", ".join(f"{v.agent.label} ({v.reason})" for v in stopped)
+    return [f"stopped finished workers to make room: {made}", *_admit(config)]
 
 
 def _said(head: memory_core.Headroom) -> str:
@@ -5301,9 +5393,9 @@ def _end_dead_rows(
                 # A listing has no report to carry a refused release; the claims then
                 # stay with the ended session until their lease lapses, as
                 # `_release_or_say` tells the callers that have one.
-                _release_or_say(store, row, why="agent exited")
-                _emit_exit(store, row)
-                mine.append(row)
+                released, _ = _release_or_say(store, row, why="agent exited")
+                if _emit_exit(store, row, released=len(released)):
+                    mine.append(row)  # only an exit that wakes is nudged (P1 WS-2, #279)
             else:  # another reader ended it first, and announced it
                 row = store.get_fleet_agent(agent.id)
             if row is not None:
@@ -5699,6 +5791,65 @@ def _note_board(store: ContextStore, project: ProjectInfo, label: str) -> str | 
     return None if agent is None else _board_of_row(agent)
 
 
+#: The agent flags that choose a model or an effort; one already in a spawn's arguments
+#: (the binding's, the role's ``extra_args``, the caller's) is the caller's choice.
+_MODEL_FLAGS = ("--model", "--effort")
+
+
+def _ladder(
+    role: str, binary: str, args: Sequence[str], spec: LaunchSpec | None
+) -> tuple[str, str] | None:
+    """``(model, effort)`` a spawn passes (#129 b), when the binary is the default agent
+    and no ``--model`` or ``--effort`` is in the binding's arguments, the role's
+    ``extra_args`` or the caller's: what ``spec`` recorded on a replay, else ``role``'s
+    ladder resolved with the cached probe only (``probe=False``: never the 150 s probe at
+    spawn). ``None`` otherwise, and for an untiered role.
+    """
+    if not harness.is_default_agent(binary):
+        return None
+    bound = harness.resolve_profile(role).args
+    if any(arg in _MODEL_FLAGS or arg.startswith(tuple(f"{f}=" for f in _MODEL_FLAGS))
+           for arg in [*bound, *args]):  # fmt: skip
+        return None
+    if spec is not None and spec.model is not None and spec.effort is not None:
+        return spec.model, spec.effort
+    resolved = harness.resolve_model(role, probe=False)
+    return None if resolved is None else (resolved.model, resolved.effort)
+
+
+def _board_context(
+    role: str, flag: str | None, spec: LaunchSpec | None, role_config: FleetRoleSettings
+) -> str:
+    """What of the board a spawn's agent reads: ``flag``, else what ``spec`` recorded (a
+    restart or switch keeps it), else the role's ``board_context``. A manager reads ``all``:
+    the board is its job, and a narrower one is refused (P1 WS-2, #279)."""
+    chosen = flag or (spec.board_context if spec is not None else None) or role_config.board_context
+    if chosen not in orchestrator.BOARD_CONTEXTS:
+        raise FleetError(
+            f"--board-context must be one of {', '.join(orchestrator.BOARD_CONTEXTS)}, "
+            f"not {chosen!r}"
+        )
+    if role == MANAGER_LABEL and chosen != "all":
+        if flag is not None:
+            raise FleetError("a manager reads the whole board: --board-context all, or none given")
+        return "all"  # a config value; `config` warns, and doctor says so
+    return chosen
+
+
+def acting_as(session_ref: str | None = None) -> str:
+    """Who a fleet command is acting for, as an event's ``actor`` (P1 WS-2, #279): the
+    session ``--as`` names (an id or a prefix of one), else the session of the caller's own
+    fleet row (``AISQUARE_FLEET_AGENT``: a manager's window), else ``user`` (asq, or a
+    shell with no session). An unknown ``--as`` is kept as given: the stop goes ahead."""
+    with store_session() as store:
+        if session_ref:
+            found = store.get_session(session_ref)
+            return found.id if found is not None else session_ref
+        own = orchestrator.env_fleet_agent()
+        row = store.get_fleet_agent(own) if own else None
+        return row.session_id if row is not None and row.session_id else "user"
+
+
 def stop(
     project: ProjectInfo,
     label: str,
@@ -5709,11 +5860,16 @@ def stop(
     agent_id: str | None = None,
     nudge: bool = True,
     live_only: bool = False,
+    actor: str | None = None,
+    reason: str | None = None,
 ) -> StopReceipt:
     """``/exit`` the agent named ``label``, wait ``grace`` seconds, then kill its window.
 
     Resolves the LIVE row by label and hands it to :func:`_stop_row`; the
-    documentation of what a stop is — and of ``handover`` — lives there.
+    documentation of what a stop is — and of ``handover`` — lives there. ``actor`` is who
+    asked (``fleet stop --as``; ``user`` for asq or a shell with no session). ``reason`` is
+    why, said on the ``agent_exited`` beside the actor and kept in its ``meta``: unlike a
+    ``why``, it wakes nobody (``auto-stop``'s, P2-W1b).
 
     With no live row, an ENDED agent's window may still be on the server
     (``remain-on-exit``), which is what the UI's 💤 row and its Stop button
@@ -5749,7 +5905,16 @@ def stop(
             if ended is None or not _kill_lingering_window(store, project, ended):
                 raise  # no such row, or no window of its own left (gone, or a reused id)
             return StopReceipt(ended, [])
-    return _stop_row(project, agent, force=force, grace=grace, handover=handover, nudge=nudge)
+    return _stop_row(
+        project,
+        agent,
+        force=force,
+        grace=grace,
+        handover=handover,
+        nudge=nudge,
+        actor=actor,
+        reason=reason,
+    )
 
 
 def _stop_row(
@@ -5760,8 +5925,13 @@ def _stop_row(
     grace: float = 5.0,
     handover: bool = False,
     nudge: bool = True,
+    actor: str | None = None,
+    reason: str | None = None,
 ) -> StopReceipt:
     """``/exit`` the agent in ``agent``'s pane, wait ``grace`` seconds, then kill its window.
+
+    ``actor`` is who asked (:func:`stop`'s): it rides on the ``agent_exited``, and the
+    manager is nudged only for an exit that wakes it, never for its own stop.
 
     Takes the ROW, so a caller that already holds one — ``shutdown`` over its
     snapshot — stops that row and no other: resolving by label again let a
@@ -5985,14 +6155,26 @@ def _stop_row(
         # nothing: the replacement inherits, and ``switch`` says ``switched``.
         released: list[TeamTask] = []
         release_failed: str | None = None
+        wakes = False
         if not handover:
             released, release_failed = _release_or_say(store, ended, why="agent stopped")
-            _emit_exit(store, ended)
+            wakes = _emit_exit(
+                store, ended, actor=actor, force=force, released=len(released), reason=reason
+            ) and not _managers_own(store, ended, actor)
     # Outside the store session, as ``reap`` does: the nudge types into a pane
     # and must not hold the write lock the woken manager's own hooks will want.
-    if not handover and nudge:
+    if not handover and nudge and wakes:
         nudge_manager(ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended))
     return StopReceipt(ended, released, release_failed, withheld=handover)
+
+
+def _managers_own(store: ContextStore, ended: FleetAgent, actor: str | None) -> bool:
+    """Whether ``actor`` is the session of the manager an exit of ``ended`` would nudge:
+    its own ``fleet stop`` is no news to it (``team.wake_class``'s ``own``)."""
+    if actor is None:
+        return False
+    manager = store.fleet_agent_by_label(ended.project_id, MANAGER_LABEL)
+    return manager is not None and manager.session_id == actor
 
 
 def _refuse_unless_gone(project: ProjectInfo, agent: FleetAgent, srv: TmuxServer) -> None:
@@ -6750,6 +6932,7 @@ def _shutdown_row(
     held: Mapping[str, tuple[SocketAnswer, str, str]] | None = None,
     forget: bool = False,
     config: FleetSettings | None = None,
+    actor: str | None = None,
 ) -> None:
     """Stop one row, leave it live or record it lost, as :func:`_shutdown_verdict` says, the
     verdict the plan showed: never ending one whose socket answers, as a server listens
@@ -6785,7 +6968,7 @@ def _shutdown_row(
         # later spawn reused. Whether it ended meanwhile is judged inside the
         # store session that ends it (`_stop_row` raises `NoSuchAgent` there),
         # not in a connection of its own a window ahead of it (round 5).
-        receipt = _stop_row(project, agent, force=force, grace=grace)
+        receipt = _stop_row(project, agent, force=force, grace=grace, actor=actor)
     except NoSuchAgent as exc:
         _row_that_went_away(agent, str(exc), report)
     except FleetError as exc:
@@ -7254,8 +7437,10 @@ def shutdown(
     force: bool = False,
     grace: float = 5.0,
     forget: bool = False,
+    actor: str | None = None,
 ) -> ShutdownReport:
-    """Stop this project's live agents (every project's with ``project=None``).
+    """Stop this project's live agents (every project's with ``project=None``). ``actor`` is
+    who asked, on each ``agent_exited`` (:func:`stop`'s).
 
     The one place a row may be ended without tmux confirming its pane died. Every
     other path — ``stop``, ``reap`` — refuses that: a server that cannot be reached
@@ -7357,6 +7542,7 @@ def shutdown(
                         held=held,
                         forget=forget,
                         config=config,
+                        actor=actor,
                     )
         except Exception:
             # The kill phase runs even if a row could not be recorded: "shutdown
@@ -8239,10 +8425,11 @@ def restart(
     except Exception:
         if handed_over is not None and handed_over.withheld:
             _abandon_handover(handed_over.agent)  # no replacement is coming for the parked claims
-        elif held_back:
+        elif held_back and bool(_team().exit_wakes({"status": agent.exit_status, "released": 0})):
             # The exit went out with its wake-up held back for a replacement that has
             # now failed to start: left unwoken, a waiting manager never hears of the
-            # agent it lost, as the hand-over's `_abandon_handover` wakes it for its own.
+            # agent it lost, as the hand-over's `_abandon_handover` wakes it for its own —
+            # for an exit that wakes (P1 WS-2, #279): a clean one is the restart's caller's.
             nudge_manager(project.id, reason=f"{label} exited", board=_board_of_row(agent))
         raise
     notes.extend(more)
@@ -9114,7 +9301,7 @@ def _bulk_one(action: BulkAction, row: BulkRow, *, spawned_by: str) -> BulkRecei
         result: StopReceipt | RestartReceipt
         if action == "stop":
             still_running()
-            result = stop(project, agent.label, agent_id=agent.id, live_only=True)
+            result = stop(project, agent.label, agent_id=agent.id, live_only=True, actor=spawned_by)
         else:
             result = restart(
                 project,
@@ -9200,6 +9387,7 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
     """
     config = settings()
     report = ReapReport()
+    waking: list[FleetAgent] = []
     absent: dict[_Address, bool] = {}
     reads = tmux_core.SocketReads()  # one per server for the sweep, not per row
     now = _now()
@@ -9280,9 +9468,10 @@ def reap(project: ProjectInfo | None = None, *, server_down: bool = False) -> Re
                             released, failed = _release_or_say(store, ended, why="agent exited")
                             _count_release(report, ended, released, failed)
                             report.ended.append(ended)
-                            _emit_exit(store, ended)
+                            if _emit_exit(store, ended, released=len(released)):
+                                waking.append(ended)
             _remove_finished_worktrees(store, current, report)
-    for ended in report.ended:
+    for ended in waking:  # only an exit that wakes is nudged (P1 WS-2, #279)
         nudge_manager(ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended))
     return report
 
@@ -9343,10 +9532,60 @@ def _hold_on_another_server(
         report.held.append(ShutdownRow(agent, f"{why} — left live: {way[0].lower() + way[1:]}"))
 
 
-def _emit_exit(store: ContextStore, agent: FleetAgent, *, why: str | None = None) -> None:
-    """The ``agent_exited`` board event the manager's Stop hook wakes on (§7.3), with
-    ``why`` after the status when the status does not say it all."""
+#: The actors that are no session (``TeamEvent.actor``): the human, a usage-limit hand-over,
+#: and P2's auto-stop.
+_NAMED_ACTORS = frozenset({"user", "usage-limit", "auto-stop"})
+
+
+def _actor_name(store: ContextStore, actor: str) -> str:
+    """How an exit's text names its ``actor``: a session by its label or role, else by the
+    label of the fleet row it runs in (a session not on the board yet), else as given."""
+    if actor in _NAMED_ACTORS:
+        return actor
+    session = store.get_session(actor)
+    if session is not None and (session.label or session.role):
+        return session.label or session.role
+    row = store.fleet_agent_for_session(actor)
+    return row.label if row is not None else actor
+
+
+def _emit_exit(
+    store: ContextStore,
+    agent: FleetAgent,
+    *,
+    why: str | None = None,
+    actor: str | None = None,
+    force: bool = False,
+    released: int = 0,
+    reason: str | None = None,
+) -> bool:
+    """The ``agent_exited`` board event (§7.3), with ``why`` after the status when the
+    status does not say it all; whether it wakes the manager (``team.exit_wakes``).
+    ``reason`` is why its stopper stopped it (``auto-stop``'s finished verdict, P2-W1b):
+    said after the actor and kept as ``meta.reason``, it is not a ``why`` and wakes nobody.
+
+    P1 WS-2 (#279): ``actor`` is who stopped it (a session id, ``user``, ``usage-limit``;
+    ``None`` for its own exit or a death found), named in the text — ``coder-auth exited
+    (0) — stopped by manager`` — and with ``force``, ``released`` (the claims its end let
+    go) and ``why`` in ``meta``. A clean exit that left nothing open is news, not a wake.
+    """
     status = "?" if agent.exit_status is None else str(agent.exit_status)
+    meta: dict[str, object] = {
+        "status": agent.exit_status,
+        "force": force,
+        "released": released,
+        "why": why,
+    }
+    if reason is not None:
+        meta["reason"] = reason
+    by = f" — stopped by {_actor_name(store, actor)}" if actor is not None else ""
+    by += f" ({reason})" if reason else ""
+    text = (
+        f"{agent.label} exited ({status})"
+        + (f": {why}" if why else "")
+        + by
+        + (" (--force)" if force else "")
+    )
     # The row is already ended; the event is the courtesy, not the record. On the board the
     # row recorded (`_board_of_row`), which its manager reads: under a hub not the row's
     # project's, and never the board of whichever process ends the row, a session or none
@@ -9356,9 +9595,12 @@ def _emit_exit(store: ContextStore, agent: FleetAgent, *, why: str | None = None
             store,
             _board_of_row(agent),
             "agent_exited",
-            f"{agent.label} exited ({status})" + (f": {why}" if why else ""),
+            text,
             session_id=agent.session_id,
+            actor=actor,
+            meta=meta,
         )
+    return bool(_team().exit_wakes(meta))
 
 
 def rename(project: ProjectInfo, codename: str, *, notes: list[str] | None = None) -> ProjectInfo:

@@ -6,19 +6,23 @@ turn and ignores a new one. So a restart of a Codex row whose persona changed si
 launch (``persona attach``) passes the new persona to a seam that drops it: it reaches the
 agent through the session-start briefing alone, and the receipt says so
 (``services.personas.resume_seam_note``). One whose persona is the one its launch passed
-says nothing.
+says nothing. The seam is the THREAD's: its first launch's persona rides with the session
+across each resume (``SessionFacts.seam_persona``), so every later resume says it again
+(SMOKE8: the second restart said nothing, its record naming the attached persona), and a
+fresh thread's seam is the persona its own launch passed.
 
 On the fleet's fake tmux, with Codex's hooks as 0.162.1 sends them.
 """
 
 from __future__ import annotations
 
+from aisquare.core import launch_seal
 from aisquare.models import TeamTask
 from aisquare.services import fleet as fleet_service
 from tests import test_codex_account_switch as switch_suite
 from tests import test_codex_fleet_parity as codex_suite
 from tests import test_fleet_service as fleet_suite
-from tests.test_codex_fleet_parity import THREAD_ONE, Codex, _rollout
+from tests.test_codex_fleet_parity import THREAD_ONE, THREAD_TWO, Codex, _rollout
 
 # The suites' fixtures, bound here so pytest finds them for this module's tests.
 tmux = fleet_suite.tmux
@@ -49,10 +53,28 @@ def test_a_codex_restart_after_a_persona_attach_says_the_briefing_carries_it(
         "reaches it through the session-start briefing"
     ], receipt.notes
 
+    # The resumed thread's own start hook, which merges into the replacement's record.
+    codex.agent = receipt.started
+    codex.become()
+    codex.start(THREAD_ONE, source="resume")
+    record = launch_seal.read(codex.agent.id)
     again = fleet_service.restart(codex.project, codex.agent.label)
 
     assert again.resumed is True
-    assert not [note for note in again.notes if SEAM in note], "its launch passed skeptic"
+    assert [note for note in again.notes if SEAM in note] == said, "the seam still holds none"
+    assert not isinstance(record, str) and record.session is not None
+    kept = record.session.model_dump()
+    assert (kept["native_id"], kept.get("seam_persona")) == (THREAD_ONE, ""), "merged, kept"
+
+    fresh = fleet_service.restart(codex.project, codex.agent.label, fresh=True)
+    codex.agent = fresh.started
+    codex.become()
+    _rollout(codex, THREAD_TWO)
+    codex.start(THREAD_TWO)
+    after = fleet_service.restart(codex.project, codex.agent.label)
+
+    assert after.resumed is True
+    assert not [note for note in after.notes if SEAM in note], "its launch passed skeptic"
 
 
 def test_a_codex_restart_with_the_persona_its_launch_passed_says_nothing_of_its_seam(

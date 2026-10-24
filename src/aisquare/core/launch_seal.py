@@ -156,6 +156,12 @@ class SessionFacts(BaseModel):
     carried from a predecessor's record, and never read from the board's session row,
     whose ``last_seen_at`` an ``end_session`` stamps with its own time (review r7 of #113,
     finding 5)."""
+    seam_persona: str | None = None
+    """The persona the launch that BEGAN this session passed (``""``: none), carried into
+    the record of each launch that resumes it (``services.fleet._respawn``): an agent whose
+    resume keeps the system prompt its thread began with (Codex's) holds that one in its
+    system seam, whatever a later launch's ``--persona``. ``None`` while the record's own
+    launch began it, whose ``--persona`` it is."""
 
 
 class WindowPlace(BaseModel):
@@ -737,6 +743,7 @@ def _with_session(record: LaunchRecord, facts: SessionFacts) -> LaunchRecord:
             # The first hook of this launch's session says when it started; a later one
             # does not move it.
             started_at=kept.started_at or facts.started_at,
+            seam_persona=kept.seam_persona,
         )
     return record.model_copy(update={"session": facts})
 

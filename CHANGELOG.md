@@ -930,6 +930,9 @@ adapter.**
 - The target picker names the account a bind made with `team bind --account`
   launches on. It read only the bind's environment and said *this shell's
   account*.
+- A Codex restart's receipt says the thread's system prompt keeps its first
+  persona at every resume while the row's persona differs from it. Only the first
+  restart after a `persona attach` said it.
 
 ## [0.8.2] - 2026-10-19
 

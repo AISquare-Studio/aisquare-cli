@@ -9744,9 +9744,11 @@ def _respawn(
     replay = role is None or role == record.role
     spec = record.spec if replay else None
     chosen = _persona_for_replay(project, agent, notes, role=role) if persona is None else persona
-    if resume is not None and (chosen or None) != _launched_persona(record):
+    began_as = _seam_persona(record)
+    if resume is not None and (chosen or None) != began_as:
         # A thread that keeps its first system prompt across a resume (Codex's) is not given
-        # the persona this launch passes, which reaches it through the briefing alone.
+        # the persona this launch passes, which reaches it through the briefing alone: said
+        # at every resume while the seam holds another, not only the first after a change.
         seam = personas_service.resume_seam_note(record.agent, chosen or None)
         if seam is not None:
             notes.append(seam)
@@ -9790,7 +9792,11 @@ def _respawn(
         own_worktree=Path(record.cwd) if record.worktree else None,
         own_branch=agent.branch,
         board_and_hub=board_and_hub,
-        session=record.session if resume is not None else None,
+        session=(
+            record.session.model_copy(update={"seam_persona": began_as or ""})
+            if resume is not None and record.session is not None
+            else None
+        ),
     )
     # Said once the replacement is up, for what it really took from the record: a
     # recorded binary that has left the PATH was replaced by today's resolution, which
@@ -9814,6 +9820,14 @@ def _launched_persona(record: launch_seal.LaunchRecord) -> str | None:
     """The persona ``record``'s launch passed (``launch --persona`` in its window's argv,
     ``LaunchSpec.command``), or ``None`` for none."""
     return next(reversed(option_values(record.spec.command, "--persona")), None) or None
+
+
+def _seam_persona(record: launch_seal.LaunchRecord) -> str | None:
+    """The persona the launch that began ``record``'s session passed: carried with the
+    session across each resume (``SessionFacts.seam_persona``), else ``record``'s own
+    launch's (:func:`_launched_persona`); ``None`` for none."""
+    carried = record.session.seam_persona if record.session is not None else None
+    return (carried or None) if carried is not None else _launched_persona(record)
 
 
 def _same_home(record: launch_seal.LaunchRecord, target: ClaudeAccount) -> bool:

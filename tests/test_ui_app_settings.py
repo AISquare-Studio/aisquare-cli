@@ -111,6 +111,7 @@ def test_settings_saves_a_changed_permission_mode_to_config_toml() -> None:
         "deny_tools": [],
         "allow_tools": [],
         "skill_listing": "full",
+        "board_context": "all",
     }
     assert fleet_on_disk["worktree_dir"] == ".fleet-trees"  # the worktree root (§4.2)
     assert "escape_key" not in fleet_on_disk  # an untouched fleet field keeps its default

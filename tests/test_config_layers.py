@@ -155,6 +155,7 @@ def test_an_entry_the_user_added_to_a_mapping_is_written_with_only_what_it_sets(
         "deny_tools": [],
         "allow_tools": [],
         "skill_listing": "names",
+        "board_context": "all",
     }
     assert written["fleet"] == {"roles": {**_ROLES, "designer": designer}}
     loaded = load_config(target)
@@ -210,7 +211,8 @@ def test_the_user_file_wins_and_whatever_it_leaves_out_is_the_default(tmp_path: 
     assert loaded.fleet.roles["coder"] == FleetRoleSettings(
         permission_mode="acceptEdits", worktree=True
     )
-    assert loaded.fleet.roles["reviewer"] == FleetRoleSettings(worktree=True)
+    # The reviewer's own defaults: no extra_args (WS-1, #280), and it reads no board (WS-2).
+    assert loaded.fleet.roles["reviewer"] == FleetRoleSettings(worktree=True, board_context="none")
     assert set(loaded.fleet.roles) == set(AppConfig().fleet.roles)
 
 
@@ -254,7 +256,8 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
         },
         "experimental": {"captain": False},
         # The role tool policy (#280): the reviewer's deny is its own, not its extra_args.
-        # The first message's two (P0-W1a, #122).
+        # The first message's two (P0-W1a, #122), and what of the board each role reads
+        # (P1 WS-2, #279): the reviewer judges cold.
         "fleet": {
             "deny_tools": list(FLEET_DENY_TOOLS),
             "first_prompt": "argv",
@@ -264,6 +267,7 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
                     "deny_tools": [],
                     "allow_tools": [],
                     "skill_listing": "full" if role == "manager" else "names",
+                    "board_context": "none" if role == "reviewer" else "all",
                     **({"extra_args": []} if role == "reviewer" else {}),
                 }
                 for role in _V1_DEFAULTS["fleet"]["roles"]

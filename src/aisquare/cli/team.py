@@ -1141,6 +1141,63 @@ def verify(
         )
 
 
+@app.command("show")
+def show(
+    receipt: Annotated[
+        str, typer.Argument(help="An event's seq number (as a board line shows it), or its id.")
+    ],
+    as_session: SessionRef = None,
+) -> None:
+    """Print one board event in full: what a one-line update points at.
+
+    Agents read each board event as one short line ending in ``aisquare team show <seq>``
+    when there is more; this prints the rest: who wrote it, who caused it, the task, the
+    addressee, its details and the whole text.
+    """
+    try:
+        shown = team_service.show_event(receipt, session_ref=as_session)
+    except STORE_ERRORS as exc:
+        _fail_team(exc, receipt)
+    event = shown.event
+    if event is None:
+        aside = f" — it exists on board {shown.elsewhere}" if shown.elsewhere else ""
+        fail(
+            f"no event matches '{receipt}' on board {shown.board_name}{aside}",
+            error="not_found",
+            ref=receipt,
+            hint=shown.elsewhere,
+        )
+    if get_state().json_output:
+        typer.echo(json.dumps(event.as_envelope().model_dump(mode="json")))
+        return
+    author = shown.author
+    who = (
+        f"{author.label or '-'} ({author.role}) · session {team_service.short_id(author.id)}"
+        if author is not None
+        else (f"session {team_service.short_id(event.session_id)}" if event.session_id else "cli")
+    )
+    task = shown.task
+    lines = [
+        f"seq {event.seq} · {local_time(event.created_at):%Y-%m-%d %H:%M:%S}"
+        f" · board {shown.board_id}",
+        f"kind:   {event.kind}",
+        f"from:   {who}",
+    ]
+    if event.actor:
+        lines.append(f"actor:  {event.actor}")
+    if event.to_role:
+        lines.append(f"to:     {event.to_role}")
+    if task is not None:
+        number = f"#{task.number} " if task.number is not None else ""
+        lines.append(f"task:   {number}{task.id} {task.title}")
+    elif event.task_id:
+        lines.append(f"task:   {event.task_id}")
+    if event.meta:
+        lines.append("meta:   " + json.dumps(event.meta, sort_keys=True, ensure_ascii=False))
+    lines += ["", event.text]
+    stdout_console().print("\n".join(lines), markup=False, highlight=False)
+
+
 def _signal_json(state: team_service.SignalState) -> dict[str, object]:
     return {
         "name": state.name,

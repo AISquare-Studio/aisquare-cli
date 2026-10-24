@@ -202,6 +202,17 @@ manager is woken (a fixed one-line nudge typed into its pane, only while it is
 new board events pending, its `Stop` hook lets it continue. No daemon, no poll
 loop, and it works with the UI closed (Phase 5).
 
+**What wakes the manager.** A review, a done, a blocked or reopened task, a result,
+a question, an agent on its usage limit, anything addressed `--to manager`, and an
+agent that exited badly: a non-zero status, a kill or a loss (no status), an exit
+that released a claim it still held, or a hand-over whose replacement did not start.
+Everything else — a clean exit, a switch, a restart, a claim, a note, a decision — is
+news: it waits past the manager's cursor and rides along with the next wake or
+prompt, so it costs no turn of its own. What the manager did itself never wakes it:
+its own `fleet stop` names it as the actor (`coder-auth exited (0) — stopped by
+manager`). Each event reaches an agent as one line, `#<seq> <who> <kind>[ #<task>]:
+<first line>`, with `… → aisquare team show <seq>` when there is more.
+
 Standalone use is unchanged: `aisquare launch planner` and `aisquare launch
 runner` keep working outside any fleet.
 
@@ -223,6 +234,7 @@ aisquare fleet spawn coder --label coder-auth --task tsk_01k9q8p3
 aisquare fleet spawn tester --no-worktree
 aisquare fleet spawn reviewer --permission-mode acceptEdits
 aisquare fleet spawn coder --persona skeptic
+aisquare fleet spawn reviewer --board-context all   # what of the board it reads
 aisquare fleet spawn coder --bin claude2 --prompt "start from the failing test" -- --model opus
 ```
 
@@ -245,6 +257,7 @@ follows as a `⚠` line.
 | `--bin B` | the agent executable | the role's binding, else `claude` |
 | `--prompt TEXT` | the agent's first message: on Claude Code's command line, typed for any other binary ([the first message](#the-first-message)); after the kickoff with `--task` | none |
 | `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
+| `--board-context all\|relevant\|none` | what of the board it reads: `relevant` keeps its own tasks, what is addressed to its role or label, and decisions; `none` gives no recent updates at start and no per-prompt deltas, its task, protocol and cycle unchanged. Set on its window as `AISQUARE_BOARD_CONTEXT` and recorded, so `restart` and `switch` keep it. A manager reads `all`, and a narrower one is refused | the role's `[fleet.roles.<role>].board_context`: `none` for the reviewer, `all` for the rest |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
 
@@ -396,7 +409,14 @@ receipt reads `typed` or `noted`.
 ```sh
 aisquare fleet stop coder-auth
 aisquare fleet stop coder-auth --force
+aisquare fleet stop coder-auth --as <session>   # who is stopping it
 ```
+
+The board's `agent_exited` names who stopped the agent — `--as`, else the session of
+the fleet window you run it in (a manager's), else `user` — with the status, `--force`
+and the claims it released in its details (`aisquare team show <seq>`). A manager's own
+stop wakes no one; a clean stop by anyone is news for the manager's next wake, and a
+kill or a failed exit wakes it.
 
 Sends `/exit`, waits a grace period, then kills the window. The agent's own
 `SessionEnd` hook releases its task claims on the way out; whatever the ended
@@ -1180,6 +1200,7 @@ extra_args = []
 permission_mode = "auto"
 worktree = true
 extra_args = []                           # its Edit/Write/NotebookEdit deny is the role's own, not this
+board_context = "none"                    # judges a change cold: no recent updates, no deltas
 
 [fleet.roles.ui-tester]
 permission_mode = "auto"

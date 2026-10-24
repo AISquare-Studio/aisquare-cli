@@ -317,6 +317,11 @@ class FleetRoleSettings(BaseModel):
     skill_listing: Literal["full", "names", "off"] = "names"
     """How much of Claude Code's skill listing rides every request: ``full``, ``names``
     (descriptions cut to nothing, every name kept) or ``off`` (the ``Skill`` tool denied)."""
+    board_context: Literal["all", "relevant", "none"] = "all"
+    """What of the board an agent of this role reads (P1 WS-2, #279): ``all``; ``relevant``
+    (its own tasks, what is addressed to it, decisions); ``none`` (no recent updates at
+    start and no per-prompt deltas — the reviewer's default, so it judges a change cold).
+    ``fleet spawn --board-context`` overrides it per spawn. A manager reads ``all``."""
 
 
 #: Tools no fleet role's cycle and no aisquare command uses, each schema paid on every
@@ -363,7 +368,7 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
         "manager": FleetRoleSettings(skill_listing="full"),
         "coder": FleetRoleSettings(worktree=True),
         "tester": FleetRoleSettings(),
-        "reviewer": FleetRoleSettings(worktree=True),
+        "reviewer": FleetRoleSettings(worktree=True, board_context="none"),
         "validator": FleetRoleSettings(),
         "ui-tester": FleetRoleSettings(),
     }

@@ -244,12 +244,14 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "import": {"engine": "auto", "api_model": "claude-opus-5"},
         },
         "experimental": {"captain": False},
-        # The fleet's admission (#283).
+        # The fleet's admission (#283), and whether a pane's program may set the clipboard
+        # (P2-W3, #101).
         "fleet": {
             "max_agents_total": 0,
             "min_free_mb": 2048,
             "test_gate_mb": 0,
             "test_gate_wait_minutes": 15,
+            "pane_clipboard": "off",
         },
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()

@@ -141,6 +141,10 @@ def test_a_live_runs_folder_is_never_touched(base: Path) -> None:
     assert _answers(socket), "a run still going lost its server"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX only: the sweep sweeps nothing on Windows, which has no /tmp",
+)
 def test_a_folder_not_named_for_a_process_is_never_touched(base: Path) -> None:
     other = base / "asq-someone-elses"
     other.mkdir()

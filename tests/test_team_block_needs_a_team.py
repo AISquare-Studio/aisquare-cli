@@ -226,3 +226,121 @@ def test_a_solo_onboarded_repo_sends_far_fewer_characters_per_request(
     assert "graphify" in before and "graphify" not in after
     assert "prefer tabs" in after
     assert len(after) < len(before) / 4
+
+
+# --- #46: the owner's decision on a hand-run plain agent, and #45's m1 and n1 ----------
+
+
+def _agent_row(project_id: str) -> None:
+    """A live fleet agent on the board, as a spawn records one."""
+    from datetime import UTC, datetime
+
+    from aisquare.models import FleetAgent
+
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_teammate",
+                project_id=project_id,
+                label="coder-1",
+                role="coder",
+                pane_id="%9",
+                cwd=Path.cwd(),
+                created_at=datetime.now(tz=UTC),
+            )
+        )
+
+
+def test_a_hand_run_plain_agent_alone_on_the_board_is_solo(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's decision (2026-10-24): ``aisquare launch agent`` run by hand, alone on its
+    board, is solo like a session with no role: no team block, the SOLO MCP line, and the
+    board on its next prompt once a team forms."""
+    monkeypatch.setenv("AISQUARE_ROLE", "agent")
+    _team_on(runner)
+    assert mcp_server.server_instructions() == mcp_server.SOLO_INSTRUCTIONS
+    assert "<aisquare-team>" not in _start(runner, SOLO, work_dir)
+    with store_session() as store:
+        assert store.get_meta(team_service._unbriefed(SOLO)) is not None
+    assert _prompt(runner, SOLO, work_dir) == ""
+
+    monkeypatch.delenv("AISQUARE_ROLE")
+    _start(runner, OTHER, work_dir)  # a teammate comes
+    assert "<aisquare-team>" in _prompt(runner, SOLO, work_dir)
+
+
+@pytest.mark.parametrize("team", ["a teammate", "an open task", "a live fleet agent"])
+def test_a_hand_run_plain_agent_with_a_team_gets_the_board(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch, team: str
+) -> None:
+    _team_on(runner)
+    if team == "a teammate":
+        _start(runner, OTHER, work_dir)
+    elif team == "an open task":
+        assert runner.invoke(app, ["task", "add", "wire auth"]).exit_code == 0
+    else:
+        _agent_row(current_project().id)
+    monkeypatch.setenv("AISQUARE_ROLE", "agent")
+    assert mcp_server.server_instructions() == mcp_server.TEAM_INSTRUCTIONS
+    assert "<aisquare-team>" in _start(runner, SOLO, work_dir)
+
+
+def test_a_plain_agent_with_a_persona_is_a_member_in_both_places(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a persona it stays a member. And a persona alone is one to the MCP server too:
+    it counted a role or a fleet row only, and gave the hooks' member the SOLO line (#45,
+    n1)."""
+    _team_on(runner)
+    monkeypatch.setenv("AISQUARE_PERSONA", "skeptic")
+    assert mcp_server.server_instructions() == mcp_server.TEAM_INSTRUCTIONS
+    monkeypatch.setenv("AISQUARE_ROLE", "agent")
+    assert mcp_server.server_instructions() == mcp_server.TEAM_INSTRUCTIONS
+    assert "<aisquare-team>" in _start(runner, SOLO, work_dir)
+
+
+def test_the_mcp_servers_own_row_is_no_teammate(runner: CliRunner, work_dir: Path) -> None:
+    """#45, m1, the reviewer's repro: a solo session calls ``team_board()``, which writes the
+    MCP server's own row (``mcp:<client>:<project>``). Read as a live teammate, it brought
+    the session the board on its next prompt, a new role-less session read a team, and the
+    server's instructions turned TEAM, for ``_STALE_AFTER``."""
+    _team_on(runner)
+    assert "<aisquare-team>" not in _start(runner, SOLO, work_dir)
+    mcp_server.team_board()
+    with store_session() as store:
+        ids = [s.id for s in store.team_sessions(current_project().id)]
+    assert any(i.startswith(team_service.CLIENT_SESSION_PREFIX) for i in ids), ids
+
+    assert _prompt(runner, SOLO, work_dir) == ""
+    # The session ends; the server's row stays live. The next client's server, and the next
+    # session's start, alone on the board, are solo. (While SOLO is live a new server counts
+    # SOLO itself: #346's known limitation, not this.)
+    ended = json.dumps({"cwd": str(work_dir), "session_id": SOLO, "reason": "exit"})
+    assert runner.invoke(app, ["hook", "session-end"], input=ended).exit_code == 0
+    assert mcp_server.server_instructions() == mcp_server.SOLO_INSTRUCTIONS
+    assert "<aisquare-team>" not in _start(runner, OTHER, work_dir)
+
+
+def test_the_gate_asks_for_an_open_task_and_never_reads_the_board_s_tasks(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#45, n7: the gate loaded every task the board ever had, done and dropped included, on
+    each role-less start and each unbriefed prompt. It asks one EXISTS on the open ones: a
+    board whose only task is done is no team, and the task list is never read."""
+    from aisquare.core.store import SqliteStore
+
+    _team_on(runner)
+    assert runner.invoke(app, ["task", "add", "shipped"]).exit_code == 0
+    with store_session() as store:
+        [task] = store.team_tasks(current_project().id)
+        store.set_task_status(task.id, "done")
+
+    def every_task(*args: object, **kwargs: object) -> Any:
+        raise AssertionError("the gate read every task")
+
+    monkeypatch.setattr(SqliteStore, "team_tasks", every_task)
+    assert "<aisquare-team>" not in _start(runner, SOLO, work_dir)
+    with store_session() as store:
+        assert not team_service._has_team(store, current_project().id, SOLO)
+        assert store.has_team_task_in(current_project().id, {"done"})

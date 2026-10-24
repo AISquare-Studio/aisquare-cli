@@ -98,7 +98,8 @@ def client_session_id(project_id: str) -> str:
     the first kept a phantom live session forever.
     """
     client = os.environ.get("AISQUARE_SERVE_CLIENT", "").strip() or "remote"
-    return f"mcp:{client}:{project_id.removeprefix('prj_')[:6]}"
+    prefix = team_service.CLIENT_SESSION_PREFIX  # which the board's team test skips
+    return f"{prefix}{client}:{project_id.removeprefix('prj_')[:6]}"
 
 
 def _client_role() -> str:
@@ -425,8 +426,9 @@ SOLO_INSTRUCTIONS = "aisquare's shared task board (team_board) and saved project
 
 
 def _serves_a_team() -> bool:
-    """Whether the session this server starts for has a team: a role or a fleet row in
-    its environment, or, on an active board, an open task, a live fleet agent or ANY
+    """Whether the session this server starts for has a team: a member by its environment
+    (:func:`~aisquare.services.team.member_by_env`, as the hooks ask it), or, on an active
+    board, an open task, a live fleet agent or ANY
     live session (:func:`~aisquare.services.team.board_has_team`): the server has no
     session id, so it cannot tell its own row from a teammate's, and counts it as one.
     The instructions are read once, at the client's start, and rode every request of a
@@ -436,7 +438,7 @@ def _serves_a_team() -> bool:
     from aisquare.core import orchestrator
     from aisquare.core.store import store_session
 
-    if orchestrator.env_role() is not None or orchestrator.env_fleet_agent() is not None:
+    if team_service.member_by_env(orchestrator.env_role()):
         return True
     try:
         with store_session() as store:

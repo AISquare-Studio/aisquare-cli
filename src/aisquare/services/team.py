@@ -1984,7 +1984,7 @@ def hook_session_start(
 
 #: The task states that are work someone may pick up or is doing: a board holding one is
 #: a team to coordinate with, whoever else is on it.
-_OPEN_TASKS = frozenset({"todo", "doing", "review", "blocked"})
+_OPEN_TASKS: frozenset[TaskStatus] = frozenset({"todo", "doing", "review", "blocked"})
 
 
 def _unbriefed(session_id: str) -> str:
@@ -1992,6 +1992,27 @@ def _unbriefed(session_id: str) -> str:
     board and protocol: it was solo when it came (:func:`_solo`). Removed when the board
     is rendered for it, and when it ends."""
     return f"unbriefed:{session_id}"
+
+
+#: The roles that make no session a member by themselves: none chosen, and #303's plain
+#: ``agent`` run by hand (``aisquare launch agent``), which the owner decided is solo
+#: when it is alone on the board (2026-10-24). A fleet-spawned one is a member by its
+#: fleet row, and one launched with a persona by its persona.
+_NO_ROLE = frozenset({"unassigned", harness.PLAIN_ROLE})
+
+CLIENT_SESSION_PREFIX = "mcp:"
+"""What every id ``mcp_server.client_session_id`` makes starts with: the row the MCP server
+writes for itself on each tool call, which is no teammate (#45, m1)."""
+
+
+def member_by_env(role: str | None) -> bool:
+    """Whether a session is a team member by how it was started, before any board is
+    read: a role that is a role (not :data:`_NO_ROLE`), a fleet row, or a persona. The one
+    rule for the hooks (:func:`_solo`) and the MCP server's instructions
+    (``mcp_server._serves_a_team``), which told a persona-only session apart (#45, n1)."""
+    if role is not None and base_role(role) not in _NO_ROLE:
+        return True
+    return orchestrator.env_fleet_agent() is not None or orchestrator.env_persona() is not None
 
 
 def _solo(
@@ -2007,14 +2028,13 @@ def _solo(
     on the board (:func:`_has_team`; decision seq 435 of #4).
 
     A role (a manager, a ``launch``-ed coder) or a fleet row is a team member by being
-    one, and is briefed as it always was. Fail-open: a read that fails is a team, so
-    the session gets today's board.
+    one, and is briefed as it always was (:func:`member_by_env`). A hand-run plain
+    ``agent`` is not, by itself (:data:`_NO_ROLE`). Fail-open: a read that fails is a
+    team, so the session gets today's board.
     """
-    if role is not None or orchestrator.env_fleet_agent() is not None:
+    if member_by_env(role):
         return False
-    if orchestrator.env_persona() is not None:
-        return False
-    if known is not None and base_role(known.role) != "unassigned":
+    if known is not None and base_role(known.role) not in _NO_ROLE:
         return False
     try:
         return not _has_team(store, project_id, session_id)
@@ -2026,7 +2046,8 @@ def _solo(
 def _has_team(store: ContextStore, project_id: str, session_id: str | None) -> bool:
     """Whether a session with no role and no fleet row has a team on this board: an open
     task, a live fleet agent, or a live session (seen within :data:`_STALE_AFTER`, not
-    ended) other than the caller's own row. Three reads on indexed columns.
+    ended) other than the caller's own row and the MCP server's. Three reads on indexed
+    columns.
 
     ``session_id`` is the caller's row where it is known (the hooks). Where it is not —
     the MCP server, started by its client alongside SessionStart and before that hook
@@ -2034,12 +2055,20 @@ def _has_team(store: ContextStore, project_id: str, session_id: str | None) -> b
     the fail-safe answer. A session restarting beside its own not-yet-ended previous row
     reads as a team for that reason.
     """
-    if any(task.status in _OPEN_TASKS for task in store.team_tasks(project_id)):
+    if store.has_team_task_in(project_id, _OPEN_TASKS):
         return True
     if store.fleet_agents(project_id, live_only=True):
         return True
     seen = store.team_sessions_seen_since(project_id, _now() - _STALE_AFTER)
-    return any(other.id != session_id and other.ended_at is None for other in seen)
+    # Never the MCP server's own row (CLIENT_SESSION_PREFIX): written on every tool call, it
+    # read a solo session's first team_board() as a teammate, and the board, the team
+    # instructions and every new start's briefing came back for _STALE_AFTER (#45, m1).
+    return any(
+        other.id != session_id
+        and other.ended_at is None
+        and not other.id.startswith(CLIENT_SESSION_PREFIX)
+        for other in seen
+    )
 
 
 def board_has_team(store: ContextStore, project_id: str) -> bool:

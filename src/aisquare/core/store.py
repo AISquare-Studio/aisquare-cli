@@ -1384,6 +1384,7 @@ class ContextStore(Protocol):
     def team_tasks(
         self, project_id: str, *, status: TaskStatus | None = None
     ) -> list[TeamTask]: ...
+    def has_team_task_in(self, project_id: str, statuses: Collection[TaskStatus]) -> bool: ...
     def claim_task(self, task_id: str, session_ref: str, lease_until: datetime) -> bool: ...
     def renew_leases(self, session_id: str, lease_until: datetime) -> None: ...
     def set_task_status(self, task_id: str, status: TaskStatus) -> TeamTask: ...
@@ -2983,6 +2984,19 @@ class SqliteStore:
                 (project_id, status),
             ).fetchall()
         return [_row_to_task(row) for row in rows]
+
+    def has_team_task_in(self, project_id: str, statuses: Collection[TaskStatus]) -> bool:
+        """Whether the board holds a task in any of ``statuses``: one ``EXISTS`` on the
+        ``(project_id, status)`` index, never the board's every task read and decoded."""
+        wanted = sorted(statuses)
+        if not wanted:
+            return False
+        marks = ", ".join("?" for _ in wanted)
+        row = self._conn.execute(
+            f"SELECT EXISTS (SELECT 1 FROM team_task WHERE project_id = ? AND status IN ({marks}))",
+            (project_id, *wanted),
+        ).fetchone()
+        return bool(row[0])
 
     def claim_task(self, task_id: str, session_ref: str, lease_until: datetime) -> bool:
         """Atomically claim a task; exactly one concurrent claimer wins.

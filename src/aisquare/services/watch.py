@@ -340,27 +340,29 @@ class Watcher:
         failed: set[str] = set()
         items = self.scan(now, notes, failed)
         watch_dir().mkdir(parents=True, exist_ok=True)
+        # One hold from the read of `seen` to its write, delivery between: two ticks that
+        # overlap (`--once` beside the loop) would each find the same items new and deliver
+        # them twice (review of #377, round 1). The second waits, or raises after the wait.
         with locking.holding(_state_lock(), wait_s=STATE_LOCK_WAIT):
-            seen = set(read_state().get("seen") or [])
-        new = [item for item in items if item.id not in seen]
-        report = TickReport(at=now, items=items, new=new, notes=notes)
-        by_project: dict[str, list[WatchItem]] = {}
-        for item in new:
-            by_project.setdefault(item.project_id, []).append(item)
-        undelivered: set[str] = set()
-        for project_id, found in by_project.items():
-            try:
-                path = _write_detail(project_id, found, now)
-                report.files[project_id] = path
-                if _deliver(project_id, found, path):
-                    report.nudged.append(project_id)
-            except Exception as exc:  # the news waits for the next tick
-                undelivered |= {item.id for item in found}
-                notes.append(f"delivery to {project_id} failed: {type(exc).__name__}: {exc}")
-        kept = {i for i in seen if _look_of(i) in failed}
-        with locking.holding(_state_lock(), wait_s=STATE_LOCK_WAIT):
-            state = read_state()
-            _write_state(
+            state = read_watch_state()
+            seen = set(state.get("seen") or [])
+            new = [item for item in items if item.id not in seen]
+            report = TickReport(at=now, items=items, new=new, notes=notes)
+            by_project: dict[str, list[WatchItem]] = {}
+            for item in new:
+                by_project.setdefault(item.project_id, []).append(item)
+            undelivered: set[str] = set()
+            for project_id, found in by_project.items():
+                try:
+                    path = _write_detail(project_id, found, now)
+                    report.files[project_id] = path
+                    if _deliver(project_id, found, path):
+                        report.nudged.append(project_id)
+                except Exception as exc:  # the news waits for the next tick
+                    undelivered |= {item.id for item in found}
+                    notes.append(f"delivery to {project_id} failed: {type(exc).__name__}: {exc}")
+            kept = {i for i in seen if _look_of(i) in failed}
+            _save_watch_state(
                 {
                     **state,
                     "seen": sorted(({item.id for item in items} - undelivered) | kept),
@@ -422,7 +424,7 @@ def _state_lock() -> Path:
     return watch_dir() / "state.json.lock"
 
 
-def read_state() -> dict[str, Any]:
+def read_watch_state() -> dict[str, Any]:
     try:
         data = json.loads(state_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -430,7 +432,7 @@ def read_state() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _write_state(data: Mapping[str, Any]) -> None:
+def _save_watch_state(data: Mapping[str, Any]) -> None:
     path = state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic.write_replacing(path, json.dumps(data), durable=False)
@@ -612,8 +614,8 @@ class Status:
         return (now or _now()) - self.last_scan_at
 
 
-def status() -> Status:
-    said = read_state().get("last_scan_at")
+def watch_status() -> Status:
+    said = read_watch_state().get("last_scan_at")
     try:
         last = datetime.fromisoformat(said) if isinstance(said, str) else None
     except ValueError:

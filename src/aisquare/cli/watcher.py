@@ -70,7 +70,7 @@ def watch(
     if sum([once, detach, stop, status]) > 1:
         fail("--once, --detach, --stop and --status are one each", error="usage", exit_code=2)
     if status:
-        _status()
+        _print_watch_status()
         return
     if stop:
         pid = watch_service.stop_detached()
@@ -107,8 +107,8 @@ def _say(payload: Mapping[str, object], line: str) -> None:
         stdout_console().print(line, markup=False)
 
 
-def _status() -> None:
-    found = watch_service.status()
+def _print_watch_status() -> None:
+    found = watch_service.watch_status()
     age = found.age()
     payload = {
         "running": found.pid is not None,

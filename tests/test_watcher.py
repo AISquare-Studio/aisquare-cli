@@ -267,7 +267,7 @@ def test_a_shutdown_that_leaves_agents_keeps_the_watcher(
 
 def test_the_doctor_row_shows_the_last_looks_age(monkeypatch: pytest.MonkeyPatch) -> None:
     watch_service.watch_dir().mkdir(parents=True, exist_ok=True)
-    watch_service._write_state(
+    watch_service._save_watch_state(
         {"last_scan_at": (datetime.now(tz=UTC) - timedelta(minutes=10)).isoformat()}
     )
     row = diagnostics._check_watcher()
@@ -344,3 +344,32 @@ def test_one_bad_tick_never_ends_the_watcher(monkeypatch: pytest.MonkeyPatch) ->
     with pytest.raises(Stop):
         watch_service.run(interval=1, on_tick=lambda report: None, on_error=errors.append)
     assert ticks == ["tick", "tick"] and errors == ["OperationalError: database is locked"]
+
+
+def test_overlapping_ticks_never_deliver_twice(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #377, round 1: a second tick inside the first's delivery (``--once`` beside
+    the loop) found the same items new and delivered them again. The state lock spans read,
+    delivery and write now: the second waits, and here, with no wait, raises."""
+    fleet_service.spawn(project, "manager")
+    fleet = Fleet(agents=[_trust_prompt(project, "coder-1")])
+    first, second = _watcher(project, fleet), _watcher(project, fleet)
+    monkeypatch.setattr(watch_service, "STATE_LOCK_WAIT", 0)
+    real = watch_service._write_detail
+    inner: list[BaseException] = []
+
+    def overlapping(project_id: str, items: Any, now: datetime) -> Path:
+        try:
+            second.tick(NOW)
+        except BaseException as exc:
+            inner.append(exc)
+        return real(project_id, items, now)
+
+    monkeypatch.setattr(watch_service, "_write_detail", overlapping)
+    first.tick(NOW)
+    assert inner and isinstance(inner[0], TimeoutError)
+    assert len(_watch_events(project.id)) == 1

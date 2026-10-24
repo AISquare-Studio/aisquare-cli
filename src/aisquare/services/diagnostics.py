@@ -2398,7 +2398,7 @@ def _check_watcher() -> DoctorCheck:
         from aisquare.core.config import load_config
         from aisquare.services import watch as watch_service
 
-        found = watch_service.status()
+        found = watch_service.watch_status()
         every = load_config().watch.interval_seconds
     except Exception as exc:  # diagnostics must never crash
         return _ok(name, f"not evaluated ({exc})")

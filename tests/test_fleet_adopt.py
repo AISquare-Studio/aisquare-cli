@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -51,7 +52,10 @@ def _transcript(
     age: float = 0.0,
 ) -> Path:
     """A transcript as Claude Code leaves one, enough of it for what adopt reads."""
-    path = account.config_dir / "projects" / str(cwd).replace("/", "-") / f"{session}.jsonl"
+    # Claude Code's folder name: every character but a letter or digit is a dash, so a
+    # Windows path (C:\Users\…) is one folder too, as the lookup's */*.jsonl expects.
+    slug = re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
+    path = account.config_dir / "projects" / slug / f"{session}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     entries = [
         {"type": "user", "isMeta": True, "cwd": str(cwd), "message": {"content": "<caveat>"}},

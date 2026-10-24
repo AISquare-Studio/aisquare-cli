@@ -394,10 +394,12 @@ aisquare task add "auth API" --project api --origin 12       # from the parent's
   parent, `task_blocked`, `result`, and every status change of a task delegated from the
   parent; `--kinds` chooses, `--pattern` adds notes whose text matches, `--off` stops it,
   and `--to parent` always routes. One child routes at most one line a minute: the rest
-  are folded into a count the next line carries (`+4 folded`).
+  are folded into a count the child's next routed line carries (`+4 folded`). A question, a
+  blocked task and anything `--to parent` are never folded: they always route at once.
 - **Linked tasks.** `task add --project <member> --origin <task>` delegates a task from the
   parent's board to a member's: the member's line shows `← hq#12`, the origin's
-  `→ 2 linked, 1 done`, a child's status changes route up, and when every child is done,
+  `→ 2 linked, 1 done`, a child's status changes route up, and when every child is
+  closed (at least one done; a dropped one does not hold the origin open),
   `linked_all_done` asks the parent's manager to close the origin. It closes it itself.
 - **Escalation.** Under a parent, a member's manager asks the parent before the human
   ("blocked twice" in its cycle names `--to parent`).

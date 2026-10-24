@@ -159,6 +159,16 @@ def test_a_burst_from_one_child_is_one_routed_line_and_a_count(
     assert "+4 folded" in last.text, last.text
 
 
+def test_a_question_is_never_folded_by_the_storm_guard(tree: dict[str, ProjectInfo]) -> None:
+    """Review of #381, 2: a ``--to parent`` question right after the child's result (inside
+    the 60 s window) was folded, so the parent saw only the result. What asks for a
+    decision (a question, a block, anything to the parent) always routes."""
+    _note("tests green", kind="result")
+    _note("may I merge #12?", kind="question", to="parent")
+    texts = [e.text for e in _events(tree["hq"], "routed")]
+    assert len(texts) == 2 and "may I merge #12?" in texts[1], texts
+
+
 def test_a_group_without_a_parent_routes_nothing(tmp_path: Path) -> None:
     """Byte for byte as before: no routed line anywhere, and no link marks."""
     a, b = _project(tmp_path / "a", "alpha"), _project(tmp_path / "b", "beta")
@@ -213,6 +223,21 @@ def test_a_delegated_task_shows_its_origin_routes_up_and_all_done_closes_the_loo
     team_service.finish_task(web_task.id, session_ref="dddd3333-0000-0000-0000-000000000000")
     [done] = _events(tree["hq"], "linked_all_done")
     assert done.to_role == "manager" and f"close #{origin.number}" in done.text
+
+
+def test_a_dropped_child_does_not_hold_the_origin_open(tree: dict[str, ProjectInfo]) -> None:
+    origin, _ = team_service.add_task("ship auth", session_ref=HQ_MANAGER)
+    kept, _ = team_service.add_task(
+        "auth API", session_ref=HQ_MANAGER, project="api", origin=str(origin.number)
+    )
+    dropped, _ = team_service.add_task(
+        "auth UI", session_ref=HQ_MANAGER, project="web", origin=str(origin.number)
+    )
+    team_service.claim_task(kept.id, session_ref=API_CODER)
+    team_service.finish_task(kept.id, session_ref=API_CODER)
+    assert _events(tree["hq"], "linked_all_done") == []
+    team_service.drop_task(dropped.id, session_ref=HQ_MANAGER)
+    assert len(_events(tree["hq"], "linked_all_done")) == 1
 
 
 def test_delegating_to_a_project_this_board_does_not_parent_is_refused(

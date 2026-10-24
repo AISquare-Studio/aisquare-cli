@@ -56,6 +56,8 @@ _NOTE_KINDS = frozenset({"note", "decision", "question", "result"})
 _TASK_KINDS = frozenset(
     {"task_review", "task_done", "task_blocked", "task_reopened", "task_dropped"}
 )
+_URGENT = frozenset({"question", "task_blocked"})
+"""What the storm guard never folds: what waits on a decision (with anything ``--to parent``)."""
 _NEVER = frozenset({"routed", "linked_all_done"})
 """What never routes again: a routed line on a parent that is itself a member stays put."""
 
@@ -184,7 +186,10 @@ def route_up(store: ContextStore, event: TeamEvent) -> list[str]:
         now = _now()
         last = kept.get("at")
         folded = int(kept.get("folded") or 0)
-        if last and now - datetime.fromisoformat(str(last)) < ROUTE_WINDOW:
+        # What asks for a decision is never folded: a question, a block, anything sent to
+        # the parent by name. The cycle escalates there now (review of #381, 2).
+        urgent = event.kind in _URGENT or (event.to_role or "").strip().lower() == PARENT
+        if not urgent and last and now - datetime.fromisoformat(str(last)) < ROUTE_WINDOW:
             store.set_meta(key, json.dumps({"at": last, "folded": folded + 1}))
         elif member is not None:
             team_service._emit(
@@ -197,7 +202,7 @@ def route_up(store: ContextStore, event: TeamEvent) -> list[str]:
             )
             store.set_meta(key, json.dumps({"at": now.isoformat(), "folded": 0}))
             wake.append(parent.project.id)
-    if event.kind == "task_done" and event.task_id is not None:
+    if event.kind in ("task_done", "task_dropped") and event.task_id is not None:
         origin = store.task_origins(event.project_id).get(event.task_id)
         if origin is not None and _all_done(store, origin[0]):
             origin_task = store.get_task(origin[0])
@@ -219,8 +224,11 @@ def route_up(store: ContextStore, event: TeamEvent) -> list[str]:
 
 
 def _all_done(store: ContextStore, origin_task_id: str) -> bool:
+    """Every task delegated from the origin is closed and at least one is done: a dropped
+    child does not hold the origin open (review of #381)."""
     linked = store.linked_tasks(origin_task_id)
-    return bool(linked) and all(task.status == "done" for task in linked)
+    closed = {"done", "dropped"}
+    return any(t.status == "done" for t in linked) and all(t.status in closed for t in linked)
 
 
 # --- the parent's briefing --------------------------------------------------------------

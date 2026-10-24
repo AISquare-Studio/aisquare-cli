@@ -18457,7 +18457,9 @@ def test_a_prompt_is_not_typed_into_security_notes_that_stay(
 
     pane = receipt.agent.pane_id
     assert all(entry == (pane, "key", "Enter") for entry in tmux.typed)
-    assert _enters(tmux, pane) == 1, "one unchanged screen is pressed once"
+    # Pressed again only once the screen stood unchanged far past a redraw, its Enter read
+    # as swallowed, and no more than the notes are given (delta review 2 of #274, n1).
+    assert _enters(tmux, pane) == fleet_service._SECURITY_PRESSES
     assert receipt.prompt_typed == "no"
     [note] = receipt.failures
     assert fleet_service.SECURITY_NOTES in note
@@ -18491,6 +18493,35 @@ def test_a_second_enter_never_lands_on_the_screen_after_the_security_notes(
     assert _enters(tmux, receipt.agent.pane_id) == 1
     assert receipt.prompt_typed == "no"
     assert any("folder-trust question" in note for note in receipt.failures)
+
+
+def test_a_swallowed_enter_at_the_security_notes_is_pressed_again_after_a_long_settle(
+    tmux: FakeTmux,
+    clock: FakeClock,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delta review 2 of #274, n1: never pressing twice on an unchanged screen dropped the
+    retry for an Enter the notes swallowed (drawn before Claude Code read its input), and
+    the agent waited out PROMPT_TIMEOUT there with its prompt untyped. The notes standing
+    unchanged far past a redraw are pressed once more, and that Enter lands. Not sooner:
+    the press before it is never followed within a redraw's time."""
+    second_at: list[float] = []
+
+    def screen(pane: str) -> list[str]:
+        if _enters(tmux, pane) >= 2:
+            second_at.append(clock.now)
+            return captain_screens.INPUT_BOX
+        return SECURITY_SCREEN  # the first Enter was swallowed
+
+    _drawn(tmux, monkeypatch, screen)
+    started = clock.now
+    receipt = fleet_service.spawn(project, "coder", worktree=False, prompt="hello")
+
+    assert _enters(tmux, receipt.agent.pane_id) == 3, "the notes' two, then the prompt's"
+    assert receipt.prompt_typed == "yes" and receipt.failures == []
+    assert second_at and second_at[0] - started >= fleet_service._SECURITY_REPRESS
 
 
 def test_an_agent_left_at_the_security_notes_reads_attention_with_the_reason(

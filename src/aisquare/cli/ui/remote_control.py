@@ -1422,7 +1422,10 @@ class RemoteController:
         self._revived_at = now
         # On a thread of its own, as this runs on Textual's: what the dead ngrok left in its
         # group (a launcher's ngrok, still up) is given its seconds to end. One replaced is
-        # told first, so its sign-in is cancelled before the new one binds the domain.
+        # told first, but not waited for: joined here, Textual's thread waited out its stop.
+        # So on a static domain an old sign-in that still lands can meet the new one with
+        # "endpoint already online"; that start fails, the old one stays this Remote's dead
+        # tunnel, and the next minute tries again (#274 delta review 2, n3).
         stopping = threading.Thread(target=dead.stop_tunnel, name="ngrok-stop", daemon=True)
         if replace:
             stopping.start()

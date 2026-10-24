@@ -163,6 +163,10 @@ _SUBMIT_TIMEOUT = 5.0
 """How long :func:`_submitted` reads the pane back for the prompt to leave the input box."""
 _SECURITY_PRESSES = 3
 """How many Enters :func:`_at_input_box` gives Claude Code's first-run Security notes."""
+_SECURITY_REPRESS = 6.0
+"""How long the notes must stay drawn, unchanged, after an Enter before it is read as
+swallowed (the notes drawn before Claude Code read its input) and pressed again: far past
+any redraw, so a second Enter never lands on the screen the first one brought."""
 _SHELLS = frozenset({"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "ash"})
 _NOT_AN_AGENT = _SHELLS | {"tmux"}
 """Foreground commands that are never the agent: a shell (left behind after an
@@ -4560,6 +4564,7 @@ def _at_input_box(
     deadline = _monotonic() + (PROMPT_TIMEOUT if wait else 0.0)
     pressed = 0
     pressed_on: list[str] | None = None
+    pressed_at = 0.0
     while True:
         try:
             lines = srv.capture(pane_id).lines
@@ -4572,12 +4577,15 @@ def _at_input_box(
         notes_up = claude_sharing.shows_security_notes(lines)
         # Another Enter only for notes drawn anew: on the very screen the last one was pressed
         # on, it may still be on its way, and a second would land on whatever comes next —
-        # the trust question, whose Enter is "No, exit" (delta review of #274, n1).
-        if notes_up and pressed < _SECURITY_PRESSES and lines != pressed_on:
+        # the trust question, whose Enter is "No, exit" (delta review of #274, n1). Unless
+        # that screen has stood unchanged far past a redraw: the first was swallowed, and the
+        # agent waited out PROMPT_TIMEOUT at the notes (delta review 2 of #274, n1).
+        swallowed = _monotonic() - pressed_at >= _SECURITY_REPRESS
+        if notes_up and pressed < _SECURITY_PRESSES and (lines != pressed_on or swallowed):
             enter = pane_write("Enter", lambda: srv.send_keys(pane_id, "Enter"))
             if enter.typed == "yes":
                 pressed += 1
-                pressed_on = list(lines)
+                pressed_on, pressed_at = list(lines), _monotonic()
                 _sleep(_PROMPT_SETTLE)
                 continue
         if pressed and not notes_up:
@@ -5373,9 +5381,10 @@ def stop(
 
     ``ended_by`` is how the row is recorded as ended (#38): ``stopped``, on aisquare's word,
     so Restart all leaves it. A 💤 row whose window this removes is marked so too: stopped
-    after it died is stopped. So is an ended row with no window left, which is all the stop
-    does to it (``StopReceipt.marked_only``). :func:`restart` ends a vanished pane's row here
-    as ``died``, and a row already ended is handed back to it as it is, window and all.
+    after it died is stopped. So is a row recorded as died with no window left, its label's
+    newest, which is all the stop does to it (``StopReceipt.marked_only``). :func:`restart`
+    ends a vanished pane's row here as ``died``, and a row already ended is handed back to
+    it as it is, window and all.
     """
     with store_session() as store:
         try:
@@ -5399,10 +5408,11 @@ def stop(
             if _kill_lingering_window(store, project, ended):
                 return StopReceipt(store.mark_fleet_agent_stopped(ended.id), [])
             head = store.fleet_agent_by_label(project.id, ended.label, live_only=False)
-            if ended.ended_by == "stopped" or head is None or head.id != ended.id:
-                # Stopped already, or a row another took the label from (the pin's
-                # refusal): none is one Restart all brings back, and nothing is left
-                # of it to remove.
+            if ended.ended_by != "died" or head is None or head.id != ended.id:
+                # Stopped already (a hand-over's stop writes that too, so its gap before
+                # the replacement is recorded is refused as it was), ended before aisquare
+                # said how, or a row another took the label from (the pin's refusal):
+                # nothing is left of it to remove, and nothing to record.
                 raise
             # Ended with no window left (its tmux server gone, a row `reap` recorded): the
             # owner's word that it stays down is recorded all the same. Refused, nothing

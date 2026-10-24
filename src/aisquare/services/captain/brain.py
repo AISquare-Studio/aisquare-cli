@@ -466,13 +466,18 @@ def _wait_until_ready(
     pane is read whatever the row says.
 
     The pane is read by the captain's own agent (``services.captain.screen``): what is
-    drawn there that a line must not go into (``modal_on_screen``), and whether its prompt
-    is drawn and free (``ready_on_screen``): Claude Code's input box, Codex's empty
-    composer.
+    drawn there that a line must not go into (``modal_on_screen``), whether its prompt is
+    drawn (``prompt_on_screen``: Claude Code's input box, Codex's empty composer), and,
+    for a captain the fleet reads working only, whether it is free too
+    (``ready_on_screen``). Waiting needs the prompt drawn alone: the rows above it are
+    the captain's own last reply, and one that quoted a busy footer (``esc to
+    interrupt``, a ``· … …`` line) read as a turn running, so every say waited out its
+    whole timeout (review r17 of #113, finding 1).
 
     One settle goes before the text, for a NEW box only: ``settle`` (this say started
     the captain), or a read here that found no box drawn. A box drawn from the first
-    read is typed into at once — a settle there cost every voice turn 2 s (13294).
+    read is typed into at once, busy or not — a settle there cost every voice turn 2 s
+    (13294; r17, finding 9).
     """
     srv = fleet.server_of(agent)
     while True:
@@ -493,12 +498,9 @@ def _wait_until_ready(
         showing = screen.modal_showing(agent, pane)
         if showing is not None:
             raise _refuse_dialog(agent, pane, showing)
-        drawn = screen.ready(agent, pane)
-        if (
-            drawn
-            and state in ("waiting", "working")
-            and fleet.pane_is_the_agent(srv, agent.pane_id)
-        ):
+        drawn = screen.drawn(agent, pane)
+        ready = state == "waiting" or (state == "working" and screen.ready(agent, pane))
+        if drawn and ready and fleet.pane_is_the_agent(srv, agent.pane_id):
             if settle:
                 _sleep(TYPE_SETTLE_S)
             return srv

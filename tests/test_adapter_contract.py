@@ -1455,6 +1455,24 @@ def test_a_line_is_typed_only_where_the_agents_screen_reads_ready(adapter: Agent
         assert ready is shown.get("ready", False), shown["what"]
 
 
+def test_a_screen_ready_for_a_line_shows_its_prompt_drawn(adapter: AgentAdapter) -> None:
+    """``screen_drawn`` (``capabilities.prompt_on_screen``, else its empty prompt; what a
+    waiting captain's line needs, review r17 of #113, finding 1) on the agent's recorded
+    screens: every screen ready for a line shows its prompt drawn, and no dialog of its own
+    does."""
+    from aisquare.core.agent_adapters.types import screen_drawn, screen_ready
+
+    screens = _screens(adapter)
+    if screens is None:
+        assert not screen_drawn(adapter.capabilities, ["$ "])
+        return
+    for shown in screens["dialogs"]:
+        assert not screen_drawn(adapter.capabilities, shown["rows"]), shown["what"]
+    for shown in screens["not_dialogs"]:
+        if screen_ready(adapter.capabilities, shown["rows"]):
+            assert screen_drawn(adapter.capabilities, shown["rows"]), shown["what"]
+
+
 def test_an_agent_that_declares_no_ready_screen_is_ready_at_its_empty_prompt_alone() -> None:
     """The default an adapter gets with no ``ready_on_screen`` (the fake's): its empty prompt
     (``idle_on_screen``, else ``idle_prompt_mark`` starting its last line) with no turn

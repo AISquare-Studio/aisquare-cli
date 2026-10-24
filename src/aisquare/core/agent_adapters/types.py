@@ -354,6 +354,15 @@ class AgentCapabilities:
     (:attr:`idle_on_screen`, else :attr:`idle_prompt_mark` on its last line) with no turn
     running on it (:attr:`working_on_screen`): Codex's. Remote never reads it, its own
     reads being :attr:`idle_on_screen`'s."""
+    prompt_on_screen: Callable[[Sequence[str]], bool] | None = None
+    """Whether the agent's screen (its visible rows) shows its prompt drawn, a turn running
+    at it or not: the captain's evidence for a line to a captain the fleet reads
+    ``waiting`` (:func:`screen_drawn`), whose own last reply is what sits above its prompt.
+    Read there as :attr:`ready_on_screen`, a reply that quoted a busy footer (``esc to
+    interrupt``) kept every ``say`` out for its whole wait (review r17 of #113, finding 1).
+    Claude Code's input box drawn (``claude_screen.box_drawn``). ``None`` takes the agent's
+    empty prompt (:attr:`idle_on_screen`, else :attr:`idle_prompt_mark` on its last line),
+    which a turn running keeps: Codex's."""
     modal_on_screen: Callable[[Sequence[str]], str | None] | None = None
     """What the agent's screen (its visible rows) shows that a typed line must not go into,
     in the owner's words, or ``None`` for a screen a line may go into: what the captain's
@@ -383,14 +392,26 @@ def screen_ready(capabilities: AgentCapabilities, rows: Sequence[str]) -> bool:
     (``working_on_screen``); ``False`` for an agent that reads none of them off its screen."""
     if capabilities.ready_on_screen is not None:
         return capabilities.ready_on_screen(rows)
-    if capabilities.idle_on_screen is not None:
-        idle = capabilities.idle_on_screen(rows)
-    else:
-        mark = capabilities.idle_prompt_mark
-        last = next((row.strip() for row in reversed(rows) if row.strip()), "")
-        idle = bool(mark) and last.startswith(mark or "")
     working = capabilities.working_on_screen
-    return idle and not (working is not None and working(rows))
+    return _empty_prompt(capabilities, rows) and not (working is not None and working(rows))
+
+
+def screen_drawn(capabilities: AgentCapabilities, rows: Sequence[str]) -> bool:
+    """Whether ``rows``, an agent's screen, show its prompt drawn, a turn running at it or
+    not: its :attr:`~AgentCapabilities.prompt_on_screen`, else its empty prompt
+    (``idle_on_screen``, else ``idle_prompt_mark`` starting its last line); ``False`` for an
+    agent that reads none of them off its screen."""
+    if capabilities.prompt_on_screen is not None:
+        return capabilities.prompt_on_screen(rows)
+    return _empty_prompt(capabilities, rows)
+
+
+def _empty_prompt(capabilities: AgentCapabilities, rows: Sequence[str]) -> bool:
+    if capabilities.idle_on_screen is not None:
+        return capabilities.idle_on_screen(rows)
+    mark = capabilities.idle_prompt_mark
+    last = next((row.strip() for row in reversed(rows) if row.strip()), "")
+    return bool(mark) and last.startswith(mark or "")
 
 
 def screen_modal(capabilities: AgentCapabilities, rows: Sequence[str]) -> str | None:

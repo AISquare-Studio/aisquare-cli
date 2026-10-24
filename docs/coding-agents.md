@@ -308,7 +308,7 @@ fleet, captain and asq code asks as #113's 0.8.2 lanes wire it in.
 | The captain's reply | Its transcript's text since the last prompt | The rollout's assistant messages since the newest prompt of the human's. | Unit tests over the recorded 0.162.1 rollout |
 | Effort on the info line | `effort.level` in its hooks | **Differs:** read off the rollout's newest `turn_context` at each prompt and stop; its hooks carry none. | Live on 0.162.1 (M8: `"effort": "high"` under `model_reasoning_effort="high"`) |
 | An unwatched pane (the captain's) | `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1` keeps its rating survey out | Nothing to set: its dialogs in a running pane are kept out by its fleet settings. | Adapter answer (`unattended_env`) |
-| The captain itself | One Claude Code session per home | **Experimental:** `[team.profiles.captain] agent = "codex"` runs it on Codex, confined as *The captain's tools* says, from its brain folder (no git checkout, so no folder trust); its own pane read by Codex's screens (`modal_on_screen`, `ready_on_screen`), its reply by its rollout ([the captain on Codex](captain.md#the-captain-on-codex)). An agent whose `tools_only_args` answers `None` is refused as the captain in one line. | Unit tests of the launch line (`tests/test_captain_spawn.py`) |
+| The captain itself | One Claude Code session per home | **Experimental:** `[team.profiles.captain] agent = "codex"` runs it on Codex, confined as *The captain's tools* says, from its brain folder (no git checkout, so no folder trust); its own pane read by Codex's screens (`modal_on_screen`, `prompt_on_screen`, `ready_on_screen`), its reply by its rollout ([the captain on Codex](captain.md#the-captain-on-codex)). An agent whose `tools_only_args` answers `None` is refused as the captain in one line. | Unit tests of the launch line (`tests/test_captain_spawn.py`) |
 | A persona attached while it works | Its next prompt's hook hands it the briefing | Same: nothing goes through `codex queue`, whose message would run as a turn in the human's name, and its own next `UserPromptSubmit` hands the briefing over as context. | `tests/test_a_persona_attached_to_a_busy_codex_is_owed_never_queued.py` |
 | A fleet server started in an agent's tool shell | `CLAUDE_PID` kept out of the server's environment | `CODEX_THREAD_ID` kept out too: every adapter's `tool_shell_env` and `pid_env` (`core.spawn.agent_identity_env_vars`). The doctor's *fleet server env* row names one a server pins, with the command that unsets it. | `tests/test_a_fleet_server_holds_no_agents_process_identity.py`, `tests/test_doctor_fleet.py` |
 
@@ -1253,6 +1253,11 @@ a `working` read for its `say`, `press` and `paste`, `types.screen_ready`. Claud
 input box drawn and idle, `claude_screen.box_idle`; `None` takes its empty prompt,
 `idle_on_screen` else `idle_prompt_mark`, with no turn on it by `working_on_screen`, which is
 Codex's. Remote never reads it),
+`prompt_on_screen` (whether its screen shows its prompt drawn, a turn running at it or not:
+all a line to a captain the fleet reads `waiting` needs, `types.screen_drawn`, since the rows
+above that prompt are the captain's own last reply, and one quoting a busy footer must not
+hold its next line out. Claude Code's input box drawn, `claude_screen.box_drawn`; `None` takes
+its empty prompt, `idle_on_screen` else `idle_prompt_mark`, which is Codex's),
 `modal_on_screen` (what its screen shows that a typed line must not go into, in the owner's
 words, or `None`: what the captain's `say` refuses by name, `types.screen_modal`. Claude
 Code's `claude_screen.modal_showing`, its chooser and trust dialog, the rating survey over its

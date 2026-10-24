@@ -9,7 +9,8 @@ Each question goes to the agent of the pane's OWN row, as its launch record plac
 (``fleet.placed_row``: its agent the record's, never the store's column), through its
 adapter's capabilities: ``screen_prompt`` (a prompt at the bottom of the screen, and the
 keys that answer it), ``ready_on_screen`` (a typed line lands as a prompt there,
-``types.screen_ready``) and ``modal_on_screen`` (what a typed line must not go into,
+``types.screen_ready``), ``prompt_on_screen`` (its prompt drawn, busy or not,
+``types.screen_drawn``) and ``modal_on_screen`` (what a typed line must not go into,
 ``types.screen_modal``). Claude Code's are ``core.agent_adapters.claude_screen``'s: its
 input box, chooser, trust dialog and rating survey. Codex's are its own dialogs: its
 folder trust, the owner's; its approval view, a chooser on ``1`` and Esc; its empty
@@ -29,6 +30,7 @@ from aisquare.core.agent_adapters import recorded_adapter
 from aisquare.core.agent_adapters.types import (
     AgentCapabilities,
     ScreenPrompt,
+    screen_drawn,
     screen_modal,
     screen_ready,
 )
@@ -75,6 +77,13 @@ def ready(agent: FleetAgent, lines: Sequence[str]) -> bool:
     line lands as a prompt (``types.screen_ready``)."""
     capabilities = _capabilities(agent)
     return capabilities is not None and screen_ready(capabilities, strip_escapes(lines))
+
+
+def drawn(agent: FleetAgent, lines: Sequence[str]) -> bool:
+    """Whether ``agent``'s pane shows its prompt drawn, a turn running at it or not
+    (``types.screen_drawn``)."""
+    capabilities = _capabilities(agent)
+    return capabilities is not None and screen_drawn(capabilities, strip_escapes(lines))
 
 
 def modal_showing(agent: FleetAgent, lines: Sequence[str]) -> str | None:

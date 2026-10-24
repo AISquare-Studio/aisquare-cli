@@ -103,6 +103,12 @@ def input_box_at(rows: Sequence[str]) -> int | None:
     return bounds[0] if bounds is not None else None
 
 
+def box_drawn(rows: Sequence[str]) -> bool:
+    """Whether Claude Code's input box is drawn, a turn running at it or not
+    (``AgentCapabilities.prompt_on_screen``)."""
+    return input_box_at(rows) is not None
+
+
 def box_idle(lines: Sequence[str]) -> bool:
     """Whether Claude Code's input box is drawn AND idle (13313): ready for text.
 

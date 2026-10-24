@@ -2000,46 +2000,6 @@ def _unbriefed(session_id: str) -> str:
 #: fleet row, and one launched with a persona by its persona.
 _NO_ROLE = frozenset({"unassigned", harness.PLAIN_ROLE})
 
-CLIENT_SESSION_PREFIX = "mcp:"
-"""What every id ``mcp_server.client_session_id`` makes starts with: the row an MCP server
-writes on each tool call. A remote teammate over ``aisquare serve`` is one of these, and a
-team member (docs/orchestration.md, *Remote agents over MCP*)."""
-
-HOST_SESSION_ENV = "CLAUDE_CODE_SESSION_ID"
-"""What Claude Code sets in the environment of the stdio MCP servers it starts: the hosting
-session's id, the very ``session_id`` its hooks are handed (measured on 2.1.310 from a
-server started under ``env -i``). Claude Desktop and every other client set none."""
-
-HOSTED_CLIENT = "cc-"
-"""The client part of the row a Claude Code session's own MCP server writes,
-``mcp:cc-<session id>:<project>`` (``mcp_server.client_session_id``), when no client name
-is set: the one ``mcp:`` row that is a session's own tools, not a teammate (#48)."""
-
-
-def hosting_session(row_id: str) -> str | None:
-    """The Claude Code session whose own MCP server wrote ``row_id``, or ``None`` for every
-    other row: a named client, a nameless Desktop's ``mcp:remote:…``, any session."""
-    head = CLIENT_SESSION_PREFIX + HOSTED_CLIENT
-    if not row_id.startswith(head):
-        return None
-    host, _, _project = row_id[len(head) :].rpartition(":")
-    return host or None
-
-
-def _speaks_for_itself(store: ContextStore, row_id: str, session_id: str | None) -> bool:
-    """Whether ``row_id`` is a Claude Code session's own MCP server row whose session is
-    already accounted for: the caller itself, or a session with its own row on the board
-    (live, it counts as itself; ended, it is gone). A hosting session with no row of its
-    own (its MCP server mounted, aisquare's hooks not installed) has only this one, and it
-    counts: no team member is ever read as solo (#48)."""
-    host = hosting_session(row_id)
-    if host is None:
-        return False
-    if host == session_id:
-        return True
-    known = store.get_session(host)
-    return known is not None and known.id == host  # get_session prefix-matches
-
 
 def member_by_env(role: str | None) -> bool:
     """Whether a session is a team member by how it was started, before any board is
@@ -2082,31 +2042,26 @@ def _solo(
 def _has_team(store: ContextStore, project_id: str, session_id: str | None) -> bool:
     """Whether a session with no role and no fleet row has a team on this board: an open
     task, a live fleet agent, or a live session (seen within :data:`_STALE_AFTER`, not
-    ended) other than the caller's own row and the MCP server's. Three reads on indexed
-    columns.
+    ended) other than the caller's own row. Three reads on indexed columns.
 
     ``session_id`` is the caller's row where it is known (the hooks). Where it is not —
     the MCP server, started by its client alongside SessionStart and before that hook
     writes the row — ANY live session is a team: it may be a teammate, and the board is
     the fail-safe answer. A session restarting beside its own not-yet-ended previous row
     reads as a team for that reason.
+
+    Every live ``mcp:`` row counts, a session's own MCP server's too: a remote teammate
+    over ``aisquare serve`` writes one, and no row tells the two apart for sure (owner
+    decision, 2026-10-24, option A). So a solo session that calls a board tool reads as a
+    team until that row goes stale (#45 m1, a known limitation; docs/orchestration.md,
+    docs/plans/mcp-own-row.md).
     """
     if store.has_team_task_in(project_id, _OPEN_TASKS):
         return True
     if store.fleet_agents(project_id, live_only=True):
         return True
     seen = store.team_sessions_seen_since(project_id, _now() - _STALE_AFTER)
-    # Never a session's own MCP server row (_speaks_for_itself): written on every tool call,
-    # it read a solo session's first team_board() as a teammate, and the board, the team
-    # instructions and every new start's briefing came back for _STALE_AFTER (#45, m1).
-    # Every other mcp: row is a remote teammate's, and counts: skipping them all read a
-    # session beside a remote agent as solo (#46's fix, final delta review MAJOR-1).
-    return any(
-        other.id != session_id
-        and other.ended_at is None
-        and not _speaks_for_itself(store, other.id, session_id)
-        for other in seen
-    )
+    return any(other.id != session_id and other.ended_at is None for other in seen)
 
 
 def board_has_team(store: ContextStore, project_id: str) -> bool:

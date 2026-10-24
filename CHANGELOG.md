@@ -330,7 +330,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gets no `<aisquare-team>` block, and the MCP server's instructions are one line where
   there is no team; `serve` over HTTP keeps the full text. The session is still on the
   board, and its first prompt after a team forms brings the board, once. A check that
-  fails keeps the board. Session start no longer points agents at the Repomix snapshot
+  fails keeps the board. Every live MCP client counts as a teammate, so a solo session that calls
+  aisquare's own board tools over MCP gets the board for 30 minutes (a known limitation,
+  docs/orchestration.md). Session start no longer points agents at the Repomix snapshot
   (it told them to read the pack FIRST, often ~110k tokens, and on some repos the
   "skeleton" and "full pack" lines named the same file) and no longer adds the
   "Past user prompts … aisquare log" line. A `Your preferences` entry whose text a

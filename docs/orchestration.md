@@ -292,6 +292,16 @@ call, and stands still while a call is running, so a tool call longer than the
 deadline is answered rather than cut off mid-wait (the captain's
 `ask_manager` waits up to 600s under a 300s default).
 
+Every MCP client is on the board as a session of its own, `mcp:<client>:<project>`
+(`AISQUARE_SERVE_CLIENT`, else `remote`), and every live one counts as a teammate. That
+includes the aisquare MCP server a session mounts for its own tools: no row tells the two
+apart for sure. So a solo session (see "Less per-request context" in the CHANGELOG) that
+calls one of aisquare's board tools, such as `team_board`, reads as a team from then on,
+and gets the board, the full MCP instructions and the team block on new starts, until
+that row goes stale 30 minutes after its last call. This is a known limitation: it costs
+tokens, and never hides a teammate. Precise detection of a session's own server is a
+planned follow-up (docs/plans/mcp-own-row.md).
+
 ### Phone control (`aisquare remote`)
 
 The fleet on your phone: one feed of everything waiting on you across every

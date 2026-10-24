@@ -419,7 +419,9 @@ also brings back every agent that **died**: one that ended for a reason nobody g
 it — killed (an outside SIGTERM, exit 143), crashed, its tmux server gone, a reboot.
 An agent aisquare stopped on purpose (`fleet stop`, *Stop all*, `fleet shutdown`) is
 not brought back; the store records how each agent ended (`stopped` or `died`), and
-`fleet stop` of a 💤 agent's window marks it stopped too. `--managers` acts on the
+`fleet stop` of a 💤 agent's window marks it stopped too, as does `fleet stop` of a
+dead agent with no window left (its tmux server gone), which then says it only
+marked it. `--managers` acts on the
 managers alone and leaves their teams. *⚙ Settings ▸ Fleet* in `asq`
 does the same through the same service function (below). An agent is running when
 it has a process: ▶ working, ⏸ waiting, 🔔 needs you, ⏳ limited, or · unknown. Each

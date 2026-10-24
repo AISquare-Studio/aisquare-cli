@@ -537,7 +537,13 @@ def stop(
         typer.echo(json.dumps(_stop_json(receipt)))
     else:
         console = stdout_console()
-        console.print(f"✓ stopped {agent.label} ({agent.id})")
+        if receipt.marked_only:
+            console.print(
+                f"✓ marked {agent.label} ({agent.id}) stopped — it had already ended and no "
+                "window of its was left; Restart all leaves it"
+            )
+        else:
+            console.print(f"✓ stopped {agent.label} ({agent.id})")
         for line in _stop_notes(receipt, target):
             console.print(f"  {line}", markup=False)
     if receipt.release_failed:

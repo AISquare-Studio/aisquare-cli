@@ -298,3 +298,212 @@ def test_an_agent_that_died_before_the_column_is_read_by_its_exit_status(
     targets = {row.agent.id for row in fleet_service.bulk_plan("restart").targets}
 
     assert killed.id in targets and quiet.id not in targets
+
+
+# --- #274 delta review 2: m1-m3 ------------------------------------------------------
+
+
+def _nudges(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Each manager wake-up's reason, from here on."""
+    reasons: list[str] = []
+
+    def nudge(project_id: str, *, reason: str, board: str | None = None) -> bool:
+        reasons.append(reason)
+        return True
+
+    monkeypatch.setattr(fleet_service, "nudge_manager", nudge)
+    return reasons
+
+
+def _respawn_refused(agent_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The replacement for ``agent_id`` fails to start; every other starts."""
+    real = fleet_service._respawn
+
+    def refused(project: ProjectInfo, agent: FleetAgent, *args: Any, **kwargs: Any) -> Any:
+        if agent.id == agent_id:
+            raise fleet_service.FleetError("tmux refused the window")
+        return real(project, agent, *args, **kwargs)
+
+    monkeypatch.setattr(fleet_service, "_respawn", refused)
+
+
+def _dies_before_its_turn(
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    agent: FleetAgent,
+    status: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``agent`` dies with ``status`` after Restart all's plan, just before its turn's look."""
+    look = fleet_service._still_to_restart
+
+    def dies_first(row: fleet_service.BulkRow) -> None:
+        if row.agent.id == agent.id:
+            tmux.die(agent.pane_id, status)
+        look(row)
+
+    monkeypatch.setattr(fleet_service, "_still_to_restart", dies_first)
+
+
+@pytest.mark.parametrize("respawn", ["fails", "starts"])
+def test_a_row_that_dies_between_the_plan_and_its_turn_keeps_its_window_and_comes_back(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    monkeypatch: pytest.MonkeyPatch,
+    respawn: str,
+) -> None:
+    """m1: the turn's look records the death with the wake-up held back, as the restart
+    holds its own. It woke the manager for an agent coming back, and a respawn that then
+    failed woke it a second time. Either way the row's last screen stays until a
+    replacement supersedes it, and one whose respawn failed is still one that died."""
+    coder = fleet.agents["alpha/coder-1"]
+    _dies_before_its_turn(tmux, coder, KILLED, monkeypatch)
+    if respawn == "fails":
+        _respawn_refused(coder.id, monkeypatch)
+    nudges = _nudges(monkeypatch)
+
+    report = fleet_service.bulk("restart")
+
+    outcome = _outcomes(fleet, report.receipts)["alpha/coder-1"]
+    if respawn == "starts":
+        assert outcome == ("done", None)
+        assert f"{coder.label} exited" not in nudges, "no manager woken for one coming back"
+        return
+    assert outcome[0] == "failed"
+    assert coder.pane_id not in tmux.killed, "its last screen stays"
+    assert _row(coder.id).ended_by == "died" and _row(coder.id).exit_status == KILLED
+    assert nudges.count(f"{coder.label} exited") == 1, "woken once, for the failed start"
+    targets = {row.agent.id: row for row in fleet_service.bulk_plan("restart").targets}
+    assert coder.id in targets and targets[coder.id].dead, "the next Restart all brings it back"
+
+
+def test_a_row_that_exits_0_before_its_turn_is_left_and_its_manager_woken(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """m1's held-back wake-up is owed when the look then leaves the row: exit 0 is ended by
+    itself, so nothing comes back, and the manager hears of it as from any listing."""
+    coder = fleet.agents["alpha/coder-1"]
+    _dies_before_its_turn(tmux, coder, 0, monkeypatch)
+    nudges = _nudges(monkeypatch)
+
+    report = fleet_service.bulk("restart")
+
+    assert _outcomes(fleet, report.receipts)["alpha/coder-1"][0] == "skipped"
+    assert nudges.count(f"{coder.label} exited") == 1
+
+
+def test_a_restart_whose_vanished_row_another_reader_ends_first_still_died(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """m1 with m3: a pane that VANISHED (its server gone) is ended by the restart through
+    ``stop`` on the copy it read. When a ``reap`` records it in between, ``stop`` finds an
+    ended row with no window; m3 marks such a row stopped for ``fleet stop``, and for the
+    restart that left a respawn that failed as an agent no Restart all brings back. The
+    restart's ``stop`` hands the row back as it is: still one that died."""
+    coder = fleet.agents["alpha/coder-1"]
+    observe = fleet_service._observe_sockets
+    reaped: list[bool] = []
+
+    def reap_first(*args: Any, **kwargs: Any) -> Any:
+        if not reaped:
+            reaped.append(True)
+            fleet_service.reap(fleet.alpha)
+            assert _row(coder.id).ended_by == "died"
+        return observe(*args, **kwargs)
+
+    tmux.vanish(coder.pane_id)
+    monkeypatch.setattr(fleet_service, "_observe_sockets", reap_first)
+    _respawn_refused(coder.id, monkeypatch)
+
+    with pytest.raises(fleet_service.FleetError, match="tmux refused"):
+        fleet_service.restart(fleet.alpha, coder.label, agent_id=coder.id)
+
+    assert reaped and _row(coder.id).ended_by == "died"
+    assert coder.id in {row.agent.id for row in fleet_service.bulk_plan("restart").targets}
+
+
+def _the_tick_records_the_exit_first(
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent exits 1 on this stop's ``/exit`` (a hook error, another binary), and the
+    UI's tick lists the project before the stop looks again: the listing records it
+    first, as ``died``."""
+    send_keys = tmux.send_keys
+
+    def enter(pane_id: str, *keys: str) -> None:
+        send_keys(pane_id, *keys)
+        if keys == ("Enter",) and pane_id in tmux.facts:
+            tmux.die(pane_id, 1)
+            fleet_service.list_agents(project)
+
+    monkeypatch.setattr(tmux, "send_keys", enter)
+
+
+def test_a_stop_whose_exit_the_tick_recorded_first_is_left_down_by_restart_all(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """m2, ``fleet stop``: the death this stop's ``/exit`` caused is the owner's stop."""
+    coder = fleet.agents["alpha/coder-1"]
+    _the_tick_records_the_exit_first(tmux, fleet.alpha, monkeypatch)
+
+    receipt = fleet_service.stop(fleet.alpha, coder.label, agent_id=coder.id)
+
+    assert receipt.agent.exit_status == 1
+    assert _row(coder.id).ended_by == "stopped"
+    assert coder.id not in {row.agent.id for row in fleet_service.bulk_plan("restart").targets}
+
+
+@pytest.mark.parametrize("record", ["_record_lost", "_record_self_exit"])
+def test_a_shutdown_row_a_listing_recorded_first_is_left_down_by_restart_all(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    record: str,
+) -> None:
+    """m2, ``shutdown``: its two recorders keep a row's first end, and a listing that got
+    there first wrote ``died``; the shutdown still took it down on purpose."""
+    coder = fleet.agents["alpha/coder-1"]
+    tmux.die(coder.pane_id, 1)
+    fleet_service.list_agents(fleet.alpha)  # the tick, between shutdown's snapshot and this
+    assert _row(coder.id).ended_by == "died"
+    report = fleet_service.ShutdownReport()
+
+    if record == "_record_lost":
+        fleet_service._record_lost(coder, "its session was killed under it", report)
+    else:
+        fleet_service._record_self_exit(coder, 1, report)
+
+    assert _row(coder.id).ended_by == "stopped"
+    assert coder.id not in {row.agent.id for row in fleet_service.bulk_plan("restart").targets}
+
+
+def test_stopping_a_dead_agent_whose_server_is_gone_keeps_it_down(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    runner: CliRunner,
+) -> None:
+    """m3: the motivating crash took the tmux server with it, so the dead row has no window
+    left to remove. ``fleet stop`` records the owner's word anyway, and says that is all it
+    did; refused, nothing could keep the agent down and Restart all brought it back."""
+    coder = fleet.agents["alpha/coder-1"]
+    _kill(tmux, coder)
+    fleet_service.list_agents(fleet.alpha)  # recorded as died
+    tmux.kill_server()
+    assert coder.id in {row.agent.id for row in fleet_service.bulk_plan("restart").targets}
+
+    result = runner.invoke(app, ["fleet", "stop", "--project", "alpha", coder.label])
+
+    assert result.exit_code == 0, result.output
+    said = " ".join(ANSI.sub("", result.stdout).split())
+    assert f"marked {coder.label} ({coder.id}) stopped" in said, said
+    assert "Restart all leaves it" in said
+    assert _row(coder.id).ended_by == "stopped"
+    assert coder.id not in {row.agent.id for row in fleet_service.bulk_plan("restart").targets}
+    again = runner.invoke(app, ["fleet", "stop", "--project", "alpha", coder.label])
+    assert again.exit_code != 0, "stopped already, and nothing left to remove"

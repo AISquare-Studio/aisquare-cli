@@ -588,6 +588,9 @@ class StopReceipt:
     a plain stop, and for a hand-over whose row a listing ended first — that
     listing released and announced it, and nothing is left to give back
     (:func:`_stop_row`)."""
+    marked_only: bool = False
+    """The agent had ended already and no window of its was left to remove: the stop
+    recorded it as stopped on purpose and nothing else, so Restart all leaves it (#38)."""
 
 
 @dataclass(frozen=True)
@@ -5357,7 +5360,9 @@ def stop(
 
     ``ended_by`` is how the row is recorded as ended (#38): ``stopped``, on aisquare's word,
     so Restart all leaves it. A 💤 row whose window this removes is marked so too: stopped
-    after it died is stopped. :func:`restart` ends a vanished pane's row here as ``died``.
+    after it died is stopped. So is an ended row with no window left, which is all the stop
+    does to it (``StopReceipt.marked_only``). :func:`restart` ends a vanished pane's row here
+    as ``died``, and a row already ended is handed back to it as it is, window and all.
     """
     with store_session() as store:
         try:
@@ -5370,9 +5375,26 @@ def stop(
                 if agent_id is None
                 else store.get_fleet_agent(agent_id)
             )
-            if ended is None or not _kill_lingering_window(store, project, ended):
-                raise  # no such row, or no window of its own left (gone, or a reused id)
-            return StopReceipt(store.mark_fleet_agent_stopped(ended.id), [])
+            if ended is None or ended.ended_at is None:
+                raise
+            if ended_by != "stopped":
+                # `restart`'s, for a vanished pane whose row another reader (`reap`, a
+                # look) ended meanwhile: it is ended, and nothing of it is the stop's to
+                # remove. Marked stopped below, a respawn that then failed left an agent
+                # Restart all leaves (#274 delta review 2, m1 and m3).
+                return StopReceipt(ended, [])
+            if _kill_lingering_window(store, project, ended):
+                return StopReceipt(store.mark_fleet_agent_stopped(ended.id), [])
+            head = store.fleet_agent_by_label(project.id, ended.label, live_only=False)
+            if ended.ended_by == "stopped" or head is None or head.id != ended.id:
+                # Stopped already, or a row another took the label from (the pin's
+                # refusal): none is one Restart all brings back, and nothing is left
+                # of it to remove.
+                raise
+            # Ended with no window left (its tmux server gone, a row `reap` recorded): the
+            # owner's word that it stays down is recorded all the same. Refused, nothing
+            # could keep one dead agent down, and Restart all brought it back (m3).
+            return StopReceipt(store.mark_fleet_agent_stopped(ended.id), [], marked_only=True)
     return _stop_row(
         project,
         agent,
@@ -5590,6 +5612,12 @@ def _stop_row(
                 # is asked for again, though: a listing has no report to carry one
                 # the store refused, and this stop has (review of #163, round 1;
                 # after the listing's went through it finds nothing).
+                # And recorded as the stop it was: the listing wrote "died" for the pane
+                # this `/exit` took down, and a non-zero exit after it (a hook error,
+                # another binary) left an agent the owner stopped for Restart all to
+                # bring back (#38; #274 delta review 2, m2).
+                if ended_by == "stopped":
+                    current = store.mark_fleet_agent_stopped(current.id)
                 return StopReceipt(current, *_release_or_say(store, current, why="agent stopped"))
             if current is not None and exited_here and handover:
                 # A hand-over's row is one no listing ends while its mark holds
@@ -6253,7 +6281,9 @@ def _record_lost(agent: FleetAgent, reason: str, report: ShutdownReport) -> None
     """End one row with no exit status, on the operator's word, saying why."""
     try:
         with store_session() as store:
-            ended = store.end_fleet_agent(agent.id, exit_status=None, ended_by="stopped")
+            store.end_fleet_agent(agent.id, exit_status=None, ended_by="stopped")
+            # Down as the shutdown wanted it, even when a listing recorded it first (m2).
+            ended = store.mark_fleet_agent_stopped(agent.id)
             _release_in(store, ended, report)
     except Exception as exc:  # a vanished row (KeyError), a locked store
         report.failed.append(ShutdownRow(agent, f"its row could not be ended ({exc})"))
@@ -6277,8 +6307,10 @@ def _record_self_exit(agent: FleetAgent, dead_status: int | None, report: Shutdo
     """
     try:
         with store_session() as store:
-            # Down as the shutdown wanted it: not one for Restart all to bring back (#38).
-            ended = store.end_fleet_agent(agent.id, exit_status=dead_status, ended_by="stopped")
+            # Down as the shutdown wanted it: not one for Restart all to bring back (#38),
+            # even when a listing recorded its death first and kept that end (m2).
+            store.end_fleet_agent(agent.id, exit_status=dead_status, ended_by="stopped")
+            ended = store.mark_fleet_agent_stopped(agent.id)
             _release_in(store, ended, report)
             _emit_exit(store, ended)
     except Exception as exc:  # a vanished row (KeyError), a locked store
@@ -7810,14 +7842,14 @@ def restart(
     # asks the same ladder and gives them itself.
     notes = [f"accounts: {note}" for note in choice.notes] if account is not None else []
     failures: list[str] = []  # the notes that say what did not happen (`RestartReceipt`)
-    if before_stop is not None:
-        before_stop()
     was_running = False
     handed_over: StopReceipt | None = None
     # Set when THIS restart ended a dead or vanished pane's row with the manager's
     # wake-up held back for the replacement (below): a replacement that then never
     # starts owes the manager that wake-up.
     held_back = False
+    if before_stop is not None:
+        before_stop()
     if agent.ended_at is None:
         # Measured BEFORE anything is done, so the operator does not read
         # "stopped and restarted" for an agent that was not running.
@@ -7861,7 +7893,8 @@ def restart(
             if ended:
                 agent = ended[0]
             else:
-                # A vanished pane, ended on its way back: died, not stopped (#38).
+                # A vanished pane, ended on its way back: died, not stopped (#38). A row
+                # another reader ended meanwhile comes back from `stop` as it is.
                 stopped = stop(project, label, agent_id=agent.id, nudge=False, ended_by="died")
                 agent = stopped.agent
                 if stopped.release_failed:
@@ -9088,13 +9121,16 @@ def _still_to_restart(row: BulkRow) -> None:
         project = store.get_project(row.project.id) or row.project
     if agent is None:
         raise NoSuchAgent(GONE_SINCE)
+    recorded: list[FleetAgent] = []
     if agent.ended_at is None:
         now = status_of(agent)
         if now.state in PROCESS_STATES:
             return
         tmux_session = session_name(project.codename) if project.codename else None
         with suppress(Exception):  # unrecorded, it reads as a death all the same
-            _end_dead_rows([agent], _observe_sockets([agent], tmux_session))
+            # No manager woken for an agent coming back: `restart` holds the wake-up for
+            # a replacement that fails to start, as it holds its own (m1).
+            recorded = _end_dead_rows([agent], _observe_sockets([agent], tmux_session), nudge=False)
         with store_session() as store:
             agent = store.get_fleet_agent(agent.id) or agent
         status = now.model_copy(update={"agent": agent})
@@ -9104,6 +9140,10 @@ def _still_to_restart(row: BulkRow) -> None:
         )
     left = _left_dead(status, _label_heads(project))
     if left is not None:
+        for ended in recorded:  # not coming back after all: the wake-up held back is owed
+            nudge_manager(
+                ended.project_id, reason=f"{ended.label} exited", board=_board_of_row(ended)
+            )
         raise NoSuchAgent(left)
 
 

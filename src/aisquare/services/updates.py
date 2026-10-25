@@ -167,8 +167,8 @@ def refresh_latest(now: datetime | None = None) -> str | None:
     update itself installs uv's newest, as ``aisquare upgrade`` does, so the number the
     dialog names is the one asked for here (review of #301).
 
-    The release it names is announced by that: the dialog said it, so the next hourly ask
-    does not toast it again as "is out" (review of #301, n1).
+    The dialog that shows the answer marks it announced (:func:`mark_announced`), not this
+    ask: a release the dialog never showed is still toasted (review of #401, n3).
     """
     found = lookup_latest()
     if found is not None:
@@ -176,8 +176,18 @@ def refresh_latest(now: datetime | None = None) -> str | None:
         with store_session() as store:
             store.set_ui_state(CHECKED_KEY, when.isoformat())
             store.set_ui_state(LATEST_KEY, found)
-            store.set_ui_state(ANNOUNCED_KEY, found)
     return found
+
+
+def mark_announced(version: str) -> None:
+    """``version`` was named on screen (the update dialog showed it): the next check does not
+    toast it again as "is out" (review of #301, n1). A store that will not take it costs a
+    second toast, never the dialog."""
+    try:
+        with store_session() as store:
+            store.set_ui_state(ANNOUNCED_KEY, version)
+    except Exception:
+        return
 
 
 # --- the press, and the reopen ----------------------------------------------------------------

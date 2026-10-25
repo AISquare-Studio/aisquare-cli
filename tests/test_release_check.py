@@ -276,10 +276,14 @@ def test_a_release_the_dialog_named_first_is_not_toasted_again(
     machine: Machine,  # noqa: F811
 ) -> None:
     """Review of #301, n1: the check found 0.9.1, then the dialog's own ask found 0.9.2 and the
-    dialog was cancelled. The dialog named 0.9.2, so the next check offers it unannounced."""
+    dialog showed it before it was cancelled. The dialog named 0.9.2 (``mark_announced``), so
+    the next check offers it unannounced. The ask alone announces nothing (review of #401,
+    n3): a release no dialog showed is still toasted."""
     first = updates.check_for_release(NOW)
     machine.latest = LatestRelease("0.9.2")
     assert updates.refresh_latest(NOW + timedelta(minutes=5)) == "0.9.2"
+    assert _state(updates.ANNOUNCED_KEY) == "0.9.1", "the ask records the release, not its toast"
+    updates.mark_announced("0.9.2")  # the dialog showed it
     next_day = updates.check_for_release(NOW + timedelta(days=1, minutes=5))
 
     assert first is not None and first.announce

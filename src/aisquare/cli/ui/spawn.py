@@ -358,6 +358,11 @@ class ConfirmTakeOverScreen(ModalScreen[bool]):
 class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     """Spawn one agent for ``project``; dismisses with the receipt, or ``None`` on cancel."""
 
+    # The label column is the longest label, "Claude Remote Control", and two: at 18 it
+    # wrapped that one at any width (review of #411). The notes start under the fields, and
+    # a note beside a field takes what the row leaves (1fr), so it wraps rather than cut.
+    # The How row's buttons are as wide as their words: Textual's 1fr made the set take the
+    # whole row, and *Start fresh* went past the dialog's edge at any width.
     DEFAULT_CSS = """
     SpawnDialog { align: center middle; }
     SpawnDialog #spawn-box { width: 90; max-width: 96%; height: auto; max-height: 92%;
@@ -368,19 +373,22 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     SpawnDialog #spawn-advanced { padding: 0; margin-top: 1; background: $surface; }
     SpawnDialog #spawn-advanced > Contents { padding: 0; }
     SpawnDialog .spawn-row { height: auto; }
-    SpawnDialog .spawn-row > Label { width: 18; padding-top: 1; }
+    SpawnDialog .spawn-row > Label { width: 23; padding-top: 1; }
     SpawnDialog .spawn-row > Select { width: 1fr; }
     SpawnDialog .spawn-row > Input { width: 1fr; }
     SpawnDialog #spawn-dice { min-width: 7; width: 7; }
     SpawnDialog #spawn-pick { min-width: 10; width: 10; }
     SpawnDialog #spawn-import { min-width: 12; width: 12; }
-    SpawnDialog .spawn-note { height: auto; padding-left: 18; color: $text-muted; }
-    SpawnDialog #spawn-worktree-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
-    SpawnDialog #spawn-pick-note { padding: 1 0 0 1; height: auto; color: $text-muted; }
+    SpawnDialog .spawn-note { height: auto; padding-left: 23; color: $text-muted; }
+    SpawnDialog #spawn-worktree-note { padding: 1 0 0 1; width: 1fr; height: auto;
+                                       color: $text-muted; }
+    SpawnDialog #spawn-pick-note { padding: 1 0 0 1; width: 1fr; height: auto;
+                                   color: $text-muted; }
     SpawnDialog #spawn-remote-note { padding: 1 0 0 1; width: 1fr; height: auto;
                                      color: $text-muted; }
     SpawnDialog #spawn-prompt { height: 6; width: 1fr; }
     SpawnDialog #spawn-how { width: auto; height: auto; }
+    SpawnDialog #spawn-how > RadioButton { width: auto; }
     SpawnDialog #spawn-fresh { margin-left: 2; }
     SpawnDialog #spawn-status { height: auto; padding: 0 0 0 0; }
     SpawnDialog #spawn-buttons { height: auto; align-horizontal: right; padding-bottom: 1; }

@@ -3258,6 +3258,72 @@ def test_log_in_again_reads_whole_on_screen_at_160_columns_unscrolled(
     assert out["seen"] and out["on_screen"]
 
 
+@pytest.mark.parametrize("size", [(160, 50), (100, 40)], ids=["160x50", "100x40"])
+def test_408s_cells_and_login_read_whole_with_301s_update_row_in_the_sidebar(
+    no_network: dict[str, Any], size: tuple[int, int]
+) -> None:
+    """Merged in #401 for 0.9.0: #408's 16-wide session cell (a kept reading's age) and 14-wide
+    *Log in again* on #406's layout, with #301's ⬆ row in the sidebar. The row takes no width
+    from the page: the sidebar is as wide with it as without, the session cell reads whole,
+    and *Log in again*, focused, is whole and in view (scrolled to at 100 columns)."""
+    from aisquare.cli.ui.sidebar import UpdateRow
+    from aisquare.services import updates
+
+    taken = datetime.now(tz=UTC) - timedelta(hours=149, minutes=5)
+
+    def usage(account: ClaudeAccount) -> ClaudeUsage:
+        if account.slot != 1:
+            return _table_usage(account)
+        return ClaudeUsage(
+            available=True,
+            session_percent=33,
+            week_percent=10,
+            fetched_at=taken,
+            last_failed_at=datetime.now(tz=UTC),
+            last_failed_reason="HTTP 503 from the usage endpoint",
+        )
+
+    no_network["usage"] = usage
+    offer = updates.Offer("0.9.1", "0.9.0", runnable=True, announce=False)
+
+    async def run(offered: bool) -> dict[str, Any]:
+        app = FleetApp(
+            refresh_seconds=3600,
+            doctor=lambda: [],
+            accounts=_table_frame,
+            release_check=(lambda: offer) if offered else None,
+        )
+        async with app.run_test(size=size) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: "33%" in cells(view, 1)["session"])
+            table = view.query_one("#claude-table")
+            session = row(view, 1).cell("session")
+            login = row(view, 1).query_one("#account-login-1", Button)
+            login.focus()
+            await pilot.pause()
+            await pilot.wait_for_scheduled_animations()
+            line = "".join(login.render_line(y).text for y in range(login.region.height))
+            return {
+                "update row": app.query_one(UpdateRow).display,
+                "sidebar": app.sidebar.outer_size.width,
+                "session": (session.region.width, session.render_line(0).text.rstrip()),
+                "login": (login_label(view, 1), line),
+                "in view": table.scrollable_content_region.contains_region(login.region)
+                and login.region.right <= view.region.right,
+            }
+
+    without = asyncio.run(run(False))
+    out = asyncio.run(run(True))
+
+    assert (without["update row"], out["update row"]) == (False, True)
+    assert out["sidebar"] == without["sidebar"], "the ⬆ row widens nothing"
+    assert out["session"] == (16, "▮▮▯▯▯ 33% · 149h"), out["session"]
+    label, line = out["login"]
+    assert label == "Log in again" and "Log in again" in line and "…" not in line, line
+    assert out["in view"]
+
+
 @pytest.mark.parametrize(
     ("size", "sidebar"),
     [((90, 40), None), ((100, 40), None), ((140, 40), None), ((100, 40), 48), ((240, 40), None)],

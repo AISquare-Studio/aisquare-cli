@@ -35,7 +35,9 @@ a release from before 0.9.0, or the minutes before a new release's installers ar
 attached), main's script carries on by itself. Either way it says which in one
 line: `using the v0.9.0 installer` or `using this installer (…)`. `--no-handoff`,
 `--offline` and `AISQUARE_INSTALL_NO_HANDOFF=1` keep main's own copy, and a
-release's own copy never hands off.
+release's own copy never hands off. The release's script installs its own version,
+so an install the hand-off made is pinned to it, as a release URL's is: asq's update
+row and `aisquare upgrade` move it on (see [Updating from asq](#updating-from-asq)).
 
 macOS, Linux and WSL2. It installs [uv](https://docs.astral.sh/uv/), a Python
 3.13 for the CLI alone, `aisquare-cli`, tmux, gh, git, Node and
@@ -164,8 +166,8 @@ ten minutes of the update handing back to asq is never acted on. If the install
 fails, its output stays on screen until you press Enter, and the version you
 had reopens.
 
-An install pinned to its release, by that release's own `install.sh` or by
-`--version`, is checked too: *Restart & update* and `aisquare upgrade` move it to
+An install pinned to its release, by that release's own `install.sh` (the one the
+one-liner on `main` hands off to) or by `--version`, is checked too: *Restart & update* and `aisquare upgrade` move it to
 the newest release and drop the pin, which `uv tool upgrade aisquare-cli` alone
 does not.
 

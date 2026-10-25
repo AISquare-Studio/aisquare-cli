@@ -818,6 +818,67 @@ def test_the_remote_control_note_wraps_at_80_columns(git_project: ProjectInfo) -
     assert note == "continue it from claude.ai/code or the Claude app"
 
 
+@pytest.mark.parametrize("size", [(80, 24), (200, 50)], ids=["80x24", "200x50"])
+def test_the_claude_remote_control_label_reads_on_one_line(
+    git_project: ProjectInfo, size: tuple[int, int]
+) -> None:
+    """Owner call W4-8 (revised) named the switch *Claude Remote Control*, 21 characters,
+    and the 18-column label column wrapped it, 'Claude Remote' over 'Control', at every
+    width (#411's review). It is painted on one line, at 80 columns and wide."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        await pilot.resize_terminal(*size)
+        await open_advanced(pilot)
+        switch = dialog.query_one("#spawn-remote", Switch)
+        switch.scroll_visible(animate=False)
+        await settle(pilot)
+        row = switch.parent
+        assert row is not None
+        x, y, width, height = row.query_one(Label).content_region
+        update = host.screen._compositor.render_full_update()
+        rows = ["".join(chop.text for chop in strip) for strip in update.strips]
+        return [line[x : x + width].strip() for line in rows[y : y + height]]
+
+    assert drive(git_project, scenario) == ["Claude Remote Control"]
+
+
+def test_every_row_of_the_open_dialog_fits_80x24_and_each_label_one_line(
+    git_project: ProjectInfo, teammates: list[FleetAgentStatus]
+) -> None:
+    """The label column is as wide as its longest label: at 80x24, with *Advanced* open and
+    a teammate picked (so the *How* row shows), every row's widgets fit inside it, and no
+    label wraps. A note with no width of its own took the whole row and ran past its edge:
+    *Pick…*'s was painted cut, '…fills Role, Binary'."""
+    teammates.append(teammate(git_project, role="tester", label="tester-1"))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        await pilot.resize_terminal(80, 24)
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        assert dialog.query_one("#spawn-how-row").display
+        advanced(dialog).collapsed = False  # its title is below the fold at 24 rows
+        await unfolded(pilot)
+        problems: list[str] = []
+        for row in dialog.query(".spawn-row"):
+            if not row.display:
+                continue
+            shown = [child for child in row.children if child.display]
+            widths = {
+                child.id or type(child).__name__: child.outer_size.width
+                + child.styles.margin.left
+                + child.styles.margin.right
+                for child in shown
+            }
+            if sum(widths.values()) > row.size.width:
+                problems.append(f"{widths} > {row.size.width}")
+            for label in row.query(Label):
+                if label.content_size.height != 1:
+                    problems.append(f"{label.content!s} wraps")
+        return problems
+
+    assert drive(git_project, scenario) == []
+
+
 def test_the_manager_role_locks_the_label_and_a_live_manager_greys_it_out(
     git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, spawns: SpawnRecorder
 ) -> None:

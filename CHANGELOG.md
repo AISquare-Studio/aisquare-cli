@@ -1188,6 +1188,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`tsk_01m5pcq******pmfre2mvs761d`). Digits touching a letter, a digit or an
   underscore are part of an id and are kept. A code you say (`123 456`,
   `code-123456`) is still masked.
+- **Every row of the Spawn dialog fits it, and each label reads on one line.** In a
+  hand-off, *Start fresh* sat past the dialog's right edge at any width, out of
+  sight and out of reach. At 80 columns *Pick…*'s note was cut ("…fills Role,
+  Binary"), and *Claude Remote Control* wrapped onto two lines at every width. The
+  label column now fits its longest label, and a note beside a field wraps in what
+  the row leaves.
 
 ## [0.8.2] - 2026-10-19
 

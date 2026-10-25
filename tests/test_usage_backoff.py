@@ -414,6 +414,26 @@ def test_a_kept_reading_has_no_trend(fake_home: Path, monkeypatch: pytest.Monkey
     assert kept[1] is None and asked == [work.slot], "no trend asked for the kept one"
 
 
+def test_a_wait_that_has_ended_is_never_shown_and_the_account_is_asked(fake_home: Path) -> None:
+    """Review of #408, n5: after a short ``Retry-After`` this process remembered the gated try
+    for five minutes, so the row said "rate-limited until" a time already past and nothing
+    was asked. Once the wait ends the account is asked, in the same process."""
+    work = _slot("work@example.com", "tok-work")
+    endpoint = _Endpoint({"tok-work": _payload(40)})
+    service.cached_usage([work], now=NOW, fetch=endpoint)
+    endpoint.by_token["tok-work"] = (429, {"Retry-After": "30"})
+    limited_at = NOW + timedelta(minutes=6)
+    held = service.cached_usage([work], now=limited_at, fetch=endpoint)[work.slot]
+    assert held.rate_limited_until == limited_at + timedelta(seconds=30)
+    endpoint.by_token["tok-work"] = _payload(55)
+
+    later = limited_at + timedelta(minutes=2)
+    shown = service.cached_usage([work], now=later, fetch=endpoint)[work.slot]
+
+    assert not shown.rate_limited and shown.session_percent == 55, "asked again, read live"
+    assert len(endpoint.calls) == 3
+
+
 def test_removing_an_account_forgets_its_wait(fake_home: Path) -> None:
     work = _slot("work@example.com", "tok-work")
     service.read_usage([work], now=NOW, fetch=_Endpoint({"tok-work": 429}))

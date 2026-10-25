@@ -1570,6 +1570,10 @@ def _served(
 ) -> dict[int, ClaudeUsage]:
     """What the cache answers for each account, from ``since`` on: the reading recorded with
     the token it holds now, or the failed fetch with that token, by :func:`_preferred`.
+
+    A remembered wait that has ended is not served: after a short ``Retry-After`` the row
+    said "rate-limited until" a time already past, and nothing was asked until the five
+    minutes were up (review of #408, n5).
     """
     recorded = _recorded_usage(accounts, tokens, since=since, now=now)
     served: dict[int, ClaudeUsage] = {}
@@ -1581,9 +1585,16 @@ def _served(
             failed = _UNANSWERED.get((str(account.config_dir), token))
         if failed is not None and (failed.fetched_at is None or failed.fetched_at < since):
             failed = None
+        if failed is not None and failed.rate_limited and _wait_over(failed, now):
+            failed = None
         if (answer := _preferred(recorded.get(account.slot), failed)) is not None:
             served[account.slot] = answer
     return served
+
+
+def _wait_over(reading: ClaudeUsage, now: datetime) -> bool:
+    """Whether the wait a rate-limited ``reading`` names has ended by ``now``."""
+    return reading.rate_limited_until is not None and reading.rate_limited_until <= now
 
 
 def _preferred(good: ClaudeUsage | None, failed: ClaudeUsage | None) -> ClaudeUsage | None:

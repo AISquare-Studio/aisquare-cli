@@ -292,6 +292,32 @@ def test_a_forgotten_project_a_capture_brought_back_is_onboarded_again(
     )
 
 
+def test_a_forgotten_project_whose_facts_are_its_own_notes_is_onboarded_again(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A project with no marker at its root gets nothing from onboard, but forget keeps
+    the notes added to it as it keeps any fact. Onboarding it again brings them back and
+    says so: a forgotten row reads as gone, so whatever it kept is back, an onboard's fact
+    or not. Only a captured row needs an earlier onboard's fact to be back (the test
+    above). Review of #399, cycle 6, n15."""
+    proj = tmp_path / "notes-only"
+    proj.mkdir()
+    monkeypatch.chdir(proj)
+    first = runner.invoke(app, ["project", "onboard"])
+    noted = runner.invoke(app, ["context", "add", "Deploys from the release branch.", "--project"])
+    forgotten = runner.invoke(app, ["project", "forget", str(proj)])
+    gone = runner.invoke(app, ["--json", "project", "list"])
+    report = _json(runner.invoke(app, ["--json", "project", "onboard"]).stdout)
+    notes = _json(runner.invoke(app, ["--json", "context", "list"]).stdout)
+
+    assert first.exit_code == 0 and noted.exit_code == 0, first.output + noted.output
+    assert forgotten.exit_code == 0, forgotten.output
+    assert _json(gone.stdout) == [], "control: the project really was forgotten"
+    assert report["restored"] is True, report
+    assert report["seeded"] == [], report
+    assert "Deploys from the release branch." in {entry["text"] for entry in notes}
+
+
 def test_switch_says_so_when_the_state_file_is_not_a_json_object(
     runner: CliRunner, work_dir: Path
 ) -> None:

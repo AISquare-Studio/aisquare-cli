@@ -1688,8 +1688,9 @@ def test_the_pages_read_opens_the_store_three_times_however_many_accounts(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Eight opens a minute for four accounts before (third round). The page's read
-    (``cached_usage_with_trends``) opens it once to look in the cache, once to record what
-    it fetched and once for every trend, whatever the number of accounts."""
+    (``cached_usage_with_trends``) opens it once to look in the cache, once to read the
+    slots' back-offs before fetching (F1 of #400), once to record what it fetched and once
+    for every trend, whatever the number of accounts."""
     import contextlib
 
     a = _slot("work@example.com", "tok-work")
@@ -1710,7 +1711,7 @@ def test_the_pages_read_opens_the_store_three_times_however_many_accounts(
     monkeypatch.setattr("aisquare.services.claude_accounts.store_session", counted_session)
     fetched = service.cached_usage_with_trends([a, b], now=NOW, fetch=fetch)
 
-    assert opens == [1, 1, 1]
+    assert opens == [1, 1, 1, 1]
     assert fetched[a.slot][0].session_percent == 40 and fetched[b.slot][0].session_percent == 60
     trend = fetched[a.slot][1]
     assert trend is not None and trend.per_hour == pytest.approx(40.0)  # 20 → 40 in 30 min
@@ -1725,7 +1726,8 @@ def test_a_recording_usage_round_opens_the_store_once_on_the_callers_thread(
     """``read_usage`` recorded from each pool thread — every headroom pick, ``accounts usage``,
     ``list --usage`` and ``doctor --live``: up to four concurrent writers on ``context.db``,
     on the launch path (review of #205, fourth round). The threads fetch; one session
-    records every answered reading, and an unanswered one leaves no row."""
+    records every answered reading, and an unanswered one leaves no row. The one other
+    open reads the back-offs before the round (F1 of #400), on the caller's thread too."""
     import contextlib
     import threading
 
@@ -1745,7 +1747,7 @@ def test_a_recording_usage_round_opens_the_store_once_on_the_callers_thread(
     monkeypatch.setattr("aisquare.services.claude_accounts.store_session", counted_session)
     readings = service.read_usage([a, b, c], now=NOW, fetch=fetch)
 
-    assert opens == [threading.current_thread().name]
+    assert opens == [threading.current_thread().name] * 2
     assert readings[a.slot].session_percent == 40 and readings[b.slot].session_percent == 60
     assert not readings[c.slot].available
     since = NOW - timedelta(days=1)

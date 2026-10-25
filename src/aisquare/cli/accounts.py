@@ -188,7 +188,8 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
 
 
 _REFRESH_HELP = (
-    "Fetch now instead of serving a reading up to five minutes old (the shared usage cache)."
+    "Fetch now instead of serving a reading up to five minutes old (the shared usage cache). "
+    "An account the usage endpoint rate-limited is not asked again before its wait ends."
 )
 
 
@@ -226,6 +227,24 @@ def _refreshed_line(statuses: list[ClaudeAccountStatus]) -> Text | None:
     )
 
 
+def _kept_lines(statuses: list[ClaudeAccountStatus]) -> list[Text]:
+    """One line per row showing an older reading because the newest try read nothing:
+    ``account 2: rate-limited until 14:32 — …; showing the reading from 12m ago`` (F1 of
+    #400). The numbers in the table are that reading's; this says how old, and why."""
+    lines: list[Text] = []
+    for status in statuses:
+        usage = status.usage
+        if usage is None or not usage.available or usage.last_failed_reason is None:
+            continue
+        age = (
+            f"; showing the reading from {accounts_service.describe_age(usage.fetched_at)}"
+            if usage.fetched_at is not None
+            else ""
+        )
+        lines.append(Text(f"{status.label}: {usage.last_failed_reason}{age}", style="yellow"))
+    return lines
+
+
 @app.command("list")
 def list_(
     usage: Annotated[
@@ -254,6 +273,9 @@ def list_(
         typer.echo(_overview_json(overview))
         return
     _emit_overview(overview, with_usage=usage)
+    if usage:
+        for kept in _kept_lines(overview.accounts):
+            stdout_console().print(kept)
     if usage and (line := _refreshed_line(overview.accounts)) is not None:
         stdout_console().print(line)
 
@@ -305,6 +327,8 @@ def usage_(
         session, week = _usage_cells(status.usage)
         table.add_row(str(status.account.slot), label, who, session, week)
     console.print(table)
+    for kept in _kept_lines(asked):
+        console.print(kept)
     if (line := _refreshed_line(asked)) is not None:
         console.print(line)
 

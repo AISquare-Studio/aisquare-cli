@@ -786,6 +786,11 @@ def offered(view: AccountsView, slot: int, stem: str) -> bool:
     return button.visible and not button.disabled
 
 
+def login_label(view: AccountsView, slot: int) -> str:
+    """What the row's login button says: *Log in* where one is needed, else *Log in again*."""
+    return str(row(view, slot).query_one(f"#account-login-{slot}", Button).label)
+
+
 def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
     no_network["usage"] = lambda account: (
         ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
@@ -801,22 +806,27 @@ def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
         _status(6, "six@example.com", signed_in=False),
     )
 
-    async def go(pilot: Pilot[None]) -> dict[int, tuple[bool, bool]]:
+    async def go(pilot: Pilot[None]) -> dict[int, tuple[bool, str, bool]]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await settle_until(app, lambda: painted(view, 1, 2, 4, 5))
         return {
-            slot: (offered(view, slot, "login"), offered(view, slot, "remove"))
+            slot: (
+                offered(view, slot, "login"),
+                login_label(view, slot),
+                offered(view, slot, "remove"),
+            )
             for slot in range(1, 7)
         }
 
     buttons = drive(go, overview=overview)
-    assert buttons[1] == (False, False)  # signed in, and never ours to remove
-    assert buttons[2] == (False, True)  # signed in, ours
-    assert buttons[3] == (True, True)  # never signed in
-    assert buttons[4] == (True, True)  # signed in, but the endpoint rejected the token (401)
-    assert buttons[5] == (True, True)  # signed in, the token expired
-    assert buttons[6] == (True, True)  # a login recorded, its token gone
+    # A healthy row offers *Log in again* (F1 of #400): the same flow, as a secondary action.
+    assert buttons[1] == (True, "Log in again", False)  # signed in, never ours to remove
+    assert buttons[2] == (True, "Log in again", True)  # signed in, ours
+    assert buttons[3] == (True, "Log in", True)  # never signed in
+    assert buttons[4] == (True, "Log in", True)  # signed in, but the token was rejected (401)
+    assert buttons[5] == (True, "Log in", True)  # signed in, the token expired
+    assert buttons[6] == (True, "Log in", True)  # a login recorded, its token gone
 
 
 def test_without_claude_code_the_page_says_how_to_install_and_add_is_disabled() -> None:
@@ -1958,8 +1968,10 @@ def test_log_in_over_a_rejected_token_waits_for_a_fresh_login_and_the_row_recove
             view._poll_login()
             await settle(app)
             await accounts_read(app)
-            await settle_until(app, lambda: painted(view, 2) and not offered(view, 2, "login"))
-            out["after"] = (cells(view, 2), offered(view, 2, "login"), view.login is None)
+            await settle_until(
+                app, lambda: painted(view, 2) and login_label(view, 2) == "Log in again"
+            )
+            out["after"] = (cells(view, 2), login_label(view, 2), view.login is None)
             out["notice"] = notice(view)
             return out
 
@@ -1975,7 +1987,7 @@ def test_log_in_over_a_rejected_token_waits_for_a_fresh_login_and_the_row_recove
     after, offered_after, closed = out["after"]
     assert closed  # the fresh login closed the window…
     assert after["session"] == "▮▮▯▯▯ 40%"  # …and the row is itself again
-    assert not offered_after
+    assert offered_after == "Log in again"  # no login needed: only the secondary action
     assert "✓ Work laptop: two@example.com · hooks installed" in out["notice"]
 
 
@@ -3132,7 +3144,8 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
     assert out["open"] == closed  # the open field moved no column on any row…
     field_region, name_box = out["field"]
     assert field_region == name_box  # …and sits exactly in the name's cell
-    assert len(closed["account-login"]) == 3  # rejected, unsigned and expired: Log in on each
+    # Log in on the rejected, unsigned and expired rows; Log in again on the healthy one.
+    assert len(closed["account-login"]) == 4
     for name, spans in out["scrolled"].items():  # scrolled sideways, all lines moved as one
         if name.startswith("row "):
             assert spans == out["scrolled"]["header"], name

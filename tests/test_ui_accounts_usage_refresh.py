@@ -535,8 +535,8 @@ def test_a_refresh_that_fails_inside_the_window_keeps_the_figure_and_says_the_tr
     """The tester's repro (reopen of the m4/m5 fix): 40 % at T0, the endpoint at 503, ↻
     Refresh usage a minute later put '503' on the row; the next tick put 40 % back and
     dropped '· last try failed'; the row went 40 % → 503 → 40 % → 503. The row keeps its
-    figure while the figure is in the window, and the line says the try failed throughout.
-    Once the figure is out of the window, the failure is the newest word."""
+    figure, and the line says the try failed throughout. Since F1 of #400 the row also says
+    how old the figure is and why the try failed, and keeps the figure past the window."""
     endpoint: dict[str, Callable[[ClaudeAccount], ClaudeUsage]] = {"up": _answering(clock)}
     no_network["usage"] = lambda account: endpoint["up"](account)
     frame = _signed_in(2, tmp_path, "tok-two")
@@ -567,11 +567,11 @@ def test_a_refresh_that_fails_inside_the_window_keeps_the_figure_and_says_the_tr
     seen = drive(go, overview=frame)
     said, row, _calls = seen["refreshed"]
     assert said == "last refreshed 1m ago · last try failed just now"
-    assert "40%" in row and "503" not in row, row
+    assert "40%" in row and "reading from 1m ago · HTTP 503 from the usage endpoint" in row, row
     for minute, age, tried in ((2, "2m ago", "1m ago"), (3, "3m ago", "2m ago")):
         said, row, calls = seen[minute]
         assert said == f"last refreshed {age} · last try failed {tried}", minute
         assert "40%" in row and calls == 2, (minute, row)
     said, row, calls = seen["aged"]
     assert said == "last refreshed 5m ago · last try failed 4m ago"
-    assert "503" in row and calls == 2, row
+    assert "40%" in row and "reading from 5m ago · HTTP 503" in row and calls == 2, row

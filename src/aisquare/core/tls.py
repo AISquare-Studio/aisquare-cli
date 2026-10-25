@@ -226,6 +226,23 @@ def cert_failure(exc: BaseException) -> bool:
     )
 
 
+def error_text(exc: BaseException) -> str:
+    """What a TLS error says, for a row: its verify message when it has one, else its message.
+
+    Not ``str(exc)``: an ``SSLError`` raised with one argument, as truststore raises a
+    certificate the OS store refused, prints its args tuple, so the tls row read
+    ``('"leaf" certificate is not trusted',)`` (TUI-401b (k) at e28697f1)."""
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, BaseException):  # a URLError around it
+        return error_text(reason)
+    message = getattr(exc, "verify_message", None)
+    if isinstance(message, str) and message:
+        return message
+    if len(exc.args) == 1:
+        return str(exc.args[0])
+    return str(exc)
+
+
 def https_proxy(host: str) -> str | None:
     """The ``HTTPS_PROXY`` a request to ``host`` goes through, as ``urlopen`` picks it
     (``NO_PROXY`` honoured), or ``None`` for a direct connection."""

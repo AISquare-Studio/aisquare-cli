@@ -693,6 +693,41 @@ def test_a_certificate_failure_points_at_the_bundle_when_the_bundle_is_the_sourc
     assert row.fix == (tls.BUNDLE_FIX if named else tls.CERT_FIX), row.fix
 
 
+def _truststores_refusal() -> ssl.SSLCertVerificationError:
+    """A certificate the OS store refused, raised as truststore raises it on macOS: one
+    argument, and the same text as its ``verify_message``."""
+    err = ssl.SSLCertVerificationError("\u201cleaf\u201d certificate is not trusted")
+    err.verify_message = "\u201cleaf\u201d certificate is not trusted"
+    return err
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        _truststores_refusal,
+        lambda: ssl.SSLCertVerificationError("\u201cleaf\u201d certificate is not trusted"),
+        lambda: urllib.error.URLError(_truststores_refusal()),
+    ],
+    ids=["truststore", "one-argument", "wrapped"],
+)
+def test_the_tls_row_says_why_without_a_tuple(monkeypatch: pytest.MonkeyPatch, raised: Any) -> None:
+    """TUI-401b (k) at e28697f1: on the OS-store path the row read 'did not verify against
+    the OS trust store (truststore): ('"leaf" certificate is not trusted',)', the args
+    tuple an SSLError with one argument prints. It says the message itself."""
+    from aisquare.services import diagnostics
+
+    def refused(host: str) -> None:
+        raise raised()
+
+    monkeypatch.setattr(tls, "handshake", refused)
+
+    row = diagnostics._check_tls()
+
+    assert row.status.value == "fail"
+    assert row.detail.endswith(": \u201cleaf\u201d certificate is not trusted"), row.detail
+    assert "('" not in row.detail and "',)" not in row.detail
+
+
 def test_doctors_tls_row_is_live_only() -> None:
     from aisquare.services import diagnostics
 

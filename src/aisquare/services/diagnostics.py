@@ -1763,7 +1763,8 @@ def _check_tls() -> DoctorCheck:
             fix = tls.BUNDLE_FIX if source == tls.SOURCE_ENV else tls.CERT_FIX
             return _fail(
                 "tls",
-                f"{_TLS_PROBE_HOST}'s certificate did not verify against {source}: {exc}",
+                f"{_TLS_PROBE_HOST}'s certificate did not verify against {source}: "
+                f"{tls.error_text(exc)}",
                 fix,
             )
         return _warn(

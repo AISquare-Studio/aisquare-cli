@@ -98,7 +98,9 @@ own any more.
   `test_onboard_and_refresh_seed_facts_and_start_nothing_but_git`). A plain run on a
   project already onboarded prints `✓ already onboarded; --refresh reads the markers
   again`, since it read none; a run that read them and found nothing new prints
-  `✓ onboarded — no new project facts to seed`.
+  `✓ onboarded — no new project facts to seed`. A forgotten project onboarded again is
+  a first run, and prints `✓ onboarded again; its earlier facts are back`, since forget
+  kept them (`restored` in `--json`; review of #399, m12).
 - **`[snapshot]` in `config.toml`** keeps loading, since unknown keys are ignored. An
   unknown section is otherwise kept by a save (`_keep_unknown`), because a newer build may
   read it; `snapshot` is in `RETIRED_SECTIONS`, so the next save drops it. Until then

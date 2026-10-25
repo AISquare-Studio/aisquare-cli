@@ -181,7 +181,7 @@ def test_onboard_and_refresh_seed_facts_and_start_nothing_but_git(
     # than "no new facts" (review of #399, m2).
     assert plain.stdout == "✓ already onboarded; --refresh reads the markers again\n", plain.output
     report = _json(refreshed.stdout)
-    assert set(report) == {"seeded", "markers_read", "warning"}
+    assert set(report) == {"seeded", "markers_read", "restored", "warning"}
     assert report["markers_read"] is True
     assert [entry["text"] for entry in report["seeded"]] == [
         "Has a Makefile — check its targets for build/test commands."
@@ -191,6 +191,53 @@ def test_onboard_and_refresh_seed_facts_and_start_nothing_but_git(
     )
     assert set(started) <= {"git"}, started
     assert not (paths.project_data_dir(project_id_for(proj.resolve())) / "snapshot").exists()
+
+
+def test_onboarding_a_forgotten_project_again_says_its_facts_are_back(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forget keeps a project's facts, hidden, so onboarding it again finds them. That is
+    no re-run: "already onboarded" would say nothing happened while the project came back
+    to the list. It says so, reads the markers as a first run does, and seeds only a
+    fact that is new; a plain run after it is a re-run again (review of #399, m12)."""
+    proj = tmp_path / "app"
+    proj.mkdir()
+    (proj / "package.json").touch()
+    monkeypatch.chdir(proj)
+
+    first = runner.invoke(app, ["project", "onboard"])
+    forgotten = runner.invoke(app, ["project", "forget", str(proj)])
+    gone = runner.invoke(app, ["--json", "project", "list"])
+    back = runner.invoke(app, ["project", "onboard"])
+    listed = runner.invoke(app, ["--json", "project", "list"])
+    plain = runner.invoke(app, ["project", "onboard"])
+    runner.invoke(app, ["project", "forget", str(proj)])
+    (proj / "Makefile").touch()
+    report = _json(runner.invoke(app, ["--json", "project", "onboard"]).stdout)
+    newer = runner.invoke(app, ["project", "forget", str(proj)])
+    (proj / "go.mod").touch()
+    seeded = runner.invoke(app, ["project", "onboard"])
+
+    assert first.stdout == "seeded 1 project fact(s):\n  - Node.js project (package.json).\n", (
+        "control: a project never seen before is no comeback"
+    )
+    assert forgotten.exit_code == 0, forgotten.output
+    assert _json(gone.stdout) == [], "control: the project really was forgotten"
+    assert back.exit_code == 0, back.output
+    assert back.stdout == "✓ onboarded again; its earlier facts are back\n", back.output
+    assert [project["root"] for project in _json(listed.stdout)] == [str(proj.resolve())]
+    assert plain.stdout == "✓ already onboarded; --refresh reads the markers again\n"
+    assert report["restored"] is True
+    assert report["markers_read"] is True
+    assert [entry["text"] for entry in report["seeded"]] == [
+        "Has a Makefile — check its targets for build/test commands."
+    ], "it read the markers, and seeded only the new one"
+    assert newer.exit_code == 0, newer.output
+    assert seeded.stdout == (
+        "✓ onboarded again; its earlier facts are back\n"
+        "seeded 1 project fact(s):\n"
+        "  - Go module (go.mod).\n"
+    ), seeded.output
 
 
 def test_switch_says_so_when_the_state_file_is_not_a_json_object(

@@ -701,7 +701,12 @@ def emit_onboard(report: OnboardReport) -> None:
         # Said as what happened: the markers were not read (review of #399).
         console.print("✓ already onboarded; --refresh reads the markers again")
         return
-    if not report.seeded:
+    if report.restored:
+        # A forgotten project added again: its kept facts are back (review of #399, m12).
+        console.print("✓ onboarded again; its earlier facts are back")
+        if not report.seeded:
+            return
+    elif not report.seeded:
         console.print("✓ onboarded — no new project facts to seed")
         return
     console.print(f"seeded {len(report.seeded)} project fact(s):")

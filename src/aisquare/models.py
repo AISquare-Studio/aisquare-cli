@@ -860,6 +860,9 @@ class OnboardReport(BaseModel):
     markers_read: bool = True
     """``False`` for a plain run on a project already onboarded: the markers were not
     read, so "no new facts" would be a claim nobody checked. ``--refresh`` reads them."""
+    restored: bool = False
+    """``True`` when this run added a forgotten project again: the facts forget kept,
+    hidden, are back. Such a run reads the markers, as a first one does."""
     warning: str | None = None
     """``project_service.HOME_WARNING`` when this onboarding made the aisquare home a
     project (D5), said once; else ``None``."""

@@ -1011,18 +1011,23 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
 
     The first run seeds one fact per marker found at the root. Later runs seed
     nothing unless ``refresh`` is set; then the markers are read again and any fact
-    not already in the pool is added, so none is ever duplicated. ``path`` is the
-    user's, refused unless it is a folder (:func:`typed_root`). Nothing is packed and no
-    process is run: the codebase snapshot it once made is gone.
+    not already in the pool is added, so none is ever duplicated. A forgotten project
+    added again is a first run: forget kept its facts, hidden, and they are back.
+    ``path`` is the user's, refused unless it is a folder (:func:`typed_root`). Nothing
+    is packed and no process is run: the codebase snapshot it once made is gone.
     """
     root = typed_root(path)
     project = ProjectInfo(id=project_id_for(root), root=root, linked_repos=[])
     facts = [fact for marker, fact in _ECOSYSTEM_MARKERS if (root / marker).exists()]
     seeded: list[ContextEntry] = []
     with store_session() as store:
+        live = store.get_project(project.id) is not None  # a forgotten row reads as None
         _, warning = onboard_on_purpose(store, project)  # the deliberate add (#139)
         project_entries = store.entries("project", project_id=project.id)
-        already_onboarded = any(entry.source == "onboard" for entry in project_entries)
+        # A re-run only while the row is live: a forgotten project has its facts kept,
+        # and "already onboarded" would say nothing happened (review of #399, m12).
+        already_onboarded = live and any(entry.source == "onboard" for entry in project_entries)
+        restored = not live and bool(project_entries)
         markers_read = refresh or not already_onboarded
         if markers_read:
             existing = {entry.text for entry in project_entries}
@@ -1032,4 +1037,6 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
                 seeded.append(
                     store.add(new_entry(fact, "project", project.id, ["onboarding"], "onboard"))
                 )
-    return OnboardReport(seeded=seeded, markers_read=markers_read, warning=warning)
+    return OnboardReport(
+        seeded=seeded, markers_read=markers_read, restored=restored, warning=warning
+    )

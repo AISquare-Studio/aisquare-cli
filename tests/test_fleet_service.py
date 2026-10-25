@@ -13340,6 +13340,94 @@ def test_switch_moves_a_limited_agent_to_the_account_with_headroom_and_resumes_i
     assert still is not None and still.status == "doing" and still.claimed_by == agent.session_id
 
 
+def test_a_move_before_the_limit_says_so_and_picks_from_the_cache_the_hook_just_read(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """F2 of #400: the move ``[accounts] before_limit = "switch"`` makes. The board's
+    ``switched`` line gives the reason, ``(before limit)``; the resumed agent is told it moved
+    before its limit, not "after before limit"; and the pick reads the candidates from the
+    cache the hook read them into, so the move sends the endpoint nothing of its own."""
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_usage_aware_accounts import _payload, _Usage
+
+    _two_slots_with_usage(monkeypatch, work=92, personal=10)
+
+    def live(percent: float) -> dict[str, Any]:
+        # The real clock runs here: windows that reset ahead of it, or the cache serves none.
+        soon = datetime.now(tz=UTC) + timedelta(hours=3)
+        payload = _payload(percent, resets_at=soon)
+        payload["seven_day"]["resets_at"] = (soon + timedelta(days=2)).isoformat()
+        return payload
+
+    endpoint = _Usage({"tok-work": live(92), "tok-personal": live(10)})
+    monkeypatch.setattr(accounts_service, "_http_get", endpoint)
+    agent = fleet_service.spawn(project, "coder", worktree=False).agent
+    assert agent.account_slot == 3  # headroom: account 2 is over the line
+    with store_session() as store:  # say it ran on 2, as the hook found it
+        store.upsert_fleet_agent(agent.model_copy(update={"account_slot": 2}))
+    transcript = tmp_path / f"{agent.session_id}.jsonl"
+    transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+    _with_transcript(agent, transcript)
+    accounts_service.cached_usage(accounts_service.list_accounts())  # the hook's reads
+    asked = len(endpoint.calls)
+
+    receipt = fleet_service.switch(
+        project,
+        agent.label,
+        reason=accounts_core.BEFORE_LIMIT_REASON,
+        spawned_by="usage-limit",
+        automatic=True,
+        agent_id=agent.id,
+        max_age=accounts_service.PICK_MAX_AGE_SECONDS,
+    )
+
+    assert (receipt.from_slot, receipt.to_slot) == (2, 3)
+    assert len(endpoint.calls) == asked, "the pick asked the endpoint again"
+    with store_session() as store:
+        kinds = [(e.kind, e.text) for e in store.recent_events(project.id, limit=10)]
+    [switched] = [text for kind, text in kinds if kind == "switched"]
+    assert "moved from account 2 (slot 2) to account 3 (slot 3) (before limit)" in switched
+    [line] = _first_lines(tmux, receipt.started.pane_id)
+    assert line.startswith(
+        f"You are {agent.label}, moved to another Claude account before its usage limit and "
+        "resumed mid-task"
+    ), line
+
+
+def test_only_an_account_named_at_the_spawn_pins_the_agent_and_its_replacements_keep_it(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``LaunchSpec.account_pinned`` (F2 of #400): ``--account`` pins, a pick does not. A
+    restart and a switch name the row's slot or the target's to the resolver, a ``--account``
+    of sorts, which must neither pin an agent nobody pinned nor unpin one somebody did."""
+    _two_slots_with_usage(monkeypatch, work=10, personal=20)
+    named = fleet_service.spawn(project, "coder", worktree=False, account="3").agent
+    picked = fleet_service.spawn(project, "coder", worktree=False).agent
+    assert named.launch_spec is not None and named.launch_spec.account_pinned
+    assert picked.launch_spec is not None and not picked.launch_spec.account_pinned
+    for agent in (named, picked):
+        _with_transcript(agent, tmp_path / "missing.jsonl")
+
+    restarted = fleet_service.restart(project, picked.label)
+    switched = fleet_service.switch(project, named.label, to="2")
+
+    assert restarted.started.launch_spec is not None
+    assert not restarted.started.launch_spec.account_pinned
+    assert switched.started.launch_spec is not None
+    assert switched.started.launch_spec.account_pinned
+    # A take-over that names an account is somebody's choice: pinned there.
+    taken = fleet_service.restart(project, picked.label, account="3")
+    assert taken.started.launch_spec is not None and taken.started.launch_spec.account_pinned
+
+
 def test_the_receipts_are_immutable() -> None:
     """``SpawnReceipt`` lost ``frozen=True`` when its neighbours were inserted (review of #205,
     second round); every caller reads a receipt, none may rewrite one."""

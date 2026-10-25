@@ -22,18 +22,19 @@ import contextlib
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import insights, orchestrator, paths, selfcli
+from aisquare.core import harness, insights, orchestrator, paths, selfcli
 from aisquare.core import spawn as spawn_core
-from aisquare.core.config import load_config
+from aisquare.core.config import AccountsSettings, load_config
 from aisquare.core.injection import build_block, claude_md_files, without_loaded_preferences
 from aisquare.core.store import store_session
 from aisquare.core.workspace import active_project
-from aisquare.models import FleetAgent, ProjectInfo, TeamSession
+from aisquare.models import ClaudeAccount, FleetAgent, ProjectInfo, TeamSession
 from aisquare.services import auto_mode, ci_augment
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
@@ -239,6 +240,9 @@ def turn_stopped(
     # Last, and it swallows its own errors too: auto-mode refusals in the
     # transcript's tail put the row in attention with one board line (#150).
     auto_mode.record_refusals(session_id)
+    if decision is None:
+        # The turn is over: a decision keeps it going, and mid-turn is no place to move it.
+        check_before_limit(session_id)
     return decision
 
 
@@ -249,11 +253,16 @@ def needs_attention(
     message: str | None = None,
     notification_type: str | None = None,
 ) -> None:
-    """Route a Claude Code notification by its TYPE: a bell, a feed line, or nothing (#153)."""
+    """Route a Claude Code notification by its TYPE: a bell, a feed line, or nothing (#153).
+
+    The idle notice is also the other safe point ``[accounts] before_limit`` acts at, after
+    a turn end (:func:`check_before_limit`)."""
     if session_id is not None:
         team_service.hook_notification(
             session_id, cwd, message, notification_type=notification_type
         )
+        if team_service.is_idle_notice(notification_type, message):
+            check_before_limit(session_id)
 
 
 def turn_failed(
@@ -464,7 +473,175 @@ def fresh_replacement_refusal(agent: FleetAgent, *, now: datetime | None = None)
     )
 
 
-def hand_over(session_id: str, *, reason: str | None = None) -> None:
+_BEFORE_LIMIT_KEY = "before_limit:{project}:{label}"
+"""The ``team_meta`` row holding when ``[accounts] before_limit`` last acted on a label — a
+warning posted, a hand-over started: the clock of its :data:`HANDOVER_COOLDOWN`. By label, so
+the replacement a move starts inherits it."""
+
+
+@dataclass(frozen=True)
+class _BeforeLimitPlan:
+    """What :func:`_plan_before_limit` found: an idle fleet agent whose account reads over the
+    line, and the account under it a hand-over would take."""
+
+    session: TeamSession
+    agent: FleetAgent
+    project: ProjectInfo
+    near: claude_accounts_service.NearLimit
+    target: ClaudeAccount
+    family: str | None
+
+
+def check_before_limit(session_id: str) -> None:
+    """``[accounts] before_limit`` at a safe point (F2 of #400): a turn end, or the idle notice.
+
+    ``off``, the default, reads nothing. Otherwise a FLEET agent waiting at its prompt whose
+    account reads at or over ``switch_at`` (``claude_accounts.near_limit``: a live reading
+    through the cache, never a kept one) is, under ``switch``, handed over the way ``on_limit``
+    hands a limited one — the same detached worker (:func:`hand_over`), which ``fleet
+    switch``es it to an account under the line, and the board's ``switched`` line says
+    ``(before limit)``. Under ``warn`` the board gets a ``before_limit`` line naming the move,
+    and nothing else happens. Neither wakes the manager; a hand-over that fails does
+    (``handover_failed``).
+
+    Nothing is done for an agent mid-turn (any state but ``waiting``), a hand-typed session,
+    a project ``fleet pause`` holds, an agent put on its account by name (``--account``, a
+    role's account binding, a binding that sets ``CLAUDE_CONFIG_DIR`` by hand:
+    ``claude_accounts.account_pin``), one started, moved or warned about within
+    :data:`HANDOVER_COOLDOWN`, an account whose windows over the line reset within
+    ``wait_if_reset_within_minutes``, or when no other account is under the line.
+
+    An extra on the turn end, never part of it: it swallows its own failures, said on stderr,
+    so a Stop is never reported as lost for it. It polls nothing; the reads are the cache's.
+    """
+    settings = claude_accounts_service.accounts_settings()
+    if settings.before_limit == "off" or not orchestrator.team_enabled():
+        return
+    try:
+        plan = _plan_before_limit(session_id, settings)
+        if plan is not None:
+            _act_before_limit(plan, settings)
+    except Exception as exc:  # the turn ended all the same; only the early move is lost
+        sys.stderr.write(
+            f"aisquare: before-limit check failed ({type(exc).__name__}: {exc}) — the agent "
+            "was not moved before its limit; run: aisquare doctor\n"
+        )
+
+
+def _before_limit_key(agent: FleetAgent) -> str:
+    return _BEFORE_LIMIT_KEY.format(project=agent.project_id, label=agent.label)
+
+
+def _cooling(agent: FleetAgent, last: str | None, now: datetime) -> bool:
+    """Whether ``agent`` is inside its cool-down: its row started less than
+    :data:`HANDOVER_COOLDOWN` ago (a spawn, a restart, a switch: where a launch just put it),
+    or ``last``, its label's :data:`_BEFORE_LIMIT_KEY` row, is that recent."""
+    if now - agent.created_at < HANDOVER_COOLDOWN:
+        return True
+    try:
+        acted = datetime.fromisoformat(last) if last else None
+    except ValueError:
+        acted = None
+    return acted is not None and now - acted < HANDOVER_COOLDOWN
+
+
+def _plan_before_limit(session_id: str, settings: AccountsSettings) -> _BeforeLimitPlan | None:
+    """The move ``check_before_limit`` makes for ``session_id``, or ``None``. The cheap checks
+    first — the board, the config — and the usage reads last: the agent's own account, then
+    only for an account over the line the others, as the pick reads them."""
+    now = datetime.now(tz=UTC)
+    with store_session() as store:
+        session = store.get_session(session_id)
+        if session is None or session.state != "waiting":
+            return None  # mid-turn, parked on a limit, or mid-hand-over: no safe point
+        agent = store.fleet_agent_for_session(session.id)  # in its own project, as above
+        project = store.get_project(agent.project_id) if agent is not None else None
+        if agent is None or project is None:
+            return None  # a hand-typed session is the operator's to move
+        if team_service.fleet_paused(store, agent):
+            return None
+        if _cooling(agent, store.get_meta(_before_limit_key(agent)), now):
+            return None
+    named = agent.launch_spec is not None and agent.launch_spec.account_pinned
+    if claude_accounts_service.account_pin(agent.role, named=named) is not None:
+        return None
+    leaving = claude_accounts_service.leaving_slot(agent.account_slot, session.account)
+    if leaving is None:
+        return None  # which account it runs on is not known: there is nothing to read
+    family = harness.model_family(session.model)
+    near = claude_accounts_service.near_limit(leaving, switch_at=settings.switch_at, family=family)
+    if near is None or near.lifts_within(settings.wait_if_reset_within_minutes):
+        return None
+    choice = claude_accounts_service.choose_for_handover(
+        role=agent.role,
+        project=project,
+        exclude=(leaving,),
+        automatic=True,
+        family=family,
+        max_age=claude_accounts_service.PICK_MAX_AGE_SECONDS,
+    )
+    if choice.account is None:
+        return None  # no account under the line: it carries on where it is
+    return _BeforeLimitPlan(session, agent, project, near, choice.account, family)
+
+
+def _act_before_limit(plan: _BeforeLimitPlan, settings: AccountsSettings) -> None:
+    """Start the cool-down, then warn (``warn``) or start the hand-over worker (``switch``)."""
+    session, agent = plan.session, plan.agent
+    with store_session() as store:
+        store.set_meta(_before_limit_key(agent), datetime.now(tz=UTC).isoformat())
+    if settings.before_limit == "warn":
+        used = claude_accounts_service.describe_headroom(
+            plan.near.account, plan.near.reading, plan.family
+        )
+        team_service.hook_before_limit(
+            session.project_id,
+            f"{agent.label}: {used} — over the {settings.switch_at}%-used line; "
+            f"{claude_accounts_core.label(plan.target)} has room — "
+            f"`{project_service.fleet_command('switch', plan.project, agent.label)}` moves it "
+            '(`before_limit = "warn"`)',
+            session_id=session.id,
+        )
+        return
+    argv = selfcli.argv_for(["--quiet", "hook", "hand-over", session.id, "--before-limit"])
+    try:
+        _detach(argv)
+    except OSError as exc:
+        team_service.hook_handover_failed(
+            session.project_id,
+            f"{agent.label}: not moved before its limit — could not start the hand-over "
+            f"worker ({exc})",
+            session_id=session.id,
+            label=agent.label,
+        )
+
+
+def _ask_again_next_time(agent: FleetAgent) -> None:
+    """Give back the cool-down a before-limit move took and did not use: the agent began a
+    turn first, and its next turn end may move it."""
+    with store_session() as store:
+        store.delete_meta(_before_limit_key(agent))
+
+
+class _StartedATurn(Exception):
+    """Raised by a before-limit hand-over's last check: the agent took a prompt meanwhile."""
+
+
+def _still_waiting(session_id: str) -> Callable[[], None]:
+    """``fleet.switch``'s ``before_stop`` for a move before the limit: the agent is still at
+    its prompt, or :class:`_StartedATurn` refuses before anything is stopped — a turn that
+    began since the hook decided is not one to cut short."""
+
+    def check() -> None:
+        with store_session() as store:
+            session = store.get_session(session_id)
+        if session is None or session.state != "waiting":
+            raise _StartedATurn(session_id)
+
+    return check
+
+
+def hand_over(session_id: str, *, reason: str | None = None, before_limit: bool = False) -> None:
     """Move the limited fleet agent of ``session_id`` — the detached half of the hand-over.
 
     Runs in the worker :func:`_detach` started, after the hook that decided it
@@ -487,6 +664,13 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
     replayed, the worktree kept), and posting them put a note on the feed at
     nearly every hand-over, account advice included, for the other agents to
     read (review of the #203 final-round fixes, F2).
+
+    ``before_limit`` is the move ``[accounts] before_limit`` makes (F2 of #400,
+    :func:`check_before_limit`): the reason is ``before limit``, the row is the one the hook
+    read, the pick reads the cache a minute deep, as the hook just did, and it is made only
+    while the agent still waits at its prompt — a turn begun since is left alone, and the
+    next turn end asks again. Its brakes are silent, as the hook asked them already; a
+    refusal from the switch is ``handover_failed``, the one line that wakes the manager.
     """
     with store_session() as store:
         session = store.get_session(session_id)
@@ -495,6 +679,12 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
         agent = store.fleet_agent_for_session(session.id)  # in its own project, as above
         project = store.get_project(agent.project_id) if agent is not None else None
     if agent is None or project is None:
+        return
+    if before_limit and session.state != "waiting":
+        # In flight or limited: another path has it. At work again since the hook asked: no
+        # move now, and the next turn end asks again, the cool-down not spent on it.
+        if session.state not in (team_service.HANDOVER_STATE, "limited"):
+            _ask_again_next_time(agent)
         return
     if session.state == team_service.HANDOVER_STATE:
         team_service.hook_note(
@@ -506,6 +696,8 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
     # The row bound to the session IS the last hand-over's replacement when it
     # was spawned by one: its age is the cooldown clock, no event lookup needed.
     since = datetime.now(tz=UTC) - agent.created_at
+    if before_limit and since < HANDOVER_COOLDOWN:
+        return  # started or moved within the cool-down: the hook would not have asked
     if agent.spawned_by == HANDOVER_SPAWNER and since < HANDOVER_COOLDOWN:
         team_service.hook_handover_failed(
             session.project_id,
@@ -521,15 +713,30 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
     # time would cost every hook, and this runs in the worker alone.
     from aisquare.services import fleet as fleet_service
 
+    not_moved = f"{agent.label}: not switched"
+    own_reset = _own_reset(session)
+    if before_limit:
+        reason = claude_accounts_core.BEFORE_LIMIT_REASON
+        not_moved, own_reset = f"{agent.label}: not moved before its limit", ""
     try:
         receipt = fleet_service.switch(
-            project, agent.label, reason=reason, spawned_by=HANDOVER_SPAWNER, automatic=True
+            project,
+            agent.label,
+            reason=reason,
+            spawned_by=HANDOVER_SPAWNER,
+            automatic=True,
+            agent_id=agent.id if before_limit else None,
+            before_stop=_still_waiting(session.id) if before_limit else None,
+            max_age=claude_accounts_service.PICK_MAX_AGE_SECONDS if before_limit else None,
         )
+    except _StartedATurn:
+        _ask_again_next_time(agent)  # not a failure: nobody is told, nobody woken
+        return
     except fleet_service.FleetError as exc:
         # The manager's to act on (#277): the refusal names `fleet switch` or the reset.
         team_service.hook_handover_failed(
             session.project_id,
-            f"{agent.label}: not switched — {exc}{_own_reset(session)}",
+            f"{not_moved} — {exc}{own_reset}",
             session_id=session.id,
             label=agent.label,
         )
@@ -542,10 +749,10 @@ def hand_over(session_id: str, *, reason: str | None = None) -> None:
         with contextlib.suppress(Exception):
             team_service.hook_handover_failed(
                 session.project_id,
-                f"{agent.label}: not switched — hand-over worker failed "
+                f"{not_moved} — hand-over worker failed "
                 f"({type(exc).__name__}: {exc}); "
                 f"`{project_service.fleet_command('switch', project, agent.label)}` moves it "
-                f"by hand{_own_reset(session)}",
+                f"by hand{own_reset}",
                 session_id=session.id,
                 label=agent.label,
             )

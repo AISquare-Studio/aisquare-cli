@@ -160,6 +160,10 @@ MANAGER_WAKE_KINDS: frozenset[str] = frozenset(
 LIMITED_HANDING_OVER = "limited_handing_over"
 #: Every kind a usage-limit line is written as, for the readers that show one.
 LIMITED_KINDS: frozenset[str] = frozenset({"limited", LIMITED_HANDING_OVER})
+#: The line ``[accounts] before_limit = "warn"`` writes when an agent's account reads over
+#: ``switch_at`` and another has room (F2 of #400): the move ``switch`` would have made, named,
+#: and no wake — the agent is still working. ``switch`` writes ``switched`` instead.
+BEFORE_LIMIT_KIND = "before_limit"
 #: What that line says of the hand-over.
 HANDING_OVER_SAID = "moving it to another account automatically"
 
@@ -2642,6 +2646,14 @@ QUIET_NOTIFICATIONS: frozenset[str] = frozenset(
 _IDLE_MESSAGE = "waiting for your input"
 
 
+def is_idle_notice(notification_type: str | None, message: str | None) -> bool:
+    """Whether a notification is Claude Code's idle notice: the agent has sat at its prompt for
+    a minute, a safe point to move it before its limit (F2 of #400) as a turn end is."""
+    if notification_type:
+        return notification_type == "idle_prompt"
+    return _IDLE_MESSAGE in (message or "").lower()
+
+
 def classify_notification(notification_type: str | None, message: str | None) -> str:
     """``attention`` · ``quiet`` · ``notice`` — what a Claude Code notification means for the board.
 
@@ -2928,6 +2940,28 @@ def hook_note(project_id: str, text: str, *, session_id: str | None = None) -> N
         return
     with store_session() as store:
         _emit(store, project_id, "note", text, session_id=session_id)
+
+
+def hook_before_limit(project_id: str, text: str, *, session_id: str | None = None) -> None:
+    """``[accounts] before_limit = "warn"``'s line (:data:`BEFORE_LIMIT_KIND`): an agent's
+    account is over the line and another has room. Nobody is woken (F2 of #400)."""
+    if not orchestrator.team_enabled():
+        return
+    with store_session() as store:
+        _emit(store, project_id, BEFORE_LIMIT_KIND, text, session_id=session_id)
+
+
+def fleet_paused(store: ContextStore, agent: FleetAgent) -> bool:
+    """Whether ``fleet pause`` holds ``agent``'s project: its ``fleet-paused`` signal is on, on
+    the board the row reads (``FleetAgent.board``), by the project's name there
+    (``harness.pause_signal``) — under a hub, the hub's board, where its manager reads it.
+    A signal that does not parse reads as paused: a move nobody can check is not made."""
+    board = agent.board or agent.project_id
+    try:
+        state = _read_signal(store, board, harness.pause_signal(agent.project_id, board))
+    except (ValueError, TypeError, AttributeError):
+        return True
+    return state is not None and state.value == "on"
 
 
 def hook_session_end(session_id: str, cwd: Path | None, *, reason: str | None = None) -> None:

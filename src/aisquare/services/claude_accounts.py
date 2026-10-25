@@ -1632,7 +1632,8 @@ def read_usage(
 # for the first and is served what it read. A launch's headroom pick reads
 # through the cache too, a minute deep (PICK_MAX_AGE_SECONDS); a hand-over and
 # `doctor --live` still read live (`read_usage`): one moves an agent off a full
-# account, the other was asked to look now.
+# account, the other was asked to look now. The move `[accounts] before_limit` makes,
+# of an agent that hit no limit, picks from the cache like a launch (F2 of #400).
 
 USAGE_MAX_AGE_SECONDS = 300.0
 """How old a recorded reading may be and still be served instead of a fetch: five minutes."""
@@ -2297,7 +2298,8 @@ sidebar's own tick, so a burst of spawns, or a spawn beside the sidebar's or the
 read, is served by one reading. And a five-hour window moves a point or two a minute
 under the heaviest use, far less than the room under ``switch_at`` a pick looks for;
 the cache's five minutes could start an agent on an account that crossed the line since.
-A hand-over still reads live (:func:`choose_for_handover`)."""
+A hand-over after a limit still reads live (:func:`choose_for_handover`); one before the
+limit (``[accounts] before_limit``) reads this deep, as a launch does."""
 
 
 def headroom_choice(
@@ -2521,6 +2523,7 @@ def choose_for_handover(
     automatic: bool = False,
     fetch: Fetch | None = None,
     family: str | None = None,
+    max_age: float | None = None,
 ) -> AccountChoice:
     """The target of a hand-over: HEADROOM FIRST; the ladder only when nothing can be measured.
 
@@ -2548,6 +2551,10 @@ def choose_for_handover(
     enabled, so headroom moved an agent onto a slot the operator had disabled.
     :func:`choose` does not pick from it by headroom or by a default either
     (review of the #205 fold, round 1). ``--to`` still names an account.
+
+    ``max_age`` reads the candidates through the cache instead, that deep: the move
+    ``[accounts] before_limit`` makes (F2 of #400), of an agent that hit no limit, whose
+    hook read them a moment ago (:func:`headroom_choice`).
     """
     skip = frozenset(exclude)  # read three times below: never an iterator
     if explicit is not None:
@@ -2566,6 +2573,7 @@ def choose_for_handover(
         least_bad=not automatic,
         family=family,
         prefer=settings.prefer,
+        max_age=max_age,
     )
     notes.extend(more)
     if picked is not None:
@@ -2591,6 +2599,98 @@ def choose_for_handover(
                 None, None, [*notes, *fallback.notes, said + mark.describe(now=moment)]
             )
     return AccountChoice(fallback.account, fallback.source, [*notes, *fallback.notes])
+
+
+# --- before the limit (F2 of #400) ---------------------------------------------------------
+#
+# ``[accounts] before_limit`` moves (or, ``warn``, names) a fleet agent whose account reads
+# over ``switch_at``, at a turn end or an idle notice (``services.hooks.check_before_limit``).
+# Nothing here polls: the agent's own account is read through the shared cache, five minutes
+# deep, and the accounts it could go to a launch's minute deep, so a fleet ending turns every
+# few seconds asks the endpoint about an account no more often than those two depths allow,
+# and never during a back-off. A kept reading (:func:`is_kept`) is no live one, and moves
+# nobody.
+
+
+@dataclass(frozen=True)
+class NearLimit:
+    """An account a live reading puts over ``switch_at`` for an agent of ``family``."""
+
+    account: ClaudeAccount
+    reading: ClaudeUsage
+    used: float
+    """Percent used of its fuller window (:func:`headroom_percent`)."""
+    lifts_at: datetime | None
+    """When every window over the line has reset, and the account is under it again; ``None``
+    when one of them named no reset."""
+
+    def lifts_within(self, minutes: int, *, now: datetime | None = None) -> bool:
+        """Whether the account is under the line again within ``minutes``: a wait that is
+        cheaper than a cold start elsewhere, as after a limit (``wait_if_reset_within_minutes``)."""
+        if self.lifts_at is None:
+            return False
+        return self.lifts_at - (now or _now()) <= timedelta(minutes=minutes)
+
+
+def near_limit(
+    slot: int,
+    *,
+    switch_at: int,
+    family: str | None = None,
+    fetch: Fetch | None = None,
+    now: datetime | None = None,
+) -> NearLimit | None:
+    """Account ``slot``, when a live reading through the cache puts it at or over ``switch_at``
+    for an agent of ``family``; ``None`` when it is under, cannot be read, or the reading is
+    a kept one (the last good figure of a failed read, or a back-off's): a figure of unknown
+    age moves no agent. A registry that cannot be read is no answer either.
+
+    Read through :func:`cached_usage`, :data:`USAGE_MAX_AGE_SECONDS` deep: a turn end asks the
+    endpoint only when no process has read the account in the last five minutes.
+    """
+    accounts, note = _read_for_handover()
+    if accounts is None or note is not None:
+        return None
+    account = next((a for a in accounts if a.slot == slot), None)
+    if account is None or not core.signed_in(account):
+        return None
+    reading = cached_usage([account], fetch=fetch, now=now)[slot]
+    if not reading.available or is_kept(reading):
+        return None
+    used = headroom_percent(reading, family)
+    if used is None or used < switch_at:
+        return None
+    windows = [
+        (reading.session_percent, reading.session_resets_at),
+        (reading.week_percent, reading.week_resets_at),
+    ]
+    if family is not None:
+        windows.append(
+            (reading.family_week_percent.get(family), reading.family_week_resets_at.get(family))
+        )
+    over = [when for percent, when in windows if percent is not None and percent >= switch_at]
+    resets = [when for when in over if when is not None]
+    lifts_at = max(resets) if resets and len(resets) == len(over) else None
+    return NearLimit(account, reading, used, lifts_at)
+
+
+def account_pin(role: str | None, *, named: bool) -> str | None:
+    """Why an agent of ``role`` stays on its account whatever its usage reads, or ``None``.
+
+    ``named`` is its launch's ``--account`` (``LaunchSpec.account_pinned``). Then the role's
+    binding to an account (``team bind <role> --account``), and a binding that sets
+    ``CLAUDE_CONFIG_DIR`` by hand, which no default overrides (#9). A hand-over after a limit
+    still moves each of them; ``[accounts] before_limit``, which acts on none (F2 of #400),
+    asks here. A config that cannot be read pins nothing, as it binds nothing.
+    """
+    if named:
+        return "named with --account"
+    bound, _note = _role_binding_ref(role)
+    if bound:
+        return f"bound to account {bound}"
+    if _binding_names_a_directory(role):
+        return "its binding sets CLAUDE_CONFIG_DIR"
+    return None
 
 
 # --- signing in -------------------------------------------------------------------------

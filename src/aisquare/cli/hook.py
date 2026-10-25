@@ -243,8 +243,16 @@ def hand_over(
     reason: Annotated[
         str | None, typer.Option("--reason", help="Why (recorded on the board).")
     ] = None,
+    before_limit: Annotated[
+        bool,
+        typer.Option(
+            "--before-limit",
+            help="A move before the usage limit (accounts.before_limit), started by `stop`.",
+        ),
+    ] = False,
 ) -> None:
-    """The detached half of an automatic hand-over (no output; started by ``stop-failure``).
+    """The detached half of an automatic hand-over (no output; started by ``stop-failure``,
+    or with ``--before-limit`` by ``stop`` and ``notification``: F2 of #400).
 
     Not a Claude Code hook: ``stop-failure`` starts this in a worker of its own
     session, because the hook itself is a child of the pane ``fleet switch``
@@ -253,9 +261,10 @@ def hand_over(
     ahead could not do (``switched — …``).
     """
     try:
-        hooks_service.hand_over(session_id, reason=reason)
+        hooks_service.hand_over(session_id, reason=reason, before_limit=before_limit)
     except Exception as exc:  # the board carries the refusal; nothing else to disrupt
-        _cost_of_failing_open("hand-over", exc, cost="the limited agent was not moved")
+        cost = "the agent was not moved" if before_limit else "the limited agent was not moved"
+        _cost_of_failing_open("hand-over", exc, cost=cost)
         return
 
 

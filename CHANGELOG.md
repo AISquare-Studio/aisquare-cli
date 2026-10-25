@@ -566,7 +566,7 @@ its own installer.**
   relocked it). A dependency change without its relock now fails CI.
 - The store migrates to schema v37 on first open, from 0.8.2's v32, in five steps: v37
   adds the `brief` table and its `brief_number` index, for work briefs. The briefs
-  branches (#300, #306, #341) stamped it v34, then v36: such a store reaches v37
+  branches (#306, #341) stamped it v34, then v36: such a store reaches v37
   through the presence pass, which adds what a step under its stamp left out, and v37
   finds `brief` in place. v36 adds the first message's three columns (under Fixed; a
   store a pre-release build stamped v34 with them reaches v36 through the presence

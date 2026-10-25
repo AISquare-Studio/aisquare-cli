@@ -1984,10 +1984,10 @@ typing the letter.
 
 ## Upgrading
 
-### To 0.9.0: verified first messages (store schema 36)
+### To 0.9.0: verified first messages and work briefs (store schema 37)
 
-**The store migrates itself on first open, from v35 to v36, in one step** (from 0.8.2's
-v32, in four: v33 to v35 are under [0.9.0] in the CHANGELOG). v36 adds three
+**The store migrates itself on first open, from v35 to v37, in two steps** (from 0.8.2's
+v32, in five: v33 to v35 are under [0.9.0] in the CHANGELOG). v36 adds three
 nullable columns: `team_session.prompted_at` (the session's last
 `UserPromptSubmit`), `fleet_agent.first_prompt` (`pending`, `acked` or `unsent`) and
 `fleet_agent.first_prompt_at` (when that last changed). The step has no script of its
@@ -1996,6 +1996,12 @@ step from v15 on is, so a store that another build already carried past v35 conv
 too, and so does one a pre-release build of this train stamped v34 with these columns.
 Nothing is rewritten. An agent spawned before the upgrade has no first-message state,
 reads as "not tracked", and is never reported as a message not taken.
+
+v37 adds the `brief` table and its `brief_number` index, for work briefs
+([work-briefs.md](work-briefs.md)). Its script is `CREATE … IF NOT EXISTS` only. A store
+that a pre-release build of the briefs branches (#306, #341) stamped v34 or v36 already
+holds `brief`, and converges the same way: the presence pass adds what a step under its
+stamp left out, and v37 finds `brief` in place, its briefs intact.
 
 **No config migration.** Every new key has a default, and a key you never set
 follows it:
@@ -2024,9 +2030,9 @@ follows it:
   type` keeps it off the command line.
 
 **Moving back** to 0.8.2 or earlier with `aisquare upgrade --version <v>` is safe. An
-older build opens a v36 store as it is, without migrating it down, and never reads the
-three columns. It ignores the new config keys and types first messages as it always
-did.
+older build opens a v37 store as it is, without migrating it down, and never reads the
+three columns or the `brief` table. It ignores the new config keys and types first
+messages as it always did.
 
 ## Troubleshooting
 

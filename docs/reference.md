@@ -61,7 +61,7 @@ aisquare
 │                                                  [--config-dir DIR]
 ├── accounts        list [--usage] · add · run <slot> [… claude args] · usage [slot]
 │                   (--usage and usage read a five-minute cache; --refresh reads now,
-│                   except an account backed off after HTTP 429 — see docs/fleet.md)
+│                   except an account backed off after HTTP 429/503 — see docs/fleet.md)
 │                   remove <slot>            — Claude Code accounts the CLI owns (docs/fleet.md)
 │                   default [<slot|alias|email>] [--project P] [--role R] [--clear]
 │                     (machine level: an alias of `move <slot> top` — rank 1 IS the default)

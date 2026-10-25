@@ -882,15 +882,19 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._release_asked_at = 0.0
         """When the release check was last asked (``time.monotonic``): the housekeeping tick
         asks again once ``updates.ASK_EVERY_SECONDS`` have passed (:meth:`_housekeeping`)."""
-        self._release_off = False
+        self._release_off = release_check is not None and not updates_service.check_enabled()
         """``[updates] check`` as App settings last read it, off: the row is taken away at once
-        (:meth:`on_ui_settings_changed`); a check asked after reads the setting itself."""
+        (:meth:`on_ui_settings_changed`); a check asked after reads the setting itself. Seeded
+        from the config asq starts with: seeded on, an asq started with the check off and then
+        switched on asked nothing until the hourly tick (review of #401, m1)."""
         self._release_stale = False
         """A check was running as ``[updates] check`` was switched: its answer is dropped, and
         asked again if the check is on (:meth:`on_ui_settings_changed`)."""
-        self._planned_runnable: bool | None = None
-        """Whether the update dialog's last plan could run the update here: the row says what
-        it said, whatever the route alone says at the next check (:meth:`_release_checked`)."""
+        self._planned_runnable: tuple[str, bool] | None = None
+        """The release the update dialog's last plan was read for, and whether it could run the
+        update here: the row says what it said for that release, whatever the route alone says
+        at the next check (:meth:`_release_checked`). Another release is the route's again: a
+        passing reason (uv off PATH, a lock) stuck for every later one (review of #401, n2)."""
         self._refreshed: tuple[str | None] | None = None
         """PyPI's answer to the update dialog's own ask (``updates.refresh_latest``), once it
         has landed: ``(None,)`` when the lookup found none. ``None`` while it is out."""
@@ -2481,8 +2485,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             and lifecycle_service.newer_release(shown.version, offer.version) is True
         ):
             offer = replace(offer, version=shown.version, announce=False)
-        if self._planned_runnable is not None:
-            offer = replace(offer, runnable=self._planned_runnable)
+        planned = self._planned_runnable
+        if planned is not None and planned[0] == offer.version:
+            offer = replace(offer, runnable=planned[1])
         return offer
 
     def on_update_selected(self, event: UpdateSelected) -> None:
@@ -2583,8 +2588,11 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             if offer is not None and found != offer.version:
                 self.release = replace(offer, version=found)
                 self.sidebar.show_update(found, runnable=offer.runnable)
+                if self._planned_runnable is not None:
+                    self._planned_runnable = (found, self._planned_runnable[1])
         if screen is not None:
             screen.show_latest(found)
+            self._announced(found)
 
     def _live_agents(self) -> list[FleetAgent]:
         """Every agent alive in the frame on screen (``ALIVE_STATES``): the ones an update keeps."""
@@ -2621,7 +2629,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         if not isinstance(plan, lifecycle_service.UpgradePlan):
             return
-        self._planned_runnable = plan.runnable
+        self._planned_runnable = (offer.version, plan.runnable)
         if plan.runnable != offer.runnable:
             # The row was decided from the install's route alone; the dialog's plan has the
             # last word (uv gone from PATH since, say), and the row says what it says.
@@ -2630,7 +2638,16 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         screen = UpdateScreen(plan, len(self._live_agents()), offer.version)
         if self._refreshed is not None:
             screen.show_latest(self._refreshed[0])  # PyPI answered before the plan was read
+            self._announced(self._refreshed[0])
         self.push_screen(screen, self._update_answered)
+
+    def _announced(self, version: str | None) -> None:
+        """The dialog shows ``version``: it is announced, and the next hourly ask toasts it no
+        more (``updates.mark_announced``). Only once a dialog shows it: recorded by the ask
+        itself, a release whose dialog never opened (a plan error, a hand-off pending, an
+        answer let go of) was never toasted (review of #401, n3)."""
+        if version is not None:
+            updates_service.mark_announced(version)
 
     def _update_answered(self, confirmed: bool | None) -> None:
         """*Restart & update*: read the agents alive now and write them down, off the UI

@@ -294,6 +294,104 @@ def test_the_release_check_switch_takes_the_row_away_and_brings_it_back_at_once(
     assert load_config().updates.check is True
 
 
+@pytest.mark.parametrize("started", ["off", "on"])
+def test_an_asq_started_with_the_check_off_asks_at_once_when_it_is_switched_on(
+    started: str,
+) -> None:
+    """Review of #401, m1: the app took the check as on whatever the config said, so an asq
+    started with ``[updates] check = false`` and then switched on in App settings asked
+    nothing, and showed no row, until the hourly tick. Seeded from the config, it asks at
+    once; started on, switching off and on again does too (control)."""
+    from aisquare.core.config import save_config
+
+    config = load_config()
+    config.updates.check = started == "on"
+    save_config(config)
+    asks: list[bool] = []
+
+    def check() -> updates.Offer | None:
+        enabled = load_config().updates.check
+        asks.append(enabled)
+        return OFFER if enabled else None
+
+    async def save(app: FleetApp, on: bool) -> None:
+        app.query_one("#updates-check", Switch).value = on
+        app.query_one("#save-settings", Button).press()
+        await settle_page(app)
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> list[object]:
+        seen: list[object] = [app.query_one(UpdateRow).display]
+        app.post_message(AppSettingsSelected())
+        await settle_page(app)
+        if started == "on":
+            await save(app, False)
+        await save(app, True)
+        await settle_until(app, lambda: app.query_one(UpdateRow).display, timeout=5)
+        seen += [app.query_one(UpdateRow).display, asks[-1]]
+        return seen
+
+    seen = _drive(body, release_check=check)
+
+    assert seen == [started == "on", True, True], (seen, asks)
+
+
+def test_the_plans_word_holds_for_its_release_and_not_for_a_newer_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #401, n2: the dialog plan's runnable stuck for every later check, so a passing
+    reason (uv off PATH) kept saying "how to update" for a release the plan never looked at.
+    It holds for the release the plan was read for, and a newer one is the route's again."""
+    gone = dataclasses.replace(_plan(), reason="uv is not on PATH")
+    monkeypatch.setattr(lifecycle, "upgrade_plan", lambda *a, **k: gone)
+    answers = [OFFER, OFFER, updates.Offer("0.9.2", "0.9.0", runnable=True, announce=False)]
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> list[str]:
+        app.query_one(UpdateRow).activate()
+        await settle_page(app)
+        assert isinstance(app.screen, UpdateScreen), app.screen
+        app.screen.dismiss(False)
+        await settle_page(app)
+        seen = []
+        for _ in range(2):
+            app.check_release()
+            await settle_page(app)
+            seen.append(shown(app.query_one(UpdateRow)))
+        return seen
+
+    seen = _drive(body, release_check=lambda: answers.pop(0))
+
+    assert seen == ["⬆︎ 0.9.1 · how to update", "⬆︎ 0.9.2 · restart to update"], seen
+
+
+@pytest.mark.parametrize("opens", [True, False], ids=["dialog-shows-it", "plan-fails"])
+def test_a_release_is_announced_by_the_dialog_that_shows_it_and_only_then(
+    monkeypatch: pytest.MonkeyPatch, fresh: Fresh, opens: bool
+) -> None:
+    """Review of #401, n3: the dialog's ask marked its answer announced whether or not a dialog
+    showed it, so a release found while the plan failed was never toasted. Marked by the
+    dialog that shows it; a plan that cannot be read shows nothing and marks nothing."""
+    fresh.answer = "0.9.2"
+    updates.mark_announced("0.9.1")
+    if not opens:
+
+        def broken(*_args: Any, **_kwargs: Any) -> UpgradePlan:
+            raise RuntimeError("the receipt could not be read")
+
+        monkeypatch.setattr(lifecycle, "upgrade_plan", broken)
+    else:
+        monkeypatch.setattr(lifecycle, "upgrade_plan", lambda *a, **k: _plan())
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> bool:
+        app.query_one(UpdateRow).activate()
+        await settle_page(app)
+        return isinstance(app.screen, UpdateScreen)
+
+    opened = _drive(body)
+
+    assert opened is opens
+    assert _state(updates.ANNOUNCED_KEY) == ("0.9.2" if opens else "0.9.1")
+
+
 # --- the dialog -------------------------------------------------------------------------------
 
 

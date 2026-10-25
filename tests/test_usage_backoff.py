@@ -347,6 +347,19 @@ def test_a_pick_skips_a_backed_off_account_whose_reading_is_old(fake_home: Path)
 # --------------------------------------------------------------------------- doctor, removal
 
 
+def test_a_503_with_retry_after_is_named_by_doctor_as_a_back_off(fake_home: Path) -> None:
+    """The tester's pass on #401, (d): an account backed off after a 503 with ``Retry-After``
+    was named by doctor's row as backed off 'after HTTP 429'. Worded for both."""
+    work = _slot("work@example.com", "tok-work")
+    held = service.read_usage(
+        [work], now=NOW, fetch=_Endpoint({"tok-work": (503, {"Retry-After": "600"})})
+    )
+    assert held[work.slot].rate_limited, "control: the 503 named a wait"
+    checks = {c.name: c for c in diagnostics._claude_accounts_checks()}
+    line = checks["claude-account-backoff"]
+    assert "after HTTP 429 or 503" in line.detail and "account 2" in line.detail, line.detail
+
+
 def test_doctor_names_the_backed_off_accounts(fake_home: Path) -> None:
     work = _slot("work@example.com", "tok-work")
     _slot("spare@example.com", "tok-spare")
@@ -362,6 +375,7 @@ def test_doctor_names_the_backed_off_accounts(fake_home: Path) -> None:
     line = checks["claude-account-backoff"]
     assert line.status == "warn"
     assert f"account 2 rate-limited until {until.astimezone().strftime('%H:%M')}" in line.detail
+    assert "after HTTP 429 or 503" in line.detail, "a 503 with Retry-After backs off too (d)"
     assert "spare" not in line.detail and "account 3" not in line.detail
     assert line.fix is not None and "does not clear a rate limit" in line.fix
 
@@ -684,6 +698,90 @@ def test_a_wait_row_this_version_cannot_read_is_replaced(fake_home: Path, raw: s
 
     assert again[work.slot].rate_limited and endpoint.calls == ["tok-work"], "the wait holds"
     assert work.slot in service.usage_backoffs([work], now=NOW + timedelta(minutes=1))
+
+
+def test_replacing_an_unreadable_wait_row_never_shortens_a_longer_one_written_meanwhile(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #401, n1: the unreadable row was overwritten blindly, so a valid, longer wait
+    another process wrote between the read and the write was shortened. Replaced only as it
+    was read, the longer wait stands."""
+    work = _slot("work@example.com", "tok-work")
+    key = service._BACKOFF_KEY.format(slot=work.slot)
+    with store_session() as store:
+        store.set_ui_state(key, "{truncated")
+        cls = type(store)
+    longer = service.UsageBackoff(
+        slot=work.slot,
+        until=NOW + timedelta(minutes=30),
+        attempts=3,
+        since=NOW,
+        token=service._login_key(work, NOW),
+    )
+    real = cls.ui_state
+    raced: list[bool] = []
+
+    def ui_state(self: Any, name: str) -> str | None:
+        value = real(self, name)
+        if name == key and not raced and value == "{truncated":
+            raced.append(True)  # another process writes its longer wait right after this read
+            with store_session() as other:
+                other.set_ui_state(key, longer.dump())
+        return value
+
+    monkeypatch.setattr(cls, "ui_state", ui_state)
+    with store_session() as store:  # the write path alone, as a 429 records it
+        held = service.UsageBackoff(
+            slot=work.slot,
+            until=NOW + timedelta(minutes=1),
+            attempts=1,
+            since=NOW,
+            token=longer.token,
+        )
+        service._record_backoff(store, held, None)
+
+    assert raced, "the race ran"
+    with store_session() as store:
+        assert real(store, key) == longer.dump(), "the longer wait stands"
+
+
+def test_a_cached_read_keeps_the_family_weeks_the_live_one_saw(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tester's pass on #401, (a): a reading served from the store had no family weeks
+    (the history has no columns for them), so ``accounts usage`` without ``--refresh``, nearly
+    every read while asq runs, showed none, a spent Opus week included. They are kept with
+    the sample they came with, and served with it; another sample of the slot is not given
+    them."""
+    work = _slot("work@example.com", "tok-work")
+    payload = _payload(40, week=30)
+    for family, used, days in (("opus", 100, 1), ("sonnet", 45, 3)):
+        resets = (NOW + timedelta(days=days)).isoformat()
+        payload[f"seven_day_{family}"] = {"utilization": used, "resets_at": resets}
+    endpoint = _Endpoint({"tok-work": payload})
+    live = service.cached_usage([work], now=NOW, fetch=endpoint)[work.slot]
+    assert live.family_week_percent == {"opus": 100.0, "sonnet": 45.0}, "control: read live"
+
+    _new_process()
+    cached = service.cached_usage([work], now=NOW + timedelta(minutes=2), fetch=endpoint)
+    assert len(endpoint.calls) == 1, "served from the store"
+    assert cached[work.slot].family_week_percent == {"opus": 100.0, "sonnet": 45.0}
+    assert cached[work.slot].family_week_resets_at["opus"] == NOW + timedelta(days=1)
+
+    monkeypatch.setattr(service, "_http_get", endpoint)
+    _at(monkeypatch, NOW + timedelta(minutes=3))
+    _new_process()
+    shown = runner.invoke(app, ["accounts", "usage"])
+    assert shown.exit_code == 0, shown.output
+    flat = " ".join(shown.stdout.split())  # the table wraps a long cell over its lines
+    assert "opus 100%" in flat and "sonnet 45%" in flat, shown.stdout
+    assert len(endpoint.calls) == 1, "still the stored reading"
+
+    plain = _payload(20, week=10)  # a newer sample with no family week: none carried over
+    endpoint.by_token["tok-work"] = plain
+    _new_process()
+    later = service.cached_usage([work], now=NOW + timedelta(minutes=10), fetch=endpoint)
+    assert later[work.slot].family_week_percent == {}
 
 
 def _new_token(account: Any, token: str) -> None:

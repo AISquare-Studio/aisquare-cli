@@ -121,10 +121,17 @@ def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> t
     week = _window_cell(usage.week_percent, usage.week_resets_at, now=now)
     # The per-family weeks (#277), each with its own reset: they bind that family alone. A
     # kept reading has none: the record holds no family week, a spent one is a limit mark.
+    # One whose reset has passed says so, as a reset session or week does: its figure is
+    # for a window that is over, never 'resets now' (tester's pass on #401, (b)).
+    moment = now or accounts_service._now()
     for family, percent in sorted(usage.family_week_percent.items()):
+        resets = usage.family_week_resets_at.get(family)
+        if resets is not None and resets <= moment:
+            week += f" · {family} reset {accounts_service.describe_age(resets, now=moment)}"
+            continue
         week += f" · {family} {_percent(percent)}"
-        if (resets := usage.family_week_resets_at.get(family)) is not None:
-            week += f" resets {format_reset(resets, now=now)}"
+        if resets is not None:
+            week += f" resets {format_reset(resets, now=moment)}"
     return session, week
 
 

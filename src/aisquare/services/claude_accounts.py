@@ -1807,13 +1807,17 @@ def usage_is_readable(status: ClaudeAccountStatus, reading: ClaudeUsage | None) 
 
 
 def describe_age(fetched_at: datetime, *, now: datetime | None = None) -> str:
-    """``just now`` / ``3m ago`` / ``2h ago``: how old a reading is, for a "refreshed …" line."""
+    """``just now`` / ``3m ago`` / ``2h ago`` / ``4d ago``: how old a reading is, for a
+    "refreshed …" line. Days from a day on: a kept reading can be a week old, and a full
+    account's ``▮▮▮▮▮ 100% · 100h`` did not fit its 16-wide cell (review of #408, n6)."""
     minutes = max(0, int(((now or _now()) - fetched_at).total_seconds() // 60))
     if minutes == 0:
         return "just now"
     if minutes < 60:
         return f"{minutes}m ago"
-    return f"{minutes // 60}h ago"
+    if minutes < 24 * 60:
+        return f"{minutes // 60}h ago"
+    return f"{minutes // (24 * 60)}d ago"
 
 
 def headroom_percent(reading: ClaudeUsage) -> float | None:

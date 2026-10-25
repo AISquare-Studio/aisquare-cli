@@ -791,15 +791,22 @@ def login_label(view: AccountsView, slot: int) -> str:
     return str(row(view, slot).query_one(f"#account-login-{slot}", Button).label)
 
 
+@pytest.mark.parametrize(
+    ("percent", "hours", "shown"),
+    [(33, 149, "▮▮▯▯▯ 33% · 6d"), (100, 100, "▮▮▮▮▮ 100% · 4d")],
+    ids=["six-days", "full-100h"],
+)
 def test_a_kept_readings_age_fits_the_session_cell_without_an_ellipsis(
-    no_network: dict[str, Any],
+    no_network: dict[str, Any], percent: int, hours: int, shown: str
 ) -> None:
     """The tester's real-UI check of #408: at 12 wide the session cell read '▮▮▯▯▯ 33% ·…',
-    so a kept reading's age never showed. 16 wide (#406's width) holds a six-day-old one."""
-    taken = datetime.now(tz=UTC) - timedelta(hours=149, minutes=5)
+    so a kept reading's age never showed. 16 wide (#406's width) holds a six-day-old one, and
+    a full account's: '▮▮▮▮▮ 100% · 100h' was 17 wide until ages over a day read in days
+    (review of #408, n6)."""
+    taken = datetime.now(tz=UTC) - timedelta(hours=hours, minutes=5)
     no_network["usage"] = ClaudeUsage(
         available=True,
-        session_percent=33,
+        session_percent=percent,
         week_percent=10,
         fetched_at=taken,
         last_failed_at=datetime.now(tz=UTC),
@@ -810,14 +817,14 @@ def test_a_kept_readings_age_fits_the_session_cell_without_an_ellipsis(
     async def go(pilot: Pilot[None]) -> tuple[str, int, int]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
-        await settle_until(app, lambda: "33%" in cells(view, 2)["session"])
+        await settle_until(app, lambda: f"{percent}%" in cells(view, 2)["session"])
         cell = row(view, 2).cell("session")
         column = next(c.width for c in accounts_view.COLUMNS if c.key == "session")
         return cell.render_line(0).text, cell.region.width, column
 
     rendered, width, column = drive(go, overview=overview)
     assert column == 16 and width == 16
-    assert rendered.rstrip() == "▮▮▯▯▯ 33% · 149h", rendered
+    assert rendered.rstrip() == shown, rendered
     assert "…" not in rendered
 
 
@@ -3318,7 +3325,7 @@ def test_408s_cells_and_login_read_whole_with_301s_update_row_in_the_sidebar(
 
     assert (without["update row"], out["update row"]) == (False, True)
     assert out["sidebar"] == without["sidebar"], "the ⬆ row widens nothing"
-    assert out["session"] == (16, "▮▮▯▯▯ 33% · 149h"), out["session"]
+    assert out["session"] == (16, "▮▮▯▯▯ 33% · 6d"), out["session"]
     label, line = out["login"]
     assert label == "Log in again" and "Log in again" in line and "…" not in line, line
     assert out["in view"]

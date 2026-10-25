@@ -624,9 +624,10 @@ adapter.**
   `npm install -g`.
   The doctor's `sandbox-hooks` row warns of an agent that sandboxes its tools whose
   hooks still run the console script (connected by a build before the `-E` form);
-  `agents connect` and an upgrade's refresh write that form. Unmeasured, and so not
-  claimed: macOS Seatbelt and the Windows sandbox (the broker is POSIX only and was
-  measured on Linux bwrap; native Windows has a read-only store and no broker), and
+  `agents connect` and an upgrade's refresh write that form. macOS Seatbelt is
+  measured live on Codex 0.164.0 too: its writes to the store are refused and its board
+  calls go through the broker. Unmeasured, and so not claimed: the Windows sandbox (the
+  broker is POSIX only; native Windows has a read-only store and no broker), and
   `recall` on a real gbrain, which no host or CI job has (its query goes as gbrain's
   positional, as gbrain's source parses one). Not shared between Codex accounts:
   `share_settings` (Claude Code's `settings.json` link has no Codex counterpart;

@@ -801,8 +801,12 @@ keep their own identity rule (`services.mcp_server`).
 A broker that cannot start costs the agent its board calls from the sandbox, which then
 say so ("this agent's broker is not running … restart the agent"), never the launch.
 The broker is POSIX only (FIFOs); the fleet's sandboxed agents are too (tmux). Measured
-on Linux (bwrap) only: macOS's Seatbelt and Windows' sandbox are unmeasured, which the
-transport's two choices above are made to survive.
+on Linux (bwrap), and on macOS's Seatbelt with Codex 0.164.0: the live sandbox suite
+(`test_real_codex_reaches_the_store_from_its_sandbox_and_rings_only_for_a_human` and the
+other sandboxed live tests) passes there. Every write it probes into the store, the launch
+records and the tree's launch inputs is refused (`Operation not permitted`), and the board
+calls still go through the broker (#113's SMOKE9, item 10, and the coder's run). Windows'
+sandbox is unmeasured, which the transport's two choices above are made to survive.
 Escalated commands, which Codex runs outside its sandbox once approved, and the agent's
 own hooks write the store directly, as before.
 

@@ -1562,13 +1562,15 @@ install_chrome_devtools() { install_node; }
 # the plugin ships), and a project's local servers sit deeper in. `{$` passes over
 # an empty `"mcpServers": {}`. Inside the block, the package counts as well as the
 # name: the name is the operator's to choose, as doctor's browser tools row holds,
-# and a server named `devtools` that runs chrome-devtools-mcp is this one already.
-# `[@"]` after it, so chrome-devtools-mcp-docs is not. A file laid out some other
+# and a server named `devtools` that runs chrome-devtools-mcp is this one already,
+# from npx, a scoped fork (@acme/chrome-devtools-mcp@1.2.0) or a checkout run by
+# node (/opt/chrome-devtools-mcp/build/src/index.js). `[/"]` before it and `[@"/]`
+# after, so chrome-devtools-mcp-docs is not. A file laid out some other
 # way reads as absent, and `claude mcp add` then answers that it exists, which
 # register_devtools_mcp reports the same way.
 devtools_mcp_registered() {
     sed -n '/^  "mcpServers": {$/,/^  }/p' "$(claude_json)" 2>/dev/null |
-        grep -q -e "^    \"$DEVTOOLS_MCP_NAME\": " -e '"chrome-devtools-mcp[@"]' && return 0
+        grep -q -e "^    \"$DEVTOOLS_MCP_NAME\": " -e '[/"]chrome-devtools-mcp[@"/]' && return 0
     _dr_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
     grep -q '"chrome-devtools-mcp@[^"]*": *true' "${_dr_dir%/}/settings.json" 2>/dev/null
 }

@@ -2014,6 +2014,34 @@ _NAMED_OTHERWISE = """{
   }
 }
 """
+#: A checkout of it run by node, and a scoped fork from npx: the package by path or
+#: under a scope is still it (review of #399, n14).
+_BY_PATH = """{
+  "mcpServers": {
+    "devtools": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "/opt/chrome-devtools-mcp/build/src/index.js"
+      ],
+      "env": {}
+    }
+  }
+}
+"""
+_SCOPED_FORK = """{
+  "mcpServers": {
+    "devtools": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "@acme/chrome-devtools-mcp@1.2.0"
+      ],
+      "env": {}
+    }
+  }
+}
+"""
 #: A package whose name only starts with the MCP's: not it.
 _LOOKALIKE_PACKAGE = """{
   "mcpServers": {
@@ -2022,6 +2050,21 @@ _LOOKALIKE_PACKAGE = """{
       "command": "npx",
       "args": [
         "chrome-devtools-mcp-docs"
+      ],
+      "env": {}
+    }
+  }
+}
+"""
+#: Nor is one by path or under a scope whose name only contains it.
+_LOOKALIKE_PATHS = """{
+  "mcpServers": {
+    "docs": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "/opt/chrome-devtools-mcp-docs/index.js",
+        "@acme/my-chrome-devtools-mcp@1.2.0"
       ],
       "env": {}
     }
@@ -2135,6 +2178,8 @@ def test_a_run_that_chose_the_extra_registers_the_mcp_once(tmp_path: Path) -> No
         "user-scope",
         "among-others",
         "named-otherwise",
+        "by-path",
+        "scoped-fork",
         "claude-config-dir",
         "plugin",
         "claude-says-so",
@@ -2154,6 +2199,10 @@ def test_an_mcp_already_registered_is_left_alone_in_one_line(tmp_path: Path, whe
         (home / ".claude.json").write_text(_USER_SCOPE_AMONG_OTHERS, encoding="utf-8")
     elif where == "named-otherwise":
         (home / ".claude.json").write_text(_NAMED_OTHERWISE, encoding="utf-8")
+    elif where == "by-path":
+        (home / ".claude.json").write_text(_BY_PATH, encoding="utf-8")
+    elif where == "scoped-fork":
+        (home / ".claude.json").write_text(_SCOPED_FORK, encoding="utf-8")
     elif where == "claude-config-dir":
         config = tmp_path / "config"
         config.mkdir()
@@ -2192,6 +2241,7 @@ def test_an_mcp_already_registered_is_left_alone_in_one_line(tmp_path: Path, whe
         (_SKILL_USAGE, None, False),  # a skill of that name, no server
         (_ANOTHER_SERVER_THEN_SKILL_USAGE, None, False),
         (_LOOKALIKE_PACKAGE, None, False),
+        (_LOOKALIKE_PATHS, None, False),
         (None, None, False),
     ],
     ids=[
@@ -2201,6 +2251,7 @@ def test_an_mcp_already_registered_is_left_alone_in_one_line(tmp_path: Path, whe
         "skill-usage-only",
         "another-server-then-skill-usage",
         "lookalike-package",
+        "lookalike-paths",
         "no-config",
     ],
 )

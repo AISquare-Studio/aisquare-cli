@@ -2139,7 +2139,11 @@ threshold or a timer.
 
 ## Upgrading
 
-### To 0.9.0: verified first messages (store schema 36)
+To 0.9.0 from 0.8.2: the store migrates itself from v32 to v37 on first open, and
+the config file moves to version 3, once. The two steps below are both 0.9.0's: the
+first messages (v36), then the token diet (v37 and config version 3).
+
+### To 0.9.0, part 1: verified first messages (store schema 36)
 
 **The store migrates itself on first open, from v35 to v36, in one step** (from 0.8.2's
 v32, in four: v33 to v35 are under [0.9.0] in the CHANGELOG). v36 adds three
@@ -2183,7 +2187,7 @@ older build opens a v36 store as it is, without migrating it down, and never rea
 three columns. It ignores the new config keys and types first messages as it always
 did.
 
-### To the release with the token diet (store schema 37, config version 3)
+### To 0.9.0, part 2: the token diet (store schema 37, config version 3)
 
 **The store migrates itself on first open, from v36 to v37, in one step.** v37 adds two
 nullable columns, `team_event.actor` (who caused an event: a session, `user`,

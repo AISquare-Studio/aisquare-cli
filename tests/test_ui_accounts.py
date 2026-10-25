@@ -314,8 +314,9 @@ def cells(view: AccountsView, slot: int) -> dict[str, str]:
 
 
 def line(view: AccountsView, slot: int) -> str:
-    """The row's non-empty cells, two spaces apart: one string to search."""
-    return "  ".join(text for text in cells(view, slot).values() if text)
+    """The row's non-empty cells but its agent's (the table's column every row fills, which
+    the Codex rows' tests read), two spaces apart: one string to search."""
+    return "  ".join(text for key, text in cells(view, slot).items() if text and key != "agent")
 
 
 def notice(view: AccountsView) -> str:
@@ -3026,7 +3027,7 @@ def _columns_at(view: AccountsView) -> dict[str, list[tuple[int, int]]]:
     """Each line's ``(x, width)`` per data column — the header's first, then each row's — and
     every button's, by id stem, so *Log in*'s column and the arranging buttons are held to
     the same rule (``header-login`` is the header's gap over *Log in*)."""
-    header = view.query_one("#claude-header")
+    header = view.query_one("#accounts-header")
     lines: dict[str, list[tuple[int, int]]] = {
         "header": [
             (cell.region.x, cell.region.width)
@@ -3070,7 +3071,7 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
             await settle_until(app, lambda: painted(view, 1, 2, 4))
             out: dict[str, Any] = {"closed": _columns_at(view)}
             out["heights"] = [r.region.height for r in view.rows()]
-            out["header"] = [shown(c) for c in view.query_one("#claude-header").query(Static)]
+            out["header"] = [shown(c) for c in view.query_one("#accounts-header").query(Static)]
             out["name 2"] = row(view, 2).cell("name").render_line(0).text
             out["email 2"] = row(view, 2).cell("email").render_line(0).text
             name_box = row(view, 2).query_one(".col-name").region
@@ -3078,7 +3079,7 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
             out["open"] = _columns_at(view)
             out["field"] = (field(view, 2).region, name_box)
             await pilot.press("escape")
-            table = view.query_one("#claude-table")
+            table = view.query_one("#accounts-table")
             out["scrolls"] = table.max_scroll_x
             table.scroll_to(x=table.max_scroll_x, animate=False, immediate=True)
             await pilot.pause()
@@ -3099,8 +3100,9 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
     starts = [x for x, _ in closed["header"]]
     assert starts == sorted(starts) and len(set(starts)) == len(starts)  # left to right
     assert out["heights"] == [1, 1, 1, 1]  # never wrapped onto a second line
-    assert out["header"][5:9] == ["session used", "week used", "status", ""]  # USED; Log in
-    assert out["header"][9:] == ["session resets", "week resets"]  # then when each resets
+    assert out["header"][2] == "agent"  # every agent's rows in one table, each saying whose
+    assert out["header"][6:10] == ["session used", "week used", "status", ""]  # USED; Log in
+    assert out["header"][10:] == ["session resets", "week resets"]  # then when each resets
     assert out["name 2"].rstrip().endswith("…") and out["email 2"].rstrip().endswith("…")
     assert out["open"] == closed  # the open field moved no column on any row…
     field_region, name_box = out["field"]
@@ -3130,7 +3132,7 @@ def test_an_expired_rows_status_and_log_in_are_on_screen_at_160_columns_unscroll
             await settle(app)
             view = await open_accounts(pilot)
             await settle_until(app, lambda: painted(view, 1, 2, 4))
-            table = view.query_one("#claude-table")
+            table = view.query_one("#accounts-table")
             seen = table.scrollable_content_region
             expired = row(view, 4)  # slot 4: the token expired
             status, login = expired.cell("status"), expired.query_one("#account-login-4", Button)
@@ -3177,7 +3179,7 @@ def test_every_button_can_be_reached_at_any_width(
             await settle(app)
             view = await open_accounts(pilot)
             await settle_until(app, lambda: painted(view, 1, 2, 4))
-            table = view.query_one("#claude-table")
+            table = view.query_one("#accounts-table")
             unreachable: list[str] = []
             reached = 0
             for account_row in view.rows():

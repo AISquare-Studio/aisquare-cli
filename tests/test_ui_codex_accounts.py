@@ -286,7 +286,7 @@ def test_the_codex_section_shows_once_codex_is_installed_or_has_a_slot() -> None
 # --- the page ----------------------------------------------------------------------------------
 
 
-def test_a_codex_slot_renders_in_its_own_section_with_offline_usage_bars(
+def test_a_codex_slot_renders_in_the_one_table_with_offline_usage_bars(
     offline: list[str],
 ) -> None:
     account = core.create_account(CODEX)
@@ -302,14 +302,12 @@ def test_a_codex_slot_renders_in_its_own_section_with_offline_usage_bars(
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await settle_until(app, lambda: painted(view, slot))
-        codex_rows = view.query_one("#codex-rows", Vertical)
         return {
             "section": view.query_one("#codex-section", Vertical).display,
             "title": shown(view.query_one("#codex-title", Static)),
-            "header": bool(view.query("#codex-header")),
-            "in_codex": bool(codex_rows.query(f"#account-row-{slot}")),
-            "in_claude": bool(
-                view.query_one("#claude-rows", Vertical).query(f"#account-row-{slot}")
+            "header": bool(view.query("#accounts-header")),
+            "in_table": bool(
+                view.query_one("#account-rows", Vertical).query(f"#account-row-{slot}")
             ),
             "line": line(view, slot),
             "cells": cells(view, slot),
@@ -320,8 +318,9 @@ def test_a_codex_slot_renders_in_its_own_section_with_offline_usage_bars(
 
     seen = drive(go, overview=overview)
     assert seen["section"] and seen["title"].startswith("Codex 0.162.1") and seen["header"]
-    assert seen["in_codex"] and not seen["in_claude"]
+    assert seen["in_table"], "every agent's rows are in the one table"
     assert f"{slot}  account {slot}" in seen["line"]
+    assert seen["cells"]["agent"] == "Codex"
     assert "codex@example.com  plus" in seen["line"]
     shown_cells = seen["cells"]
     assert (shown_cells["session"], shown_cells["week"]) == ("▮▮▯▯▯ 42%", "▯▯▯▯▯ 7%")
@@ -507,3 +506,44 @@ def test_default_on_a_codex_row_sets_the_codex_default_and_leaves_claudes_alone(
     codex_default = accounts_service.machine_default(CODEX)
     assert codex_default is not None and codex_default.slot == slot
     assert accounts_service.machine_default() is None  # Claude Code's own is untouched
+
+
+def test_a_codex_account_moves_above_a_claude_one_in_the_one_order_at_80x24(
+    fake_home: Path,
+) -> None:
+    """Owner, PR #113: one priority order over every agent's accounts. *↑* on a Codex row
+    moves it past the Claude row above it, in the store and on the page, at 80x24 (the
+    table scrolls sideways to the button), and the order says what it means above it."""
+    import asyncio
+
+    from aisquare.cli.ui.app import FleetApp
+    from tests.test_ui_accounts import _registry_frame, accounts_read
+
+    claude = core.create_account()
+    codex = core.create_account(CODEX)
+
+    async def run() -> tuple[list[int], list[int], str, str]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_registry_frame)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, claude.slot, codex.slot))
+            before = [r.slot for r in view.rows()]
+            await press(pilot, f"#account-up-{codex.slot}")
+            await settle(app)
+            await accounts_read(app)
+            await settle_until(app, lambda: [r.slot for r in view.rows()] != before)
+            return (
+                before,
+                [r.slot for r in view.rows()],
+                cells(view, codex.slot)["agent"],
+                shown(view.query_one("#accounts-order", Static)),
+            )
+
+    before, after, agent, order_note = asyncio.run(run())
+    plain = core.kind(core.AGENT).plain_slot
+    assert before == [plain, claude.slot, codex.slot]
+    assert after == [plain, codex.slot, claude.slot]
+    assert [a.slot for a in accounts_service.list_accounts()] == after
+    assert agent == "Codex"
+    assert order_note.startswith("In priority order, every agent's")

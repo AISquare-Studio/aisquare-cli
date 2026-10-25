@@ -8,8 +8,10 @@ docs/plans/claude-accounts.md. Two halves, one page:
   here, the browser is opened when one can reach the user, and a thread
   worker polls (``services.device_flow``) until the approval lands or *Cancel*
   is pressed. *Sign out* revokes and forgets, as ``aisquare logout`` does.
-- **Claude Code** — a table (:data:`COLUMNS`), one aligned row per slot that
-  ``services.claude_accounts`` knows: the default's ★, the slot, its name, who
+- **Coding agent accounts** — ONE table (:data:`COLUMNS`) of every agent's slots, in the
+  one priority order a launch that names no agent picks its agent from (owner, PR #113):
+  one aligned row per slot that ``services.claude_accounts`` knows: the default's ★,
+  the slot, its agent, its name, who
   is signed in, the plan, the five-hour and seven-day windows (a bar and the
   percent USED), a status with *Log in* beside it, then when each window resets.
   *Add* makes a fresh slot and opens Claude Code's own login in a tmux window
@@ -20,8 +22,9 @@ docs/plans/claude-accounts.md. Two halves, one page:
   (:func:`needs_login`) — then the window waits for a NEW login, not the stale
   one on disk. Nothing is typed for the user and nothing is written into
   Claude Code's files.
-- **Codex** — the same table for every Codex slot (slot 0 is the plain
-  ``codex``; managed slots share the one ladder), in a section of its own,
+  Under the table, each agent's install line and its *Add*.
+- **Codex** — rows in the same table for every Codex slot (slot 0 is the plain
+  ``codex``; managed slots share the one ladder); its install line and *Add* are
   shown once Codex is installed or has a slot. The usage is what the
   account's own sessions recorded — read offline from its rollouts, never
   over the network — so a row says how old that reading is. *Add* (and *Log
@@ -30,9 +33,10 @@ docs/plans/claude-accounts.md. Two halves, one page:
   all, the moment ``auth.json`` lands.
 - **Arranging** (#145) — each row carries *Default*, *↑*/*↓* and
   *Disable*/*Enable*: the machine default a launch picks when nothing more
-  specific says, the priority order, and whether the slot may be picked at
-  all. The name — the alias ``--account``, the board and the row say, any text
-  the operator likes — is renamed in place: double-click it (or Enter / F2 on
+  specific says, the priority order (one across agents: *↑* moves a Codex account
+  past a Claude one), and whether the slot may be picked at all. The name — the
+  alias ``--account``, the board and the row say, any text the operator likes — is
+  renamed in place: double-click it (or Enter / F2 on
   the row) and it becomes a field prefilled with it; Enter or leaving the
   field saves (blank clears it), Esc closes it untouched, and a name the
   service refuses keeps the field open to correct. All of them write the
@@ -340,6 +344,7 @@ class Column(NamedTuple):
 COLUMNS: tuple[Column, ...] = (
     Column("default", "", 1),
     Column("slot", "#", 2),
+    Column("agent", "agent", 11),
     Column("name", "name", 16),
     Column("email", "signed in as", 24),
     Column("plan", "plan", 7),
@@ -373,6 +378,13 @@ LAYOUT: tuple[Column, ...] = (
 )
 """Every column of a line as laid out — :data:`COLUMNS` with *Log in* after the status —
 then the arranging buttons (:data:`_ACTIONS`)."""
+
+
+ORDER_NOTE = (
+    "In priority order, every agent's: a launch that names no agent runs the agent of the "
+    "first account with room. ↑/↓ move an account past any other."
+)
+"""What the table's order means, said above it (owner, PR #113)."""
 
 
 def needs_login(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
@@ -431,6 +443,7 @@ def account_cells(
     if account.is_default:
         cells["default"] = Text(DEFAULT_BADGE, style="bold green")
     cells["slot"] = Text(str(account.slot), style="bold", justify="right")
+    cells["agent"] = Text(core.agent_label(account.agent), style="dim")
     cells["name"] = Text(status.label, style="cyan")
     notes: list[Text] = []
     if status.identity is None:
@@ -548,8 +561,8 @@ def agent_title_text(agent: str, overview: AccountsOverview) -> Text:
 
 
 def other_agents() -> tuple[str, ...]:
-    """The agents with account slots besides Claude Code (whose slots are the page's first
-    section, ``AgentAccounts.legacy_slots``), each a section of its own."""
+    """The agents with account slots besides Claude Code (``AgentAccounts.legacy_slots``,
+    whose install line is the first), each an install line and an *Add* of its own."""
     return tuple(agent for agent in core.account_agents() if not core.kind(agent).legacy_slots)
 
 
@@ -646,8 +659,8 @@ _ACTIONS: tuple[tuple[str, str, int], ...] = (
 
 
 class AccountsTable(Vertical):
-    """An agent's accounts table (Claude Code's, Codex's): a header line, then one
-    :class:`AccountRow` per slot.
+    """The accounts table, every agent's in the one priority order: a header line, then
+    one :class:`AccountRow` per slot, its agent in a column of its own.
 
     The whole table scrolls sideways as one when the page is narrower than it, so the
     header stays over its columns and the action buttons stay reachable at any width
@@ -656,7 +669,7 @@ class AccountsTable(Vertical):
 
     DEFAULT_CSS = """
     AccountsTable { height: auto; overflow-x: auto; overflow-y: hidden; }
-    AccountsTable #claude-rows, AccountsTable .agent-rows { width: auto; height: auto; }
+    AccountsTable #account-rows { width: auto; height: auto; }
     AccountsTable .cell { height: 1; margin: 0 1 0 0; text-wrap: nowrap; text-overflow: ellipsis; }
     AccountsTable .account-actions { width: auto; height: 1; }
     """ + _column_css()
@@ -952,9 +965,9 @@ class AccountsView(Vertical):
     AccountsView #aisquare-code { height: auto; margin-top: 1; }
     AccountsView .actions { height: auto; margin-top: 1; }
     AccountsView .actions Button { margin: 0 1 0 0; }
-    AccountsView #claude-table { margin-top: 1; }
+    AccountsView #accounts-table { margin-top: 1; }
+    AccountsView #accounts-order { height: auto; color: $text-muted; }
     AccountsView .agent-section { height: auto; }
-    AccountsView .agent-table { margin-top: 1; }
     AccountsView #usage-bar Button { margin: 0 2 0 0; }
     AccountsView #usage-age { width: auto; height: 1; color: $text-muted; }
     AccountsView #accounts-notice { height: auto; margin-top: 1; }
@@ -1029,30 +1042,34 @@ class AccountsView(Vertical):
                 yield Button("Sign out", id="aisquare-sign-out")
                 yield Button("Cancel", id="aisquare-cancel", variant="warning")
             yield Static(
-                Text("Claude Code", style="bold"), id="claude-title", classes="section-title"
+                Text("Coding agent accounts", style="bold"),
+                id="accounts-title",
+                classes="section-title",
             )
+            yield Static(Text(ORDER_NOTE), id="accounts-order")
             with Horizontal(classes="actions", id="usage-bar"):
                 refresh = Button("↻ Refresh usage", id="usage-refresh", compact=True)
                 refresh.tooltip = "ask every account now — otherwise at most once every 5 minutes"
                 yield refresh
                 yield Static(Text("last refreshed never", style="dim"), id="usage-age")
-            with AccountsTable(id="claude-table"):
-                yield AccountsHeader(id="claude-header")
-                yield Vertical(id="claude-rows")
+            with AccountsTable(id="accounts-table"):
+                yield AccountsHeader(id="accounts-header")
+                yield Vertical(id="account-rows")
+            yield Static(
+                Text("Claude Code", style="bold"), id="claude-title", classes="section-title"
+            )
             with Horizontal(classes="actions", id="claude-actions"):
                 yield Button("+ Add Claude account", id="claude-add", variant="primary")
             for agent in other_agents():
-                # One section per other agent, hidden until it is installed or has a
-                # slot (`agent_section_shown`); its rows keep the ladder's slot ids.
+                # One line per other agent, hidden until it is installed or has a slot
+                # (`agent_section_shown`): its install and its Add; its rows are in the
+                # one table above, in the one order.
                 with Vertical(id=f"{agent}-section", classes="agent-section"):
                     yield Static(
                         Text(core.agent_label(agent), style="bold"),
                         id=f"{agent}-title",
                         classes="section-title",
                     )
-                    with AccountsTable(id=f"{agent}-table", classes="agent-table"):
-                        yield AccountsHeader(id=f"{agent}-header")
-                        yield Vertical(id=f"{agent}-rows", classes="agent-rows")
                     with Horizontal(classes="actions", id=f"{agent}-actions"):
                         yield Button(
                             f"+ Add {core.agent_label(agent)} account",
@@ -1216,14 +1233,7 @@ class AccountsView(Vertical):
     def _paint_claude(self, overview: AccountsOverview) -> None:
         self.query_one("#claude-title", Static).update(claude_title_text(overview))
         self.query_one("#claude-add", Button).disabled = not overview.claude.installed
-        self._paint_rows(
-            self.query_one("#claude-rows", Vertical),
-            [
-                status
-                for status in overview.accounts
-                if core.kind(status.account.agent).legacy_slots
-            ],
-        )
+        self._paint_rows(self.query_one("#account-rows", Vertical), list(overview.accounts))
         for agent in other_agents():
             section = self.query_one(f"#{agent}-section", Vertical)
             section.display = agent_section_shown(agent, overview)
@@ -1232,13 +1242,10 @@ class AccountsView(Vertical):
             self.query_one(f"#{agent}-add", Button).disabled = not (
                 found is not None and found.installed
             )
-            self._paint_rows(
-                self.query_one(f"#{agent}-rows", Vertical),
-                [status for status in overview.accounts if status.account.agent == agent],
-            )
 
     def _paint_rows(self, holder: Vertical, statuses: list[ClaudeAccountStatus]) -> None:
-        """One agent's rows into its holder, in priority order; ↑/↓ end stops per agent."""
+        """Every agent's rows into the one table, in the one priority order; ↑/↓ end stops
+        at its ends."""
         existing = {row.slot: row for row in holder.query(AccountRow)}
         count = len(statuses)
         for index, frame_status in enumerate(statuses):

@@ -38,7 +38,9 @@ write ``team.profiles.<role>.agent`` and ``.account`` — exactly what ``aisquar
 team bind <role> --agent/--account`` write — through the same one writer. The
 account is the middle rung of the account ladder a launch walks (``--account`` >
 role binding > project default > machine default), and it is an account of the
-role's agent. The user's coding agent (``[agents] default``) is the first row.
+role's agent. The user's coding agent (``[agents] default``) is the first row: the
+fallback a launch runs when no account is usable; otherwise the agent of the first
+account with room in the Accounts page's one order runs.
 
 Permission is ONE value per role, for every agent: ``fleet.roles.<role>.permission``,
 ``WRITE:APPROVALS`` (``workspace:auto``…), which each agent's adapter maps to its own
@@ -188,6 +190,13 @@ _INPUTS = (
     "accounts-wait-minutes",
 )
 _SELECTS = ("default-agent", "accounts-pick", "accounts-on-limit")
+
+FALLBACK_AGENT_TIP = (
+    "The agent a launch runs only when no account is usable (no one signed in, an API key, "
+    "or the accounts unreadable). Otherwise it runs the agent of the first account with "
+    "room in the Accounts page's order; a role's own agent, --agent and a project's "
+    "default still win."
+)
 """The form's fields beside the per-role rows, by id: what :meth:`AppSettingsView._changed`
 compares with what they showed when the form was read."""
 _ACCOUNT_SWITCHES = {
@@ -717,10 +726,14 @@ class AppSettingsView(Vertical):
         yield note
 
     def _compose_agent(self) -> ComposeResult:
-        """The user's coding agent, the one a role with none of its own runs (#113)."""
+        """The user's coding agent: the fallback a role with none of its own runs when no
+        account is usable (#113). Otherwise the agent of the best account in the Accounts
+        page's one order runs (``claude_accounts.agent_pick``)."""
         config = self._config
         with Horizontal(classes="row"):
-            yield Label("user coding agent")
+            label = Label("fallback coding agent")
+            label.tooltip = FALLBACK_AGENT_TIP
+            yield label
             yield Select(
                 agent_options(config.agents.default or ""),
                 value=config.agents.default or "",

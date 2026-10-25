@@ -1021,13 +1021,18 @@ def onboard(path: Path | None, *, refresh: bool) -> OnboardReport:
     facts = [fact for marker, fact in _ECOSYSTEM_MARKERS if (root / marker).exists()]
     seeded: list[ContextEntry] = []
     with store_session() as store:
-        live = store.get_project(project.id) is not None  # a forgotten row reads as None
+        before = store.get_project(project.id)  # a forgotten row reads as None
+        # Listed, not merely live: forget clears onboarded_at, and a capture revives the
+        # row unlisted (review of #399, m13).
+        listed = before is not None and before.onboarded_at is not None
         _, warning = onboard_on_purpose(store, project)  # the deliberate add (#139)
         project_entries = store.entries("project", project_id=project.id)
-        # A re-run only while the row is live: a forgotten project has its facts kept,
-        # and "already onboarded" would say nothing happened (review of #399, m12).
-        already_onboarded = live and any(entry.source == "onboard" for entry in project_entries)
-        restored = not live and bool(project_entries)
+        earlier = any(entry.source == "onboard" for entry in project_entries)
+        # A re-run only while the project is listed: a forgotten one has its facts kept,
+        # and "already onboarded" would say nothing happened (review of #399, m12). A
+        # captured row is back only with an earlier onboard's facts, else it never left.
+        already_onboarded = listed and earlier
+        restored = not listed and bool(project_entries) and (before is None or earlier)
         markers_read = refresh or not already_onboarded
         if markers_read:
             existing = {entry.text for entry in project_entries}

@@ -240,6 +240,58 @@ def test_onboarding_a_forgotten_project_again_says_its_facts_are_back(
     ), seeded.output
 
 
+def test_a_forgotten_project_a_capture_brought_back_is_onboarded_again(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forget clears ``onboarded_at``, and a capture (a prompt there, with ``[projects]
+    capture`` on) revives the row live but unlisted. Onboarding it then lists it again,
+    so it is no re-run either: it says its facts are back and reads the markers. A
+    captured row never onboarded has nothing back, though it holds a fact of another
+    kind (review of #399, m13)."""
+    from aisquare.core.entries import new_entry
+    from aisquare.core.store import store_session
+    from aisquare.core.workspace import project_id_for
+    from aisquare.models import ProjectInfo
+
+    def captured(root: Path, note: str | None = None) -> None:
+        project = ProjectInfo(id=project_id_for(root.resolve()), root=root.resolve())
+        with store_session() as store:
+            store.ensure_project(project)
+            if note is not None:
+                store.add(new_entry(note, "project", project.id, [], "cli"))
+
+    proj = tmp_path / "app"
+    proj.mkdir()
+    (proj / "package.json").touch()
+    monkeypatch.chdir(proj)
+    runner.invoke(app, ["project", "onboard"])
+    forgotten = runner.invoke(app, ["project", "forget", str(proj)])
+    (proj / "Makefile").touch()
+    captured(proj)
+    gone = runner.invoke(app, ["--json", "project", "list"])
+    back = runner.invoke(app, ["project", "onboard"])
+    listed = runner.invoke(app, ["--json", "project", "list"])
+
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    (fresh / "Cargo.toml").touch()
+    captured(fresh, note="Deploys from the release branch.")
+    monkeypatch.chdir(fresh)
+    first = runner.invoke(app, ["project", "onboard"])
+
+    assert forgotten.exit_code == 0, forgotten.output
+    assert _json(gone.stdout) == [], "control: the capture revived it unlisted"
+    assert back.stdout == (
+        "✓ onboarded again; its earlier facts are back\n"
+        "seeded 1 project fact(s):\n"
+        "  - Has a Makefile — check its targets for build/test commands.\n"
+    ), back.output
+    assert [project["root"] for project in _json(listed.stdout)] == [str(proj.resolve())]
+    assert first.stdout == "seeded 1 project fact(s):\n  - Rust project (Cargo.toml).\n", (
+        "a captured row never onboarded is a first run, not a comeback"
+    )
+
+
 def test_switch_says_so_when_the_state_file_is_not_a_json_object(
     runner: CliRunner, work_dir: Path
 ) -> None:

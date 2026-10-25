@@ -33,6 +33,10 @@ from aisquare.core import tls
 from aisquare.services import claude_accounts as service
 from tests.test_claude_accounts import LIVE_USAGE, NOW, _sign_in
 
+#: The real handshake, taken at import: the suite's ``no_tls_probe`` refuses every host off
+#: this machine, and a test whose connection is a stand-in puts this back.
+REAL_HANDSHAKE = tls.handshake
+
 SRC = Path(__file__).resolve().parent.parent / "src" / "aisquare"
 
 
@@ -489,6 +493,45 @@ def test_doctors_tls_row_fails_on_a_bundle_that_will_not_load(
     assert row.status.value == "fail" and "could not be loaded" in row.detail
 
 
+def test_a_live_doctor_run_from_the_suite_connects_nowhere_off_this_machine(
+    runner: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REVIEW-403, MAJOR-1: the ``tls`` row shook hands with api.anthropic.com for real in
+    every test that ran ``doctor --live``. Under the suite's guard (``no_tls_probe``) a live
+    run connects nowhere off this machine, and the row says it could not reach the host."""
+    import socket
+
+    from aisquare.cli.app import app
+    from tests.conftest import TLS_CLOSED
+
+    tried: list[str] = []
+    connect, lookup = socket.socket.connect, socket.getaddrinfo
+
+    def local(host: object) -> bool:
+        return str(host) in ("127.0.0.1", "::1", "localhost", "") or str(host).startswith("/")
+
+    def guarded_connect(self: socket.socket, address: Any) -> None:
+        if isinstance(address, tuple) and not local(address[0]):
+            tried.append(f"connect {address[0]}:{address[1]}")
+            raise ConnectionRefusedError("refused by the test")
+        connect(self, address)
+
+    def guarded_lookup(host: Any, *args: Any, **kwargs: Any) -> Any:
+        if host is not None and not local(host):
+            tried.append(f"lookup {host}")
+            raise socket.gaierror("refused by the test")
+        return lookup(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_lookup)
+
+    result = runner.invoke(app, ["--json", "doctor", "--live"])
+
+    assert tried == [], tried
+    rows = {row["name"]: row for row in json.loads(result.stdout)}
+    assert rows["tls"]["status"] == "warn" and TLS_CLOSED in rows["tls"]["detail"], rows["tls"]
+
+
 def test_doctors_tls_row_is_live_only() -> None:
     from aisquare.services import diagnostics
 
@@ -767,6 +810,7 @@ def test_a_proxy_with_no_port_is_dialled_on_443_as_urllib_does(
 
     monkeypatch.setattr(http.client, "HTTPSConnection", Connection)
     monkeypatch.setattr(tls, "https_proxy", lambda host: "http://proxy.corp")
+    monkeypatch.setattr(tls, "handshake", REAL_HANDSHAKE)  # the connection is a stand-in
     tls.handshake("api.anthropic.com")
     assert dialled == [("proxy.corp", 443)]
     row = diagnostics._check_tls()

@@ -7,6 +7,7 @@ and duck-type the command/parameter attributes instead of importing click.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from enum import Enum
 from typing import Any
@@ -66,6 +67,16 @@ Filled like a required argument. tests/test_fleet_cli.py checks that each one is
 refused without either."""
 
 
+TRAILING: dict[tuple[str, ...], list[str]] = {
+    ("exec",): ["--", sys.executable, "-c", "pass"],
+}
+"""What a command that takes everything after ``--`` is given to run.
+
+``exec`` has no declared argument, so the walk would leave it bare and it would exit 2 on
+usage. A placeholder such as ``sample`` is no answer: it is a real program on macOS
+(``/usr/bin/sample``). The interpreter running the suite, doing nothing, is."""
+
+
 def leaf_invocations_by_path() -> list[tuple[tuple[str, ...], list[str]]]:
     """``(path, argv)`` for every leaf: its own name, and a RUNNABLE invocation.
 
@@ -92,6 +103,7 @@ def leaf_invocations_by_path() -> list[tuple[tuple[str, ...], list[str]]]:
                 argv.append(_placeholder(parameter))
             elif parameter.param_type_name == "option":
                 argv.extend([parameter.opts[0], _placeholder(parameter)])
+        argv.extend(TRAILING.get(path, []))
         invocations.append((path, argv))
     return invocations
 

@@ -943,7 +943,12 @@ def _repin(store: ContextStore) -> tuple[ProjectInfo | None, str | None]:
 
 
 def _remove_data_dir(project_id: str) -> bool:
-    """Delete ``~/.aisquare/projects/<id>/`` (snapshot, brain); False if there was none."""
+    """Delete ``~/.aisquare/projects/<id>/`` (snapshot, brain); False if there was none.
+
+    The project's kept brief artifacts (``~/.aisquare/briefs/<id>/``) go too: the purge
+    has deleted the briefs that cite them.
+    """
+    shutil.rmtree(paths.aisquare_home() / "briefs" / project_id, ignore_errors=True)
     directory = paths.project_data_dir(project_id)
     if not directory.is_dir():
         return False

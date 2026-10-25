@@ -2139,9 +2139,9 @@ threshold or a timer.
 
 ## Upgrading
 
-To 0.9.0 from 0.8.2: the store migrates itself from v32 to v37 on first open, and
-the config file moves to version 3, once. The two steps below are both 0.9.0's: the
-first messages (v36), then the token diet (v37 and config version 3).
+To 0.9.0 from 0.8.2: the store migrates itself from v32 to v38 on first open, and
+the config file moves to version 3, once. The three steps below are all 0.9.0's: the
+first messages (v36), the token diet (v37 and config version 3), then work briefs (v38).
 
 ### To 0.9.0, part 1: verified first messages (store schema 36)
 
@@ -2235,6 +2235,19 @@ launch with tools this one denies, with the `config set` that keeps them denied 
 0.8.1 and 0.8.2 read a version-3 file over their own defaults. An install that shares
 `~/.aisquare` without going through `aisquare upgrade` (a second tool install, a synced
 home) is not warned.
+
+### To 0.9.0, part 3: work briefs (store schema 38)
+
+**The store migrates itself on first open, from v37 to v38, in one step.** v38 adds the
+`brief` table and its `brief_number` index, for work briefs and the evidence gate
+([work-briefs.md](work-briefs.md)). Its script is `CREATE … IF NOT EXISTS` only. A store
+that a pre-release build of the briefs branches (#306, #341, #417) stamped v34, v36 or v37
+already holds `brief`, and converges the same way as the steps above: the presence pass
+adds what a step under its stamp left out, and v38 finds `brief` in place, its briefs
+intact. No config key is added, and a task no brief links is done exactly as before.
+
+**Moving back** with `aisquare upgrade --version <v>` is safe for the store: an older build
+opens a v38 store as it is, without migrating it down, and never reads the `brief` table.
 
 ## Troubleshooting
 

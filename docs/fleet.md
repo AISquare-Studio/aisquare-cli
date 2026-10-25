@@ -171,9 +171,9 @@ tmux can see and its row says so (`no hooks`).
    Then label (prefilled `<role>-1`, or `<role>-<task short id>` once a task is
    picked; 🎲 offers `<role>-<adjective>-<animal>`; a label that breaks the rule
    disables *Spawn* and shows the rule), task (the project's open tasks),
-   worktree (disabled with "not a git repository" outside one), *Remote control*
-   (Claude Code's own, at the role's `remote_control`; it follows the role until
-   you touch it), permission mode,
+   worktree (disabled with "not a git repository" outside one), *Claude Remote
+   Control* (Claude Code's own, at the role's `remote_control`; it follows the role
+   until you touch it), permission mode,
    extra agent args (split like a shell would; a quoting error is shown inline)
    and a first prompt. A field left as it opened means the role's default,
    exactly as an omitted `fleet spawn` flag does; picking `(none)` over a role

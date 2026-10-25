@@ -42,8 +42,9 @@ aisquare fleet spawn coder --no-remote-control               # this coder withou
 ```
 
 Each session is titled `<project> · <label>` (`alpha · coder-auth`), so you can
-tell the agents apart in the Claude app. The Spawn dialog has a *Remote control*
-switch under *Advanced*, at the role's default. The choice is recorded on the agent's row, so
+tell the agents apart in the Claude app. The Spawn dialog has a *Claude Remote
+Control* switch under *Advanced*, at the role's default (not *Remote control*, which is
+this page's phone remote in *⚙ Settings*). The choice is recorded on the agent's row, so
 `fleet restart` and `fleet switch` keep it, and `fleet ls --json` reports it as
 `remote_control`.
 

@@ -17,8 +17,8 @@ is *(none) — general-purpose Claude*, ``fleet.PLAIN_ROLE``: a plain Claude Cod
 session on the board, with no standing cycle and no mission; ``coder`` stays
 the default. Everything else is folded into one *Advanced* section (a
 ``Collapsible``, opened by a click or ``Enter`` on its title): *Pick…*, Binary,
-Persona with *Import…*, Label with 🎲, Task, Worktree, Remote control, Permission
-mode, Extra agent args and First prompt. It opens by itself when a preset fills one
+Persona with *Import…*, Label with 🎲, Task, Worktree, Claude Remote Control,
+Permission mode, Extra agent args and First prompt. It opens by itself when a preset fills one
 of its fields (``binary=``, ``persona=`` from the persona-first flow but not the
 captain's own persona, or the ``label=``, ``task_id=`` and ``prompt=`` a form
 reopened after a sign-in carries) and whenever one of its fields blocks *Spawn* — a bad
@@ -665,7 +665,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                             "" if self._git else "not a git repository", id="spawn-worktree-note"
                         )
                     with Horizontal(classes="spawn-row"):
-                        yield Label("Remote control")
+                        # Claude Code's own, never "Remote control": that is the phone
+                        # remote's name in Settings (owner call W4-8, revised at the main sync).
+                        yield Label("Claude Remote Control")
                         yield Switch(value=defaults.remote_control, id="spawn-remote")
                         yield Static(
                             "continue it from claude.ai/code or the Claude app",

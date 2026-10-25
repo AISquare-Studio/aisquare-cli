@@ -279,7 +279,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `[fleet.roles.<role>] remote_control = true`, or `fleet spawn --remote-control` /
   `--no-remote-control` for one agent, starts Claude Code with `--remote-control
   "<project> · <label>"`, so the session can be continued from claude.ai/code or the
-  Claude app. The Spawn dialog has a *Remote control* switch at the role's default.
+  Claude app. The Spawn dialog has a *Claude Remote Control* switch under *Advanced*,
+  at the role's default (*Remote control* is the phone remote's name in *⚙ Settings*).
   The choice is recorded on the row (a restart and a switch keep it), and
   `fleet ls --json` reports it as `remote_control`. `aisquare launch` leaves the flag
   off, saying why in one line, when the binary is not Claude Code, when your own

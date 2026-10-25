@@ -34,11 +34,13 @@ import pytest
 from textual.app import App
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
+from textual.widget import Widget
 from textual.widgets import (
     Button,
     Checkbox,
     Collapsible,
     Input,
+    Label,
     OptionList,
     RadioButton,
     Select,
@@ -758,8 +760,8 @@ def test_untouched_defaults_follow_the_role_and_touched_ones_stay(
 def test_the_remote_control_switch_follows_the_role_until_touched_and_is_sent_then(
     git_project: ProjectInfo,
 ) -> None:
-    """#289: *Remote control* opens at the role's ``remote_control``, follows a role change
-    while untouched, and is sent only when it differs from the role's default."""
+    """#289: *Claude Remote Control* opens at the role's ``remote_control``, follows a role
+    change while untouched, and is sent only when it differs from the role's default."""
     config = load_config()
     config.fleet.roles["reviewer"] = FleetRoleSettings.model_validate({"remote_control": True})
     save_config(config)
@@ -786,24 +788,34 @@ def test_the_remote_control_switch_follows_the_role_until_touched_and_is_sent_th
 
 
 def test_the_remote_control_note_wraps_at_80_columns(git_project: ProjectInfo) -> None:
-    """At 80 columns the note beside *Remote control* was laid out on one line wider than
-    its row and painted cut, '…or the Cl' (#335's walk). It wraps in its row now."""
+    """At 80 columns the note beside the switch was laid out on one line wider than its row
+    and painted cut, '…or the Cl' (#335's walk). It wraps in its row now. The label is
+    *Claude Remote Control*, never main's *Remote control*, the phone remote's name in
+    Settings (owner call W4-8, revised at the main sync), and it is painted whole."""
 
-    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> str:
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
         await pilot.resize_terminal(80, 45)
         await open_advanced(pilot)  # the row is in Advanced
-        widget = dialog.query_one("#spawn-remote-note", Static)
-        widget.scroll_visible(animate=False)
+        note = dialog.query_one("#spawn-remote-note", Static)
+        note.scroll_visible(animate=False)
         await settle(pilot)
-        x, y, width, height = widget.region
+        row = note.parent
+        assert row is not None
+        label = row.query_one(Label)
         # What the screen paints there, not the layout: a line wider than its row is laid
         # out whole and painted cut (test_ui_remote.painted_in).
         update = host.screen._compositor.render_full_update()
-        rows = ["".join(chop.text for chop in row) for row in update.strips]
-        return " ".join(" ".join(row[x : x + width] for row in rows[y : y + height]).split())
+        rows = ["".join(chop.text for chop in strip) for strip in update.strips]
 
-    painted = drive(git_project, scenario)
-    assert painted == "continue it from claude.ai/code or the Claude app"
+        def painted(widget: Widget) -> str:
+            x, y, width, height = widget.region
+            return " ".join(" ".join(row[x : x + width] for row in rows[y : y + height]).split())
+
+        return [painted(label), painted(note)]
+
+    label, note = drive(git_project, scenario)
+    assert label == "Claude Remote Control"
+    assert note == "continue it from claude.ai/code or the Claude app"
 
 
 def test_the_manager_role_locks_the_label_and_a_live_manager_greys_it_out(

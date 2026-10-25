@@ -1300,6 +1300,129 @@ def test_the_transcript_page_names_the_human_and_the_agent(
     assert page.more is False and page.lines[-1] == ""
 
 
+def _plain_page(path: Path, agent: str) -> list[str]:
+    """``agent``'s conversation as its own reader pages it, without escapes."""
+    import re
+
+    from aisquare.services import handoff, transcript
+
+    page = transcript.read_page(path, limit=handoff.TURNS, width=handoff.WIDTH, agent=agent)
+    return [re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", line).rstrip() for line in page.lines]
+
+
+def test_a_hand_off_brief_carries_the_conversation_the_agents_own_reader_renders(
+    adapter: AgentAdapter, tmp_path: Path
+) -> None:
+    """Task #15: a hand-off across agents takes the source's conversation from its own
+    transcript reader (``records`` and ``page_lines``, as the Transcript tab pages it) and
+    nothing of its name, so a new adapter gets one by implementing what this suite asks.
+    The brief names both agents, fits the first prompt's bound, and holds no escape."""
+    from datetime import UTC, datetime
+
+    from aisquare.core import launch_seal
+    from aisquare.models import FleetAgent, LaunchSpec
+    from aisquare.services import handoff
+
+    _reader(adapter)
+    path = _written(_moments(adapter)["asked"], tmp_path / "session.jsonl")
+    record = launch_seal.LaunchRecord(
+        id="agt_1", project_id="prj_contract", project_root=str(tmp_path), role="coder",
+        agent=adapter.id, binary=adapter.binary, cwd=str(tmp_path),
+        spec=LaunchSpec(binary=adapter.binary),
+        session=launch_seal.SessionFacts(id="ses_1", agent=adapter.id, transcript=str(path)),
+    )  # fmt: skip
+    source = FleetAgent(
+        id="agt_1", project_id="prj_contract", label="coder-1", role="coder", agent=adapter.id,
+        binary=adapter.binary, pane_id="%1", session_id="ses_1", cwd=tmp_path,
+        created_at=datetime.now(tz=UTC),
+    )  # fmt: skip
+    lines = _plain_page(path, adapter.id)
+    assert handoff.conversation(record) == tuple(lines) and any(line.strip() for line in lines)
+    for target in ALL:
+        if target == adapter.id:
+            continue
+        brief = handoff.build(label="coder-1", source=source, record=record, target_agent=target)
+        text = brief.text()
+        assert f"which ran on {adapter.label}" in text, (adapter.id, target)
+        assert f"You run on {get_adapter(target).label}" in text
+        assert len(text.encode("utf-8")) <= handoff.PROMPT_MAX and "\x1b" not in text
+        newest = [line for line in lines if line.strip()][-2:]
+        assert all(line in text for line in newest), (newest, text)
+
+
+def _hands_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, target: str
+) -> tuple[FakeTmux, Any, Any, Path]:
+    """``source`` spawned on the fleet's fake tmux, its conversation recorded at its own
+    "asked" moment, then switched onto ``target``: the tmux, the receipt, the source's row
+    and its transcript. Both binaries are fakes on the PATH."""
+    from tests.test_fleet_service import FakeClock
+    from tests.test_hand_off_across_agents import _ran, _ready_as
+
+    config = load_config()
+    config.fleet.roles["coder"] = FleetRoleSettings(worktree=False)
+    save_config(config)
+    bin_dir = tmp_path / "bin"
+    for name in {get_adapter(source).binary, get_adapter(target).binary}:
+        fakebin.executable_fake(bin_dir, name, windows="echo fake\nset /p line=", posix="read line")
+    fakebin.prepend_to_path(bin_dir, monkeypatch)
+    tmux = FakeTmux()
+    clock = FakeClock()
+    monkeypatch.setattr(fleet_service, "server", lambda config=None: tmux)
+    monkeypatch.setattr(fleet_service, "_sleep", clock.sleep)
+    monkeypatch.setattr(fleet_service, "_monotonic", clock.monotonic)
+    # An agent that comes to rest at its prompt on its SessionStart has come, as the fleet
+    # tests' own `tmux` fixture takes it (`fleet._type_at_its_start`).
+    monkeypatch.setattr(fleet_service, "_started_since", lambda session_id, launched: True)
+    project = team_project(tmp_path)
+    with store_session() as store:
+        store.onboard_project(project)
+    agent = fleet_service.spawn(project, "coder", agent=source).agent
+    transcript = _written(_moments(get_adapter(source))["asked"], tmp_path / "session.jsonl")
+    _ran(agent, transcript, native="0199a3b2-0000-7000-8000-00000000000a")
+    _ready_as(tmux, monkeypatch, get_adapter(target).binary)
+    receipt = fleet_service.switch(project, agent.label, to_agent=target)
+    return tmux, receipt, agent, transcript
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    [("fake-agent", "claude-code"), ("claude-code", "fake-agent"), ("codex", "fake-agent")],
+)
+def test_the_synthetic_agent_hands_off_across_agents_both_ways(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, target: str
+) -> None:
+    """Task #15, the plug-and-play proof: the fake agent, which only implements this suite's
+    contract (its transcript reader, its first-prompt path), hands off onto Claude Code and
+    takes one from Claude Code and Codex, through the same switch: the source's own reader
+    makes the brief, the target's own prompt path delivers it, and the new launch record
+    names the target."""
+    from aisquare.core import launch_seal
+
+    tmux, receipt, agent, transcript = _hands_off(tmp_path, monkeypatch, source, target)
+
+    assert receipt.crossed and (receipt.from_agent, receipt.to_agent) == (source, target)
+    assert receipt.started.agent == target and receipt.resumed is False, receipt.notes
+    assert receipt.prompt_typed == "yes", receipt.notes
+    record = launch_seal.read(receipt.started.id)
+    assert isinstance(record, launch_seal.LaunchRecord) and record.agent == target
+    command = tmux.spawned[-1]["command"]
+    assert isinstance(command, list)
+    if get_adapter(target).capabilities.positional_prompt:
+        prompt = command[-1]
+    else:
+        [prompt] = [
+            text
+            for pane, kind, text in tmux.typed
+            if pane == receipt.started.pane_id and kind == "paste"
+        ]
+    assert f"which ran on {get_adapter(source).label}" in prompt
+    assert f"You run on {get_adapter(target).label}" in prompt
+    newest = [line for line in _plain_page(transcript, source) if line.strip()][-2:]
+    assert all(line in prompt for line in newest), (newest, prompt)
+    assert agent.pane_id in tmux.killed  # the source was stopped, through its own exit
+
+
 def test_the_reply_since_the_newest_prompt_is_read_off_a_recorded_moment(
     adapter: AgentAdapter, tmp_path: Path
 ) -> None:

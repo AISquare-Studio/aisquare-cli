@@ -378,6 +378,9 @@ def _read_fleet(show_captured: bool, *, captain: bool = False) -> _FleetRead:
         except Exception as exc:  # a bug in the fleet path must not take the view down
             agents[project.id] = []
             notices[project.id] = f"agents unavailable — {_why_unread(exc)}"
+    # The one write a frame makes: a manager nudge a draft held back goes out once its input
+    # box is clear (P0-W2, #276). One indexed read when nothing is held back; never raises.
+    fleet_service.retry_deferred_nudges()
     return _FleetRead(capturing, projects, groups, agents, notices, home=home)
 
 

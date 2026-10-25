@@ -61,6 +61,15 @@ fleet still running, and every release now carries its own installer.**
   when it saves, reloads or resets, so it shows at once and the two-second refresh
   never reads `config.toml` for it. A `config set` from a shell while `asq` runs
   shows after App settings' *Reload* or at `asq`'s next start, not live.
+- **`[accounts] prefer = "reset-soonest"`** (*under the line, prefer* in App
+  settings): of the accounts under `switch_at`, a spawn and a hand-over take the
+  one whose week resets first, priority breaking ties, so a week's allowance is
+  spent before it lapses. `priority`, the default, picks as before. `accounts
+  usage` shows each per-family week and its reset beside the week. **`fleet
+  switch --force`** moves an agent the usage-limit hand-over moved minutes ago,
+  which is otherwise refused. New event **`handover_failed`**: the automatic
+  hand-over could not move a limited agent, with the reason and the `fleet
+  switch` that would; it wakes the manager. (#277)
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in
@@ -127,7 +136,7 @@ fleet still running, and every release now carries its own installer.**
   there says so rather than that the pack is opt-in (a pack of it left from before
   is not served, and the next onboard or `init` deletes it). Removing it from the
   fleet hides it again. Every other role, fleet row and board, and the store
-  (schema v35), are the same either way. Four fleet changes that came with it are
+  (schema v36), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line
   names, and `serve --stdio`'s idle clock (all under Fixed, below).
@@ -387,12 +396,6 @@ fleet still running, and every release now carries its own installer.**
   the Remote panel. Save, Reload and Reset all hide on *Remote*, which acts at once; the
   Captain box now follows *Reload* and *Reset all*, which left it, the ★ and the
   Captain section as they were until a restart.
-- **`fleet spawn --task` with no `--prompt` tells the agent to start on its
-  task** (#32; the owner's decision, board seq 671): its first message names the
-  task and says to read it with `aisquare task show N`, then do what its
-  briefing's ASSIGNED TO YOU line says, which decides per role and state whether
-  to claim it (a tester on a todo task is told it is not its to claim). A spawn
-  with neither is typed nothing, and reads `waiting`.
 - **Less per-request context from aisquare.** A solo session (no role, no fleet row,
   nobody else on the board: no open task, no live fleet agent, no other live session)
   gets no `<aisquare-team>` block, and the MCP server's instructions are one line where
@@ -453,7 +456,31 @@ fleet still running, and every release now carries its own installer.**
   launches on its own directory after the upgrade. A headroom pick still
   overrides the binding, as before. An old default that is signed out or
   disabled no longer gets the launch: the next enabled, signed-in account does.
-- The store migrates to schema v35 on first open, from 0.8.2's v32, in three steps: v35
+- **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and
+  the suite on one Linux leg (py3.12), the Linux package job and the other jobs
+  bar the ambient legs and the demo. Pushes to `rc/**` and `main`, PRs into
+  `main`, the nightly and a run by hand keep the full matrix (CONTRIBUTING).
+- **`make test` runs the suite on every core** (#129 d). pytest-xdist is in the `dev`
+  extra and `uv.lock`, and `make test` runs `pytest -n auto`; so does CI's `check` job on
+  3.11–3.13 (the `ambient` job stays serial: it exists to catch reads of machine state,
+  not to be fast). No test needed a group: each one already has a home, a tmux folder and
+  a `claude` stand-in of its own. What a test left running wrote outside every home is
+  still reported under workers: each worker hands its notes to the controller, which
+  prints the summary. Run serially with `pytest -p no:xdist`. A killed run (a timeout,
+  `kill`, a worker that dies) runs no teardown, and its tmux servers lived on with a pane
+  each, 55 on one box, some days old. The suite's private folders under `/tmp` are now
+  named for the process that made them (`asqtx<pid>-…`), and each run starts by ending
+  the servers in, and removing, every folder whose process is gone; a folder of a run
+  still going is never touched.
+- **CI checks that `uv.lock` matches `pyproject.toml` (#278).** A new `lock` job
+  runs `uv lock --check` on a pinned uv, and `make check` runs it too where `uv` is
+  on PATH (`make lockcheck`). The lock had drifted unseen: CI installs with pip, so
+  nothing read it, and `uv run --frozen` failed on every persona path for want of
+  `pyyaml`. The `voice` extra had drifted the same way since (the xdist change
+  relocked it). A dependency change without its relock now fails CI.
+- The store migrates to schema v36 on first open, from 0.8.2's v32, in four steps: v36
+  adds the first message's three columns (under Fixed; a store a pre-release build
+  stamped v34 with them reaches v36 through the presence pass, as #346's does). v35
   adds two tables, `usage_session` and `usage_turn`, for `aisquare metrics tokens`. v34
   adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,
   `died` otherwise; NULL on a row from before it, read by its exit status, #38). The
@@ -538,6 +565,16 @@ fleet still running, and every release now carries its own installer.**
   Settings shows the field again, on or off, as *Replace your ngrok token*
   (*Change ngrok token* under *Advanced* opens it at any time), and a token saved
   while Remote is on starts ngrok again at once.
+- The P0 reliability plan (`docs/plans/handoff-p0-reliability.md`, "W0 results") now
+  records what was measured on a live box before its prompt-delivery work starts. On
+  Claude Code 2.1.309 and 2.1.223, a typed prompt's first Enter is taken as soon as the
+  input box is drawn, and the reported 30–50 s delay did not reproduce. An Enter sent
+  before the box is drawn is dropped, and the prompt stays unsent in the input box.
+  A prompt passed on the command line runs as the first turn, alone, with `--resume`
+  or after `--`. The results also record the inbox socket's message line and when a
+  message is delivered or held, and that the usage endpoint reports a per-model window
+  in `limits[]`. `tests/test_claude_accounts.py` gains a fixture shaped like the
+  endpoint's answer of 2026-10-23, with invented values.
 
 ### Fixed
 
@@ -585,22 +622,118 @@ fleet still running, and every release now carries its own installer.**
   and the exact `aisquare fleet restart --project <codename> <label>`, so after a
   crash *Managers only* brings the managers back and they bring their teams. A
   restart of all brings each manager back after its team.
-- **A `fleet spawn --prompt` is sent, not left in the input box** (#32). It was
-  typed once the agent's process ran and two seconds had passed. A Claude Code
-  still starting reads the keyboard into an early-input buffer that keeps the
-  text and takes its Enter for a newline, so the prompt sat in the box unsent.
-  The launcher now waits for Claude Code's input box, then reads the pane back:
-  a prompt still in the box gets one more Enter, and one still there after it
-  is reported as unsent, with where to press Enter.
 - **A new account's first spawn starts working** (#32). Claude Code's
-  first-run "Security notes" screen took the spawn's prompt and lost it. The
+  first-run "Security notes" screen took the spawn's prompt and lost it. Where the
+  first message is typed into Claude Code (`[fleet] first_prompt = "type"`), the
   launcher presses Enter past it, then types the prompt. An agent left at that
   screen reads `attention` in `fleet ls`, the sidebar and Remote, with the
   reason, and its prompt is kept rather than typed into it.
-- **An agent that has had no prompt reads `waiting`, not `working`** (#32).
-  Every session start (not a compaction) leaves the board row waiting until
-  its first prompt; only the captain's did before, so a `fleet spawn` with no
-  prompt sat idle while `fleet ls` and the board said it was working.
+- **Every first message reaches its agent and starts a turn, or `fleet ls` says it
+  did not.** A spawn's `--prompt`, the line `fleet restart` and `fleet switch` start
+  a replacement with, a fresh hand-off and the usage-limit hand-over's were typed
+  with one Enter about two seconds after the agent started. An Enter that reaches
+  Claude Code before it draws its input box is dropped while the text stays in the
+  box, so the agent sat idle with its message unsent, and the board read it
+  `working`. A Claude Code agent now gets its first message on its command line
+  (`claude -- "<message>"`), in a file only you can read that its launch deletes,
+  so the row's recorded launch never holds it and a restart replays no old message;
+  the launch takes only a file the fleet wrote, in its own folder, and reads nothing
+  else.
+  Any other binary, and every agent under `[fleet] first_prompt = "type"`, has it
+  typed once Claude Code's input box is drawn, checked in the box, and sent again
+  only while the text is provably still waiting there. The row reads `pending` until
+  the agent's turn takes it: its `UserPromptSubmit`, or its `Stop` if that hook
+  could not record the prompt. `fleet spawn`, `restart` and `switch` wait
+  `[fleet] prompt_ack_seconds` (45) for that and say so, and their `--json` adds
+  `prompt_delivery` and `prompt_acked`. A message still pending past that wait at an
+  idle input box reads `attention` ("first prompt not taken", with the `fleet tell`
+  and `fleet restart` that take it on), and the board gets one `prompt_unsent`, which
+  wakes the manager. One held at Claude Code's first-run Security notes, which a
+  command-line message waits behind, does too, its `attention` saying to press Enter in
+  its window: it read `waiting` with nothing on the board, for good, once its
+  SessionStart had fired. `aisquare doctor` gains a `fleet-delivery` row: the last week's first
+  messages acknowledged, N of M, and how long agents took to start their first turn.
+  The store migrates to schema v36, which adds three nullable columns:
+  `team_session.prompted_at`, `fleet_agent.first_prompt` and
+  `fleet_agent.first_prompt_at`. A row from before them reads as "not tracked".
+  And `fleet spawn coder --task <id>` with no `--prompt` typed nothing, so the coder
+  waited at an empty prompt: its first message is now a kickoff that names the task
+  as its ASSIGNED TO YOU block does, a `--prompt` beside `--task` following it.
+  (#122, #32)
+- **Nothing the fleet types lands in your draft.** A board write that woke the
+  manager typed its nudge into the manager's input box whatever was there. A human
+  halfway through a message in `asq` had the nudge appended to the draft, and its
+  Enter sent both. Every typed write now reads the input box first and types nothing
+  while it holds a draft, or while you have typed into the pane in `asq` within
+  `[fleet] draft_quiet_seconds` (10). That covers the manager's nudge, `fleet tell`,
+  a typed first message and the Remote's paste. Claude Code's own dim placeholder
+  and suggestion are not a draft. A nudge held back goes out once the box is clear
+  (`asq` retries it as it refreshes); if you send the draft first, your prompt
+  carries the same board update and the nudge is dropped. A tell held back is filed
+  as a note and says why. A draft that appears while the text is being pasted
+  stops it before its Enter, and the tell or the first message's note says so: "a
+  draft appeared in its input box while the text was being typed; ours is in the
+  box with it, unsent, and nothing was sent". And a note reaches a busy agent at the end of its turn: a
+  note to an agent's label or role, including a `fleet tell` to an agent that was
+  working, waited for the agent's next prompt, which one that had finished might
+  never get. Its `Stop` hook now hands it the notes addressed to it when the turn
+  ends, as the manager is kept going on fresh board decisions, with the same
+  guards: not on a turn already continuing from a stop hook, and at most `[fleet]
+  max_continuations_per_hour` an hour. `[fleet] deliver_notes_at_turn_end = false`
+  turns it off. (#276)
+- **A coder that claims a task sees its contract.** `task claim` and `task next
+  --claim` printed the title line alone, and the contract (`--detail`) was a
+  separate `task show` that nothing named, so people pasted contracts into coders'
+  panes. A claim now prints the contract, the reason the task was last reopened
+  (which was lost the moment a reopened task was claimed again) and the command
+  that shows it again, `aisquare task show 2`: the bare number, which a shell keeps
+  (`#2` starts a comment). `task next` without `--claim` says when a task has a contract. The
+  coder's cycle names `task show`, the manager's says the contract belongs in
+  `--detail`, and `--detail`'s help says it is the contract. `--json` is unchanged.
+  (#74)
+- **A session resumed under another account keeps its transcript.** `claude
+  --resume <path>` under another `CLAUDE_CONFIG_DIR` (every resumed `fleet
+  switch` and usage-limit hand-over) reports a transcript under the new account
+  that Claude Code never creates, and keeps writing the original. The board
+  recorded the missing one, so every prompt after it raised a false *TWO live
+  agents* collision banner, and the agent's next restart or switch found nothing
+  to resume and started fresh. A session start no longer replaces a transcript
+  on disk with one that is not, and a row an earlier build wrote heals at the next
+  prompt. Found by the P0-W0 spike on Claude Code 2.1.309 and 2.1.223.
+- **`capture.enabled = false` stops prompt capture (#268).** The key was read by
+  nothing: with it off, `UserPromptSubmit` stored every prompt, `aisquare log`
+  listed it, and Explainability spooled it. Off, no prompt is stored or spooled;
+  the turn's metrics row (no text) and the teammate delta still arrive, and the
+  CI experiment, its own opt-in, still consults its endpoint. A config that cannot
+  be read records no prompt and says so on stderr: privacy fails closed.
+  `config set capture.enabled false` says in one line what stops and what does not.
+- **One usage limit moves an agent once, to an account that can take it.**
+  With `on_limit = "switch"` the `limited` line woke the manager with a `fleet
+  switch` while the hand-over was already moving the agent, and once that had
+  finished the manager's switch moved the replacement again: two `switched` for
+  one limit. The line is now a `limited_handing_over` event, *moving it to another
+  account automatically*, that wakes nobody; the manager's cycle acts on
+  `handover_failed` instead; a replacement minutes old is refused without
+  `--force`; and `switched` is news on the next delta, not a wake-up. And a pick
+  read only the five-hour and seven-day windows. The per-family week (Opus, Sonnet,
+  Fable), which the usage endpoint sends as a `limits[]` entry of kind
+  `weekly_scoped` (the `seven_day_opus` and `seven_day_sonnet` keys come null), and
+  a window's `locked_reason` were dropped, so an Opus agent was moved onto an
+  account whose Opus week was spent and refused at once. They are read now
+  (`weekly_all` counts as the shared week), and an account whose family week is
+  spent is skipped for that family by every headroom pick, a switch by hand
+  included. Every limit an agent hits is remembered on its account until the reset
+  it named, so no pick by headroom sends an agent back before then. (#277)
+- **An idle agent reads waiting, not working.** A session start wrote `working`,
+  and only the captain was set back to `waiting`, so a just-spawned agent sitting
+  at an empty prompt read busy for up to 30 minutes: `fleet tell` filed a note it
+  never read, and an agent whose first prompt was never submitted looked busy to
+  everyone who could have reached it. Every role now reads `waiting` from its
+  session start until a prompt starts a turn (a compaction keeps what the turn
+  said). And a `working` row whose pane has printed nothing for `[fleet]
+  busy_quiet_seconds` (30) is checked once: if Claude Code sits idle at its prompt —
+  a turn ended with Esc fires no hook — it reads ⏸ waiting, *idle (the board said
+  working)*, and a `fleet tell` is typed into it instead of filed. (#123, #32)
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for
   every other spawn: a seat reads the board of the hub its spawner honours, and its

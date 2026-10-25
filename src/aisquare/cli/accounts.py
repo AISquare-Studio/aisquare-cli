@@ -117,10 +117,15 @@ def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> t
         return _DASH, _DASH
     if not usage.available:
         return usage.reason or "unavailable", ""
-    return (
-        _window_cell(usage.session_percent, usage.session_resets_at, now=now),
-        _window_cell(usage.week_percent, usage.week_resets_at, now=now),
-    )
+    session = _window_cell(usage.session_percent, usage.session_resets_at, now=now)
+    week = _window_cell(usage.week_percent, usage.week_resets_at, now=now)
+    # The per-family weeks (#277), each with its own reset: they bind that family alone. A
+    # kept reading has none: the record holds no family week, a spent one is a limit mark.
+    for family, percent in sorted(usage.family_week_percent.items()):
+        week += f" · {family} {_percent(percent)}"
+        if (resets := usage.family_week_resets_at.get(family)) is not None:
+            week += f" resets {format_reset(resets, now=now)}"
+    return session, week
 
 
 def _window_cell(percent: float | None, resets_at: datetime | None, *, now: datetime | None) -> str:

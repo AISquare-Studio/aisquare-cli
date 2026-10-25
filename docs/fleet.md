@@ -108,7 +108,10 @@ tmux can see and its row says so (`no hooks`).
    them (`docs/personas.md`).
 4. **Watch the agents appear**, indented under the project, each with a role
    icon (🧭 manager · 🔨 coder · 🧪 tester · 🌐 ui-tester · 👀 reviewer · 🛡 validator) and a
-   state chip — **▶ working**, **⏸ waiting**, **🔔 NEEDS YOU** (with a terminal
+   state chip — **▶ working**, **⏸ waiting** (a fresh agent reads waiting until its
+   first prompt starts a turn, and one whose pane has been quiet for
+   `busy_quiet_seconds` with Claude Code idle at its prompt reads *idle (the board
+   said working)*: a turn ended with Esc fires no hook), **🔔 NEEDS YOU** (with a terminal
    bell), **⏳ limited** (parked on a Claude usage limit, with the reset time),
    **💤 exited(N)**, **✗ lost**. **Click an agent** and you see its real
    session; click into the pane and every key you type goes to it. The header
@@ -251,11 +254,11 @@ follows as a `⚠` line.
 | --- | --- | --- |
 | `<role>` | `manager`, `coder`, `tester`, `ui-tester`, `reviewer`, `validator`, or any role you have bound with `team bind` | — |
 | `--label L` / `-l L` | the agent's label (see [Naming](#naming)) | `<role>-<task short id>` with `--task`, else `<role>-<n>` |
-| `--task ID` | the board task this agent is for (id or prefix) | none |
+| `--task ID` | the board task this agent is for (id or prefix); with no `--prompt`, its first message is a kickoff that names the task as its ASSIGNED TO YOU block does | none |
 | `--worktree` / `--no-worktree` | run in its own git worktree | the role's setting: on for coder and reviewer |
 | `--permission-mode M` | Claude Code permission mode | the role's setting: `auto` |
 | `--bin B` | the agent executable | the role's binding, else `claude` |
-| `--prompt TEXT` | first message typed once the agent is up: for Claude Code, once its input box is drawn, past its first-run Security notes screen (Enter), and read back from the pane so a lost Enter is pressed once more | with `--task`, "Start on your assigned task #N … `aisquare task show N`, then do what the ASSIGNED TO YOU line of your briefing says" — that line says per role and state whether to claim; else none |
+| `--prompt TEXT` | the agent's first message: on Claude Code's command line, typed for any other binary ([the first message](#the-first-message)); after the kickoff with `--task`. Typed into Claude Code (`[fleet] first_prompt = "type"`), it goes in once its input box is drawn, past its first-run Security notes screen (Enter) | none |
 | `--persona NAME` | the persona the agent runs as ([docs/personas.md](personas.md)): passed to `launch`, briefed once at session start, recorded on the row | the role's `[fleet.roles.<role>].persona`, else none |
 | `--as SESSION` | the acting session — a manager passes its own, so the row records who spawned it | `user` |
 | `-- <agent args>` | everything after the options goes to the agent, as with `aisquare launch` | — |
@@ -306,6 +309,45 @@ was parked for. A nested `claude -p` started from the agent's shell inherits
 task and never takes its row, whatever start it reports. A binary that exports
 no `CLAUDE_PID` binds its row on first arrival and keeps that session; a
 `/clear` there releases its claims, as any session end does.
+
+### The first message
+
+Every first message the fleet gives an agent — `--prompt`, the kickoff of a
+`--task` spawn, the line `fleet restart` and `fleet switch` start a replacement
+with, a fresh hand-off, the usage-limit hand-over's — either starts a turn, or
+`fleet ls` says it did not.
+
+- **A Claude Code agent gets it on its command line**, as Claude Code's own
+  first turn (`claude -- "<message>"`, and `claude --resume <transcript> --
+  "<message>"` for a replacement). Nothing is typed, so there is no Enter to
+  lose: an Enter that reaches Claude Code before it draws its input box is
+  dropped while the text stays in the box, which left agents idle with their
+  first message unsent. The message waits behind Claude Code's folder-trust
+  question too, and runs once the folder is trusted. It travels in a file only
+  you can read (`$AISQUARE_HOME/run/prompts/<agent>.txt`), named to `aisquare
+  launch` with `--first-prompt-file` and deleted as the launch reads it, so the
+  row's recorded launch never holds it and a restart replays no old message.
+- **Any other binary has it typed**, and so does every agent with `[fleet]
+  first_prompt = "type"`. For Claude Code that means once its input box is
+  drawn: the text is pasted, checked in the box, sent with Enter, and Enter is
+  pressed again only while the text is provably still waiting there — never into
+  a box that is empty, holds anything else, or has a dialog over it.
+- **The board tracks it.** The agent's row reads `pending` until its
+  `UserPromptSubmit` says a turn started (`acked`). `fleet spawn`, `restart` and
+  `switch` wait up to `[fleet] prompt_ack_seconds` (45) for that and print it
+  (`✓ first message taken`); their `--json` adds `prompt_delivery` (`argv` or
+  `typed`) and `prompt_acked`. A message still pending past that wait, with the
+  agent at an idle input box, is not going to be taken: the agent reads
+  `attention` — "first prompt not taken", with the `fleet tell` and `fleet
+  restart` commands that take it on, each naming the project — and the board
+  gets one `prompt_unsent`, which wakes the manager. An agent held at Claude Code's
+  first-run Security notes past that wait is not going to take it either: it reads
+  `attention` — "Claude Code's first-run Security notes screen — press Enter in its
+  window" — with the same one `prompt_unsent`, since a `fleet tell` typed there is lost.
+  `aisquare doctor`'s `fleet-delivery` row counts the last week's: acknowledged N
+  of M, and how long the agents took to start their first turn.
+
+Both keys are in [the configuration keys](reference.md#configuration-keys).
 
 ### `fleet ls` / `fleet status`
 
@@ -359,6 +401,34 @@ Under `--json`, `typed` is `yes`, `no`, `unsent` or `maybe` beside `delivered`:
 `unsent` when the text is at its prompt and tmux refused its Enter (press Enter in
 its pane to send it), `maybe` when tmux did not answer in time with the text or its
 Enter, which may still arrive. Neither is to be told again: read the agent's pane.
+
+**Never over a draft.** Nothing the fleet types goes into a pane while its input
+box holds something a human typed and has not sent, or while someone has typed
+into the pane in `asq` within `[fleet] draft_quiet_seconds` (10). That covers a
+tell, the manager's nudge, a typed first message and the Remote's paste.
+Claude Code's own dim words in an empty box (its placeholder, its suggestion
+after a turn) are not a draft. A tell held back this way is filed as a note and
+says why ("a draft is in its input box, which nothing types over"). A draft
+that appears in the instant the tell is pasted, a human typing between the check
+and the paste, stops it before its Enter: the text stays in the box with the
+draft, unsent, and the tell says so ("a draft appeared in its input box while
+the text was being typed; ours is in the box with it, unsent, and nothing was
+sent") and is filed as a note. A manager's
+nudge waits, and goes out once the box is clear: `asq` retries it as it
+refreshes, and the next board write does too. If the human sends the draft
+first, that prompt hands the manager the same board update, and the nudge is
+dropped.
+
+**A note reaches a busy agent at the end of its turn.** A note addressed to an
+agent's label or role (`fleet tell` to a busy agent, `aisquare note --to
+<label|role>`) is handed to it by its `Stop` hook when the turn it was working
+on ends, the way the manager is woken: the board update as the reason it keeps
+going. It used to wait for the agent's next prompt, which an agent that had
+finished might never get. It is guarded like the manager's wake-up: not on a
+turn that is already continuing from a stop hook, and at most `[fleet]
+max_continuations_per_hour` times an hour. Only an addressed note does this;
+the rest of the board rides along with one, and waits for the next prompt
+otherwise. `[fleet] deliver_notes_at_turn_end = false` turns it off.
 
 `aisquare persona attach <name> --to <label>` types a persona's briefing into a
 waiting agent the same way, and keeps the persona on the agent's row so a `/clear`
@@ -904,7 +974,20 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   --live` ask the endpoint now. The first account in priority order under `switch_at`
   (85 % by default) is taken — or, when all are over it, the one with the most
   left. An account counts as full as the fuller of its two windows, so one
-  that has spent its week is not taken for an empty five hours. Usage is the
+  that has spent its week is not taken for an empty five hours. The endpoint's
+  per-family weeks count too, for an agent of that family: Claude Code's Opus
+  and Sonnet limits apply only to requests to that model family, so an account
+  whose Opus week is spent is no room for an Opus agent and still is for a
+  Sonnet one (the family is the session's model, or for a spawn its `--model`
+  or the role's ladder). A spent family week is no answer at all for that
+  family, not even the least bad one a switch by hand would take. A window the
+  endpoint marks locked reads 100 % used.
+  `[accounts] prefer = "reset-soonest"` (*under the line, prefer* in App
+  settings) takes, of the accounts under `switch_at`, the one whose week resets
+  first, so an allowance is spent before it lapses; `priority`, the default,
+  takes the first in order (every `[accounts]` key:
+  [Configuration keys](reference.md#configuration-keys)). `accounts usage` shows
+  each week's reset and each family week beside it. Usage is the
   same best-effort endpoint as the bars, so an
   account that is backed off after a 429 is not asked, and an older reading kept
   on a row after any failed read is never taken for a live one: the pick uses it
@@ -914,16 +997,40 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   account that does not answer is skipped with a note and, when none answers,
   the machine default decides as before. Each reading is kept: the row's bar
   gains *≈ 40 min to the limit* once two readings of the same window exist.
+- **Limits are remembered.** Every usage limit an agent hits leaves a mark on
+  the account it was on until the reset the message named (*weekly limit ·
+  resets Mon 12:00am*), and every pick by headroom — a spawn with `pick =
+  "headroom"`, the automatic hand-over, a `fleet switch` without `--to` —
+  skips that account until then, saying so: *account 3 skipped — weekly
+  limit until Mon 00:00 (in 2d 4h), refused 10:42*. A hand-over or a `fleet
+  switch` without `--to` never takes a marked account, its fallback rungs (the
+  binding, the project default, the machine default) included: with nowhere
+  else to go it refuses, and `handover_failed` says when the agent's own limit
+  resets. A launch's choices are not second-guessed: `--account`, a role
+  binding, a project default and `pick = "default"` still name the account, and
+  when every account carries a mark a spawn falls to the machine default as it
+  does when no usage can be read. `--to` always names the account. A session or weekly limit
+  closes the account to every agent; an Opus or Sonnet limit to that family's.
+  The endpoint may read an account under the line while it refuses, so the
+  refusal is believed over the reading. A live reading that shows a family
+  week spent leaves the same mark (*read* instead of *refused*), because the
+  cache a spawn picks from keeps only the two shared windows.
 - **A usage limit.** When an agent's turn ends on one (Claude Code's
   `StopFailure` hook, `You've hit your session limit · resets 12:30am`), its
-  row turns **⏳ limited** with the reset time, a `limited` line goes on the
-  board naming `aisquare fleet switch <label>`, and the manager is woken. Claude
+  row turns **⏳ limited** with the reset time and a `limited` line goes on the
+  board. When the automatic hand-over (below) will move it, the line is a
+  `limited_handing_over` event that says *moving it to another account
+  automatically* and wakes nobody; otherwise it
+  names `aisquare fleet switch <label>` and the manager is woken. Claude
   Code's own wait-and-continue at the reset is left running. `fleet switch`
   stops the agent as `fleet stop` would and starts it again under the same
   label and task, in its worktree as it stands (the branch it was on, any
   uncommitted work), on the account with the most headroom (`--to` names
   one), **resuming its session** from its transcript (`claude --resume
-  <path>`) when that file is on disk — the resumed agent keeps its task claims
+  <path>`) when that file is on disk (a session resumed under another account
+  keeps writing its original transcript while Claude Code reports a path under
+  the new account that is never created, so the board keeps the file on disk,
+  and the next restart or switch resumes it too) — the resumed agent keeps its task claims
   and is told in one line to continue, and no exit is announced for it —
   `--fresh` (or a transcript that is not on disk) starts new with a hand-off
   prompt built from the board instead; that agent takes the claims over too,
@@ -941,7 +1048,12 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   is there to take it (with one account, `switch` is `wait`), in a worker
   detached from the agent's
   own hook; a hand-over that finds no headroom leaves the agent parked, its
-  own wait intact, and says so on the board. One that goes ahead says on the
+  own wait intact, and says so with a `handover_failed` event naming `fleet
+  switch` or the reset — that event, not `limited`, wakes the manager. One
+  limit moves an agent once: `fleet switch` refuses a replacement the hand-over
+  started within the last ten minutes (*moved 3 min ago by the usage-limit
+  hand-over; `--force` moves it again*), and a successful `switched` is news on
+  the next delta, not a wake-up. One that goes ahead says on the
   board what it could not do (a first line it could not type, claims it could
   not move) in a note beside `switched`, and `switched` itself says whether
   the replacement's first line reached it. `doctor` lists parked agents; `doctor --live` warns when every account
@@ -1007,6 +1119,7 @@ aisquare accounts move 3 top           # up · down · top · bottom
 aisquare accounts disable 3            # out of automatic selection; enable puts it back
 aisquare config set accounts.pick default      # spawns stay on the machine default (headroom is the default)
 aisquare config set accounts.on_limit wait     # an agent that hits its limit stays parked (switch is the default)
+aisquare config set accounts.prefer reset-soonest # under the line, the week that ends first (priority is the default)
 aisquare accounts trust                # trust this folder on every account (its repository, in a checkout)
 aisquare accounts trust --sync         # every folder any account trusts, trusted on all of them
 aisquare config set accounts.share_trust false # launches stop copying a folder's trust (on by default)
@@ -1020,6 +1133,7 @@ aisquare fleet restart manager         # an exited (or stuck) agent, back under 
                                        # binary, permission mode, arguments and account (#144)
 aisquare fleet restart coder-auth --permission-mode acceptEdits   # …another mode; later restarts keep it
 aisquare fleet switch coder-auth --to personal --fresh   # a named account; a new session + hand-off
+aisquare fleet switch coder-auth --force # again, minutes after the usage-limit hand-over moved it
 ```
 
 `add` and `run` hand the terminal to Claude Code, so they have no `--json`
@@ -1135,6 +1249,9 @@ aisquare config list --overrides   # what you changed, and nothing else
 aisquare config reset              # every setting back to its default; asks first, --yes off a terminal
 ```
 
+The keys that need more than their name are listed in
+[reference: configuration keys](reference.md#configuration-keys).
+
 `config reset` moves the file aside to `config.toml.bak-<stamp>` beside it, so
 moving it back undoes the reset; through a symlink, the file it points at is
 copied there and emptied, and the link stays. With no file, or one that holds
@@ -1151,6 +1268,8 @@ max_agents_per_project = 4                # the manager (and you) cannot exceed 
 worktree_dir = ".aisquare-worktrees"      # relative to the repo root; kept out of git via .git/info/exclude
 disable_native_agent_teams = true         # exports CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0 into fleet launches
 max_continuations_per_hour = 30           # cap on the manager's Stop-hook continuations
+busy_quiet_seconds = 30                   # a "working" row whose pane printed nothing this long is
+                                          # checked once: an idle Claude Code prompt reads waiting
 
 [fleet.roles.manager]
 permission_mode = "auto"                  # any Claude Code mode; "" = pass no flag
@@ -1480,6 +1599,16 @@ session per project; one window per agent. Agents survive an update of aisquare:
 `aisquare launch` hands each pane to the agent's own program, so no aisquare
 code runs in a pane, and asq's ⬆ *Restart & update* reattaches them after it
 reopens, restarting any whose pane is gone ([Updating from asq](install.md#updating-from-asq)).
+
+**The typing lease.** When you type into an agent's pane in `asq`, it touches
+`~/.aisquare/run/typing/<socket>-<server>-<pane>`, at most once a second.
+`<server>` is a digest of the socket's real path, so another `asq` server at
+another path, whose pane ids repeat this one's, is never held by it. For `[fleet]
+draft_quiet_seconds` (10) after your last key, no fleet write types into that
+pane: not a nudge, a tell, a typed first message or the Remote's paste. The
+input box is read too, so a draft you leave there holds them off for as long as
+it stays (see [`fleet tell`](#fleet-tell)). Typing through `tmux attach` leaves
+no lease, and the input box covers it.
 
 **Each agent is asked of its own server.** A spawn records the socket its
 server says it listens on, and every fleet command — `fleet ls` and the UI,
@@ -1851,7 +1980,68 @@ typing the letter.
 
 ---
 
+## Upgrading
+
+### To the release with verified first messages (store schema 36)
+
+**The store migrates itself on first open, from v35 to v36, in one step** (from 0.8.2's
+v32, in four: v33 to v35 are under [Unreleased] in the CHANGELOG). v36 adds three
+nullable columns: `team_session.prompted_at` (the session's last
+`UserPromptSubmit`), `fleet_agent.first_prompt` (`pending`, `acked` or `unsent`) and
+`fleet_agent.first_prompt_at` (when that last changed). The step has no script of its
+own: the columns are checked for by presence and added only where absent, as every
+step from v15 on is, so a store that another build already carried past v35 converges
+too, and so does one a pre-release build of this train stamped v34 with these columns.
+Nothing is rewritten. An agent spawned before the upgrade has no first-message state,
+reads as "not tracked", and is never reported as a message not taken.
+
+**No config migration.** Every new key has a default, and a key you never set
+follows it:
+
+| Key | Default | What it changes |
+| --- | --- | --- |
+| `[fleet] first_prompt` | `argv` | A Claude Code agent's first message rides its command line. `type` types it instead, once the input box is drawn, and never puts it on a command line. |
+| `[fleet] prompt_ack_seconds` | `45` | How long `fleet spawn`, `restart` and `switch` wait for the agent to take its first message. |
+| `[fleet] busy_quiet_seconds` | `30` | How long a `working` agent's pane may stay quiet before one capture checks whether it is idle. |
+| `[fleet] draft_quiet_seconds` | `10` | How long after your last keystroke in a pane the fleet waits before typing into it. |
+| `[fleet] deliver_notes_at_turn_end` | `true` | A note addressed to a busy agent is handed over when its turn ends. |
+| `[accounts] prefer` | `priority` | Of the accounts under the switch threshold, which one a spawn's pick and a hand-over take: the first by priority, or with `reset-soonest` the one whose week resets first. |
+
+**What you will notice.**
+
+- `fleet spawn`, `restart` and `switch` take up to `prompt_ack_seconds` longer and end
+  with `✓ first message taken`, or say it was not.
+- A just-spawned agent reads `waiting` until its first prompt, not `working`.
+- `fleet switch` refuses to move an agent that was just moved, unless you add `--force`.
+  One usage limit now moves an agent once.
+- `capture.enabled = false` now stops prompt capture: `aisquare log` stays empty and
+  nothing is spooled ([reference](reference.md#configuration-keys)).
+- `aisquare doctor` gains a `fleet-delivery` row.
+- **On a shared machine**, a first message on the command line can be read by other
+  local users in `ps` while the agent runs. `aisquare config set fleet.first_prompt
+  type` keeps it off the command line.
+
+**Moving back** to 0.8.2 or earlier with `aisquare upgrade --version <v>` is safe. An
+older build opens a v36 store as it is, without migrating it down, and never reads the
+three columns. It ignores the new config keys and types first messages as it always
+did.
+
 ## Troubleshooting
+
+**An agent reads `attention`: "first prompt not taken".** Its first message
+never started a turn: nothing acknowledged it within `[fleet] prompt_ack_seconds`
+and its input box is idle. Look at its window (`aisquare fleet attach`): text
+still in the box goes with an Enter there; an empty box takes the message again
+with `aisquare fleet tell <label> "…"`, or `aisquare fleet restart <label>`
+starts it over. Either one clears the `attention`. See [the first
+message](#the-first-message).
+
+**An agent reads `attention`: "Claude Code's first-run Security notes screen —
+press Enter in its window".** A new account's first run shows those notes, and a
+first message on the command line waits behind them. Press Enter in its window
+(`aisquare fleet attach`); the notes' only key is Enter. If its first turn then
+starts, the `attention` clears; if it sits at an empty box instead, it reads
+"first prompt not taken", above.
 
 **`asq` prints usage instead of opening the UI.** It is not at an interactive
 terminal: stdin or stdout is a pipe, or `TERM` is empty or `dumb`. That is

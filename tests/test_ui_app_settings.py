@@ -335,6 +335,7 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line() -> None:
         host.query_one("#accounts-switch-at", Input).value = "70"
         host.query_one("#accounts-on-limit", Select).value = "wait"
         host.query_one("#accounts-wait-minutes", Input).value = "5"
+        host.query_one("#accounts-prefer", Select).value = "reset-soonest"
         host.query_one("#save-settings", Button).press()
         await settle(pilot)
         return host.notices
@@ -347,6 +348,7 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line() -> None:
         "switch_at": 70,
         "on_limit": "wait",
         "wait_if_reset_within_minutes": 5,
+        "prefer": "reset-soonest",
     }
     assert load_config().accounts.pick == "default"
 

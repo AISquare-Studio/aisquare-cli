@@ -63,6 +63,9 @@ def set_(
     except ValueError as exc:
         fail(str(exc), error="invalid_value", ref=key)
     emit_config_value(key, stored)
+    note = settings_service.what_it_changes(key, stored)
+    if note and not get_state().json_output:
+        stdout_console().print(note, style="dim")
 
 
 @app.command("redaction")

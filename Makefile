@@ -1,4 +1,4 @@
-.PHONY: install test lint typecheck fmt check demo
+.PHONY: install test lint typecheck lockcheck fmt check demo
 
 # Every tool runs through the project venv's interpreter when .venv exists —
 # a bare tool name resolves through PATH and can land in a sibling env whose
@@ -12,9 +12,9 @@ PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 install:
 	$(PYTHON) -m pip install -c ci/constraints.txt -e ".[dev]"
 
-## test: run the test suite
+## test: run the test suite, one pytest-xdist worker per core
 test:
-	$(PYTHON) -m pytest
+	$(PYTHON) -m pytest -n auto
 
 ## lint: static checks without modifying files (matches CI: format + lint)
 lint:
@@ -25,13 +25,19 @@ lint:
 typecheck:
 	$(PYTHON) -m mypy
 
+## lockcheck: uv.lock still matches pyproject.toml (`uv lock --check`); skipped,
+## and said so, where uv is not on PATH — CI's lock job always runs it (#278)
+lockcheck:
+	@if command -v uv >/dev/null 2>&1; then uv lock --check; \
+	else echo "lockcheck: uv not on PATH, skipped (CI runs it)"; fi
+
 ## fmt: auto-format and auto-fix lint findings
 fmt:
 	$(PYTHON) -m ruff format src tests
 	$(PYTHON) -m ruff check --fix src tests
 
 ## check: everything CI would run
-check: lint typecheck test
+check: lint typecheck lockcheck test
 
 ## demo: render docs/demo.tape into out/ (demo.gif, demo.txt, welcome.png); needs docker
 demo:

@@ -3176,6 +3176,7 @@ def _waited_reads() -> dict[str, str]:
         welcome.worker_name("candidates"): "Welcome's folder list",
         welcome.worker_name("validate"): "Welcome's folder check",
         spawn.ACCOUNTS_WORKER: "the Spawn dialog's accounts",
+        spawn.DEFAULT_WORKER: "the Spawn dialog's default account",
         attach.TARGETS_WORKER: "the persona target picker's list",
         persona_dialogs.SKILLS_WORKER: "the Import dialog's skill list",
         captain.BAR_WORKER: "the captain's bar",

@@ -596,6 +596,20 @@ fleet still running, and every release now carries its own installer.**
 
 ### Fixed
 
+- **The Spawn dialog's Account field says what a spawn with no account runs on**
+  (#12 on the board). With rank 1 the default (#406), the field still opened on
+  `(this shell's)`, which read as if the spawn skipped the accounts while it ran
+  on rank 1. It now names the account and the rung that picks it — `(default:
+  rank 1 · work)`, `(default: headroom · work)`, `(default: bound to tester ·
+  account 2)`, `(default: project default · work)` — for the role in the form
+  and a `--model` in its Extra agent args (the family a headroom pick reads),
+  read again when either changes; the captain's dialog says the captain's. It
+  reads `(this shell's)` only when no account is signed in, and `(default:
+  <role>'s CLAUDE_CONFIG_DIR)` for a role bound to a directory by hand (#9).
+  What is sent is unchanged: no `--account`, so the spawn asks the same ladder
+  when it runs. A headroom pick is shown from the shared five-minute usage
+  cache, so the label sends no request the status line would not.
+
 - **A headroom pick no longer overrides a hand-written `CLAUDE_CONFIG_DIR`
   binding.** With `[accounts] pick = "headroom"` (the default) and usage
   readable, a role bound with `team bind <role> --env CLAUDE_CONFIG_DIR=…` (or

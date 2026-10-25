@@ -749,7 +749,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `prompt_delivery` and `prompt_acked`. A message still pending past that wait at an
   idle input box reads `attention` ("first prompt not taken", with the `fleet tell`
   and `fleet restart` that take it on), and the board gets one `prompt_unsent`, which
-  wakes the manager. `aisquare doctor` gains a `fleet-delivery` row: the last week's first
+  wakes the manager. One held at Claude Code's first-run Security notes, which a
+  command-line message waits behind, does too, its `attention` saying to press Enter in
+  its window: it read `waiting` with nothing on the board, for good, once its
+  SessionStart had fired. `aisquare doctor` gains a `fleet-delivery` row: the last week's first
   messages acknowledged, N of M, and how long agents took to start their first turn.
   The store migrates to schema v36, which adds three nullable columns:
   `team_session.prompted_at`, `fleet_agent.first_prompt` and

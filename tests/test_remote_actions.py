@@ -708,8 +708,17 @@ class FakePane:
         """Asked where the row's spawn recorded its server (``TmuxServer.at``): this one."""
         return self
 
+    socket = "asq"
+    """Its name, as a real server's."""
+
+    def socket_path(self) -> Path:
+        """Where its socket is, as a real server's: the key of the pane's typing lease (P0-W2)."""
+        return Path("/run/fake/tmux-1000/asq")
+
     def __init__(self, log: list[str]) -> None:
         self.log = log
+        self.screens: dict[str, list[str]] = {}
+        """What each pane shows (``capture``): nothing, unless a test draws a screen."""
         self.sent: list[tuple[str, str, str]] = []
         """``(pane id, "key" or "paste", the key or the text)``."""
         self.sockets: list[str] = []
@@ -760,6 +769,10 @@ class FakePane:
         return SimpleNamespace(
             dead=False, current_command="claude", server_started=self.started_at()
         )
+
+    def capture(self, pane_id: str, **_kwargs: object) -> SimpleNamespace:
+        """The pane's screen, as the delivery door reads it before it types (P0-W2)."""
+        return SimpleNamespace(lines=list(self.screens.get(pane_id, [])))
 
     def started_at(self) -> datetime:
         """The server started before every row here was written: no pane outlived its row."""

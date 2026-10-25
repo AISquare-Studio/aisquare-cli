@@ -335,6 +335,7 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line() -> None:
         host.query_one("#accounts-switch-at", Input).value = "70"
         host.query_one("#accounts-on-limit", Select).value = "wait"
         host.query_one("#accounts-wait-minutes", Input).value = "5"
+        host.query_one("#accounts-prefer", Select).value = "reset-soonest"
         host.query_one("#save-settings", Button).press()
         await settle(pilot)
         return host.notices
@@ -347,6 +348,7 @@ def test_settings_saves_the_accounts_section_and_rejects_a_bad_line() -> None:
         "switch_at": 70,
         "on_limit": "wait",
         "wait_if_reset_within_minutes": 5,
+        "prefer": "reset-soonest",
     }
     assert load_config().accounts.pick == "default"
 
@@ -392,6 +394,55 @@ def test_settings_switches_what_the_accounts_share() -> None:
 
     assert drive(reopened) is False  # the form opened on what the file holds
     assert _config_toml()["accounts"] == {"share_trust": False, "share_settings": True}
+
+
+def test_settings_switch_the_daily_release_check_off_and_on() -> None:
+    """``[updates] check`` (on by default) is a switch of its own; Save writes it alone."""
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> bool:
+        await pilot.pause()
+        shown = host.query_one("#updates-check", Switch).value
+        host.query_one("#updates-check", Switch).value = False
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return shown
+
+    assert drive(scenario) is True  # the default
+    assert _config_toml()["updates"] == {"check": False}
+    assert load_config().updates.check is False
+
+    async def reopened(pilot: Pilot[None], host: AppHost) -> bool:
+        await pilot.pause()
+        shown = host.query_one("#updates-check", Switch).value
+        host.query_one("#updates-check", Switch).value = True
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return shown
+
+    assert drive(reopened) is False  # the form opened on what the file holds
+    assert load_config().updates.check is True
+
+
+def test_one_save_writes_the_no_role_agents_row_and_the_release_check_together() -> None:
+    """Merged in #401 for 0.9.0: #405 made the role-less ``agent`` a default role, which gave
+    *Agent settings* its row, and #301 put the release check's switch in *User
+    preferences*. Both tabs are one form with one Save: the ``agent`` row is there, and a
+    Save writes it and the switch together, neither in place of the other."""
+    from aisquare.cli.ui.views.app_settings import role_widget_id
+    from aisquare.core.harness import PLAIN_ROLE
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> None:
+        await pilot.pause()
+        host.query_one(f"#{role_widget_id('perm', PLAIN_ROLE)}", Select).value = "acceptEdits"
+        host.query_one("#updates-check", Switch).value = False
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+
+    drive(scenario)
+    saved = _config_toml()
+    assert saved["fleet"]["roles"][PLAIN_ROLE]["permission_mode"] == "acceptEdits"
+    assert saved["updates"] == {"check": False}
+    assert load_config().fleet.roles[PLAIN_ROLE].permission_mode == "acceptEdits"
 
 
 def test_reset_all_asks_first_then_keeps_a_backup_and_shows_the_defaults() -> None:
@@ -913,7 +964,12 @@ def test_reset_all_turns_always_show_project_directory_off() -> None:
 #: folds — the list posted to the board before the fold was built.
 IN_VIEW = {
     AGENT_TAB: ("#captain-toggle", "#accounts-pick", "#accounts-on-limit"),
-    PREFERENCES_TAB: ("#ui-always-show-path", "#ui-always-show-path-about"),
+    PREFERENCES_TAB: (
+        "#ui-always-show-path",
+        "#ui-always-show-path-about",
+        "#updates-check",
+        "#updates-check-about",
+    ),
     REMOTE_TAB: ("#settings-remote-title",),
 }
 FOLDED = {

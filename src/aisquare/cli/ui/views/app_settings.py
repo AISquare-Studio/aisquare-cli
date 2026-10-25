@@ -5,7 +5,8 @@ holds that is not about one project: permission mode, worktree, persona and acco
 per role, the fleet's escape key, agent cap, worktree root and native-teams switch,
 how launches pick an account, what a usage limit does and what the accounts share.
 *User preferences* is ``[ui]``, how ``asq`` shows things to the person at it: today
-*Always show project directory* (``ui.always_show_project_path``). *Remote* is Remote
+*Always show project directory* (``ui.always_show_project_path``); and below it
+``[updates]``, *Check for a new release daily* (``updates.check``). *Remote* is Remote
 control (``views.settings_remote``). Save, Reload and Reset all sit under the tabs and
 act on the first two; they hide on *Remote*, whose every control acts at once.
 
@@ -13,8 +14,8 @@ act on the first two; they hide on *Remote*, whose every control acts at once.
 view, the rest a click away). *Agent settings* shows the *Captain (experimental)* box on
 top (``views.settings_captain``: it saves at once, as it did on the hub) and how launches
 pick an account and what a usage limit does; its *Advanced* holds the roles, the fleet
-and the rest of the accounts' rules. *User preferences* shows its switch, and folds the
-note on setting it from a shell. *Remote* shows Turn on/off, the token field when one is
+and the rest of the accounts' rules. *User preferences* shows its two switches, and
+folds the note on setting one from a shell. *Remote* shows Turn on/off, the token field when one is
 needed and the link, QR and password while on; its own *Advanced* holds the rest. A
 Save refused for a folded field opens that *Advanced*, so the reason is never out of
 sight. The project's own
@@ -95,6 +96,7 @@ from aisquare.core.config import (
     FleetSettings,
     RoleLaunchProfile,
     UiSettings,
+    UpdatesSettings,
     load_config,
     save_config,
 )
@@ -121,6 +123,11 @@ ON_LIMIT_MODES: tuple[tuple[str, str], ...] = (
     ("switch to the account with headroom", "switch"),
 )
 """``[accounts] on_limit``: what the fleet does when an agent's turn ends on a usage limit."""
+PREFER_MODES: tuple[tuple[str, str], ...] = (
+    ("the first in priority order", "priority"),
+    ("the week that resets soonest", "reset-soonest"),
+)
+"""``[accounts] prefer`` (#277): which account under ``switch_at`` a pick takes."""
 _ID_KEPT = re.compile(r"[A-Za-z0-9-]")
 """The characters of a role name its widget ids keep as they are (:func:`widget_suffix`)."""
 ACCOUNTS_WORKER = "app-settings-accounts"
@@ -132,7 +139,7 @@ _INPUTS = (
     "accounts-switch-at",
     "accounts-wait-minutes",
 )
-_SELECTS = ("accounts-pick", "accounts-on-limit")
+_SELECTS = ("accounts-pick", "accounts-on-limit", "accounts-prefer")
 """The form's fields beside the per-role rows, by id: what :meth:`AppSettingsView._changed`
 compares with what they showed when the form was read."""
 _ACCOUNT_SWITCHES = {
@@ -141,12 +148,14 @@ _ACCOUNT_SWITCHES = {
 }
 """``[accounts]``'s two switches, by id → field: what the accounts share
 (``core.claude_sharing``)."""
+UPDATES_CHECK = "updates-check"
+"""``[updates] check``'s switch: asq's daily release check (``services.updates``)."""
 _UI_SWITCHES = {"ui-always-show-path": "always_show_project_path"}
 """*User preferences*' switches, by id → ``[ui]`` field."""
 AGENT_TAB = "tab-agent-settings"
 """The *Agent settings* tab's pane id: roles, the fleet, accounts. Shown first."""
 PREFERENCES_TAB = "tab-user-preferences"
-"""The *User preferences* tab's pane id: ``[ui]``."""
+"""The *User preferences* tab's pane id: ``[ui]``, and ``[updates]`` below it."""
 REMOTE_TAB = "tab-remote"
 """The *Remote* tab's pane id: Remote control, which acts at once (no Save)."""
 AGENT_ADVANCED = "agent-settings-advanced"
@@ -253,11 +262,13 @@ class RoleRow(NamedTuple):
 
 class UiSettingsChanged(Message):
     """App settings re-read the file — after a Save, a Reload or a Reset all: ``[ui]`` as
-    it now holds it, for the app, which holds what the sidebar reads of it."""
+    it now holds it, for the app, which holds what the sidebar reads of it, and ``[updates]``,
+    whose release check the app stops or asks again at once (review of #301, m2)."""
 
-    def __init__(self, ui: UiSettings) -> None:
+    def __init__(self, ui: UiSettings, updates: UpdatesSettings | None = None) -> None:
         super().__init__()
         self.ui = ui
+        self.updates = updates
 
 
 def section_title(title: str, about: str) -> Text:
@@ -308,8 +319,8 @@ class ConfirmReset(ModalScreen[bool]):
 
 class AppSettingsView(Vertical):
     """The machine-wide settings in three tabs — *Agent settings* (the captain, roles,
-    fleet, accounts), *User preferences* (``[ui]``) and *Remote* — and under the first two
-    Save, Reload, Reset all."""
+    fleet, accounts), *User preferences* (``[ui]``, ``[updates]``) and *Remote* — and under
+    the first two Save, Reload, Reset all."""
 
     DEFAULT_CSS = """
     AppSettingsView { padding: 1 1 0 1; }
@@ -368,6 +379,9 @@ class AppSettingsView(Vertical):
         "Show each project's path under its name in the sidebar. "
         "Off: shown only when two projects share a name."
     )
+    UPDATES_SECTION: ClassVar[tuple[str, str]] = ("Updates", "whether asq looks for a new release")
+    # One line: at 80x24, beside the sidebar, three pushed the tab's Advanced one scroll down.
+    UPDATES_CHECK_ABOUT: ClassVar[str] = "Off: no PyPI lookup, no ⬆ row in the sidebar."
     PREFERENCES_FROM_A_SHELL: ClassVar[tuple[str, str]] = (
         "Set from a shell (",
         "), a preference shows after Reload here or when asq next starts, not live.",
@@ -381,6 +395,7 @@ class AppSettingsView(Vertical):
         config = self._read_config()
         self.fleet = config.fleet
         self.accounts = config.accounts
+        self.updates = config.updates
         self.ui = config.ui
         self._roles: list[str] = role_order(self.fleet)
         self._account_bindings: dict[str, str] = settings_service.role_account_bindings(config)
@@ -623,6 +638,11 @@ class AppSettingsView(Vertical):
             yield Label("switch at (% used)")
             yield Input(value=str(self.accounts.switch_at), type="integer", id="accounts-switch-at")
         with Horizontal(classes="row"):
+            yield Label("under the line, prefer")
+            yield Select(
+                PREFER_MODES, value=self.accounts.prefer, allow_blank=False, id="accounts-prefer"
+            )
+        with Horizontal(classes="row"):
             yield Label("wait if reset within (min)")
             yield Input(
                 value=str(self.accounts.wait_if_reset_within_minutes),
@@ -660,6 +680,11 @@ class AppSettingsView(Vertical):
         yield Static(
             Text(self.ALWAYS_SHOW_PATH_ABOUT), id="ui-always-show-path-about", classes="about"
         )
+        yield Static(section_title(*self.UPDATES_SECTION), classes="section")
+        with Horizontal(classes="row preference"):
+            yield Label("Check for a new release daily", classes="preference-label")
+            yield Switch(self.updates.check, id=UPDATES_CHECK)
+        yield Static(Text(self.UPDATES_CHECK_ABOUT), id="updates-check-about", classes="about")
         before, after = self.PREFERENCES_FROM_A_SHELL
         with Collapsible(
             title="Advanced", collapsed=True, id=PREFERENCES_ADVANCED, classes="advanced"
@@ -709,6 +734,7 @@ class AppSettingsView(Vertical):
         values["native-teams"] = self.query_one("#native-teams", Switch).value
         for wid in (*_ACCOUNT_SWITCHES, *_UI_SWITCHES):
             values[wid] = self.query_one(f"#{wid}", Switch).value
+        values[UPDATES_CHECK] = self.query_one(f"#{UPDATES_CHECK}", Switch).value
         return values
 
     def _changed(self) -> set[str]:
@@ -756,11 +782,14 @@ class AppSettingsView(Vertical):
         self.query_one("#accounts-pick", Select).value = self.accounts.pick
         self.query_one("#accounts-switch-at", Input).value = str(self.accounts.switch_at)
         self.query_one("#accounts-on-limit", Select).value = self.accounts.on_limit
+        self.query_one("#accounts-prefer", Select).value = self.accounts.prefer
         self.query_one("#accounts-wait-minutes", Input).value = str(
             self.accounts.wait_if_reset_within_minutes
         )
         for wid, key in _ACCOUNT_SWITCHES.items():
             self.query_one(f"#{wid}", Switch).value = getattr(self.accounts, key)
+        self.updates = config.updates
+        self.query_one(f"#{UPDATES_CHECK}", Switch).value = self.updates.check
         self.ui = config.ui
         for wid, key in _UI_SWITCHES.items():
             self.query_one(f"#{wid}", Switch).value = getattr(self.ui, key)
@@ -780,7 +809,7 @@ class AppSettingsView(Vertical):
             row.account.value = bound or NO_ACCOUNT
         self._shown = self._field_values()
         self._load_accounts()  # the slots as they are now, off the UI thread
-        self.post_message(UiSettingsChanged(self.ui))
+        self.post_message(UiSettingsChanged(self.ui, self.updates))
 
     # --- writing -----------------------------------------------------------------------
 
@@ -845,7 +874,11 @@ class AppSettingsView(Vertical):
             "switch_at": switch_at,
             "wait_if_reset_within_minutes": wait_minutes,
         }
-        for wid, key in (("accounts-pick", "pick"), ("accounts-on-limit", "on_limit")):
+        for wid, key in (
+            ("accounts-pick", "pick"),
+            ("accounts-on-limit", "on_limit"),
+            ("accounts-prefer", "prefer"),
+        ):
             value = self.query_one(f"#{wid}", Select).value
             if wid in changed and isinstance(value, str):
                 update[key] = value
@@ -927,6 +960,9 @@ class AppSettingsView(Vertical):
             self._refused(accounts)
             return
         config.accounts = accounts
+        if UPDATES_CHECK in changed:
+            check = self.query_one(f"#{UPDATES_CHECK}", Switch).value
+            config.updates = config.updates.model_copy(update={"check": check})
         config.ui = self._form_ui(config.ui, changed)
         try:
             written = save_config(config)

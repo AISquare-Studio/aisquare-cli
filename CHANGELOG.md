@@ -6,55 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+## [0.9.0] - 2026-10-25
 
-- **`install.sh` offers the Chrome DevTools MCP as an opt-in extra** (#399, the owner's
-  decisions of 2026-10-24). Node 22.12+ is no longer installed for aisquare, which never
-  runs it, but for the MCP, whose floor 22.12 is. Chosen, the extra installs Node, then
-  registers the MCP with Claude Code at user scope, as the package's own guide does:
-  `claude mcp add chrome-devtools --scope user npx chrome-devtools-mcp@latest`. The
-  summary says how to undo it (`claude mcp remove -s user chrome-devtools`). It skips
-  the registration in one line under `--no-agent`, without Claude Code, or when the MCP
-  (or the chrome-devtools-mcp plugin) is already there, and a failed registration only
-  warns. It is asked about with its own prompt, which defaults to no, or chosen without
-  asking with `--with chrome-devtools`; `--yes`, a run with no terminal and
-  `--no-system-deps` install no extra unless named. The extras are a list
-  (`OPTIONAL_EXTRAS`), so more can be added the same way. A machine without Node is
-  current, and the run exits 2 only when an extra you chose did not install (its Node,
-  or the npx that starts the MCP). Doctor's browser tools row names the same command.
-  The installed release's own `repomix`, `snapshot` and `tiktoken` rows are expected
-  amber until a release without them is the latest on PyPI, so `--yes` on a machine
-  with an older Node exits 0.
-
-### Removed
-
-- **The codebase snapshot, and Repomix with it** (#399; the owner's decision of
-  2026-10-24: nothing on the AISquare platform reads a CLI pack). No pack is made,
-  read or reported, and the CLI never runs Node. `aisquare project onboard` keeps its
-  other job: the first run seeds one fact per marker it finds at the root, a plain
-  second run reads nothing and says so (`already onboarded; --refresh reads the markers
-  again`; `--json` gains `markers_read`, false on that run), and `--refresh` adds only
-  the facts that are new. A forgotten project onboarded again is a first run: forget
-  kept its facts, and it says they are back (`onboarded again; its earlier facts are
-  back`; `--json` gains `restored`, true on that run). It starts
-  no process but the `git rev-parse` that finds the root. `init` makes no pack and says
-  nothing about one. Doctor's `repomix`, `tiktoken` and `snapshot` rows are gone, so a
-  machine with no Node and no tiktoken has nothing amber over them.
-  - **Old packs are deleted once**, by the first command that opens the store: every
-    `~/.aisquare/projects/<id>/snapshot/`, the aisquare home's included, and nothing
-    else (never `brain/`, never a symlink's target). It runs after the store's
-    migrations, because a store from 0.6 or older still reads a project's pack as the
-    mark of a project you added (#139): such a project stays listed, then its pack goes.
-  - **A `config.toml` with `[snapshot]` still loads.** Doctor's config row says the
-    section is no longer read (green), and the next save drops it.
-    `aisquare config get/set snapshot.*` answer `unknown config key`.
-  - **tiktoken** counted pack tokens and nothing else, and this build never imports it.
-    The one-liner still adds it for now: it installs the latest release, and a release
-    up to 0.9.0 asks for tiktoken in doctor on a machine with Node. An install that has
-    it keeps a harmless unused package.
+**The captain: an experimental voice-and-text agent that runs every project's fleet
+for you, off until you turn it on. Personas: run any agent as someone. Remote control
+needs nothing more installed. Restart all brings back agents that died, the agent
+pane keeps up with your typing, the first enabled, signed-in account is the
+machine default, asq offers each new release and installs it in one click with the
+fleet still running, and every release now carries its own installer.**
 
 ### Added
 
+- **Versioned installers on every release**: from 0.9.0 on, each GitHub Release
+  carries `install.sh` and `install.ps1` stamped to its own version, so
+  `https://github.com/AISquare-Studio/aisquare-cli/releases/download/v0.9.0/install.sh`
+  installs exactly 0.9.0 and `…/releases/latest/download/install.sh` the latest
+  (which can answer 404 for a few minutes right after a release, before its
+  installers are attached).
+  `publish.yml` stamps and checks them before the PyPI publish
+  (`installers-check.yml`), and attaches them after it, once PyPI serves the
+  version (`installers.yml`; the stamp is `scripts/stamp_installers.py`).
+  `--version V` still overrides a stamped pin, and `--version latest` or an empty
+  `AISQUARE_INSTALL_VERSION=` drops it. A stamped copy's header and `--help` give
+  its own URL. The default one-liner is unchanged: the copy on `main`, which
+  installs the latest release, in the README, `docs/install.md` and the repair
+  command `aisquare upgrade` prints. `docs/install.md` shows how to pin.
+- **Accounts: *Log in again* on any signed-in row.** The login column offers the same
+  sign-in flow as *Log in* (as a secondary button) on a row that reads fine, so a fresh
+  login no longer needs `aisquare accounts run <slot>` and `/login` by hand. Its tooltip
+  says it does not clear a rate limit. (F1 of #400.)
+- **`doctor` lists accounts whose usage reads are backed off** (`claude-account-backoff`),
+  and until when. (F1 of #400.)
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]
   [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
   read only the bytes the session's transcript gained since the last record, plus its
@@ -79,6 +61,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when it saves, reloads or resets, so it shows at once and the two-second refresh
   never reads `config.toml` for it. A `config set` from a shell while `asq` runs
   shows after App settings' *Reload* or at `asq`'s next start, not live.
+- **`[accounts] prefer = "reset-soonest"`** (*under the line, prefer* in App
+  settings): of the accounts under `switch_at`, a spawn and a hand-over take the
+  one whose week resets first, priority breaking ties, so a week's allowance is
+  spent before it lapses. `priority`, the default, picks as before. `accounts
+  usage` shows each per-family week and its reset beside the week. **`fleet
+  switch --force`** moves an agent the usage-limit hand-over moved minutes ago,
+  which is otherwise refused. New event **`handover_failed`**: the automatic
+  hand-over could not move a limited agent, with the reason and the `fleet
+  switch` that would; it wakes the manager. (#277)
 - **The captain** — the home-level voice-and-text agent that runs every
   project's fleet for you (`docs/captain.md`; the plan as merged in
   `docs/plans/captain.md`; the acceptance runbook in
@@ -145,7 +136,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   there says so rather than that the pack is opt-in (a pack of it left from before
   is not served, and the next onboard or `init` deletes it). Removing it from the
   fleet hides it again. Every other role, fleet row and board, and the store
-  (schema v35), are the same either way. Four fleet changes that came with it are
+  (schema v36), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line
   names, and `serve --stdio`'s idle clock (all under Fixed, below).
@@ -344,6 +335,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the way: a private `_running` on a Textual screen shadows the message
   pump's own flag and silently leaves every button of the screen dead; the
   dialog's flag is `_spawning`.
+- **asq says when a newer aisquare is out, and updates in one confirmed click.**
+  From 0.9.0 on (an 0.8.x install updates once with `aisquare upgrade`; the first
+  release offered is one after 0.9.0), at most once a day asq asks PyPI what
+  `aisquare upgrade --check` asks it (at start when the last answer is 24 hours
+  old, and again each day while it runs, off the UI thread). A newer release shows
+  as `⬆ 0.9.1 · restart to update` under *⚙ Settings*, until asq runs that version
+  or a newer one, with one toast the first time each release is found. The row
+  opens a confirm dialog with the live agent count, which asks PyPI again as it
+  opens and keeps its button off until PyPI answers, for 5 s at most by the clock
+  (after which it says "the newest release", the last check's number as that, and
+  a later answer is ignored; nothing newer closes it with a toast); *Restart &
+  update* hands the terminal to `aisquare upgrade` the way Doctor's Update does,
+  with no y/N and unpinned, and asq reopens by itself on the new version, in the
+  view it had open. The fleet's tmux panes and their sessions keep running; the
+  agents alive at the press are recorded, and any whose pane is gone after the
+  reopen is restarted on its session (`fleet restart`). The toast says `✓ aisquare
+  0.9.1 — 2 agents reattached`, and names each restart and its reason. An agent
+  stopped on purpose since the press, or one that exited 0, is left and named, as
+  *Restart all* leaves it. The record is that reopen's alone: a reopen that cannot
+  start drops it, and one not taken within ten minutes of the run handing back to
+  asq is never acted on. A failed install stays on screen with "Press Enter to go
+  back to asq", and the old version reopens. Homebrew, pip and pipx installs get
+  the row and a dialog with the command that updates them; a checkout or an
+  editable install is never checked. An install pinned to its release by that
+  release's own installer (`aisquare-cli==0.9.0`) is checked as well, and the
+  update drops the pin, as `aisquare upgrade` does. A failed lookup (offline) is
+  silent and tried again within the hour. Off with `aisquare config set
+  updates.check false` (`[updates] check`), or the *Check for a new release daily*
+  switch in App settings ▸ User preferences ▸ Updates. What it found lives in the
+  store's `ui_state`. `aisquare upgrade`, `--check`, `--reopen` and Doctor's
+  Update behave as before; the new `upgrade --one-click` and `ui --after-update`
+  are hidden.
 - **No role at all**: `aisquare fleet spawn agent` and `aisquare launch agent` start a
   plain, general-purpose Claude Code session (labelled `agent-1` and on) that joins the
   board and its fleet row like any agent but has no standing cycle, no mission and no
@@ -352,6 +375,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **A hand-over whose live usage read fails now picks by a recent reading.** When the live
+  read of an account fails with anything but a 429 or a login problem (the endpoint
+  unreachable, an HTTP 5xx), the automatic hand-over picks by that account's reading if
+  one is at most five minutes old, with neither window reset since, and says so in its
+  note (`account 2 HTTP 500 from the usage endpoint — picked by its reading from 2m ago`).
+  An older reading skips the account with a note giving its age. Before, any failed live
+  read skipped the account.
 - **App settings shows the bare minimum, and Remote and the Captain live in it** (#41,
   the owner's placement): a third tab, *Remote*, is Remote control, with Turn on/off,
   the ngrok token field when one is needed and the link, QR and password while on in
@@ -366,12 +396,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the Remote panel. Save, Reload and Reset all hide on *Remote*, which acts at once; the
   Captain box now follows *Reload* and *Reset all*, which left it, the ★ and the
   Captain section as they were until a restart.
-- **`fleet spawn --task` with no `--prompt` tells the agent to start on its
-  task** (#32; the owner's decision, board seq 671): its first message names the
-  task and says to read it with `aisquare task show N`, then do what its
-  briefing's ASSIGNED TO YOU line says, which decides per role and state whether
-  to claim it (a tester on a todo task is told it is not its to claim). A spawn
-  with neither is typed nothing, and reads `waiting`.
 - **Less per-request context from aisquare.** A solo session (no role, no fleet row,
   nobody else on the board: no open task, no live fleet agent, no other live session)
   gets no `<aisquare-team>` block, and the MCP server's instructions are one line where
@@ -402,7 +426,61 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   *Spawn* is disabled, so the reason is never folded out of sight. The box sizes to what
   it shows instead of 92% of the terminal, and scrolls between its docked header and
   buttons once Advanced is open on a short one. What a spawn sends is unchanged.
-- The store migrates to schema v35 on first open, from 0.8.2's v32, in three steps: v35
+- **Rank 1 is the machine default.** There is no separate default account any
+  more: the account a launch runs on when nothing more specific says (no
+  `--account`, role binding, project default or headroom pick) is the first
+  enabled, signed-in account in the priority order. `aisquare accounts default
+  <ref>` at machine level now moves that account to rank 1 (an alias of `accounts
+  move <ref> top`, said in its help), and `accounts default --clear` without
+  `--project`/`--role` is refused — some account is always first. Project
+  defaults and role bindings are unchanged. A launch line reads `[work ·
+  preferred (rank 1)]` where it read `[work · machine default]`. `accounts
+  list` / `accounts usage` lose the `*` default mark and the "no default account"
+  hint (the preferred account is the first enabled, signed-in one), and the
+  account JSON loses `is_default`. The **Accounts** page loses the ★ column, the
+  *Default* button and the status column: **↑**/**↓** are the first columns of
+  each row, before `#`, the plan is the last, and why a row has no usage (not
+  signed in, a token to renew, the reason the usage could not be read) reads in
+  its session/week used cells, the whole text and the session's pace in their
+  tooltips.
+  **Upgrade note:** a machine default set by an older build moves to rank 1 on
+  the registry's next read, the others keeping their order behind it, and the
+  retired `is_default` flag is cleared (the column stays, unread). It is keyed on
+  the flag, not on a schema version, so a store already carried past any version
+  is promoted too, once. No schema step. A machine that never set a default and
+  has accounts signed in now launches on the first enabled, signed-in one. A
+  `team bind <role> --env CLAUDE_CONFIG_DIR=…` written by hand wins over the
+  preferred account. That is a change where an older build set a machine
+  default and headroom does not pick (`pick = "default"`, or no usage readable):
+  the default won over such a binding, and now the binding does, so that role
+  launches on its own directory after the upgrade. A headroom pick still
+  overrides the binding, as before. An old default that is signed out or
+  disabled no longer gets the launch: the next enabled, signed-in account does.
+- **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and
+  the suite on one Linux leg (py3.12), the Linux package job and the other jobs
+  bar the ambient legs and the demo. Pushes to `rc/**` and `main`, PRs into
+  `main`, the nightly and a run by hand keep the full matrix (CONTRIBUTING).
+- **`make test` runs the suite on every core** (#129 d). pytest-xdist is in the `dev`
+  extra and `uv.lock`, and `make test` runs `pytest -n auto`; so does CI's `check` job on
+  3.11–3.13 (the `ambient` job stays serial: it exists to catch reads of machine state,
+  not to be fast). No test needed a group: each one already has a home, a tmux folder and
+  a `claude` stand-in of its own. What a test left running wrote outside every home is
+  still reported under workers: each worker hands its notes to the controller, which
+  prints the summary. Run serially with `pytest -p no:xdist`. A killed run (a timeout,
+  `kill`, a worker that dies) runs no teardown, and its tmux servers lived on with a pane
+  each, 55 on one box, some days old. The suite's private folders under `/tmp` are now
+  named for the process that made them (`asqtx<pid>-…`), and each run starts by ending
+  the servers in, and removing, every folder whose process is gone; a folder of a run
+  still going is never touched.
+- **CI checks that `uv.lock` matches `pyproject.toml` (#278).** A new `lock` job
+  runs `uv lock --check` on a pinned uv, and `make check` runs it too where `uv` is
+  on PATH (`make lockcheck`). The lock had drifted unseen: CI installs with pip, so
+  nothing read it, and `uv run --frozen` failed on every persona path for want of
+  `pyyaml`. The `voice` extra had drifted the same way since (the xdist change
+  relocked it). A dependency change without its relock now fails CI.
+- The store migrates to schema v36 on first open, from 0.8.2's v32, in four steps: v36
+  adds the first message's three columns (under Fixed; a store a pre-release build
+  stamped v34 with them reaches v36 through the presence pass, as #346's does). v35
   adds two tables, `usage_session` and `usage_turn`, for `aisquare metrics tokens`. v34
   adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,
   `died` otherwise; NULL on a row from before it, read by its exit status, #38). The
@@ -487,9 +565,93 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Settings shows the field again, on or off, as *Replace your ngrok token*
   (*Change ngrok token* under *Advanced* opens it at any time), and a token saved
   while Remote is on starts ngrok again at once.
+- The P0 reliability plan (`docs/plans/handoff-p0-reliability.md`, "W0 results") now
+  records what was measured on a live box before its prompt-delivery work starts. On
+  Claude Code 2.1.309 and 2.1.223, a typed prompt's first Enter is taken as soon as the
+  input box is drawn, and the reported 30–50 s delay did not reproduce. An Enter sent
+  before the box is drawn is dropped, and the prompt stays unsent in the input box.
+  A prompt passed on the command line runs as the first turn, alone, with `--resume`
+  or after `--`. The results also record the inbox socket's message line and when a
+  message is delivered or held, and that the usage endpoint reports a per-model window
+  in `limits[]`. `tests/test_claude_accounts.py` gains a fixture shaped like the
+  endpoint's answer of 2026-10-23, with invented values.
+
+- **`install.sh` offers the Chrome DevTools MCP as an opt-in extra** (#399, the owner's
+  decisions of 2026-10-24). Node 22.12+ is no longer installed for aisquare, which never
+  runs it, but for the MCP, whose floor 22.12 is. Chosen, the extra installs Node, then
+  registers the MCP with Claude Code at user scope, as the package's own guide does:
+  `claude mcp add chrome-devtools --scope user npx chrome-devtools-mcp@latest`. The
+  summary says how to undo it (`claude mcp remove -s user chrome-devtools`). It skips
+  the registration in one line under `--no-agent`, without Claude Code, or when the MCP
+  (or the chrome-devtools-mcp plugin) is already there, and a failed registration only
+  warns. It is asked about with its own prompt, which defaults to no, or chosen without
+  asking with `--with chrome-devtools`; `--yes`, a run with no terminal and
+  `--no-system-deps` install no extra unless named. The extras are a list
+  (`OPTIONAL_EXTRAS`), so more can be added the same way. A machine without Node is
+  current, and the run exits 2 only when an extra you chose did not install (its Node,
+  or the npx that starts the MCP). Doctor's browser tools row names the same command.
+  The installed release's own `repomix`, `snapshot` and `tiktoken` rows are expected
+  amber until a release without them is the latest on PyPI, so `--yes` on a machine
+  with an older Node exits 0.
+
+### Removed
+
+- **The codebase snapshot, and Repomix with it** (#399; the owner's decision of
+  2026-10-24: nothing on the AISquare platform reads a CLI pack). No pack is made,
+  read or reported, and the CLI never runs Node. `aisquare project onboard` keeps its
+  other job: the first run seeds one fact per marker it finds at the root, a plain
+  second run reads nothing and says so (`already onboarded; --refresh reads the markers
+  again`; `--json` gains `markers_read`, false on that run), and `--refresh` adds only
+  the facts that are new. A forgotten project onboarded again is a first run: forget
+  kept its facts, and it says they are back (`onboarded again; its earlier facts are
+  back`; `--json` gains `restored`, true on that run). It starts
+  no process but the `git rev-parse` that finds the root. `init` makes no pack and says
+  nothing about one. Doctor's `repomix`, `tiktoken` and `snapshot` rows are gone, so a
+  machine with no Node and no tiktoken has nothing amber over them.
+  - **Old packs are deleted once**, by the first command that opens the store: every
+    `~/.aisquare/projects/<id>/snapshot/`, the aisquare home's included, and nothing
+    else (never `brain/`, never a symlink's target). It runs after the store's
+    migrations, because a store from 0.6 or older still reads a project's pack as the
+    mark of a project you added (#139): such a project stays listed, then its pack goes.
+  - **A `config.toml` with `[snapshot]` still loads.** Doctor's config row says the
+    section is no longer read (green), and the next save drops it.
+    `aisquare config get/set snapshot.*` answer `unknown config key`.
+  - **tiktoken** counted pack tokens and nothing else, and this build never imports it.
+    The one-liner still adds it for now: it installs the latest release, and a release
+    up to 0.9.0 asks for tiktoken in doctor on a machine with Node. An install that has
+    it keeps a harmless unused package.
 
 ### Fixed
 
+- **Spawn dialog follow-ups to #303.** With Role *(none) — general-purpose
+  Claude* and no persona, the Persona note says *plain Claude: no role, no
+  persona* instead of "runs as its role alone". The *Pick…* note under Advanced
+  is hidden while *Pick…* cannot be pressed (the captain's dialog, a hand-off from
+  a teammate). `aisquare config get/set fleet.roles.agent.*` now works, so the
+  no-role agent's permission mode, worktree and extra args can be set like any
+  role's; another role the config does not have is still an unknown key. Two things
+  show it: *App settings ▸ Agent settings* always has an `agent` row (the no-role
+  agent's, the dialog's *(none)*), and with tracing configured doctor's auto-mode
+  line counts `agent` among the roles on auto mode.
+- **A rate-limited usage read backs off instead of sticking** (F1 of #400). An HTTP 429
+  from the usage endpoint (or a 503 with `Retry-After`) records a wait per account on
+  disk — the endpoint's `Retry-After`, or one minute doubling per 429 in a row up to 30
+  minutes — and no `aisquare` process, the Accounts page, `--refresh`, a headroom pick or
+  a hand-over sends that account a request before it ends. Before, `Retry-After` was
+  dropped, a failure was remembered only in the process that saw it, and `--refresh`
+  asked anyway, so any poller kept the account rate-limited.
+- **A failed usage read keeps the last good numbers.** The row (page and CLI) shows the
+  most recent reading on record for the token, with its age (the page: `40% · 12m` in the
+  session cell) and why the newer try read nothing (the cell's tooltip, or a line under the
+  CLI table: `reading from 12m ago · rate-limited until 14:32`); `—` only when nothing was
+  ever read. A window of that reading that has reset since shows as `reset 1h ago`. Before,
+  a failure older than the five-minute cache showed `—`. A kept reading is never taken for
+  a live one: a headroom pick uses it only inside the pick's own window with neither window
+  reset since, and otherwise skips it with a note giving its age; the fleet's dot ignores
+  one older than five minutes. A wait is the signed-in account's: a token refresh or *Log
+  in again* to the same account keeps it, and a slot signed into another account is not
+  held to it. `--json` readings carry `kept`, `rate_limited`, `rate_limited_until` and
+  `last_failed_reason`.
 - **Restart all brings back the agents that died** (#38). After an outside SIGTERM
   killed every agent of a fleet (exit 143), *Settings ▸ Fleet ▸ Restart all…* and
   `fleet restart --all` listed each one as exited and restarted none: they acted on
@@ -505,22 +667,118 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the exact `aisquare fleet restart --project <codename> <label>`, so after a
   crash *Managers only* brings the managers back and they bring their teams. A
   restart of all brings each manager back after its team.
-- **A `fleet spawn --prompt` is sent, not left in the input box** (#32). It was
-  typed once the agent's process ran and two seconds had passed. A Claude Code
-  still starting reads the keyboard into an early-input buffer that keeps the
-  text and takes its Enter for a newline, so the prompt sat in the box unsent.
-  The launcher now waits for Claude Code's input box, then reads the pane back:
-  a prompt still in the box gets one more Enter, and one still there after it
-  is reported as unsent, with where to press Enter.
 - **A new account's first spawn starts working** (#32). Claude Code's
-  first-run "Security notes" screen took the spawn's prompt and lost it. The
+  first-run "Security notes" screen took the spawn's prompt and lost it. Where the
+  first message is typed into Claude Code (`[fleet] first_prompt = "type"`), the
   launcher presses Enter past it, then types the prompt. An agent left at that
   screen reads `attention` in `fleet ls`, the sidebar and Remote, with the
   reason, and its prompt is kept rather than typed into it.
-- **An agent that has had no prompt reads `waiting`, not `working`** (#32).
-  Every session start (not a compaction) leaves the board row waiting until
-  its first prompt; only the captain's did before, so a `fleet spawn` with no
-  prompt sat idle while `fleet ls` and the board said it was working.
+- **Every first message reaches its agent and starts a turn, or `fleet ls` says it
+  did not.** A spawn's `--prompt`, the line `fleet restart` and `fleet switch` start
+  a replacement with, a fresh hand-off and the usage-limit hand-over's were typed
+  with one Enter about two seconds after the agent started. An Enter that reaches
+  Claude Code before it draws its input box is dropped while the text stays in the
+  box, so the agent sat idle with its message unsent, and the board read it
+  `working`. A Claude Code agent now gets its first message on its command line
+  (`claude -- "<message>"`), in a file only you can read that its launch deletes,
+  so the row's recorded launch never holds it and a restart replays no old message;
+  the launch takes only a file the fleet wrote, in its own folder, and reads nothing
+  else.
+  Any other binary, and every agent under `[fleet] first_prompt = "type"`, has it
+  typed once Claude Code's input box is drawn, checked in the box, and sent again
+  only while the text is provably still waiting there. The row reads `pending` until
+  the agent's turn takes it: its `UserPromptSubmit`, or its `Stop` if that hook
+  could not record the prompt. `fleet spawn`, `restart` and `switch` wait
+  `[fleet] prompt_ack_seconds` (45) for that and say so, and their `--json` adds
+  `prompt_delivery` and `prompt_acked`. A message still pending past that wait at an
+  idle input box reads `attention` ("first prompt not taken", with the `fleet tell`
+  and `fleet restart` that take it on), and the board gets one `prompt_unsent`, which
+  wakes the manager. One held at Claude Code's first-run Security notes, which a
+  command-line message waits behind, does too, its `attention` saying to press Enter in
+  its window: it read `waiting` with nothing on the board, for good, once its
+  SessionStart had fired. `aisquare doctor` gains a `fleet-delivery` row: the last week's first
+  messages acknowledged, N of M, and how long agents took to start their first turn.
+  The store migrates to schema v36, which adds three nullable columns:
+  `team_session.prompted_at`, `fleet_agent.first_prompt` and
+  `fleet_agent.first_prompt_at`. A row from before them reads as "not tracked".
+  And `fleet spawn coder --task <id>` with no `--prompt` typed nothing, so the coder
+  waited at an empty prompt: its first message is now a kickoff that names the task
+  as its ASSIGNED TO YOU block does, a `--prompt` beside `--task` following it.
+  (#122, #32)
+- **Nothing the fleet types lands in your draft.** A board write that woke the
+  manager typed its nudge into the manager's input box whatever was there. A human
+  halfway through a message in `asq` had the nudge appended to the draft, and its
+  Enter sent both. Every typed write now reads the input box first and types nothing
+  while it holds a draft, or while you have typed into the pane in `asq` within
+  `[fleet] draft_quiet_seconds` (10). That covers the manager's nudge, `fleet tell`,
+  a typed first message and the Remote's paste. Claude Code's own dim placeholder
+  and suggestion are not a draft. A nudge held back goes out once the box is clear
+  (`asq` retries it as it refreshes); if you send the draft first, your prompt
+  carries the same board update and the nudge is dropped. A tell held back is filed
+  as a note and says why. A draft that appears while the text is being pasted
+  stops it before its Enter, and the tell or the first message's note says so: "a
+  draft appeared in its input box while the text was being typed; ours is in the
+  box with it, unsent, and nothing was sent". And a note reaches a busy agent at the end of its turn: a
+  note to an agent's label or role, including a `fleet tell` to an agent that was
+  working, waited for the agent's next prompt, which one that had finished might
+  never get. Its `Stop` hook now hands it the notes addressed to it when the turn
+  ends, as the manager is kept going on fresh board decisions, with the same
+  guards: not on a turn already continuing from a stop hook, and at most `[fleet]
+  max_continuations_per_hour` an hour. `[fleet] deliver_notes_at_turn_end = false`
+  turns it off. (#276)
+- **A coder that claims a task sees its contract.** `task claim` and `task next
+  --claim` printed the title line alone, and the contract (`--detail`) was a
+  separate `task show` that nothing named, so people pasted contracts into coders'
+  panes. A claim now prints the contract, the reason the task was last reopened
+  (which was lost the moment a reopened task was claimed again) and the command
+  that shows it again, `aisquare task show 2`: the bare number, which a shell keeps
+  (`#2` starts a comment). `task next` without `--claim` says when a task has a contract. The
+  coder's cycle names `task show`, the manager's says the contract belongs in
+  `--detail`, and `--detail`'s help says it is the contract. `--json` is unchanged.
+  (#74)
+- **A session resumed under another account keeps its transcript.** `claude
+  --resume <path>` under another `CLAUDE_CONFIG_DIR` (every resumed `fleet
+  switch` and usage-limit hand-over) reports a transcript under the new account
+  that Claude Code never creates, and keeps writing the original. The board
+  recorded the missing one, so every prompt after it raised a false *TWO live
+  agents* collision banner, and the agent's next restart or switch found nothing
+  to resume and started fresh. A session start no longer replaces a transcript
+  on disk with one that is not, and a row an earlier build wrote heals at the next
+  prompt. Found by the P0-W0 spike on Claude Code 2.1.309 and 2.1.223.
+- **`capture.enabled = false` stops prompt capture (#268).** The key was read by
+  nothing: with it off, `UserPromptSubmit` stored every prompt, `aisquare log`
+  listed it, and Explainability spooled it. Off, no prompt is stored or spooled;
+  the turn's metrics row (no text) and the teammate delta still arrive, and the
+  CI experiment, its own opt-in, still consults its endpoint. A config that cannot
+  be read records no prompt and says so on stderr: privacy fails closed.
+  `config set capture.enabled false` says in one line what stops and what does not.
+- **One usage limit moves an agent once, to an account that can take it.**
+  With `on_limit = "switch"` the `limited` line woke the manager with a `fleet
+  switch` while the hand-over was already moving the agent, and once that had
+  finished the manager's switch moved the replacement again: two `switched` for
+  one limit. The line is now a `limited_handing_over` event, *moving it to another
+  account automatically*, that wakes nobody; the manager's cycle acts on
+  `handover_failed` instead; a replacement minutes old is refused without
+  `--force`; and `switched` is news on the next delta, not a wake-up. And a pick
+  read only the five-hour and seven-day windows. The per-family week (Opus, Sonnet,
+  Fable), which the usage endpoint sends as a `limits[]` entry of kind
+  `weekly_scoped` (the `seven_day_opus` and `seven_day_sonnet` keys come null), and
+  a window's `locked_reason` were dropped, so an Opus agent was moved onto an
+  account whose Opus week was spent and refused at once. They are read now
+  (`weekly_all` counts as the shared week), and an account whose family week is
+  spent is skipped for that family by every headroom pick, a switch by hand
+  included. Every limit an agent hits is remembered on its account until the reset
+  it named, so no pick by headroom sends an agent back before then. (#277)
+- **An idle agent reads waiting, not working.** A session start wrote `working`,
+  and only the captain was set back to `waiting`, so a just-spawned agent sitting
+  at an empty prompt read busy for up to 30 minutes: `fleet tell` filed a note it
+  never read, and an agent whose first prompt was never submitted looked busy to
+  everyone who could have reached it. Every role now reads `waiting` from its
+  session start until a prompt starts a turn (a compaction keeps what the turn
+  said). And a `working` row whose pane has printed nothing for `[fleet]
+  busy_quiet_seconds` (30) is checked once: if Claude Code sits idle at its prompt —
+  a turn ended with Esc fires no hook — it reads ⏸ waiting, *idle (the board said
+  working)*, and a `fleet tell` is typed into it instead of filed. (#123, #32)
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for
   every other spawn: a seat reads the board of the hub its spawner honours, and its
@@ -4560,7 +4818,8 @@ First release — a portable memory layer for coding agents.
 - **Diagnostics & config** — `status`, `doctor` (dependency + setup health with
   fixes), the `config` group, and `log` (captured prompt history).
 
-[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/AISquare-Studio/aisquare-cli/compare/v0.7.0...v0.8.0

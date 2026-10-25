@@ -50,7 +50,10 @@ if sys.platform == "win32":  # pragma: no cover - the POSIX installer's own test
     pytest.skip("install.sh is a POSIX shell script", allow_module_level=True)
 
 REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "install.sh"
+#: AISQUARE_TEST_INSTALL_SH points these tests at another copy: the release
+#: workflow (.github/workflows/installers.yml) runs them on the STAMPED install.sh
+#: it is about to upload, so a release asset is held to the same guards.
+SCRIPT = Path(os.environ.get("AISQUARE_TEST_INSTALL_SH") or REPO / "install.sh")
 
 #: Resolved from the REAL PATH, once, and passed to `subprocess.run` absolutely.
 #: Every test below hands the child a narrowed PATH so an absent tool is really
@@ -1538,6 +1541,24 @@ def test_an_extra_this_run_chose_and_could_not_install_is_unexpected(tmp_path: P
     assert result.returncode == 2, result.stdout
     assert "UNEXPECTED=1" in result.stdout
     assert _NODE_FAILED in result.stdout
+
+
+def test_a_usage_back_off_at_install_time_is_expected_not_amber(tmp_path: Path) -> None:
+    """The tester's pass on #401, (e): an account whose usage reads were backed off after a
+    429 (doctor's `claude-account-backoff`) was "Not expected, and worth a look" and exited
+    2, so a transient rate limit turned a good install amber. It says nothing about the
+    install: expected, explained, exit 0. Another amber row still exits 2 (control)."""
+    result = _summary_then_handoff(
+        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain claude-account-backoff'", node=True
+    )
+    control = _summary_then_handoff(
+        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain claude-accounts'", node=True
+    )
+
+    assert "UNEXPECTED=0" in result.stdout and result.returncode == 0, result.stdout
+    assert "claude-account-backoff — an account's usage reads wait out a rate" in result.stdout
+    assert "Not expected" not in result.stdout
+    assert control.returncode == 2 and "UNEXPECTED=1" in control.stdout, control.stdout
 
 
 @pytest.mark.parametrize(

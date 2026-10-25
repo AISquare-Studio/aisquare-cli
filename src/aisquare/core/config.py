@@ -34,7 +34,9 @@ from aisquare.models import Pool, RedactionLevel
 
 
 class CaptureSettings(BaseModel):
-    """Settings for the background capture pipeline."""
+    """Prompt capture. ``enabled`` off: the ``UserPromptSubmit`` hook neither stores the
+    prompt (``aisquare log``) nor spools it for Explainability (#268); the turn's metrics
+    row, without text, and the teammate delta still happen."""
 
     enabled: bool = True
 
@@ -307,7 +309,15 @@ class FleetRoleSettings(BaseModel):
 
 
 def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
-    """The six fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6).
+    """The six fleet roles and their built-in launch shape (docs/plans/fleet-tui.md §3.6),
+    and the role-less agent's (``harness.PLAIN_ROLE``, the Spawn dialog's *(none)*).
+
+    ``agent`` is here so ``config get/set/list fleet.roles.agent.*`` know it as they know
+    any role, at the shape spawn gave it when no table named it (``FleetRoleSettings()``).
+    A default, not a table ``set`` seeds: seeded, every unrelated ``config set`` wrote it,
+    and ``holds_a_setting`` then read the file as holding a setting, which undid #261's
+    reset/backup rule (review of #405, M1). At its default it is left out of the file
+    (``_with_whole_role_tables``).
 
     ``ui-tester`` carries no ``extra_args`` here: its ``--chrome`` is the role's own
     default (``harness.ROLE_PROFILES[...].default_args``) and is added by ``launch``
@@ -335,7 +345,15 @@ def _default_fleet_roles() -> dict[str, FleetRoleSettings]:
         "reviewer": FleetRoleSettings(worktree=True, extra_args=list(REVIEWER_ARGS)),
         "validator": FleetRoleSettings(),
         "ui-tester": FleetRoleSettings(),
+        _plain_role(): FleetRoleSettings(),
     }
+
+
+def _plain_role() -> str:
+    """``harness.PLAIN_ROLE``, imported here: harness imports this module back."""
+    from aisquare.core.harness import PLAIN_ROLE
+
+    return PLAIN_ROLE
 
 
 #: The reviewer's built-in ``extra_args``: Claude Code without the tools that edit files.
@@ -621,6 +639,26 @@ class FleetSettings(BaseModel):
     ``CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=0`` into fleet launches so a manager
     cannot spawn help the sidebar cannot see; ``max_continuations_per_hour`` caps
     how often the manager's Stop hook may keep it going on new board events.
+
+    ``first_prompt`` is how an agent's first message reaches it (P0-W1a, #122):
+    ``argv``, Claude Code's own command line (``claude -- "<prompt>"``), for a Claude
+    Code agent, and typed into its input box for any other binary; ``type`` types it
+    for every agent (``services.delivery``). ``prompt_ack_seconds`` is how long
+    ``fleet spawn``, ``restart`` and ``switch`` wait for the agent's
+    ``UserPromptSubmit`` to say the first message started a turn, and how long a
+    listing gives a first message before it reads the agent ``attention``.
+
+    ``busy_quiet_seconds`` is how long a pane may print nothing while its board row
+    says ``working`` before its screen is asked whether Claude Code sits idle at its
+    prompt (#123): a turn redraws its spinner every second, so a quiet pane with an
+    idle input box is an agent waiting, whatever the row says.
+
+    ``draft_quiet_seconds`` is how long a key typed into an agent's pane in ``asq`` keeps
+    every fleet write out of that pane (P0-W2, #276): a nudge, a tell, a typed first
+    message, the Remote's paste — beside the input box itself, which none of them types
+    into while it holds a draft. ``deliver_notes_at_turn_end`` lets a non-manager agent's
+    ``Stop`` hook hand it the notes addressed to it, so a note sent while it worked reaches
+    it at the end of that turn instead of waiting for a prompt that may never come.
     """
 
     tmux_socket: str = "asq"
@@ -629,6 +667,11 @@ class FleetSettings(BaseModel):
     worktree_dir: str = ".aisquare-worktrees"
     disable_native_agent_teams: bool = True
     max_continuations_per_hour: int = 30
+    first_prompt: Literal["argv", "type"] = "argv"
+    prompt_ack_seconds: float = Field(default=45.0, ge=0)
+    busy_quiet_seconds: int = Field(default=30, ge=1)
+    draft_quiet_seconds: float = Field(default=10.0, ge=0)
+    deliver_notes_at_turn_end: bool = True
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
 
 
@@ -696,6 +739,15 @@ class AccountsSettings(BaseModel):
     Both defaults were ``default`` and ``wait`` through 0.8.0; a file those builds
     saved keeps either only where it differs from them (``_V1_DEFAULTS``).
 
+    ``prefer`` orders the accounts under ``switch_at`` (#277): ``priority``, the default,
+    takes the first in the operator's order, rank 1 (the machine default, #406) first;
+    ``reset-soonest`` takes the one whose weekly window resets first, priority breaking
+    ties, so a week's allowance is spent before it lapses rather than draining accounts
+    with days still to run. It applies to a launch's headroom pick and to a hand-over's;
+    under ``pick = "default"`` the preferred account, rank 1, decides and ``prefer`` is
+    not read. The week is the shared seven-day window's reset, for every
+    agent: a family week (Opus, Sonnet) only ever makes an account read fuller.
+
     ``share_trust``, on by default, copies a folder's trust into the account a launch
     runs on when any other account has it, so an agent never waits at Claude Code's
     "trust this folder?" for a folder the human already said yes to on another login.
@@ -710,8 +762,20 @@ class AccountsSettings(BaseModel):
     switch_at: int = Field(default=85, ge=1, le=100)
     on_limit: Literal["wait", "switch"] = "switch"
     wait_if_reset_within_minutes: int = Field(default=15, ge=0)
+    prefer: Literal["priority", "reset-soonest"] = "priority"
     share_trust: bool = True
     share_settings: bool = False
+
+
+class UpdatesSettings(BaseModel):
+    """``[updates]`` — asq's daily release check (``services.updates``).
+
+    ``check`` on, the default: asq asks PyPI at most once a day whether a newer aisquare is
+    out and, when one is, offers it under *⚙ Settings*. Off, it never asks. ``aisquare
+    upgrade`` asks whenever it is run, whatever this says.
+    """
+
+    check: bool = True
 
 
 class UiSettings(BaseModel):
@@ -743,6 +807,7 @@ class AppConfig(BaseModel):
     team: TeamSettings = Field(default_factory=TeamSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
     accounts: AccountsSettings = Field(default_factory=AccountsSettings)
+    updates: UpdatesSettings = Field(default_factory=UpdatesSettings)
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
     experimental: ExperimentalSettings = Field(default_factory=ExperimentalSettings)
     persona: PersonaSettings = Field(default_factory=PersonaSettings)
@@ -842,6 +907,12 @@ def _with_whole_role_tables(sparse: dict[str, Any], full: dict[str, Any]) -> dic
     roles = fleet.get("roles") if isinstance(fleet, dict) else None
     if not isinstance(roles, dict) or not roles:
         return sparse
+    # The role-less agent's table, at its default, is not written: no build before it
+    # was a default reads one (each falls back to ``FleetRoleSettings()``, the same
+    # shape), and written, every file a ``config set`` saved carried a role nobody set.
+    plain = _plain_role()
+    if roles.get(plain) == _dumped(FleetRoleSettings()):
+        roles = {role: table for role, table in roles.items() if role != plain}
     whole = dict(sparse)
     whole["fleet"] = {**sparse.get("fleet", {}), "roles": roles}
     return whole

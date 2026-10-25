@@ -20,9 +20,14 @@ byte-identical to what it always was.
 The environment has one more decision in it since #145: WHICH CLAUDE ACCOUNT.
 ``--account`` names one for this launch; without it the role's binding, the
 project's default and the machine's default are consulted in that order
-(``aisquare accounts default``), and with none of those set the environment is
-exactly what it always was. One resolver, ``services.claude_accounts.choose``,
-answers for ``launch`` and ``fleet spawn`` alike.
+(``aisquare accounts default``). The machine's default is the preferred account,
+the first enabled, signed-in one in the priority order (#406), so with an account
+signed in a launch runs on one. The exception is a role whose binding sets Claude
+Code's directory itself (``team bind --env``/``--env-file``): it keeps that directory
+unless a flag, an account binding, a project default or a headroom pick names an
+account. With no account signed in, the environment is exactly what it always was.
+One resolver, ``services.claude_accounts.choose``, answers for ``launch`` and
+``fleet spawn`` alike.
 """
 
 from __future__ import annotations
@@ -48,8 +53,8 @@ from aisquare.core.config import load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.services import claude_accounts as claude_accounts_service
+from aisquare.services import delivery, explainability_ops
 from aisquare.services import explainability as explainability_service
-from aisquare.services import explainability_ops
 from aisquare.services import team as team_service
 from aisquare.services.team import TeamDisabledError
 
@@ -384,6 +389,16 @@ def launch(
             metavar="NAME",
         ),
     ] = None,
+    first_prompt_file: Annotated[
+        Path | None,
+        typer.Option(
+            delivery.FIRST_PROMPT_FLAG,
+            help="A file holding the agent's first message: read, deleted, and passed to the "
+            "agent as its prompt, after `--` (what `fleet spawn` gives a Claude Code agent).",
+            metavar="PATH",
+            hidden=True,
+        ),
+    ] = None,
 ) -> None:
     """Launch an agent session already attached to this project's team board.
 
@@ -488,8 +503,11 @@ def launch(
     # the role's standing shape. For slot 1 that means RESTORING this shell's
     # own two variables (or their absence) over whatever the binding set — a
     # launch announced as `[plain claude]` must not run on the binding's other
-    # login. When NOTHING chose (no flag, no binding, no default — every
-    # machine before #145), the environment is left exactly as it was.
+    # login. The machine's default is the first enabled, signed-in account
+    # (#406), so something chooses whenever one is signed in. Nothing chooses
+    # when none is, or when the role's binding sets Claude Code's directory
+    # itself and no flag, account binding, project default or headroom pick
+    # names an account: then the environment is left as the binding made it.
     try:
         choice = claude_accounts_service.choose(account, role=role, project=project)
     except claude_accounts_service.NoSuchAccount as exc:
@@ -643,6 +661,28 @@ def launch(
         else []
     )
     argv = [resolution.binary, *profile.args, *role_args, *persona_args, *ctx.args, *pinned_id]
+    # The first message (P0-W1a, #122), last: Claude Code's positional prompt, after `--`.
+    # Read from a file and the file deleted, so the window's command, which tmux carries and
+    # the row records, never holds the text, and a replay of that command finds no file and
+    # starts without one: a restart is given a line of its own.
+    if first_prompt_file is not None:
+        try:
+            first = delivery.take_prompt_file(first_prompt_file)
+        except delivery.NotAPromptFile as exc:
+            stderr_console().print(
+                f"first prompt: {exc} — not read, not deleted; starting without one",
+                style="dim",
+                markup=False,
+            )
+            first = ""
+        if first is None:
+            stderr_console().print(
+                f"first prompt: {first_prompt_file} is not there (read by an earlier launch) "
+                "— starting without one",
+                style="dim",
+            )
+        elif first:
+            argv += delivery.argv_tail(first)
     # Text.assemble rather than "[bold]{role}[/bold]": this is the one line that
     # styles a single token instead of the whole line, and it interpolates a
     # role name, a binary path and a project name. A Text carries its styling

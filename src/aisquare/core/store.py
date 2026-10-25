@@ -1138,6 +1138,19 @@ CREATE TABLE IF NOT EXISTS usage_turn (
 );
 CREATE INDEX IF NOT EXISTS usage_turn_session ON usage_turn (session_id, seq);
 """
+# v36 (P0-W1a, #122): whether a fleet agent's first message started a turn. The session's
+# last ``UserPromptSubmit`` (``team_session.prompted_at``), and on the agent's row where its
+# first message stands (``fleet_agent.first_prompt``: pending, acked, unsent) and since when
+# (``first_prompt_at``). Nullable: a row from before them reads as "not tracked", never as
+# a message that was not taken. The columns are the whole step, so the script is empty:
+# they are in :data:`_PRODUCTS`, added only where absent.
+#
+# rc/p0-reliability stamped this step v34, beside main's #38 v34 and #346 v35 (the sync
+# of main 8eb18a8a moved it here). A store that ran rc/p0 reads v34 with these columns and
+# neither ``fleet_agent.ended_by`` nor the usage tables: the presence pass
+# (:func:`_converge_by_presence`) adds the column, the ladder runs v35's ``IF NOT EXISTS``
+# script, and this step finds its columns in place.
+_SCHEMA_V36 = ""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1175,6 +1188,7 @@ _MIGRATIONS = (
     _SCHEMA_V33,
     _SCHEMA_V34,
     _SCHEMA_V35,
+    _SCHEMA_V36,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1234,6 +1248,13 @@ _PRODUCTS: dict[int, _Products] = {
     ),
     33: _Products(columns=(("fleet_agent", "ended_by", "TEXT"),)),
     34: _Products(("usage_session", "usage_session_project", "usage_turn", "usage_turn_session")),
+    35: _Products(
+        columns=(
+            ("team_session", "prompted_at", "TEXT"),
+            ("fleet_agent", "first_prompt", "TEXT"),
+            ("fleet_agent", "first_prompt_at", "TEXT"),
+        )
+    ),
 }
 
 _PROJECT_COLUMNS = (
@@ -1298,7 +1319,7 @@ in the wall-clock median. Older than this it stays open and is excluded
 instead, which is what an unfinished turn is."""
 _SESSION_COLUMNS = (
     "id, project_id, role, label, focus, started_at, last_seen_at, ended_at, cursor, state, "
-    "transcript_path, account, model, effort, limit_resets_at, persona"
+    "transcript_path, account, model, effort, limit_resets_at, persona, prompted_at"
 )
 _USAGE_COLUMNS = (
     "slot, fetched_at, session_percent, session_resets_at, week_percent, week_resets_at, "
@@ -1315,7 +1336,7 @@ _FLEET_AGENT_FIELDS = (
     "id", "project_id", "label", "role", "binary", "tmux_socket", "pane_id", "session_id",
     "cwd", "worktree", "task_id", "spawned_by", "created_at", "ended_at", "exit_status",
     "account_slot", "launch_spec", "socket_path", "boot_id", "server_started_at", "branch",
-    "board", "persona", "ended_by",
+    "board", "persona", "ended_by", "first_prompt", "first_prompt_at",
 )  # fmt: skip
 _FLEET_AGENT_COLUMNS = ", ".join(_FLEET_AGENT_FIELDS)
 
@@ -1430,6 +1451,7 @@ class ContextStore(Protocol):
     def mark_handover(self, session_id: str, *, held_after: datetime) -> bool: ...
     def mark_attention(self, session_id: str) -> bool: ...
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None: ...
+    def set_transcript_path(self, session_id: str, transcript_path: str) -> None: ...
     def unmark_handover(self, session_id: str, state: str) -> None: ...
     def end_session(self, session_id: str, *, release_claims: bool = True) -> list[TeamTask]: ...
     def release_claims(self, session_id: str) -> list[TeamTask]: ...
@@ -1540,6 +1562,14 @@ class ContextStore(Protocol):
     def upsert_fleet_agent_unless_stopped(
         self, agent: FleetAgent, replaces: str
     ) -> FleetAgent | None: ...
+    def mark_prompted(
+        self, session_id: str, at: datetime, *, agent_id: str | None = None
+    ) -> bool: ...
+    def mark_first_prompt_unsent(self, agent_id: str, at: datetime) -> bool: ...
+    def take_first_prompt(
+        self, at: datetime, *, session_id: str, agent_id: str | None = None
+    ) -> bool: ...
+    def first_prompt_rows(self, since: datetime) -> list[FleetAgent]: ...
     def get_fleet_agent(self, ref: str) -> FleetAgent | None: ...
     def fleet_agents(self, project_id: str, *, live_only: bool = False) -> list[FleetAgent]: ...
     def live_fleet_agents(self) -> list[FleetAgent]: ...
@@ -1551,6 +1581,7 @@ class ContextStore(Protocol):
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
+    def replace_ui_state(self, key: str, expected: str | None, value: str | None) -> bool: ...
     def project_groups(self) -> list[ProjectGroup]: ...
     def get_project_group(self, group_id: str) -> ProjectGroup | None: ...
     def find_project_group(self, name: str) -> ProjectGroup | None: ...
@@ -1616,10 +1647,10 @@ class ContextStore(Protocol):
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord: ...
     def delete_claude_account(self, slot: int) -> bool: ...
     def delete_claude_accounts(self, slots: Sequence[int]) -> int: ...
-    def set_claude_account_default(self, slot: int | None) -> None: ...
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None: ...
     def set_claude_account_disabled(self, slot: int, disabled: bool) -> None: ...
     def order_claude_accounts(self, slots: Sequence[int]) -> None: ...
+    def promote_retired_claude_account_default(self) -> int | None: ...
     # Usage readings (v16, #146): the history behind "how fast is this window filling".
     def add_usage_sample(self, sample: UsageSample) -> None: ...
     def usage_samples(self, slot: int, *, since: datetime) -> list[UsageSample]: ...
@@ -1706,6 +1737,8 @@ def _row_to_fleet_agent(row: sqlite3.Row) -> FleetAgent:
         board=row["board"],  # never NULL as read (`_FLEET_AGENT_READ`)
         persona=row["persona"],
         ended_by=row["ended_by"],
+        first_prompt=row["first_prompt"],
+        first_prompt_at=_maybe_dt(row["first_prompt_at"]),
     )
 
 
@@ -1895,6 +1928,7 @@ def _row_to_session(row: sqlite3.Row) -> TeamSession:
         effort=row["effort"],
         limit_resets_at=_maybe_dt(row["limit_resets_at"]),
         persona=row["persona"],
+        prompted_at=_maybe_dt(row["prompted_at"]),
     )
 
 
@@ -2616,7 +2650,7 @@ class SqliteStore:
         """
         self._conn.execute(
             f"INSERT INTO team_session ({_SESSION_COLUMNS}) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (id) DO UPDATE SET "
             "last_seen_at = excluded.last_seen_at, ended_at = NULL, "
             "state = 'working', "
@@ -2624,7 +2658,8 @@ class SqliteStore:
             "account = COALESCE(excluded.account, account), "
             "model = COALESCE(excluded.model, model), "
             "effort = COALESCE(excluded.effort, effort), "
-            "persona = COALESCE(excluded.persona, persona)",
+            "persona = COALESCE(excluded.persona, persona), "
+            "prompted_at = COALESCE(excluded.prompted_at, prompted_at)",
             (
                 session.id,
                 session.project_id,
@@ -2642,6 +2677,7 @@ class SqliteStore:
                 session.effort,
                 session.limit_resets_at.isoformat() if session.limit_resets_at else None,
                 session.persona,
+                session.prompted_at.isoformat() if session.prompted_at else None,
             ),
         )
         self._conn.commit()
@@ -2848,6 +2884,19 @@ class SqliteStore:
         )
         self._conn.commit()
         return cursor.rowcount == 1
+
+    def set_transcript_path(self, session_id: str, transcript_path: str) -> None:
+        """Point the row at the transcript its agent writes, and touch nothing else (P0-W3b).
+
+        For a row whose recorded transcript is not on disk: a cross-account resume reports
+        one under the new account that Claude Code never creates. ``upsert_session`` would
+        also revive the row and set it ``working``, over a hand-over's or a limit's state.
+        """
+        self._conn.execute(
+            "UPDATE team_session SET transcript_path = ? WHERE id = ?",
+            (transcript_path, session_id),
+        )
+        self._conn.commit()
 
     def mark_limited(self, session_id: str, resets_at: datetime | None) -> None:
         """The session's turn ended on a usage limit (#146): park it as ``limited``.
@@ -3768,6 +3817,11 @@ class SqliteStore:
         A second LIVE agent with the same label in the same project trips the
         partial unique index and raises ``sqlite3.IntegrityError`` — the service
         layer picks the suffixed label and retries; the store never guesses.
+
+        The first message's state is written with the row and never by an update here:
+        only its own transitions move it (:meth:`mark_prompted`,
+        :meth:`mark_first_prompt_unsent`), so an upsert of a row read before its
+        ``UserPromptSubmit`` cannot put an ``acked`` message back to ``pending``.
         """
         stored = self._upsert_fleet_agent(agent, None)
         assert stored is not None  # nothing guards it
@@ -3792,7 +3846,7 @@ class SqliteStore:
         )
         cursor = self._conn.execute(
             f"INSERT INTO fleet_agent ({_FLEET_AGENT_COLUMNS}) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? "
             f"{guard}"
             "ON CONFLICT (id) DO UPDATE SET "
             "pane_id = excluded.pane_id, session_id = excluded.session_id, "
@@ -3826,6 +3880,8 @@ class SqliteStore:
                 agent.board if agent.board is not None else agent.project_id,
                 agent.persona,
                 agent.ended_by,
+                agent.first_prompt,
+                agent.first_prompt_at.isoformat() if agent.first_prompt_at else None,
                 *((unless_stopped,) if unless_stopped is not None else ()),
             ),
         )
@@ -3835,6 +3891,74 @@ class SqliteStore:
         stored = self.get_fleet_agent(agent.id)
         assert stored is not None  # just written
         return stored
+
+    def mark_prompted(self, session_id: str, at: datetime, *, agent_id: str | None = None) -> bool:
+        """A prompt started a turn in ``session_id`` (``UserPromptSubmit``): stamp the session's
+        ``prompted_at``, and take the first message of the fleet row it belongs to.
+
+        The row is the one ``agent_id`` names (``AISQUARE_FLEET_AGENT``, the window's own) or,
+        failing that, the live one bound to the session. Only a ``pending`` message is taken:
+        one already ``acked`` keeps its time, and an ``unsent`` one becomes ``acked`` too,
+        since a human's Enter sent it after the listing gave up on it. Returns whether this
+        prompt took one. One transaction, an indexed read and at most two indexed updates:
+        every prompt of every session pays it, and no row is read back.
+        """
+        self._conn.execute(
+            "UPDATE team_session SET prompted_at = ? WHERE id = ?", (at.isoformat(), session_id)
+        )
+        return self.take_first_prompt(at, session_id=session_id, agent_id=agent_id)
+
+    def take_first_prompt(
+        self, at: datetime, *, session_id: str, agent_id: str | None = None
+    ) -> bool:
+        """Mark the first message of ``session_id``'s fleet row taken (``acked``), as
+        :meth:`mark_prompted` does, without stamping ``prompted_at``: for a ``Stop``, which
+        ends a turn that only a prompt starts. A ``UserPromptSubmit`` whose own record failed
+        (a locked store; the hook fails open) left the row ``pending`` under a turn that ran,
+        and a listing read it "first prompt not taken" (review of #330, round 1). Not the
+        stamp: a tell's acknowledgement asks ``prompted_at``, and a Stop is no prompt.
+        Returns whether this took one."""
+        stamp = at.isoformat()
+        # A read, then a compare-and-set on what it found: no ``RETURNING``, which the SQLite
+        # of an older Python lacks.
+        found = self._conn.execute(
+            "SELECT id FROM fleet_agent "
+            "WHERE first_prompt IN ('pending', 'unsent') AND ended_at IS NULL "
+            "AND (id = ? OR (? IS NULL AND session_id = ?)) LIMIT 1",
+            (agent_id, agent_id, session_id),
+        ).fetchone()
+        taken = found is not None and (
+            self._conn.execute(
+                "UPDATE fleet_agent SET first_prompt = 'acked', first_prompt_at = ? "
+                "WHERE id = ? AND first_prompt IN ('pending', 'unsent')",
+                (stamp, found["id"]),
+            ).rowcount
+            == 1
+        )
+        self._conn.commit()
+        return taken
+
+    def mark_first_prompt_unsent(self, agent_id: str, at: datetime) -> bool:
+        """Move ``agent_id``'s first message from ``pending`` to ``unsent``: compare and set,
+        so of two listings that both found it overdue exactly one moves it, and only that one
+        writes the board's ``prompt_unsent``. False when it was not pending any more."""
+        cursor = self._conn.execute(
+            "UPDATE fleet_agent SET first_prompt = 'unsent', first_prompt_at = ? "
+            "WHERE id = ? AND first_prompt = 'pending'",
+            (at.isoformat(), agent_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def first_prompt_rows(self, since: datetime) -> list[FleetAgent]:
+        """Every fleet row given a first message since ``since``, in any project: what doctor's
+        ``fleet-delivery`` row counts."""
+        rows = self._conn.execute(
+            f"SELECT {self._fleet_agent_read} FROM fleet_agent "
+            "WHERE first_prompt IS NOT NULL AND created_at >= ? ORDER BY created_at",
+            (since.isoformat(),),
+        ).fetchall()
+        return [_row_to_fleet_agent(row) for row in rows]
 
     # --- project groups, pins and order (#140) ------------------------------------------
 
@@ -4335,6 +4459,33 @@ class SqliteStore:
             )
         self._conn.commit()
 
+    def replace_ui_state(self, key: str, expected: str | None, value: str | None) -> bool:
+        """Compare-and-set: write ``value`` under ``key`` (``None`` forgets it) only while the
+        row still holds ``expected`` (``None``: no row). Returns whether it was written.
+
+        For a fact two processes may race on, read in one session and written in another
+        (a usage read's back-off, F1 of #400): a stale write must not undo a newer one."""
+        if expected is None and value is None:
+            row = self._conn.execute("SELECT 1 FROM ui_state WHERE key = ?", (key,)).fetchone()
+            return row is None
+        if expected is None:
+            cursor = self._conn.execute(
+                "INSERT INTO ui_state (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (key) DO NOTHING",
+                (key, value, _now_iso()),
+            )
+        elif value is None:
+            cursor = self._conn.execute(
+                "DELETE FROM ui_state WHERE key = ? AND value = ?", (key, expected)
+            )
+        else:
+            cursor = self._conn.execute(
+                "UPDATE ui_state SET value = ?, updated_at = ? WHERE key = ? AND value = ?",
+                (value, _now_iso(), key, expected),
+            )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""
         rows = self._conn.execute(
@@ -4695,7 +4846,7 @@ class SqliteStore:
     def upsert_claude_account(self, slot: int, config_dir: Path) -> ClaudeAccountRecord:
         """Register ``slot`` at the END of the order, or refresh a known slot's directory.
 
-        The arrangement of a known slot — alias, position, default, disabled —
+        The arrangement of a known slot — alias, position, disabled —
         is never touched by an upsert: a sync that re-reads the directories
         must not reorder what the operator arranged. New slots queue at the
         end because "the account I just added" is the one most safely ranked
@@ -4717,10 +4868,8 @@ class SqliteStore:
     def delete_claude_account(self, slot: int) -> bool:
         """Forget a slot's arrangement; True when there was one.
 
-        A default that named this slot goes with the row — the partial index
-        keeps "one default" true, and a default pointing at nothing is exactly
-        the state a removal must not leave behind (the next ``add`` reuses the
-        number, and a stale default would silently adopt the newcomer).
+        Its rank goes with the row and the order closes up, so the next ``add``,
+        which reuses the number, queues at the end rather than inheriting a place.
         """
         return self.delete_claude_accounts([slot]) == 1
 
@@ -4741,24 +4890,6 @@ class SqliteStore:
         else:
             self._conn.commit()
         return deleted
-
-    def set_claude_account_default(self, slot: int | None) -> None:
-        """Make ``slot`` the one default (``None`` clears it). Unknown slot → ``KeyError``.
-
-        Two statements in one transaction: clear, then set. The partial unique
-        index would otherwise refuse the second default before the first was
-        cleared, and a clear that committed alone would leave NO default if
-        the set then failed — which is a worse state than the one asked for.
-        """
-        self._conn.execute("UPDATE claude_account SET is_default = 0 WHERE is_default = 1")
-        if slot is not None:
-            cursor = self._conn.execute(
-                "UPDATE claude_account SET is_default = 1 WHERE slot = ?", (slot,)
-            )
-            if cursor.rowcount != 1:
-                self._conn.rollback()
-                raise KeyError(slot)
-        self._conn.commit()
 
     def set_claude_account_alias(self, slot: int, alias: str | None) -> None:
         """Name a slot (``None`` unnames it). A taken alias raises ``sqlite3.IntegrityError``."""
@@ -4797,6 +4928,54 @@ class SqliteStore:
                 "UPDATE claude_account SET position = ? WHERE slot = ?", (position, slot)
             )
         self._conn.commit()
+
+    def promote_retired_claude_account_default(self) -> int | None:
+        """Move the slot the retired ``is_default`` flag names to rank 1 and clear the flag.
+
+        The machine default IS rank 1 of the order (#8 on the board), so a flag an
+        older build set is folded into the order: that slot goes to the top, the
+        others keep their order behind it, renumbered 1..n, and the flag is cleared
+        — so a launch that took a signed-in, enabled old default takes the same account
+        after the upgrade. Two do change. An old default that is signed out or disabled
+        is skipped by the preferred rung, so the launch goes to the next enabled,
+        signed-in account (before, a signed-out one opened on its login screen). And
+        where headroom does not pick (``pick = "default"``, or no usage readable), a
+        role with a hand-written ``team bind <role> --env CLAUDE_CONFIG_DIR=…`` ran on
+        the old default and now runs on its own directory, since a binding wins over
+        the preferred account; a headroom pick still overrides that binding, as before.
+        Keyed on the DATA, not on a schema
+        version: a store any line carried past whatever version a step would have had
+        still holds the flag, and is promoted on its next read all the same. Clearing
+        it makes this idempotent, and lets a later reorder stand. One transaction;
+        the slot moved, or ``None`` when no flag was set. The column and its index
+        stay (dropping a column is a table rebuild, and an older build reading this
+        store still expects it).
+        """
+        row = self._conn.execute(
+            "SELECT slot FROM claude_account WHERE is_default = 1 LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None  # the common case: one read, no transaction, no lock
+        promoted = int(row[0])
+        # Clear the flag FIRST: the UPDATE takes the write lock, and only the one that
+        # still finds the flag goes on. Reading the order before it, a promote racing a
+        # promote-then-reorder wrote its stale order over the reorder (review of #406,
+        # the lost update); a second promoter now finds no flag and writes nothing.
+        cleared = self._conn.execute(
+            "UPDATE claude_account SET is_default = 0 WHERE slot = ? AND is_default = 1",
+            (promoted,),
+        )
+        if cleared.rowcount != 1:
+            self._conn.rollback()
+            return None
+        current = [record.slot for record in self.claude_accounts()]  # under the lock
+        order = [promoted, *(slot for slot in current if slot != promoted)]
+        for position, slot in enumerate(order, start=1):
+            self._conn.execute(
+                "UPDATE claude_account SET position = ? WHERE slot = ?", (position, slot)
+            )
+        self._conn.commit()
+        return promoted
 
     # --- usage readings (v16, #146) ------------------------------------------------------------
 

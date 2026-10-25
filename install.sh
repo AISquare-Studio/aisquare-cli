@@ -102,6 +102,11 @@ OPTIONAL_EXTRAS="chrome-devtools"
 # `brain` is always expected to be amber when this finishes — gbrain is out of
 # scope (§0.4). `expected_amber` adds to it what the flags asked for.
 EXPECTED_AMBER="brain"
+# Amber for a passing reason that says nothing about the install: an account whose
+# usage reads wait out a rate limit (HTTP 429, or 503 with Retry-After) resume by
+# themselves. Counted as unexpected, a transient limit at install time exited 2 on a
+# good install. Expected in every run, but not part of `expected_amber`'s set.
+TRANSIENT_AMBER="claude-account-backoff"
 
 # The installed RELEASE's rows for the codebase snapshot this tree removed
 # (#399): `repomix`, `snapshot` and `tiktoken`. This script installs the latest
@@ -121,7 +126,15 @@ WANT_AGENT=1
 WANT_SYSTEM_DEPS=1
 WANT_PROJECT=1
 PROJECT_DIR=""
-PIN_VERSION=${AISQUARE_INSTALL_VERSION:-}
+# THE RELEASE STAMP. Empty in the repository, so the copy on `main` installs the
+# latest release. A release asset (releases/download/vX.Y.Z/install.sh) has this
+# set to its own version by scripts/stamp_installers.py, so that URL installs
+# exactly that version. Either way --version V and AISQUARE_INSTALL_VERSION=V
+# still win, and `--version latest` or an empty AISQUARE_INSTALL_VERSION= drops
+# the pin (no colon below: set-but-empty is a choice, not "unset"). Keep it ONE
+# line: the stamper replaces this exact text and refuses it missing or doubled.
+STAMPED_VERSION=""
+PIN_VERSION=${AISQUARE_INSTALL_VERSION-$STAMPED_VERSION}
 PYTHON_VERSION="$DEFAULT_PYTHON"
 DRY_RUN=0
 VERBOSE=0
@@ -720,6 +733,8 @@ resolve() {
         _resolve_system
         return 0
     fi
+    # `latest` is the way out of a stamped pin: the newest release, as unstamped.
+    [ "$PIN_VERSION" = latest ] && PIN_VERSION=""
     if [ -n "$PIN_VERSION" ]; then
         LATEST_VERSION=$PIN_VERSION
         note "pinned to $PIN_VERSION"
@@ -1987,7 +2002,7 @@ expected_amber() {
 # tests/test_install_script_is_posix.py now fails on any name assigned in two
 # functions, so the next one is caught rather than read.
 is_expected_amber() {
-    for _want in $(expected_amber); do
+    for _want in $(expected_amber) $TRANSIENT_AMBER; do
         [ "$1" = "$_want" ] && return 0
     done
     return 1
@@ -2345,6 +2360,12 @@ summary() {
                 ;;
         esac
         case " $_expected " in
+            *" claude-account-backoff "*)
+                note "  claude-account-backoff — an account's usage reads wait out a rate"
+                note "             limit; they resume by themselves (aisquare doctor says until when)."
+                ;;
+        esac
+        case " $_expected " in
             *" claude-code "*)
                 # Information, not an instruction: under --no-agent no state of
                 # Claude Code is this run's to change, so the doctor's fix is not
@@ -2525,7 +2546,8 @@ Options
                        no; --yes asks nothing.
       --project DIR    Register DIR as the project (default: $PWD if a git repo).
       --no-project     Machine setup only; register nothing.
-      --version V      Pin aisquare-cli to V (default: latest).
+      --version V      Pin aisquare-cli to V, or `latest` (default: latest, or
+                       the release a release asset was downloaded from).
       --python V       Interpreter uv resolves for the tool env (default: 3.13).
       --offline        Do not ask PyPI what the latest version is.
       --upgrade-all    Also move uv itself and the system packages.

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aisquare-cli"
-version = "0.8.2"
+version = "0.9.0"
 description = "One terminal over your projects and your coding agents: task a manager in plain words, and it runs the coders, testers and reviewers for you."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -180,6 +180,10 @@ experiment = [
 ]
 dev = [
   "pytest>=9.1.1",
+  # `make test` runs the suite on every core (#129 d). Each test already has a home,
+  # a tmux folder and a `claude` stand-in of its own (tests/conftest.py), so workers
+  # share nothing a test writes.
+  "pytest-xdist>=3.6",
   "mypy>=1.10",
   "ruff>=0.5",
   # Both bounds are load-bearing, not caution. mcp 2.0.0 renamed FastMCP to

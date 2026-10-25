@@ -78,6 +78,18 @@ def set_value(key: str, value: str) -> str:
     return get_value(key)
 
 
+def what_it_changes(key: str, stored: str) -> str | None:
+    """One line on what a change does, for a key whose name says less than it means:
+    ``capture.enabled`` off stops storing prompts but not the board or the CI experiment
+    (#268). ``None`` for every other key."""
+    if key == "capture.enabled" and stored == "false":
+        return (
+            "Prompts are no longer stored or spooled; turn metrics (no text), teammate "
+            "updates and the CI experiment, if you turned it on, carry on."
+        )
+    return None
+
+
 def set_redaction(level: RedactionLevel) -> str:
     """Set the capture redaction level and return it."""
     config = load_config()

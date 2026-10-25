@@ -68,7 +68,10 @@ def capture_on() -> bool:
     """``[projects] capture``: whether a directory a hooked session merely runs in gets a
     row of its own, captured and unlisted (#139). Off by default since 0.8.1; an unreadable
     config costs the setting, never the hook, as every section's does, and is read again on
-    the next ask (review of #259, round 18).
+    the next ask (review of #259, round 18). The default it falls back to is off, so an
+    unreadable config captures nothing more: the same direction as ``capture.enabled``,
+    which fails closed on purpose (``hooks.capture_prompt``, #268): both record less, never
+    more.
 
     Asked twice a SessionStart, once a prompt, and on asq's UI thread every refresh tick:
     :func:`~aisquare.core.config.load_config` parses the file again only when it changed."""

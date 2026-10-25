@@ -39,6 +39,7 @@ from aisquare.core.config import (
     save_config,
     system_defaults,
 )
+from aisquare.core.harness import PLAIN_ROLE
 from aisquare.core.paths import config_path
 from aisquare.services import settings as settings_service
 
@@ -49,7 +50,11 @@ def _file(target: Path) -> dict[str, Any]:
 
 #: Every fleet role's table at its defaults: what every save writes whole, so that a build
 #: before the layers, which reads the file without the defaults under it, sees them all.
-_ROLES: dict[str, Any] = system_defaults()["fleet"]["roles"]
+#: All but the role-less agent's, which no such build reads and a save leaves out at its
+#: default (review of #405, M1).
+_ROLES: dict[str, Any] = {
+    role: table for role, table in system_defaults()["fleet"]["roles"].items() if role != PLAIN_ROLE
+}
 
 
 def _roles(**changes: Any) -> dict[str, Any]:
@@ -238,6 +243,7 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "on_limit": "switch",
             "share_trust": True,
             "share_settings": False,
+            "prefer": "priority",  # added by P0-W3 (#277)
         },
         "projects": {"capture": False},
         # The persona train and the captain's switch, added since (#201, #240).
@@ -246,8 +252,22 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "import": {"engine": "auto", "api_model": "claude-opus-5"},
         },
         "experimental": {"captain": False},
+        # asq's daily release check (services.updates).
+        "updates": {"check": True},
         # App settings ▸ User preferences, added since.
         "ui": {"always_show_project_path": False},
+        # The first message's two (P0-W1a, #122).
+        "fleet": {
+            "first_prompt": "argv",
+            "prompt_ack_seconds": 45.0,
+            # The idle check's quiet window (P0-W1b, #123).
+            "busy_quiet_seconds": 30,
+            # The delivery guards (P0-W2, #276).
+            "draft_quiet_seconds": 10.0,
+            "deliver_notes_at_turn_end": True,
+            # The role-less agent, a default since review of #405 (M1).
+            "roles": {PLAIN_ROLE: {"permission_mode": "auto", "worktree": False, "extra_args": []}},
+        },
     }
     then = _overlay(_V1_DEFAULTS, changed)
     assert set(RETIRED_SECTIONS) <= set(then)
@@ -438,7 +458,13 @@ def test_a_file_this_build_writes_reads_the_same_without_the_defaults_under_it(
     save_config(config, target)
 
     older = _as_a_whole_file_reader_reads(target)
-    assert older.fleet.roles == load_config(target).fleet.roles == config.fleet.roles
+    assert load_config(target).fleet.roles == config.fleet.roles
+    # The role-less agent's table is left out at its default; such a build falls back to
+    # the same shape for it (fleet.role_settings), so the fleet reads the same.
+    assert older.fleet.roles == {
+        role: table for role, table in config.fleet.roles.items() if role != PLAIN_ROLE
+    }
+    assert config.fleet.roles[PLAIN_ROLE] == FleetRoleSettings()
     assert older.fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
     assert older.fleet.roles["coder"] == FleetRoleSettings(
         permission_mode="acceptEdits", worktree=True

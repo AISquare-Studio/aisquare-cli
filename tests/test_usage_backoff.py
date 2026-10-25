@@ -543,6 +543,26 @@ def test_a_stale_write_never_shortens_a_newer_wait(fake_home: Path) -> None:
         assert store.ui_state(key) == longer.dump()
 
 
+@pytest.mark.parametrize(
+    "raw", ["{truncated", '{"until": "soon"}'], ids=["truncated", "other-shape"]
+)
+def test_a_wait_row_this_version_cannot_read_is_replaced(fake_home: Path, raw: str) -> None:
+    """Review of #408, n1: an unreadable ``usage-backoff`` row was never replaced (compared as
+    absent, its insert hit the row), so the slot was asked on every read. A 429 replaces it,
+    and the wait it starts holds."""
+    work = _slot("work@example.com", "tok-work")
+    key = service._BACKOFF_KEY.format(slot=work.slot)
+    with store_session() as store:
+        store.set_ui_state(key, raw)
+    endpoint = _Endpoint({"tok-work": (429, {"Retry-After": "600"})})
+
+    service.read_usage([work], now=NOW, fetch=endpoint)
+    again = service.read_usage([work], now=NOW + timedelta(minutes=1), fetch=endpoint)
+
+    assert again[work.slot].rate_limited and endpoint.calls == ["tok-work"], "the wait holds"
+    assert work.slot in service.usage_backoffs([work], now=NOW + timedelta(minutes=1))
+
+
 def _new_token(account: Any, token: str) -> None:
     """An OAuth refresh, or a *Log in again* to the same account: a new token, the same login."""
     creds = core.credentials_path(account)

@@ -1300,15 +1300,21 @@ def _next_backoff(
 
 def _record_backoff(store: ContextStore, held: UsageBackoff, seen: UsageBackoff | None) -> None:
     """Write ``held`` unless the row changed since ``seen`` was read and now holds a longer
-    wait for the same login: a stale write never shortens a newer wait (review of #408, N2)."""
+    wait for the same login: a stale write never shortens a newer wait (review of #408, N2).
+
+    A row this version cannot read (another version's shape, a truncated write) is replaced:
+    compared as absent, it was never, and that slot was asked on every read (n1)."""
     key = _BACKOFF_KEY.format(slot=held.slot)
     expected = seen.raw if seen is not None else None
     if store.replace_ui_state(key, expected, held.dump()):
         return
     current = UsageBackoff.load(held.slot, store.ui_state(key))
-    if current is not None and current.holds(held.token) and current.until >= held.until:
+    if current is None:
+        store.set_ui_state(key, held.dump())
+        return
+    if current.holds(held.token) and current.until >= held.until:
         return  # another process recorded a wait at least as long: keep it
-    store.replace_ui_state(key, current.raw if current is not None else None, held.dump())
+    store.replace_ui_state(key, current.raw, held.dump())
 
 
 def _read_backoffs(store: ContextStore, slots: Iterable[int]) -> dict[int, UsageBackoff]:

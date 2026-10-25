@@ -124,7 +124,10 @@ not inside asq, and a reinstall does not touch them. asq writes down the agents
 running when you press the button; after the reopen, any whose pane is gone is
 restarted on its session, as `aisquare fleet restart` does, and the toast says
 what it found: `✓ aisquare 0.8.3 — 2 agents reattached`, plus each restart and
-its reason. That record is for this reopen only: if asq cannot open again, or
+its reason. As *Restart all* does, it leaves an agent stopped on purpose since
+the press (`aisquare fleet stop`, or Stop in its view) and one that ended by
+itself with exit 0, and names each: `1 left as it was (coder-1: stopped on
+purpose)`. That record is for this reopen only: if asq cannot open again, or
 you stay in the shell, it is dropped, and one the reopen does not take within
 ten minutes of the update handing back to asq is never acted on. If the install
 fails, its output stays on screen until you press Enter, and the version you

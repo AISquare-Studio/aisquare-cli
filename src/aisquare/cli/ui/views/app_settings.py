@@ -372,10 +372,8 @@ class AppSettingsView(Vertical):
         "Off: shown only when two projects share a name."
     )
     UPDATES_SECTION: ClassVar[tuple[str, str]] = ("Updates", "whether asq looks for a new release")
-    UPDATES_CHECK_ABOUT: ClassVar[str] = (
-        "Once a day asq asks PyPI for a newer aisquare; a ⬆ row under Settings offers it. "
-        "Off: no lookup, no row."
-    )
+    # One line: at 80x24, beside the sidebar, three pushed the tab's Advanced one scroll down.
+    UPDATES_CHECK_ABOUT: ClassVar[str] = "Off: no PyPI lookup, no ⬆ row in the sidebar."
     PREFERENCES_FROM_A_SHELL: ClassVar[tuple[str, str]] = (
         "Set from a shell (",
         "), a preference shows after Reload here or when asq next starts, not live.",

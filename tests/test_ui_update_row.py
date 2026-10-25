@@ -1092,6 +1092,44 @@ def test_the_reopen_reattaches_and_says_so(monkeypatch: pytest.MonkeyPatch) -> N
     assert not any("reattached" in toast for toast in ordinary)
 
 
+@pytest.mark.parametrize(
+    ("outcome", "warning"),
+    [
+        (
+            updates.Reattached(
+                previous="0.9.0", version="0.9.1", left=(("coder-1", "stopped on purpose"),)
+            ),
+            False,
+        ),
+        (
+            updates.Reattached(
+                previous="0.9.0", version="0.9.1", failed=(("coder-1", "its row is gone"),)
+            ),
+            True,
+        ),
+    ],
+    ids=["left", "control-failed"],
+)
+def test_an_agent_left_as_it_was_is_named_in_an_information_toast(
+    monkeypatch: pytest.MonkeyPatch, outcome: updates.Reattached, warning: bool
+) -> None:
+    """The owner's choice for PR #301: an agent the reopen leaves, as Restart all leaves it,
+    is named, and is no trouble; a restart that could not be done is a warning."""
+    monkeypatch.setattr(updates, "reattach_after_update", lambda: outcome)
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> list[tuple[str, bool]]:
+        from textual.widgets._toast import Toast
+
+        await _toasts(app)
+        return [
+            (toast.render().plain, toast.has_class("-warning")) for toast in app.screen.query(Toast)
+        ]
+
+    toasts = _drive(body, offer=None, after_update=True)
+
+    assert (outcome.toast(), warning) in toasts, toasts
+
+
 # --- the hidden flags -------------------------------------------------------------------------
 
 _ENTER = "Press Enter to go back to asq "

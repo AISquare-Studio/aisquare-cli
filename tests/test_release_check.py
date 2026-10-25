@@ -484,6 +484,90 @@ def test_a_restart_that_fails_is_named_and_its_row_left(
     )
 
 
+def _end(agent: FleetAgent, *, ended_by: str, exit_status: int | None) -> None:
+    with store_session() as store:
+        store.end_fleet_agent(agent.id, exit_status=exit_status, ended_by=ended_by)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("ended_by", "exit_status", "why"),
+    [
+        ("stopped", None, fleet_service.STOPPED_ON_PURPOSE),
+        ("died", 0, fleet_service.ENDED_CLEANLY),
+    ],
+    ids=["fleet-stop", "exit-0"],
+)
+def test_an_agent_stopped_on_purpose_or_ended_cleanly_since_the_press_is_left_and_named(
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    ended_by: str,
+    exit_status: int | None,
+    why: str,
+) -> None:
+    """Restart all's rule (#38, main #274): a ``fleet stop`` while the failed install's
+    "Press Enter" screen waited, or an agent that exited 0 there, is not brought back with
+    a hand-off prompt (validator's compatibility gate on 19724a72, M1). Named, as info."""
+    agents = [
+        _agent(project, "coder-1", "%1"),
+        _agent(project, "coder-2", "%2"),
+        _agent(project, "reviewer-1", "%3"),
+    ]
+    fleet = _Fleet(
+        monkeypatch,
+        {
+            "coder-1": ("exited", ""),
+            "coder-2": ("lost", "pane gone"),
+            "reviewer-1": ("waiting", ""),
+        },
+    )
+    monkeypatch.setattr(updates, "__version__", "0.9.0")
+    updates.record_press(agents)
+    _end(agents[0], ended_by=ended_by, exit_status=exit_status)  # after the press
+    monkeypatch.setattr(updates, "__version__", "0.9.1")
+
+    outcome = updates.reattach_after_update()
+
+    assert fleet.restarted == [("coder-2", "agt_coder-2")], "the lost one alone"
+    assert outcome is not None
+    assert outcome.left == (("coder-1", why),)
+    assert outcome.failed == ()
+    assert outcome.toast() == (
+        "✓ aisquare 0.9.1 — 1 agent reattached, 1 restarted (coder-2: pane gone), "
+        f"1 left as it was (coder-1: {why})"
+    )
+
+
+@pytest.mark.parametrize("exit_status", [None, 1, 137], ids=["killed", "exit-1", "sigkill"])
+def test_an_agent_that_died_since_the_press_is_still_restarted(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, exit_status: int | None
+) -> None:
+    """Control for the rule above: a death nobody asked for, recorded as one, comes back."""
+    agents = [_agent(project, "coder-1", "%1")]
+    fleet = _Fleet(monkeypatch, {"coder-1": ("exited", "")})
+    updates.record_press(agents)
+    _end(agents[0], ended_by="died", exit_status=exit_status)
+
+    outcome = updates.reattach_after_update()
+
+    assert fleet.restarted == [("coder-1", "agt_coder-1")]
+    assert outcome is not None and outcome.left == ()
+
+
+def test_an_exit_0_not_recorded_yet_is_left_by_its_pane(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row no listing has ended yet is judged by its pane, as Restart all judges it: the
+    pane's ``exit 0`` leaves it, an ``exit 1`` brings it back."""
+    agents = [_agent(project, "coder-1", "%1"), _agent(project, "coder-2", "%2")]
+    fleet = _Fleet(monkeypatch, {"coder-1": ("exited", "exit 0"), "coder-2": ("exited", "exit 1")})
+    updates.record_press(agents)
+
+    outcome = updates.reattach_after_update()
+
+    assert fleet.restarted == [("coder-2", "agt_coder-2")]
+    assert outcome is not None and outcome.left == (("coder-1", fleet_service.ENDED_CLEANLY),)
+
+
 def test_a_failed_update_reopens_on_the_old_version_and_says_so(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -314,6 +314,9 @@ class Reattached:
     """The labels whose agent still runs."""
     restarted: tuple[tuple[str, str], ...] = ()
     """``(label, why it was not running)`` for each one restarted."""
+    left: tuple[tuple[str, str], ...] = ()
+    """``(label, why a restart leaves it)``: stopped on purpose or exited 0 since the press,
+    as a Restart all leaves it (``fleet.restart_leaves``)."""
     failed: tuple[tuple[str, str], ...] = ()
     """``(label, why it was not restarted)``: its row stays as the listing shows it."""
 
@@ -334,6 +337,10 @@ class Reattached:
         if self.restarted:
             why = ", ".join(f"{label}: {reason}" for label, reason in self.restarted)
             parts.append(f"{len(self.restarted)} restarted ({why})")
+        if self.left:
+            why = ", ".join(f"{label}: {reason}" for label, reason in self.left)
+            gone = "it was" if len(self.left) == 1 else "they were"
+            parts.append(f"{len(self.left)} left as {gone} ({why})")
         if self.failed:
             why = ", ".join(f"{label}: {reason}" for label, reason in self.failed)
             parts.append(f"not restarted ({why})")
@@ -345,13 +352,16 @@ def reattach_agents(press: Press) -> Reattached:
 
     Running is what the listing reads as having a process (``fleet.PROCESS_STATES``,
     ``unknown`` among them: a server that could not be asked is no pane shown gone, and a
-    restart would stop whatever runs there). Any other is restarted as the agent view's
-    Restart does it, pinned to the recorded row (``agent_id``): ``fleet.restart`` resumes
-    the session when its transcript is on disk. A restart that is refused, or a row that is
+    restart would stop whatever runs there). Any other is judged as a Restart all judges a
+    dead row (``fleet.restart_leaves``): one stopped on purpose since the press, or one
+    that exited 0, is left and named. The rest are restarted as the agent view's Restart
+    does it, pinned to the recorded row (``agent_id``): ``fleet.restart`` resumes the
+    session when its transcript is on disk. A restart that is refused, or a row that is
     gone, is named and its row left as the listing shows it.
     """
     kept: list[str] = []
     restarted: list[tuple[str, str]] = []
+    left: list[tuple[str, str]] = []
     failed: list[tuple[str, str]] = []
     for recorded in press.agents:
         with store_session() as store:
@@ -365,16 +375,23 @@ def reattach_agents(press: Press) -> Reattached:
             continue
         why = status.detail or status.state
         try:
-            fleet_service.restart(fleet_service.project_of(agent), agent.label, agent_id=agent.id)
+            project = fleet_service.project_of(agent)
+            leave = fleet_service.restart_leaves(project, status)
+            if leave is None:
+                fleet_service.restart(project, agent.label, agent_id=agent.id)
         except Exception as exc:  # a refusal is an answer to name, never a crash
             failed.append((agent.label, f"{why}; {exc}"))
         else:
-            restarted.append((agent.label, why))
+            if leave is None:
+                restarted.append((agent.label, why))
+            else:
+                left.append((agent.label, leave))
     return Reattached(
         previous=press.previous,
         version=__version__,
         kept=tuple(kept),
         restarted=tuple(restarted),
+        left=tuple(left),
         failed=tuple(failed),
     )
 

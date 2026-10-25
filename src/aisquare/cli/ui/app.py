@@ -2679,7 +2679,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             timeout=12,
             markup=False,
         )
-        if outcome.restarted:
+        if outcome.restarted or outcome.left:  # a row left was ended as it was judged
             self.refresh_data()
 
     async def on_app_settings_selected(self, event: AppSettingsSelected) -> None:

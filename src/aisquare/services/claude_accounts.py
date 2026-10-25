@@ -537,8 +537,9 @@ def choose(
     # applying an account does (core.apply_launch_env). That binding launched on its own
     # directory before rank 1 was the default, and still does (review of #406, M1), whether
     # rank 1 or a headroom pick would have chosen (#9). A flag, an account binding or a
-    # project default still win over it, and so does a hand-over's pick (``spread``, which
-    # choose_for_handover passes), whose whole point is to move the agent elsewhere.
+    # project default still win over it, and so does a hand-over, whose whole point is to
+    # move the agent elsewhere: any ``spread`` is one (choose_for_handover reads headroom
+    # itself, then falls back here with ``spread=False``).
     hand_written = _binding_names_a_directory(role)
     if hand_written and spread is None:
         return AccountChoice(None, None, notes)

@@ -429,6 +429,7 @@ def choose(
     spread: bool | None = None,
     fetch: Fetch | None = None,
     family: str | None = None,
+    max_age: float | None = None,
 ) -> AccountChoice:
     """THE account resolver: which Claude account a launch runs under, and why.
 
@@ -467,7 +468,9 @@ def choose(
     hand-over (``spread=True``) reads it live.
 
     ``family`` is the launch's model family (``core.harness.launch_family``), for the
-    headroom rung's per-family weeks and limit marks (#277).
+    headroom rung's per-family weeks and limit marks (#277). ``max_age`` is how deep a
+    launch's headroom rung reads the cache, :data:`PICK_MAX_AGE_SECONDS` when unsaid: a
+    form that only SHOWS the pick reads the shared five minutes (:func:`launch_default`).
 
     ``exclude`` is honoured on EVERY rung: a binding or a project default that
     names the account being left is skipped with a note and the ladder goes on,
@@ -544,12 +547,14 @@ def choose(
     settings = accounts_settings()
     by_headroom = spread if spread is not None else settings.pick == "headroom"
     if by_headroom:
+        # A hand-over reads live; a launch through the cache, a minute deep unless told.
+        depth = PICK_MAX_AGE_SECONDS if max_age is None else max_age
         picked, more = headroom_choice(
             accounts,
             switch_at=settings.switch_at,
             exclude=skip,
             fetch=fetch,
-            max_age=PICK_MAX_AGE_SECONDS if spread is None else None,
+            max_age=depth if spread is None else None,
             family=family,
             prefer=settings.prefer,
         )
@@ -567,6 +572,33 @@ def choose(
     if preferred is not None:
         return AccountChoice(preferred, "preferred", notes)
     return AccountChoice(None, None, notes)
+
+
+@dataclass(frozen=True)
+class LaunchDefault:
+    """What a launch with no ``--account`` runs under, for a form to show before it launches
+    (the Spawn dialog's Account field, #12 on the board): :func:`choose`'s answer, and why
+    it chose nothing when that is a binding's directory rather than this shell's."""
+
+    choice: AccountChoice
+    bound_directory: bool = False
+    """Nothing was chosen because the role's binding sets ``CLAUDE_CONFIG_DIR`` by hand,
+    which the launch keeps (#9): it runs on that directory, not on this shell's."""
+
+
+def launch_default(
+    role: str | None, *, project: ProjectInfo | None = None, family: str | None = None
+) -> LaunchDefault:
+    """:func:`choose` with no flag, as ``fleet spawn`` asks it for ``role`` in ``project``.
+
+    For showing, not launching: its headroom rung reads the shared cache five minutes deep
+    (:data:`USAGE_MAX_AGE_SECONDS`, the status line's depth), so a form that shows it sends
+    no request the status line would not. The launch itself reads a minute deep and can
+    pick another account when a window moved since. Raises :class:`NoSuchAccount` as the
+    launch would.
+    """
+    choice = choose(None, role=role, project=project, family=family, max_age=USAGE_MAX_AGE_SECONDS)
+    return LaunchDefault(choice, choice.account is None and _binding_names_a_directory(role))
 
 
 def _binding_names_a_directory(role: str | None) -> bool:

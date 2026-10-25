@@ -118,6 +118,7 @@ from textual.worker import Worker, WorkerState
 from aisquare.cli.ui.attach import AttachTargetScreen, NewAccountRequested, Target
 from aisquare.cli.ui.persona_dialogs import ImportPersonaScreen
 from aisquare.cli.ui.views.app_settings import permission_options
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import codenames, experimental, harness, personas
 from aisquare.core.config import FleetRoleSettings, load_config
 from aisquare.core.personas import Persona
@@ -139,12 +140,19 @@ tab's, and a worker's state change bubbles up to the app past both."""
 
 ACCOUNTS_WORKER = "spawn-accounts"
 """The worker that reads the Claude accounts, so the dialog opens before they are read."""
+DEFAULT_WORKER = "spawn-default-account"
+"""The worker that reads what a spawn with no account runs on (:func:`read_launch_default`):
+the registry, the config, and through the shared cache the usage a headroom pick reads."""
 
 NO_TASK = ""
 """The Task field's ``(none)``."""
 
 THIS_SHELL = ""
-"""The Account field's ``(this shell's)``: no ``--account`` at all."""
+"""The Account field's first option: no ``--account`` at all, so the spawn runs where the
+resolver's ladder says (``claude_accounts.choose``). Labelled with that pick
+(:func:`default_account_label`), ``(this shell's)`` only when the ladder picks nothing."""
+DEFAULT_PENDING = "(default)"
+"""That option's label while the pick is being read, or when it could not be."""
 
 NO_PERSONA = ""
 """The Persona field's ``(none)`` — and what ``spawn`` reads as "no persona"."""
@@ -225,6 +233,39 @@ def task_choice(task: TeamTask) -> str:
     return (
         f"{task.id.removeprefix('tsk_')[: fleet_service.TASK_SHORT]} [{task.status}] {task.title}"
     )
+
+
+def read_launch_default(project: ProjectInfo, role: str) -> accounts_service.LaunchDefault:
+    """What a spawn of ``role`` in ``project`` with no account runs on: the service's
+    ``launch_default``, with the model family ``fleet.spawn`` passes the ladder (#277)."""
+    family = harness.launch_family(role, fleet_service.role_settings(role).extra_args)
+    return accounts_service.launch_default(role, project=project, family=family)
+
+
+def default_account_label(default: accounts_service.LaunchDefault, role: str) -> str:
+    """``(default: rank 1 · work)`` — what the Account field's no-account option runs on,
+    by the rung that picked it (rank, headroom, the role's binding, the project's default).
+
+    ``(this shell's)`` only when the ladder picks nothing — no account signed in — and the
+    launch leaves this shell's environment as it is; a role whose binding sets
+    ``CLAUDE_CONFIG_DIR`` by hand runs on that directory instead, and says so. Before #12 on
+    the board it always read ``(this shell's)``, as if the launch skipped the accounts.
+    """
+    account = default.choice.account
+    if account is None:
+        return (
+            f"(default: {role}'s CLAUDE_CONFIG_DIR)"
+            if default.bound_directory
+            else "(this shell's)"
+        )
+    source = default.choice.source
+    if source == "preferred":
+        why = f"rank {account.position}" if account.position is not None else "preferred"
+    elif source == "role binding":
+        why = f"bound to {role}"
+    else:
+        why = source or "picked"
+    return f"(default: {why} · {accounts_core.label(account)})"
 
 
 def account_choice(status: ClaudeAccountStatus) -> str:
@@ -392,10 +433,15 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         binary: str | None = None,
         account: str | None = None,
         accounts: Callable[[], AccountsOverview] | None = accounts_service.overview,
+        defaults: Callable[[ProjectInfo, str], accounts_service.LaunchDefault]
+        | None = read_launch_default,
     ) -> None:
         super().__init__()
         self.project = project
         self._accounts = accounts
+        self._launch_default = defaults
+        self._default_label = DEFAULT_PENDING
+        """The no-account option's label: what the spawn runs on (:func:`default_account_label`)."""
         self._fleet = fleet_service.settings()
         self._git = fleet_service.is_git_project(project.root)
         self._role = role or "coder"
@@ -518,7 +564,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         return options
 
     def _account_options(self, statuses: Iterable[ClaudeAccountStatus]) -> list[tuple[str, str]]:
-        options = [("(this shell's)", THIS_SHELL)] + [
+        options = [(self._default_label, THIS_SHELL)] + [
             (account_choice(status), str(status.account.slot)) for status in statuses
         ]
         preset = self._preset_account
@@ -693,7 +739,24 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 thread=True,
                 exit_on_error=False,
             )
+        self._read_default()
         self.query_one("#spawn-role", Select).focus()
+
+    def _read_default(self) -> None:
+        """Read what the no-account option runs on for the role the form holds now, off the
+        UI thread: the registry, the config and, for a headroom pick, the usage cache."""
+        defaults = self._launch_default
+        if defaults is None:
+            return
+        project, role = self.project, self._role
+        self.run_worker(
+            lambda: (role, defaults(project, role)),
+            name=DEFAULT_WORKER,
+            group=DEFAULT_WORKER,
+            thread=True,
+            exclusive=True,
+            exit_on_error=False,
+        )
 
     def _grey_out_manager(self) -> None:
         overlay = self.query_one("#spawn-role", Select).query_one(OptionList)
@@ -836,6 +899,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             self._put_persona(self._persona_default(role))
         self.query_one("#spawn-binary", Input).placeholder = self._binary_hint(role)
         self._describe_persona()  # the empty persona reads differently with no role
+        self._read_default()  # a role's binding is a rung of the ladder
         self._validate()
 
     @on(Select.Changed, "#spawn-persona")
@@ -1300,6 +1364,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name == ACCOUNTS_WORKER:
             self._accounts_changed(event.worker, event.state)
+        elif event.worker.name == DEFAULT_WORKER:
+            self._default_changed(event.worker, event.state)
         elif event.worker.name == SPAWN_WORKER:
             self._spawn_changed(event.worker, event.state)
 
@@ -1350,6 +1416,41 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._set_spawning(False)
         # A Text, not a markup string: the reason can carry a path with [brackets].
         self._note("#spawn-status", reason, style="bold red")
+
+    def _default_changed(self, worker: Worker[Any], state: WorkerState) -> None:
+        """Label the no-account option with the pick read for the role still in the form; a
+        read for a role the form has left since is dropped. A ladder that would refuse the
+        spawn (a binding to a removed slot) says so under the field."""
+        if state is WorkerState.SUCCESS:
+            role, default = worker.result or (None, None)
+            if role == self._role and isinstance(default, accounts_service.LaunchDefault):
+                self._label_default(default_account_label(default, role))
+        elif state is WorkerState.ERROR:
+            error = worker.error
+            self._label_default(DEFAULT_PENDING)
+            if isinstance(error, accounts_service.NoSuchAccount):
+                self._note("#spawn-account-note", f"with no account the spawn is refused: {error}")
+            else:
+                self._note(
+                    "#spawn-account-note",
+                    f"default account unavailable — {type(error).__name__}: {error}",
+                    style="dim",
+                )
+
+    def _label_default(self, label: str) -> None:
+        """Relabel the no-account option, whatever the field holds kept."""
+        if label == self._default_label:
+            return
+        self._default_label = label
+        select = self.query_one("#spawn-account", Select)
+        current = select.value
+        options = self._account_options(self._account_statuses)
+        select.set_options(options)
+        if current in {value for _, value in options}:
+            select.value = current
+        if select.value == THIS_SHELL:
+            # The same value set again redraws nothing: the closed field kept the old label.
+            select.mutate_reactive(type(select).value)
 
     def _accounts_changed(self, worker: Worker[Any], state: WorkerState) -> None:
         if state is WorkerState.SUCCESS and isinstance(worker.result, AccountsOverview):

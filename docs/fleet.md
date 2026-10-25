@@ -134,7 +134,16 @@ tmux can see and its row says so (`no hooks`).
    plain Claude Code session with no standing cycle or mission, `fleet spawn
    agent` below; then the fleet's roles plus any role bound with `team bind`;
    `manager` is greyed out while one runs), **hand off from** (a teammate to
-   fork or take over) and **account**. Everything else is folded into
+   fork or take over) and **account**. Account opens on no account at all, the
+   spawn's own default, and says what that runs on and why: `(default: rank 1 ·
+   work)`, `(default: headroom · work)`, `(default: bound to tester · account
+   2)` or `(default: project default · work)`, what `accounts order`, `team
+   bind` and `accounts default --project` decide for the role picked (read again
+   when the role changes; the captain's dialog the same for the captain). It
+   reads `(this shell's)` only when no account is signed in, so the spawn leaves
+   this shell's `CLAUDE_CONFIG_DIR` as it is. A headroom pick is shown from the
+   readings the status line already has; the spawn picks again when it runs.
+   Everything else is folded into
    **Advanced** — click its title, or `Tab` to it and press `Enter`. It opens
    by itself when the dialog opens with a binary or persona already filled in,
    and whenever one of its fields is why *Spawn* is disabled. In it, first who

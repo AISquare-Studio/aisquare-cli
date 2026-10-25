@@ -62,6 +62,7 @@ from aisquare.cli.ui.spawn import (
     role_choices,
 )
 from aisquare.cli.ui.views.accounts import AccountsView
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import codenames, experimental, harness, personas
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import FleetRoleSettings, load_config, save_config
@@ -80,6 +81,7 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
@@ -256,11 +258,14 @@ class Host(App[None]):
         *,
         accounts: Callable[[], AccountsOverview] | None = None,
         presets: dict[str, str] | None = None,
+        defaults: Any = None,
     ) -> None:
         super().__init__()
         self._project = project
         self._accounts = accounts
-        self._presets = presets or {}
+        self._presets: dict[str, Any] = dict(presets or {})
+        if defaults is not None:  # else the dialog's own: the real ladder, in this test's home
+            self._presets["defaults"] = defaults
         self.results: list[fleet_service.SpawnReceipt | None] = []
         self.notices: list[tuple[str, str]] = []
         self.picks: list[str] = []
@@ -293,11 +298,12 @@ def drive(
     *,
     accounts: Callable[[], AccountsOverview] | None = None,
     presets: dict[str, str] | None = None,
+    defaults: Any = None,
 ) -> T:
     """Run ``scenario`` against the dialog open over a bare host."""
 
     async def run() -> T:
-        host = Host(project, accounts=accounts, presets=presets)
+        host = Host(project, accounts=accounts, presets=presets, defaults=defaults)
         async with host.run_test(size=SIZE) as pilot:
             await settle(pilot)
             dialog = host.screen
@@ -822,6 +828,133 @@ def test_an_accounts_reader_that_fails_costs_the_list_not_the_dialog(
     reason = drive(git_project, scenario, accounts=broken)
     assert reason == "accounts unavailable — OSError: permission denied: /accounts"
     assert spawns.calls == [(git_project.id, "coder", UNTOUCHED)]
+
+
+# --- #12: the no-account option says what the spawn runs on ----------------------------------
+
+
+def account_field(dialog: SpawnDialog) -> tuple[str, str]:
+    """What the Account field shows closed, and its first option: the no-account one."""
+    field = select(dialog, "account")
+    overlay = field.query_one(OptionList)
+    return shown(field.query_one("SelectCurrent #label", Static)), str(
+        overlay.get_option_at_index(0).prompt
+    )
+
+
+def _account(slot: int, alias: str | None = None, position: int | None = None) -> ClaudeAccount:
+    return ClaudeAccount(
+        slot=slot, config_dir=Path(f"/accounts/{slot}"), alias=alias, position=position
+    )
+
+
+def test_the_no_account_option_says_what_the_spawn_runs_on_and_this_shells_only_when_none_is_in(
+    git_project: ProjectInfo, spawns: SpawnRecorder, fake_home: Path
+) -> None:
+    """tester-tls on #406: with rank 1 the default, the Account field still opened on
+    '(this shell's)', which read as if the spawn skipped the accounts, while it ran on rank 1.
+    The option names what the spawn runs on, by the real ladder in this test's home; it reads
+    '(this shell's)' only while no account is signed in. What is sent is unchanged: no
+    ``--account``, so the spawn asks the same ladder when it runs."""
+    from aisquare.core.config import AccountsSettings
+    from tests.test_claude_accounts import _sign_in
+
+    config = load_config()
+    config.accounts = AccountsSettings(pick="default")  # the order alone: no usage read
+    save_config(config)
+    work = accounts_core.create_account()
+    accounts_service.set_alias("2", "work")
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> tuple[str, str]:
+        shown_now = account_field(dialog)
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        return shown_now
+
+    assert drive(git_project, scenario) == ("(this shell's)", "(this shell's)")
+    _sign_in(work, "work@example.com")
+    accounts_service.set_default("2")  # rank 1
+    signed = drive(git_project, scenario)
+    assert signed == ("(default: rank 1 · work)", "(default: rank 1 · work)")
+    picked = accounts_service.choose(None, role="coder", project=git_project).account
+    assert picked is not None and picked.slot == 2, "the account the spawn itself runs on"
+    assert [sent["account"] for _, _, sent in spawns.calls] == [None, None]  # no --account
+
+
+def test_the_label_follows_the_role_and_says_which_rung_picked(git_project: ProjectInfo) -> None:
+    """A role's binding is a rung of the ladder, so the option is read again for the role
+    the field holds. Each rung reads as itself; a ladder that would refuse the spawn says
+    so under the field, and the option reads '(default)'."""
+    asked: list[tuple[str, str]] = []
+    work = _account(3, alias="work", position=1)
+
+    def defaults(project: ProjectInfo, role: str) -> accounts_service.LaunchDefault:
+        asked.append((project.id, role))
+        if role == "reviewer":
+            raise accounts_service.NoSuchAccount("the role binding for 'reviewer' names 9")
+        if role == "tester":
+            choice = accounts_service.AccountChoice(_account(2), "role binding")
+        else:
+            choice = accounts_service.AccountChoice(work, "preferred")
+        return accounts_service.LaunchDefault(choice)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        seen: list[Any] = [account_field(dialog)[1]]
+        for role in ("tester", "reviewer", "coder"):
+            select(dialog, "role").value = role
+            await settle(pilot)
+            seen.append((account_field(dialog)[1], note(dialog, "#spawn-account-note")))
+        return seen
+
+    seen = drive(git_project, scenario, defaults=defaults)
+    assert seen[0] == "(default: rank 1 · work)"
+    assert seen[1] == ("(default: bound to tester · account 2)", None)
+    assert seen[2] == (
+        "(default)",
+        "with no account the spawn is refused: the role binding for 'reviewer' names 9",
+    )
+    assert seen[3][0] == "(default: rank 1 · work)"
+    assert [role for _, role in asked] == ["coder", "tester", "reviewer", "coder"]
+    assert {project for project, _ in asked} == {git_project.id}
+
+
+@pytest.mark.needs_captain
+def test_the_captains_dialog_says_what_the_captain_runs_on(spawns: SpawnRecorder) -> None:
+    """The captain starts through ``fleet.spawn`` on the home board as role ``captain``
+    (``brain.start``), so its dialog asks the ladder for that role in that project and
+    labels the option the same way."""
+    home = captain_state.home_project()
+    asked: list[tuple[str, str]] = []
+
+    def defaults(project: ProjectInfo, role: str) -> accounts_service.LaunchDefault:
+        asked.append((project.id, role))
+        work = _account(2, alias="work", position=1)
+        return accounts_service.LaunchDefault(accounts_service.AccountChoice(work, "headroom"))
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> tuple[str, str]:
+        return account_field(dialog)
+
+    shown_now = drive(
+        home, scenario, presets={"role": fleet_service.CAPTAIN_ROLE}, defaults=defaults
+    )
+    assert shown_now == ("(default: headroom · work)", "(default: headroom · work)")
+    assert asked == [(home.id, fleet_service.CAPTAIN_ROLE)]
+
+
+def test_default_account_label_names_each_rung() -> None:
+    def label(choice: accounts_service.AccountChoice, bound: bool = False) -> str:
+        return spawn_module.default_account_label(
+            accounts_service.LaunchDefault(choice, bound), "coder"
+        )
+
+    choice = accounts_service.AccountChoice
+    work = _account(2, alias="work", position=2)
+    assert label(choice(work, "preferred")) == "(default: rank 2 · work)"
+    assert label(choice(work, "headroom")) == "(default: headroom · work)"
+    assert label(choice(work, "role binding")) == "(default: bound to coder · work)"
+    assert label(choice(work, "project default")) == "(default: project default · work)"
+    assert label(choice(None, None)) == "(this shell's)"
+    assert label(choice(None, None), bound=True) == "(default: coder's CLAUDE_CONFIG_DIR)"
 
 
 # --- refusals, cancel, and the receipt --------------------------------------------------

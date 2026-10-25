@@ -1821,7 +1821,9 @@ def _check_tls() -> DoctorCheck:
     except tls.CABundleError as exc:
         return _fail("tls", f"the CA bundle could not be loaded: {exc}", tls.BUNDLE_FIX)
     except OSError as exc:  # the OS store or certifi refused to build: rare, never a crash
-        return _fail("tls", f"the TLS context could not be built: {exc}", tls.CERT_FIX)
+        return _fail(
+            "tls", f"the TLS context could not be built: {tls.error_text(exc)}", tls.CERT_FIX
+        )
     proxy = tls.https_proxy(_TLS_PROBE_HOST)
     via = ""
     try:
@@ -1845,7 +1847,8 @@ def _check_tls() -> DoctorCheck:
             )
         return _warn(
             "tls",
-            f"could not reach {_TLS_PROBE_HOST}{via} to check TLS ({type(exc).__name__}: {exc})",
+            f"could not reach {_TLS_PROBE_HOST}{via} to check TLS "
+            f"({type(exc).__name__}: {tls.error_text(exc)})",
             "check the network or proxy; usage reads need https://api.anthropic.com",
         )
     return _ok("tls", f"{_TLS_PROBE_HOST}{via} verified against {source}")

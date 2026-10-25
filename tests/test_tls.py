@@ -728,6 +728,30 @@ def test_the_tls_row_says_why_without_a_tuple(monkeypatch: pytest.MonkeyPatch, r
     assert "('" not in row.detail and "',)" not in row.detail
 
 
+@pytest.mark.parametrize("where", ["build", "reach"])
+def test_the_tls_rows_other_failures_say_why_without_a_tuple(
+    monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """Review of #401, n1: the context that would not build and the handshake that failed
+    for another reason printed a one-argument SSLError's args tuple too, as (k) did."""
+    from aisquare.services import diagnostics
+
+    def broke(*_args: object) -> None:
+        raise ssl.SSLError("the store broke")
+
+    monkeypatch.setattr(tls, "trust_source" if where == "build" else "handshake", broke)
+
+    row = diagnostics._check_tls()
+
+    expected = (
+        "the TLS context could not be built: the store broke"
+        if where == "build"
+        else "(SSLError: the store broke)"
+    )
+    assert row.detail.endswith(expected), row.detail
+    assert "('" not in row.detail, row.detail
+
+
 def test_doctors_tls_row_is_live_only() -> None:
     from aisquare.services import diagnostics
 

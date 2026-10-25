@@ -10,6 +10,7 @@ from typing import Annotated
 import typer
 
 from aisquare.cli.common import (
+    USAGE_ERROR,
     emit_onboard,
     emit_project_action,
     emit_project_detail,
@@ -21,10 +22,11 @@ from aisquare.cli.common import (
 from aisquare.core.console import stdout_console
 from aisquare.core.state import get_state
 from aisquare.core.state_file import StateUnwritableError
-from aisquare.core.store import store_session
+from aisquare.core.store import ContextStore, GroupSettings, store_session
 from aisquare.core.workspace import find_project_root, project_id_for
 from aisquare.models import ProjectGroup, ProjectInfo
 from aisquare.services import install_route
+from aisquare.services import parent as parent_service
 from aisquare.services import project as project_service
 from aisquare.services import project_groups as groups_service
 
@@ -533,6 +535,125 @@ def group_move(
     except KeyError as exc:
         fail(f"no group matches {exc.args[0]!r}", error="not_found", ref=str(exc.args[0]))
     _emit_layout(f"✓ group {group} moved")
+
+
+def _emit_parent(group: str, settings: GroupSettings, line: str) -> None:
+    """One line, or under --json the group's parent settings (P2-W6)."""
+    if get_state().json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "group": group,
+                    "parent_project_id": settings.parent_project_id,
+                    "route": settings.route,
+                    "max_agents": settings.max_agents,
+                }
+            )
+        )
+        return
+    stdout_console().print(line, markup=False)
+
+
+def _group_id(store: ContextStore, group: str) -> str:
+    try:
+        return groups_service.resolve_group(store, group).id
+    except KeyError:
+        fail(f"no group matches '{group}'", error="not_found", ref=group)
+
+
+@group_app.command("parent")
+def group_parent(
+    ctx: typer.Context,
+    group: Annotated[str, typer.Argument(help="Group name or id.")],
+    project: Annotated[
+        str | None,
+        typer.Argument(help="The parent: a project outside the group, its coordination home."),
+    ] = None,
+    clear: Annotated[bool, typer.Option("--clear", help="The group has no parent.")] = False,
+) -> None:
+    """Name a group's parent: its manager hears the members' questions, blocks, results and
+    linked tasks (`project group route` chooses) as `routed` lines on its board, nudged."""
+    if project is not None and clear:
+        fail("give a project or --clear, not both", error="usage", exit_code=2)
+    if project is None and not clear:
+        # The words typer says for a missing required argument, through its own usage error
+        # (as `fleet stop` does for its label): exit 2, and JSON under --json.
+        raise USAGE_ERROR("Missing argument 'project'.", ctx)
+    parent = _project_ref(project) if project is not None else None
+    with store_session() as store:
+        gid = _group_id(store, group)
+        if parent is not None and parent.group_id == gid:
+            fail(
+                f"{project} is a member of {group}: a parent is a project outside it",
+                error="invalid_group",
+                ref=project,
+            )
+        settings = store.set_group_settings(
+            gid, parent_project_id=parent.id if parent is not None else None
+        )
+    line = (
+        f"✓ {group}'s parent is {project_service.display_name(parent)}"
+        if parent is not None
+        else f"✓ {group} has no parent"
+    )
+    _emit_parent(group, settings, line)
+
+
+@group_app.command("route")
+def group_route(
+    group: Annotated[str, typer.Argument(help="Group name or id.")],
+    kinds: Annotated[
+        str | None,
+        typer.Option(
+            "--kinds",
+            help="Comma-separated: question, task_blocked, result, linked (the default), "
+            "task_done, task_review, task_reopened, note.",
+        ),
+    ] = None,
+    pattern: Annotated[
+        str | None,
+        typer.Option(
+            "--pattern", help="A regex: a note whose text matches routes too ('' clears)."
+        ),
+    ] = None,
+    off: Annotated[bool, typer.Option("--off", help="Route nothing up.")] = False,
+) -> None:
+    """Choose what a group's members route up to its parent's manager."""
+    with store_session() as store:
+        gid = _group_id(store, group)
+        current = store.group_settings(gid)
+        try:
+            route = parent_service.route_settings(
+                current.route,
+                kinds=[k.strip() for k in kinds.split(",") if k.strip()] if kinds else None,
+                pattern=pattern,
+                off=off,
+            )
+        except ValueError as exc:
+            fail(str(exc), error="invalid_route", ref=group)
+        settings = store.set_group_settings(gid, route=route)
+    said = "off" if off else ", ".join(route.get("kinds") or parent_service.DEFAULT_KINDS)
+    if route.get("pattern") and not off:
+        said += f"; notes matching {route['pattern']!r}"
+    _emit_parent(group, settings, f"✓ {group} routes up: {said}")
+
+
+@group_app.command("cap")
+def group_cap(
+    group: Annotated[str, typer.Argument(help="Group name or id.")],
+    max_agents: Annotated[
+        int, typer.Argument(min=0, help="Live agents across its members and parent; 0: no cap.")
+    ],
+) -> None:
+    """Cap the live agents across a group's members and its parent (checked at spawn)."""
+    with store_session() as store:
+        gid = _group_id(store, group)
+        settings = store.set_group_settings(gid, max_agents=max_agents)
+    _emit_parent(
+        group,
+        settings,
+        f"✓ {group}: at most {max_agents} live agents" if max_agents else f"✓ {group}: no cap",
+    )
 
 
 @app.command("pin")

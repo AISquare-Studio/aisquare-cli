@@ -714,6 +714,18 @@ class FleetSettings(BaseModel):
     ``deny_tools`` are the Claude Code tools every role launches without
     (:data:`FLEET_DENY_TOOLS` by default), wherever it starts.
 
+    Admission (#283): ``max_agents_total`` caps the live agents across every project,
+    the captain excluded (``0``: no budget); ``min_free_mb`` refuses a spawn below that
+    much available memory, or at critical memory pressure (``0``: off);
+    ``test_gate_mb`` is ``fleet gate``'s floor (``0``: ``min_free_mb``) and
+    ``test_gate_wait_minutes`` how long the gate waits for it.
+
+    Auto-stop (P2-W1b, #283): with ``auto_stop_finished`` a worker of a role in
+    ``auto_stop_roles`` that has finished — its task closed (or a ``result`` posted),
+    nothing claimed, nothing addressed to it unread, nothing queued for it, an empty input
+    box — and has sat idle ``auto_stop_idle_minutes`` is stopped, ``actor=auto-stop``.
+    Coders are not in the default list: a coder in review may be reopened.
+
     ``first_prompt`` is how an agent's first message reaches it (P0-W1a, #122):
     ``argv``, Claude Code's own command line (``claude -- "<prompt>"``), for a Claude
     Code agent, and typed into its input box for any other binary; ``type`` types it
@@ -760,6 +772,44 @@ class FleetSettings(BaseModel):
     quiet_compact_state_max_age: float = Field(default=20.0, ge=0)
     quiet_compact_resume: bool = False
     roles: dict[str, FleetRoleSettings] = Field(default_factory=_default_fleet_roles)
+    max_agents_total: int = 0
+    min_free_mb: int = 2048
+    test_gate_mb: int = 0
+    test_gate_wait_minutes: int = 15
+    auto_stop_finished: bool = True
+    auto_stop_idle_minutes: float = Field(default=5.0, ge=0)
+    auto_stop_roles: list[str] = Field(
+        default_factory=lambda: ["tester", "reviewer", "validator", "ui-tester"]
+    )
+    pane_clipboard: Literal["off", "on"] = "off"
+    """Whether a program in an agent's pane may set your clipboard (OSC 52, tmux's
+    ``set-clipboard``). Off by default: on, any program a pane runs can write it. Applies
+    to a server started after the change."""
+
+
+class WatchSource(BaseModel):
+    """One operator command ``aisquare watch`` runs (``[watch.sources.<name>]``): it prints
+    JSON lines ``{"id", "project", "kind", "summary"}``, every ``every_seconds``."""
+
+    command: list[str] = Field(default_factory=list)
+    every_seconds: int = Field(default=300, ge=1)
+
+
+class WatchSettings(BaseModel):
+    """``aisquare watch``, the fleet's one non-AI watcher (P2-W2, #284): what a manager
+    would otherwise watch with its own turns.
+
+    ``interval_seconds`` is one tick. ``github`` (off by default: it leaves the machine)
+    asks GitHub for each project's open pull requests every ``github_every_seconds``,
+    with ETags, so an unchanged answer costs no rate limit. ``auto_stop`` runs P2-W1b's
+    ``reap --finished`` each tick. ``sources`` are the operator's own commands.
+    """
+
+    interval_seconds: int = Field(default=60, ge=1)
+    github: bool = False
+    github_every_seconds: int = Field(default=120, ge=1)
+    auto_stop: bool = True
+    sources: dict[str, WatchSource] = Field(default_factory=dict)
 
 
 class SnapshotSettings(BaseModel):
@@ -792,6 +842,19 @@ class SnapshotSettings(BaseModel):
 
     max_tokens: int = 150_000
     ignore: list[str] = Field(default_factory=list)
+
+
+class CodeSettings(BaseModel):
+    """``[code]`` — the per-project symbol index behind ``aisquare code`` (#285).
+
+    ``enabled`` builds the index when a project is onboarded (``project onboard``,
+    ``--refresh``) and lets a session start refresh it in the background; ``false``
+    leaves ``aisquare code index`` as the only way to build one. ``max_file_kb``: a
+    file larger than this is not indexed (a generated bundle, a vendored blob).
+    """
+
+    enabled: bool = True
+    max_file_kb: int = 1024
 
 
 class PersonaImportSettings(BaseModel):
@@ -871,6 +934,13 @@ class AccountsSettings(BaseModel):
     ``share_settings``, off by default, keeps every managed account's ``settings.json``
     a link to the plain claude's. Both: ``core.claude_sharing``.
 
+    ``share`` (P2-W7, #198), empty by default, names what every account has in common:
+    ``memory`` (one auto-memory directory per project under
+    ``~/.aisquare/claude-shared/memory``, passed to each launch as ``--settings``),
+    ``skills``, ``agents``, ``commands`` and ``claude_md`` (each managed slot's entry a
+    link to the plain claude's, its own kept beside it), and ``plugins`` (experimental).
+    ``aisquare accounts share`` turns parts on and off; a launch links a slot made since.
+
     Read from the config file alone, like ``[fleet]``: there is no
     ``AISQUARE_ACCOUNTS_*`` variable, for the same reason that section gives.
     """
@@ -882,6 +952,9 @@ class AccountsSettings(BaseModel):
     prefer: Literal["priority", "reset-soonest"] = "priority"
     share_trust: bool = True
     share_settings: bool = False
+    share: list[Literal["memory", "skills", "agents", "commands", "claude_md", "plugins"]] = Field(
+        default_factory=list
+    )
 
 
 class UiSettings(BaseModel):
@@ -917,6 +990,8 @@ class AppConfig(BaseModel):
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
     experimental: ExperimentalSettings = Field(default_factory=ExperimentalSettings)
     persona: PersonaSettings = Field(default_factory=PersonaSettings)
+    watch: WatchSettings = Field(default_factory=WatchSettings)
+    code: CodeSettings = Field(default_factory=CodeSettings)
     ui: UiSettings = Field(default_factory=UiSettings)
 
 

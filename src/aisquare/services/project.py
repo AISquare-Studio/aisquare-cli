@@ -1043,13 +1043,39 @@ def onboard(path: Path | None, *, refresh: bool, pack: bool = True) -> OnboardRe
                 )
     if not pack and not snapshot_core.is_the_homes(project.id):
         return OnboardReport(
-            seeded=seeded, snapshot=snapshot_core.load(project.id), warning=warning
+            seeded=seeded,
+            snapshot=snapshot_core.load(project.id),
+            warning=warning,
+            code_index=_ensure_code_index(project, refresh=refresh),
         )
     # The home takes this path asked or not: _ensure_snapshot packs nothing there, deletes
     # a pack left from before, and says why, where `init`'s opt-in line would point at a
     # `project onboard` that never packs it (D5, #42).
     snapshot, note = _ensure_snapshot(project, refresh=refresh)
-    return OnboardReport(seeded=seeded, snapshot=snapshot, snapshot_note=note, warning=warning)
+    return OnboardReport(
+        seeded=seeded,
+        snapshot=snapshot,
+        snapshot_note=note,
+        warning=warning,
+        code_index=_ensure_code_index(project, refresh=refresh),
+    )
+
+
+def _ensure_code_index(project: ProjectInfo, *, refresh: bool) -> str | None:
+    """Start building or refreshing the symbol index (#285) detached, as one line for the
+    report; ``None`` when ``[code] enabled`` is off. Never inline: a first index of a large
+    checkout takes minutes, and the onboard (and ``init``) returns at once. Incremental
+    unless ``refresh``; never fails the onboard."""
+    from aisquare.services import code as code_service  # lazy: onboard imports this module
+    from aisquare.services import hooks as hooks_service  # lazy: hooks imports this module
+
+    if not code_service.settings().enabled:
+        return None
+    try:
+        hooks_service.start_code_index(project, full=refresh)
+    except Exception as exc:  # an index is optional; the onboard is not
+        return f"not started ({exc}) — build it with `aisquare code index`"
+    return "building in the background — `aisquare code index --status` says when it is ready"
 
 
 def snapshot_settings() -> SnapshotSettings:

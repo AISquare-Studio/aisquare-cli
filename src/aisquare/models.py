@@ -912,6 +912,9 @@ class OnboardReport(BaseModel):
     warning: str | None = None
     """``project_service.HOME_WARNING`` when this onboarding made the aisquare home a
     project (D5), said once; else ``None``."""
+    code_index: str | None = None
+    """The symbol index's line (#285): what this onboard (or ``init``) started, or why
+    not. ``None`` with ``[code] enabled = false``."""
 
 
 class ProjectForgetReport(BaseModel):

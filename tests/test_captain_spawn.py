@@ -30,6 +30,7 @@ from aisquare.services import team as team_service
 from aisquare.services.captain import brain
 from aisquare.services.captain import state as captain_state
 from tests import test_fleet_service as fleet_suite
+from tests.fleet_fakes import list_agents_as
 from tests.test_fleet_service import FakeTmux
 
 # The fleet suite's fixtures, bound here so pytest finds them for this module's tests.
@@ -392,9 +393,8 @@ def test_a_dead_captain_the_listing_could_not_end_is_still_not_found(
         id="agt_dead", project_id=home.id, label="captain", role="captain",
         pane_id="%9", cwd=brain.brain_dir(), created_at=datetime.now(tz=UTC),
     )  # fmt: skip
-    monkeypatch.setattr(
-        fleet_service,
-        "list_agents",
+    list_agents_as(
+        monkeypatch,
         lambda project, **kw: [FleetAgentStatus(agent=row, state="exited")],
     )
     assert brain.find() is None

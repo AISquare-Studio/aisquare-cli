@@ -212,7 +212,8 @@ def test_a_too_large_verdict_reads_off_with_nothing_to_click_where_nothing_can_p
     assert _onboard_buttons(checks) == []
     assert row.status is CheckStatus.ok
     assert row.detail == snapshot_core.off_detail()
-    assert onboard.stdout.strip() == f"snapshot: {snapshot_core.off_detail()}"
+    # The first line; the symbol index (#285) says its own on the next.
+    assert onboard.stdout.strip().splitlines()[0] == f"snapshot: {snapshot_core.off_detail()}"
 
 
 @pytest.mark.usefixtures("with_node")
@@ -330,7 +331,7 @@ def test_a_refresh_without_node_keeps_the_last_pack_and_says_so(
     rows = _rows(diagnostics.doctor())
 
     assert refreshed.exit_code == 0, refreshed.output
-    line = refreshed.stdout.strip()
+    line = refreshed.stdout.strip().splitlines()[0]  # the code index (#285) says its own next
     assert line.startswith("snapshot: not refreshed — "), line
     assert "The last pack stays, made " in line
     assert snapshot_core.OFF_DETAIL not in refreshed.stdout

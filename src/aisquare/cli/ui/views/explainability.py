@@ -50,6 +50,8 @@ STATUS_WORKER = "explainability-status"
 REGISTER_WORKER = "explainability-register"
 SHIP_WORKER = "explainability-ship"
 SAVE_WORKER = "explainability-save"
+LEFTOVERS_WORKER = "explainability-leftovers"
+RESET_WORKER = "explainability-reset"
 SHIP_LIMIT = 500
 """Most records one press of Ship drains — the CLI's default."""
 
@@ -447,6 +449,41 @@ def ship_spool() -> Notice:
     return Notice(message, "warning" if report.blocked else "information")
 
 
+def routing_leftovers() -> Notice | None:
+    """What Disable leaves routing to a proxy of ours (#51), as a warning; ``None`` when nothing.
+
+    The scan ``aisquare doctor``'s ``anthropic routing`` row reads: settings files, role
+    bindings, the fleet tmux server. This process's own export has its own notice
+    (:func:`stale_shell_export`). Off the UI thread: it reads files and asks tmux.
+    """
+    files = [s for s in ops.routing_sources() if s.stale and s.kind != "process"]
+    if not files:
+        return None
+    named = "; ".join(f"{s.where}" for s in files)
+    return Notice(
+        f"still routing to a proxy of ours: {named} — agents launched with it fail once the "
+        f"proxy stops. Reset removes them ({ops.RESET_COMMAND})",
+        "warning",
+        timeout=12,
+    )
+
+
+def reset_routing() -> Notice:
+    """What *Reset* does: ``aisquare explainability reset --yes``, as one notice."""
+    report = ops.reset_routing()
+    if report.failed:
+        failed = "; ".join(f"{s.where}: {why}" for s, why in report.failed)
+        return Notice(f"reset incomplete — {failed}", "error", timeout=12)
+    if report.nothing_to_reset:
+        return Notice("✓ nothing to reset")
+    done = f"✓ removed the proxy from {len(report.removed)} place(s)"
+    if report.backups:
+        done += f"; backups beside each settings file ({report.backups[0].name}…)"
+    if report.shell_unset:
+        done += f"; the shell that started the UI still needs: {report.shell_unset}"
+    return Notice(done, "warning" if report.shell_unset else "information", timeout=12)
+
+
 def stale_shell_export(config: AppConfig) -> str | None:
     """The ``ANTHROPIC_BASE_URL`` this process still carries for the proxy just switched off.
 
@@ -695,6 +732,8 @@ class ExplainabilityView(VerticalScroll):
         with Horizontal(id="explainability-actions"):
             yield Button("Enable tracing", id="explainability-enable", variant="primary")
             yield Button("Disable", id="explainability-disable")
+            # Shown once Disable finds a leftover of ours (#51); hidden again after it ran.
+            yield Button("Reset routing", id="explainability-reset", variant="warning")
             yield Button("Register roster", id="explainability-register")
             yield Button("Ship spool", id="explainability-ship")
             yield Button("Refresh", id="explainability-refresh")
@@ -749,6 +788,7 @@ class ExplainabilityView(VerticalScroll):
             yield Button("Save setup", id="explainability-save", variant="success")
 
     def on_mount(self) -> None:
+        self.query_one("#explainability-reset", Button).display = False
         self.refresh_status()
 
     # --- reading ---------------------------------------------------------------------
@@ -1003,7 +1043,39 @@ class ExplainabilityView(VerticalScroll):
                 timeout=10,
                 markup=False,
             )
+        self.run_worker(
+            routing_leftovers, name=LEFTOVERS_WORKER, group=LEFTOVERS_WORKER,
+            exclusive=True, thread=True, exit_on_error=False,
+        )  # fmt: skip
         self.refresh_status()
+
+    @on(Button.Pressed, "#explainability-reset")
+    def _reset_routing(self) -> None:
+        """What ``aisquare explainability reset --yes`` does; offered only after Disable found
+        something, so the press is the consent."""
+        self.query_one("#explainability-reset", Button).disabled = True
+        self.run_worker(
+            reset_routing, name=RESET_WORKER, group=RESET_WORKER,
+            exclusive=True, thread=True, exit_on_error=False,
+        )  # fmt: skip
+
+    def _routing_answered(self, event: Worker.StateChanged) -> None:
+        reset = self.query_one("#explainability-reset", Button)
+        if event.state is WorkerState.ERROR:
+            what = event.worker.name.removeprefix("explainability-")
+            self.notify(f"{what} failed: {event.worker.error}",
+                        severity="error", timeout=10, markup=False)  # fmt: skip
+        elif event.state is WorkerState.SUCCESS:
+            notice = event.worker.result
+            if isinstance(notice, Notice):
+                self.notify(notice.message, severity=notice.severity, timeout=notice.timeout,
+                            markup=False)  # fmt: skip
+            # Offered while the scan found something; once Reset has run, gone again.
+            reset.display = event.worker.name == LEFTOVERS_WORKER and notice is not None
+            if event.worker.name == RESET_WORKER:
+                self.refresh_status()
+        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            reset.disabled = False
 
     # --- the network work (thread workers; results are notices) -------------------------
 
@@ -1041,6 +1113,9 @@ class ExplainabilityView(VerticalScroll):
                 self.query_one("#explainability-status", Static).update(
                     Text(f"could not read the tracing state: {event.worker.error}", style="red")
                 )
+            return
+        if name in (LEFTOVERS_WORKER, RESET_WORKER):
+            self._routing_answered(event)
             return
         if name not in (REGISTER_WORKER, SHIP_WORKER):
             return

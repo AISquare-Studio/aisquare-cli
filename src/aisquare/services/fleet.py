@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import json
 import os
 import re
 import shutil
@@ -43,7 +44,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 from aisquare.core import agents as agent_core
 from aisquare.core import claude_accounts as claude_accounts_core
@@ -58,6 +59,7 @@ from aisquare.core import (
     personas,
     selfcli,
 )
+from aisquare.core import memory as memory_core
 from aisquare.core import tmux as tmux_core
 from aisquare.core.config import (
     CLAUDE_PERMISSION_MODES,
@@ -103,7 +105,14 @@ from aisquare.models import (
     TeamSession,
     TeamTask,
 )
-from aisquare.services import auto_mode, delivery, explainability_ops, install_route, pane_idle
+from aisquare.services import (
+    auto_mode,
+    autostop,
+    delivery,
+    explainability_ops,
+    install_route,
+    pane_idle,
+)
 from aisquare.services import claude_accounts as claude_accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import project as project_service
@@ -224,6 +233,19 @@ class NoSuchProject(FleetError):
 
 class NoSuchAgent(FleetError):
     """No live agent with that label in this project."""
+
+
+class CapacityRefused(FleetError):
+    """A spawn the machine has no room for (#283): ``code`` says which limit.
+
+    ``capacity_project`` (``max_agents_per_project``), ``capacity_fleet``
+    (``max_agents_total``, every project's live agents) or ``capacity_memory``
+    (``min_free_mb``, or the kernel's memory pressure at critical).
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class EndedMeanwhile(NoSuchAgent):
@@ -818,6 +840,26 @@ def resolve_project(ref: str | None = None, *, cwd: Path | None = None) -> Proje
         if ref is None:
             return active_project(store, cwd)
         return only_project(ref, store.find_projects(ref))
+
+
+def ui_scope(projects: Sequence[str] = (), groups: Sequence[str] = ()) -> frozenset[str] | None:
+    """The project ids ``aisquare ui --project … --group …`` shows, or ``None`` for every one.
+
+    Each ``--project`` is one project (:func:`resolve_project`'s refs), each ``--group`` its
+    members as they stand now, pinned ones included. For an operator with many projects
+    who works in a few (#83): the sidebar reads only those on every tick.
+    """
+    if not projects and not groups:
+        return None
+    scope = {resolve_project(ref).id for ref in projects}
+    with store_session() as store:
+        listed = store.list_projects(all=True)
+        for name in groups:
+            group = store.find_project_group(name)
+            if group is None:
+                raise NoSuchProject(f"no project group named {name!r}")
+            scope.update(p.id for p in listed if p.group_id == group.id)
+    return frozenset(scope)
 
 
 def only_project(ref: str, matches: list[ProjectInfo]) -> ProjectInfo:
@@ -2147,11 +2189,41 @@ def _on_another_server(
     return booted_at is None or agent.created_at >= booted_at
 
 
+class _Tick:
+    """One read's server-wide answer per server (:meth:`TmuxServer.every_window`), asked once.
+
+    For a reader of many projects (:func:`list_agents_many`, ``asq``'s tick, #83): each
+    project's :func:`_observe` asked its server for its session's windows and for every
+    pane's output time, two tmux processes per project per tick, the second the same
+    answer each time. A server that could not be asked raises for every project on it,
+    as it did when each asked on its own.
+    """
+
+    def __init__(self) -> None:
+        self._answers: dict[object, tuple[dict[str, list[WindowInfo]], dict[str, datetime]]] = {}
+        self._failed: dict[object, TmuxError] = {}
+
+    def every_window(
+        self, srv: TmuxServer
+    ) -> tuple[dict[str, list[WindowInfo]], dict[str, datetime]]:
+        key = (srv.socket, srv.path)
+        if key in self._failed:
+            raise self._failed[key]
+        if key not in self._answers:
+            try:
+                self._answers[key] = srv.every_window()
+            except TmuxError as exc:
+                self._failed[key] = exc
+                raise
+        return self._answers[key]
+
+
 def _observe(
     srv: TmuxServer,
     tmux_session: str | None,
     agents: Sequence[FleetAgent],
     reads: tmux_core.SocketReads | None = None,
+    tick: _Tick | None = None,
 ) -> _Observed | None:
     """Row id → the facts of that row's pane, or ``None`` when tmux cannot be asked at all.
 
@@ -2187,13 +2259,18 @@ def _observe(
     answers ``None`` for it, as for a server that could not be asked.
     """
     try:
-        windows = (
-            {window.pane_id: window for window in srv.list_windows(tmux_session)}
-            if tmux_session
-            else {}
-        )
         live = [agent for agent in agents if agent.ended_at is None]
-        output_at = _activity_times(srv) if live else {}
+        if tick is not None:  # the server's one answer for every project of this read
+            every, times = tick.every_window(srv)
+            windows = {w.pane_id: w for w in every.get(tmux_session, [])} if tmux_session else {}
+            output_at = times if live else {}
+        else:
+            windows = (
+                {window.pane_id: window for window in srv.list_windows(tmux_session)}
+                if tmux_session
+                else {}
+            )
+            output_at = _activity_times(srv) if live else {}
         said = [w.server_started for w in windows.values() if w.server_started is not None]
         seen: dict[str, _PaneView] = {}
         for agent in agents:
@@ -2245,6 +2322,7 @@ def _observe_sockets(
     config: FleetSettings | None = None,
     addresses: Mapping[str, _Address] | None = None,
     reads: tmux_core.SocketReads | None = None,
+    tick: _Tick | None = None,
 ) -> dict[_Address, _Observed | None]:
     """Server → what THAT server says about the live agents recorded on it.
 
@@ -2265,7 +2343,7 @@ def _observe_sockets(
     for agent in agents:
         groups.setdefault(_where(agent, config, addresses), []).append(agent)
     return {
-        address: _observe(_server_at(address, config), tmux_session, group, reads)
+        address: _observe(_server_at(address, config), tmux_session, group, reads, tick)
         for address, group in groups.items()
     }
 
@@ -2792,6 +2870,11 @@ def _unaskable_root(project: ProjectInfo, exc: OSError) -> FleetError:
     )
 
 
+def board_of_row(agent: FleetAgent) -> str:
+    """The board ``agent``'s row reads, which its manager is woken on (:func:`_board_of_row`)."""
+    return _board_of_row(agent)
+
+
 def _board_of_row(agent: FleetAgent) -> str:
     """The board ``agent``'s sessions read, as its spawn recorded it (``FleetAgent.board``).
 
@@ -3044,6 +3127,7 @@ def spawn(
     start_point: str | None = None,
     fork: bool = False,
     hub: str | None = None,
+    admit: bool = True,
     kickoff: bool = True,
     ack_wait: float = 0.0,
     board_context: str | None = None,
@@ -3276,11 +3360,20 @@ def spawn(
                 "`aisquare captain` attaches to it"
             )
     if len(live) >= config.max_agents_per_project:
-        raise FleetError(
+        raise CapacityRefused(
+            "capacity_project",
             f"{_name(project)} already runs {len(live)} agents "
             f"(max_agents_per_project = {config.max_agents_per_project}) — stop one, "
-            "or raise the limit in [fleet]"
+            "or raise the limit in [fleet]",
         )
+    _refuse_by_group(project, spawned_by, admit=admit)
+    # The machine's own limits (#283), after the project's: the fleet-wide budget and
+    # the memory floor. Before the store opens below and before any window.
+    # ``admit`` is False for a live 1:1 replacement (a restart of a running agent, a
+    # switch: `_respawn(takes_over=True)`): its own seat and memory are freed as it
+    # starts, and refused after the stop, the agent was lost (review of #323).
+    if admit and not experimental.captain_role(role):
+        notes.extend(_admit_or_make_room(config))
     # Before the store opens: with no hub, `_board_for` runs git (review of #259, round 29,
     # 5/8), and the refusals above need neither.
     board, hub = (
@@ -3675,6 +3768,7 @@ def spawn(
             wanted=label,
             notes=notes,
             cap=config.max_agents_per_project,
+            total=0 if experimental.captain_role(role) else config.max_agents_total,
             onboard=onboard,
             codename=codename,
             replaces=replaces,
@@ -4384,6 +4478,7 @@ def _record(
     cap: int,
     onboard: bool,
     codename: str,
+    total: int = 0,
     replaces: str | None = None,
 ) -> FleetAgent:
     """Write the row; on a live-label collision re-pick the label and retry.
@@ -4415,6 +4510,7 @@ def _record(
             wanted=wanted,
             notes=notes,
             cap=cap,
+            total=total,
             onboard=onboard,
             codename=codename,
             replaces=replaces,
@@ -4445,6 +4541,7 @@ def _write_row(
     cap: int,
     onboard: bool,
     codename: str,
+    total: int = 0,
     replaces: str | None = None,
 ) -> FleetAgent:
     """The store half of :func:`_record`: onboard, insert, relabelling past a live collision.
@@ -4469,6 +4566,8 @@ def _write_row(
                 )
             stored = written
             _verify_cap(store, stored, cap)
+            _verify_budget(store, stored, total)
+            _verify_group_cap(store, stored)
             return stored
     raise FleetError(f"could not record {agent.label!r}: every label tried was taken")
 
@@ -4551,6 +4650,352 @@ def _verify_cap(store: ContextStore, stored: FleetAgent, cap: int) -> None:
         "spawn took the last slot while this one was starting; stop one, or raise the "
         "limit in [fleet]"
     )
+
+
+def is_paused(project: ProjectInfo) -> bool:
+    """Whether ``project``'s ``fleet-paused`` signal reads on, on any board it lives on
+    (:func:`_pause_where_on`). A store that cannot be read says not paused."""
+    if not orchestrator.team_enabled():
+        return False
+    try:
+        with store_session() as store:
+            states = _team().board_signals_in(store)
+    except Exception:
+        return False
+    return bool(_pause_where_on(project, states))
+
+
+def _under_a_parent(project: ProjectInfo) -> bool:
+    """Whether ``project`` is in a parent relation (a member under a parent, or a parent):
+    the subtree a group pause covers. A project in none behaves as before."""
+    from aisquare.services import parent as parent_service
+
+    with store_session() as store:
+        return parent_service.parent_of(store, project.id) is not None or bool(
+            parent_service.groups_parented_by(store, project.id)
+        )
+
+
+def _refuse_by_group(project: ProjectInfo, spawned_by: str, *, admit: bool) -> None:
+    """P2-W6 (#199): an agent's spawn (``--as``) on a paused board under a parent is
+    refused, so a parent manager cannot restart what ``fleet pause --group`` paused; and a
+    spawn past its group's ``max_agents`` is refused (``capacity_group``), as admission
+    refuses past the budget. A person's spawn on a paused board goes ahead, as before; a 1:1
+    replacement (``admit`` False) takes the seat it frees."""
+    from aisquare.services import parent as parent_service
+
+    if (
+        spawned_by not in ("user", "usage-limit")
+        and _under_a_parent(project)
+        and is_paused(project)
+    ):
+        raise FleetError(
+            f"{_name(project)} is paused — an agent may not spawn there; "
+            f"`{project_service.fleet_command('resume', project)}` first"
+        )
+    if not admit:
+        return
+    with store_session() as store:
+        why = parent_service.cap_refusal(store, project.id)
+    if why is not None:
+        raise CapacityRefused("capacity_group", why)
+
+
+def _verify_group_cap(store: ContextStore, stored: FleetAgent) -> None:
+    """Back the row out if it is past its group's ``max_agents`` (P2-W6, #199): settled as
+    :func:`_verify_cap` settles the project's, over the group's members and parent."""
+    from aisquare.services import parent as parent_service  # lazy: it reads the store only
+
+    why = parent_service.over_cap(store, stored)
+    if why is not None:
+        store.end_fleet_agent(stored.id, ended_by="stopped")  # backed out on purpose
+        raise CapacityRefused("capacity_group", why)
+
+
+def _verify_budget(store: ContextStore, stored: FleetAgent, total: int) -> None:
+    """Back the row out if it is past ``max_agents_total`` (#283); ``0`` is no budget.
+
+    :func:`_verify_cap`'s settlement, over every project's live rows: the same total
+    order (``created_at, id``), so N parallel spawns at the budget's last seat settle to
+    exactly the budget, whichever projects they are in. The captain is not counted.
+    """
+    if total <= 0:
+        return
+    live = sorted(
+        (agent for agent in store.live_fleet_agents() if agent.role != CAPTAIN_ROLE),
+        key=lambda agent: (agent.created_at, agent.id),
+    )
+    if len(live) <= total or all(agent.id != stored.id for agent in live[total:]):
+        return
+    store.end_fleet_agent(stored.id, ended_by="stopped")  # backed out on purpose
+    raise CapacityRefused(
+        "capacity_fleet",
+        f"that would be {len(live)} live agents across the fleet (max_agents_total = "
+        f"{total}) — another spawn took the last seat while this one was starting; stop "
+        "one, or raise the budget in [fleet]",
+    )
+
+
+# --- admission: the machine's own limits (#283) ------------------------------------
+
+_ADMISSION_LOG_MAX = 1024 * 1024
+"""``admission.jsonl`` is rotated to ``admission.jsonl.1`` past this size."""
+MEMORY_MARGIN_MB = 512
+"""What a memory refusal adds to ``min_free_mb`` for :data:`MEMORY_MARGIN_MINUTES`."""
+MEMORY_MARGIN_MINUTES = 5
+_MEMORY_REFUSED_META = "fleet:memory_refused_at"
+
+
+def _admit(config: FleetSettings) -> list[str]:
+    """The fleet-wide budget and the memory floor for one spawn: its notes, or a refusal.
+
+    Raises :class:`CapacityRefused` (``capacity_fleet`` naming each project's count;
+    ``capacity_memory`` naming the numbers and ``aisquare fleet capacity``). After a
+    memory refusal the floor is ``min_free_mb + 512`` for five minutes, so admission
+    does not flap on a box hovering at the line. Unknown headroom admits, with a note.
+    Each refusal, and each admission that fills the budget, is one line in
+    ``~/.aisquare/fleet/admission.jsonl``.
+    """
+    notes: list[str] = []
+    counts = _live_per_project() if config.max_agents_total > 0 else {}
+    live_total = sum(counts.values())
+    head = memory_core.headroom()
+    record: dict[str, object] = {
+        "live_total": live_total,
+        "max_agents_total": config.max_agents_total,
+        "available_mb": head.available_mb,
+        "pressure": head.pressure,
+        "min_free_mb": config.min_free_mb,
+    }
+    if config.max_agents_total > 0 and live_total >= config.max_agents_total:
+        each = ", ".join(f"{name} {count}" for name, count in sorted(counts.items()))
+        _log_admission("capacity_fleet", record)
+        raise CapacityRefused(
+            "capacity_fleet",
+            f"{live_total} live agents across the fleet (max_agents_total = "
+            f"{config.max_agents_total}): {each} — stop one (`aisquare fleet capacity` lists "
+            "them), or raise the budget in [fleet]",
+        )
+    floor = _memory_floor(config.min_free_mb)
+    if config.min_free_mb > 0 and head.pressure == "critical":
+        _memory_refused(record, f"memory pressure is critical ({_said(head)})")
+    if config.min_free_mb > 0 and head.available_mb is not None and head.available_mb < floor:
+        why = f"{head.available_mb} MB available, {floor} MB needed"
+        if floor != config.min_free_mb:
+            why += (
+                f" (min_free_mb = {config.min_free_mb}, plus {MEMORY_MARGIN_MB} for "
+                f"{MEMORY_MARGIN_MINUTES} min after a refusal)"
+            )
+        else:
+            why += " (min_free_mb)"
+        _memory_refused(record, why)
+    if head.pressure == "warn":
+        notes.append(f"memory pressure is warn ({_said(head)}) — admitted; heavy runs may swap")
+    if not head.known and config.min_free_mb > 0:
+        notes.append("could not read this machine's memory — admitted without the floor")
+    if config.max_agents_total > 0 and live_total + 1 >= config.max_agents_total:
+        _log_admission("admitted-at-budget", record)
+    return notes
+
+
+def _admit_or_make_room(config: FleetSettings) -> list[str]:
+    """:func:`_admit`; refused, and with ``[fleet] auto_stop_finished`` on, stop the workers
+    that have finished on every project and ask once more (P2-W1b, #283). A seat a finished
+    tester still held was a refusal the manager then had to stop it for. Whatever was stopped
+    is said in the notes; refused again, the second refusal is the answer."""
+    try:
+        return _admit(config)
+    except CapacityRefused:
+        if not config.auto_stop_finished:
+            raise
+        stopped = [
+            item.verdict
+            for item in autostop.reap_finished(autostop.every_project())
+            if item.stopped
+        ]
+        if not stopped:
+            raise
+    made = ", ".join(f"{v.agent.label} ({v.reason})" for v in stopped)
+    return [f"stopped finished workers to make room: {made}", *_admit(config)]
+
+
+def _said(head: memory_core.Headroom) -> str:
+    available = f"{head.available_mb} MB available" if head.available_mb is not None else ""
+    psi = f"PSI some avg10 {head.psi_some_avg10:g}" if head.psi_some_avg10 is not None else ""
+    return ", ".join(part for part in (available, psi) if part) or head.source
+
+
+def _memory_floor(min_free_mb: int) -> int:
+    """``min_free_mb``, or ``min_free_mb + 512`` within five minutes of a memory refusal."""
+    if min_free_mb <= 0:
+        return 0
+    try:
+        with store_session() as store:
+            said = store.get_meta(_MEMORY_REFUSED_META)
+        refused = datetime.fromisoformat(said) if said else None
+    except Exception:  # a meta that cannot be read is no recent refusal
+        refused = None
+    if refused is not None and _now() - refused < timedelta(minutes=MEMORY_MARGIN_MINUTES):
+        return min_free_mb + MEMORY_MARGIN_MB
+    return min_free_mb
+
+
+def _live_per_project() -> dict[str, int]:
+    """Live agents per project, the captain excluded: what the fleet-wide budget counts.
+
+    Counted by project id and named as lists name a project, with its root beside the
+    name where two share it: two checkouts of one repo, neither nicknamed, are two
+    projects, and one entry for both read as one project over its cap (review of #323).
+    """
+    counts: dict[str, int] = {}
+    rows: dict[str, ProjectInfo | None] = {}
+    with store_session() as store:
+        for agent in store.live_fleet_agents():
+            if agent.role == CAPTAIN_ROLE:
+                continue
+            if agent.project_id not in rows:
+                rows[agent.project_id] = store.get_project(agent.project_id, include_forgotten=True)
+            counts[agent.project_id] = counts.get(agent.project_id, 0) + 1
+    names = {pid: _name(row) if row is not None else pid[:12] for pid, row in rows.items()}
+    shared = {name for name in names.values() if list(names.values()).count(name) > 1}
+    labelled: dict[str, int] = {}
+    for pid, count in counts.items():
+        row = rows[pid]
+        label = names[pid]
+        if label in shared:
+            label = f"{label} ({row.root if row is not None else pid[:12]})"
+        labelled[label] = count
+    return dict(sorted(labelled.items()))
+
+
+def _memory_refused(record: Mapping[str, object], why: str) -> NoReturn:
+    with contextlib.suppress(Exception), store_session() as store:
+        store.set_meta(_MEMORY_REFUSED_META, _now().isoformat())
+    _log_admission("capacity_memory", record)
+    raise CapacityRefused(
+        "capacity_memory",
+        f"not enough memory to start another agent: {why} — see `aisquare fleet capacity`, "
+        "or lower min_free_mb in [fleet] (0 turns the floor off)",
+    )
+
+
+def _log_admission(outcome: str, record: Mapping[str, object]) -> None:
+    """One JSON line per refusal and per admission at the budget; never fails a spawn."""
+    with contextlib.suppress(OSError):
+        log = paths.aisquare_home() / "fleet" / "admission.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        if log.is_file() and log.stat().st_size > _ADMISSION_LOG_MAX:
+            log.replace(log.with_name(log.name + ".1"))
+        line = {"at": _now().isoformat(timespec="seconds"), "outcome": outcome, **record}
+        with log.open("a", encoding="utf-8") as out:
+            out.write(json.dumps(line) + "\n")
+
+
+@dataclass(frozen=True)
+class CapacityReport:
+    """``aisquare fleet capacity``: the machine's headroom against every admission limit."""
+
+    headroom: memory_core.Headroom
+    min_free_mb: int
+    """The floor a spawn needs now: ``min_free_mb``, or ``+512`` just after a refusal."""
+    max_agents_total: int
+    max_agents_per_project: int
+    live: dict[str, int]
+    """Live agents per project (by the name lists use), the captain excluded."""
+    admits: bool
+    reason: str
+
+    @property
+    def live_total(self) -> int:
+        return sum(self.live.values())
+
+    def as_json(self) -> dict[str, Any]:
+        head = self.headroom
+        return {
+            "available_mb": head.available_mb,
+            "total_mb": head.total_mb,
+            "pressure": head.pressure,
+            "psi_some_avg10": head.psi_some_avg10,
+            "source": head.source,
+            "min_free_mb": self.min_free_mb,
+            "max_agents_total": self.max_agents_total,
+            "max_agents_per_project": self.max_agents_per_project,
+            "live_total": self.live_total,
+            "live": self.live,
+            "admits": self.admits,
+            "reason": self.reason,
+        }
+
+
+def capacity() -> CapacityReport:
+    """What the next spawn would meet: the same reads :func:`_admit` makes, nothing written."""
+    config = settings()
+    live = _live_per_project()
+    head = memory_core.headroom()
+    floor = _memory_floor(config.min_free_mb)
+    total = sum(live.values())
+    admits, reason = True, "a spawn would be admitted"
+    if config.max_agents_total > 0 and total >= config.max_agents_total:
+        admits, reason = False, f"the fleet is at max_agents_total = {config.max_agents_total}"
+    elif config.min_free_mb > 0 and head.pressure == "critical":
+        admits, reason = False, "memory pressure is critical"
+    elif config.min_free_mb > 0 and head.available_mb is not None and head.available_mb < floor:
+        admits, reason = False, f"{head.available_mb} MB available, {floor} MB needed"
+    elif head.pressure == "warn":
+        reason = "a spawn would be admitted, with a warning: memory pressure is warn"
+    elif not head.known:
+        reason = "a spawn would be admitted: this machine's memory cannot be read"
+    return CapacityReport(
+        headroom=head,
+        min_free_mb=floor,
+        max_agents_total=config.max_agents_total,
+        max_agents_per_project=config.max_agents_per_project,
+        live=live,
+        admits=admits,
+        reason=reason,
+    )
+
+
+GATE_POLL_SECONDS = 5.0
+GATE_EXIT = 75
+"""``fleet gate``'s exit at the deadline: ``EX_TEMPFAIL``, "try again later"."""
+
+
+@dataclass(frozen=True)
+class GateResult:
+    """What ``fleet gate`` waited for and what it found."""
+
+    passed: bool
+    available_mb: int | None
+    needed_mb: int
+    waited_seconds: float
+    pressure: str
+
+
+def gate_floor(min_free_mb: int | None = None) -> int:
+    """``--min-free-mb``, else ``test_gate_mb``, else ``min_free_mb``."""
+    if min_free_mb is not None:
+        return min_free_mb
+    config = settings()
+    return config.test_gate_mb or config.min_free_mb
+
+
+def wait_for_memory(needed_mb: int, wait_seconds: float) -> GateResult:
+    """Poll the headroom every 5 s until ``needed_mb`` is available (and pressure is not
+    critical), or ``wait_seconds`` have passed. Unknown headroom passes: the gate cannot
+    hold a run on a number it cannot read."""
+    started = _monotonic()
+    while True:
+        head = memory_core.headroom()
+        enough = head.available_mb is None or head.available_mb >= needed_mb
+        if enough and head.pressure != "critical":
+            return GateResult(
+                True, head.available_mb, needed_mb, _monotonic() - started, head.pressure
+            )
+        waited = _monotonic() - started
+        if waited >= wait_seconds:
+            return GateResult(False, head.available_mb, needed_mb, waited, head.pressure)
+        _sleep(min(GATE_POLL_SECONDS, max(wait_seconds - waited, 0.0)))
 
 
 def _type_prompt(
@@ -4980,29 +5425,63 @@ def list_agents(
       ``fleet ls`` shows the same rows, so the two never disagree.
     """
     with store_session() as store:
-        current = store.get_project(project.id) or project
-        agents = store.fleet_agents(project.id, live_only=False)
-        sessions = {session.id: session for session in store.team_sessions(project.id)}
-        # A live row's session another board keeps (under AISQUARE_TEAM_HUB, every one):
-        # read by its id here, in this one store session, for the folder-trust question
-        # (`_with_trust_prompts`), and for a caller that derives those rows again with it.
-        by_id = {
-            agent.session_id: store.get_session(agent.session_id)
-            for agent in agents
-            if agent.ended_at is None and agent.session_id and agent.session_id not in sessions
-        }
+        listing = _listing(store, project)
     if looked_up is not None:
-        looked_up.update(by_id)
+        looked_up.update(listing.by_id)
+    return _statuses(listing, live_only=live_only)
+
+
+@dataclass(frozen=True)
+class _Listing:
+    """What a listing of one project read in the store (:func:`_listing`)."""
+
+    project: ProjectInfo
+    agents: list[FleetAgent]
+    sessions: dict[str, TeamSession]
+    by_id: dict[str, TeamSession | None]
+
+
+def _listing(store: ContextStore, project: ProjectInfo) -> _Listing:
+    """The project's rows and sessions, as :func:`list_agents` reads them, in ``store``."""
+    current = store.get_project(project.id) or project
+    agents = store.fleet_agents(project.id, live_only=False)
+    sessions = {session.id: session for session in store.team_sessions(project.id)}
+    # A live row's session another board keeps (under AISQUARE_TEAM_HUB, every one):
+    # read by its id here, in this one store session, for the folder-trust question
+    # (`_with_trust_prompts`), and for a caller that derives those rows again with it.
+    by_id = {
+        agent.session_id: store.get_session(agent.session_id)
+        for agent in agents
+        if agent.ended_at is None and agent.session_id and agent.session_id not in sessions
+    }
+    return _Listing(current, agents, sessions, by_id)
+
+
+def _statuses(
+    listing: _Listing,
+    *,
+    live_only: bool = True,
+    config: FleetSettings | None = None,
+    tick: _Tick | None = None,
+) -> list[FleetAgentStatus]:
+    """:func:`list_agents`'s answer for what :func:`_listing` read: tmux asked, dead rows
+    ended, each row's state derived. ``tick`` shares each server's answer across projects."""
+    current, agents, sessions, by_id = (
+        listing.project,
+        listing.agents,
+        listing.sessions,
+        listing.by_id,
+    )
     now = _now()
     if live_only:
         cutoff = now - RECENTLY_ENDED
         agents = [a for a in agents if a.ended_at is None or a.ended_at >= cutoff]
     tmux_session = session_name(current.codename) if current.codename else None
-    config = settings()
+    config = config or settings()
     # Each row's address once for this read (`_where`): asked about five times per row
     # otherwise, each resolving two paths, on asq's tick (follow-up of #257).
     addresses = {agent.id: _address(agent, config) for agent in agents}
-    views = _observe_sockets(agents, tmux_session, config, addresses)
+    views = _observe_sockets(agents, tmux_session, config, addresses, tick=tick)
     ended = {
         row.id: row
         for row in _end_dead_rows(
@@ -5026,8 +5505,66 @@ def list_agents(
         for agent in agents
     ]
     return _with_first_prompts(
-        _with_trust_prompts(statuses, config, by_id, addresses), project, config, addresses
+        _with_trust_prompts(statuses, config, by_id, addresses), current, config, addresses
     )
+
+
+@dataclass(frozen=True)
+class Listings:
+    """What one read of many projects found in the store (:func:`read_listings`)."""
+
+    listings: dict[str, _Listing]
+    """Project id → its rows and sessions, for every project a listing can show a row of."""
+    live: dict[str, int]
+    """Project id → its live rows, for every project read or skipped that has any."""
+
+
+@dataclass(frozen=True)
+class ManyAgents:
+    """:func:`list_agents_many`'s answer: each project's agents, or why they are missing."""
+
+    agents: dict[str, list[FleetAgentStatus]]
+    errors: dict[str, Exception]
+
+
+def read_listings(
+    store: ContextStore, projects: Sequence[ProjectInfo], *, skip: Collection[str] = ()
+) -> Listings:
+    """The store half of :func:`list_agents_many`, in the caller's ``store`` session.
+
+    Only a project with a live row, or one that ended within :data:`RECENTLY_ENDED`, is
+    read: any other lists nothing (:func:`list_agents` keeps no older row), and with 305
+    listed projects every ``asq`` tick read each one's rows and sessions and asked its tmux
+    server, for no agent at all (#83). ``skip`` (a collapsed group's hidden members) is not
+    read either; :attr:`Listings.live` still counts its live rows.
+    """
+    live = store.fleet_live_counts(_now() - RECENTLY_ENDED)
+    listings = {
+        project.id: _listing(store, project)
+        for project in projects
+        if project.id in live and project.id not in skip
+    }
+    return Listings(listings, live)
+
+
+def list_agents_many(listings: Listings) -> ManyAgents:
+    """:func:`list_agents` for every project :func:`read_listings` read, with tmux asked once
+    per server for all of them (:class:`_Tick`) instead of twice per project.
+
+    The same statuses per project as :func:`list_agents` (``live_only``), dead rows ended the
+    same way. A project whose read failed is in ``errors`` and nowhere else, so one broken
+    project costs its own rows, not the listing.
+    """
+    config = settings()
+    tick = _Tick()
+    agents: dict[str, list[FleetAgentStatus]] = {}
+    errors: dict[str, Exception] = {}
+    for project_id, listing in listings.listings.items():
+        try:
+            agents[project_id] = _statuses(listing, config=config, tick=tick)
+        except Exception as exc:  # one project's failure is that project's: said, not raised
+            errors[project_id] = exc
+    return ManyAgents(agents, errors)
 
 
 def _end_dead_rows(
@@ -5626,13 +6163,16 @@ def stop(
     nudge: bool = True,
     live_only: bool = False,
     actor: str | None = None,
+    reason: str | None = None,
     ended_by: EndedBy = "stopped",
 ) -> StopReceipt:
     """``/exit`` the agent named ``label``, wait ``grace`` seconds, then kill its window.
 
     Resolves the LIVE row by label and hands it to :func:`_stop_row`; the
     documentation of what a stop is — and of ``handover`` — lives there. ``actor`` is who
-    asked (``fleet stop --as``; ``user`` for asq or a shell with no session).
+    asked (``fleet stop --as``; ``user`` for asq or a shell with no session). ``reason`` is
+    why, said on the ``agent_exited`` beside the actor and kept in its ``meta``: unlike a
+    ``why``, it wakes nobody (``auto-stop``'s, P2-W1b).
 
     With no live row, an ENDED agent's window may still be on the server
     (``remain-on-exit``), which is what the UI's 💤 row and its Stop button
@@ -5716,6 +6256,7 @@ def stop(
         nudge=nudge,
         ended_by=ended_by,
         actor=actor,
+        reason=reason,
     )
 
 
@@ -5728,6 +6269,7 @@ def _stop_row(
     handover: bool = False,
     nudge: bool = True,
     actor: str | None = None,
+    reason: str | None = None,
     ended_by: EndedBy = "stopped",
 ) -> StopReceipt:
     """``/exit`` the agent in ``agent``'s pane, wait ``grace`` seconds, then kill its window.
@@ -5967,7 +6509,7 @@ def _stop_row(
         if not handover:
             released, release_failed = _release_or_say(store, ended, why="agent stopped")
             wakes = _emit_exit(
-                store, ended, actor=actor, force=force, released=len(released)
+                store, ended, actor=actor, force=force, released=len(released), reason=reason
             ) and not _managers_own(store, ended, actor)
     # Outside the store session, as ``reap`` does: the nudge types into a pane
     # and must not hold the write lock the woken manager's own hooks will want.
@@ -7789,6 +8331,8 @@ def _respawn(
         own_worktree=agent.cwd if agent.worktree else None,
         own_branch=agent.branch,
         board_and_hub=board_and_hub,
+        # A hand-over replaces a running agent 1:1: admitted as the agent it replaces.
+        admit=not takes_over,
         # Its own first line, never a kickoff: the resume line and the hand-off prompt
         # both name the task already.
         kickoff=False,
@@ -9729,9 +10273,12 @@ def _emit_exit(
     actor: str | None = None,
     force: bool = False,
     released: int = 0,
+    reason: str | None = None,
 ) -> bool:
     """The ``agent_exited`` board event (§7.3), with ``why`` after the status when the
     status does not say it all; whether it wakes the manager (``team.exit_wakes``).
+    ``reason`` is why its stopper stopped it (``auto-stop``'s finished verdict, P2-W1b):
+    said after the actor and kept as ``meta.reason``, it is not a ``why`` and wakes nobody.
 
     P1 WS-2 (#279): ``actor`` is who stopped it (a session id, ``user``, ``usage-limit``;
     ``None`` for its own exit or a death found), named in the text — ``coder-auth exited
@@ -9745,7 +10292,10 @@ def _emit_exit(
         "released": released,
         "why": why,
     }
+    if reason is not None:
+        meta["reason"] = reason
     by = f" — stopped by {_actor_name(store, actor)}" if actor is not None else ""
+    by += f" ({reason})" if reason else ""
     text = (
         f"{agent.label} exited ({status})"
         + (f": {why}" if why else "")
@@ -10104,27 +10654,44 @@ def retry_deferred_nudges() -> int:
     One indexed read when nothing is held back. A nudge whose manager has prompted since it
     was held back is dropped unsent: that prompt's ``UserPromptSubmit`` handed it the delta
     the nudge was for. One whose manager row has ended is dropped too. A draft still there
-    keeps it held back (``nudge_manager`` asks the guard again). Never raises."""
+    keeps it held back (``nudge_manager`` asks the guard again). Never raises.
+
+    Read and sent in two steps (:func:`deferred_nudge_targets`, :func:`send_deferred_nudges`)
+    so ``asq``'s frame reads in its own store session and sends after it: one store session
+    per read (P2-W3, #83)."""
     try:
         with store_session() as store:
-            held = {
-                key.removeprefix(NUDGE_DEFERRED): since
-                for key, since in store.list_meta(NUDGE_DEFERRED).items()
-                if since
-            }
-            targets: list[FleetAgent] = []
-            for session_id, since in held.items():
-                row = store.fleet_agent_for_session(session_id)
-                session = store.get_session(session_id)
-                prompted = session.prompted_at if session is not None else None
-                gone = row is None or row.ended_at is not None or row.label != MANAGER_LABEL
-                if gone or (prompted is not None and prompted >= datetime.fromisoformat(since)):
-                    store.set_meta(f"{NUDGE_DEFERRED}{session_id}", "")
-                    continue
-                assert row is not None
-                targets.append(row)
+            targets = deferred_nudge_targets(store)
     except Exception:
         return 0
+    return send_deferred_nudges(targets)
+
+
+def deferred_nudge_targets(store: ContextStore) -> list[FleetAgent]:
+    """The managers whose held-back nudge is still owed, read in ``store``; one owed no
+    more (its manager prompted since, or its row ended) is dropped there. One indexed read
+    when nothing is held back."""
+    held = {
+        key.removeprefix(NUDGE_DEFERRED): since
+        for key, since in store.list_meta(NUDGE_DEFERRED).items()
+        if since
+    }
+    targets: list[FleetAgent] = []
+    for session_id, since in held.items():
+        row = store.fleet_agent_for_session(session_id)
+        session = store.get_session(session_id)
+        prompted = session.prompted_at if session is not None else None
+        gone = row is None or row.ended_at is not None or row.label != MANAGER_LABEL
+        if gone or (prompted is not None and prompted >= datetime.fromisoformat(since)):
+            store.set_meta(f"{NUDGE_DEFERRED}{session_id}", "")
+            continue
+        assert row is not None
+        targets.append(row)
+    return targets
+
+
+def send_deferred_nudges(targets: Sequence[FleetAgent]) -> int:
+    """Send each of :func:`deferred_nudge_targets`' nudges; how many were sent."""
     return sum(
         nudge_manager(
             row.project_id,

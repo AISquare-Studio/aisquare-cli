@@ -143,7 +143,9 @@ jobs:
     name: test (${{ matrix.leg }}, shard ${{ matrix.shard }}/${{ matrix.shards }})
     runs-on: ${{ matrix.os }}
     # About twice a shard's time on a slow runner: 6-8 minutes on Linux, 7-10 on
-    # Windows, whose runners vary more (one took 14.2, run 40230136547).
+    # Windows, whose runners vary more (one took 14.2, run 40230136547). A test past
+    # pyproject's faulthandler_timeout prints every thread's stack first, and
+    # --durations names each shard's slowest tests.
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 25 || 15 }}
     strategy:
       fail-fast: false
@@ -222,7 +224,7 @@ jobs:
       # tests/test_ci_covers_the_ambient_environment.py pins.
       - name: Test (pytest)
         if: matrix.ambient == 'none'
-        run: pytest -n auto -ra --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"
+        run: pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"
         env:
           AISQUARE_SUITE_CAPTAIN: ${{ matrix.captain }}
 
@@ -466,7 +468,7 @@ jobs:
           fi
 
           assert_proxy before
-          pytest -n auto -ra --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"
+          pytest -n auto -ra --durations=20 --splits ${{ matrix.shards }} --group ${{ matrix.shard }} --splitting-algorithm least_duration --shard-manifest "${{ runner.temp }}/shards/${{ matrix.leg }}/${{ matrix.shard }}.json"
           # Re-asserted on the far side, because a listener that died mid-suite
           # would otherwise leave a GREEN run that silently tested the other
           # ambient — and a job cannot notice that it tested the wrong thing.

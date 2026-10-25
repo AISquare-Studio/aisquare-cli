@@ -19,6 +19,15 @@ from tests.ci_support import git, repo, request
 TRACE = "trc_01j9q8p3k7zr4m2n6v0c1d8e5f"
 
 
+#: The product's budget, as written: the bound test runs on it, not on the suite's.
+PRODUCT_BUDGET = ci_snapshot.new_budget
+
+#: Each git call's own ceiling in the suite. The product's 2 s per call was not enough
+#: either: one ``git stash create`` on a loaded Windows runner took longer (rc/p1 push
+#: run 40074661474, attempt 2), and the capture failed open as designed.
+SUITE_GIT_SECONDS = 30.0
+
+
 @pytest.fixture(autouse=True)
 def unhurried_git(monkeypatch: pytest.MonkeyPatch) -> None:
     """The turn's budget on a clock that does not move, for every ``capture`` and
@@ -28,15 +37,16 @@ def unhurried_git(monkeypatch: pytest.MonkeyPatch) -> None:
     has just hit enter, past which the hook fails open. A loaded Windows runner spent it
     across one capture's four git spawns, and the test read the product's fail-open as a
     failure of its own (CI of #259, run 38482592483, attempt 1). The budget is judged by
-    the clock it is given, and this one does not run: every git call gets the product's
-    whole allowance as its own ceiling, which the suite still holds git to
-    (``test_git_runs_without_the_traced_identity_and_without_optional_locks``), and
-    nothing accumulates across calls. The tests of the budget itself make their own.
+    the clock it is given, and this one does not run: every git call gets
+    :data:`SUITE_GIT_SECONDS` as its own ceiling, and nothing accumulates across calls.
+    The product's bound is pinned on the product's budget
+    (``test_git_runs_without_the_traced_identity_and_without_optional_locks``), and the
+    tests of the budget itself make their own.
     """
     monkeypatch.setattr(
         ci_snapshot,
         "new_budget",
-        lambda: ci_snapshot._Budget(ci_snapshot.GIT_BUDGET_SECONDS, clock=lambda: 0.0),
+        lambda: ci_snapshot._Budget(SUITE_GIT_SECONDS, clock=lambda: 0.0),
     )
 
 
@@ -269,6 +279,7 @@ def test_git_runs_without_the_traced_identity_and_without_optional_locks(
         raise OSError("stop here")
 
     monkeypatch.setattr(subprocess, "run", record)
+    monkeypatch.setattr(ci_snapshot, "new_budget", PRODUCT_BUDGET)
     ci_snapshot.capture(tmp_path, TRACE)
     for name in TRACING_ENV_VARS:
         assert name not in seen["env"]

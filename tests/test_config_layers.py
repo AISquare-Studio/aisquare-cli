@@ -247,6 +247,7 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "share_trust": True,
             "share_settings": False,
             "prefer": "priority",  # added by P0-W3 (#277)
+            "share": [],  # what every account has in common (P2-W7, #198)
         },
         "projects": {"capture": False},
         # The persona train and the captain's switch, added since (#201, #240).
@@ -255,19 +256,30 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "import": {"engine": "auto", "api_model": "claude-opus-5"},
         },
         "experimental": {"captain": False},
+        # The symbol index (#285).
+        "code": {"enabled": True, "max_file_kb": 1024},
         # App settings ▸ User preferences, added since.
         "ui": {"always_show_project_path": False},
-        # The role tool policy (#280): the reviewer's deny is its own, not its extra_args.
-        # The first message's two (P0-W1a, #122), and what of the board each role reads
-        # (P1 WS-2, #279): the reviewer judges cold. The manager's quiet-point compaction,
-        # off, and the task contract's blocks (P1 WS-4, #281).
+        # The fleet's admission (#283), the role tool policy (#280: the reviewer's deny is its
+        # own, not its extra_args), the first message's two (P0-W1a, #122), the idle check's
+        # quiet window (P0-W1b, #123), the delivery guards (P0-W2, #276), whether a pane's
+        # program may set the clipboard (P2-W3, #101), what of the board each role reads (P1
+        # WS-2, #279): the reviewer judges cold; the manager's quiet-point compaction, off, and
+        # the task contract's blocks (P1 WS-4, #281).
         "fleet": {
+            "max_agents_total": 0,
+            "min_free_mb": 2048,
+            "test_gate_mb": 0,
+            "test_gate_wait_minutes": 15,
+            # Auto-stop of finished workers (P2-W1b, #283).
+            "auto_stop_finished": True,
+            "auto_stop_idle_minutes": 5.0,
+            "auto_stop_roles": ["tester", "reviewer", "validator", "ui-tester"],
             "deny_tools": list(FLEET_DENY_TOOLS),
             "first_prompt": "argv",
             "prompt_ack_seconds": 45.0,
-            # The idle check's quiet window (P0-W1b, #123).
             "busy_quiet_seconds": 30,
-            # The delivery guards (P0-W2, #276).
+            "pane_clipboard": "off",
             "draft_quiet_seconds": 10.0,
             "deliver_notes_at_turn_end": True,
             "quiet_compact_at": 0,
@@ -287,6 +299,14 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             },
         },
         "team": {"brief_blocks": ["objective", "acceptance", "boundaries"], "brief_strict": False},
+        # `aisquare watch`, the fleet's one non-AI watcher (P2-W2, #284).
+        "watch": {
+            "interval_seconds": 60,
+            "github": False,
+            "github_every_seconds": 120,
+            "auto_stop": True,
+            "sources": {},
+        },
     }
     assert _overlay(_V1_DEFAULTS, changed) == system_defaults()
 

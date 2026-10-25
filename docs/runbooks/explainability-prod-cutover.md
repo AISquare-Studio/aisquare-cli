@@ -2216,6 +2216,25 @@ your shell is still routing through the configured proxy.
 Unsetting after stopping leaves a window where every launch from that shell
 dies.
 
+### Files are not config either: `reset`
+
+The same proxy can sit in a Claude `settings.json` `env` block, a role binding,
+an env file or the fleet tmux server's global environment. `disable` names what
+it finds there, and `aisquare doctor` warns in its `anthropic routing` row. One
+command removes them (tracing off, targets kept, a backup beside each settings
+file, your own gateway untouched):
+
+```bash
+aisquare explainability reset --dry-run
+aisquare explainability reset --yes
+```
+
+It prints the shell `unset` line and the rc files that mention the variables;
+it never edits them. Run it again and it says "nothing to reset".
+
+`doctor --fix` turns tracing on only with `--target prod`, so a fix run no
+longer undoes this rollback.
+
 ---
 
 ## Per-step verification and rollback, at a glance

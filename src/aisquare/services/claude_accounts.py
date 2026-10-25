@@ -50,7 +50,7 @@ from typing import Any, Literal
 
 from aisquare.core import claude_accounts as core
 from aisquare.core import claude_sharing as sharing
-from aisquare.core import paths
+from aisquare.core import paths, tls
 from aisquare.core.config import AccountsSettings, FleetSettings, load_config
 from aisquare.core.harness import MODEL_FAMILIES, model_family
 from aisquare.core.names import name_key
@@ -815,7 +815,7 @@ def _http_get(
 
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with tls.urlopen(request, timeout=timeout) as response:
             return int(response.status), bytes(response.read()), dict(response.headers.items())
     except urllib.error.HTTPError as exc:
         sent = dict(exc.headers.items()) if exc.headers is not None else {}
@@ -995,6 +995,16 @@ def usage(
     try:
         answer = (fetch or _http_get)(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
     except OSError as exc:  # URLError, a refused connection, a timeout
+        if isinstance(exc, tls.CABundleError):
+            return ClaudeUsage(
+                available=False,
+                reason=f"TLS: the CA bundle could not be loaded — {tls.BUNDLE_FIX}",
+            )
+        if tls.cert_failure(exc):
+            return ClaudeUsage(
+                available=False,
+                reason=f"TLS certificate could not be verified — {tls.CERT_HINT}",
+            )
         return ClaudeUsage(
             available=False, reason=f"could not reach the usage endpoint ({type(exc).__name__})"
         )

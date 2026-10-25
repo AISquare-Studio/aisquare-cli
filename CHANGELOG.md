@@ -734,6 +734,21 @@ fleet still running, and every release now carries its own installer.**
   busy_quiet_seconds` (30) is checked once: if Claude Code sits idle at its prompt —
   a turn ended with Esc fires no hook — it reads ⏸ waiting, *idle (the board said
   working)*, and a `fleet tell` is typed into it instead of filed. (#123, #32)
+- **HTTPS calls verify against the OS trust store, so usage reads work on a
+  python.org Python on macOS.** That interpreter ships no CA bundle until its
+  "Install Certificates.command" is run, so every usage read failed
+  `CERTIFICATE_VERIFY_FAILED` and each account said *could not reach the usage
+  endpoint (URLError)* while `curl` to the same URL worked. Every HTTPS caller —
+  usage, IAM, explainability, CI, persona import, the upgrade check, remote push
+  — now goes through one lazily built context (`core/tls.py`): `SSL_CERT_FILE` /
+  `SSL_CERT_DIR` when set, else the OS store via `truststore`, else `certifi`
+  (both now declared dependencies). A certificate that does not verify says
+  *TLS certificate could not be verified* with a hint instead of a bare
+  `URLError`, and a bundle `SSL_CERT_FILE` names that will not load says *the
+  CA bundle could not be loaded*. Plain `http://` calls never build the
+  context. `aisquare doctor --live` gains a `tls` row: one verified handshake
+  to api.anthropic.com, through `HTTPS_PROXY` when one applies, naming the
+  trust source in use.
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for
   every other spawn: a seat reads the board of the hub its spawner honours, and its

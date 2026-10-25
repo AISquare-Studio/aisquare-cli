@@ -52,7 +52,12 @@ def test_the_base_install_gains_no_dependencies() -> None:
     ``segno`` (pure python, typed, one module) is the Remote modal's QR. It is
     imported lazily by the QR renderer alone (``cli/ui/views/remote.py``), so the
     hook path never loads it; when it is absent the modal says the QR is unavailable, and the
-    command that puts segno back in the install that runs, instead of failing."""
+    command that puts segno back in the install that runs, instead of failing.
+
+    ``truststore`` and ``certifi`` (both pure python) are what every HTTPS call
+    verifies against (``core/tls.py``): a python.org Python on macOS ships no CA
+    bundle, so without them every usage read failed certificate verification.
+    Imported inside ``tls.ssl_context`` only, so the hook path never loads them."""
     import re
     import tomllib
 
@@ -64,6 +69,7 @@ def test_the_base_install_gains_no_dependencies() -> None:
     assert required == {
         "typer", "rich", "pydantic", "tomli-w", "textual", "pyyaml", "tzdata", "segno",
         "starlette", "uvicorn", "websockets", "cryptography", "ngrok",
+        "truststore", "certifi",
     }  # fmt: skip
 
 

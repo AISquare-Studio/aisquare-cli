@@ -3227,6 +3227,37 @@ def test_an_expired_rows_reason_and_log_in_are_on_screen_at_160_columns_unscroll
     assert gap == 1  # right beside the usage cells: one cell apart
 
 
+def test_log_in_again_reads_whole_on_screen_at_160_columns_unscrolled(
+    no_network: dict[str, Any],
+) -> None:
+    """The tester on #408: with the status column still there *Log in again* read
+    'Log in ag' at 160 columns. Without it (#406), the 14-wide login column shows the
+    whole label on a healthy row, on screen, with nothing scrolled."""
+    no_network["usage"] = _table_usage
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_table_frame)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 4))
+            table = view.query_one("#claude-table")
+            login = row(view, 1).query_one("#account-login-1", Button)
+            line = "".join(login.render_line(y).text for y in range(login.region.height))
+            return {
+                "scroll": table.scroll_x,
+                "label": login_label(view, 1),
+                "line": line,
+                "seen": table.scrollable_content_region.contains_region(login.region),
+                "on_screen": login.region.right <= app.size.width,
+            }
+
+    out = asyncio.run(run())
+    assert out["scroll"] == 0 and out["label"] == "Log in again"
+    assert "Log in again" in out["line"] and "…" not in out["line"], out["line"]
+    assert out["seen"] and out["on_screen"]
+
+
 @pytest.mark.parametrize(
     ("size", "sidebar"),
     [((90, 40), None), ((100, 40), None), ((140, 40), None), ((100, 40), 48), ((240, 40), None)],

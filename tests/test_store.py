@@ -438,8 +438,9 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # row ended, stopped or died (#38), v35 session token usage (#346, stamped v34 there),
     # v36-v38 the coding-agent identity, team_meta dates and their repair (#113),
     # v39 the arrangement of another agent's account slots (Codex accounts),
-    # v40 every window of a usage reading (an agent's daily per-model quotas)
-    assert version == SCHEMA_VERSION == 40
+    # v40 every window of a usage reading (an agent's daily per-model quotas),
+    # v41 one priority order over every agent's accounts (account_rank)
+    assert version == SCHEMA_VERSION == 41
 
 
 def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -> None:
@@ -1510,7 +1511,7 @@ _USAGE_STEP = {
 
 
 def _pr_113_steps() -> set[tuple[str, str]]:
-    """#113's v36 to v40 by name (the coding-agent steps, appended on main's v35): what a
+    """#113's v36 to v41 by name (the coding-agent steps, appended on main's v35): what a
     fresh store holds past main's ladder."""
     return _built(SCHEMA_VERSION) - _built(35)
 
@@ -1809,7 +1810,7 @@ def test_mains_v35_store_and_113s_v38_store_reach_this_schema_with_every_row(
 ) -> None:
     """The two shapes the #274 merge adds, each replayed from a dump of the store its build
     made (frozen, never this ladder's). Main's v35 (#274: ``fleet_agent.ended_by`` and the
-    two token-usage tables): the ladder runs #113's v36 to v40, whose backfill marks the
+    two token-usage tables): the ladder runs #113's v36 to v41, whose backfill marks the
     agent started as ``claude`` Claude Code's. #113's own v38, from a build of this line
     before the merge: its five steps stamped v34-v38 and neither #274 step, which the
     presence pass adds (``ended_by`` NULL, the usage tables empty) before the ladder runs
@@ -1879,11 +1880,11 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     persona columns are #201's v33, one step on main's v32 with an empty script and the two
     columns as its products, so a store that holds them already (the RC's) is not changed
     by it. v34 adds ``fleet_agent.ended_by`` (#38) on top, v35 the two token-usage tables
-    (#346), #113's v36 to v40 the coding-agent steps, and nothing else."""
+    (#346), #113's v36 to v41 the coding-agent steps, and nothing else."""
     fresh = _built(SCHEMA_VERSION)
     persona = _built(33)
 
-    assert SCHEMA_VERSION == 40
+    assert SCHEMA_VERSION == 41
     ours = _pr_113_steps()
     assert fresh == _built(35) | ours
     assert _built(35) == persona | _ENDED_BY_COLUMN | _USAGE_STEP
@@ -1992,7 +1993,7 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
     _schema_again, rows_again = _contents(db)
     version, shape, notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 40, label
+    assert version == SCHEMA_VERSION == 41, label
     assert shape == _built(SCHEMA_VERSION), label
     assert notnull == {"team_session": 0, "fleet_agent": 0}, label
     assert old_session is not None and old_session.persona == persona, label
@@ -2034,20 +2035,20 @@ def test_a_v39_stores_usage_reading_reaches_v40_and_reads_as_its_session_and_wee
         store.close()
     version, shape, _notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 40
+    assert version == SCHEMA_VERSION == 41
     assert shape == _built(SCHEMA_VERSION)
-    assert shape - _built(39) == {("column", "claude_usage.windows")}
+    assert _built(40) - _built(39) == {("column", "claude_usage.windows")}
     assert (old.session_percent, old.week_percent, old.token_fingerprint) == (12.0, 40.0, "fp")
     assert old.windows is None, "a v39 row: its session and week are all it had"
     assert new.windows == daily
 
 
 def test_a_fresh_store_is_built_with_the_persona_step() -> None:
-    """No file at all: v1 to v40, the same shape as every cohort above reaches."""
+    """No file at all: v1 to v41, the same shape as every cohort above reaches."""
     open_store().close()
     version, shape, notnull = _persona_shape(_db_path())
 
-    assert version == SCHEMA_VERSION == 40
+    assert version == SCHEMA_VERSION == 41
     assert shape == _built(SCHEMA_VERSION)
     assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
     assert notnull == {"team_session": 0, "fleet_agent": 0}
@@ -2133,7 +2134,7 @@ def test_the_two_v34_steps_are_v34_and_v35_each_idempotent() -> None:
     Run twice on one store, each leaves what it left once."""
     from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
 
-    assert SCHEMA_VERSION == len(_MIGRATIONS) == 40
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 41
     assert _MIGRATIONS[33] == ""
     assert _PRODUCTS[33] == _Products(columns=(("fleet_agent", "ended_by", "TEXT"),))
     assert _PRODUCTS[34] == _Products(

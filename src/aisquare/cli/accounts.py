@@ -648,12 +648,13 @@ def _has_project() -> bool:
     return True
 
 
-def _role_agent(role: str) -> str:
-    """The agent ``role`` launches (its binding's, else the default's); Claude Code if unknown."""
+def _role_agent(role: str, account: str | None = None) -> str:
+    """The agent ``role`` launches with ``--account account`` (its binding's, else the
+    account's, else the order's or the default's); Claude Code if unknown."""
     from aisquare.services import agent_launch
 
     try:
-        return agent_launch.resolve(role).adapter.id
+        return agent_launch.resolve(role, account=account).adapter.id
     except Exception:
         return core.AGENT
 
@@ -860,8 +861,11 @@ def add(agent: AgentOpt = None) -> None:
             + agents_service.config_dir_command("connect", whose, account.config_dir),
             style="yellow",
         )
-    # The role's own agent needs no --agent (a coder runs Claude Code unless bound).
-    as_role = "coder" if _role_agent("coder") == whose else f"coder --agent {whose}"
+    # No --agent where the role runs the account's agent: naming an account names its
+    # agent unless the role's binding pins another.
+    as_role = (
+        "coder" if _role_agent("coder", str(account.slot)) == whose else f"coder --agent {whose}"
+    )
     console.print(
         f"  open it: aisquare accounts run {account.slot} · "
         f"as a role: aisquare launch {as_role} --account {account.slot}",

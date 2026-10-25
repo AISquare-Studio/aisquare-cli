@@ -1009,3 +1009,54 @@ def test_the_files_that_name_it_are_looked_for_in_ci_the_plugins_and_the_top_too
     assert {path for path in named if not _optional(path)} == {
         path for path, allowed in planted.items() if not allowed
     }
+
+
+def test_a_third_agents_account_on_top_of_the_one_order_runs_it(
+    third: Any, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Owner, PR #113: a launch that nothing pins runs the agent of the best account in the
+    one order across agents — a future agent's too, for implementing only its account
+    slots. Its account on top, it runs; below a Claude account with room, Claude Code does;
+    and the hand-off's cross-agent pick (``choose_any``) finds it among the agents allowed."""
+    import shutil
+
+    from aisquare.core.store import store_session
+    from aisquare.services import agent_launch
+    from aisquare.services import claude_accounts as accounts_service
+    from tests.test_claude_accounts import _sign_in as claude_sign_in
+
+    real_which = shutil.which
+    installed = {"claude", third.binary}
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name, *a, **k: f"/bin/{name}" if name in installed else real_which(name, *a, **k),
+    )
+    monkeypatch.setattr(
+        accounts_service,
+        "cached_usage",
+        lambda accounts, **_: {
+            a.slot: ClaudeUsage(available=False, reason="unread") for a in accounts
+        },
+    )
+    with store_session():
+        pass
+    claude = accounts_core.create_account()
+    claude_sign_in(claude, "c@example.com")
+    if isinstance(third, GeminiShapedAdapter):
+        mine = _signed_in_slot(third)
+    else:
+        mine = accounts_core.create_account(third.id)
+        (mine.config_dir / "login.json").write_text(
+            json.dumps({"user": "f@example.com", "token": "t"}), encoding="utf-8"
+        )
+
+    assert agent_launch.resolve("coder").adapter.id == accounts_core.AGENT, "Claude first"
+
+    accounts_service.move(str(mine.slot), "top")
+    selected = agent_launch.resolve("coder")
+    assert (selected.adapter.id, selected.source) == (third.id, "accounts")
+
+    picked = accounts_service.choose_any(agents=[third.id])
+    assert picked.agent == third.id and picked.account is not None
+    assert picked.account.slot == mine.slot  # the one candidate, taken with no reading

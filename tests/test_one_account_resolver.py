@@ -47,6 +47,12 @@ _DECIDERS = frozenset(
         "managed_accounts",
         "machine_default",
         "project_default",
+        # The one priority order across agents (owner, PR #113): an agent and an account
+        # picked from it are the agent rung's (`agent_launch.resolve`), then `choose`'s.
+        "agent_pick",
+        "account_agent",
+        "usable_accounts",
+        "headroom_choice",
     }
 )
 #: Reading the default flag is deciding too: ``[a for a in accounts if a.is_default]``
@@ -146,6 +152,12 @@ _OFFENDING_BODIES = {
         "def f(accounts):\n    return [a for a in accounts if a.is_default]\n"
     ),
     "hard-codes slot 1": "def f():\n    return core.DEFAULT_SLOT\n",
+    "picks from the one order itself": (
+        "def f():\n    return claude_accounts_service.agent_pick().account\n"
+    ),
+    "walks the usable accounts itself": (
+        "def f(accounts):\n    return claude_accounts_service.usable_accounts(accounts)[0]\n"
+    ),
 }
 #: Correct bodies the rule must leave alone — the two real launchers are
 #: shaped like these.
@@ -221,3 +233,28 @@ def test_the_launcher_really_asks_the_resolver(module: str, function: str) -> No
         f"{module}::{function} no longer asks claude_accounts_service.choose — either the "
         "ladder moved (update this test) or the launcher stopped honouring defaults"
     )
+
+
+def test_the_agent_the_one_order_picks_is_asked_in_one_place() -> None:
+    """Owner, PR #113: a launch that nothing pins runs the agent of the best account in the
+    one order across agents. That rung is ``agent_launch.resolve``'s and nobody else's, as
+    the account is ``choose``'s: every surface that asks which agent a role runs (launch,
+    fleet spawn, Welcome, the doctor, the Spawn dialog) asks ``resolve``, so none of them can
+    answer differently. Found by walking every source module, and the rung really calls it."""
+    import aisquare
+
+    root = Path(aisquare.__file__).parent
+    callers: dict[str, set[str]] = {}
+    for path in sorted(root.rglob("*.py")):
+        for inner in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(inner, ast.Call):
+                continue
+            func = inner.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name in {"agent_pick", "account_agent"}:
+                callers.setdefault(name, set()).add(path.relative_to(root).as_posix())
+
+    assert callers == {
+        "agent_pick": {"services/agent_launch.py"},
+        "account_agent": {"services/agent_launch.py"},
+    }

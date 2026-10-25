@@ -648,8 +648,9 @@ def test_a_launch_takes_only_its_own_agents_account_naming_both_otherwise(home: 
     claude = core.create_account()
     codex_slot = _codex_slot("me@example.com")
 
+    # Third in the one order across agents: Claude Code's plain slot and slot 2 first.
     assert service.choose("3", agent="codex").account == codex_slot.model_copy(
-        update={"position": 1}
+        update={"position": 3}
     )
     with pytest.raises(service.WrongAgent, match=r"Claude Code account.*runs Codex"):
         service.choose(str(claude.slot), agent="codex")
@@ -801,7 +802,8 @@ def test_accounts_add_codex_runs_codex_login_in_the_slot_and_connects_its_hooks(
 
     assert result.exit_code == 0, result.output
     assert "Added Codex account 3: stub@example.com" in result.stderr
-    assert "launch coder --agent codex --account 3" in result.stderr
+    # Naming the account names its agent: no --agent where the coder's binding pins none.
+    assert "as a role: aisquare launch coder --account 3" in result.stderr
     [slot] = core.managed_accounts("codex")
     assert core.identity(slot) is not None and service.describe(slot).hooks_installed
     assert (slot.config_dir / "hooks.json").is_file()  # `agents connect codex --config-dir`

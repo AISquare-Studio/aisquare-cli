@@ -450,6 +450,7 @@ def launch(
             agent=agent,
             binary=command,
             env_overrides=environment,
+            account=account,
         )
     except ValueError as exc:
         fail(str(exc), error="agent_configuration")
@@ -528,7 +529,7 @@ def launch(
     if selected.adapter.accounts is not None:
         try:
             choice = claude_accounts_service.choose(
-                account, role=role, project=project, agent=selected.adapter.id
+                account, role=role, project=project, agent=selected.adapter.id, pick=selected.pick
             )
         except claude_accounts_service.NoSuchAccount as exc:
             message = str(exc)

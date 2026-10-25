@@ -4195,7 +4195,9 @@ def spawn(
         # Today's default stays the default: carried as `--command` only when chosen.
         chosen = replayed.binary if replayed.source != "default" else None
     try:
-        selected = agent_launch.resolve(role, agent=agent, binary=chosen, cwd=project.root)
+        selected = agent_launch.resolve(
+            role, agent=agent, binary=chosen, cwd=project.root, account=account
+        )
     except ValueError as exc:
         raise FleetError(str(exc)) from exc
     resolution = selected.binary
@@ -4441,7 +4443,7 @@ def spawn(
     if selected.adapter.accounts is not None:
         try:
             choice = claude_accounts_service.choose(
-                account, role=role, project=project, agent=selected.adapter.id
+                account, role=role, project=project, agent=selected.adapter.id, pick=selected.pick
             )
         except claude_accounts_service.NoSuchAccount as exc:
             raise FleetError(str(exc)) from exc

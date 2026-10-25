@@ -10,7 +10,7 @@ from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aisquare.core import agents, harness, orchestrator, paths, selfcli
 from aisquare.core.agent_adapters import (
@@ -29,6 +29,9 @@ from aisquare.core.config import AppConfig, config_snapshot, load_config, save_c
 from aisquare.core.spawn import LAUNCH_AGENT_ENV as LAUNCH_AGENT_ENV
 from aisquare.core.spawn import LAUNCH_PID_ENV
 from aisquare.core.store import store_session
+
+if TYPE_CHECKING:
+    from aisquare.services.claude_accounts import AgentPick
 
 # Operator preference; launches export their own family under LAUNCH_AGENT_ENV.
 ACTIVE_AGENT_ENV = "AISQUARE_CODING_AGENT"
@@ -79,6 +82,9 @@ class ResolvedAgent:
     source: str
     profile: harness.LaunchProfile
     config_dir: Path
+    pick: AgentPick | None = None
+    """The accounts rung's answer when it chose the agent (``source == "accounts"``), for
+    ``claude_accounts.choose(pick=...)``: the account it picked costs no second read."""
 
 
 def executable(selected: ResolvedAgent) -> str | None:
@@ -178,7 +184,12 @@ def resolve(
     cwd: Path | None = None,
     env_overrides: dict[str, str] | None = None,
     extra_args: list[str] | None = None,
+    account: str | None = None,
 ) -> ResolvedAgent:
+    """The agent ``role`` launches, its binary and why. ``account`` is the launch's
+    ``--account``: the account it names (else the role's bound one) names the agent when
+    nothing above pins it; below that, the agent of the best account in the one priority
+    order (``claude_accounts.agent_pick``), then the fallbacks."""
     profile = harness.resolve_profile(role, env_overrides=env_overrides, extra_args=extra_args)
     chosen_binary = harness.resolve_binary(role, override=binary)
     try:
@@ -197,11 +208,20 @@ def resolve(
     # Launch identity and operator preference have different lifetimes. A
     # parent's executable family cannot identify an arbitrary wrapper.
     owned_family = os.environ.get(LAUNCH_AGENT_ENV) if chosen_binary.source == "default" else None
+    pinned = agent or (bound.agent if bound else None) or inferred or preferred
+    # Nothing pins the agent and no binary was named: the agent of the best account, by
+    # the one priority order and headroom (owner, PR #113). A named binary that names no
+    # agent is the default agent's wrapper, as it always was.
+    unpinned = not pinned and chosen_binary.source == "default"
+    named = account_agent(account, role) if unpinned else None
+    pick = accounts_pick() if unpinned and not named else None
     choices = (
         (agent, "flag"),
         (bound.agent if bound else None, "role"),
         (inferred.id if inferred else None, chosen_binary.source),
         (preferred, "project"),
+        (named, "account"),
+        (pick.agent if pick else None, "accounts"),
         (owned_family, "inherited"),
         (inherited, "operator"),
         (config.agents.default, "user"),
@@ -241,7 +261,26 @@ def resolve(
         # The binding's or this shell's, as the agent itself reads it (Claude Code's as
         # written, as every reader names it: core.agents._claude_home).
         adapter.config_dir(agents._home(), effective_env),
+        pick if source == "accounts" else None,
     )
+
+
+def account_agent(account: str | None, role: str) -> str | None:
+    """The agent of the account a launch names (``claude_accounts.account_agent``)."""
+    from aisquare.services import claude_accounts
+
+    return claude_accounts.account_agent(account, role=role)
+
+
+def accounts_pick() -> AgentPick | None:
+    """The accounts rung (``claude_accounts.agent_pick``); ``None`` on any failure, as a
+    damaged store must not prevent launching."""
+    from aisquare.services import claude_accounts
+
+    try:
+        return claude_accounts.agent_pick()
+    except Exception:
+        return None
 
 
 def _undeclared_binding(

@@ -265,12 +265,13 @@ class AccountChoice:
 
 
 def _arranged(store: ContextStore) -> list[ClaudeAccount]:
-    """Every slot on disk, folded with its registry row, in priority order.
+    """Every slot on disk, folded with its registry row, in the ONE priority order.
 
     Reconciles as it reads (see the section comment): rows are created for new
     slots and dropped for vanished ones, so the table can never describe an
-    account that is not there. Claude Code's slots come first, in their order,
-    then each other agent's in ITS order (``agent_account``, store v29).
+    account that is not there. Each agent's rows keep its own ranking
+    (``claude_account``, ``agent_account``), and :func:`_ranked` lays all of them
+    in one order across agents (store v41): ``position`` is the place in it.
     """
     listed = core.list_accounts()
     arranged: list[ClaudeAccount] = []
@@ -280,7 +281,38 @@ def _arranged(store: ContextStore) -> list[ClaudeAccount]:
             arranged.extend(_arranged_claude(store, mine))
         else:
             arranged.extend(_arranged_agent(store, agent, mine))
-    return arranged
+    return _ranked(store, arranged)
+
+
+def _default_agent() -> str:
+    """The user's coding agent (``[agents] default``), else the built-in default; never raises."""
+    try:
+        chosen = load_config().agents.default
+    except Exception:
+        chosen = None
+    return chosen if chosen in core.account_agents() else AGENT
+
+
+def _ranked(store: ContextStore, arranged: Sequence[ClaudeAccount]) -> list[ClaudeAccount]:
+    """``arranged`` (each agent's slots in its own order) in the one order across agents.
+
+    The ranked slots by their rank, then any slot with none (added by a build before
+    store v41, or just now) after them, each agent's in its own order. A store that has
+    ranked nothing yet (one coming from v40 or older) is seeded with the user's coding
+    agent's accounts first and every other agent's after, as they were listed, so the
+    upgrade changes no launch's agent (owner, PR #113). Written only when it changed.
+    """
+    ranks = store.account_ranks()
+    if ranks:
+        known = sorted((a for a in arranged if a.slot in ranks), key=lambda a: ranks[a.slot])
+        order = [*known, *(a for a in arranged if a.slot not in ranks)]
+    else:
+        first = _default_agent()
+        order = sorted(arranged, key=lambda a: a.agent != first)
+    slots = [a.slot for a in order]
+    if ranks != {slot: rank for rank, slot in enumerate(slots, start=1)}:
+        store.rank_accounts(slots)
+    return [a.model_copy(update={"position": rank}) for rank, a in enumerate(order, start=1)]
 
 
 def _arranged_agent(
@@ -580,6 +612,7 @@ def choose(
     spread: bool | None = None,
     fetch: Fetch | None = None,
     agent: str = AGENT,
+    pick: AgentPick | None = None,
 ) -> AccountChoice:
     """THE account resolver: which Claude account a launch runs under, and why.
 
@@ -617,6 +650,10 @@ def choose(
     can be read, the machine default decides exactly as before. A launch reads
     usage through the cache, a minute deep (:data:`PICK_MAX_AGE_SECONDS`); a
     hand-over (``spread=True``) reads it live.
+
+    ``pick`` is the launch's agent rung's answer (:func:`agent_pick`): an account of
+    ``agent`` it chose by headroom across agents is the headroom rung's answer, with no
+    second usage read; every rung above it still wins.
 
     ``exclude`` is honoured on EVERY rung: a binding or a project default that
     names the account being left is skipped with a note and the ladder goes on,
@@ -686,6 +723,10 @@ def choose(
                 return AccountChoice(preferred, "project default", notes)
     settings = accounts_settings()
     by_headroom = spread if spread is not None else settings.pick == "headroom"
+    chosen = pick.account if pick is not None else None
+    if by_headroom and chosen is not None and chosen.agent == agent and chosen.slot not in skip:
+        notes.extend(pick.notes if pick is not None else ())
+        return AccountChoice(chosen, "headroom", notes)
     if by_headroom:
         picked, more = headroom_choice(
             [a for a in accounts if a.agent == agent],
@@ -868,10 +909,13 @@ def reorder(refs: Sequence[str]) -> list[ClaudeAccount]:
 
 
 def _write_order(order: Sequence[ClaudeAccount]) -> list[ClaudeAccount]:
-    """Each agent's slots of ``order`` first, in that order, in its own ranking."""
+    """``order``'s slots first, in that order, in the one order across agents (the rest
+    keep theirs after them), and each agent's of them first in its own ranking."""
     try:
         with store_session() as store:
-            _arranged(store)
+            current = _arranged(store)
+            wanted = [a.slot for a in order]
+            store.rank_accounts([*wanted, *(a.slot for a in current if a.slot not in wanted)])
             for agent in dict.fromkeys([AGENT, *(a.agent for a in order)]):
                 slots = [a.slot for a in order if a.agent == agent]
                 if core.kind(agent).legacy_slots:
@@ -889,11 +933,13 @@ Direction = Literal["up", "down", "top", "bottom"]
 def move(ref: str, direction: Direction) -> list[ClaudeAccount]:
     """Move one slot a step (or all the way) in the priority order — one read, one write.
 
-    Among its own agent's accounts: a Codex account moves past Codex accounts.
+    In the one order across agents: a Codex account moves past a Claude account as past
+    another Codex one, and the agent of the account on top is the agent a launch that
+    nothing pins runs (:func:`agent_pick`).
     """
     accounts, note = _read_arranged()
     account = _resolve_in(accounts, ref, note=note)
-    order = [a for a in accounts if a.agent == account.agent]
+    order = list(accounts)
     index = next(at for at, a in enumerate(order) if a.slot == account.slot)
     order.pop(index)
     if direction == "up":
@@ -1848,6 +1894,141 @@ def _over_the_line(account: ClaudeAccount, switch_at: int, *, now: datetime | No
         f"{switch_at}%-used line; {core.label(account)} has the most room "
         f"({max(0, 100 - percent):.0f}% left)"
     ]
+
+
+@dataclass(frozen=True)
+class AgentPick:
+    """Which agent, and which of its accounts, the one priority order puts first.
+
+    From :func:`choose_any`: ``agent`` is the picked account's, and both are ``None`` when
+    no account is usable or none could be measured. From :func:`agent_pick` (a launch's
+    agent rung), ``account`` may be ``None`` with ``agent`` set: the order chose the agent
+    and leaves its account to :func:`choose`, as before.
+    """
+
+    agent: str | None
+    account: ClaudeAccount | None
+    notes: tuple[str, ...] = ()
+
+
+def usable_accounts(
+    accounts: Sequence[ClaudeAccount],
+    *,
+    exclude: Iterable[int] = (),
+    agents: Iterable[str] | None = None,
+    which: Callable[[str], str | None] | None = None,
+) -> list[ClaudeAccount]:
+    """``accounts``, in their order, that a launch could run on: enabled, signed in, not in
+    ``exclude``, of an agent in ``agents`` (every agent with account slots when ``None``)
+    whose binary is on ``PATH`` (``which``, ``shutil.which`` by default, asked once per
+    agent)."""
+    find = which if which is not None else shutil.which
+    skip = set(exclude)
+    allowed = None if agents is None else set(agents)
+    installed: dict[str, bool] = {}
+
+    def on_path(agent: str) -> bool:
+        if agent not in installed:
+            installed[agent] = find(get_adapter(agent).binary) is not None
+        return installed[agent]
+
+    return [
+        account
+        for account in accounts
+        if not account.disabled
+        and account.slot not in skip
+        and (allowed is None or account.agent in allowed)
+        and on_path(account.agent)
+        and core.signed_in(account)
+    ]
+
+
+def choose_any(
+    *,
+    exclude: Iterable[int] = (),
+    agents: Iterable[str] | None = None,
+    live: bool = False,
+    least_bad: bool = True,
+    fetch: Fetch | None = None,
+    which: Callable[[str], str | None] | None = None,
+) -> AgentPick:
+    """The best account of ANY agent: the first in the one priority order with headroom.
+
+    Candidates are :func:`usable_accounts` (``exclude`` a hand-over's account, ``agents``
+    the agents allowed); the rule is :func:`headroom_choice`'s, with ``[accounts]
+    switch_at``: the first under the line, else the least used when ``least_bad``, read
+    in one round for every candidate, now when ``live`` (a hand-over) or through the
+    one-minute cache. No role, project or flag rung: what pins an agent or an account
+    is the caller's. Both ``None`` when nothing is usable or nothing could be read.
+    """
+    accounts, note = _read_arranged()
+    if note is not None:
+        return AgentPick(None, None, (note,))
+    candidates = usable_accounts(accounts, exclude=exclude, agents=agents, which=which)
+    if not candidates:
+        return AgentPick(None, None, (_NOTHING_TO_PICK,))
+    picked, notes = headroom_choice(
+        candidates,
+        switch_at=accounts_settings().switch_at,
+        fetch=fetch,
+        least_bad=least_bad,
+        max_age=None if live else PICK_MAX_AGE_SECONDS,
+    )
+    if picked is None:
+        return AgentPick(None, None, tuple(notes))
+    return AgentPick(picked.agent, picked, tuple(notes))
+
+
+def account_agent(ref: str | None, *, role: str | None = None) -> str | None:
+    """The agent of the account ``ref`` names (a launch's ``--account``), else of the one
+    ``role``'s binding names: naming an account names its agent, so a launch that nothing
+    else pins runs it there (``services.agent_launch.resolve``). ``None`` when neither names
+    an account that exists: :func:`choose` says why, as it always did. Never raises, and
+    makes no store on a machine that has none."""
+    try:
+        wanted = ref if ref is not None else _role_binding_ref(role)[0]
+        if not wanted:
+            return None
+        accounts = _read_arranged()[0] if paths.db_path().exists() else core.list_accounts()
+        return _resolve_in(accounts, wanted).agent
+    except Exception:
+        return None
+
+
+def agent_pick(
+    *, fetch: Fetch | None = None, which: Callable[[str], str | None] | None = None
+) -> AgentPick:
+    """The agent a launch that nothing pins runs: the agent of the best usable account.
+
+    A launch's agent rung (``services.agent_launch.resolve``, below ``--agent``, a role's
+    binding, a binary and the project's default). Usable accounts of one agent alone
+    decide it with no usage read, and leave the account to :func:`choose`. Across agents,
+    with ``[accounts] pick = "headroom"``, :func:`choose_any`'s rule picks the account too,
+    which :func:`choose` then takes (one usage read for both); with nothing measured, or
+    with ``pick = "default"``, the first usable account's agent. ``agent=None`` when no
+    account is usable, the registry cannot be read, or this machine has no store yet:
+    the launch's fallbacks decide (the user's coding agent under App settings).
+    """
+    if not paths.db_path().exists():
+        return AgentPick(None, None)
+    accounts, note = _read_arranged()
+    if note is not None:
+        return AgentPick(None, None, (note,))
+    candidates = usable_accounts(accounts, which=which)
+    if not candidates:
+        return AgentPick(None, None)
+    first = candidates[0]
+    if len({account.agent for account in candidates}) == 1:
+        return AgentPick(first.agent, None)
+    settings = accounts_settings()
+    if settings.pick != "headroom":
+        return AgentPick(first.agent, None, (f"{core.label(first)} is first in the order",))
+    picked, notes = headroom_choice(
+        candidates, switch_at=settings.switch_at, fetch=fetch, max_age=PICK_MAX_AGE_SECONDS
+    )
+    if picked is None:
+        return AgentPick(first.agent, None, (*notes, f"{core.label(first)} is first in the order"))
+    return AgentPick(picked.agent, picked, tuple(notes))
 
 
 def choose_for_handover(

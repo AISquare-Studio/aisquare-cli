@@ -166,7 +166,9 @@ def _manager_env(selected: ResolvedAgent) -> tuple[dict[str, str], Path]:
     env = harness._probe_env()
     env.update(selected.profile.env)
     try:
-        choice = accounts_service.choose(role="manager", agent=selected.adapter.id)
+        choice = accounts_service.choose(
+            role="manager", agent=selected.adapter.id, pick=selected.pick
+        )
     except accounts_service.NoSuchAccount as exc:  # WrongAgent too
         raise EngineUnavailable(f"manager engine: {exc}") from None
     if choice.account is not None:

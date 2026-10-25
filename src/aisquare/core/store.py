@@ -1204,6 +1204,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS agent_account_default ON agent_account (agent)
 # the script is empty: it is in :data:`_PRODUCTS`; a row from before it keeps NULL, which
 # reads as its session and week columns say, as every row did.
 _SCHEMA_V40 = ""
+# v41: ONE priority order over every agent's accounts (owner, PR #113): a rank per slot,
+# whatever agent the slot is (``slot`` alone is the key, as v39 says). The per-agent
+# ``position`` columns stay, and are kept in step with it, for the builds before this step
+# that share the store. A table of its own, not a column on the two registries: an older
+# build reconciles those and would never write a rank for the slots it adds, while a slot
+# with no rank here is simply ranked last by the service, which seeds the table on its
+# first read (``services.claude_accounts._ranked``: the default agent's accounts first,
+# so nothing changes on upgrade) since the default agent is the user's config, not the
+# store's.
+_SCHEMA_V41 = """
+CREATE TABLE IF NOT EXISTS account_rank (
+    slot  INTEGER PRIMARY KEY,
+    rank  INTEGER NOT NULL
+);
+"""
 # Ordered migrations; index i upgrades the db from user_version i to i+1.
 _MIGRATIONS = (
     _SCHEMA_V1,
@@ -1246,6 +1261,7 @@ _MIGRATIONS = (
     _SCHEMA_V38,
     _SCHEMA_V39,
     _SCHEMA_V40,
+    _SCHEMA_V41,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -1318,6 +1334,7 @@ _PRODUCTS: dict[int, _Products] = {
     ),
     38: _Products(("agent_account", "agent_account_alias", "agent_account_default")),
     39: _Products(columns=(("claude_usage", "windows", "TEXT"),)),
+    40: _Products(("account_rank",)),
 }
 
 _PROJECT_COLUMNS = (
@@ -1727,6 +1744,9 @@ class ContextStore(Protocol):
     def set_agent_account_alias(self, agent: str, slot: int, alias: str | None) -> None: ...
     def set_agent_account_disabled(self, agent: str, slot: int, disabled: bool) -> None: ...
     def order_agent_accounts(self, agent: str, slots: Sequence[int]) -> None: ...
+    # One priority order over every agent's slots (v41).
+    def account_ranks(self) -> dict[int, int]: ...
+    def rank_accounts(self, slots: Sequence[int]) -> None: ...
     # Usage readings (v16, #146): the history behind "how fast is this window filling".
     def add_usage_sample(self, sample: UsageSample) -> None: ...
     def usage_samples(self, slot: int, *, since: datetime) -> list[UsageSample]: ...
@@ -5387,6 +5407,20 @@ class SqliteStore:
                 "UPDATE agent_account SET position = ? WHERE agent = ? AND slot = ?",
                 (position, agent, slot),
             )
+        self._commit()
+
+    # --- one priority order over every agent's slots (v41) ----------------------------------
+
+    def account_ranks(self) -> dict[int, int]:
+        """Each ranked slot's place in the one order, 1 first."""
+        rows = self._conn.execute("SELECT slot, rank FROM account_rank").fetchall()
+        return {int(row[0]): int(row[1]) for row in rows}
+
+    def rank_accounts(self, slots: Sequence[int]) -> None:
+        """The whole order: ``slots`` ranked 1..n (first mention wins), every other row dropped."""
+        self._conn.execute("DELETE FROM account_rank")
+        for rank, slot in enumerate(dict.fromkeys(slots), start=1):
+            self._conn.execute("INSERT INTO account_rank (slot, rank) VALUES (?, ?)", (slot, rank))
         self._commit()
 
     # --- usage readings (v16, #146) ------------------------------------------------------------

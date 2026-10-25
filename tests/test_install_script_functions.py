@@ -1251,7 +1251,7 @@ def test_doctor_amber_is_sorted_so_the_comparison_is_about_the_set(tmp_path: Pat
         body=f"case \"$1\" in --json) printf '%s' '{payload}' ;; esac\nexit 0",
     )
     result = sh("doctor_amber; echo", path=f"{cli}:{base_path(tmp_path)}")
-    assert result.stdout.strip() == "brain snapshot", (
+    assert result.stdout.strip().split("\n") == ["brain", "snapshot"], (
         f"doctor_amber returned {result.stdout.strip()!r} — it must sort, or the "
         f"short-circuit breaks on a reordering\n{result.stderr}"
     )
@@ -1550,10 +1550,10 @@ def test_a_usage_back_off_at_install_time_is_expected_not_amber(tmp_path: Path) 
     2, so a transient rate limit turned a good install amber. It says nothing about the
     install: expected, explained, exit 0. Another amber row still exits 2 (control)."""
     result = _summary_then_handoff(
-        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain claude-account-backoff'", node=True
+        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain\nclaude-account-backoff'", node=True
     )
     control = _summary_then_handoff(
-        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain claude-accounts'", node=True
+        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain\nclaude-accounts'", node=True
     )
 
     assert "UNEXPECTED=0" in result.stdout and result.returncode == 0, result.stdout
@@ -1572,8 +1572,8 @@ def test_a_usage_back_off_at_install_time_is_expected_not_amber(tmp_path: Path) 
         ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain; DRY_RUN=1", False, 0),
         # A Node that is too old, and a packer with no Node, turn the repomix row
         # amber: counted once, as repomix, never twice.
-        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain repomix'", True, 1),
-        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain repomix'", False, 1),
+        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain\nrepomix'", True, 1),
+        ("WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain\nrepomix'", False, 1),
     ],
     ids=["node-installed", "no-system-deps", "dry-run", "node-too-old", "packer-without-node"],
 )
@@ -1596,7 +1596,7 @@ def test_a_missing_node_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None:
     """
     alone = _summary_then_handoff(tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER=brain", node=False)
     both = _summary_then_handoff(
-        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain python'", node=False
+        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain\npython'", node=False
     )
 
     assert "node — Node 22+ did not install" in alone.stdout
@@ -1605,6 +1605,40 @@ def test_a_missing_node_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None:
     pointer = both.stdout.index("the full detail and a fix for each: aisquare doctor")
     assert both.stdout.index("  python\n") < pointer < both.stdout.index("node — Node 22+")
     assert both.returncode == 2
+
+
+_SPACED_ROWS = json.dumps(
+    [
+        {"name": "brain", "status": "warn", "detail": "x", "fix": "y"},
+        {"name": "manager board context", "status": "warn", "detail": "x", "fix": "y"},
+        {"name": "python", "status": "warn", "detail": "x", "fix": "y"},
+        {"name": "home", "status": "ok", "detail": "x", "fix": None},
+    ]
+)
+
+
+def test_a_row_name_with_spaces_is_one_row(tmp_path: Path) -> None:
+    """Review of #401, n16: the amber names were word-split, so P1's `manager board context`
+    row counted as three unexpected rows and was listed in pieces. One name per line now."""
+    cli = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body=f"case \"$1\" in --json) printf '%s' '{_SPACED_ROWS}' ;; esac\nexit 0",
+    )
+    counted = sh("DRY_RUN=0; run_doctor", path=f"{cli}:{base_path(tmp_path)}")
+    result = _summary_then_handoff(
+        tmp_path,
+        'WANT_SYSTEM_DEPS=1; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER=$(doctor_amber "$DOCTOR_RAW")',
+        node=True,
+        env={"PAYLOAD": _SPACED_ROWS},
+    )
+
+    assert "doctor: 4 checks, 3 not ok" in counted.stdout, counted.stdout + counted.stderr
+    assert "UNEXPECTED=2" in result.stdout, result.stdout
+    assert "  manager board context\n  python\n" in result.stdout, result.stdout
+    assert "  manager\n" not in result.stdout and "  board\n" not in result.stdout
+    assert result.returncode == 2
 
 
 def test_exit_2_is_documented_for_a_node_that_did_not_install(tmp_path: Path) -> None:
@@ -1965,7 +1999,7 @@ def test_an_amber_claude_code_row_is_unexpected_and_printed_in_the_doctors_words
 
     result = _summary_then_handoff(
         tmp_path,
-        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain\nclaude-code'",
         node=False,
         env={"PAYLOAD": json.dumps([row])},
     )
@@ -2066,7 +2100,7 @@ def test_a_home_with_a_non_ascii_name_is_printed_exactly(
 
     result = _summary_then_handoff(
         tmp_path,
-        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain\nclaude-code'",
         node=False,
         env={"PAYLOAD": json.dumps([row])},
     )
@@ -2112,7 +2146,7 @@ def test_a_no_agent_run_expects_claude_code_whatever_its_row_says(
 
     result = _summary_then_handoff(
         tmp_path,
-        "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain\nclaude-code'",
         node=False,
         env={"PAYLOAD": json.dumps([row])},
     )
@@ -2141,7 +2175,7 @@ def test_a_no_agent_row_whose_detail_cannot_be_read_says_where_to_read_it(
 
     result = _summary_then_handoff(
         tmp_path,
-        "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain\nclaude-code'",
         node=False,
         env={"PAYLOAD": json.dumps([row])},
     )
@@ -2252,7 +2286,7 @@ def test_the_snapshot_advice_is_only_for_a_project_with_no_snapshot(
 
     result = _summary_then_handoff(
         tmp_path,
-        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain snapshot'",
+        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain\nsnapshot'",
         node=False,
         env={"PAYLOAD": json.dumps([check.model_dump(mode="json")])},
     )

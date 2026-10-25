@@ -9,6 +9,7 @@ PyPI.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -396,12 +397,17 @@ def test_a_reopen_long_after_the_press_restarts_nothing(
 
 
 class _Fleet:
-    """``status_of`` per label, and every ``restart`` asked: the fleet the reopen finds."""
+    """``status_of`` per label, and every ``restart`` asked: the fleet the reopen finds.
+
+    ``restart`` runs as the real one does: its refusals, then the caller's ``before_stop``,
+    then the restart. ``meanwhile`` runs for a label just before that check: what lands
+    between the reopen's look at a row and its restart."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, states: dict[str, tuple[str, str]]) -> None:
         self.states = states
         self.restarted: list[tuple[str, str | None]] = []
         self.refuse: dict[str, str] = {}
+        self.meanwhile: dict[str, Callable[[], None]] = {}
         monkeypatch.setattr(fleet_service, "status_of", self.status_of)
         monkeypatch.setattr(fleet_service, "restart", self.restart)
 
@@ -412,6 +418,11 @@ class _Fleet:
     def restart(self, project: ProjectInfo, label: str, **kwargs: Any) -> object:
         if label in self.refuse:
             raise fleet_service.FleetError(self.refuse[label])
+        if label in self.meanwhile:
+            self.meanwhile[label]()
+        before_stop = kwargs.get("before_stop")
+        if before_stop is not None:
+            before_stop()
         self.restarted.append((label, kwargs.get("agent_id")))
         return object()
 
@@ -487,6 +498,43 @@ def test_a_restart_that_fails_is_named_and_its_row_left(
 def _end(agent: FleetAgent, *, ended_by: str, exit_status: int | None) -> None:
     with store_session() as store:
         store.end_fleet_agent(agent.id, exit_status=exit_status, ended_by=ended_by)  # type: ignore[arg-type]
+
+
+def test_a_fleet_stop_landing_before_the_restart_is_left_not_undone(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #301, m1: the reopen judged a row, then restarted it with no check of its
+    own inside the restart, so a ``fleet stop`` landing between was undone. Judged again as
+    the restart's ``before_stop``, as Restart all does (``fleet.bulk``), it is left."""
+    agents = [_agent(project, "coder-1", "%1")]
+    fleet = _Fleet(monkeypatch, {"coder-1": ("lost", "pane gone")})
+    fleet.meanwhile["coder-1"] = lambda: _end(agents[0], ended_by="stopped", exit_status=None)
+    updates.record_press(agents)
+
+    outcome = updates.reattach_after_update()
+
+    assert fleet.restarted == [], "the stop stands"
+    assert outcome is not None
+    assert outcome.left == (("coder-1", fleet_service.STOPPED_ON_PURPOSE),)
+    assert outcome.restarted == () and outcome.failed == ()
+
+
+def test_a_pane_that_answers_again_before_the_restart_is_kept_not_handed_over(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #301, m1: a pane that answers again between the reopen's look and its restart
+    was handed over, a working agent stopped and started again. Read again inside the
+    restart, it is kept."""
+    agents = [_agent(project, "coder-1", "%1")]
+    fleet = _Fleet(monkeypatch, {"coder-1": ("lost", "pane gone")})
+    fleet.meanwhile["coder-1"] = lambda: fleet.states.update({"coder-1": ("working", "")})
+    updates.record_press(agents)
+
+    outcome = updates.reattach_after_update()
+
+    assert fleet.restarted == [], "nothing stopped"
+    assert outcome is not None and outcome.kept == ("coder-1",)
+    assert outcome.restarted == () and outcome.left == () and outcome.failed == ()
 
 
 @pytest.mark.parametrize(

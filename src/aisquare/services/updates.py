@@ -29,14 +29,14 @@ start reads no record.
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from aisquare.core.config import load_config
 from aisquare.core.store import store_session
 from aisquare.core.version import __version__
-from aisquare.models import FleetAgent
+from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import install_route
 from aisquare.services import lifecycle as lifecycle_service
@@ -347,6 +347,38 @@ class Reattached:
         return f"{head} — {', '.join(parts)}"
 
 
+class _RunningAgain(Exception):
+    """The agent's pane answers again, read as its restart was about to stop anything."""
+
+
+class _Leave(Exception):
+    """A restart leaves the agent after all (``fleet.restart_leaves``), read as its restart was
+    about to stop anything; the reason is the exception's text."""
+
+
+def _still_down(project: ProjectInfo, status: FleetAgentStatus) -> Callable[[], None]:
+    """The check ``fleet.restart`` makes as its ``before_stop`` for one reattach, as Restart all
+    passes its own (``fleet.bulk``): the row read again after the restart's refusals and
+    before anything is stopped. One that answers again is :class:`_RunningAgain`, never
+    handed over; one a restart leaves now, a ``fleet stop`` meanwhile among them, is
+    :class:`_Leave`."""
+
+    def check() -> None:
+        with store_session() as store:
+            row = store.get_fleet_agent(status.agent.id)
+        if (
+            row is not None
+            and row.ended_at is None
+            and fleet_service.status_of(row).state in fleet_service.PROCESS_STATES
+        ):
+            raise _RunningAgain
+        leave = fleet_service.restart_leaves(project, status)
+        if leave is not None:
+            raise _Leave(leave)
+
+    return check
+
+
 def reattach_agents(press: Press) -> Reattached:
     """Each agent ``press`` recorded: still running, or restarted on its session.
 
@@ -358,6 +390,11 @@ def reattach_agents(press: Press) -> Reattached:
     does it, pinned to the recorded row (``agent_id``): ``fleet.restart`` resumes the
     session when its transcript is on disk. A restart that is refused, or a row that is
     gone, is named and its row left as the listing shows it.
+
+    Each is judged again inside its restart, after the restart's refusals and before it stops
+    anything (:func:`_still_down`): judged only before it, a ``fleet stop`` landing between
+    was undone, and a pane that answered again by then was stopped and restarted (review of
+    #301, m1). Then the one stopped meanwhile is left, and the one running again is kept.
     """
     kept: list[str] = []
     restarted: list[tuple[str, str]] = []
@@ -378,7 +415,18 @@ def reattach_agents(press: Press) -> Reattached:
             project = fleet_service.project_of(agent)
             leave = fleet_service.restart_leaves(project, status)
             if leave is None:
-                fleet_service.restart(project, agent.label, agent_id=agent.id)
+                fleet_service.restart(
+                    project,
+                    agent.label,
+                    agent_id=agent.id,
+                    before_stop=_still_down(project, status),
+                )
+        except _RunningAgain:
+            kept.append(agent.label)
+            continue
+        except _Leave as exc:
+            left.append((agent.label, str(exc)))
+            continue
         except Exception as exc:  # a refusal is an answer to name, never a crash
             failed.append((agent.label, f"{why}; {exc}"))
         else:

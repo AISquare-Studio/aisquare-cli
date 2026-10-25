@@ -738,7 +738,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deny was the reviewer's default `extra_args`, and a list replaces whole, so setting
   them launched the reviewer with Edit, Write and NotebookEdit, and `aisquare launch
   reviewer` and `team spawn reviewer` denied it nothing at all.
-- The store migrates to schema v37 on first open, from 0.8.2's v32, in five steps: v37
+- The store migrates to schema v38 on first open, from 0.8.2's v32, in six steps: v38
+  adds a group's parent manager, routing rules and cap (`project_group.parent_project_id`,
+  `route`, `max_agents`) and a task's origin (`team_task.origin_task_id`,
+  `origin_project_id`), for a parent manager over a group (above; a store the pre-release
+  P2 train stamped v36 with them reaches v38 through the presence pass). v37
   adds `team_event.actor` and `team_event.meta`, who caused a board event and its
   details (above; a store the pre-release P1 train stamped v35 with them reaches v37
   through the presence pass). v36 adds the first message's three columns (under Fixed; a store a pre-release build
@@ -935,7 +939,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `prompt_delivery` and `prompt_acked`. A message still pending past that wait at an
   idle input box reads `attention` ("first prompt not taken", with the `fleet tell`
   and `fleet restart` that take it on), and the board gets one `prompt_unsent`, which
-  wakes the manager. `aisquare doctor` gains a `fleet-delivery` row: the last week's first
+  wakes the manager. One held at Claude Code's first-run Security notes, which a
+  command-line message waits behind, does too, its `attention` saying to press Enter in
+  its window: it read `waiting` with nothing on the board, for good, once its
+  SessionStart had fired. `aisquare doctor` gains a `fleet-delivery` row: the last week's first
   messages acknowledged, N of M, and how long agents took to start their first turn.
   The store migrates to schema v36, which adds three nullable columns:
   `team_session.prompted_at`, `fleet_agent.first_prompt` and

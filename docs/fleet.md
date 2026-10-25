@@ -400,7 +400,10 @@ with, a fresh hand-off, the usage-limit hand-over's — either starts a turn, or
   agent at an idle input box, is not going to be taken: the agent reads
   `attention` — "first prompt not taken", with the `fleet tell` and `fleet
   restart` commands that take it on, each naming the project — and the board
-  gets one `prompt_unsent`, which wakes the manager.
+  gets one `prompt_unsent`, which wakes the manager. An agent held at Claude Code's
+  first-run Security notes past that wait is not going to take it either: it reads
+  `attention` — "Claude Code's first-run Security notes screen — press Enter in its
+  window" — with the same one `prompt_unsent`, since a `fleet tell` typed there is lost.
   `aisquare doctor`'s `fleet-delivery` row counts the last week's: acknowledged N
   of M, and how long the agents took to start their first turn.
 
@@ -2677,6 +2680,13 @@ still in the box goes with an Enter there; an empty box takes the message again
 with `aisquare fleet tell <label> "…"`, or `aisquare fleet restart <label>`
 starts it over. Either one clears the `attention`. See [the first
 message](#the-first-message).
+
+**An agent reads `attention`: "Claude Code's first-run Security notes screen —
+press Enter in its window".** A new account's first run shows those notes, and a
+first message on the command line waits behind them. Press Enter in its window
+(`aisquare fleet attach`); the notes' only key is Enter. If its first turn then
+starts, the `attention` clears; if it sits at an empty box instead, it reads
+"first prompt not taken", above.
 
 **`asq` prints usage instead of opening the UI.** It is not at an interactive
 terminal: stdin or stdout is a pipe, or `TERM` is empty or `dumb`. That is

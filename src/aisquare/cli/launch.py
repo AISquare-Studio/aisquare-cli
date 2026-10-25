@@ -44,7 +44,7 @@ from rich.text import Text
 from aisquare.cli.common import fail
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core import experimental, harness, orchestrator, paths, personas
-from aisquare.core.config import load_config
+from aisquare.core.config import FleetSettings, load_config
 from aisquare.core.console import stderr_console
 from aisquare.core.store import ContextStore, is_locked_error, store_session
 from aisquare.services import claude_accounts as claude_accounts_service
@@ -235,6 +235,18 @@ def _persona_system_prompt(
 def _exec(binary: str, argv: list[str], env: dict[str, str]) -> None:
     """Replace this process with the agent (indirection so tests can intercept)."""
     os.execve(binary, argv, env)
+
+
+def _fleet() -> FleetSettings:
+    """The ``[fleet]`` settings the role's tool policy reads; the built-in ones, said, when the
+    config cannot be read. A role's safety list is code, so it holds either way."""
+    try:
+        return load_config().fleet
+    except Exception as exc:  # the same fail-open bar as tracing's config read
+        stderr_console().print(
+            f"tool policy: config unreadable ({exc}) — the built-in deny list", style="dim"
+        )
+        return FleetSettings()
 
 
 def _await_fleet_row(*, say: bool = True) -> None:
@@ -543,8 +555,16 @@ def launch(
     defaults = harness.role_defaults(
         role, binary=resolution.binary, args=[*profile.args, *ctx.args]
     )
-    role_args = defaults.args
-    for note in defaults.notes:
+    # The role's tools and skill listing (`harness.tool_policy`), here as in `team spawn`
+    # and every fleet window (whose `extra_args` arrive in `ctx.args`): its safety list
+    # holds whatever the config says, and every `--disallowedTools` the binding or this
+    # line carries is merged into ONE token beside the role's own flags.
+    policy = harness.tool_policy(
+        role, binary=resolution.binary, args=[*profile.args, *ctx.args], fleet=_fleet()
+    )
+    role_args = [*defaults.args, *policy.args]
+    binding_args, agent_args = policy.strip(profile.args), policy.strip(ctx.args)
+    for note in [*defaults.notes, *policy.notes]:
         # A withheld flag is otherwise invisible: the launch succeeds and the
         # role degrades silently (a ui-tester with no browser reopens every UI
         # task). Same surface and style as the tracing notes below.
@@ -577,7 +597,7 @@ def launch(
             )
         # The EFFECTIVE argument list, not just what this invocation typed.
         # `argv` below is
-        # `[binary, *profile.args, *role_args, *ctx.args, *pinned_id]`, so a
+        # `[binary, *binding_args, *role_args, *agent_args, *pinned_id]`, so a
         # role bound with `--session-id`, `--resume` or `--continue` via
         # `team bind --arg` — or handed one by its own `RoleProfile.default_args`
         # — carries it here without appearing in `ctx.args`.
@@ -589,7 +609,7 @@ def launch(
         # board row and one Run. `team spawn` already passes its profile args
         # (cli/team.py), so this path was the asymmetric one.
         identity = explainability_service.plan_session_identity(
-            resolution.binary, [*profile.args, *role_args, *ctx.args]
+            resolution.binary, [*binding_args, *role_args, *agent_args]
         )
         # The ACTIVE target's overrides folded onto the settings the wiring
         # reads. `explainability enable --target prod --proxy-url …` writes
@@ -647,12 +667,12 @@ def launch(
     # resolve inside cannot fail here.
     persona_args = (
         _persona_system_prompt(
-            persona, persona_root, resolution.binary, [*profile.args, *role_args, *ctx.args]
+            persona, persona_root, resolution.binary, [*binding_args, *role_args, *agent_args]
         )
         if persona is not None
         else []
     )
-    argv = [resolution.binary, *profile.args, *role_args, *persona_args, *ctx.args, *pinned_id]
+    argv = [resolution.binary, *binding_args, *role_args, *persona_args, *agent_args, *pinned_id]
     # The first message (P0-W1a, #122), last: Claude Code's positional prompt, after `--`.
     # Read from a file and the file deleted, so the window's command, which tmux carries and
     # the row records, never holds the text, and a replay of that command finds no file and

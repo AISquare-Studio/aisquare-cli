@@ -64,8 +64,11 @@ def _persona(root: Path, name: str, body: str) -> None:
 
 
 def _system_prompt(spy: dict[str, Any]) -> str:
-    assert spy["argv"][:2] == ["claude", launch_cli.SYSTEM_PROMPT_FLAG], spy["argv"]
-    return Path(spy["argv"][2]).read_text(encoding="utf-8")
+    """The appended system-prompt file's text. Found by its flag, not by position: the
+    role's tool policy (P1-WS1) puts its own flags in the argv too."""
+    argv = spy["argv"]
+    assert argv[0] == "claude" and launch_cli.SYSTEM_PROMPT_FLAG in argv, argv
+    return Path(argv[argv.index(launch_cli.SYSTEM_PROMPT_FLAG) + 1]).read_text(encoding="utf-8")
 
 
 def test_a_persona_only_the_repository_has_is_appended_from_its_layer(
@@ -105,7 +108,7 @@ def test_a_persona_gone_after_the_check_costs_the_file_never_the_launch(
     result = runner.invoke(app, ["launch", "coder", "--persona", "tempo"])
 
     assert result.exit_code == 0, result.output
-    assert spy["argv"] == ["claude"]
+    assert spy["argv"][0] == "claude" and launch_cli.SYSTEM_PROMPT_FLAG not in spy["argv"]
     assert spy["env"]["AISQUARE_PERSONA"] == "tempo", "the hook channel still asks for it"
     said = " ".join((result.output + (result.stderr if hasattr(result, "stderr") else "")).split())
     assert "persona tempo:" in said and "the session-start hook alone" in said

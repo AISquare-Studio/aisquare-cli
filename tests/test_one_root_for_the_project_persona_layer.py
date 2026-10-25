@@ -221,8 +221,10 @@ def test_launch_asks_the_helper(
     result = runner.invoke(app, ["launch", "coder", "--persona", "solo"])
 
     assert result.exit_code == 0, result.output
-    assert captured["argv"][1] == launch_cli.SYSTEM_PROMPT_FLAG
-    assert "You are solo." in Path(captured["argv"][2]).read_text(encoding="utf-8")
+    argv = captured["argv"]
+    # Anywhere on the line: the role's tool policy (P1 WS-1) comes before it.
+    flag = argv.index(launch_cli.SYSTEM_PROMPT_FLAG)
+    assert "You are solo." in Path(argv[flag + 1]).read_text(encoding="utf-8")
 
 
 def test_spawn_attach_and_a_replay_ask_the_helper(elsewhere: Path, project: ProjectInfo) -> None:

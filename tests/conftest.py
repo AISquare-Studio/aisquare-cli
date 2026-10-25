@@ -212,6 +212,9 @@ AMBIENT_ENV_VARS = (
     "AISQUARE_ROLE",
     # Exported by `launch --persona`; a fleet agent running the suite has one.
     "AISQUARE_PERSONA",
+    # Exported on every fleet window since P1 WS-2 (#279): a reviewer running the suite
+    # reads the board as `none`, and every delta test read nothing.
+    "AISQUARE_BOARD_CONTEXT",
     # Read off the ambient env by `services/mcp_server.py` to attribute remote
     # calls — same family as the two above, and missed for the same reason.
     "AISQUARE_SERVE_CLIENT",

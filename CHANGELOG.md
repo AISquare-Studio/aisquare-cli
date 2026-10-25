@@ -583,8 +583,9 @@ fleet still running, and every release now carries its own installer.**
   `(this shell's)`, which read as if the spawn skipped the accounts while it ran
   on rank 1. It now names the account and the rung that picks it — `(default:
   rank 1 · work)`, `(default: headroom · work)`, `(default: bound to tester ·
-  account 2)`, `(default: project default · work)` — for the role in the form,
-  read again when the role changes; the captain's dialog says the captain's. It
+  account 2)`, `(default: project default · work)` — for the role in the form
+  and a `--model` in its Extra agent args (the family a headroom pick reads),
+  read again when either changes; the captain's dialog says the captain's. It
   reads `(this shell's)` only when no account is signed in, and `(default:
   <role>'s CLAUDE_CONFIG_DIR)` for a role bound to a directory by hand (#9).
   What is sent is unchanged: no `--account`, so the spawn asks the same ladder

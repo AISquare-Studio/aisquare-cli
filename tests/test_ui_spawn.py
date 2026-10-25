@@ -26,7 +26,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable, Coroutine, Iterator, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -888,7 +888,9 @@ def test_the_label_follows_the_role_and_says_which_rung_picked(git_project: Proj
     asked: list[tuple[str, str]] = []
     work = _account(3, alias="work", position=1)
 
-    def defaults(project: ProjectInfo, role: str) -> accounts_service.LaunchDefault:
+    def defaults(
+        project: ProjectInfo, role: str, args: list[str]
+    ) -> accounts_service.LaunchDefault:
         asked.append((project.id, role))
         if role == "reviewer":
             raise accounts_service.NoSuchAccount("the role binding for 'reviewer' names 9")
@@ -918,6 +920,58 @@ def test_the_label_follows_the_role_and_says_which_rung_picked(git_project: Proj
     assert {project for project, _ in asked} == {git_project.id}
 
 
+def test_a_model_in_the_extra_args_is_the_family_the_label_picks_by(
+    git_project: ProjectInfo, fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #424: the label read the model family from the role's args alone, where
+    ``fleet.spawn`` adds the form's. With work (rank 1) over the line in its Opus week and
+    spare with room, a spawn with ``--model opus`` in Extra agent args ran on spare under a
+    label naming work. The form's args are read too, by the real ladder here, and read
+    again when they name another model, not on every key typed."""
+    from aisquare.core.config import AccountsSettings
+    from tests.test_claude_accounts import NOW as ACCOUNTS_NOW
+    from tests.test_usage_aware_accounts import _payload, _slot, _Usage
+
+    config = load_config()
+    config.accounts = AccountsSettings(pick="headroom")
+    save_config(config)
+    _slot("two@example.com", "tok-two")
+    _slot("three@example.com", "tok-three")
+    accounts_service.set_alias("2", "work")
+    accounts_service.set_alias("3", "spare")
+    out_of_opus = _payload(10.0, week=20.0)
+    out_of_opus["seven_day_opus"] = {
+        "utilization": 99.0,
+        "resets_at": (ACCOUNTS_NOW + timedelta(days=2)).isoformat(),
+    }
+    endpoint = _Usage({"tok-two": out_of_opus, "tok-three": _payload(10.0, week=20.0)})
+    monkeypatch.setattr(accounts_service, "_http_get", endpoint)
+    reads: list[list[str]] = []
+
+    def counted(project: ProjectInfo, role: str, args: list[str]) -> accounts_service.LaunchDefault:
+        reads.append(list(args))
+        return spawn_module.read_launch_default(project, role, args)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        field = dialog.query_one("#spawn-args", Input)
+        seen: list[str] = []
+        for value in ("--model sonnet", "--model sonnet --verbose", "--model opus"):
+            field.value = value
+            await settle(pilot)
+            seen.append(account_field(dialog)[0])  # what the closed field shows
+        return seen
+
+    seen = drive(git_project, scenario, defaults=counted)
+    assert seen == [
+        "(default: headroom · work)",
+        "(default: headroom · work)",  # another flag, the same model: not read again
+        "(default: headroom · spare)",
+    ]
+    assert reads == [[], ["--model", "sonnet"], ["--model", "opus"]]
+    spawned = accounts_service.choose(None, role="coder", project=git_project, family="opus")
+    assert spawned.account is not None and spawned.account.slot == 3, "what the spawn runs on"
+
+
 @pytest.mark.needs_captain
 def test_the_captains_dialog_says_what_the_captain_runs_on(spawns: SpawnRecorder) -> None:
     """The captain starts through ``fleet.spawn`` on the home board as role ``captain``
@@ -926,7 +980,9 @@ def test_the_captains_dialog_says_what_the_captain_runs_on(spawns: SpawnRecorder
     home = captain_state.home_project()
     asked: list[tuple[str, str]] = []
 
-    def defaults(project: ProjectInfo, role: str) -> accounts_service.LaunchDefault:
+    def defaults(
+        project: ProjectInfo, role: str, args: list[str]
+    ) -> accounts_service.LaunchDefault:
         asked.append((project.id, role))
         work = _account(2, alias="work", position=1)
         return accounts_service.LaunchDefault(accounts_service.AccountChoice(work, "headroom"))

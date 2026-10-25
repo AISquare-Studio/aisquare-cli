@@ -138,8 +138,9 @@ tmux can see and its row says so (`no hooks`).
    spawn's own default, and says what that runs on and why: `(default: rank 1 ·
    work)`, `(default: headroom · work)`, `(default: bound to tester · account
    2)` or `(default: project default · work)`, what `accounts order`, `team
-   bind` and `accounts default --project` decide for the role picked (read again
-   when the role changes; the captain's dialog the same for the captain). It
+   bind` and `accounts default --project` decide for the role picked and a
+   `--model` in Extra agent args (read again when either changes; the captain's
+   dialog the same for the captain). It
    reads `(this shell's)` only when no account is signed in, so the spawn leaves
    this shell's `CLAUDE_CONFIG_DIR` as it is. A headroom pick is shown from the
    readings the status line already has; the spawn picks again when it runs.

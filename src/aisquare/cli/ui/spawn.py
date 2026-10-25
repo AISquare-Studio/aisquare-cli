@@ -89,7 +89,7 @@ from __future__ import annotations
 import dataclasses
 import random
 import shlex
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, ClassVar
 
 from rich.text import Text
@@ -235,10 +235,15 @@ def task_choice(task: TeamTask) -> str:
     )
 
 
-def read_launch_default(project: ProjectInfo, role: str) -> accounts_service.LaunchDefault:
+def read_launch_default(
+    project: ProjectInfo, role: str, agent_args: Sequence[str] = ()
+) -> accounts_service.LaunchDefault:
     """What a spawn of ``role`` in ``project`` with no account runs on: the service's
-    ``launch_default``, with the model family ``fleet.spawn`` passes the ladder (#277)."""
-    family = harness.launch_family(role, fleet_service.role_settings(role).extra_args)
+    ``launch_default``, with the model family ``fleet.spawn`` passes the ladder (#277), from
+    the role's configured args and then the form's ``agent_args`` (a ``--model opus`` typed
+    into *Extra agent args* reads that family's week; review of #424)."""
+    args = [*fleet_service.role_settings(role).extra_args, *agent_args]
+    family = harness.launch_family(role, args)
     return accounts_service.launch_default(role, project=project, family=family)
 
 
@@ -433,13 +438,15 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         binary: str | None = None,
         account: str | None = None,
         accounts: Callable[[], AccountsOverview] | None = accounts_service.overview,
-        defaults: Callable[[ProjectInfo, str], accounts_service.LaunchDefault]
+        defaults: Callable[[ProjectInfo, str, list[str]], accounts_service.LaunchDefault]
         | None = read_launch_default,
     ) -> None:
         super().__init__()
         self.project = project
         self._accounts = accounts
         self._launch_default = defaults
+        self._default_model: str | None = None
+        """The ``--model`` of the args the no-account option was last read with."""
         self._default_label = DEFAULT_PENDING
         """The no-account option's label: what the spawn runs on (:func:`default_account_label`)."""
         self._fleet = fleet_service.settings()
@@ -743,14 +750,17 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self.query_one("#spawn-role", Select).focus()
 
     def _read_default(self) -> None:
-        """Read what the no-account option runs on for the role the form holds now, off the
-        UI thread: the registry, the config and, for a headroom pick, the usage cache."""
+        """Read what the no-account option runs on for the role and the extra args the form
+        holds now, off the UI thread: the registry, the config and, for a headroom pick, the
+        usage cache."""
         defaults = self._launch_default
         if defaults is None:
             return
-        project, role = self.project, self._role
+        args = self._form_args()
+        self._default_model = harness.model_arg(args)
+        project, role, model = self.project, self._role, self._default_model
         self.run_worker(
-            lambda: (role, defaults(project, role)),
+            lambda: (role, model, defaults(project, role, args)),
             name=DEFAULT_WORKER,
             group=DEFAULT_WORKER,
             thread=True,
@@ -1149,6 +1159,22 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     def _field_changed(self) -> None:
         self._validate()
 
+    @on(Input.Changed, "#spawn-args")
+    def _args_changed(self) -> None:
+        """A ``--model`` in the extra args is the family a headroom pick reads (#277): the
+        no-account option is read again when the args name another model, not on every key
+        typed (review of #424)."""
+        if harness.model_arg(self._form_args()) != self._default_model:
+            self._read_default()
+
+    def _form_args(self) -> list[str]:
+        """*Extra agent args* as the spawn would send them; none while they do not parse
+        (the form says why, and Spawn is disabled until they do)."""
+        try:
+            return split_agent_args(self.query_one("#spawn-args", Input).value)
+        except ValueError:
+            return []
+
     @on(Button.Pressed, "#spawn-dice")
     def _roll(self) -> None:
         label = dice_label(self._role)
@@ -1418,13 +1444,14 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._note("#spawn-status", reason, style="bold red")
 
     def _default_changed(self, worker: Worker[Any], state: WorkerState) -> None:
-        """Label the no-account option with the pick read for the role still in the form; a
-        read for a role the form has left since is dropped. A ladder that would refuse the
-        spawn (a binding to a removed slot) says so under the field."""
+        """Label the no-account option with the pick read for the role and model still in the
+        form; a read for a role or a ``--model`` the form has left since is dropped. A ladder
+        that would refuse the spawn (a binding to a removed slot) says so under the field."""
         if state is WorkerState.SUCCESS:
-            role, default = worker.result or (None, None)
-            if role == self._role and isinstance(default, accounts_service.LaunchDefault):
-                self._label_default(default_account_label(default, role))
+            role, model, default = worker.result or (None, None, None)
+            current = role == self._role and model == self._default_model
+            if current and isinstance(default, accounts_service.LaunchDefault):
+                self._label_default(default_account_label(default, self._role))
         elif state is WorkerState.ERROR:
             error = worker.error
             self._label_default(DEFAULT_PENDING)

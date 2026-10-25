@@ -487,10 +487,11 @@ adapter.**
   pump's own flag and silently leaves every button of the screen dead; the
   dialog's flag is `_spawning`.
 - **No role at all**: `aisquare fleet spawn agent` and `aisquare launch agent` start a
-  plain, general-purpose Claude Code session (labelled `agent-1` and on) that joins the
-  board and its fleet row like any agent but has no standing cycle, no mission and no
-  model ladder. It is the Spawn dialog's new first Role option, *(none) —
-  general-purpose Claude*; `coder` stays the one preselected.
+  plain, general-purpose session of the agent (Claude Code by default; `--agent codex`
+  for Codex), labelled `agent-1` and on, that joins the board and its fleet row like any
+  agent but has no standing cycle, no mission and no model ladder. It is the Spawn
+  dialog's new first Role option, *(none) — general-purpose agent*; `coder` stays the one
+  preselected.
 
 - Terminal Codex integration through a shared coding-agent adapter registry:
   native hooks, memory, board identity, fleet launches, permissions, optional

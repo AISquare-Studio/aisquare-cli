@@ -1212,15 +1212,18 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   account of the agent's own was read over `switch_at`, or it has none, onto the first
   account of another installed agent under the line, in priority order. An own account
   with room always comes first and resumes the session; one whose usage cannot be read
-  is never taken for full. No conversation moves between agents, so the replacement
+  is never taken for full, and one with a limit mark still in force for the session's
+  model family is. No conversation moves between agents, so the replacement
   starts **fresh** there, and a **hand-off brief** carries the work: the task and its
   contract, the claims (moved onto the new row, as a fresh hand-over's are), the last
   board entries, the tree's branch, uncommitted paths and last commits, and the newest
   of the conversation, read off the old agent's transcript by its own reader. It is the
-  new agent's first prompt (its launch argument on Codex, typed in on Claude Code), cut
-  to 6 000 bytes; the whole brief is kept under `~/.aisquare/handoffs/` and the prompt
-  names it. The old session ends, `switched` names both agents, and the new launch
-  record names the new agent, so a restart or Fork of it stays there. Switched off, a
+  new agent's first message, on its command line through the prompt file as any first
+  message goes, and acknowledged by its first turn, cut to 6 000 bytes; the whole brief
+  is kept under `~/.aisquare/handoffs/` and the prompt names it. The old session ends,
+  `switched` names both agents, and the new launch record names the new agent, so a
+  restart or Fork of it stays there. One switch per limit holds across agents too: the
+  replacement the hand-over started is moved again only with `--force`. Switched off, a
   hand-over stays on its agent as before. The captain keeps its agent.
 - **Folder trust.** Claude Code asks *"Is this a project you created or one you
   trust?"* the first time it starts in a folder, once **per account** — and the

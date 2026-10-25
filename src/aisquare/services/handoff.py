@@ -17,14 +17,14 @@ contract already asks (docs/coding-agents.md, "Adding a terminal agent"):
   Transcript tab pages it (``services.transcript.read_page``: ``AgentTranscript.records``
   and ``page_lines``), from the transcript its own hook reported (the launch record's,
   never the board session's column, which a sandbox could write);
-- the brief reaches the TARGET through its own first-prompt path, ``spawn``'s ``prompt``:
-  a positional argument where ``capabilities.positional_prompt`` says so, typed into its
-  prompt otherwise.
+- the brief reaches the TARGET as its first message, ``spawn``'s ``prompt``, the way every
+  first message goes (``services.delivery``, #295): on its command line through the prompt
+  file where ``capabilities.positional_prompt`` says it takes one, typed into its prompt
+  otherwise, and acknowledged by its first turn either way.
 
-The first prompt holds the brief cut to :data:`PROMPT_MAX` bytes, since a positional
-prompt travels in tmux's ``new-window`` command, which tmux refuses past one message; the
-whole brief, up to :data:`FILE_MAX`, is written under the aisquare home (:func:`brief_dir`),
-which a sandboxed agent may read and never write, and the prompt names it.
+The first prompt holds the brief cut to :data:`PROMPT_MAX` bytes; the whole brief, up to
+:data:`FILE_MAX`, is written under the aisquare home (:func:`brief_dir`), which a sandboxed
+agent may read and never write, and the prompt names it.
 """
 
 from __future__ import annotations
@@ -50,10 +50,11 @@ from aisquare.models import FleetAgent, TeamEvent, TeamTask
 from aisquare.services import claude_accounts as claude_accounts_service
 
 PROMPT_MAX = 6_000
-"""Most UTF-8 bytes of the brief a first prompt carries. A positional prompt is one argument
-of tmux's ``new-window``, and tmux refuses a command past one 16 KiB message ("command too
-long"), the launch's own arguments and variables included; a typed one is pasted 512 bytes
-a call. The conversation is cut to fit, the oldest of it first."""
+"""Most UTF-8 bytes of the brief a first prompt carries: the replacement's first turn, which
+the task, the claims, the board and the newest of the conversation fill, with the whole
+brief one file read away. No tmux limit bounds it since #295: a first message travels in a
+prompt file, never in the window's command. The conversation is cut to fit, the oldest of
+it first."""
 
 FILE_MAX = 48_000
 """Most UTF-8 bytes of the brief file (:func:`write`)."""

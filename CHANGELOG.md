@@ -21,8 +21,8 @@ adapter.**
   conversation moves between agents, so the replacement starts fresh on the other agent
   with a hand-off brief of the work — its task, contract and claims, its last board
   entries, its tree, and the newest of its conversation read off the old agent's
-  transcript by that agent's own reader — as its first prompt, through the new agent's
-  own prompt path, the whole brief kept under `~/.aisquare/handoffs/`. The claims move
+  transcript by that agent's own reader — as its first message, delivered as any first
+  message is, the whole brief kept under `~/.aisquare/handoffs/`. The claims move
   to the new row, the old session ends, and its restart and Fork keep the new agent.
   The automatic hand-over still prefers an account of the agent's own with room (its
   session resumes), and crosses only once every own account was read over the line:

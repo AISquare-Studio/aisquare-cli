@@ -1393,11 +1393,12 @@ def test_the_synthetic_agent_hands_off_across_agents_both_ways(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, target: str
 ) -> None:
     """Task #15, the plug-and-play proof: the fake agent, which only implements this suite's
-    contract (its transcript reader, its first-prompt path), hands off onto Claude Code and
+    contract (its transcript reader, its capabilities), hands off onto Claude Code and
     takes one from Claude Code and Codex, through the same switch: the source's own reader
-    makes the brief, the target's own prompt path delivers it, and the new launch record
-    names the target."""
+    makes the brief, the target's own first-message way delivers it, and the new launch
+    record names the target."""
     from aisquare.core import launch_seal
+    from tests.test_fleet_service import _first_lines
 
     tmux, receipt, agent, transcript = _hands_off(tmp_path, monkeypatch, source, target)
 
@@ -1406,16 +1407,11 @@ def test_the_synthetic_agent_hands_off_across_agents_both_ways(
     assert receipt.prompt_typed == "yes", receipt.notes
     record = launch_seal.read(receipt.started.id)
     assert isinstance(record, launch_seal.LaunchRecord) and record.agent == target
-    command = tmux.spawned[-1]["command"]
-    assert isinstance(command, list)
-    if get_adapter(target).capabilities.positional_prompt:
-        prompt = command[-1]
-    else:
-        [prompt] = [
-            text
-            for pane, kind, text in tmux.typed
-            if pane == receipt.started.pane_id and kind == "paste"
-        ]
+    # The way #295 delivers any first message: on the command line through the prompt file
+    # for an agent that takes it as its argument, else typed into its pane.
+    way = "argv" if get_adapter(target).capabilities.positional_prompt else "typed"
+    assert receipt.prompt_delivery == way, receipt.notes
+    [prompt] = _first_lines(tmux, receipt.started.pane_id)
     assert f"which ran on {get_adapter(source).label}" in prompt
     assert f"You run on {get_adapter(target).label}" in prompt
     newest = [line for line in _plain_page(transcript, source) if line.strip()][-2:]

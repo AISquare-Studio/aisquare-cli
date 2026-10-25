@@ -2,8 +2,9 @@
 
 No conversation moves between agents, so the replacement starts FRESH on the other agent,
 and a brief carries the work (``services.handoff``): the source's conversation as its own
-adapter's transcript reader renders it, the board and the tree, delivered through the
-TARGET's own first-prompt path (Codex's positional argument, Claude Code's typed prompt).
+adapter's transcript reader renders it, the board and the tree, delivered as the TARGET's
+first message the way #295 delivers any (on the command line through the prompt file, for
+Codex and Claude Code alike, which take it as their argument).
 The claims move onto the new row, the old session ends, and the new launch record names
 the new agent, so its restart keeps it.
 
@@ -49,6 +50,7 @@ from tests.test_codex_accounts import _rollout, _sign_in, _token_count, _window
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
     _command,
+    _first_lines,
     _flag,
     _task,
     _task_now,
@@ -59,9 +61,6 @@ from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     tmux,
 )
 from tests.test_usage_aware_accounts import _payload, _slot, _Usage
-
-TMUX_MESSAGE = 16_384
-"""tmux's one-message limit on a command ("command too long"), MAX_IMSGSIZE."""
 
 
 def _claude_slot(monkeypatch: pytest.MonkeyPatch, used: float) -> ClaudeAccount:
@@ -154,6 +153,15 @@ def _conversation_lines(path: Path, agent: str) -> list[str]:
 
 def _typed(server: FakeTmux, pane: str) -> list[str]:
     return [text for at, kind, text in server.typed if at == pane and kind == "paste"]
+
+
+def _first_message(server: FakeTmux, receipt: fleet_service.SwitchReceipt) -> str:
+    """The replacement's first message: on its command line, through the prompt file
+    (``--first-prompt-file``), and never typed into its pane."""
+    assert receipt.prompt_delivery == "argv", receipt.prompt_delivery
+    assert not _typed(server, receipt.started.pane_id)
+    [prompt] = _first_lines(server, receipt.started.pane_id)
+    return prompt
 
 
 def _events(where: ProjectInfo) -> list[tuple[str, str]]:
@@ -266,7 +274,7 @@ def test_the_brief_reads_the_tree_it_was_given(repo: Path) -> None:  # noqa: F81
 # --- by hand: Codex -> Claude Code, Claude Code -> Codex -------------------------------------
 
 
-def test_a_codex_agent_switched_onto_claude_code_starts_fresh_there_with_the_brief_typed_in(
+def test_a_codex_agent_switched_onto_claude_code_starts_fresh_there_with_the_brief(
     tmux: FakeTmux,  # noqa: F811 - pytest resolves fixtures by NAME
     codex_on_path: Path,  # noqa: F811 - pytest resolves fixtures by NAME
     claude_on_path: Path,  # noqa: F811
@@ -275,7 +283,7 @@ def test_a_codex_agent_switched_onto_claude_code_starts_fresh_there_with_the_bri
     tmp_path: Path,
 ) -> None:
     """``fleet switch --agent claude-code`` of a Codex agent: the Codex rollout read by Codex's
-    reader, delivered as Claude Code's typed first prompt; the claims moved onto the new
+    reader, delivered as Claude Code's first message; the claims moved onto the new
     session, the old one ended, and the new launch record names Claude Code, which its
     restart keeps."""
     own = _codex_slot(10)
@@ -299,7 +307,7 @@ def test_a_codex_agent_switched_onto_claude_code_starts_fresh_there_with_the_bri
     new = receipt.started.session_id
     assert new is not None and new != old and _flag(command, "--session-id") == new
     assert receipt.started.agent == "claude-code" and receipt.started.task_id == task.id
-    [prompt] = _typed(tmux, receipt.started.pane_id)
+    prompt = _first_message(tmux, receipt)
     assert prompt.startswith(f"You are {agent.label}, taking over from {agent.label}, which ran")
     assert "on Codex" in prompt and "You run on Claude Code" in prompt
     assert "Claims, now yours:" in prompt and "Wire the auth flow" in prompt
@@ -338,7 +346,7 @@ def test_a_claude_code_agent_switched_to_a_codex_account_takes_the_brief_as_its_
 ) -> None:
     """``fleet switch --to <a Codex slot>`` of a Claude Code agent: ``--to`` names an account
     of another agent, which brings its agent. Claude Code's transcript read by its reader,
-    delivered as Codex's positional prompt, and the whole command fits tmux's message."""
+    delivered as Codex's first message, which the window's command names and never holds."""
     claude = _claude_slot(monkeypatch, 95)
     codex = _codex_slot(10)
     task = _task(project, "Ship the router")
@@ -352,22 +360,16 @@ def test_a_claude_code_agent_switched_to_a_codex_account_takes_the_brief_as_its_
     receipt = fleet_service.switch(project, agent.label, to=str(codex.slot), reason="5h limit")
 
     assert receipt.crossed and receipt.to_agent == "codex" and receipt.to_slot == codex.slot
-    spawned = tmux.spawned[-1]
     command = _command(tmux)
     assert _flag(command, "--account") == str(codex.slot)
     assert "--resume" not in command
-    prompt = command[-1]
+    prompt = _first_message(tmux, receipt)
     assert prompt.startswith(f"You are {agent.label}, taking over from {agent.label}")
     assert "ran on Claude Code (it stopped on 5h limit)" in prompt and "You run on Codex" in prompt
     for line in _conversation_lines(transcript, "claude-code")[-3:]:
         assert line.strip()[:60] in prompt
-    env = spawned["env"]
-    assert isinstance(env, dict)
-    size = sum(len(part.encode()) + 1 for part in command)
-    size += sum(len(f"{k}={v}".encode()) + 4 for k, v in env.items())
-    assert size < TMUX_MESSAGE, size  # one tmux message, with room for its own framing
+    assert not any(prompt[:200] in part for part in command)  # the file holds it, not tmux
     assert receipt.started.agent == "codex" and _task_now(task.id).status == "doing"
-    assert not _typed(tmux, receipt.started.pane_id)  # the argument, never typed in
 
 
 def test_a_switch_onto_an_agent_that_is_not_installed_is_refused_before_the_stop(
@@ -437,8 +439,90 @@ def test_the_automatic_hand_over_crosses_agents_once_every_own_account_is_full(
 
     assert receipt.crossed and receipt.to_agent == "claude-code" and receipt.to_slot == claude.slot
     assert receipt.resumed is False and receipt.started.spawned_by == "user"
-    [prompt] = _typed(tmux, receipt.started.pane_id)
+    prompt = _first_message(tmux, receipt)
     assert "which ran on Codex (it stopped on 5h limit)" in prompt
+
+
+def test_an_own_account_with_a_limit_mark_in_force_counts_as_full(
+    tmux: FakeTmux,  # noqa: F811 - pytest resolves fixtures by NAME
+    codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """#295's refusal memory: a Codex account that refused with a weekly limit still in force
+    is full however its rollout reads (its pick skips it), so the hand-over crosses."""
+    from aisquare.services import claude_accounts as accounts_service
+
+    full = _codex_slot(100, "full@example.com")
+    marked = _codex_slot(10, "marked@example.com")
+    claude = _claude_slot(monkeypatch, 20)
+    accounts_service.remember_limit(marked.slot, "weekly", datetime.now(tz=UTC) + timedelta(days=2))
+    agent = fleet_service.spawn(
+        project, "coder", agent="codex", worktree=False, account=str(full.slot)
+    ).agent
+    _ran(agent, _written(_moments(get_adapter("codex"))["asked"], tmp_path / "r.jsonl"))
+    _ready_as(tmux, monkeypatch, "claude")
+
+    assert handoff.own_accounts_full("codex", full.slot)
+    receipt = fleet_service.switch(project, agent.label, reason="5h limit", automatic=True)
+
+    assert receipt.crossed and receipt.to_agent == "claude-code" and receipt.to_slot == claude.slot
+
+
+def test_a_family_limit_mark_fills_an_own_account_for_that_family_alone(
+    claude_on_path: Path,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An Opus week marked on the other Claude Code account: full to an Opus session, which
+    may cross, and not to any other, whose reading (20 %) still has room (#277)."""
+    from aisquare.services import claude_accounts as accounts_service
+
+    leaving, other = _claude_slots(monkeypatch, 95, 20)
+    accounts_service.remember_limit(other.slot, "opus", datetime.now(tz=UTC) + timedelta(days=2))
+
+    assert handoff.own_accounts_full("claude-code", leaving.slot, family="opus")
+    assert not handoff.own_accounts_full("claude-code", leaving.slot, family="sonnet")
+    assert not handoff.own_accounts_full("claude-code", leaving.slot)
+
+
+def test_a_replacement_the_hand_over_started_on_another_agent_moves_again_only_with_force(
+    tmux: FakeTmux,  # noqa: F811 - pytest resolves fixtures by NAME
+    codex_on_path: Path,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One switch per limit holds across agents: a manager woken by the same limit cannot move
+    the Claude Code replacement the hand-over just started, back to Codex or anywhere, without
+    ``--force`` (``hooks.fresh_replacement_refusal``)."""
+    from aisquare.services import hooks
+
+    full = _codex_slot(100, "full@example.com")
+    _codex_slot(97, "also-full@example.com")
+    _claude_slot(monkeypatch, 20)
+    agent = fleet_service.spawn(
+        project, "coder", agent="codex", worktree=False, account=str(full.slot)
+    ).agent
+    _ran(agent, _written(_moments(get_adapter("codex"))["asked"], tmp_path / "r.jsonl"))
+    _ready_as(tmux, monkeypatch, "claude")
+    crossed = fleet_service.switch(
+        project,
+        agent.label,
+        reason="5h limit",
+        automatic=True,
+        spawned_by=hooks.HANDOVER_SPAWNER,
+    )
+    assert crossed.crossed and crossed.started.spawned_by == hooks.HANDOVER_SPAWNER
+
+    with pytest.raises(fleet_service.FleetError, match="--force"):
+        fleet_service.switch(project, agent.label, to_agent="codex")
+    assert len(tmux.spawned) == 2 and crossed.started.pane_id not in tmux.killed
+
+    again = fleet_service.switch(project, agent.label, to_agent="codex", force=True)
+    assert again.crossed and (again.from_agent, again.to_agent) == ("claude-code", "codex")
 
 
 def test_an_own_account_that_cannot_be_read_keeps_the_hand_over_on_its_agent(
@@ -506,7 +590,8 @@ def test_the_limit_hook_starts_the_worker_when_only_another_agent_has_an_account
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One Codex account, limited, and a Claude Code one: today's gate said nowhere to go;
-    with the switch on, the worker is started (it crosses once it reads the Codex one full)."""
+    with the switch on, the plan made before the board write goes, and the worker is
+    started (it crosses once it reads the Codex one full)."""
     from aisquare.services import hooks
 
     codex = core.create_account("codex")
@@ -543,13 +628,17 @@ def test_the_limit_hook_starts_the_worker_when_only_another_agent_has_an_account
     monkeypatch.setattr(hooks, "_detach", started.append)
     failure = team_service.TurnFailure(session=session, error="rate_limit", notice=None)
 
-    hooks._hand_over_if_configured(failure)
+    plan = hooks._plan_hand_over(session.id, error="rate_limit", message=None)
+    assert plan is not None and plan.go
+    hooks._hand_over_if_configured(failure, plan)
     assert len(started) == 1 and "hand-over" in started[0]
 
     config = load_config()
     config.accounts.cross_agent_handover = False
     save_config(config)
-    hooks._hand_over_if_configured(failure)
+    plan = hooks._plan_hand_over(session.id, error="rate_limit", message=None)
+    assert plan is not None and not plan.go
+    hooks._hand_over_if_configured(failure, plan)
     assert len(started) == 1, "switched off, a lone limited account waits as before"
 
 

@@ -443,7 +443,7 @@ def test_a_limited_codex_agent_counts_a_claude_account_only_as_the_hook_does(
         accounts=AccountsSettings(on_limit="switch"),
         hands_over=sources.hands_over,
     )
-    assert card.kind == "limited"
+    assert card.kind == "limited" and card.push_after is not None
     if crossing:
         assert card.push_after > card.since, "a Claude Code account to cross to: held"
     else:

@@ -217,6 +217,15 @@ LABEL_RULE = (
 )
 
 
+def args_hint(agent: str) -> str:
+    """The Extra agent args field's example: the agent's own model flag (``model_args``), so
+    Codex is never shown Claude Code's ``--model opus`` (SMOKE9 N1 of #113)."""
+    try:
+        return "e.g. " + " ".join(get_adapter(agent).model_args("MODEL", None))
+    except Exception:  # an agent this install does not know, or one that refuses the name
+        return ""
+
+
 class PickTargetRequested(Message):
     """Choose who runs the new agent — a bind or an account — in the target picker (§4.6)."""
 
@@ -793,7 +802,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                             placeholder=(
                                 "the captain's own: its server and no other tool"
                                 if self._captain
-                                else "e.g. --model opus"
+                                else args_hint(DEFAULT_AGENT)
                             ),
                             disabled=self._captain,
                             id="spawn-args",
@@ -1012,6 +1021,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 field.value = picked
         agent = picked or self._role_agent(role, binary)
         self.query_one("#spawn-binary", Input).placeholder = self._binary_hint(role, picked)
+        if not self._captain:
+            self.query_one("#spawn-args", Input).placeholder = args_hint(agent)
         self._offer_accounts(agent)
         sandboxed = self._sandboxed(agent)
         # One value for every agent replaces the agent's own words, which then hide. The

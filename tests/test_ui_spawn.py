@@ -58,6 +58,7 @@ from aisquare.cli.ui.spawn import (
     NO_TASK,
     PickTargetRequested,
     SpawnDialog,
+    args_hint,
     dice_label,
     role_choices,
 )
@@ -1871,6 +1872,24 @@ def test_one_permission_for_every_agent_replaces_the_agents_own_controls(
     [(_, _, kwargs)] = spawns.calls
     assert kwargs["permission_mode"] == "workspace:auto"  # `fleet spawn --permission-mode`
     assert kwargs["sandbox"] is None and kwargs["approval_policy"] is None
+
+
+def test_the_extra_args_example_is_the_picked_agents_own_model_flag(
+    git_project: ProjectInfo, spawns: SpawnRecorder
+) -> None:
+    """SMOKE9 N1 of #113: the example read ``e.g. --model opus``, a Claude Code model, with
+    Codex picked. It is the picked agent's own ``model_args``, naming no agent's model."""
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
+        field = dialog.query_one("#spawn-args", Input)
+        seen = [str(field.placeholder)]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        return [*seen, str(field.placeholder)]
+
+    shown = drive(git_project, scenario)
+    assert shown == [args_hint("claude-code"), args_hint("codex")]
+    assert all("opus" not in hint and hint.startswith("e.g. --model") for hint in shown), shown
 
 
 def test_the_roles_own_agent_is_named_and_followed_and_sent_as_none(

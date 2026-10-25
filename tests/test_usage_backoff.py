@@ -686,6 +686,51 @@ def test_a_wait_row_this_version_cannot_read_is_replaced(fake_home: Path, raw: s
     assert work.slot in service.usage_backoffs([work], now=NOW + timedelta(minutes=1))
 
 
+def test_replacing_an_unreadable_wait_row_never_shortens_a_longer_one_written_meanwhile(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #401, n1: the unreadable row was overwritten blindly, so a valid, longer wait
+    another process wrote between the read and the write was shortened. Replaced only as it
+    was read, the longer wait stands."""
+    work = _slot("work@example.com", "tok-work")
+    key = service._BACKOFF_KEY.format(slot=work.slot)
+    with store_session() as store:
+        store.set_ui_state(key, "{truncated")
+        cls = type(store)
+    longer = service.UsageBackoff(
+        slot=work.slot,
+        until=NOW + timedelta(minutes=30),
+        attempts=3,
+        since=NOW,
+        token=service._login_key(work, NOW),
+    )
+    real = cls.ui_state
+    raced: list[bool] = []
+
+    def ui_state(self: Any, name: str) -> str | None:
+        value = real(self, name)
+        if name == key and not raced and value == "{truncated":
+            raced.append(True)  # another process writes its longer wait right after this read
+            with store_session() as other:
+                other.set_ui_state(key, longer.dump())
+        return value
+
+    monkeypatch.setattr(cls, "ui_state", ui_state)
+    with store_session() as store:  # the write path alone, as a 429 records it
+        held = service.UsageBackoff(
+            slot=work.slot,
+            until=NOW + timedelta(minutes=1),
+            attempts=1,
+            since=NOW,
+            token=longer.token,
+        )
+        service._record_backoff(store, held, None)
+
+    assert raced, "the race ran"
+    with store_session() as store:
+        assert real(store, key) == longer.dump(), "the longer wait stands"
+
+
 def _new_token(account: Any, token: str) -> None:
     """An OAuth refresh, or a *Log in again* to the same account: a new token, the same login."""
     creds = core.credentials_path(account)

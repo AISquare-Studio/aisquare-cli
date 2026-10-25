@@ -744,8 +744,11 @@ fleet still running, and every release now carries its own installer.**
   `SSL_CERT_DIR` when set, else the OS store via `truststore`, else `certifi`
   (both now declared dependencies). A certificate that does not verify says
   *TLS certificate could not be verified* with a hint instead of a bare
-  `URLError`, and `aisquare doctor --live` gains a `tls` row: one verified
-  handshake to api.anthropic.com, naming the trust source in use.
+  `URLError`, and a bundle `SSL_CERT_FILE` names that will not load says *the
+  CA bundle could not be loaded*. Plain `http://` calls never build the
+  context. `aisquare doctor --live` gains a `tls` row: one verified handshake
+  to api.anthropic.com, through `HTTPS_PROXY` when one applies, naming the
+  trust source in use.
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,
   and the seats it spawns on their own projects' boards.** 0.8.1's rule holds for
   every other spawn: a seat reads the board of the hub its spawner honours, and its

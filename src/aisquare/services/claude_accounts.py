@@ -994,6 +994,11 @@ def usage(
     try:
         answer = (fetch or _http_get)(USAGE_URL, headers, USAGE_TIMEOUT_SECONDS)
     except OSError as exc:  # URLError, a refused connection, a timeout
+        if isinstance(exc, tls.CABundleError):
+            return ClaudeUsage(
+                available=False,
+                reason=f"TLS: the CA bundle could not be loaded — {tls.BUNDLE_FIX}",
+            )
         if tls.cert_failure(exc):
             return ClaudeUsage(
                 available=False,

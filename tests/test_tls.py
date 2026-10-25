@@ -652,3 +652,42 @@ def test_doctors_tls_row_names_the_proxy_without_its_credentials(
     row = diagnostics._check_tls()
     assert row.status.value == "ok" and "through the proxy proxy.corp:3128" in row.detail
     assert "hunter2" not in row.detail and "me:" not in row.detail
+
+
+# ------------------------------------------------------------- a bundle that will not load
+
+
+@pytest.mark.parametrize("bundle", ["/nonexistent/ca.pem", "/dev/null"], ids=["missing", "empty"])
+def test_a_bundle_that_will_not_load_is_named_on_the_usage_row(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch, https_server: _Server, bundle: str
+) -> None:
+    """tester-tls on #403: ``SSL_CERT_FILE=/nonexistent`` (or ``/dev/null``) read
+    "could not reach the usage endpoint (FileNotFoundError)" on every row, while doctor's
+    tls row already said the bundle could not be loaded. The row says it too now."""
+    monkeypatch.setenv("SSL_CERT_FILE", bundle)
+    monkeypatch.setattr(service, "USAGE_URL", https_server.url)
+    account = core.create_account()
+    _sign_in(account, "two@example.com")
+
+    usage = service.usage(account, now=NOW)
+
+    assert not usage.available and usage.reason is not None
+    assert usage.reason.startswith("TLS: the CA bundle could not be loaded — ")
+    assert "could not reach" not in usage.reason and "Error" not in usage.reason
+    assert not usage.needs_login
+    with pytest.raises(tls.CABundleError, match="SSL_CERT_FILE="):
+        tls.ssl_context()  # and it is an OSError, so every other caller still maps it
+    assert issubclass(tls.CABundleError, OSError)
+
+
+def test_doctors_tls_row_says_the_bundle_and_how_to_fix_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aisquare.services import diagnostics
+
+    monkeypatch.setenv("SSL_CERT_FILE", "/dev/null")
+    monkeypatch.setattr(tls, "handshake", lambda host: pytest.fail("no bundle, no handshake"))
+    row = diagnostics._check_tls()
+    assert row.status.value == "fail"
+    assert "could not be loaded" in row.detail and "SSL_CERT_FILE=/dev/null" in row.detail
+    assert row.fix == tls.BUNDLE_FIX

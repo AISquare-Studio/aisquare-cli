@@ -41,6 +41,15 @@ SOURCE_DEFAULT = "the interpreter's default CA paths"
 CERT_FIX = "set SSL_CERT_FILE to your CA bundle if a proxy re-signs HTTPS"
 #: The hint a certificate failure carries, short enough for a usage row.
 CERT_HINT = f"{CERT_FIX}, or see `aisquare doctor --live`"
+#: What to do about a bundle that will not load: doctor's fix line, and a usage row's hint.
+BUNDLE_FIX = "point SSL_CERT_FILE / SSL_CERT_DIR at a readable PEM bundle, or unset them"
+
+
+class CABundleError(OSError):
+    """``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` named a bundle that will not load (missing,
+    ``/dev/null``, not PEM). An ``OSError``, so every caller that maps a network failure
+    still catches it; its own type, so a usage row and doctor can say what it is rather
+    than "could not reach the usage endpoint (FileNotFoundError)"."""
 
 
 def _build() -> tuple[ssl.SSLContext, str]:
@@ -49,7 +58,15 @@ def _build() -> tuple[ssl.SSLContext, str]:
     cafile = os.environ.get("SSL_CERT_FILE") or None
     capath = os.environ.get("SSL_CERT_DIR") or None
     if cafile or capath:
-        return ssl.create_default_context(cafile=cafile, capath=capath), SOURCE_ENV
+        try:
+            return ssl.create_default_context(cafile=cafile, capath=capath), SOURCE_ENV
+        except OSError as exc:  # ssl.SSLError is one too
+            named = " and ".join(
+                f"{var}={value}"
+                for var, value in (("SSL_CERT_FILE", cafile), ("SSL_CERT_DIR", capath))
+                if value
+            )
+            raise CABundleError(f"{named}: {exc}") from exc
     try:
         import truststore
     except ImportError:

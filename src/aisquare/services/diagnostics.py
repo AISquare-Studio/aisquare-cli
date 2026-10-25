@@ -1855,8 +1855,10 @@ def _check_tls() -> DoctorCheck:
     """
     try:
         source = tls.trust_source()
-    except OSError as exc:  # SSL_CERT_FILE / SSL_CERT_DIR named something unloadable
-        return _fail("tls", f"the CA bundle could not be loaded: {exc}", tls.CERT_FIX)
+    except tls.CABundleError as exc:
+        return _fail("tls", f"the CA bundle could not be loaded: {exc}", tls.BUNDLE_FIX)
+    except OSError as exc:  # the OS store or certifi refused to build: rare, never a crash
+        return _fail("tls", f"the TLS context could not be built: {exc}", tls.CERT_FIX)
     proxy = tls.https_proxy(_TLS_PROBE_HOST)
     via = ""
     if proxy:  # host:port only: a proxy URL may carry credentials, which no row prints

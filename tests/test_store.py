@@ -2868,7 +2868,7 @@ def test_the_backfill_resolves_no_root_for_a_row_without_a_pack(
     is_the_home = store_module.is_the_home
 
     def spy(root: Path) -> bool:
-        asked.append(str(root))
+        asked.append(root.as_posix())
         return is_the_home(root)
 
     monkeypatch.setattr(store_module, "is_the_home", spy)

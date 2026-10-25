@@ -1863,7 +1863,7 @@ def _check_tls() -> DoctorCheck:
     via = ""
     if proxy:  # host:port only: a proxy URL may carry credentials, which no row prints
         where = urlsplit(proxy if "://" in proxy else f"http://{proxy}")
-        via = f" through the proxy {where.hostname}:{where.port or 80}"
+        via = f" through the proxy {where.hostname}:{where.port or 443}"
     try:
         tls.handshake(_TLS_PROBE_HOST)
     except OSError as exc:

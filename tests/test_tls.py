@@ -135,6 +135,7 @@ def https_server(tmp_path: Path) -> Iterator[_Server]:
     ca_file, leaf_file, key_file = _private_ca(tmp_path)
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Usage)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2  # CodeQL: no protocol older than 1.2
     context.load_cert_chain(leaf_file, key_file)
     server.socket = context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -306,6 +307,10 @@ _UNVERIFIED = {"CERT_NONE"}
 #: Modules a forbidden name may not be imported from (``from aisquare.core.tls import
 #: urlopen`` is the shared one, and allowed).
 _STDLIB_TLS = {"urllib", "urllib.request", "ssl", "_ssl"}
+#: Classes that take a context, checked at their calls by name: imported bare, under an
+#: alias (``from http.client import HTTPSConnection as C``), the call no longer carries
+#: the name, so the import itself is refused — reach them as ``http.client.…``.
+_TAKES_CONTEXT = {"HTTPSConnection", "HTTPSHandler"}
 
 
 def _is_tls_call(node: ast.AST, attr: str) -> bool:
@@ -341,9 +346,11 @@ def _violations(path: Path) -> list[str]:
 
     for node in ast.walk(tree):
         where = f"{path.name}:{getattr(node, 'lineno', '?')}"
-        if isinstance(node, ast.ImportFrom) and node.module in _STDLIB_TLS:
+        if isinstance(node, ast.ImportFrom) and node.module in _STDLIB_TLS | {"http.client"}:
             for alias in node.names:
-                if alias.name == "*" or alias.name in _OPENS | _BUILDS_CONTEXT | _UNVERIFIED:
+                if alias.name == "*" or alias.name in (
+                    _OPENS | _BUILDS_CONTEXT | _UNVERIFIED | _TAKES_CONTEXT
+                ):
                     found.append(f"{where} imports {node.module}.{alias.name}")
         elif isinstance(node, ast.Attribute) and node.attr in _OPENS:
             if not (isinstance(node.value, ast.Name) and node.value.id == "tls"):
@@ -410,6 +417,9 @@ def test_no_module_opens_https_without_the_shared_context() -> None:
         ("handler(check_hostname=False)\n", "check_hostname=False"),
         ("import http.client\nhttp.client.HTTPSConnection('x')\n", "HTTPSConnection without"),
         ("from urllib.request import build_opener\nbuild_opener()\n", "build_opener without"),
+        ("from http.client import HTTPSConnection as C\n", "imports http.client.HTTPSConnection"),
+        ("from http.client import *\n", "imports http.client.*"),
+        ("from urllib.request import HTTPSHandler as H\n", "imports urllib.request.HTTPSHandler"),
     ],
 )
 def test_the_guard_catches_each_way_around_it(tmp_path: Path, source: str, expected: str) -> None:
@@ -551,6 +561,8 @@ def test_the_ci_exchange_builds_the_context_before_its_clock_and_only_for_https(
 
     events: list[tuple[str, float]] = []
     monkeypatch.setattr(tls, "ssl_context", lambda: events.append(("context", 0.0)))
+    ci_client._opener.cache_clear()
+    monkeypatch.setattr(ci_client, "build_opener", lambda *_: events.append(("opener", 0.0)))
 
     def exchange(url: str, *, started: float, **_: Any) -> Any:
         events.append(("started", started))
@@ -560,8 +572,9 @@ def test_the_ci_exchange_builds_the_context_before_its_clock_and_only_for_https(
     ci_client.exchange(f"{scheme}://ci.example/run", method="GET", deadline_ms=5000)
 
     assert [name for name, _ in events] == (
-        ["context", "started"] if scheme == "https" else ["started"]
+        ["opener", "context", "started"] if scheme == "https" else ["opener", "started"]
     )
+    ci_client._opener.cache_clear()  # the stand-in opener is no one else's
 
 
 # --------------------------------------------------------------------------- HTTPS_PROXY
@@ -691,3 +704,69 @@ def test_doctors_tls_row_says_the_bundle_and_how_to_fix_it(
     assert row.status.value == "fail"
     assert "could not be loaded" in row.detail and "SSL_CERT_FILE=/dev/null" in row.detail
     assert row.fix == tls.BUNDLE_FIX
+
+
+# --------------------------------------------------------------------------- http → https
+
+
+def test_an_http_request_redirected_to_https_verifies_through_the_shared_context(
+    https_server: _Server, no_default_cas: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #403: the ``http://`` call went without the context, so a redirect to
+    ``https://`` verified against the interpreter's default paths — empty on a python.org
+    Python — and failed where a direct ``https://`` request passed."""
+    from http.server import HTTPServer
+
+    class Redirect(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", https_server.url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args: Any) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Redirect)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _certifi_only(monkeypatch, https_server.ca_file)
+        with tls.urlopen(f"http://127.0.0.1:{server.server_address[1]}/", timeout=5) as response:
+            assert response.status == 200 and json.loads(response.read()) == LIVE_USAGE
+            assert response.geturl() == https_server.url
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_proxy_with_no_port_is_dialled_on_443_as_urllib_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #403: a port-less ``HTTPS_PROXY`` was dialled on 80; urllib's tunnel uses
+    its ``HTTPSConnection``'s default, 443."""
+    import http.client
+
+    from aisquare.services import diagnostics
+
+    dialled: list[tuple[str, int]] = []
+
+    class Connection:
+        def __init__(self, host: str, port: int, **_: Any) -> None:
+            dialled.append((host, port))
+
+        def set_tunnel(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def connect(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(http.client, "HTTPSConnection", Connection)
+    monkeypatch.setattr(tls, "https_proxy", lambda host: "http://proxy.corp")
+    tls.handshake("api.anthropic.com")
+    assert dialled == [("proxy.corp", 443)]
+    row = diagnostics._check_tls()
+    assert "through the proxy proxy.corp:443" in row.detail

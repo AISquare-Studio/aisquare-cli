@@ -104,18 +104,24 @@ def is_https(request: Any) -> bool:
 def urlopen(request: Any, *, timeout: float) -> Any:
     """``urllib.request.urlopen`` with :func:`ssl_context`: the way this package opens a URL.
 
-    The context goes to an ``https://`` request only: built for a plain ``http://`` one
-    (the explainability proxy's ``/health`` on loopback), an ``SSL_CERT_FILE`` that will
-    not load failed a call that never speaks TLS (review of #403, M2).
+    An ``https://`` request needs the context, and fails as its build fails. A plain
+    ``http://`` one gets it too when it builds, so a redirect to ``https://`` verifies as
+    a direct request would (review of #403), and goes without it when it does not: an
+    ``SSL_CERT_FILE`` that will not load must not fail a call that never speaks TLS —
+    the explainability proxy's ``/health`` on loopback (review of #403, M2).
 
     Looked up on ``urllib.request`` at call time, so a test that replaces
     ``urllib.request.urlopen`` still intercepts it.
     """
     import urllib.request
 
-    if not is_https(request):
+    if is_https(request):
+        return urllib.request.urlopen(request, timeout=timeout, context=ssl_context())
+    try:
+        context = ssl_context()
+    except OSError:  # only a redirect would use it; the request itself is plain HTTP
         return urllib.request.urlopen(request, timeout=timeout)
-    return urllib.request.urlopen(request, timeout=timeout, context=ssl_context())
+    return urllib.request.urlopen(request, timeout=timeout, context=context)
 
 
 def https_handler() -> Any:
@@ -170,8 +176,9 @@ def handshake(host: str, *, port: int = 443, timeout: float = 10.0) -> None:
         connection = http.client.HTTPSConnection(host, port, timeout=timeout, context=ssl_context())
     else:
         parts = urlsplit(proxy if "://" in proxy else f"http://{proxy}")
+        # No port: 443, the port urllib's own tunnel uses (its HTTPSConnection's default).
         connection = http.client.HTTPSConnection(
-            parts.hostname or "", parts.port or 80, timeout=timeout, context=ssl_context()
+            parts.hostname or "", parts.port or 443, timeout=timeout, context=ssl_context()
         )
         headers = {}
         if parts.username:

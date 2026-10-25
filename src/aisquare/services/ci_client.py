@@ -254,11 +254,13 @@ def exchange(
     hook has already waited too long, and counting it would hide exactly the
     latency being measured.
     """
+    # The opener and, for https, the context are built once per process before the clock:
+    # elapsed_ms measures the exchange, not this process's first setup — the OS trust
+    # store's ~15 ms, and on 3.12+ the ~3 ms default context HTTPSHandler builds itself
+    # (review of #403). A bundle that will not load raises again inside the exchange,
+    # which maps it to a reason.
+    _opener()
     if tls.is_https(url):
-        # The context is built once per process (the OS trust store: ~15 ms against the
-        # stdlib's ~3 ms), before the clock: elapsed_ms measures the exchange, not this
-        # process's first TLS setup (review of #403). A bundle that will not load raises
-        # again inside the exchange, which maps it to a reason.
         with contextlib.suppress(OSError):
             tls.ssl_context()
     started = time.monotonic()

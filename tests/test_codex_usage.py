@@ -133,15 +133,34 @@ def test_a_forks_rollout_counts_its_own_record_never_its_parents_running_total(
     count = _line(
         3, "event_msg", {"type": "token_count", "info": {"total_token_usage": {"total": 3690}}}
     )
+    # As measured (SMOKE9 item 11): the record's own usage, and the thread's running total
+    # carrying the parent's two responses (2460) besides this one.
+    own = {
+        "input_tokens": 1200,
+        "cached_input_tokens": 200,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 30,
+        "reasoning_output_tokens": 0,
+        "total_tokens": 1230,
+    }
+    inherited = {**own, "input_tokens": 3600, "cached_input_tokens": 600, "output_tokens": 90}
+    record = {
+        "turn_id": "t1",
+        "response_id": "resp_fork",
+        "usage": own,
+        "thread_token_usage": {**inherited, "total_tokens": 3690},
+    }
     found = _scan(
         tmp_path / "rollout-fork.jsonl",
         meta,
         _turn(1, "t1", "gpt-6.1-sol"),
-        _record(2, "t1", "resp_fork", input=1200, output=30, running=3690),
+        _line(2, "token_usage_record", record),
         count,
     ).delta
     sol = found.models["gpt-6.1-sol"]
-    assert (sol.requests, sol.total) == (1, 1230)
+    # Its own 1200 in (200 cached) and 30 out, never the inherited 3600 / 600 / 90.
+    assert (sol.requests, sol.input, sol.cache_read, sol.output) == (1, 1000, 200, 30)
+    assert sol.total == 1230
 
 
 def test_a_long_prompt_is_priced_at_the_long_context_rates(tmp_path: Path) -> None:

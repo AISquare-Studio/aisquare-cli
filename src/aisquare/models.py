@@ -309,6 +309,14 @@ class ClaudeUsage(BaseModel):
     week_percent: float | None = None
     """The rolling seven-day window: percent USED (0-100)."""
     week_resets_at: datetime | None = None
+    family_week_percent: dict[str, float] = Field(default_factory=dict)
+    """The per-family weeks (``seven_day_opus`` → ``opus``…): percent USED (0-100). Such a
+    limit applies only to requests to that model family (#277), so a pick counts it for an
+    agent of that family alone (``services.claude_accounts.headroom_percent``). Live
+    readings only: the cache keeps the two shared windows, and a spent family week is
+    remembered as a limit mark instead (``remember_limit``)."""
+    family_week_resets_at: dict[str, datetime] = Field(default_factory=dict)
+    """When each family week resets, where the endpoint said."""
     fetched_at: datetime | None = None
     """When the reading was taken — or, when nothing could be read, when that was found out."""
     last_failed_at: datetime | None = None
@@ -768,6 +776,11 @@ class TeamSession(BaseModel):
     persona: str | None = None
     """The persona the session was launched as (``AISQUARE_PERSONA``), recorded at start —
     what was ASKED, even when it could not be loaded (docs/plans/spawn-personas.md §3.7)."""
+    prompted_at: datetime | None = None
+    """When its last prompt started a turn (``UserPromptSubmit``), however the prompt came:
+    typed, on the command line, or from another session's inbox. ``None`` before the first,
+    and on rows from before schema 36. What a typed delivery's acknowledgement asks
+    (``services.delivery``)."""
 
 
 class TeamTask(BaseModel):
@@ -1003,6 +1016,9 @@ FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited"
 pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
 when neither source can answer."""
 
+FirstPromptState = Literal["pending", "acked", "unsent"]
+"""Where a fleet agent's first message stands (:attr:`FleetAgent.first_prompt`)."""
+
 
 class ProjectGroup(BaseModel):
     """A named, collapsible container of projects — a management layer only (#140).
@@ -1215,6 +1231,16 @@ class FleetAgent(BaseModel):
     """How the row ended (v34, #38): ``stopped`` when aisquare ended it on purpose, ``died``
     when a read or ``reap`` recorded a death nobody asked for. ``None`` while it runs, and on
     a row ended before the column, which is read by its exit status (Restart all)."""
+    first_prompt: FirstPromptState | None = None
+    """Whether the first message it was given started a turn (P0-W1a, #122): ``pending``
+    from the spawn until its ``UserPromptSubmit``, then ``acked``; ``unsent`` once a
+    listing found it still pending past ``[fleet] prompt_ack_seconds`` at an idle input
+    box, or a typed delivery left it in the box. ``None`` when it was given none, and on
+    rows from before schema 36 ("not tracked")."""
+    first_prompt_at: datetime | None = None
+    """When ``first_prompt`` last changed: given (``pending``), taken (``acked``), found
+    not taken (``unsent``). An ``acked`` row's ``first_prompt_at - created_at`` is how long
+    the agent took to start its first turn (doctor's ``fleet-delivery`` row)."""
 
 
 class FleetAgentStatus(BaseModel):

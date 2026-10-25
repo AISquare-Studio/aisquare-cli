@@ -157,9 +157,9 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "_exited_note"): "each exited row's own ``project_id``",
     ("services/fleet.py", "_tell"): _FLEET_OP,
     ("services/fleet.py", "_send_it_later"): _FLEET_OP,
+    ("services/fleet.py", "unsent_detail"): "the project the listing reads, whose agent it is",
     ("services/fleet.py", "_past_trust_prompt"): _FLEET_OP,
     ("services/fleet.py", "_at_input_box"): _FLEET_OP,
-    ("services/fleet.py", "_submitted"): _FLEET_OP,
     ("services/fleet.py", "_dead_team_line"): (
         "the project of the manager restarted, whose dead team the line names (#38)"
     ),
@@ -170,6 +170,10 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "restart"): _FLEET_OP,
     ("services/fleet.py", "rename"): "the project renamed, with its new codename",
     ("services/fleet.py", "attach_argv"): _FLEET_OP,
+    ("services/hooks.py", "hand_over"): (
+        "the limited agent's own row's project (``agent.project_id``), which the "
+        "hand-over moves it in (#277)"
+    ),
     ("services/project.py", "BoardReader.frees"): (
         "each project whose fleet agents read a hub's board (``ProjectBusyError``, and doctor's "
         "capture-off line of a captured row's board)"

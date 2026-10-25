@@ -352,6 +352,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **CI runs each leg's suite in shards: a sub-PR's CI takes about 8 minutes, the full
+  matrix about 14, down from 22 and 64.** The suite is ~13k tests and its time is a
+  long tail, so it is split across standard runners rather than sped up: pytest-split
+  (now in the `dev` extra) splits each leg by the per-test times in `.test_durations`,
+  measured on CI itself, into 4 jobs per Linux leg and 8 on Windows, each on every core.
+  Every shard notes what it collected and ran, and a `shards` job fails unless each
+  leg's shards ran every collected test exactly once (`tests/shards.py`). The two
+  ambient jobs, which ran the suite serially for over an hour, are now the py3.11
+  (proxy-down) and py3.13 (proxy-up) legs, sharded and parallel, with every premise
+  check in every shard; the suite runs 5 times per full run, not 7. ruff, the format
+  check, mypy (now also as `--platform win32`, which the Windows leg used to cover) and
+  `uv lock --check` run once, in `lint`. Installs use uv. Every job has a timeout. A
+  new `ci-ok` job passes only when every other job did: one check name for branch
+  protection, whatever the shards. Sharding found a test that passed only after a
+  neighbour had left `insights`' cached config with shipping on; it now configures
+  shipping itself, and the suite resets that cache for every test.
 - **App settings shows the bare minimum, and Remote and the Captain live in it** (#41,
   the owner's placement): a third tab, *Remote*, is Remote control, with Turn on/off,
   the ngrok token field when one is needed and the link, QR and password while on in

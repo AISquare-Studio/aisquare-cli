@@ -53,6 +53,14 @@ permissions:
 #   ci-ok    passes only when every job above did: the one check for branch
 #            protection to require, whatever the number of legs or shards.
 #
+# Measured after, on 7776eaea: a sub-PR's slowest job ended 8.2 minutes after its
+# run started, against 22 (run 40230232483: the 4 shards 4.6-8.1); the full
+# matrix's at 14.3, against 64 (run 40230136547: Linux shards 4.5-7.0, Windows
+# 7.1-9.8 and one at 14.2). pytest-split's shards are even, each within 7% of the
+# others by the last run's times; what spreads them is the runners, 0.6 to 1.4
+# times as fast as each other within one run (Windows' 14.2 ran 1.41 times slower
+# than its tests' last run).
+#
 # Every job has a timeout of about twice its usual time, so a hung shard fails in
 # minutes, not at GitHub's six hours. Installs are uv's, not pip's: about 1 s
 # against 13 on Linux and 21 against 50 on Windows (run 40226083784 against
@@ -134,7 +142,8 @@ jobs:
   test:
     name: test (${{ matrix.leg }}, shard ${{ matrix.shard }}/${{ matrix.shards }})
     runs-on: ${{ matrix.os }}
-    # About twice a shard's usual time on each platform (the header says what that is).
+    # About twice a shard's time on a slow runner: 6-8 minutes on Linux, 7-10 on
+    # Windows, whose runners vary more (one took 14.2, run 40230136547).
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 25 || 15 }}
     strategy:
       fail-fast: false

@@ -596,29 +596,46 @@ def _serial(ca_file: Path) -> int:
     return x509.load_pem_x509_certificate(ca_file.read_bytes()).serial_number
 
 
-def test_ssl_cert_file_adds_to_the_default_paths_as_the_stdlib_did(
+def _trusted(context: ssl.SSLContext) -> set[int]:
+    """The serial numbers of the CAs a context holds, as OpenSSL loaded them."""
+    return {int(str(ca["serialNumber"]), 16) for ca in context.get_ca_certs()}
+
+
+def test_ssl_cert_file_replaces_the_default_ca_file_as_openssl_does(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Review of #403, n2: ``SSL_CERT_FILE`` made the context trust that bundle ALONE, where the
-    stdlib's own context (every call before #403) read the default paths beside it, so a
-    bundle holding only a re-signing proxy's CA failed every public host reached directly.
-    The env rung trusts both."""
-    (tmp_path / "proxy").mkdir()
-    (tmp_path / "public").mkdir()
-    proxy_ca, _leaf, _key = _private_ca(tmp_path / "proxy")
-    public_ca, _leaf2, _key2 = _private_ca(tmp_path / "public")
-
-    def load_default_certs(self: ssl.SSLContext, purpose: Any = None) -> None:
-        self.load_verify_locations(cafile=str(public_ca))  # stands for the system's roots
-
-    monkeypatch.setattr(ssl.SSLContext, "load_default_certs", load_default_certs)
+    """Review of #401, m3: the docs promised a bundle in ``SSL_CERT_FILE`` was trusted
+    BESIDE the default paths, and a test that stubbed ``load_default_certs`` agreed. Real
+    OpenSSL takes ``SSL_CERT_FILE`` as its default CA file, so the bundle replaces it (only
+    the default directory, read lazily and not listed here, stays): a one-CA bundle is ONE
+    CA, as with the stdlib's own context before #403. Kept so, and said so; trust is not
+    widened behind the operator's back. Windows' stdlib loads its store first."""
+    proxy_ca, _leaf, _key = _private_ca(tmp_path)
     monkeypatch.setenv("SSL_CERT_FILE", str(proxy_ca))
 
-    trusted = {int(str(ca["serialNumber"]), 16) for ca in tls.ssl_context().get_ca_certs()}
+    trusted = _trusted(tls.ssl_context())
 
     assert tls.trust_source() == tls.SOURCE_ENV
-    assert _serial(proxy_ca) in trusted, "the bundle named"
-    assert _serial(public_ca) in trusted, "and the default paths beside it"
+    assert trusted == _trusted(ssl.create_default_context()), "what the stdlib trusts, no more"
+    if sys.platform == "win32":
+        assert _serial(proxy_ca) in trusted
+    else:
+        assert trusted == {_serial(proxy_ca)}, f"{len(trusted)} CAs: the default file was kept"
+
+
+def test_ssl_cert_dir_keeps_the_default_ca_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """m3's other half, the way the docs give to ADD a bundle: ``SSL_CERT_DIR`` replaces
+    only the default directory, so every CA of the default file is still trusted."""
+    defaults = _trusted(ssl.create_default_context())
+    (tmp_path / "hashed").mkdir()
+    monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "hashed"))
+
+    trusted = _trusted(tls.ssl_context())
+
+    assert tls.trust_source() == tls.SOURCE_ENV
+    assert trusted == defaults, f"{len(trusted)} of the default file's {len(defaults)} CAs"
 
 
 @pytest.mark.parametrize("rung", ["env", "truststore", "certifi"])

@@ -43,7 +43,7 @@ fleet still running, and every release now carries its own installer.**
   `--no-handoff`, `AISQUARE_INSTALL_NO_HANDOFF=1`, `--offline` and
   `AISQUARE_INSTALL_PACKAGE` keep main's copy. With no `--version` the install is the
   latest release, unpinned, as main's own would be (the release's script is handed
-  `AISQUARE_INSTALL_VERSION` empty, and the PyPI answer main's copy already read), so
+  `--version latest`, and the PyPI answer main's copy already read), so
   `uv tool upgrade` still moves it; `--version V` pins.
   `install.ps1` hands WSL main's `install.sh`, so the hand-off happens there.
 - **Accounts: *Log in again* on any signed-in row.** The login column offers the same
@@ -877,8 +877,9 @@ fleet still running, and every release now carries its own installer.**
   endpoint (URLError)* while `curl` to the same URL worked. Every HTTPS caller —
   usage, IAM, explainability, CI, persona import, the upgrade check, remote push
   — now goes through one lazily built context (`core/tls.py`, one per thread):
-  `SSL_CERT_FILE` / `SSL_CERT_DIR` when set, added to the interpreter's default paths
-  as the stdlib always did, else the OS store via `truststore`, else `certifi` where
+  `SSL_CERT_FILE` / `SSL_CERT_DIR` when set, trusted as the stdlib always did
+  (`SSL_CERT_FILE` replaces OpenSSL's default CA file, so a proxy's bundle must hold
+  the public roots too; `SSL_CERT_DIR` adds to it), else the OS store via `truststore`, else `certifi` where
   `truststore` cannot be imported (both now declared dependencies). Every rung
   requires a certificate, checks the hostname and refuses below TLS 1.2. A certificate that does not verify says
   *TLS certificate could not be verified* with a hint instead of a bare

@@ -176,11 +176,15 @@ for name in $SHELLS; do
     [ "$(head -n 1 "$WORK/out")" = "  using the v$VERSION installer" ] ||
         fail "the first line is not the hand-off"
     # No version named: the release's installer installs the latest UNPINNED, as
-    # main's would (it is handed AISQUARE_INSTALL_VERSION empty).
+    # main's would (it is handed --version latest).
     ! grep -q "pinned to" "$WORK/out" || fail "the release's installer pinned its own version"
-    # Plain on a machine without aisquare, `@latest` on one that has it.
-    grep -q -e "aisquare-cli$" -e "aisquare-cli@latest" "$WORK/out" ||
-        fail "the release's installer did not install the latest release"
+    # The install target, on uv's line: plain on a machine without aisquare,
+    # `@latest` on one that has it, and never ==V or @V. A machine whose aisquare
+    # is already the latest has no install line (`is current`), only the check above.
+    if ! grep -q "^==> aisquare-cli $VERSION is current\$" "$WORK/out"; then
+        grep -Eq "^ *would run: uv tool install .* aisquare-cli(@latest)?\$" "$WORK/out" ||
+            fail "the release's installer did not install the latest release"
+    fi
     expect "nothing above was actually run" "--dry-run was not passed through"
     fetched "github.com/AISquare-Studio/aisquare-cli/releases/latest/download/install.sh" \
         "the latest release's installer was not fetched"

@@ -54,6 +54,10 @@ PYPI_JSON_URL="https://pypi.org/pypi/aisquare-cli/json"
 #: so setting this also turns the version comparison off — see `resolve`.
 INSTALL_TARGET=${AISQUARE_INSTALL_PACKAGE:-$PYPI_PACKAGE}
 UV_INSTALLER_URL="https://astral.sh/uv/install.sh"
+#: A newline. The doctor's amber row names are listed one per line, because a
+#: name can hold spaces (`manager board context`): see `doctor_amber`.
+NL='
+'
 CLAUDE_INSTALLER_URL="https://claude.ai/install.sh"
 FNM_INSTALLER_URL="https://fnm.vercel.app/install"
 NODESOURCE_DEB_URL="https://deb.nodesource.com/setup_NODEMAJOR.x"
@@ -496,11 +500,12 @@ version_lt() {
 # MAIN'S COPY RUNS THE RELEASE'S OWN install.sh, and carries on itself only when
 # it cannot. This file installs the latest release from PyPI, but the copy on
 # `main` has main's steps and checks, and those can be ahead of that release:
-# #399 dropped `--with tiktoken` here while the latest release's doctor still
-# had a tiktoken row, and every install-matrix cell went amber. A release's own
-# copy is stamped (STAMPED_VERSION) and matches the package it installs, so an
-# UNSTAMPED copy downloads it, from releases/latest/download or, for
-# --version V, from vV's, and runs it with the same arguments.
+# an earlier draft of #399 dropped `--with tiktoken` here while the latest
+# release's doctor still had a tiktoken row, and every install-matrix cell went
+# amber. A release's own copy is stamped (STAMPED_VERSION) and matches the
+# package it installs, so an UNSTAMPED copy downloads it, from
+# releases/latest/download or, for --version V, from vV's, and runs it with the
+# same arguments.
 #
 # Whatever goes wrong is one quiet line and this script carrying on, never an
 # error: no network, a timeout, a 404 (a release before 0.9.0 has no installer
@@ -565,18 +570,24 @@ hand_off() {
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    # No version named: the release's script installs unpinned, as this copy would.
+    # Left to its stamp, every plain one-liner install was pinned to the release
+    # (aisquare-cli==V), and `uv tool upgrade` never moved it again. `--version
+    # latest` is the stamped script's way out of its pin, passed as an ARGUMENT,
+    # last so it is the one parse_args keeps, and before release_checked so the
+    # release must know it like any option given. Not an exported
+    # AISQUARE_INSTALL_VERSION=: that reached asq, the tmux server and every agent
+    # through the release's `exec asq`, and a release's own installer run later
+    # from those shells installed the latest instead of its version (review of
+    # #401, m4). A `latest` or a --version V named goes as given, and
+    # AISQUARE_INSTALL_VERSION=V still pins from the environment.
+    [ -n "$PIN_VERSION" ] || set -- "$@" --version latest
     if release_checked "$@"; then
         note "using the v$HANDOFF_VERSION installer"
         AISQUARE_INSTALL_HANDED_OFF=$HANDOFF_FILE
         export AISQUARE_INSTALL_HANDED_OFF
         if [ -z "$PIN_VERSION" ] || [ "$PIN_VERSION" = latest ]; then
-            # No version named: the release's script installs unpinned, as this copy
-            # would. Left to its stamp, every plain one-liner install was pinned to the
-            # release (aisquare-cli==V), and `uv tool upgrade` never moved it again. Set
-            # but empty is the stamped script's documented "drop the pin"; --version V
-            # (or AISQUARE_INSTALL_VERSION=V) still pins, in the arguments or the env.
-            AISQUARE_INSTALL_VERSION=
-            export AISQUARE_INSTALL_VERSION
+            # Unpinned, it needs PyPI's latest: the answer this copy already read.
             AISQUARE_INSTALL_PYPI_LATEST=$PYPI_LATEST
             export AISQUARE_INSTALL_PYPI_LATEST
         fi
@@ -1111,9 +1122,13 @@ short_circuit() {
     # broken machine is worse than one that never ran." An unanswerable doctor
     # is a reason to do the work, not to skip it.
     _amber=$(doctor_amber 2>/dev/null) || return 1
+    _sc_ifs=$IFS
+    IFS=$NL
     for _amber_check in $_amber; do
+        IFS=$_sc_ifs
         is_expected_amber "$_amber_check" || return 1
     done
+    IFS=$_sc_ifs
 
     say ""
     say "${C_BOLD}aisquare $CLI_VERSION is already the latest.${C_RESET}"
@@ -1129,30 +1144,22 @@ short_circuit() {
     # — so `--no-project` on such a machine read "everything ok except snapshot
     # (gbrain is out of scope)", blaming a check that was fine.
     _why=""
-    case " $_amber " in
-        *" brain "*) _why="gbrain is out of scope" ;;
-    esac
-    case " $_amber " in
-        *" claude-code "*)
-            [ -n "$_why" ] && _why="$_why; "
-            _why="${_why}Claude Code left alone (--no-agent)"
-            ;;
-    esac
-    case " $_amber " in
-        *" tmux "* | *" gh "*)
-            [ -n "$_why" ] && _why="$_why; "
-            _why="${_why}system deps skipped"
-            ;;
-    esac
-    case " $_amber " in
-        *" repomix "* | *" snapshot "* | *" tiktoken "*)
-            [ -n "$_why" ] && _why="$_why; "
-            _why="${_why}this release's codebase-snapshot rows, gone in the next"
-            ;;
-    esac
+    listed "$_amber" brain && _why="gbrain is out of scope"
+    if listed "$_amber" claude-code; then
+        [ -n "$_why" ] && _why="$_why; "
+        _why="${_why}Claude Code left alone (--no-agent)"
+    fi
+    if listed "$_amber" tmux || listed "$_amber" gh; then
+        [ -n "$_why" ] && _why="$_why; "
+        _why="${_why}system deps skipped"
+    fi
+    if listed "$_amber" repomix || listed "$_amber" snapshot || listed "$_amber" tiktoken; then
+        [ -n "$_why" ] && _why="$_why; "
+        _why="${_why}this release's codebase-snapshot rows, gone in the next"
+    fi
     [ -n "$_why" ] || _why="all expected"
     if [ -n "$_amber" ]; then
-        note "doctor: everything ok except $_amber ($_why)"
+        note "doctor: everything ok except $(listed_words "$_amber") ($_why)"
     else
         note "doctor: every check ok"
     fi
@@ -2247,6 +2254,22 @@ is_expected_amber() {
     return 1
 }
 
+# True when $2 is a whole line of the list $1. The doctor's amber names are
+# listed one per line, never split on spaces: P1's `manager board context` row,
+# word-split, was three unexpected rows named in pieces (review of #401, n16).
+listed() {
+    case "$NL$1$NL" in
+        *"$NL$2$NL"*) return 0 ;;
+    esac
+    return 1
+}
+
+# The list $1, one name per line, as one line for a note: the names joined by
+# spaces.
+listed_words() {
+    printf '%s' "$1" | tr '\n' ' ' | sed 's/^ *//; s/ *$//'
+}
+
 # `aisquare --json doctor` as this script judges it: every check as this folder
 # answers it, except claude-code, which is asked from `/`. One check per line, the
 # `tr '{' '\n'` form every reader below splits a payload into anyway.
@@ -2363,9 +2386,7 @@ doctor_amber() {
         sed -n \
             -e 's/.*"name": *"\([^"]*\)".*"status": *"warn".*/\1/p' \
             -e 's/.*"name": *"\([^"]*\)".*"status": *"fail".*/\1/p' |
-        sort |
-        tr '\n' ' ' |
-        sed 's/  */ /g; s/^ //; s/ $//'
+        sort
 }
 
 # How many checks the payload claims to hold, so a parse that silently dropped
@@ -2401,7 +2422,7 @@ run_doctor() {
     fi
 
     DOCTOR_AMBER=$(doctor_amber "$DOCTOR_RAW" || true)
-    note "doctor: $_total checks, $(printf '%s' "$DOCTOR_AMBER" | wc -w | tr -d ' ') not ok"
+    note "doctor: $_total checks, $(printf '%s' "$DOCTOR_AMBER" | grep -c . || true) not ok"
 }
 
 # ---------------------------------------------------------------------------
@@ -2560,83 +2581,79 @@ summary() {
         return 0
     fi
 
+    # Each list one name per line, as DOCTOR_AMBER is (`listed`), and each loop
+    # over one splits on newlines only, back to the default IFS inside.
     _expected=""
     _actionable=""
     _unexpected=""
+    _su_ifs=$IFS
+    IFS=$NL
     for _check in $DOCTOR_AMBER; do
+        IFS=$_su_ifs
         if is_expected_amber "$_check"; then
-            _expected="$_expected $_check"
+            _expected="$_expected$NL$_check"
             continue
         fi
         _fix=$(_actionable_fix "$_check")
         if [ -n "$_fix" ]; then
-            _actionable="$_actionable $_check"
+            _actionable="$_actionable$NL$_check"
         else
-            _unexpected="$_unexpected $_check"
+            _unexpected="$_unexpected$NL$_check"
             UNEXPECTED=$((UNEXPECTED + 1))
         fi
     done
+    IFS=$_su_ifs
     # An extra this run was asked for (`--with`, or yes at its prompt) that is
     # still not there. No doctor row can say so: an extra is optional, so no row
     # goes amber without it. That knowledge is this script's, and it exits 2.
     for _sm_extra in $CHOSEN_EXTRAS; do
         extra_call current "$_sm_extra" && continue
-        _unexpected="$_unexpected $_sm_extra"
+        _unexpected="$_unexpected$NL$_sm_extra"
         UNEXPECTED=$((UNEXPECTED + 1))
     done
 
     if [ -n "$_expected" ]; then
         say ""
-        note "expected:$_expected"
+        note "expected: $(listed_words "$_expected")"
         # Each line explained only if it is actually there. `brain` was printed
         # unconditionally, which is wrong on a machine that HAS gbrain: the
         # macOS runner reported brain green with another row amber, and the
         # summary would have explained a check that was fine.
-        case " $_expected " in
-            *" brain "*)
-                note "  brain    — gbrain is out of scope for this installer; team"
-                note "             decisions are simply not distilled without it."
-                ;;
-        esac
-        case " $_expected " in
-            *" claude-account-backoff "*)
-                note "  claude-account-backoff — an account's usage reads wait out a rate"
-                note "             limit; they resume by themselves (aisquare doctor says until when)."
-                ;;
-        esac
-        case " $_expected " in
-            *" claude-code "*)
-                # Information, not an instruction: under --no-agent no state of
-                # Claude Code is this run's to change, so the doctor's fix is not
-                # printed. Asked in this folder (doctor_json), so the doctor run
-                # here shows the same row.
-                _cc_said=$(_json_text "$(_doctor_detail claude-code)")
-                if [ -n "$_cc_said" ]; then
-                    note "  claude-code — left alone by --no-agent; aisquare doctor here says:"
-                    note "             $_cc_said"
-                else
-                    # A detail that could not be read off the payload (a `{` in a
-                    # path splits it): named where it can be read in full.
-                    note "  claude-code — left alone by --no-agent; aisquare doctor here shows its state."
-                fi
-                ;;
-        esac
-        case " $_expected " in
-            *" tmux "* | *" gh "*)
-                # Named as a group, because --no-system-deps skipped them
-                # together and explaining each separately would read as two
-                # problems rather than one deliberate choice.
-                note "  tmux/gh  — skipped by --no-system-deps. The CLI works;"
-                note "             the fleet UI needs tmux, and PRs need gh."
-                ;;
-        esac
+        if listed "$_expected" brain; then
+            note "  brain    — gbrain is out of scope for this installer; team"
+            note "             decisions are simply not distilled without it."
+        fi
+        if listed "$_expected" claude-account-backoff; then
+            note "  claude-account-backoff — an account's usage reads wait out a rate"
+            note "             limit; they resume by themselves (aisquare doctor says until when)."
+        fi
+        if listed "$_expected" claude-code; then
+            # Information, not an instruction: under --no-agent no state of
+            # Claude Code is this run's to change, so the doctor's fix is not
+            # printed. Asked in this folder (doctor_json), so the doctor run
+            # here shows the same row.
+            _cc_said=$(_json_text "$(_doctor_detail claude-code)")
+            if [ -n "$_cc_said" ]; then
+                note "  claude-code — left alone by --no-agent; aisquare doctor here says:"
+                note "             $_cc_said"
+            else
+                # A detail that could not be read off the payload (a `{` in a
+                # path splits it): named where it can be read in full.
+                note "  claude-code — left alone by --no-agent; aisquare doctor here shows its state."
+            fi
+        fi
+        if listed "$_expected" tmux || listed "$_expected" gh; then
+            # Named as a group, because --no-system-deps skipped them
+            # together and explaining each separately would read as two
+            # problems rather than one deliberate choice.
+            note "  tmux/gh  — skipped by --no-system-deps. The CLI works;"
+            note "             the fleet UI needs tmux, and PRs need gh."
+        fi
         # The release's rows for what the next one removes (RELEASE_ERA_AMBER),
         # named as one, and only those actually amber.
         _sm_era=""
-        for _check in $_expected; do
-            case " $RELEASE_ERA_AMBER " in
-                *" $_check "*) _sm_era="${_sm_era:+$_sm_era/}$_check" ;;
-            esac
+        for _check in $RELEASE_ERA_AMBER; do
+            listed "$_expected" "$_check" && _sm_era="${_sm_era:+$_sm_era/}$_check"
         done
         if [ -n "$_sm_era" ]; then
             note "  $_sm_era — this release's rows for the codebase snapshot,"
@@ -2647,9 +2664,12 @@ summary() {
     if [ -n "$_actionable" ]; then
         say ""
         say "Two minutes of your own, and these go green:"
+        IFS=$NL
         for _check in $_actionable; do
+            IFS=$_su_ifs
             printf '  %s — %s\n' "$_check" "$(_actionable_fix "$_check")"
         done
+        IFS=$_su_ifs
     fi
 
     if [ -n "$_unexpected" ]; then
@@ -2666,21 +2686,26 @@ summary() {
         # it read green while the run said otherwise (review of #257).
         _from_doctor=""
         _cc_detail=""
+        IFS=$NL
         for _check in $_unexpected; do
+            IFS=$_su_ifs
             case " $OPTIONAL_EXTRAS " in
                 *" $_check "*) continue ;;
             esac
             case "$_check" in
                 claude-code)
                     _cc_detail=$(_json_text "$(_doctor_detail claude-code)")
-                    [ -n "$_cc_detail" ] || _from_doctor="$_from_doctor $_check"
+                    [ -n "$_cc_detail" ] || _from_doctor="$_from_doctor$NL$_check"
                     ;;
-                *) _from_doctor="$_from_doctor $_check" ;;
+                *) _from_doctor="$_from_doctor$NL$_check" ;;
             esac
         done
+        IFS=$NL
         for _check in $_from_doctor; do
+            IFS=$_su_ifs
             printf '  %s\n' "$_check"
         done
+        IFS=$_su_ifs
         if [ -n "$_from_doctor" ]; then
             note "the full detail and a fix for each: aisquare doctor"
         fi

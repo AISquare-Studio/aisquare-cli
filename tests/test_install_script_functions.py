@@ -1236,7 +1236,7 @@ def test_doctor_amber_is_sorted_so_the_comparison_is_about_the_set(tmp_path: Pat
         body=f"case \"$1\" in --json) printf '%s' '{payload}' ;; esac\nexit 0",
     )
     result = sh("doctor_amber; echo", path=f"{cli}:{base_path(tmp_path)}")
-    assert result.stdout.strip() == "brain gh", (
+    assert result.stdout.strip().split("\n") == ["brain", "gh"], (
         f"doctor_amber returned {result.stdout.strip()!r} — it must sort, or the "
         f"short-circuit breaks on a reordering\n{result.stderr}"
     )
@@ -1557,10 +1557,10 @@ def test_a_usage_back_off_at_install_time_is_expected_not_amber(tmp_path: Path) 
     2, so a transient rate limit turned a good install amber. It says nothing about the
     install: expected, explained, exit 0. Another amber row still exits 2 (control)."""
     result = _summary_then_handoff(
-        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain claude-account-backoff'"
+        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain\nclaude-account-backoff'"
     )
     control = _summary_then_handoff(
-        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain claude-accounts'"
+        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain\nclaude-accounts'"
     )
 
     assert "UNEXPECTED=0" in result.stdout and result.returncode == 0, result.stdout
@@ -1606,7 +1606,7 @@ def test_a_missing_extra_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None
         tmp_path, "CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=; DOCTOR_AMBER=brain"
     )
     both = _summary_then_handoff(
-        tmp_path, "CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=; DOCTOR_AMBER='brain python'"
+        tmp_path, "CHOSEN_EXTRAS=chrome-devtools; NODE_VERSION=; DOCTOR_AMBER='brain\npython'"
     )
 
     assert _NODE_FAILED in alone.stdout
@@ -1616,6 +1616,39 @@ def test_a_missing_extra_alone_is_not_sent_to_the_doctor(tmp_path: Path) -> None
     assert both.stdout.index("  python\n") < pointer < both.stdout.index(_NODE_FAILED)
     assert "  chrome-devtools\n" not in both.stdout, "an extra is not listed as a doctor check"
     assert both.returncode == 2
+
+
+_SPACED_ROWS = json.dumps(
+    [
+        {"name": "brain", "status": "warn", "detail": "x", "fix": "y"},
+        {"name": "manager board context", "status": "warn", "detail": "x", "fix": "y"},
+        {"name": "python", "status": "warn", "detail": "x", "fix": "y"},
+        {"name": "home", "status": "ok", "detail": "x", "fix": None},
+    ]
+)
+
+
+def test_a_row_name_with_spaces_is_one_row(tmp_path: Path) -> None:
+    """Review of #401, n16: the amber names were word-split, so P1's `manager board context`
+    row counted as three unexpected rows and was listed in pieces. One name per line now."""
+    cli = stub_dir(
+        tmp_path,
+        "cli",
+        "aisquare",
+        body=f"case \"$1\" in --json) printf '%s' '{_SPACED_ROWS}' ;; esac\nexit 0",
+    )
+    counted = sh("DRY_RUN=0; run_doctor", path=f"{cli}:{base_path(tmp_path)}")
+    result = _summary_then_handoff(
+        tmp_path,
+        'WANT_SYSTEM_DEPS=1; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER=$(doctor_amber "$DOCTOR_RAW")',
+        env={"PAYLOAD": _SPACED_ROWS},
+    )
+
+    assert "doctor: 4 checks, 3 not ok" in counted.stdout, counted.stdout + counted.stderr
+    assert "UNEXPECTED=2" in result.stdout, result.stdout
+    assert "  manager board context\n  python\n" in result.stdout, result.stdout
+    assert "  manager\n" not in result.stdout and "  board\n" not in result.stdout
+    assert result.returncode == 2
 
 
 def test_exit_2_is_documented_for_an_extra_that_did_not_install(tmp_path: Path) -> None:
@@ -1828,7 +1861,8 @@ def test_a_chosen_extra_that_is_not_there_is_work_for_the_short_circuit(
     assert said.strip().splitlines()[-1] == expected, said
 
 
-#: The installed release's rows for the codebase snapshot (`RELEASE_ERA_AMBER`).
+#: The installed release's rows for the codebase snapshot (`RELEASE_ERA_AMBER`), named
+#: here with spaces; the script is given them one per line, as `doctor_amber` lists them.
 _RELEASE_ROWS = ("brain repomix", "brain snapshot", "brain tiktoken", "brain repomix snapshot")
 
 
@@ -1855,7 +1889,8 @@ def test_the_installed_releases_snapshot_rows_are_expected(
     Review of #399, MAJOR 1: `--yes` on Debian 12's own Node 18 exited 2 on `repomix`.
     They are expected, under every flag and for a pin below 0.9.0 even once 0.9.0 is the
     latest, and the summary says why in one line."""
-    result = _summary_then_handoff(tmp_path, f"{flags or ':'}; DOCTOR_AMBER='{amber}'")
+    one_per_line = amber.replace(" ", "\n")
+    result = _summary_then_handoff(tmp_path, f"{flags or ':'}; DOCTOR_AMBER='{one_per_line}'")
 
     assert "UNEXPECTED=0" in result.stdout, result.stdout
     assert result.returncode == 0, result.stdout + result.stderr
@@ -1871,7 +1906,7 @@ def test_the_installed_releases_snapshot_rows_do_not_stop_the_short_circuit(
 ) -> None:
     """A current machine whose release doctor shows them still has nothing to do, and
     the one line says why."""
-    said = _short_circuits(tmp_path, flags, "brain repomix snapshot", npx=False)
+    said = _short_circuits(tmp_path, flags, "brain\nrepomix\nsnapshot", npx=False)
 
     assert said.strip().splitlines()[-1] == "SHORT", said
     assert (
@@ -2732,7 +2767,7 @@ def test_an_amber_claude_code_row_is_unexpected_and_printed_in_the_doctors_words
 
     result = _summary_then_handoff(
         tmp_path,
-        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain\nclaude-code'",
         env={"PAYLOAD": json.dumps([row])},
     )
 
@@ -2832,7 +2867,7 @@ def test_a_home_with_a_non_ascii_name_is_printed_exactly(
 
     result = _summary_then_handoff(
         tmp_path,
-        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        "WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain\nclaude-code'",
         env={"PAYLOAD": json.dumps([row])},
     )
 
@@ -2877,7 +2912,7 @@ def test_a_no_agent_run_expects_claude_code_whatever_its_row_says(
 
     result = _summary_then_handoff(
         tmp_path,
-        "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain\nclaude-code'",
         env={"PAYLOAD": json.dumps([row])},
     )
 
@@ -2905,7 +2940,7 @@ def test_a_no_agent_row_whose_detail_cannot_be_read_says_where_to_read_it(
 
     result = _summary_then_handoff(
         tmp_path,
-        "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain claude-code'",
+        "WANT_AGENT=0; WANT_SYSTEM_DEPS=0; DOCTOR_RAW=$PAYLOAD; DOCTOR_AMBER='brain\nclaude-code'",
         env={"PAYLOAD": json.dumps([row])},
     )
 

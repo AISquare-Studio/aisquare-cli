@@ -784,6 +784,42 @@ def test_a_cached_read_keeps_the_family_weeks_the_live_one_saw(
     assert later[work.slot].family_week_percent == {}
 
 
+@pytest.mark.parametrize(
+    ("opus_resets", "picked"),
+    [(timedelta(minutes=1), 0), (timedelta(days=1), 1)],
+    ids=["reset-since", "control-still-spent"],
+)
+def test_a_cached_family_week_that_has_reset_is_not_read_as_spent(
+    fake_home: Path, opus_resets: timedelta, picked: int
+) -> None:
+    """Review of #401, m2 (the reviewer's repro): a reads 10 % with its Opus week spent until
+    NOW+1m, b 60 %. Three minutes on, a new process's pick for an Opus agent read a's Opus
+    week as spent from the store cache, skipped it and took b. The week has reset: a is
+    picked. Control: with the Opus week spent for a day, a is still skipped."""
+    a = _slot("a@example.com", "tok-a")
+    b = _slot("b@example.com", "tok-b")
+    payload = _payload(10, week=10)
+    payload["seven_day_opus"] = {
+        "utilization": 100,
+        "resets_at": (NOW + opus_resets).isoformat(),
+    }
+    endpoint = _Endpoint({"tok-a": payload, "tok-b": _payload(60, week=60)})
+    service.read_usage([a, b], now=NOW, fetch=endpoint)
+    _new_process()
+    later = NOW + timedelta(minutes=3)
+
+    choice, notes = service.headroom_choice(
+        [a, b], switch_at=90, now=later, fetch=endpoint, max_age=300, family="opus"
+    )
+
+    assert choice is not None and choice.slot == [a, b][picked].slot, notes
+    assert len(endpoint.calls) == 2, "served from the store cache"
+    cached = service.cached_usage([a], now=later, fetch=endpoint)[a.slot]
+    if picked == 0:
+        assert "opus" not in cached.family_week_percent, "the figure for a week that is over"
+        assert service._has_reset(cached, later), "a family reset counts as a reset"
+
+
 def _new_token(account: Any, token: str) -> None:
     """An OAuth refresh, or a *Log in again* to the same account: a new token, the same login."""
     creds = core.credentials_path(account)

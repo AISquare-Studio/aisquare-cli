@@ -508,6 +508,56 @@ def test_an_unacknowledged_first_prompt_reads_attention_once(
     assert status.state != "attention"
 
 
+def test_a_first_prompt_held_at_the_security_notes_after_session_start_is_never_silent(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P0-FU1 (review of #404): a command-line first message waits behind Claude Code's
+    first-run Security notes, whose only key is Enter. Its SessionStart has fired, so the
+    trust-question read (no hook since the row began) never looks, and the screen is no idle
+    box: the row read plain ``waiting`` and stayed ``pending``, silent, for good. Past
+    ``prompt_ack_seconds`` it moves to ``unsent`` once, the board gets one ``prompt_unsent``
+    naming the notes, and every listing reads ``attention`` with the notes' one key, not a
+    ``fleet tell`` its notes would lose. Pressed past to an idle box, it reads as any
+    message not taken; a prompt then takes it."""
+    agent = fleet_service.spawn(project, "coder", worktree=False, prompt="go").agent
+    assert agent.session_id is not None and agent.first_prompt == "pending"
+    _board_session(agent, "waiting")  # its SessionStart has fired
+    tmux.screens[agent.pane_id] = fleet_suite.SECURITY_SCREEN
+    later = datetime.now(tz=UTC) + timedelta(seconds=FleetSettings().prompt_ack_seconds + 400)
+    monkeypatch.setattr(fleet_service, "_now", lambda: later)
+    nudges: list[str] = []
+    monkeypatch.setattr(
+        fleet_service, "nudge_manager", lambda *args, **kwargs: nudges.append(kwargs["reason"])
+    )
+
+    def unsent_events() -> list[str]:
+        with store_session() as store:
+            events = store.events_since(project.id, 0, limit=500)
+        return [event.text for event in events if event.kind == "prompt_unsent"]
+
+    for _ in range(2):
+        [status] = fleet_service.list_agents(project)
+        assert status.state == "attention"
+        assert status.detail == f"{fleet_service.SECURITY_NOTES} — press Enter in its window"
+    [said] = unsent_events()
+    assert said == f"{agent.label}: first prompt not taken — held at Claude Code's Security notes"
+    assert _row(agent.id).first_prompt == "unsent" and len(nudges) == 1
+
+    tmux.screens[agent.pane_id] = _box()  # a human pressed Enter past the notes
+    [status] = fleet_service.list_agents(project)
+    assert (status.state, status.detail) == (
+        "attention",
+        fleet_service.unsent_detail(project, agent.label),
+    )
+    assert len(unsent_events()) == 1
+
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", agent.id)
+    monkeypatch.setenv("AISQUARE_ROLE", "coder")
+    team_service.hook_prompt_heartbeat(agent.session_id, project.root)  # its first turn starts
+    [status] = fleet_service.list_agents(project)
+    assert status.state != "attention" and _row(agent.id).first_prompt == "acked"
+
+
 @pytest.mark.parametrize("evidence", ["its-stop", "its-session-stamp"])
 def test_a_turn_whose_prompt_record_failed_is_not_read_as_not_taken(
     tmux: FakeTmux,

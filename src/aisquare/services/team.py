@@ -2471,8 +2471,10 @@ def hook_prompt_heartbeat(
     message (``store.mark_prompted``, P0-W1a): the acknowledgement ``fleet spawn``,
     ``restart`` and ``switch`` wait for, and a typed delivery asks before it presses Enter
     again. The row is the window's own (``AISQUARE_FLEET_AGENT``), else the one bound to the
-    session. One indexed update, no tmux call, on every path: an unbriefed (solo) session's
-    prompt starts a turn too.
+    session. One indexed update, no tmux call. Not for a solo (unbriefed) session's prompt:
+    no fleet row is ever solo (:func:`member_by_env`), and only a fleet row's or a manager's
+    ``prompted_at`` is ever read (a tell's and a nudge's acknowledgement, the listing's
+    take), so the stamp there was a write no reader could reach (review of #404).
     """
     if not orchestrator.team_enabled():
         return ""
@@ -2513,10 +2515,10 @@ def hook_prompt_heartbeat(
                     prompted_at=now,
                 )
             )
-            store.mark_prompted(session.id, now, agent_id=orchestrator.env_fleet_agent())
             if solo:
                 store.set_meta(_unbriefed(session.id), "1")
                 return ""
+            store.mark_prompted(session.id, now, agent_id=orchestrator.env_fleet_agent())
             # This door binds a fleet row too (an agent that started before the
             # orchestrator was switched on) — and does so BEFORE the tasks are
             # read: computed as an argument, the claim it moved was rendered
@@ -2550,7 +2552,6 @@ def hook_prompt_heartbeat(
             session = session.model_copy(update={"transcript_path": transcript_path})
         collision = _shared_row_banner(session, transcript_path, _now())
         if store.get_meta(_unbriefed(session.id)) is not None:
-            store.mark_prompted(session.id, _now(), agent_id=orchestrator.env_fleet_agent())
             return collision + _brief_when_a_team_forms(store, session, cwd)
         # The fleet-row bind the start hook could not make is tried again here,
         # and the briefing it was owed comes with it (rule 2, second half).

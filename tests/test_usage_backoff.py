@@ -352,7 +352,7 @@ def test_doctor_names_the_backed_off_accounts(fake_home: Path) -> None:
     )
     until = datetime.now(tz=UTC) + timedelta(minutes=20)
     with store_session() as store:
-        token = service._token_fingerprint(work)
+        token = service._login_key(work, NOW)
         held = service.UsageBackoff(slot=work.slot, until=until, attempts=1, since=NOW, token=token)
         store.set_ui_state(service._BACKOFF_KEY.format(slot=work.slot), held.dump())
     checks = {c.name: c for c in diagnostics._claude_accounts_checks()}
@@ -503,7 +503,7 @@ def test_a_stale_clear_never_removes_a_newer_wait(fake_home: Path) -> None:
     B's 200 lands. B clears only the row it read, so Y stands."""
     work = _slot("work@example.com", "tok-work")
     key = service._BACKOFF_KEY.format(slot=work.slot)
-    token = service._token_fingerprint(work)
+    token = service._login_key(work, NOW)
     expired = service.UsageBackoff(
         slot=work.slot, until=NOW - timedelta(seconds=1), attempts=1, since=NOW, token=token
     )
@@ -527,7 +527,7 @@ def test_a_stale_clear_never_removes_a_newer_wait(fake_home: Path) -> None:
 def test_a_stale_write_never_shortens_a_newer_wait(fake_home: Path) -> None:
     work = _slot("work@example.com", "tok-work")
     key = service._BACKOFF_KEY.format(slot=work.slot)
-    token = service._token_fingerprint(work)
+    token = service._login_key(work, NOW)
     longer = service.UsageBackoff(
         slot=work.slot, until=NOW + timedelta(minutes=30), attempts=3, since=NOW, token=token
     )
@@ -543,19 +543,50 @@ def test_a_stale_write_never_shortens_a_newer_wait(fake_home: Path) -> None:
         assert store.ui_state(key) == longer.dump()
 
 
+def _new_token(account: Any, token: str) -> None:
+    """An OAuth refresh, or a *Log in again* to the same account: a new token, the same login."""
+    creds = core.credentials_path(account)
+    data = json.loads(creds.read_text())
+    data["claudeAiOauth"]["accessToken"] = token
+    creds.write_text(json.dumps(data))
+
+
 def test_a_wait_is_the_logins_not_the_slots(fake_home: Path) -> None:
-    """N3: a slot signed into another login is not held to the last login's wait."""
+    """N3: a slot signed into another account is not held to the last account's wait."""
     work = _slot("work@example.com", "tok-work")
     endpoint = _Endpoint({"tok-work": (429, {"Retry-After": "3600"}), "tok-new": _payload(25)})
     service.read_usage([work], now=NOW, fetch=endpoint)
     assert work.slot in service.usage_backoffs([work], now=NOW)
-    creds = core.credentials_path(work)
-    data = json.loads(creds.read_text())
-    data["claudeAiOauth"]["accessToken"] = "tok-new"
-    creds.write_text(json.dumps(data))
+    path = core.claude_json_path(work)
+    data = json.loads(path.read_text())
+    data["oauthAccount"].update(emailAddress="home@example.com", accountUuid="another-uuid")
+    path.write_text(json.dumps(data))
+    _new_token(work, "tok-new")
     reading = service.read_usage([work], now=NOW + timedelta(minutes=1), fetch=endpoint)
     assert reading[work.slot].session_percent == 25 and endpoint.calls == ["tok-work", "tok-new"]
     assert service.usage_backoffs([work], now=NOW + timedelta(minutes=1)) == {}
+
+
+def test_a_token_refresh_of_the_same_login_keeps_the_wait_and_its_doubling(
+    fake_home: Path,
+) -> None:
+    """Review of #408, m1: keyed to the token, every OAuth refresh and every *Log in again*
+    lifted the wait, sent a request at once and started the doubling over, while the row said
+    logging in again does not clear it. The same account keeps its wait, and its doubling."""
+    work = _slot("work@example.com", "tok-work")
+    endpoint = _Endpoint({"tok-work": 429, "tok-refreshed": 429})
+    first = service.read_usage([work], now=NOW, fetch=endpoint)[work.slot]
+    assert first.rate_limited_until == NOW + timedelta(seconds=60)
+    _new_token(work, "tok-refreshed")
+
+    inside = service.read_usage([work], now=NOW + timedelta(seconds=30), fetch=endpoint)
+    assert inside[work.slot].rate_limited and endpoint.calls == ["tok-work"], "still waiting"
+    assert work.slot in service.usage_backoffs([work], now=NOW + timedelta(seconds=30))
+
+    after = NOW + timedelta(seconds=61)
+    again = service.read_usage([work], now=after, fetch=endpoint)[work.slot]
+    assert endpoint.calls == ["tok-work", "tok-refreshed"]
+    assert again.rate_limited_until == after + timedelta(seconds=120), "the doubling goes on"
 
 
 def test_a_reading_recorded_just_after_anothers_429_is_kept_for_the_whole_wait(

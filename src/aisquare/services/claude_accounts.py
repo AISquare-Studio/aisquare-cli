@@ -1179,10 +1179,11 @@ class UsageBackoff:
     """One slot's recorded wait: no usage request before ``until``.
 
     ``attempts`` counts the 429s in a row that led here (the exponential default's
-    exponent); ``since`` is when the latest came back. ``token`` is the fingerprint of the
-    token that was refused: a wait is the login's, not the slot's, so a slot signed into
-    another login since is not held to it (review of #408, N3). ``raw`` is the row as read,
-    for the compare-and-set that clears or replaces it (N2).
+    exponent); ``since`` is when the latest came back. ``token`` is whose wait it is
+    (:func:`_login_key`): a wait is the login's, not the slot's, so a slot signed into
+    another login since is not held to it (review of #408, N3), and a token refresh or a
+    *Log in again* to the same account is (m1). ``raw`` is the row as read, for the
+    compare-and-set that clears or replaces it (N2).
     """
 
     slot: int
@@ -1196,7 +1197,7 @@ class UsageBackoff:
         return self.until > now
 
     def holds(self, token: str | None) -> bool:
-        """Whether this wait is the login holding ``token``'s."""
+        """Whether this wait is the login ``token`` (:func:`_login_key`) names."""
         return self.token == token
 
     @property
@@ -1241,6 +1242,22 @@ class UsageBackoff:
             )
         except (ValueError, TypeError, KeyError):
             return None  # a row this version cannot read waits for nothing
+
+
+def _login_key(account: ClaudeAccount, now: datetime) -> str | None:
+    """Whose wait a slot is held to: the account signed into it, by the uuid and email its
+    ``.claude.json`` records, which a token refresh and a *Log in again* to the same account
+    keep; the token's fingerprint when the file names no login.
+
+    Keyed to the token alone, every OAuth refresh and every *Log in again* lifted the wait,
+    restarted the doubling and sent a request at once, while the row said logging in again
+    does not clear it (review of #408, m1). Another account signed into the slot is still
+    not held to the last one's wait (N3).
+    """
+    who = core.identity(account)
+    if who is not None:
+        return f"login:{who.account_uuid or ''}:{who.email}"
+    return _token_fingerprint(account, now)
 
 
 def rate_limited_until_text(until: datetime | None) -> str:
@@ -1314,11 +1331,11 @@ def usage_backoffs(
             held = _read_backoffs(store, [account.slot for account in accounts])
     except sqlite3.Error:
         return {}
-    tokens = {account.slot: _token_fingerprint(account, moment) for account in accounts}
+    logins = {account.slot: _login_key(account, moment) for account in accounts}
     return {
         slot: backoff
         for slot, backoff in held.items()
-        if backoff.active(moment) and backoff.holds(tokens.get(slot))
+        if backoff.active(moment) and backoff.holds(logins.get(slot))
     }
 
 
@@ -1355,11 +1372,18 @@ def read_usage(
     backoffs: dict[int, UsageBackoff] = {}
     with contextlib.suppress(sqlite3.Error), store_session() as store:
         backoffs = _read_backoffs(store, [account.slot for account in accounts])
-    tokens = {account.slot: _token_fingerprint(account, moment) for account in accounts}
+    logins: dict[int, str | None] = {}
+
+    def login(account: ClaudeAccount) -> str | None:
+        """:func:`_login_key`, read once per slot, and only for a slot a wait concerns."""
+        if account.slot not in logins:
+            logins[account.slot] = _login_key(account, moment)
+        return logins[account.slot]
+
     asked: list[ClaudeAccount] = []
     for account in accounts:
         held = backoffs.get(account.slot)
-        if held is not None and held.active(moment) and held.holds(tokens[account.slot]):
+        if held is not None and held.active(moment) and held.holds(login(account)):
             readings[account.slot] = held.reading(moment)
         else:
             asked.append(account)
@@ -1383,7 +1407,7 @@ def read_usage(
             readings[account.slot],
             backoffs.get(account.slot),
             moment,
-            tokens[account.slot],
+            login(account),
         )
         for account in asked
         if readings[account.slot].rate_limited

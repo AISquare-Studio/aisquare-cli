@@ -30,6 +30,7 @@ from aisquare.core.store import BriefChangedError, store_session
 from aisquare.models import RequirementStatus, TeamTask, WorkBrief
 from aisquare.services import briefs, install_route, team
 from aisquare.services import command_reports as reports
+from aisquare.services import context as context_service
 from aisquare.services import fleet as fleet_service
 from tests.projects import add_project
 
@@ -1347,7 +1348,11 @@ def test_the_block_is_clipped_and_the_session_start_fits_the_hook_cap(
 def _busy_board(monkeypatch: pytest.MonkeyPatch, repo: Path, runner: CliRunner) -> TeamTask:
     """The tester's board on #341: 7 live coder sessions, 8 open tasks with long titles,
     three 1,500-character results among the latest events, and a 64-requirement brief
-    at its limits linked to a task the coder holds."""
+    at its limits linked to a task the coder holds. P1's one-line updates (#279) show
+    those results in about 200 characters each, so three 1,100-character project facts,
+    which session start prints whole before the board, keep it near the cap."""
+    for n in range(3):
+        context_service.add_entry(f"Project fact {n}: " + "f" * 1_100, "project", [])
     for n in range(6):
         _start_as(monkeypatch, repo, runner, f"dddd{n:04d}-0000-0000-0000-000000000000")
     _start_as(monkeypatch, repo, runner, CODER)

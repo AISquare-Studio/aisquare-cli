@@ -786,6 +786,48 @@ def offered(view: AccountsView, slot: int, stem: str) -> bool:
     return button.visible and not button.disabled
 
 
+def login_label(view: AccountsView, slot: int) -> str:
+    """What the row's login button says: *Log in* where one is needed, else *Log in again*."""
+    return str(row(view, slot).query_one(f"#account-login-{slot}", Button).label)
+
+
+@pytest.mark.parametrize(
+    ("percent", "hours", "shown"),
+    [(33, 149, "▮▮▯▯▯ 33% · 6d"), (100, 100, "▮▮▮▮▮ 100% · 4d")],
+    ids=["six-days", "full-100h"],
+)
+def test_a_kept_readings_age_fits_the_session_cell_without_an_ellipsis(
+    no_network: dict[str, Any], percent: int, hours: int, shown: str
+) -> None:
+    """The tester's real-UI check of #408: at 12 wide the session cell read '▮▮▯▯▯ 33% ·…',
+    so a kept reading's age never showed. 16 wide (#406's width) holds a six-day-old one, and
+    a full account's: '▮▮▮▮▮ 100% · 100h' was 17 wide until ages over a day read in days
+    (review of #408, n6)."""
+    taken = datetime.now(tz=UTC) - timedelta(hours=hours, minutes=5)
+    no_network["usage"] = ClaudeUsage(
+        available=True,
+        session_percent=percent,
+        week_percent=10,
+        fetched_at=taken,
+        last_failed_at=datetime.now(tz=UTC),
+        last_failed_reason="HTTP 503 from the usage endpoint",
+    )
+    overview = _overview(_status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, int, int]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: f"{percent}%" in cells(view, 2)["session"])
+        cell = row(view, 2).cell("session")
+        column = next(c.width for c in accounts_view.COLUMNS if c.key == "session")
+        return cell.render_line(0).text, cell.region.width, column
+
+    rendered, width, column = drive(go, overview=overview)
+    assert column == 16 and width == 16
+    assert rendered.rstrip() == shown, rendered
+    assert "…" not in rendered
+
+
 def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
     no_network["usage"] = lambda account: (
         ClaudeUsage(available=False, reason="the token was rejected", needs_login=True)
@@ -801,22 +843,27 @@ def test_buttons_follow_each_slots_state(no_network: dict[str, Any]) -> None:
         _status(6, "six@example.com", signed_in=False),
     )
 
-    async def go(pilot: Pilot[None]) -> dict[int, tuple[bool, bool]]:
+    async def go(pilot: Pilot[None]) -> dict[int, tuple[bool, str, bool]]:
         app = fleet_app(pilot)
         view = await open_accounts(pilot)
         await settle_until(app, lambda: painted(view, 1, 2, 4, 5))
         return {
-            slot: (offered(view, slot, "login"), offered(view, slot, "remove"))
+            slot: (
+                offered(view, slot, "login"),
+                login_label(view, slot),
+                offered(view, slot, "remove"),
+            )
             for slot in range(1, 7)
         }
 
     buttons = drive(go, overview=overview)
-    assert buttons[1] == (False, False)  # signed in, and never ours to remove
-    assert buttons[2] == (False, True)  # signed in, ours
-    assert buttons[3] == (True, True)  # never signed in
-    assert buttons[4] == (True, True)  # signed in, but the endpoint rejected the token (401)
-    assert buttons[5] == (True, True)  # signed in, the token expired
-    assert buttons[6] == (True, True)  # a login recorded, its token gone
+    # A healthy row offers *Log in again* (F1 of #400): the same flow, as a secondary action.
+    assert buttons[1] == (True, "Log in again", False)  # signed in, never ours to remove
+    assert buttons[2] == (True, "Log in again", True)  # signed in, ours
+    assert buttons[3] == (True, "Log in", True)  # never signed in
+    assert buttons[4] == (True, "Log in", True)  # signed in, but the token was rejected (401)
+    assert buttons[5] == (True, "Log in", True)  # signed in, the token expired
+    assert buttons[6] == (True, "Log in", True)  # a login recorded, its token gone
 
 
 def test_without_claude_code_the_page_says_how_to_install_and_add_is_disabled() -> None:
@@ -1958,8 +2005,10 @@ def test_log_in_over_a_rejected_token_waits_for_a_fresh_login_and_the_row_recove
             view._poll_login()
             await settle(app)
             await accounts_read(app)
-            await settle_until(app, lambda: painted(view, 2) and not offered(view, 2, "login"))
-            out["after"] = (cells(view, 2), offered(view, 2, "login"), view.login is None)
+            await settle_until(
+                app, lambda: painted(view, 2) and login_label(view, 2) == "Log in again"
+            )
+            out["after"] = (cells(view, 2), login_label(view, 2), view.login is None)
             out["notice"] = notice(view)
             return out
 
@@ -1975,7 +2024,7 @@ def test_log_in_over_a_rejected_token_waits_for_a_fresh_login_and_the_row_recove
     after, offered_after, closed = out["after"]
     assert closed  # the fresh login closed the window…
     assert after["session"] == "▮▮▯▯▯ 40%"  # …and the row is itself again
-    assert not offered_after
+    assert offered_after == "Log in again"  # no login needed: only the secondary action
     assert "✓ Work laptop: two@example.com · hooks installed" in out["notice"]
 
 
@@ -3132,7 +3181,8 @@ def test_the_table_lines_its_columns_up_on_every_row_whatever_the_values(
     assert out["open"] == closed  # the open field moved no column on any row…
     field_region, name_box = out["field"]
     assert field_region == name_box  # …and sits exactly in the name's cell
-    assert len(closed["account-login"]) == 3  # rejected, unsigned and expired: Log in on each
+    # Log in on the rejected, unsigned and expired rows; Log in again on the healthy one.
+    assert len(closed["account-login"]) == 4
     for name, spans in out["scrolled"].items():  # scrolled sideways, all lines moved as one
         if name.startswith("row "):
             assert spans == out["scrolled"]["header"], name
@@ -3182,6 +3232,103 @@ def test_an_expired_rows_reason_and_log_in_are_on_screen_at_160_columns_unscroll
     offered_here, login_seen, on_screen, gap = out["login"]
     assert offered_here and login_seen and on_screen
     assert gap == 1  # right beside the usage cells: one cell apart
+
+
+def test_log_in_again_reads_whole_on_screen_at_160_columns_unscrolled(
+    no_network: dict[str, Any],
+) -> None:
+    """The tester on #408: with the status column still there *Log in again* read
+    'Log in ag' at 160 columns. Without it (#406), the 14-wide login column shows the
+    whole label on a healthy row, on screen, with nothing scrolled."""
+    no_network["usage"] = _table_usage
+
+    async def run() -> dict[str, Any]:
+        app = FleetApp(refresh_seconds=3600, doctor=lambda: [], accounts=_table_frame)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: painted(view, 1, 2, 4))
+            table = view.query_one("#claude-table")
+            login = row(view, 1).query_one("#account-login-1", Button)
+            line = "".join(login.render_line(y).text for y in range(login.region.height))
+            return {
+                "scroll": table.scroll_x,
+                "label": login_label(view, 1),
+                "line": line,
+                "seen": table.scrollable_content_region.contains_region(login.region),
+                "on_screen": login.region.right <= app.size.width,
+            }
+
+    out = asyncio.run(run())
+    assert out["scroll"] == 0 and out["label"] == "Log in again"
+    assert "Log in again" in out["line"] and "…" not in out["line"], out["line"]
+    assert out["seen"] and out["on_screen"]
+
+
+@pytest.mark.parametrize("size", [(160, 50), (100, 40)], ids=["160x50", "100x40"])
+def test_408s_cells_and_login_read_whole_with_301s_update_row_in_the_sidebar(
+    no_network: dict[str, Any], size: tuple[int, int]
+) -> None:
+    """Merged in #401 for 0.9.0: #408's 16-wide session cell (a kept reading's age) and 14-wide
+    *Log in again* on #406's layout, with #301's ⬆ row in the sidebar. The row takes no width
+    from the page: the sidebar is as wide with it as without, the session cell reads whole,
+    and *Log in again*, focused, is whole and in view (scrolled to at 100 columns)."""
+    from aisquare.cli.ui.sidebar import UpdateRow
+    from aisquare.services import updates
+
+    taken = datetime.now(tz=UTC) - timedelta(hours=149, minutes=5)
+
+    def usage(account: ClaudeAccount) -> ClaudeUsage:
+        if account.slot != 1:
+            return _table_usage(account)
+        return ClaudeUsage(
+            available=True,
+            session_percent=33,
+            week_percent=10,
+            fetched_at=taken,
+            last_failed_at=datetime.now(tz=UTC),
+            last_failed_reason="HTTP 503 from the usage endpoint",
+        )
+
+    no_network["usage"] = usage
+    offer = updates.Offer("0.9.1", "0.9.0", runnable=True, announce=False)
+
+    async def run(offered: bool) -> dict[str, Any]:
+        app = FleetApp(
+            refresh_seconds=3600,
+            doctor=lambda: [],
+            accounts=_table_frame,
+            release_check=(lambda: offer) if offered else None,
+        )
+        async with app.run_test(size=size) as pilot:
+            await settle(app)
+            view = await open_accounts(pilot)
+            await settle_until(app, lambda: "33%" in cells(view, 1)["session"])
+            table = view.query_one("#claude-table")
+            session = row(view, 1).cell("session")
+            login = row(view, 1).query_one("#account-login-1", Button)
+            login.focus()
+            await pilot.pause()
+            await pilot.wait_for_scheduled_animations()
+            line = "".join(login.render_line(y).text for y in range(login.region.height))
+            return {
+                "update row": app.query_one(UpdateRow).display,
+                "sidebar": app.sidebar.outer_size.width,
+                "session": (session.region.width, session.render_line(0).text.rstrip()),
+                "login": (login_label(view, 1), line),
+                "in view": table.scrollable_content_region.contains_region(login.region)
+                and login.region.right <= view.region.right,
+            }
+
+    without = asyncio.run(run(False))
+    out = asyncio.run(run(True))
+
+    assert (without["update row"], out["update row"]) == (False, True)
+    assert out["sidebar"] == without["sidebar"], "the ⬆ row widens nothing"
+    assert out["session"] == (16, "▮▮▯▯▯ 33% · 6d"), out["session"]
+    label, line = out["login"]
+    assert label == "Log in again" and "Log in again" in line and "…" not in line, line
+    assert out["in view"]
 
 
 @pytest.mark.parametrize(

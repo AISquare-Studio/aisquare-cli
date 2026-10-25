@@ -11,7 +11,7 @@ import shutil
 import string
 import sys
 from collections.abc import Callable, Collection, Container, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib import metadata
 from pathlib import Path, PurePath
 from urllib.parse import urlsplit
@@ -158,6 +158,7 @@ def doctor(
         _check_fleet(),
         *_check_dead_managers(),
         *_check_resumable_agents(),
+        *_check_fleet_delivery(),
         *_check_captured_projects(),
         # After the actionable machine checks on purpose. The fleet UI's sidebar
         # showed the first three not-ok rows (a stable sort within the warn
@@ -1347,7 +1348,7 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
         # directory deleted by hand drops none, so `choose` refused every launch in
         # that project while this said nothing (round 3).
         defaults = _claude_account_default_checks() if _arranges_an_account() else []
-        return [*defaults, *_claude_account_limit_checks()]
+        return [*defaults, *_claude_account_limit_checks(), *_claude_account_backoff_checks()]
     statuses = [claude_accounts_service.describe(account) for account in managed]
     parts = [
         f"{status.account.slot} {status.identity.email if status.identity else 'not signed in'}"
@@ -1365,11 +1366,13 @@ def _claude_accounts_checks() -> list[DoctorCheck]:
             ),
             *_claude_account_default_checks(),
             *_claude_account_limit_checks(),
+            *_claude_account_backoff_checks(),
         ]
     return [
         _ok("claude-accounts", detail),
         *_claude_account_default_checks(),
         *_claude_account_limit_checks(),
+        *_claude_account_backoff_checks(),
     ]
 
 
@@ -1442,6 +1445,63 @@ def _check_resumable_agents() -> list[DoctorCheck]:
             f"Restart continues the session instead of starting over: {shown}",
         )
     ]
+
+
+#: How far back ``fleet-delivery`` counts first messages.
+DELIVERY_WINDOW = timedelta(days=7)
+
+
+def _check_fleet_delivery(now: datetime | None = None) -> list[DoctorCheck]:
+    """How the fleet's first messages went over the last week (P0-W1a, #122): acknowledged N
+    of M, and how long the agents took to start their first turn, median and 95th percentile
+    (``first_prompt_at - created_at`` of each acknowledged row). A warning when any was
+    never taken (``unsent``), naming where to look. Machine-wide; silent when no row in the
+    window was given one, and gated on the store existing, as ``fleet-resume`` is."""
+    if _uncreated_home("fleet-delivery") is not None:
+        return []
+    now = now or datetime.now(tz=UTC)
+    try:
+        with store_session() as store:
+            rows = store.first_prompt_rows(now - DELIVERY_WINDOW)
+    except Exception:  # the database line reports a broken store
+        return []
+    if not rows:
+        return []
+    acked = [row for row in rows if row.first_prompt == "acked"]
+    unsent = [row for row in rows if row.first_prompt == "unsent"]
+    waits = sorted(
+        (row.first_prompt_at - row.created_at).total_seconds()
+        for row in acked
+        if row.first_prompt_at is not None
+    )
+    timing = (
+        f"; first turn after {_seconds(_percentile(waits, 50))} (median), "
+        f"{_seconds(_percentile(waits, 95))} (p95)"
+        if waits
+        else ""
+    )
+    detail = f"last 7 days: acknowledged {len(acked)} of {len(rows)} first messages{timing}"
+    if not unsent:
+        return [_ok("fleet-delivery", detail)]
+    labels = ", ".join(sorted({row.label for row in unsent})[:6])
+    return [
+        _warn(
+            "fleet-delivery",
+            f"{detail}; {len(unsent)} never taken ({labels})",
+            "each one still live reads attention in its project's fleet listing, which names "
+            "the tell that sends the message again and the restart that starts it over",
+        )
+    ]
+
+
+def _percentile(values: Sequence[float], percent: int) -> float:
+    """The ``percent``-th percentile of sorted ``values`` (nearest rank)."""
+    rank = max(1, min(len(values), -(-percent * len(values) // 100)))
+    return values[rank - 1]
+
+
+def _seconds(value: float) -> str:
+    return f"{value:.1f} s" if value < 60 else f"{value / 60:.1f} min"
 
 
 def _check_captured_projects() -> list[DoctorCheck]:
@@ -1734,6 +1794,46 @@ def _claude_account_limit_checks() -> list[DoctorCheck]:
                 else "Wait — "
             )
             + "Claude Code continues by itself at the reset",
+        )
+    ]
+
+
+def _claude_account_backoff_checks() -> list[DoctorCheck]:
+    """Accounts whose usage reads are backed off (F1 of #400) — offline, from the store.
+
+    The usage endpoint answered one of them HTTP 429 (or 503 with ``Retry-After``), and
+    no ``aisquare`` process asks it again before the recorded wait ends. One line naming
+    each and until when; nothing when none waits. Gated on ``context.db`` like its
+    siblings: a doctor run creates nothing.
+    """
+    if not paths.db_path().exists():
+        return []
+    try:
+        # The slot directories, read from disk: `list_accounts` reconciles the registry as it
+        # reads, a write a doctor run must not make on a machine that arranged nothing.
+        accounts = [
+            claude_accounts_core.default_account(),
+            *claude_accounts_core.managed_accounts(),
+        ]
+        waiting = claude_accounts_service.usage_backoffs(accounts)
+    except Exception:  # the database line reports a broken store
+        return []
+    if not waiting:
+        return []
+    parts = [
+        f"{claude_accounts_core.label(account)} "
+        f"{claude_accounts_service.rate_limited_until_text(waiting[account.slot].until)}"
+        for account in accounts
+        if account.slot in waiting
+    ]
+    return [
+        _warn(
+            "claude-account-backoff",
+            f"usage reads backed off after HTTP 429 for {len(parts)} account(s): "
+            + " · ".join(parts),
+            "Nothing to do — reads resume by themselves when the wait ends, and the last good "
+            "reading is shown meanwhile. Logging in again does not clear a rate limit; poll "
+            "usage less often (see docs/fleet.md)",
         )
     ]
 

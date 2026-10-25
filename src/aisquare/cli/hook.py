@@ -16,7 +16,7 @@ import typer
 
 from aisquare.core import paths
 from aisquare.services import hooks as hooks_service
-from aisquare.services.team import ManagerWakeupError
+from aisquare.services.team import ManagerWakeupError, TurnEndDeliveryError
 
 app = typer.Typer(
     help="Internal hook handlers for agent integrations.",
@@ -42,6 +42,7 @@ _COST = {
     "notification": "the board will not show this session as needing attention",
     "stop-failure": "the board will not show this session as limited, and no hand-over will run",
     "manager-wakeup": "the manager will not be woken by this turn's board updates",
+    "turn-end-delivery": "the notes addressed to it wait for its next prompt",
 }
 
 
@@ -197,6 +198,9 @@ def stop() -> None:
         )
     except ManagerWakeupError as exc:  # the row is right; only the wake-up was lost
         _cost_of_failing_open("stop", exc.cause, cost=_COST["manager-wakeup"])
+        return
+    except TurnEndDeliveryError as exc:  # the row is right; only the hand-over was lost
+        _cost_of_failing_open("stop", exc.cause, cost=_COST["turn-end-delivery"])
         return
     except Exception as exc:  # never disrupt the agent
         _cost_of_failing_open("stop", exc)

@@ -341,7 +341,9 @@ Fixed widths, so a column starts at the same x on every row whatever its values:
 a value too long for its cell ends in ``…`` and never wraps (the whole text is the
 cell's tooltip). The resets columns fit :func:`format_reset`'s longest answer,
 ``in 6d 12h (Tue 02:00)``; the usage columns fit ``▮▮▮▮▮ 100%``, the session's also
-``⚠ token rejected``. When there is no
+``⚠ token rejected`` and a kept reading's age beside its bar, ``▮▮▮▮▮ 100% · 59m`` (F1
+of #400): a session window resets within five hours, and a kept reading's reset window
+reads ``reset``. When there is no
 reading, the usage cells say why — not signed in, a token to renew, the reason the
 usage could not be read — where the bars would be (#8 on the board: there is no
 status column).
@@ -350,8 +352,9 @@ status column).
 MOVE_COLUMNS: tuple[Column, ...] = (Column("up", "↑", 3), Column("down", "↓", 3))
 """The *↑*/*↓* buttons, the first columns of every line: the order IS the arrangement."""
 
-LOGIN_COLUMN = Column("login", "", 8)
-"""*Log in*'s column, beside the usage cells that say why it is there."""
+LOGIN_COLUMN = Column("login", "", 14)
+"""*Log in*'s column, beside the usage cells that say why it is there — or *Log in again*,
+the same flow as a secondary action on a row that reads fine (:func:`offers_login_again`)."""
 
 LAYOUT: tuple[Column, ...] = (
     *MOVE_COLUMNS,
@@ -364,6 +367,16 @@ LAYOUT: tuple[Column, ...] = (
 the usage that says why it is there — what needs doing reads, and can be done, without
 scrolling sideways at 160 columns — and the plan last; then the arranging buttons
 (:data:`_ACTIONS`)."""
+
+
+def offers_login_again(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
+    """Whether the row offers *Log in again*: signed in and not already offering *Log in*.
+
+    The same sign-in flow (``begin_claude_sign_in``), for a person who wants a fresh login
+    on a slot that reads fine — another login, or a token they distrust. Not a cure for a
+    rate limit: the 429 reason says so itself (F1 of #400).
+    """
+    return status.signed_in and status.identity is not None and not needs_login(status, usage)
 
 
 def needs_login(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> bool:
@@ -388,10 +401,38 @@ def _window_cells(
     if usage is None:
         return Text("…", style="dim"), Text()
     percent: float | None = getattr(usage, f"{window}_percent")
+    resets_at: datetime | None = getattr(usage, f"{window}_resets_at")
+    moment = now or accounts_service._now()
+    if usage.available and percent is None and resets_at is not None and resets_at <= moment:
+        # A kept reading's window that has reset since: its figure is over (review of #408,
+        # MAJ-1), so it reads as reset, never as the old bar with "now".
+        age = accounts_service.describe_age(resets_at, now=moment)
+        return Text("reset", style="dim"), Text(f"reset {age}", style="dim")
     if not usage.available or percent is None:
         return Text("—", style="dim"), Text()
-    resets_at: datetime | None = getattr(usage, f"{window}_resets_at")
-    return usage_bar(percent), Text(format_reset(resets_at, now=now), style="dim")
+    bar = usage_bar(percent)
+    if window == "session" and (kept := kept_age(usage, now=moment)) is not None:
+        bar.append(f" · {kept}", style="yellow")
+    return bar, Text(format_reset(resets_at, now=moment), style="dim")
+
+
+def kept_age(usage: ClaudeUsage, *, now: datetime | None = None) -> str | None:
+    """``12m`` — how old a kept reading is (the last good figure a failed read shows, F1 of
+    #400), for the session cell; ``None`` for a live one. The full ``reading from 12m ago ·
+    <why>`` is the cell's tooltip (:func:`kept_tooltip`)."""
+    if not usage.available or usage.last_failed_reason is None or usage.fetched_at is None:
+        return None
+    age = accounts_service.describe_age(usage.fetched_at, now=now)
+    return "now" if age == "just now" else age.removesuffix(" ago")
+
+
+def kept_tooltip(usage: ClaudeUsage | None, *, now: datetime | None = None) -> str | None:
+    """``reading from 12m ago · rate-limited until 14:32 — logging in again does not clear
+    it``: why the session cell shows an older figure, or ``None`` for a live one."""
+    if usage is None or kept_age(usage, now=now) is None or usage.fetched_at is None:
+        return None
+    age = accounts_service.describe_age(usage.fetched_at, now=now)
+    return f"reading from {age} · {usage.last_failed_reason}"
 
 
 def account_cells(
@@ -603,7 +644,9 @@ class AccountRow(Horizontal, can_focus=True):
     *↑*/*↓*, first, move it in the priority order (the end stops are disabled) —
     the first enabled, signed-in row is the machine default; *Log in*, beside the
     usage, shows when the slot has no login or its token is missing, expired or
-    rejected (:func:`needs_login`); *Disable*/*Enable* take it out of
+    rejected (:func:`needs_login`), and reads *Log in again* — the same sign-in, as a
+    secondary action — on any other signed-in row (:func:`offers_login_again`);
+    *Disable*/*Enable* take it out of
     or back into automatic selection; *Remove* shows when the CLI owns the
     directory. A button that does not apply keeps its place, so the buttons stay
     in columns too. Every
@@ -793,8 +836,13 @@ class AccountRow(Horizontal, can_focus=True):
                 # The whole value, for the cell that cut it short with an ellipsis.
                 cell.tooltip = self._cell_tooltip(column.key, cells[column.key])
         login = self.query_one(f"#account-login-{self.slot}", Button)
+        needed = needs_login(self.status, self.usage)
+        login.label = "Log in" if needed else "Log in again"
+        login.variant = "primary" if needed else "default"
         login.tooltip = "log in again: Claude Code opens below; type /login if it does not ask"
-        self._offer(login, needs_login(self.status, self.usage))
+        if not needed:
+            login.tooltip += " — a rate limit is not cleared by it"
+        self._offer(login, needed or offers_login_again(self.status, self.usage))
         self.query_one(f"#account-up-{self.slot}", Button).disabled = self.first
         self.query_one(f"#account-down-{self.slot}", Button).disabled = self.last
         toggle = self.query_one(f"#account-toggle-{self.slot}", Button)
@@ -810,6 +858,8 @@ class AccountRow(Horizontal, can_focus=True):
             return f"{text.plain}{disabled} — double-click (or Enter / F2) to rename"
         if key == "session":
             lines = [text.plain] if text.plain else []
+            if (kept := kept_tooltip(self.usage)) is not None:
+                lines.append(kept)  # why the bar is an older reading (F1 of #400)
             if self.usage is not None and self.usage.reason and self.usage.reason != text.plain:
                 lines.append(self.usage.reason)
             pace = accounts_service.describe_trend(self.trend)

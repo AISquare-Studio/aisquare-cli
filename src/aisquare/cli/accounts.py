@@ -117,13 +117,28 @@ def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> t
         return _DASH, _DASH
     if not usage.available:
         return usage.reason or "unavailable", ""
-    session = _percent(usage.session_percent)
-    if usage.session_resets_at is not None:
-        session += f" · resets {format_reset(usage.session_resets_at, now=now)}"
-    week = _percent(usage.week_percent)
-    if usage.week_resets_at is not None:
-        week += f" · resets {format_reset(usage.week_resets_at, now=now)}"
+    session = _window_cell(usage.session_percent, usage.session_resets_at, now=now)
+    week = _window_cell(usage.week_percent, usage.week_resets_at, now=now)
+    # The per-family weeks (#277), each with its own reset: they bind that family alone. A
+    # kept reading has none: the record holds no family week, a spent one is a limit mark.
+    for family, percent in sorted(usage.family_week_percent.items()):
+        week += f" · {family} {_percent(percent)}"
+        if (resets := usage.family_week_resets_at.get(family)) is not None:
+            week += f" resets {format_reset(resets, now=now)}"
     return session, week
+
+
+def _window_cell(percent: float | None, resets_at: datetime | None, *, now: datetime | None) -> str:
+    """``40% · resets in 3h 10m (18:00)`` — or ``reset 1h ago`` for a kept reading's window
+    that has reset since (its figure emptied: the window it described is over; review of
+    #408, MAJ-1), never the old figure with ``resets now``."""
+    moment = now or accounts_service._now()
+    if percent is None and resets_at is not None and resets_at <= moment:
+        return f"reset {accounts_service.describe_age(resets_at, now=moment)}"
+    cell = _percent(percent)
+    if resets_at is not None:
+        cell += f" · resets {format_reset(resets_at, now=moment)}"
+    return cell
 
 
 def _short(path: object) -> str:
@@ -188,7 +203,8 @@ def _emit_overview(overview: AccountsOverview, *, with_usage: bool) -> None:
 
 
 _REFRESH_HELP = (
-    "Fetch now instead of serving a reading up to five minutes old (the shared usage cache)."
+    "Fetch now instead of serving a reading up to five minutes old (the shared usage cache). "
+    "An account the usage endpoint rate-limited is not asked again before its wait ends."
 )
 
 
@@ -220,10 +236,49 @@ def _refreshed_line(statuses: list[ClaudeAccountStatus]) -> Text | None:
     said = f"usage as of {accounts_service.describe_age(min(read))}" if read else "no usage read"
     if failed:
         said += f" · last try failed {accounts_service.describe_age(max(failed))}"
+    # During a wait `--refresh` sends nothing for that account: the hint says so rather than
+    # promise a fetch (review of #408, N1).
+    moment = accounts_service._now()
+    waiting = [
+        (status.label, until)
+        for status in statuses
+        if status.usage is not None
+        and status.usage.rate_limited
+        and (until := status.usage.rate_limited_until) is not None
+        and until > moment
+    ]
+    if not waiting:
+        hint = "--refresh fetches now"
+    elif len(waiting) == len(tried):
+        first = min(until for _, until in waiting)
+        hint = f"{accounts_service.rate_limited_until_text(first)}; --refresh waits too"
+    else:
+        held = ", ".join(
+            f"{label} {accounts_service.rate_limited_until_text(until)}" for label, until in waiting
+        )
+        hint = f"--refresh fetches now, except {held}"
     return Text(
-        f"{said} (percent USED; refreshed at most every 5 min) — --refresh fetches now",
+        f"{said} (percent USED; refreshed at most every 5 min) — {hint}",
         style="dim",
     )
+
+
+def _kept_lines(statuses: list[ClaudeAccountStatus]) -> list[Text]:
+    """One line per row showing an older reading because the newest try read nothing:
+    ``account 2: rate-limited until 14:32 — …; showing the reading from 12m ago`` (F1 of
+    #400). The numbers in the table are that reading's; this says how old, and why."""
+    lines: list[Text] = []
+    for status in statuses:
+        usage = status.usage
+        if usage is None or not usage.available or usage.last_failed_reason is None:
+            continue
+        age = (
+            f"; showing the reading from {accounts_service.describe_age(usage.fetched_at)}"
+            if usage.fetched_at is not None
+            else ""
+        )
+        lines.append(Text(f"{status.label}: {usage.last_failed_reason}{age}", style="yellow"))
+    return lines
 
 
 @app.command("list")
@@ -254,6 +309,9 @@ def list_(
         typer.echo(_overview_json(overview))
         return
     _emit_overview(overview, with_usage=usage)
+    if usage:
+        for kept in _kept_lines(overview.accounts):
+            stdout_console().print(kept)
     if usage and (line := _refreshed_line(overview.accounts)) is not None:
         stdout_console().print(line)
 
@@ -305,6 +363,8 @@ def usage_(
         session, week = _usage_cells(status.usage)
         table.add_row(str(status.account.slot), label, who, session, week)
     console.print(table)
+    for kept in _kept_lines(asked):
+        console.print(kept)
     if (line := _refreshed_line(asked)) is not None:
         console.print(line)
 

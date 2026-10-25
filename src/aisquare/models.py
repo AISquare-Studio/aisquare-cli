@@ -309,12 +309,41 @@ class ClaudeUsage(BaseModel):
     week_percent: float | None = None
     """The rolling seven-day window: percent USED (0-100)."""
     week_resets_at: datetime | None = None
+    family_week_percent: dict[str, float] = Field(default_factory=dict)
+    """The per-family weeks (``seven_day_opus`` → ``opus``…): percent USED (0-100). Such a
+    limit applies only to requests to that model family (#277), so a pick counts it for an
+    agent of that family alone (``services.claude_accounts.headroom_percent``). Live
+    readings only: the cache keeps the two shared windows, and a spent family week is
+    remembered as a limit mark instead (``remember_limit``)."""
+    family_week_resets_at: dict[str, datetime] = Field(default_factory=dict)
+    """When each family week resets, where the endpoint said."""
     fetched_at: datetime | None = None
     """When the reading was taken — or, when nothing could be read, when that was found out."""
     last_failed_at: datetime | None = None
     """When a later try to read failed without replacing this reading: an unreachable
     endpoint or an HTTP error after it, while it is still within the five-minute cache.
-    The figure stands; the line that says how old it is says the try failed too."""
+    The figure stands; the line that says how old it is says the try failed too. Since
+    F1 of #400 the figure stands whatever its age: a reading on record is shown, with
+    its age and :attr:`last_failed_reason`, rather than ``—``."""
+    last_failed_reason: str | None = None
+    """Why the try at :attr:`last_failed_at` read nothing ("rate-limited until 14:32",
+    "could not reach the usage endpoint …"), shown beside the older figure it kept."""
+    rate_limited: bool = False
+    """The usage endpoint answered HTTP 429 (or 503 with ``Retry-After``) for this account,
+    now or on a try still being waited out: logging in again does not clear it."""
+    rate_limited_until: datetime | None = None
+    """No usage request is sent for this account before then: the endpoint's
+    ``Retry-After``, or an exponential default when it sent none. Recorded on disk, so
+    every ``aisquare`` process, the Accounts page and ``--refresh`` wait it out too."""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def kept(self) -> bool:
+        """Not a live reading: the endpoint asked to wait (:attr:`rate_limited`), or a failed
+        read is showing the last good figure (:attr:`last_failed_reason`). Shown with its age;
+        never counted as live. In ``--json`` so a reader need not work it out from the two
+        (review of #408, n3)."""
+        return self.rate_limited or self.last_failed_reason is not None
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -768,6 +797,11 @@ class TeamSession(BaseModel):
     persona: str | None = None
     """The persona the session was launched as (``AISQUARE_PERSONA``), recorded at start —
     what was ASKED, even when it could not be loaded (docs/plans/spawn-personas.md §3.7)."""
+    prompted_at: datetime | None = None
+    """When its last prompt started a turn (``UserPromptSubmit``), however the prompt came:
+    typed, on the command line, or from another session's inbox. ``None`` before the first,
+    and on rows from before schema 36. What a typed delivery's acknowledgement asks
+    (``services.delivery``)."""
 
 
 class TeamTask(BaseModel):
@@ -1155,6 +1189,9 @@ FleetAgentState = Literal["working", "waiting", "attention", "limited", "exited"
 pane's facts (exited with a status, or lost when the pane is gone); ``unknown``
 when neither source can answer."""
 
+FirstPromptState = Literal["pending", "acked", "unsent"]
+"""Where a fleet agent's first message stands (:attr:`FleetAgent.first_prompt`)."""
+
 
 class ProjectGroup(BaseModel):
     """A named, collapsible container of projects — a management layer only (#140).
@@ -1367,6 +1404,16 @@ class FleetAgent(BaseModel):
     """How the row ended (v34, #38): ``stopped`` when aisquare ended it on purpose, ``died``
     when a read or ``reap`` recorded a death nobody asked for. ``None`` while it runs, and on
     a row ended before the column, which is read by its exit status (Restart all)."""
+    first_prompt: FirstPromptState | None = None
+    """Whether the first message it was given started a turn (P0-W1a, #122): ``pending``
+    from the spawn until its ``UserPromptSubmit``, then ``acked``; ``unsent`` once a
+    listing found it still pending past ``[fleet] prompt_ack_seconds`` at an idle input
+    box, or a typed delivery left it in the box. ``None`` when it was given none, and on
+    rows from before schema 36 ("not tracked")."""
+    first_prompt_at: datetime | None = None
+    """When ``first_prompt`` last changed: given (``pending``), taken (``acked``), found
+    not taken (``unsent``). An ``acked`` row's ``first_prompt_at - created_at`` is how long
+    the agent took to start its first turn (doctor's ``fleet-delivery`` row)."""
 
 
 class FleetAgentStatus(BaseModel):

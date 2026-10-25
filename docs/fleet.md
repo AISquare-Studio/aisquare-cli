@@ -904,9 +904,11 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   left. An account counts as full as the fuller of its two windows, so one
   that has spent its week is not taken for an empty five hours. Usage is the
   same best-effort endpoint as the bars, so an
-  account that is backed off after a 429 is not asked: the pick uses its
-  reading if one was taken in the last five minutes (and says so), else skips it
-  with a note naming the wait. An
+  account that is backed off after a 429 is not asked, and an older reading kept
+  on a row after any failed read is never taken for a live one: the pick uses it
+  only if it falls inside the pick's own window with neither window reset since
+  (and says so), else skips it with a note giving its age. The fleet's dot
+  ignores a kept reading older than five minutes. An
   account that does not answer is skipped with a note and, when none answers,
   the machine default decides as before. Each reading is kept: the row's bar
   gains *≈ 40 min to the limit* once two readings of the same window exist.

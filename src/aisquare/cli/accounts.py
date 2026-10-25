@@ -117,13 +117,23 @@ def _usage_cells(usage: ClaudeUsage | None, *, now: datetime | None = None) -> t
         return _DASH, _DASH
     if not usage.available:
         return usage.reason or "unavailable", ""
-    session = _percent(usage.session_percent)
-    if usage.session_resets_at is not None:
-        session += f" · resets {format_reset(usage.session_resets_at, now=now)}"
-    week = _percent(usage.week_percent)
-    if usage.week_resets_at is not None:
-        week += f" · resets {format_reset(usage.week_resets_at, now=now)}"
-    return session, week
+    return (
+        _window_cell(usage.session_percent, usage.session_resets_at, now=now),
+        _window_cell(usage.week_percent, usage.week_resets_at, now=now),
+    )
+
+
+def _window_cell(percent: float | None, resets_at: datetime | None, *, now: datetime | None) -> str:
+    """``40% · resets in 3h 10m (18:00)`` — or ``reset 1h ago`` for a kept reading's window
+    that has reset since (its figure emptied: the window it described is over; review of
+    #408, MAJ-1), never the old figure with ``resets now``."""
+    moment = now or accounts_service._now()
+    if percent is None and resets_at is not None and resets_at <= moment:
+        return f"reset {accounts_service.describe_age(resets_at, now=moment)}"
+    cell = _percent(percent)
+    if resets_at is not None:
+        cell += f" · resets {format_reset(resets_at, now=now)}"
+    return cell
 
 
 def _short(path: object) -> str:
@@ -221,8 +231,29 @@ def _refreshed_line(statuses: list[ClaudeAccountStatus]) -> Text | None:
     said = f"usage as of {accounts_service.describe_age(min(read))}" if read else "no usage read"
     if failed:
         said += f" · last try failed {accounts_service.describe_age(max(failed))}"
+    # During a wait `--refresh` sends nothing for that account: the hint says so rather than
+    # promise a fetch (review of #408, N1).
+    moment = accounts_service._now()
+    waiting = [
+        (status.label, until)
+        for status in statuses
+        if status.usage is not None
+        and status.usage.rate_limited
+        and (until := status.usage.rate_limited_until) is not None
+        and until > moment
+    ]
+    if not waiting:
+        hint = "--refresh fetches now"
+    elif len(waiting) == len(tried):
+        first = min(until for _, until in waiting)
+        hint = f"{accounts_service.rate_limited_until_text(first)}; --refresh waits too"
+    else:
+        held = ", ".join(
+            f"{label} {accounts_service.rate_limited_until_text(until)}" for label, until in waiting
+        )
+        hint = f"--refresh fetches now, except {held}"
     return Text(
-        f"{said} (percent USED; refreshed at most every 5 min) — --refresh fetches now",
+        f"{said} (percent USED; refreshed at most every 5 min) — {hint}",
         style="dim",
     )
 

@@ -27,7 +27,8 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
-from aisquare.cli.ui.views.accounts import account_cells
+from aisquare.cli.ui.views.accounts import account_cells, kept_tooltip
+from aisquare.core import claude_accounts as core
 from aisquare.core.store import store_session
 from aisquare.models import ClaudeAccountStatus, ClaudeIdentity, ClaudeUsage
 from aisquare.services import claude_accounts as service
@@ -279,9 +280,17 @@ def test_the_row_says_how_old_the_kept_reading_is_and_why() -> None:
         rate_limited_until=until,
     )
     cells = account_cells(status, usage, now=NOW)
-    assert "40%" in cells["session"].plain, "the bars are the kept reading's, never —"
+    assert cells["session"].plain.endswith("40% · 12m"), "the kept figure, aged, never —"
+    assert "status" not in cells, "#406 took the status column away: the age is the session's"
+    assert cells["week"].plain.endswith("10%"), "a kept reading is no reason to blank the week"
     clock = until.astimezone().strftime("%H:%M")
-    assert cells["status"].plain.startswith(f"reading from 12m ago · rate-limited until {clock}")
+    assert kept_tooltip(usage, now=NOW) == (
+        f"reading from 12m ago · rate-limited until {clock} — logging in again does not clear it"
+    )
+    live = usage.model_copy(update={"last_failed_reason": None, "rate_limited": False})
+    assert kept_tooltip(live, now=NOW) is None and account_cells(status, live, now=NOW)[
+        "session"
+    ].plain.endswith("40%")
 
 
 # --------------------------------------------------------------------------- picks
@@ -328,7 +337,7 @@ def test_a_pick_skips_a_backed_off_account_whose_reading_is_old(fake_home: Path)
         assert picked is not None and picked.slot == spare.slot
         skipped = [n for n in notes if n.startswith("headroom: account 2 skipped")]
         assert skipped and "rate-limited until" in skipped[0]
-        assert "no reading from the last 5 min to pick by" in skipped[0]
+        assert "its last reading is from 30m ago, too old to pick by" in skipped[0]
     assert "tok-work" not in endpoint.calls[calls:]
 
 
@@ -343,7 +352,8 @@ def test_doctor_names_the_backed_off_accounts(fake_home: Path) -> None:
     )
     until = datetime.now(tz=UTC) + timedelta(minutes=20)
     with store_session() as store:
-        held = service.UsageBackoff(slot=work.slot, until=until, attempts=1, since=NOW)
+        token = service._token_fingerprint(work)
+        held = service.UsageBackoff(slot=work.slot, until=until, attempts=1, since=NOW, token=token)
         store.set_ui_state(service._BACKOFF_KEY.format(slot=work.slot), held.dump())
     checks = {c.name: c for c in diagnostics._claude_accounts_checks()}
     line = checks["claude-account-backoff"]
@@ -361,3 +371,198 @@ def test_removing_an_account_forgets_its_wait(fake_home: Path) -> None:
     service.forget_arrangement(work.slot)  # what `remove` calls once the directory is gone
     with store_session() as store:
         assert store.ui_state(service._BACKOFF_KEY.format(slot=work.slot)) is None
+
+
+# --------------------------------------------------------------------------- review of #408
+
+
+@pytest.mark.parametrize(
+    ("resets_in", "why"),
+    [
+        (timedelta(hours=3), "its last reading is from 4h ago, and a window has reset since"),
+        (timedelta(hours=9), "its last reading is from 4h ago, too old to pick by"),
+    ],
+    ids=["window-reset", "window-open"],
+)
+@pytest.mark.parametrize(
+    "max_age", [service.PICK_MAX_AGE_SECONDS, None], ids=["launch", "handover"]
+)
+def test_a_kept_reading_from_any_failure_is_never_picked_by_when_old(
+    fake_home: Path, resets_in: timedelta, why: str, max_age: float | None
+) -> None:
+    """MAJ-1's probe: ``work`` read 20 % at NOW; at NOW+4h its read answers HTTP 500 and
+    ``spare`` reads 50 %. The 4 h-old figure is shown on the row, never picked by."""
+    work = _slot("work@example.com", "tok-work")
+    spare = _slot("spare@example.com", "tok-spare")
+    endpoint = _Endpoint(
+        {"tok-work": _payload(20, resets_at=NOW + resets_in), "tok-spare": _payload(50)}
+    )
+    service.cached_usage([work, spare], now=NOW, fetch=endpoint)
+    endpoint.by_token["tok-work"] = 500
+    endpoint.by_token["tok-spare"] = _payload(50, resets_at=NOW + timedelta(hours=7))
+    later = NOW + timedelta(hours=4)
+
+    picked, notes = service.headroom_choice(
+        [work, spare], switch_at=85, now=later, fetch=endpoint, max_age=max_age
+    )
+    assert picked is not None and picked.slot == spare.slot, notes
+    skipped = [n for n in notes if n.startswith("headroom: account 2 skipped")]
+    assert skipped == [f"headroom: account 2 skipped — HTTP 500 from the usage endpoint; {why}"]
+
+
+def test_a_kept_reading_inside_the_picks_window_is_used_and_said(fake_home: Path) -> None:
+    work = _slot("work@example.com", "tok-work")
+    spare = _slot("spare@example.com", "tok-spare")
+    endpoint = _Endpoint({"tok-work": _payload(20), "tok-spare": _payload(50)})
+    service.cached_usage([work, spare], now=NOW, fetch=endpoint)
+    endpoint.by_token["tok-work"] = 500
+    picked, notes = service.headroom_choice(
+        [work, spare], switch_at=85, now=NOW + timedelta(minutes=2), fetch=endpoint
+    )
+    assert picked is not None and picked.slot == work.slot
+    assert (
+        "headroom: account 2 HTTP 500 from the usage endpoint — picked by its reading from 2m ago"
+        in notes
+    )
+
+
+def test_the_fleet_dot_ignores_a_reset_or_old_kept_reading(fake_home: Path) -> None:
+    """MAJ-1's probe: one account read 99 % with its window resetting at NOW+1h; at NOW+2h
+    the read answers 500. The dot is empty (as on the rc base), not 'critical' from a
+    window that is over — and a kept reading half an hour old does not count either."""
+    work = _slot("work@example.com", "tok-work")
+    service.cached_usage(
+        [work],
+        now=NOW,
+        fetch=_Endpoint({"tok-work": _payload(99, resets_at=NOW + timedelta(hours=1))}),
+    )
+    down = _Endpoint({"tok-work": 500})
+    summary = service.read_fleet_headroom([work], now=NOW + timedelta(hours=2), fetch=down)
+    assert (summary.level, summary.usable, summary.left_by_slot) == ("empty", 0, {})
+    shown = service.cached_usage([work], now=NOW + timedelta(hours=2), fetch=down)[work.slot]
+    assert shown.available and shown.session_percent is None, "the reset window is emptied"
+    assert shown.session_resets_at == NOW + timedelta(hours=1)
+
+    other = _slot("other@example.com", "tok-other")
+    service.cached_usage([other], now=NOW, fetch=_Endpoint({"tok-other": _payload(30)}))
+    _new_process()
+    old = service.read_fleet_headroom(
+        [other], now=NOW + timedelta(minutes=30), fetch=_Endpoint({"tok-other": 500})
+    )
+    assert (old.level, old.usable) == ("empty", 0)
+    _new_process()
+    fresh = service.read_fleet_headroom(
+        [other], now=NOW + timedelta(minutes=2), force=True, fetch=_Endpoint({"tok-other": 500})
+    )
+    assert fresh.usable == 1 and fresh.left_by_slot == {other.slot: 70.0}
+
+
+def test_the_cli_shows_a_kept_readings_reset_window_as_reset(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _slot("work@example.com", "tok-work")
+    monkeypatch.setattr(
+        service,
+        "_http_get",
+        _Endpoint({"tok-work": _payload(40, resets_at=NOW + timedelta(hours=1))}),
+    )
+    assert runner.invoke(app, ["accounts", "usage"]).exit_code == 0
+    monkeypatch.setattr(service, "_http_get", _Endpoint({"tok-work": 503}))
+    _at(monkeypatch, NOW + timedelta(hours=2))
+    shown = runner.invoke(app, ["accounts", "usage"])
+    assert "reset 1h ago" in shown.stdout, shown.stdout
+    assert "40% ·" not in shown.stdout, "never the old figure beside its reset"
+    assert "7% · resets" in shown.stdout  # the week's window is still open: its figure stays
+    assert "showing the reading from 2h ago" in shown.stdout
+
+
+def test_during_a_wait_the_cli_says_no_try_was_made_now(
+    fake_home: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N1: 40 min into a 6 h wait the line said 'last try failed just now … --refresh fetches
+    now'. Nothing was sent, and --refresh will not send before the wait ends."""
+    _slot("work@example.com", "tok-work")
+    endpoint = _Endpoint({"tok-work": _payload(40, resets_at=NOW + timedelta(hours=9))})
+    monkeypatch.setattr(service, "_http_get", endpoint)
+    runner.invoke(app, ["accounts", "usage"])
+    endpoint.by_token["tok-work"] = (429, {"Retry-After": str(6 * 3600)})
+    _at(monkeypatch, NOW + timedelta(minutes=5))
+    runner.invoke(app, ["accounts", "usage", "--refresh"])
+    _new_process()
+    _at(monkeypatch, NOW + timedelta(minutes=45))
+    shown = runner.invoke(app, ["accounts", "usage", "--refresh"])
+    until = (NOW + timedelta(minutes=5, hours=6)).astimezone().strftime("%H:%M")
+    assert "last try failed 40m ago" in shown.stdout, shown.stdout
+    assert "just now" not in shown.stdout and "--refresh fetches now" not in shown.stdout
+    assert f"rate-limited until {until}; --refresh waits too" in shown.stdout
+    assert len(endpoint.calls) == 2
+
+
+def test_a_stale_clear_never_removes_a_newer_wait(fake_home: Path) -> None:
+    """N2: B reads an expired wait X; A records a new wait Y while B's read is in flight;
+    B's 200 lands. B clears only the row it read, so Y stands."""
+    work = _slot("work@example.com", "tok-work")
+    key = service._BACKOFF_KEY.format(slot=work.slot)
+    token = service._token_fingerprint(work)
+    expired = service.UsageBackoff(
+        slot=work.slot, until=NOW - timedelta(seconds=1), attempts=1, since=NOW, token=token
+    )
+    newer = service.UsageBackoff(
+        slot=work.slot, until=NOW + timedelta(minutes=10), attempts=2, since=NOW, token=token
+    )
+    with store_session() as store:
+        store.set_ui_state(key, expired.dump())
+    answering = _Endpoint({"tok-work": _payload(30)})
+
+    def racing(url: str, headers: Mapping[str, str], timeout: float) -> Any:
+        with store_session() as store:  # another process records its 429 meanwhile
+            store.set_ui_state(key, newer.dump())
+        return answering(url, headers, timeout)
+
+    assert service.read_usage([work], now=NOW, fetch=racing)[work.slot].available
+    with store_session() as store:
+        assert store.ui_state(key) == newer.dump()
+
+
+def test_a_stale_write_never_shortens_a_newer_wait(fake_home: Path) -> None:
+    work = _slot("work@example.com", "tok-work")
+    key = service._BACKOFF_KEY.format(slot=work.slot)
+    token = service._token_fingerprint(work)
+    longer = service.UsageBackoff(
+        slot=work.slot, until=NOW + timedelta(minutes=30), attempts=3, since=NOW, token=token
+    )
+    limited = _Endpoint({"tok-work": (429, {"Retry-After": "60"})})
+
+    def racing(url: str, headers: Mapping[str, str], timeout: float) -> Any:
+        with store_session() as store:
+            store.set_ui_state(key, longer.dump())
+        return limited(url, headers, timeout)
+
+    service.read_usage([work], now=NOW, fetch=racing)
+    with store_session() as store:
+        assert store.ui_state(key) == longer.dump()
+
+
+def test_a_wait_is_the_logins_not_the_slots(fake_home: Path) -> None:
+    """N3: a slot signed into another login is not held to the last login's wait."""
+    work = _slot("work@example.com", "tok-work")
+    endpoint = _Endpoint({"tok-work": (429, {"Retry-After": "3600"}), "tok-new": _payload(25)})
+    service.read_usage([work], now=NOW, fetch=endpoint)
+    assert work.slot in service.usage_backoffs([work], now=NOW)
+    creds = core.credentials_path(work)
+    data = json.loads(creds.read_text())
+    data["claudeAiOauth"]["accessToken"] = "tok-new"
+    creds.write_text(json.dumps(data))
+    reading = service.read_usage([work], now=NOW + timedelta(minutes=1), fetch=endpoint)
+    assert reading[work.slot].session_percent == 25 and endpoint.calls == ["tok-work", "tok-new"]
+    assert service.usage_backoffs([work], now=NOW + timedelta(minutes=1)) == {}
+
+
+def test_sample_usage_honours_the_wait(fake_home: Path) -> None:
+    """N5: ``sample_usage`` is public; it goes through the gate like every other read."""
+    work = _slot("work@example.com", "tok-work")
+    endpoint = _Endpoint({"tok-work": (429, {"Retry-After": "600"})})
+    service.sample_usage(work, now=NOW, fetch=endpoint)
+    endpoint.by_token["tok-work"] = _payload(30)
+    held = service.sample_usage(work, now=NOW + timedelta(minutes=5), fetch=endpoint)
+    assert held.rate_limited and endpoint.calls == ["tok-work"]

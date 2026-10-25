@@ -1684,7 +1684,7 @@ def test_reorder_and_move_read_the_registry_once(
     assert len(reads) == 1
 
 
-def test_the_pages_read_opens_the_store_three_times_however_many_accounts(
+def test_the_pages_read_opens_the_store_four_times_however_many_accounts(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Eight opens a minute for four accounts before (third round). The page's read
@@ -1720,7 +1720,7 @@ def test_the_pages_read_opens_the_store_three_times_however_many_accounts(
         assert len(store.usage_samples(b.slot, since=NOW - timedelta(days=1))) == 1
 
 
-def test_a_recording_usage_round_opens_the_store_once_on_the_callers_thread(
+def test_a_recording_usage_round_opens_the_store_twice_on_the_callers_thread(
     fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``read_usage`` recorded from each pool thread — every headroom pick, ``accounts usage``,

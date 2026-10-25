@@ -1493,6 +1493,7 @@ class ContextStore(Protocol):
     def fleet_agent_for_session(self, session_id: str) -> FleetAgent | None: ...
     def ui_state(self, key: str) -> str | None: ...
     def set_ui_state(self, key: str, value: str | None) -> None: ...
+    def replace_ui_state(self, key: str, expected: str | None, value: str | None) -> bool: ...
     def project_groups(self) -> list[ProjectGroup]: ...
     def get_project_group(self, group_id: str) -> ProjectGroup | None: ...
     def find_project_group(self, name: str) -> ProjectGroup | None: ...
@@ -4276,6 +4277,33 @@ class SqliteStore:
                 (key, value, _now_iso()),
             )
         self._conn.commit()
+
+    def replace_ui_state(self, key: str, expected: str | None, value: str | None) -> bool:
+        """Compare-and-set: write ``value`` under ``key`` (``None`` forgets it) only while the
+        row still holds ``expected`` (``None``: no row). Returns whether it was written.
+
+        For a fact two processes may race on, read in one session and written in another
+        (a usage read's back-off, F1 of #400): a stale write must not undo a newer one."""
+        if expected is None and value is None:
+            row = self._conn.execute("SELECT 1 FROM ui_state WHERE key = ?", (key,)).fetchone()
+            return row is None
+        if expected is None:
+            cursor = self._conn.execute(
+                "INSERT INTO ui_state (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (key) DO NOTHING",
+                (key, value, _now_iso()),
+            )
+        elif value is None:
+            cursor = self._conn.execute(
+                "DELETE FROM ui_state WHERE key = ? AND value = ?", (key, expected)
+            )
+        else:
+            cursor = self._conn.execute(
+                "UPDATE ui_state SET value = ?, updated_at = ? WHERE key = ? AND value = ?",
+                (value, _now_iso(), key, expected),
+            )
+        self._conn.commit()
+        return cursor.rowcount == 1
 
     def get_fleet_agent(self, ref: str) -> FleetAgent | None:
         """A fleet agent by id or unambiguous id prefix (git-style)."""

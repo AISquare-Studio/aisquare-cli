@@ -519,12 +519,16 @@ machine default, and every release now carries its own installer.**
   dropped, a failure was remembered only in the process that saw it, and `--refresh`
   asked anyway, so any poller kept the account rate-limited.
 - **A failed usage read keeps the last good numbers.** The row (page and CLI) shows the
-  most recent reading on record for the token, with its age and why the newer try read
-  nothing (`reading from 12m ago · rate-limited until 14:32`); `—` only when nothing was
-  ever read. Before, a failure older than the five-minute cache showed `—`. A headroom
-  pick uses a backed-off account's reading only while it is under five minutes old, and
-  otherwise skips it with a note naming the wait. `--json` readings carry
-  `rate_limited`, `rate_limited_until` and `last_failed_reason`.
+  most recent reading on record for the token, with its age (the page: `40% · 12m` in the
+  session cell) and why the newer try read nothing (the cell's tooltip, or a line under the
+  CLI table: `reading from 12m ago · rate-limited until 14:32`); `—` only when nothing was
+  ever read. A window of that reading that has reset since shows as `reset 1h ago`. Before,
+  a failure older than the five-minute cache showed `—`. A kept reading is never taken for
+  a live one: a headroom pick uses it only inside the pick's own window with neither window
+  reset since, and otherwise skips it with a note giving its age; the fleet's dot ignores
+  one older than five minutes. A wait is the login's: a slot signed into another login is
+  not held to it. `--json` readings carry `rate_limited`, `rate_limited_until` and
+  `last_failed_reason`.
 - **Restart all brings back the agents that died** (#38). After an outside SIGTERM
   killed every agent of a fleet (exit 143), *Settings ▸ Fleet ▸ Restart all…* and
   `fleet restart --all` listed each one as exited and restarted none: they acted on

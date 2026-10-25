@@ -15,8 +15,11 @@ import pytest
 
 from aisquare.core.source_revision import (
     GENERATED_DIRECTORIES,
+    changed_paths,
+    moved_stamps,
     source_file_hashes,
     source_fingerprint,
+    source_state,
     source_unchanged,
 )
 
@@ -137,18 +140,59 @@ def test_an_untracked_nested_repository_contributes_its_content(checkout: Path) 
     assert source_fingerprint(checkout) != edited
 
 
-def test_a_new_file_is_ignored_while_a_changed_or_vanished_one_is_not(checkout: Path) -> None:
-    """Trap: a check that wrote a per-run output file into the checkout could never pass."""
+def test_a_new_changed_or_vanished_file_is_each_a_change(checkout: Path) -> None:
+    """Owner's decision on M6: no path is exempt as a check's output. A new file counts
+    like an edit; one git ignores is not source at all."""
     (checkout / "other.py").write_text("b = 1\n")
     recorded = source_file_hashes(checkout)
     (checkout / "report.xml").write_text("<testsuite/>")
-    assert source_unchanged(recorded, source_file_hashes(checkout)), "new output is ignored"
+    assert changed_paths(recorded, source_file_hashes(checkout)) == ["report.xml"]
+    (checkout / "report.xml").unlink()
+    assert source_unchanged(recorded, source_file_hashes(checkout))
     (checkout / "app.py").write_text("answer = 3\n")
     assert not source_unchanged(recorded, source_file_hashes(checkout)), "an edit counts"
     (checkout / "app.py").write_text("answer = 1\n")
     assert source_unchanged(recorded, source_file_hashes(checkout))
     (checkout / "other.py").unlink()
-    assert not source_unchanged(recorded, source_file_hashes(checkout)), "a vanished file counts"
+    assert changed_paths(recorded, source_file_hashes(checkout)) == ["other.py"]
+
+
+def test_a_link_to_a_directory_in_the_checkout_counts_what_is_in_it(checkout: Path) -> None:
+    """X3 for a directory: a link into an ignored directory is that directory's files."""
+    (checkout / ".git" / "info" / "exclude").write_text("hidden/\n")
+    (checkout / "hidden").mkdir()
+    (checkout / "hidden" / "impl.py").write_text("v = 1\n")
+    try:
+        (checkout / "tests").symlink_to("hidden", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks are not available here: {exc}")
+    recorded, stamps = source_state(checkout)
+    assert "tests" in recorded and "hidden/impl.py" not in recorded
+    (checkout / "hidden" / "impl.py").write_text("v = 2\n")
+    now, later = source_state(checkout)
+    assert changed_paths(recorded, now) == ["tests"]
+    assert "tests" in moved_stamps(stamps, later)
+
+
+def test_a_link_whose_resolve_raises_counts_by_its_text(
+    checkout: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P3 on #14, as Python 3.11 and 3.12 behave on any Python: resolve() on a link loop
+    raises RuntimeError. The identity is still taken, with the link by its text."""
+    try:
+        (checkout / "a").symlink_to("b")
+    except OSError as exc:
+        pytest.skip(f"symlinks are not available here: {exc}")
+    real = Path.resolve
+
+    def looping(self: Path, strict: bool = False) -> Path:
+        if self.name == "a":
+            raise RuntimeError(f"Symlink loop from {self}")
+        return real(self, strict)
+
+    monkeypatch.setattr(Path, "resolve", looping)
+    files, stamps = source_state(checkout)
+    assert "a" in files and "a" in stamps
 
 
 def test_a_non_git_directory_is_walked_without_its_generated_directories(tmp_path: Path) -> None:

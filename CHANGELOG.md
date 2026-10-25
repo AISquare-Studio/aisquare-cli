@@ -31,16 +31,17 @@ machine default, and every release now carries its own installer.**
   installs the latest release, in the README, `docs/install.md` and the repair
   command `aisquare upgrade` prints. `docs/install.md` shows how to pin.
 - **Command reports: `asq exec` and `asq reports`** (`docs/command-reports.md`).
-  `asq exec [--project ID] [--task ID] [--session ID] [--raw] [--max-output-bytes N]
+  `asq exec [--project ID] [--task REF] [--session ID] [--raw] [--max-output-bytes N]
   -- CMD …` runs a command once, with no shell and its arguments unchanged, and
   saves a report of how it ended: the exit status (a death by signal is reproduced
   after the report is saved; a command that cannot start is a saved 126 or 127),
   `interrupted_by`, whether both streams were kept whole, and any launch error. Both
   streams' originals are kept, the first 1 MiB each by default, with truncation
-  marked. Interrupts go to the command's process group, the second as SIGTERM and
-  the third as SIGKILL, and a background process holding the output pipe no longer
-  keeps the wrapper waiting: it stops after two seconds of silence, ten seconds
-  after the exit at most, and records `output_pipes_held_open`. With `--project`, the report holds the checkout's
+  marked. Interrupts go to the command's process group, and on Linux and macOS the
+  second is sent as SIGTERM and the third as SIGKILL. A background process holding
+  the output pipe no longer keeps the wrapper waiting: it stops after two seconds of
+  silence, ten seconds after the exit at most, and records
+  `output_pipes_held_open`. With `--project`, the report holds the checkout's
   per-file source identity before and after the command: content, not Git HEAD;
   build directories left out among untracked files only; submodule and nested-repo
   content counted; a worktree as its own files; the home tree refused; and a
@@ -71,8 +72,48 @@ machine default, and every release now carries its own installer.**
   is ignored while a live linked task remains, and a session's own writes do not
   wake it. Store v36 adds the `brief` table (not #136's `work_brief`, which a store
   that ran a #136 build keeps, unread); `project forget --purge` deletes its rows.
-  The gate on `task done`, `brief check` and report-backed evidence are the next
-  part (#275).
+- **The evidence gate** (`docs/work-briefs.md`). `aisquare task done` on a task
+  linked to a brief's requirements refuses unless that task recorded a fresh pass
+  for each, naming every requirement and its state (`missing`, `failed`, `blocked`
+  or `stale`, and `unreadable` for a damaged brief that names the task) in text and
+  as a list under `--json` (`task_not_proven`). The check
+  and the status write are one transaction, so a correction landing in between
+  fails the completion (`brief_changed`); a task is gated only by the briefs that
+  link it, and a task no brief links is done exactly as before. `brief evidence
+  --report ID` records a check backed by an `asq exec --project` report: a pass
+  needs exit 0, no interruption, both streams whole, no launch error, a known
+  source identity and the same identity before, after and now, compared file by
+  file in the report's own checkout: every tracked file and every untracked one
+  git does not ignore, with no exemption for a check's own output. Check output
+  goes in a gitignored directory (`--junitxml=reports/a.xml` with `reports/` in
+  `.gitignore`) or outside the checkout. The ignore rules themselves count (every
+  `.gitignore` git reads, a self-ignored one too, `.git/info/exclude` and
+  `core.excludesFile`), and a symlink counts as its in-checkout target, walked as a
+  checkout is (so ignored files under a linked directory count: check output goes
+  in a gitignored directory no link reaches). A run during which a source file is
+  created, changed or removed is refused, and so is one during which a file that
+  existed was changed and put back (each file's change time is kept before and
+  after, nested repositories included), and a pass goes stale when one is new,
+  changed or gone since, such as an added `conftest.py`. The reason names the first
+  changed files and says to gitignore (in git), delete or write elsewhere a check's
+  own output, and says when a changed path is a linked directory. `brief show` and
+  `brief check` print the command that backed each report pass. Known limits: a file
+  created and deleted within one run is not seen, nor is a case-only rename on a
+  case-insensitive file system (by git either), and on Windows a change put back with
+  its old modification time, e.g. via utime or by renaming the original back, is not
+  seen. `asq exec
+  --task` takes the task's number or id, like every other
+  `--task`, and a report taken with it backs only that task. Manual `--artifact`
+  passes keep their checkout's whole-tree fingerprint.
+  `aisquare brief check BRIEF [--source-root PATH]` re-checks every pass against
+  the source now and exits 1 while anything is missing, failed, blocked, stale or
+  unlinked; `--source-root` compares every pass with one checkout of the project
+  and refuses any other path with exit 2. A session whose task is linked sees those
+  requirements at start, in at most 2,500 characters and only the room the session
+  start leaves under the 10,000-character hook cap, failing open on its own.
+  Reports that recorded evidence cites are kept by `asq reports prune` (it says how
+  many) until the briefs citing them are purged, and when the brief store cannot be
+  read nothing is pruned.
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]
   [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
   read only the bytes the session's transcript gained since the last record, plus its

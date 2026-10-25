@@ -913,6 +913,8 @@ class BriefEvidence(BaseModel):
     artifact_sha256: str | None = None
     report_id: str | None = None
     """The command report behind ``report`` evidence."""
+    report_sha256: str | None = None
+    """That report's digest when recorded: a report changed since no longer backs it."""
     source_root: str | None = None
     """The checkout the check ran in, for ``report`` evidence."""
     source_fingerprint: str | None = None
@@ -971,6 +973,9 @@ class TaskProof(BaseModel):
     reason: str
     evidence_id: str | None = None
     kind: EvidenceKind | None = None
+    command: str | None = None
+    """The command whose report backs this check, as run: shown beside the requirement's
+    expected check, so a report of ``true`` cannot pass for ``pytest`` unseen."""
 
 
 class RequirementStatus(BaseModel):
@@ -989,6 +994,15 @@ class BriefView(BaseModel):
 
     brief: WorkBrief
     requirements: list[RequirementStatus]
+
+
+class BriefCheck(BriefView):
+    """``asq brief check``: every pass checked against the source now."""
+
+    complete: bool
+    """Every requirement is a pass: what makes ``brief check`` exit 0."""
+    source_root: str | None = None
+    """The one checkout every pass was compared with (``--source-root``), if any."""
 
 
 class Snapshot(BaseModel):

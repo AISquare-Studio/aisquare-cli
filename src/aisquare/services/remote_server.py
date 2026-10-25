@@ -3639,7 +3639,8 @@ def _remote_board_refusals(
     one named nothing (sweep 3 of #243). Looked up on the write's own ``reach``
     (:class:`_RemoteReach`).
     """
-    from aisquare.core.store import AmbiguousIdError
+    from aisquare.core.store import AmbiguousIdError, BriefChangedError
+    from aisquare.services import briefs as briefs_service
     from aisquare.services import project as project_service
     from aisquare.services import team as team_service
 
@@ -3651,6 +3652,10 @@ def _remote_board_refusals(
         raise RequestError(409, "not_added", str(exc)) from None
     except team_service.ClaimLostError as exc:
         raise RequestError(409, "claim_lost", str(exc)) from None
+    except briefs_service.TaskNotProven as exc:
+        raise RequestError(409, "task_not_proven", str(exc)) from None
+    except BriefChangedError as exc:
+        raise RequestError(409, "brief_changed", str(exc)) from None
     except AmbiguousIdError as exc:
         said = f"{exc.ref!r} is ambiguous — use more characters"
         raise RequestError(400, "ambiguous_id", said) from None

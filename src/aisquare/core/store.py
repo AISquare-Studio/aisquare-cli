@@ -1467,6 +1467,8 @@ class ContextStore(Protocol):
     ) -> tuple[int, TeamEvent]: ...
     def get_brief(self, project_id: str, ref: str) -> BriefRow | None: ...
     def briefs(self, project_id: str) -> list[BriefRow]: ...
+    def all_brief_documents(self) -> list[str]: ...
+    def complete_task_if_unchanged(self, task_id: str, briefs: Mapping[str, int]) -> TeamTask: ...
     def save_brief(
         self,
         brief_id: str,
@@ -3613,6 +3615,53 @@ class SqliteStore:
             (project_id,),
         ).fetchall()
         return [_row_to_brief(row) for row in rows]
+
+    def all_brief_documents(self) -> list[str]:
+        """Every brief's stored document on every board, a forgotten project's included:
+        report retention keeps what their evidence cites, and a forgotten project comes
+        back with its briefs when its root registers again."""
+        return [str(row[0]) for row in self._conn.execute("SELECT data FROM brief").fetchall()]
+
+    def complete_task_if_unchanged(self, task_id: str, briefs: Mapping[str, int]) -> TeamTask:
+        """Mark a task done, in one ``BEGIN IMMEDIATE`` transaction with the check that every
+        brief linking it is still at the revision its evidence gate read (``briefs``).
+
+        A brief linked to the task that changed since, or that links it now and was not
+        read, raises :class:`BriefChangedError` and writes nothing: a correction landing
+        between the gate and the write fails the completion. A brief that does not name
+        the task is never read, and one that names it but cannot be parsed counts as
+        linked. The write itself is :meth:`set_task_status`'s for ``done``.
+        """
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            task = self.get_task(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            rows = self._conn.execute(
+                "SELECT id, revision, data FROM brief WHERE project_id = ?", (task.project_id,)
+            ).fetchall()
+            for row in rows:
+                data = str(row["data"])
+                if task.id not in data:
+                    continue
+                try:
+                    document = json.loads(data)
+                    linked = any(
+                        task.id in requirement.get("task_ids", [])
+                        for requirement in document.get("requirements", [])
+                    )
+                except (ValueError, AttributeError, TypeError):
+                    linked = True
+                if linked and briefs.get(str(row["id"])) != int(row["revision"]):
+                    raise BriefChangedError(str(row["id"]))
+            self._conn.execute(
+                "UPDATE team_task SET status = 'done', claimed_by = NULL, "
+                "claim_expires_at = NULL, updated_at = ? WHERE id = ?",
+                (_now_iso(), task.id),
+            )
+        updated = self.get_task(task.id)
+        assert updated is not None  # just updated
+        return updated
 
     def save_brief(
         self,

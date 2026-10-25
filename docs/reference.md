@@ -32,6 +32,8 @@ concurrency-tested against racing parallel sessions):
 ├── state.json    # small runtime state (e.g. the pinned active project)
 ├── agents.json   # registry of connected agents
 ├── projects/     # per-project data — snapshot/ (Repomix pack), brain/ (gbrain)
+├── reports/      # what `asq exec` saved: argv, the streams' first bytes, source hashes (0700)
+├── briefs/       # copies of the artifacts brief checks recorded, per project and brief (0700)
 ├── cache/        # disposable (e.g. last_injection.json)
 └── log/          # capture and diagnostic logs
 ```
@@ -80,8 +82,10 @@ aisquare
 │                   update <brief> [-r R1=…] [--check R1=…] [--add TEXT] [--title T]
 │                                  [--assumption A]… [--boundary B]…
 │                                  [--clear-assumptions] [--clear-boundaries]
-│                   evidence <brief> R1 --task T --verdict pass|fail --summary S --artifact F
+│                   evidence <brief> R1 --task T --verdict pass|fail --summary S
+│                                    (--report ID | --artifact F)
 │                   finding <brief> R1 --task T --summary S [--artifact F]
+│                   check <brief> [--source-root PATH]   exit 1 until every requirement is proven
 │                   (all with [--as SESSION]; a brief is its id, or B1 / 1 — docs/work-briefs.md)
 ├── note <text> [--task T] [--to ROLE] [--kind note|decision|question|result]
 ├── board [-w] [-i SECONDS] · recall <query>

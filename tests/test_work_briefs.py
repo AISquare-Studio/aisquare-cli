@@ -55,8 +55,11 @@ def nudges(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
 
 
 @pytest.fixture
-def shot(work: Path) -> Path:
-    path = work / "shot.png"
+def shot(tmp_path: Path) -> Path:
+    """A screenshot outside the checkout, as one usually is: a manual pass keeps the
+    checkout's whole-tree fingerprint, so a file edited inside it would stale it."""
+    path = tmp_path / "artifacts" / "shot.png"
+    path.parent.mkdir()
     path.write_bytes(b"a screenshot")
     return path
 
@@ -792,7 +795,9 @@ def test_the_cli_round_trip(runner: CliRunner, shot: Path) -> None:
 
     found = _cli(runner, "brief", "finding", "B1", "R2", "--task", task.id, "--summary", "clipped")
     assert found.exit_code == 0, found.output
-    assert "finding [manual]" in found.stdout
+    # No artifact, nothing for the validator to judge: not labelled manual (#136, n7).
+    assert "recorded R2 finding:" in found.stdout and "[manual]" not in found.stdout
+    assert "the validator judges it" not in found.stdout
 
     updated = _cli(runner, "--json", "brief", "update", "B1", "-r", "R1=Valid login, fast")
     assert json.loads(updated.stdout)["stale"] == ["R1"]

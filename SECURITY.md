@@ -49,7 +49,9 @@ setting it comes from.
   directory, the first 1 MiB of its standard output and error (more with
   `--max-output-bytes`), and with `--project` a hash of each source file. Readable
   by your user only on Linux and macOS; kept 14 days, newest 64. `asq reports
-  prune --keep 0 --days 0` removes them.
+  prune --keep 0 --days 0` removes them, except the reports that recorded brief
+  evidence cites: those stay until the project's briefs are purged
+  (`aisquare project forget <id> --purge`), and prune says how many it kept.
 - Everything else gets your umask's default permissions. To restrict the whole
   tree to your user, run `chmod 700 "${AISQUARE_HOME:-$HOME/.aisquare}"`.
 

@@ -41,7 +41,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from aisquare.core import orchestrator
 from aisquare.core.insights import RUN_KEY_ENV_VAR
 from aisquare.core.paths import aisquare_home
-from aisquare.core.source_revision import fingerprint_of, source_file_hashes, source_root_for
+from aisquare.core.source_revision import fingerprint_of, source_root_for, source_state
 from aisquare.core.store import store_session
 
 DEFAULT_STREAM_LIMIT = 1024 * 1024
@@ -162,11 +162,16 @@ class CommandReport(BaseModel):
 
 
 class SourceFiles(BaseModel):
-    """The per-file identities behind a report's two fingerprints."""
+    """The per-file identities behind a report's two fingerprints, and each file's stamp
+    (``source_revision.source_state``) before and after: a file changed and put back
+    while the command ran has the same bytes but not the same stamp. A report from a
+    build before stamps has none."""
 
     model_config = ConfigDict(extra="forbid")
     before: dict[str, str]
     after: dict[str, str] | None = None
+    before_stamps: dict[str, str] | None = None
+    after_stamps: dict[str, str] | None = None
 
 
 def reports_dir() -> Path:
@@ -226,6 +231,12 @@ def load_report(report_id: str) -> CommandReport:
     return report
 
 
+def saved_report_bytes(report_id: str) -> bytes:
+    """A report's ``report.json`` exactly as saved: what evidence digests, so a later
+    schema or serializer change never reads as the report having changed."""
+    return _read_file(_directory(report_id) / "report.json", _REPORT_JSON_LIMIT)
+
+
 def load_source_files(report_id: str) -> SourceFiles | None:
     """The per-file maps of a ``--project`` report, or None when none were saved."""
     if not load_report(report_id).source_files_saved:
@@ -268,13 +279,15 @@ def list_reports() -> list[CommandReport]:
 # --------------------------------------------------------------------------- retention
 
 
-def _no_protected_reports() -> Collection[str]:
-    return frozenset()
+def _evidence_reports() -> Collection[str]:
+    """The reports work-brief evidence cites (``briefs.referenced_report_ids``)."""
+    from aisquare.services import briefs  # lazy: briefs reads reports
+
+    return briefs.referenced_report_ids()
 
 
 #: Names the reports that back recorded evidence, which retention must never delete.
-#: Nothing records evidence yet; the evidence store replaces this with its own reader.
-protected_reports_provider: Callable[[], Collection[str]] = _no_protected_reports
+protected_reports_provider: Callable[[], Collection[str]] = _evidence_reports
 
 
 def protected_report_ids() -> set[str] | None:
@@ -717,10 +730,13 @@ def _kill_tree(child: subprocess.Popen[bytes]) -> None:
     child.wait()
 
 
+_State = tuple[dict[str, str], dict[str, str]]
+
+
 def _source_before(
     project_id: str | None, cwd: Path
-) -> tuple[Path | None, dict[str, str] | None, str | None]:
-    """``(root, per-file map, error)`` before the command. Never stops the command."""
+) -> tuple[Path | None, _State | None, str | None]:
+    """``(root, per-file maps, error)`` before the command. Never stops the command."""
     if project_id is None:
         return None, None, None
     try:
@@ -732,16 +748,16 @@ def _source_before(
         if not cwd.is_relative_to(root) and orchestrator.team_project(cwd).root.resolve() != root:
             raise ValueError("command working directory is outside the named project's board")
         root = source_root_for(root, cwd)
-        return root, source_file_hashes(root), None
+        return root, source_state(root), None
     except Exception as exc:  # an observer of the command, never a gate on it
         return None, None, f"Before command: {exc}"[:2048]
 
 
-def _source_after(root: Path | None) -> tuple[dict[str, str] | None, str | None]:
+def _source_after(root: Path | None) -> tuple[_State | None, str | None]:
     if root is None:
         return None, None
     try:
-        return source_file_hashes(root), None
+        return source_state(root), None
     except Exception as exc:  # unknown proof, never a cancelled report
         return None, f"After command: {exc}"[:2048]
 
@@ -789,7 +805,7 @@ def run_command(
     try:
         _write_file(pending / "wrapper.pid", f"{os.getpid()}\n".encode("ascii"))
         working_dir = (cwd or Path.cwd()).resolve()
-        source_root, files_before, source_error = _source_before(project_id, working_dir)
+        source_root, state_before, source_error = _source_before(project_id, working_dir)
         seen = _Interrupts()
         started = datetime.now(UTC)
         launch_error = None
@@ -839,7 +855,7 @@ def run_command(
                 pipeline_id=pipeline_id,
                 source_root=str(source_root) if source_root is not None else None,
                 source_fingerprint_before=(
-                    fingerprint_of(files_before) if files_before is not None else None
+                    fingerprint_of(state_before[0]) if state_before is not None else None
                 ),
                 source_capture_error=source_error,
                 stdout=records["stdout"],
@@ -850,7 +866,7 @@ def run_command(
                 display_stderr_bytes=0,
                 per_stream_limit=max_output_bytes,
             )
-            report = _publish(pending, draft, source_root, files_before, compact=compact)
+            report = _publish(pending, draft, source_root, state_before, compact=compact)
     except BaseException:
         shutil.rmtree(pending, ignore_errors=True)
         raise
@@ -863,15 +879,25 @@ def _publish(
     pending: Path,
     draft: CommandReport,
     source_root: Path | None,
-    files_before: dict[str, str] | None,
+    state_before: _State | None,
     *,
     compact: bool,
 ) -> CommandReport:
     """Everything after the command exited: the after-identity, display files, rename."""
-    files_after, after_error = _source_after(source_root)
+    state_after, after_error = _source_after(source_root)
+    files_after = state_after[0] if state_after is not None else None
     saved = False
-    if files_before is not None:
-        payload = SourceFiles(before=files_before, after=files_after).model_dump_json().encode()
+    if state_before is not None:
+        payload = (
+            SourceFiles(
+                before=state_before[0],
+                after=files_after,
+                before_stamps=state_before[1],
+                after_stamps=state_after[1] if state_after is not None else None,
+            )
+            .model_dump_json()
+            .encode()
+        )
         if len(payload) <= _SOURCE_JSON_LIMIT:
             _write_file(pending / "source.json", payload)
             saved = True

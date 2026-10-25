@@ -65,6 +65,8 @@ def _out(text: str) -> None:
 def _errors(as_session: str | None) -> Iterator[None]:
     try:
         yield
+    except service.SourceRootError as exc:
+        fail(str(exc), error="invalid_source_root", exit_code=2)
     except service.BriefNotFound as exc:
         fail(str(exc), error="not_found", ref=exc.ref)
     except BriefChangedError as exc:
@@ -126,7 +128,7 @@ def _render(view: BriefView) -> None:
     _out(f"{brief.label} {brief.id} r{brief.revision}: {brief.title}")
     for requirement in brief.requirements:
         status = statuses[requirement.id]
-        label = status.state + (" (manual)" if status.manual else "")
+        label = status.state + (" (manual)" if status.manual and status.state == "pass" else "")
         _out(f"  {requirement.id} r{requirement.revision} [{label}] {requirement.text}")
         if requirement.check:
             _out(f"      check: {requirement.check}")
@@ -136,6 +138,8 @@ def _render(view: BriefView) -> None:
                 f"      {_task_ref(proof.task_id, proof.task_number)} ({proof.task_status}) "
                 f"{proof.state}{kind}: {proof.reason}"
             )
+            if proof.command:
+                _out(f"        ran: {proof.command}")
         if not status.tasks:
             _out(f"      {status.reason}")
     for heading, values in (("Assumptions", brief.assumptions), ("Boundaries", brief.boundaries)):
@@ -150,7 +154,7 @@ def _render(view: BriefView) -> None:
             artifact = f" ({evidence.artifact})" if evidence.artifact else ""
             _out(
                 f"  {evidence.id} {evidence.requirement_id} r{evidence.requirement_revision} "
-                f"{what} [{evidence.kind}] by {evidence.task_id}: {evidence.summary}{artifact}"
+                f"{what}{_backing(evidence)} by {evidence.task_id}: {evidence.summary}{artifact}"
             )
     if brief.corrections:
         _out("Corrections:")
@@ -259,8 +263,11 @@ def update(
     ] = False,
     as_session: SessionRef = None,
 ) -> None:
-    """Correct a brief. Ids stay; what changed makes its evidence stale and reopens its
-    tasks in review or done. Re-sending what is already there changes nothing."""
+    """Correct a brief; its ids stay.
+
+    What changed makes its evidence stale,
+    and reopens its tasks in review or done.
+    Re-sending what is already there changes nothing."""
     changes = _pairs(requirement, "--requirement")
     checks = _pairs(check, "--check")
     if not (changes or checks or add or title or assumption or boundary) and not (
@@ -302,8 +309,10 @@ def link(
     ],
     as_session: SessionRef = None,
 ) -> None:
-    """Link a board task to requirements. A task can cover several; a requirement can
-    need several tasks, each proving its own part."""
+    """Link a board task to requirements.
+
+    A task can cover several requirements,
+    and a requirement can need several tasks, each proving its own part."""
     brief, linked, changed = _call(
         as_session, lambda: service.link(ref, task, requirement, session_ref=as_session)
     )
@@ -316,11 +325,19 @@ def _task(task: TeamTask) -> dict[str, object]:
     return {"task_id": task.id, "task_number": task.number}
 
 
+def _backing(evidence: BriefEvidence) -> str:
+    """How a record is backed, as its lines label it: ``[report]``, ``[manual]`` for an
+    artifact, and nothing for a finding no artifact shows (there is nothing to judge)."""
+    if evidence.kind == "manual" and evidence.artifact is None:
+        return ""
+    return f" [{evidence.kind}]"
+
+
 def _evidence_written(brief: WorkBrief, evidence: BriefEvidence, changed: bool) -> None:
     what = "finding" if evidence.finding else evidence.verdict
-    verb = f"recorded {evidence.requirement_id} {what} [{evidence.kind}]"
+    verb = f"recorded {evidence.requirement_id} {what}{_backing(evidence)}"
     _written(verb, brief, changed, {"evidence": evidence.model_dump(mode="json")})
-    if changed and not get_state().json_output and evidence.kind == "manual":
+    if changed and not get_state().json_output and evidence.artifact is not None:
         _out("  manual evidence: the validator judges it; nothing checked it here")
 
 
@@ -332,17 +349,27 @@ def evidence(
     verdict: Annotated[Verdict, typer.Option("--verdict", help="pass or fail.")],
     summary: Summary,
     artifact: Annotated[
-        Path,
+        Path | None,
         typer.Option(
             "--artifact", help="The file that shows it, such as a screenshot: manual evidence."
         ),
-    ],
+    ] = None,
+    report: Annotated[
+        str | None,
+        typer.Option("--report", help="The saved command report (`asq exec --project`)."),
+    ] = None,
     as_session: SessionRef = None,
 ) -> None:
-    """Record a check of a requirement by a linked task, backed by an artifact.
+    """Record a check by a linked task, backed by --report or --artifact.
 
-    Artifact-backed evidence is MANUAL: recorded as such and labelled so everywhere,
-    because only the validator can judge it. A fail has `brief finding`'s effect."""
+    A --report pass needs an uninterrupted run that exited 0.
+    Its output must be kept whole.
+    Its source must be unchanged before the run, after it and now.
+    The source is every tracked file and every untracked one git does not ignore.
+    A file the check writes there is a change: gitignore it, or write it outside.
+    Artifact-backed evidence is MANUAL, and labelled so everywhere.
+    Only the validator can judge it.
+    A fail has `brief finding`'s effect."""
     narrowed: EvidenceVerdict = "pass" if verdict is Verdict.PASS else "fail"
     brief, recorded, changed = _call(
         as_session,
@@ -353,10 +380,61 @@ def evidence(
             verdict=narrowed,
             summary=summary,
             artifact=artifact,
+            report_id=report,
             session_ref=as_session,
         ),
     )
     _evidence_written(brief, recorded, changed)
+
+
+@app.command("check")
+def check(
+    ref: BriefRef,
+    source_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--source-root",
+            help="Compare every pass with this one checkout (the project's, or a worktree).",
+        ),
+    ] = None,
+    as_session: SessionRef = None,
+) -> None:
+    """Check every requirement against the source now.
+
+    A pass goes stale when any source file is new, changed or gone since its check.
+    Source is every tracked file and every untracked one git does not ignore.
+    Exits 1 while any is missing, failed, blocked, stale or unlinked (no live task).
+    Exits 2 for a --source-root that is not a checkout of the project."""
+    result = _call(
+        as_session, lambda: service.check(ref, source_root=source_root, session_ref=as_session)
+    )
+    if get_state().json_output:
+        typer.echo(result.model_dump_json())
+    else:
+        brief = result.brief
+        verdict = "PROVEN" if result.complete else "NOT PROVEN"
+        against = f" against {result.source_root}" if result.source_root else ""
+        _out(f"{brief.label} r{brief.revision} {brief.title}: {verdict}{against}")
+        expected = {r.id: r.check for r in brief.requirements}
+        for status in result.requirements:
+            label = status.state + (" (manual)" if status.manual and status.state == "pass" else "")
+            _out(f"  {status.id} [{label}] {status.reason}")
+            if expected.get(status.id):
+                _out(f"      check: {expected[status.id]}")
+            # Every linked task when there are several: a [missing] requirement listed
+            # only the task that passed, never the one still missing (re-gate, n3).
+            for proof in status.tasks:
+                ref = _task_ref(proof.task_id, proof.task_number)
+                if len(status.tasks) > 1 or proof.state != status.state:
+                    _out(f"      {ref} {proof.state}: {proof.reason}")
+                # What backed the pass, beside the check the requirement expects.
+                if proof.command and proof.state == "pass":
+                    _out(f"      {ref} ran: {proof.command}")
+        manual = [status.id for status in result.requirements if status.manual]
+        if manual:
+            _out(f"Manual evidence, for the validator to judge: {', '.join(manual)}")
+    if not result.complete:
+        raise typer.Exit(1)
 
 
 @app.command("finding")
@@ -372,9 +450,10 @@ def finding(
 ) -> None:
     """Record a failure found in a task's work on a requirement.
 
-    A task in review or done goes back to todo; one being worked on keeps its owner; a
-    dropped one stays dropped. Three distinct failures by one task on one revision of a
-    requirement block the task, so the manager re-plans it."""
+    A task in review or done goes back to todo,
+    one being worked on keeps its owner, and a dropped one stays dropped.
+    Three distinct failures by one task on one revision of a requirement
+    block the task, so the manager re-plans it."""
     brief, recorded, changed = _call(
         as_session,
         lambda: service.finding(

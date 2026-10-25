@@ -69,7 +69,7 @@ from aisquare.cli.ui.views.agent import AgentView, info_line
 from aisquare.core.keys import Drop
 from aisquare.core.tmux import BUNDLED_CONF, PASTE_BUFFER, TmuxError, TmuxServer
 from aisquare.models import FleetAgent, FleetAgentStatus
-from tests import guard_clock
+from tests import guard_clock, toast_log
 from tests.pane_harness import (
     FakePane,
     FakeTmux,
@@ -3176,7 +3176,10 @@ def test_hiding_the_pane_drops_its_highlight(fake: FakeTmux, tmp_path: Path) -> 
             await drag(pilot, first, (0, 1), (5, 1))
             standing = first.text_selection
             host.tabs.current = "second"
-            await pilot.pause()
+            # Hide reaches the pane at the next layout, which one pause did not always
+            # reach on Windows (CI runs 37790858879 and 38557402746): wait for it.
+            with contextlib.suppress(AssertionError):
+                await wait_until(pilot, lambda: first.text_selection is None)
             hidden = first.text_selection
             host.set_focus(None)
             await pilot.press("ctrl+c")
@@ -4756,6 +4759,11 @@ def test_a_double_click_the_program_copies_is_mirrored_once(
             await click(pilot, widget, (1, 1))
             await click(pilot, widget, (1, 1))
             fake.buffer = "word"  # the program's handler for the second release ran
+            # Waited for, not paused for: a fixed 0.2 s past the delay missed the read on
+            # a loaded Windows runner (main's scheduled run 38695758190, '' == 'word').
+            with contextlib.suppress(AssertionError):
+                await wait_until(pilot, lambda: host.clipboard == "word")
+            # A second mirror would read within one more delay of the first.
             await pilot.pause(widget.BUFFER_MIRROR_DELAY + 0.2)
             return host.clipboard, list(host.notices)
 
@@ -5536,13 +5544,16 @@ def test_agent_view_stop_says_a_release_the_store_refused(
 
     async def drive() -> list[tuple[str, str]]:
         host = ViewHost()
+        # Recorded at the call: the dialog notifies and then dismisses, and its callback
+        # runs ahead of the queued toast, so the screen's toasts can still be [] (seq 381).
+        told = toast_log.record_severity(host)
         async with host.run_test(size=(80, 12)) as pilot:
             await pilot.pause()
             host.push_screen(StopAgentScreen(project, working), callback=closed.append)
             await pilot.pause()
             await pilot.click("#stop-confirm")
             await wait_until(pilot, lambda: len(closed) == 1)
-            return [(str(toast.message), str(toast.severity)) for toast in host._notifications]
+            return told
 
     said = run(drive())
     assert closed == [working.agent]  # dismissed with the receipt's row, as a clean stop is

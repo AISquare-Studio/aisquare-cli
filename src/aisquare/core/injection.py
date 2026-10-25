@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import contextlib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from aisquare.core import paths
 from aisquare.models import ContextEntry, InjectionRecord, ProjectInfo
@@ -33,6 +35,74 @@ def build_block(entries: list[ContextEntry], project: ProjectInfo) -> str:
     if not user and not project_entries:
         lines += ["_No saved context yet._", ""]
     return "\n".join(lines).rstrip("\n") + "\n"
+
+
+#: The memory files Claude Code reads in each directory from the session's cwd up to the
+#: filesystem root, beside the user's own ``CLAUDE.md`` in its config directory.
+_PROJECT_MEMORY_FILES = ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md")
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+def claude_md_files(cwd: Path | None) -> list[Path]:
+    """The ``CLAUDE.md`` files Claude Code loads into a session started in ``cwd``: the
+    user's (``CLAUDE_CONFIG_DIR`` or ``~/.claude``) and the project chain, cwd upwards."""
+    from aisquare.core import agents as agent_core  # lazy: injection is imported early
+
+    files = [agent_core.claude_home() / "CLAUDE.md"]
+    if cwd is not None:
+        start = cwd.resolve()
+        for directory in (start, *start.parents):
+            files += [directory / name for name in _PROJECT_MEMORY_FILES]
+    return files
+
+
+def _lines(text: str) -> list[str]:
+    """``text``'s non-blank lines, each with its whitespace collapsed."""
+    return [
+        line for line in (_WHITESPACE.sub(" ", raw).strip() for raw in text.splitlines()) if line
+    ]
+
+
+def _holds_whole_lines(haystack: list[str], needle: list[str]) -> bool:
+    """Whether ``needle`` is a contiguous run of whole lines of ``haystack``."""
+    width = len(needle)
+    return any(
+        haystack[start : start + width] == needle for start in range(len(haystack) - width + 1)
+    )
+
+
+def without_loaded_preferences(
+    entries: list[ContextEntry], loaded: Iterable[Path]
+) -> list[ContextEntry]:
+    """``entries`` less the user-pool ones that duplicate content Claude Code already
+    loads this session from one of the ``loaded`` files (:func:`claude_md_files`).
+
+    ``agents connect`` imports ``~/.claude/CLAUDE.md`` into the user pool section by
+    section, so every session saw those sections twice: once from Claude Code, once
+    under "Your preferences". An entry is dropped only when its lines are the whole
+    file or a contiguous run of WHOLE lines in it (whitespace aside, blank lines
+    ignored): "Use uv" beside a line "Use uv run for every Python command" is a
+    preference of its own, and stays. So does every entry a file no longer holds. A
+    file that cannot be read is simply not loaded.
+    """
+    files: list[list[str]] = []
+    for path in loaded:
+        try:
+            lines = _lines(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError):
+            continue
+        if lines:
+            files.append(lines)
+    if not files:
+        return entries
+    return [
+        entry
+        for entry in entries
+        if entry.pool != "user"
+        or not (wanted := _lines(entry.text))
+        or not any(_holds_whole_lines(lines, wanted) for lines in files)
+    ]
 
 
 def _bullet(text: str) -> str:

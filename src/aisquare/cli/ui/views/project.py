@@ -345,9 +345,10 @@ class ProjectView(TabbedContent):
                 id="tab-explainability",
             ),
             TabPane("Settings", SettingsView(project, id="project-settings"), id="tab-settings"),
-            # Personas live with the fleet they serve (spawn-personas.md §4.2):
-            # the project supplies the project layer and every attach target.
-            TabPane("Personas", PersonasTab(project, id="project-personas"), id="tab-personas"),
+            # Personas live with the fleet they serve (spawn-personas.md §4.2): the
+            # project supplies the project layer and every attach target. Empty until
+            # it is first opened (:meth:`open_personas`).
+            TabPane("Personas", id="tab-personas"),
         )
         for pane in panes:
             self.compose_add_child(pane)
@@ -389,9 +390,19 @@ class ProjectView(TabbedContent):
             self.refresh_status(pending)
 
     @on(TabbedContent.TabActivated, pane="#tab-personas")
-    def reload_personas(self) -> None:
-        """Re-read the catalogue each time the tab is opened: the disk may have changed."""
-        for tab in self.query(PersonasTab):
+    def open_personas(self) -> None:
+        """Build the Personas tab the first time it is opened, which reads the catalogue as
+        it mounts; re-read it each later time, as the disk may have changed.
+
+        Built with the view, every project view read the whole catalogue on the UI thread,
+        and asked git, for a tab that may never be opened (review of #201, R1-F10).
+        """
+        tabs = self.query(PersonasTab)
+        if not tabs:
+            pane = self.query_one("#tab-personas", TabPane)
+            pane.mount(PersonasTab(self.project, id="project-personas"))
+            return
+        for tab in tabs:
             tab.reload()
 
     def refresh(

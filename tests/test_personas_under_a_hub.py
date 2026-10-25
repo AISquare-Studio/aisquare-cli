@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 from aisquare.cli import launch as launch_cli
-from aisquare.core import orchestrator
+from aisquare.core import orchestrator, personas
 from aisquare.core.store import store_session
 from aisquare.models import ProjectInfo
 from aisquare.services import fleet as fleet_service
@@ -88,8 +88,10 @@ def test_launch_under_a_hub_finds_a_persona_in_its_own_repositorys_layer(
     monkeypatch.chdir(project.root)
     board = orchestrator.team_project(project.root)
     assert board.root == hub_root.resolve()
+    root = personas.project_root()  # what `launch` asks, from the working directory
+    assert root == project.root, "the seat's own repository, not the hub"
 
-    launch_cli._check_persona("reporev", board)  # refuses with typer.Exit when not found
+    launch_cli._check_persona("reporev", root)  # refuses with typer.Exit when not found
 
 
 def test_a_seat_under_a_hub_is_briefed_with_its_own_repositorys_persona(

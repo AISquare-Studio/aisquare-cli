@@ -921,6 +921,38 @@ def test_a_persona_holding_the_kept_name_is_refused_before_any_engine_runs(
     assert not (_user_layer() / INVENTED).exists()
 
 
+def test_a_replacement_whose_last_rename_fails_puts_the_old_persona_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--force`` moved the old persona aside, then the new one failed to take its place:
+    the old one was left only in a hidden ``.pair.old-*`` directory, gone from every
+    catalogue (review of #201, R1-F4)."""
+    held = _user_layer() / "pair"
+    held.mkdir(parents=True)
+    (held / "SKILL.md").write_text(
+        "---\nname: pair\ndescription: Held.\n---\nYou hold the name.\n", encoding="utf-8"
+    )
+    source = tmp_path / "pair"
+    source.mkdir()
+    (source / "SKILL.md").write_text(
+        "---\nname: pair\ndescription: New.\n---\nYou are new.\n", encoding="utf-8"
+    )
+    rename = Path.rename
+
+    def refuse_the_staged_copy(self: Path, target: Any) -> Path:
+        if self.name.startswith(".pair.new-"):
+            raise OSError(28, "No space left on device", str(target))
+        return rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", refuse_the_staged_copy)
+
+    with pytest.raises(OSError):
+        _import(str(source), force=True)
+
+    assert personas.resolve("pair").description == "Held."
+    assert sorted(entry.name for entry in _user_layer().iterdir()) == ["pair"]
+
+
 def test_a_kept_name_that_breaks_the_rule_is_refused_before_any_engine_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -935,3 +967,115 @@ def test_a_kept_name_that_breaks_the_rule_is_refused_before_any_engine_runs(
     assert "'Long_Skill' breaks the skill-name rule" in str(caught.value)
     assert "pass --name" in str(caught.value)
     assert handed == []
+
+
+# --- the name, resolved once (review of #201, R2) -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "skill_md",
+    [
+        "---\nname: own-dir\n---\nNo description.\n",
+        "You are a reviewer, with no frontmatter at all.\n",
+        "---\nname: [not, a, string\n---\n" + "w" * 13_000 + "\n",
+    ],
+    ids=["no description", "no frontmatter", "over the cap with bad frontmatter"],
+)
+def test_a_skill_directory_the_recognised_test_refuses_keeps_its_name_on_the_llm_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, skill_md: str
+) -> None:
+    """R2-F1: only a source with no name of its own is named by the engine, and a directory
+    has one, recognised or not. Its unrecognised SKILL.md was saved under the engine's."""
+    _drafts_named(monkeypatch)
+    source = tmp_path / "own-dir"
+    source.mkdir()
+    (source / "SKILL.md").write_text(skill_md, encoding="utf-8")
+
+    result = _import(str(source), condense=True)
+
+    assert result.persona.name == "own-dir"
+    assert not (_user_layer() / INVENTED).exists()
+
+
+def test_a_name_flag_that_breaks_the_rule_is_refused_before_any_engine_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-F2: an implied name was checked up front, ``--name`` was not: two drafts were spent
+    on a rule the engine cannot fix, and the import ended ``import_invalid``."""
+    handed = _drafts_named(monkeypatch)
+
+    with pytest.raises(PersonaError) as caught:
+        _import(str(_long_skill(tmp_path)), condense=True, name="Bad_Name")
+
+    assert caught.value.code == "invalid_name"
+    assert "'Bad_Name' breaks the skill-name rule" in str(caught.value)
+    assert "pass --name" not in str(caught.value), "it was passed"
+    assert handed == []
+
+
+def test_a_file_whose_name_slugs_to_nothing_is_told_of_its_name_not_a_directory(
+    tmp_path: Path,
+) -> None:
+    """R2-F5: ``!!!.md`` has no directory, and was told "the directory name '!!!'"."""
+    source = tmp_path / "!!!.md"
+    source.write_text("---\ndescription: Bangs.\n---\nBang.\n", encoding="utf-8")
+
+    with pytest.raises(PersonaError) as caught:
+        _import(str(source))
+
+    assert caught.value.code == "invalid_name"
+    assert str(caught.value).startswith(f"{source}: the name '!!!' breaks the skill-name rule")
+    assert "directory" not in str(caught.value)
+    assert str(caught.value).endswith("— pass --name")
+
+
+def test_drafting_a_kept_draft_again_keeps_the_draft_it_was_read_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-F3: the retry after ``import_invalid`` is ``persona import .drafts/<name>
+    --condense``. The new draft kept the source's name, and was written over the source:
+    the earlier engine output was lost."""
+    drafted: list[int] = []
+
+    def draft(
+        source_text: str, **_kwargs: object
+    ) -> tuple[persona_import.PersonaDraft, persona_import.RanEngine, str | None]:
+        drafted.append(len(drafted) + 1)
+        body = f"draft {len(drafted)} " + "w" * 4_100  # over the soft cap: --condense refuses
+        answer = {**DRAFT, "body": body}
+        return persona_import.PersonaDraft.model_validate(answer), "manager", None
+
+    monkeypatch.setattr(persona_import, "draft", draft)
+    kept = _user_layer() / service.DRAFTS_DIR / "long-skill"
+    with pytest.raises(service.DraftKept) as first:
+        _import(str(_long_skill(tmp_path)), condense=True)
+    assert first.value.draft_path == kept / "SKILL.md"
+
+    with pytest.raises(service.DraftKept) as again:
+        _import(str(kept), condense=True)
+
+    retried = _user_layer() / service.DRAFTS_DIR / "retry" / "long-skill" / "SKILL.md"
+    assert again.value.draft_path == retried
+    assert "draft 2 " in (kept / "SKILL.md").read_text(encoding="utf-8"), "the source, as kept"
+    assert "draft 4 " in retried.read_text(encoding="utf-8")
+
+
+def test_the_soft_cap_warning_names_an_import_that_condenses_the_persona_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-F6: the warning said ``persona import --condense``, which keeps the persona's name,
+    and so met ``persona_exists`` for the very persona it warned about."""
+    _drafts_named(monkeypatch)
+    long = _user_layer() / "long-skill"
+    long.mkdir(parents=True)
+    (long / "SKILL.md").write_text(
+        "---\nname: long-skill\ndescription: Long.\n---\n" + "w" * 4_100 + "\n", encoding="utf-8"
+    )
+    hint = f"`aisquare persona import {long} --condense --force` rewrites it shorter"
+
+    warned = personas.warnings(personas.resolve("long-skill"))
+    result = _import(str(long), condense=True, force=True)  # what it says, as it says it
+
+    assert any(hint in warning for warning in warned), warned
+    assert result.replaced and result.persona.path == long
+    assert len(result.persona.body) < personas.BODY_SOFT_CAP

@@ -98,6 +98,7 @@ from aisquare.models import (
     FleetAgent,
     FleetAgentStatus,
     HeadroomSummary,
+    LaunchSpec,
     ProjectInfo,
     TeamSession,
 )
@@ -105,6 +106,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import explainability as explainability_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project_groups as groups_service
+from aisquare.services.captain import state as captain_state
 from tests import guard_clock, toast_log
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
 from tests.ui_workers import settle_page
@@ -145,7 +147,13 @@ def status(
     minute: int = 0,
     exit_status: int | None = None,
 ) -> FleetAgentStatus:
-    """A scripted agent; the id is derived so a test can address its row."""
+    """A scripted agent; the id is derived so a test can address its row. A ``captain`` row
+    is launched as the captain's start launches it (``fleet.is_the_captains_row``)."""
+    spec = (
+        LaunchSpec(binary="claude", extra_args=["--strict-mcp-config", "--tools", ""])
+        if role == "captain"
+        else None
+    )
     agent = FleetAgent(
         id=f"agt_{project_id.removeprefix('prj_')}_{label}",
         project_id=project_id,
@@ -157,6 +165,7 @@ def status(
         created_at=T0 + timedelta(minutes=minute),
         ended_at=T0 + timedelta(minutes=minute + 1) if exit_status is not None else None,
         exit_status=exit_status,
+        launch_spec=spec,
     )
     return FleetAgentStatus(agent=agent, state=state)
 
@@ -2789,11 +2798,18 @@ def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
     is still painted. The first frame, read at mount before anything is drawn, is not
     the tick's and is not counted."""
     seed(tmp_path, ("prj_a", "alpha", None), ("prj_b", "beta", None))
+    # The captain's home board too, so its read lists the home's agents as well (review
+    # of #272, m4): without it, the captain's read found no home and asked nothing.
+    home = captain_state.home_project()
     threads: dict[str, list[threading.Thread]] = {"store": [], "list_agents": []}
+    listed: list[str] = []
     answer = ["waiting"]
 
     def fake(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         threads["list_agents"].append(threading.current_thread())
+        listed.append(project.id)
+        if project.id == home.id:
+            return []
         return [status(project.id, "manager", "manager", answer[0])]
 
     @contextmanager
@@ -2808,6 +2824,7 @@ def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
         app = fleet_app(pilot)
         for seen in threads.values():
             seen.clear()
+        listed.clear()
         monkeypatch.setattr(app_mod, "store_session", recorded)
         answer[0] = "working"
         app.refresh_data()  # what the two-second timer runs
@@ -2816,9 +2833,11 @@ def test_the_tick_reads_the_store_and_the_agents_off_the_ui_thread(
         return *rows, app.captain_on
 
     row_a, row_b, captain = drive(go)
-    # With the captain on, the read also looks up its home board, in a session of its own
-    # (``_read_captain``): one more, off the UI thread as well.
-    assert len(threads["store"]) == 1 + captain and len(threads["list_agents"]) == 2, threads
+    # With the captain on, the read also looks up its home board, in the fleet's own store
+    # session (review of #272, m5: it was a second one), and lists the home's agents
+    # (``_read_captain``): one more list_agents, off the UI thread as well (m4).
+    assert len(threads["store"]) == 1, threads
+    assert sorted(listed) == sorted(["prj_a", "prj_b", *([home.id] if captain else [])])
     main = threading.main_thread()
     assert all(t is not main for seen in threads.values() for t in seen), threads
     assert row_a.rstrip().endswith("▶") and row_b.rstrip().endswith("▶")  # …and painted

@@ -170,6 +170,7 @@ def session_end() -> None:
             _cwd(payload),
             session_id=_str(payload, "session_id"),
             reason=_str(payload, "reason"),
+            transcript_path=_str(payload, "transcript_path"),
         )
     except Exception as exc:  # never disrupt the agent
         _cost_of_failing_open("session-end", exc)
@@ -195,6 +196,7 @@ def stop() -> None:
             stop_hook_active=_flag(payload, "stop_hook_active"),
             last_message=_str(payload, "last_assistant_message"),
             permission_mode=_str(payload, "permission_mode"),
+            transcript_path=_str(payload, "transcript_path"),
         )
     except ManagerWakeupError as exc:  # the row is right; only the wake-up was lost
         _cost_of_failing_open("stop", exc.cause, cost=_COST["manager-wakeup"])
@@ -229,6 +231,8 @@ def stop_failure() -> None:
             error=_str(payload, "error"),
             message=_str(payload, "last_assistant_message"),
             details=_str(payload, "error_details"),
+            transcript_path=_str(payload, "transcript_path"),
+            cwd=_cwd(payload),
         )
     except Exception as exc:  # never disrupt the agent
         _cost_of_failing_open("stop-failure", exc)

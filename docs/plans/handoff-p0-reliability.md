@@ -52,8 +52,9 @@ from day 1; it rebases on W1a for `services/fleet.py` and `core/harness.py`.
 - `core/harness.py`: W1a/W1c edit the coder and manager cycles (:984-993,
   :1023-1061); W3 edits the manager cycle's switch sentence (:1051-1054). One
   coder lands harness text; the other rebases.
-- `core/store.py`: only W1a adds a migration (schema version 34). Anyone else who
-  needs one takes version 35 after W1a merges.
+- `core/store.py`: only W1a adds a migration (schema version 34 as built; 36 since the
+  sync of main 8eb18a8a, whose #38 and #346 hold 34 and 35). Anyone else who
+  needs one takes the next version after W1a merges.
 
 **Agents.** One coder per workstream (W1 may run three: 1a, 1b, 1c). One reviewer
 per PR, read-only (`REVIEWER_ARGS`), who checks: the failing-first test exists and
@@ -436,7 +437,8 @@ names.
   block never disagree: "You are coder-auth. <the block's lines>". A `--prompt` given
   with `--task` is appended after it. The manager cycle (`core/harness.py:1040`) adds:
   "`--task` delivers the task; add `--prompt` only for extra instructions."
-- **Acknowledgement.** Migration to schema version 34: `team_session.prompted_at`
+- **Acknowledgement.** Migration to schema version 36 (34 as built, before the sync of
+  main 8eb18a8a): `team_session.prompted_at`
   (set by `hook_prompt_heartbeat`, `services/team.py:1972`, on every `UserPromptSubmit`),
   `fleet_agent.first_prompt` (`pending` | `acked` | `unsent` | NULL) and
   `fleet_agent.first_prompt_at`. Spawn records `pending`; the heartbeat flips the
@@ -1063,7 +1065,7 @@ trade-off is first.
 | 23 | Lean CI for sub-PRs into `rc/**` | One Linux check leg (py3.12, captain on), the Linux package job and `lock`; the demo renders on rc pushes and train PRs | #322 | `gh workflow run ci.yml --ref <branch>` runs the full matrix |
 | 24 | P1-WS5d (pytest-xdist) landing via this train | Merged into `rc/p0-reliability` so every train gets it through the syncs; P1's release notes say so; `-n auto` in the Makefile and CI `check`, not `addopts`; the ambient job stays serial | #309 | `pytest -p no:xdist` runs serially |
 | 25 | W0's scale and oldest Claude Code version | 5 sessions, not 20; 2.1.223 as the oldest (the fleet's resume floor) | #320 | The as-written run after all four trains are on `main` |
-| 26 | The version number | 0.9.0 proposed: a store migration (schema 34) and new receipt fields | — | The owner sets it when cutting the release |
+| 26 | The version number | 0.9.0 proposed: a store migration (schema 36) and new receipt fields | — | The owner sets it when cutting the release |
 
 ### Known gaps
 
@@ -1090,7 +1092,7 @@ Status 2026-10-23 is given in **bold** after each item.
 
 - Version: the next release cut from `main` after this train. `[Unreleased]` already
   carries the captain (#240) and personas (#201); with a store migration (schema
-  version 34) and new receipt fields, expect 0.9.0. The owner sets it. **Owner.**
+  version 36) and new receipt fields, expect 0.9.0. The owner sets it. **Owner.**
 - CHANGELOG `[Unreleased]`: `Fixed` — first prompts acknowledged (#122), idle agents
   read waiting (#123), claimed contracts (#74), drafts never overwritten (W2), tells
   delivered at turn end (W2), one switch per limit and per-family windows (W3),
@@ -1100,7 +1102,7 @@ Status 2026-10-23 is given in **bold** after each item.
   `deliver_notes_at_turn_end`, `inbox_delivery` (if built); `[accounts] prefer`;
   `fleet switch --force`; events `prompt_unsent`, `handover_failed`; doctor row
   `fleet-delivery`. **Done: one entry per workstream (P0-REL coherence pass); `inbox_delivery` not built.**
-- Migration notes: store schema version 34 adds `team_session.prompted_at`, `fleet_agent.first_prompt`,
+- Migration notes: store schema version 36 adds `team_session.prompted_at`, `fleet_agent.first_prompt`,
   `fleet_agent.first_prompt_at` (nullable; old rows read NULL, meaning "not tracked").
   No config migration; new keys default as above. **Done: `docs/fleet.md` "Upgrading".**
 - Rollout defaults: command-line first prompts on for Claude Code agents; typed

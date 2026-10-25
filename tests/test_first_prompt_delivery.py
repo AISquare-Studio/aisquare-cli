@@ -559,13 +559,13 @@ def test_a_first_prompt_still_inside_its_wait_is_not_attention(
 # --- the store, the harness, doctor, the CLI ---------------------------------------------------
 
 
-def test_a_v33_store_gains_the_first_prompt_columns_and_a_second_open_changes_nothing() -> None:
-    """Schema 34 over a store at 33: three nullable columns, read as "not tracked" on rows
+def test_a_v35_store_gains_the_first_prompt_columns_and_a_second_open_changes_nothing() -> None:
+    """Schema 36 over main's store at 35: three nullable columns, read as "not tracked" on rows
     from before them; the presence pass finds them on the next open and adds nothing."""
     from aisquare.core.store import SCHEMA_VERSION, open_store
     from tests.test_store import _at_version, _contents, _db_path
 
-    db = _at_version(33)
+    db = _at_version(35)
     import sqlite3
 
     raw = sqlite3.connect(str(db))
@@ -586,8 +586,8 @@ def test_a_v33_store_gains_the_first_prompt_columns_and_a_second_open_changes_no
     once = _contents(db)
     open_store().close()
 
-    # W1a's step is 34; P1 WS-2's (#279) is 35 on a train that holds both.
-    assert SCHEMA_VERSION >= 34 and _contents(db) == once
+    # W1a's step is v36; P1 WS-2's (#279) is v37 on a train that holds both.
+    assert SCHEMA_VERSION >= 36 and _contents(db) == once
     assert old is not None and (old.first_prompt, old.first_prompt_at) == (None, None)
     assert _db_path() == db
 

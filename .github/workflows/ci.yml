@@ -460,6 +460,26 @@ jobs:
           ):
               subprocess.run([str(bindir / argv[0]), *argv[1:]], check=True)
 
+          # Remote works out of the box (#34): with no extra, the bundled ngrok
+          # imports and the server starts and serves its page, in a home of its own.
+          remote = (
+              "import socket, urllib.request\n"
+              "from aisquare.services import ngrok_sdk, remote_server\n"
+              "assert ngrok_sdk.sdk() is not None, 'the bundled ngrok'\n"
+              "probe = socket.socket(); probe.bind(('127.0.0.1', 0))\n"
+              "port = probe.getsockname()[1]; probe.close()\n"
+              "info = remote_server.start_remote_server(port=port)\n"
+              "try:\n"
+              "    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))\n"
+              "    assert opener.open(info.url_local, timeout=30).status == 200\n"
+              "finally:\n"
+              "    remote_server.stop_remote_server()\n"
+          )
+          home = Path(os.environ["RUNNER_TEMP"]) / "remote-home"
+          python = bindir / f"python{suffix}"
+          env = {**os.environ, "AISQUARE_HOME": str(home)}
+          subprocess.run([str(python), "-c", remote], check=True, env=env, cwd=os.environ["RUNNER_TEMP"])
+
       # THE INSTALL LINE THE SETUP GUIDE ACTUALLY GIVES PEOPLE, which nothing
       # tested until now. It is a different environment from every other job
       # here: the SDK shares this package's top-level import name, so the two

@@ -226,7 +226,7 @@ def test_the_real_fetch_hands_back_the_headers(monkeypatch: pytest.MonkeyPatch) 
     sent = Message()
     sent["Retry-After"] = "30"
 
-    def refuse(request: Any, timeout: float) -> Any:
+    def refuse(request: Any, timeout: float, **_: Any) -> Any:
         raise urllib.error.HTTPError(request.full_url, 429, "Too Many", sent, io.BytesIO(b""))
 
     monkeypatch.setattr(urllib.request, "urlopen", refuse)

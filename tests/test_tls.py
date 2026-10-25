@@ -193,7 +193,7 @@ def test_http_get_verifies_through_the_shared_context_where_the_default_paths_ha
     assert isinstance(bare.value.reason, ssl.SSLCertVerificationError)
 
     _certifi_only(monkeypatch, https_server.ca_file)
-    status, body = service._http_get(https_server.url, {}, 5)
+    status, body, _headers = service._http_get(https_server.url, {}, 5)
 
     assert status == 200 and json.loads(body) == LIVE_USAGE
     assert tls.trust_source() == tls.SOURCE_CERTIFI

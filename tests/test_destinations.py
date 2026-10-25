@@ -967,7 +967,7 @@ def test_a_key_bound_to_the_machines_target_answers_for_its_gateway_however_spel
 
 
 def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
-    isolated_home: Path, tmp_path: Path
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``deployment_fix`` worded the rows with no gateway, and the other rows that can
     name a project's own deployment still said ``enable --target <name>``: that makes the
@@ -993,6 +993,9 @@ def test_no_remediation_for_a_projects_deployment_makes_it_the_machines_target(
             session,
         )
 
+    # The doctor's proxy row asks the configured proxy, which is the real staging host's
+    # :9443: answered here, as the rest of this file answers it (REVIEW-403's socket guard).
+    monkeypatch.setattr(ops, "probe_proxy", lambda _url: service.ProxyProbe(True, "healthy"))
     doctor = {check.name: check for check in ops.checks(project_id=project.id)}
     key_row = " ".join((doctor["explainability config"].fix or "").split())
     assert "$EXPLAINABILITY_STG_API_KEY" in key_row

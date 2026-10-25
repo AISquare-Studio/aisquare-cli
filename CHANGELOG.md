@@ -16,6 +16,20 @@ adapter.**
   beside 0.162.1's). Older releases lack `--approve-for-me` and the hook trust
   review this relies on. Claude Code stays the default agent and nothing changes for a machine
   without Codex.
+- A hand-off across agent types (`fleet switch --agent <agent>`, `--to` another
+  agent's account, the Spawn dialog's *Hand off from* with another *Agent*): no
+  conversation moves between agents, so the replacement starts fresh on the other agent
+  with a hand-off brief of the work — its task, contract and claims, its last board
+  entries, its tree, and the newest of its conversation read off the old agent's
+  transcript by that agent's own reader — as its first prompt, through the new agent's
+  own prompt path, the whole brief kept under `~/.aisquare/handoffs/`. The claims move
+  to the new row, the old session ends, and its restart and Fork keep the new agent.
+  The automatic hand-over still prefers an account of the agent's own with room (its
+  session resumes), and crosses only once every own account was read over the line:
+  `[accounts] cross_agent_handover`, on by default, *hand off across agents* in App
+  settings. Any adapter gets it from what the adapter contract already asks (its
+  transcript reader and its first-prompt path); the synthetic third agent proves it
+  both ways ([the parity row](docs/coding-agents.md#parity-with-claude-code)).
 - On a machine with Codex alone, every step has a Codex path:
   `install.sh --agent codex`, Welcome, a manager and two coders on Codex,
   restart, switch, tell, stop, accounts and usage limits.

@@ -1203,6 +1203,25 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   not move) in a note beside `switched`, and `switched` itself says whether
   the replacement's first line reached it. `doctor` lists parked agents; `doctor --live` warns when every account
   is over the line.
+- **Across agents.** A hand-over can move an agent onto another coding agent:
+  `fleet switch <label> --agent codex`, `--to` an account of another agent (it brings
+  its agent), or the Spawn dialog's *Hand off from* with another *Agent* picked (under
+  *Advanced*; *Start fresh* is then checked and locked). With `[accounts]
+  cross_agent_handover` on, the default (*hand off across agents* in App settings), the
+  automatic hand-over and a switch with no `--to` cross by themselves once every other
+  account of the agent's own was read over `switch_at`, or it has none, onto the first
+  account of another installed agent under the line, in priority order. An own account
+  with room always comes first and resumes the session; one whose usage cannot be read
+  is never taken for full. No conversation moves between agents, so the replacement
+  starts **fresh** there, and a **hand-off brief** carries the work: the task and its
+  contract, the claims (moved onto the new row, as a fresh hand-over's are), the last
+  board entries, the tree's branch, uncommitted paths and last commits, and the newest
+  of the conversation, read off the old agent's transcript by its own reader. It is the
+  new agent's first prompt (its launch argument on Codex, typed in on Claude Code), cut
+  to 6 000 bytes; the whole brief is kept under `~/.aisquare/handoffs/` and the prompt
+  names it. The old session ends, `switched` names both agents, and the new launch
+  record names the new agent, so a restart or Fork of it stays there. Switched off, a
+  hand-over stays on its agent as before. The captain keeps its agent.
 - **Folder trust.** Claude Code asks *"Is this a project you created or one you
   trust?"* the first time it starts in a folder, once **per account** — and the
   answer it highlights is *No, exit*. So a yes on account 2 left every agent on
@@ -1320,6 +1339,7 @@ aisquare accounts disable 3            # out of automatic selection; enable puts
 aisquare config set accounts.pick default      # spawns stay on the machine default (headroom is the default)
 aisquare config set accounts.on_limit wait     # an agent that hits its limit stays parked (switch is the default)
 aisquare config set accounts.prefer reset-soonest # under the line, the week that ends first (priority is the default)
+aisquare config set accounts.cross_agent_handover false  # a hand-over never moves an agent onto another agent
 aisquare accounts trust                # trust this folder on every account (its repository, in a checkout)
 aisquare accounts trust --sync         # every folder an account trusts, on all of its agent's accounts
 aisquare config set accounts.share_trust false # launches stop copying a folder's trust (on by default)
@@ -1335,6 +1355,7 @@ aisquare fleet restart coder-auth --permission-mode acceptEdits   # …another m
 aisquare fleet restart coder-auth --permission-mode workspace:ask # …or one for any agent (below)
 aisquare fleet switch coder-auth --to personal --fresh   # a named account; a new session + hand-off
 aisquare fleet switch coder-auth --force # again, minutes after the usage-limit hand-over moved it
+aisquare fleet switch coder-auth --agent codex   # onto another agent: fresh, with a hand-off brief
 ```
 
 `add` and `run` hand the terminal to the agent, so they have no `--json`

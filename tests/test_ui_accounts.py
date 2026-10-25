@@ -865,6 +865,35 @@ def test_a_rate_limit_that_ends_between_ticks_never_shows_a_past_until(
     assert "the rate limit has ended" in after, after
 
 
+def test_a_backed_off_row_with_no_reading_repaints_when_its_wait_ends(
+    no_network: dict[str, Any],
+) -> None:
+    """Review of #401, m1, on the page: a backed-off account with no kept reading says its
+    wait in the session cell, and says it has ended the moment it does, with no re-read."""
+    no_network["usage"] = ClaudeUsage(available=True, session_percent=40, week_percent=10)
+    overview = _overview(_status(2, "two@example.com"))
+
+    async def go(pilot: Pilot[None]) -> tuple[str, str, str]:
+        app = fleet_app(pilot)
+        view = await open_accounts(pilot)
+        await settle_until(app, lambda: "40%" in cells(view, 2)["session"])
+        until = datetime.now(tz=UTC) + timedelta(seconds=1)
+        line = row(view, 2)
+        line.show(
+            line.status,
+            accounts_service.UsageBackoff(
+                slot=2, until=until, attempts=1, since=datetime.now(tz=UTC)
+            ).reading(datetime.now(tz=UTC)),
+        )
+        during = cells(view, 2)["session"]
+        await pilot.pause(1.5)  # the wait is over; the page's next re-read is a minute away
+        return until.astimezone().strftime("%H:%M"), during, cells(view, 2)["session"]
+
+    clock, during, after = drive(go, overview=overview)
+    assert during.startswith(f"rate-limited until {clock}"), during
+    assert "until" not in after and after.startswith("the rate limit has ended"), after
+
+
 @pytest.fixture
 def windows_timers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Textual's timers as they sleep on Windows (``textual._win_sleep``), on any OS.

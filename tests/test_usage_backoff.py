@@ -301,6 +301,31 @@ def test_the_row_says_how_old_the_kept_reading_is_and_why() -> None:
     ].plain.endswith("40%")
 
 
+def test_a_backed_off_account_with_no_kept_reading_never_names_a_past_until() -> None:
+    """Review of #401, m1: with no kept reading, a backed-off account's session cell printed
+    the wait's reason as frozen at the read ('rate-limited until <a past time>') until the
+    page's next tick, a minute on. It reads from the wait's end as of the paint."""
+    from aisquare.models import ClaudeAccount
+
+    status = ClaudeAccountStatus(
+        account=ClaudeAccount(slot=2, config_dir=Path("/h/.aisquare/claude-accounts/2")),
+        label="work",
+        identity=ClaudeIdentity(email="work@example.com"),
+        signed_in=True,
+        token_state="ok",
+    )
+    until = NOW + timedelta(seconds=45)
+    waiting = service.UsageBackoff(slot=2, until=until, attempts=1, since=NOW).reading(NOW)
+    clock = until.astimezone().strftime("%H:%M")
+
+    during = account_cells(status, waiting, now=NOW)["session"].plain
+    after = account_cells(status, waiting, now=until + timedelta(seconds=1))["session"].plain
+
+    assert waiting.reason == service.backoff_reason(until), "control: the frozen reason"
+    assert during == f"rate-limited until {clock} — logging in again does not clear it"
+    assert "until" not in after and after.startswith("the rate limit has ended"), after
+
+
 # --------------------------------------------------------------------------- picks
 
 

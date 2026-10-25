@@ -427,21 +427,26 @@ def kept_age(usage: ClaudeUsage, *, now: datetime | None = None) -> str | None:
     return "now" if age == "just now" else age.removesuffix(" ago")
 
 
+def wait_said(usage: ClaudeUsage, *, now: datetime | None = None) -> str | None:
+    """A rate limit's wait as of ``now``, from its end time: ``rate-limited until 14:32 —
+    logging in again does not clear it``, or that it has ended; ``None`` when ``usage``
+    names no wait. Never the reason string frozen at the read, which after a short
+    Retry-After named a time already past until the page's next tick, a minute on
+    (TUI-401b check 5 at e28697f1; review of #401, m1; 55d1bc78 did this for the CLI)."""
+    if not usage.rate_limited or usage.rate_limited_until is None:
+        return None
+    if usage.rate_limited_until > (now or accounts_service._now()):
+        return accounts_service.backoff_reason(usage.rate_limited_until)
+    return "the rate limit has ended — the next read asks again"
+
+
 def kept_tooltip(usage: ClaudeUsage | None, *, now: datetime | None = None) -> str | None:
     """``reading from 12m ago · rate-limited until 14:32 — logging in again does not clear
     it``: why the session cell shows an older figure, or ``None`` for a live one."""
     if usage is None or kept_age(usage, now=now) is None or usage.fetched_at is None:
         return None
     age = accounts_service.describe_age(usage.fetched_at, now=now)
-    why = usage.last_failed_reason
-    if usage.rate_limited and usage.rate_limited_until is not None:
-        # The wait from its end time, as of now: the reason is a string frozen at the read,
-        # so after a short Retry-After it named a time already past until the page's next
-        # tick, a minute on (TUI-401b check 5 at e28697f1; 55d1bc78 did this for the CLI).
-        if usage.rate_limited_until > (now or accounts_service._now()):
-            why = accounts_service.backoff_reason(usage.rate_limited_until)
-        else:
-            why = "the rate limit has ended — the next read asks again"
+    why = wait_said(usage, now=now) or usage.last_failed_reason
     return f"reading from {age} · {why}"
 
 
@@ -472,7 +477,7 @@ def account_cells(
         reading = usage if status.signed_in else ClaudeUsage(available=False)
         for window in ("session", "week"):
             cells[window], cells[f"{window}-resets"] = _window_cells(reading, window, now=now)
-    reason = usage_reason(status, usage)
+    reason = usage_reason(status, usage, now=now)
     if reason is not None:
         cells["session"] = reason
         cells["week"] = Text("—", style="dim")
@@ -482,7 +487,9 @@ def account_cells(
     return cells
 
 
-def usage_reason(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> Text | None:
+def usage_reason(
+    status: ClaudeAccountStatus, usage: ClaudeUsage | None, *, now: datetime | None = None
+) -> Text | None:
     """Why a row shows no usage, worst first — or ``None`` when it shows a reading or ``…``.
 
     What the status column said before #8 on the board took it away: the usage cells
@@ -497,7 +504,8 @@ def usage_reason(status: ClaudeAccountStatus, usage: ClaudeUsage | None) -> Text
     if usage is not None and usage.needs_login:
         return Text("⚠ token rejected", style="yellow")
     if usage is not None and not usage.available:
-        return Text(usage.reason or "unavailable", style="dim")
+        # A backed-off account with no kept reading: its wait as of the paint (m1).
+        return Text(wait_said(usage, now=now) or usage.reason or "unavailable", style="dim")
     return None
 
 
@@ -901,7 +909,12 @@ class AccountRow(Horizontal, can_focus=True):
             lines = [text.plain] if text.plain else []
             if (kept := kept_tooltip(self.usage)) is not None:
                 lines.append(kept)  # why the bar is an older reading (F1 of #400)
-            if self.usage is not None and self.usage.reason and self.usage.reason != text.plain:
+            if (
+                self.usage is not None
+                and self.usage.reason
+                and self.usage.reason != text.plain
+                and wait_said(self.usage) is None  # a wait reads as of the paint, above
+            ):
                 lines.append(self.usage.reason)
             pace = accounts_service.describe_trend(self.trend)
             if pace:

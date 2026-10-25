@@ -985,7 +985,9 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   `[accounts] prefer = "reset-soonest"` (*under the line, prefer* in App
   settings) takes, of the accounts under `switch_at`, the one whose week resets
   first, so an allowance is spent before it lapses; `priority`, the default,
-  takes the first in order (every `[accounts]` key:
+  takes the first in rank order, rank 1 (the machine default) first. It orders the
+  headroom pick alone, a launch's under `pick = "headroom"` and every hand-over's:
+  under `pick = "default"` rank 1 decides, whatever `prefer` says (every `[accounts]` key:
   [Configuration keys](reference.md#configuration-keys)). `accounts usage` shows
   each week's reset and each family week beside it. Usage is the
   same best-effort endpoint as the bars, so an
@@ -1982,10 +1984,10 @@ typing the letter.
 
 ## Upgrading
 
-### To the release with verified first messages (store schema 36)
+### To 0.9.0: verified first messages (store schema 36)
 
 **The store migrates itself on first open, from v35 to v36, in one step** (from 0.8.2's
-v32, in four: v33 to v35 are under [Unreleased] in the CHANGELOG). v36 adds three
+v32, in four: v33 to v35 are under [0.9.0] in the CHANGELOG). v36 adds three
 nullable columns: `team_session.prompted_at` (the session's last
 `UserPromptSubmit`), `fleet_agent.first_prompt` (`pending`, `acked` or `unsent`) and
 `fleet_agent.first_prompt_at` (when that last changed). The step has no script of its
@@ -2005,7 +2007,7 @@ follows it:
 | `[fleet] busy_quiet_seconds` | `30` | How long a `working` agent's pane may stay quiet before one capture checks whether it is idle. |
 | `[fleet] draft_quiet_seconds` | `10` | How long after your last keystroke in a pane the fleet waits before typing into it. |
 | `[fleet] deliver_notes_at_turn_end` | `true` | A note addressed to a busy agent is handed over when its turn ends. |
-| `[accounts] prefer` | `priority` | Of the accounts under the switch threshold, which one a spawn's pick and a hand-over take: the first by priority, or with `reset-soonest` the one whose week resets first. |
+| `[accounts] prefer` | `priority` | Of the accounts under the switch threshold, which one a spawn's headroom pick and a hand-over take: the first by rank (rank 1 is the machine default), or with `reset-soonest` the one whose week resets first. Under `pick = "default"` rank 1 decides. |
 
 **What you will notice.**
 

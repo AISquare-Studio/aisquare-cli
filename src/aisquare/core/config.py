@@ -772,10 +772,12 @@ class AccountsSettings(BaseModel):
     saved keeps either only where it differs from them (``_V1_DEFAULTS``).
 
     ``prefer`` orders the accounts under ``switch_at`` (#277): ``priority``, the default,
-    takes the first in the operator's order; ``reset-soonest`` takes the one whose weekly
-    window resets first, priority breaking ties, so a week's allowance is spent before it
-    lapses rather than draining accounts with days still to run. It applies to a launch's
-    pick and to a hand-over's. The week is the shared seven-day window's reset, for every
+    takes the first in the operator's order, rank 1 (the machine default, #406) first;
+    ``reset-soonest`` takes the one whose weekly window resets first, priority breaking
+    ties, so a week's allowance is spent before it lapses rather than draining accounts
+    with days still to run. It applies to a launch's headroom pick and to a hand-over's;
+    under ``pick = "default"`` the preferred account, rank 1, decides and ``prefer`` is
+    not read. The week is the shared seven-day window's reset, for every
     agent: a family week (Opus, Sonnet) only ever makes an account read fuller.
 
     ``share_trust``, on by default, copies a folder's trust into the account a launch

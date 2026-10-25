@@ -133,7 +133,7 @@ list` prints every key. The ones that need more than their name:
 | --- | --- | --- |
 | `accounts.pick` | `headroom` | how a launch picks an account when nothing names one: `headroom` (the first under `switch_at`) or `default` (the machine default) |
 | `accounts.switch_at` | `85` | percent USED of the fuller window (and, for an agent of that family, its family week) at which an account counts as full |
-| `accounts.prefer` | `priority` | of the accounts under `switch_at`, `priority` takes the first in order; `reset-soonest` takes the one whose week resets first |
+| `accounts.prefer` | `priority` | of the accounts under `switch_at`, `priority` takes the first in rank order (rank 1, the machine default, first); `reset-soonest` takes the one whose week resets first. The headroom pick's alone: with `pick = "default"` rank 1 decides |
 | `accounts.on_limit` | `switch` | on a usage limit, `switch` hands a fleet agent to another account; `wait` leaves it parked |
 | `accounts.wait_if_reset_within_minutes` | `15` | with `switch`, wait instead when the limit lifts this soon |
 | `accounts.share_trust` | `true` | copy a folder's trust into the account a launch runs on |

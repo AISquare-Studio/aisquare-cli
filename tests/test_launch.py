@@ -27,7 +27,7 @@ from aisquare.core.config import (
 )
 from aisquare.core.orchestrator import team_project
 from aisquare.core.store import ContextStore, store_session
-from aisquare.models import FleetAgent
+from aisquare.models import FleetAgent, LaunchSpec
 from aisquare.services import settings as settings_service
 from aisquare.services.explainability import join_records
 from tests import bundled_personas
@@ -301,6 +301,19 @@ def test_launch_rejects_an_unknown_role(
     assert not spy, "nothing should be exec'd for an invalid role"
 
 
+def test_launch_agent_is_a_plain_claude_session_on_the_board(
+    runner: CliRunner, work_dir: Path, spy: dict[str, Any]
+) -> None:
+    """``agent`` is no role (the Spawn dialog's *(none)*, card tsk_01m5mm2sz23b): launched
+    as one, so the session joins the board, with the plain agent and no role's flags."""
+    result = runner.invoke(app, ["launch", "agent"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"][0] == "claude" and spy["env"]["AISQUARE_ROLE"] == "agent"
+    with store_session() as store:
+        assert store.team_active(team_project(work_dir).id)
+
+
 @pytest.mark.needs_captain
 def test_launch_captain_outside_the_fleet_is_refused(
     runner: CliRunner, work_dir: Path, spy: dict[str, Any], monkeypatch: pytest.MonkeyPatch
@@ -313,6 +326,106 @@ def test_launch_captain_outside_the_fleet_is_refused(
     assert result.exit_code == 1
     assert "`aisquare captain` starts it" in result.output
     assert not spy, "nothing should be exec'd"
+
+
+_CAPTAINS_LAUNCH = LaunchSpec(binary="claude", extra_args=["--strict-mcp-config", "--tools", ""])
+"""The captain's start launches it so (``brain.launch_args``): what ``is_the_captains_row`` asks."""
+
+
+def _seat(
+    agent_id: str,
+    *,
+    role: str,
+    project_id: str,
+    cwd: Path,
+    launch_spec: LaunchSpec | None = None,
+) -> None:
+    with store_session() as store:
+        store.upsert_fleet_agent(
+            FleetAgent(
+                id=agent_id,
+                project_id=project_id,
+                label=role,
+                role=role,
+                pane_id="%9",
+                cwd=cwd,
+                created_at=datetime.now(tz=UTC),
+                launch_spec=launch_spec,
+            )
+        )
+
+
+@pytest.mark.needs_captain
+@pytest.mark.parametrize(
+    "seat",
+    [
+        "a coder's window",
+        "a captain row on a project",
+        "a declared captain on the home board",
+        "a row that never shows",
+    ],
+)
+def test_launch_captain_in_a_window_that_is_not_the_captains_is_refused(
+    seat: str,
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #240, R1-F6: any fleet window carries AISQUARE_FLEET_AGENT, so ``launch
+    captain`` in a coder's started a full-tool claude briefed as the captain."""
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_not_the_captain")
+    if seat == "a coder's window":
+        _seat("agt_not_the_captain", role="coder", project_id="prj_launch", cwd=work_dir)
+    elif seat == "a captain row on a project":
+        _seat(
+            "agt_not_the_captain",
+            role="captain",
+            project_id="prj_launch",
+            cwd=work_dir,
+            launch_spec=_CAPTAINS_LAUNCH,
+        )
+    elif seat == "a declared captain on the home board":
+        # Review of #274, m4: the home added as a project (D5), a `captain` role declared
+        # and spawned there: on the home board, with no launch of the captain's.
+        from aisquare.core.workspace import project_id_for
+
+        home = project_id_for(paths.aisquare_home().resolve())
+        _seat("agt_not_the_captain", role="captain", project_id=home, cwd=work_dir)
+
+    result = runner.invoke(app, ["launch", "captain"])
+
+    assert result.exit_code == 1, result.output
+    assert "`aisquare captain` starts it" in result.output
+    assert "starting anyway" not in result.output, "a refusal, never 'starting' (#274, n1)"
+    assert not spy, "nothing should be exec'd"
+
+
+@pytest.mark.needs_captain
+def test_launch_captain_in_the_captains_own_window_starts_it(
+    runner: CliRunner,
+    work_dir: Path,
+    spy: dict[str, Any],
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from aisquare.core.workspace import project_id_for
+
+    home = project_id_for(paths.aisquare_home().resolve())
+    monkeypatch.setenv("AISQUARE_FLEET_AGENT", "agt_the_captain")
+    _seat(
+        "agt_the_captain",
+        role="captain",
+        project_id=home,
+        cwd=work_dir,
+        launch_spec=_CAPTAINS_LAUNCH,
+    )
+
+    result = runner.invoke(app, ["launch", "captain"])
+
+    assert result.exit_code == 0, result.output
+    assert spy["argv"][0] == "claude"
 
 
 def test_launch_reports_a_missing_agent_binary(

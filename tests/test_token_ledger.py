@@ -308,7 +308,7 @@ def test_latest_context_reads_the_last_request_from_the_tail(tmp_path: Path) -> 
     assert transcripts.latest_context_tokens(tmp_path / "missing.jsonl") is None
 
 
-def test_metrics_tokens_prints_counts_never_text(runner: CliRunner, work_dir: Path) -> None:
+def test_metrics_ledger_prints_counts_never_text(runner: CliRunner, work_dir: Path) -> None:
     path = _fixture(work_dir / "t.jsonl")
     project = team_project(work_dir)
     with store_session() as store:
@@ -316,7 +316,7 @@ def test_metrics_tokens_prints_counts_never_text(runner: CliRunner, work_dir: Pa
         session = _session(path).model_copy(update={"project_id": project.id})
         store.upsert_session(session)
 
-    result = runner.invoke(app, ["--json", "metrics", "tokens"])
+    result = runner.invoke(app, ["--json", "metrics", "ledger"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     (row,) = payload["sessions"]
@@ -325,8 +325,8 @@ def test_metrics_tokens_prints_counts_never_text(runner: CliRunner, work_dir: Pa
     assert "start the fleet" not in result.stdout and "merged #12" not in result.stdout
     assert str(path) not in result.stdout, "a transcript's path is not a count"
 
-    table = runner.invoke(app, ["metrics", "tokens", "--role", "manager"])
+    table = runner.invoke(app, ["metrics", "ledger", "--role", "manager"])
     assert table.exit_code == 0, table.output
     assert "7,523" in table.stdout and "total" in table.stdout
-    none = runner.invoke(app, ["--json", "metrics", "tokens", "--role", "coder"])
+    none = runner.invoke(app, ["--json", "metrics", "ledger", "--role", "coder"])
     assert json.loads(none.stdout)["sessions"] == []

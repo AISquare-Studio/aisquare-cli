@@ -4,9 +4,10 @@ Review of #240, finding 7. Attaching to a busy agent no longer files the briefin
 board: the persona is recorded, and the agent's own next prompt hands it the briefing,
 for it alone (``tests/test_a_busy_agent_is_briefed_privately_at_its_next_prompt.py``).
 The toast read ``✓ attached pair to coder-auth (noted)`` and stopped there, which told
-the owner the briefing was waiting on the board. For ``noted`` it now carries the
-receipt's own sentence, as ``persona attach`` prints it on its second line; a ``typed``
-attach, which is done when the toast shows, reads as it did.
+the owner the briefing was waiting on the board. For ``noted`` — and since #201's R1-F9,
+``unsent`` and ``maybe`` too — it now carries the receipt's own sentence, as ``persona
+attach`` prints it on its second line; a ``typed`` attach, which is done when the toast
+shows, reads as it did.
 
 Driven like ``tests/test_ui_personas.py``: the picker and the confirmation are real, and
 ``fleet_service.attach_persona`` is a recorder that answers with the receipt under test.
@@ -45,7 +46,7 @@ def _toasts_after_attaching(
     targets: list[FleetAgentStatus],
     monkeypatch: pytest.MonkeyPatch,
     *,
-    delivered: Literal["typed", "noted"],
+    delivered: Literal["typed", "noted", "unsent", "maybe"],
     how: str,
 ) -> list[tuple[str, str]]:
     """Attach ``pair`` to the picker's one agent, confirmed; every toast the tab raised."""
@@ -81,6 +82,29 @@ def test_the_toast_for_a_busy_agent_says_the_persona_reaches_it_with_its_next_pr
     notices = _toasts_after_attaching(project, targets, monkeypatch, delivered="noted", how=LATER)
 
     assert (f"✓ attached pair to coder-auth (noted) — {LATER}", "information") in notices
+
+
+@pytest.mark.parametrize(
+    ("delivered", "how"),
+    [
+        ("unsent", "typed it at its prompt, but its Enter was refused — not told again"),
+        ("maybe", "typed it at its prompt, but tmux did not answer in time — not told again"),
+    ],
+)
+def test_the_toast_for_an_unsent_or_maybe_briefing_says_how_too(
+    project: ProjectInfo,
+    catalogue: dict[str, Path],
+    targets: list[FleetAgentStatus],
+    monkeypatch: pytest.MonkeyPatch,
+    delivered: Literal["unsent", "maybe"],
+    how: str,
+) -> None:
+    """Only ``noted`` carried the receipt's sentence, though an ``unsent`` or ``maybe``
+    briefing may not have reached the agent either, and the CLI prints it for every kind
+    (review of #201, R1-F9)."""
+    notices = _toasts_after_attaching(project, targets, monkeypatch, delivered=delivered, how=how)
+
+    assert (f"✓ attached pair to coder-auth ({delivered}) — {how}", "information") in notices
 
 
 def test_the_toast_for_a_waiting_agent_reads_as_it_did(

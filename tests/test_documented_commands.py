@@ -1006,7 +1006,9 @@ CENSUS = {
     "docs/plans/hackathon-demo.md": (14, 1),
     # Measured 2026-10-07, the day it was written: nine commands, and two
     # mentions (the `aisquare-cli[remote]` requirement, `~/.aisquare/remote-dist`).
-    "docs/remote.md": (9, 2),
+    # Re-measured 2026-10-23 at (9, 1) when #34 made Remote's dependencies core: the
+    # Install section has no install line left to classify.
+    "docs/remote.md": (9, 1),
 }
 
 

@@ -115,10 +115,14 @@ DRIFTS_BY_INTERPRETER = {"_socket", "array", "socket", "tempfile"}
 #: ``file://`` URL into a path, and it does not exist in the closure anywhere
 #: else. It is stdlib, it is pure Python, and it arrives through an import this
 #: package already makes deliberately — so it is an allowance, not a finding.
+#: ``_scproxy`` is macOS-only, the same import's other half: ``urllib.request``
+#: reads the system proxy settings through it (``from _scproxy import
+#: _get_proxy_settings, _get_proxies``), and it exists nowhere else. Named here, not
+#: waved through as "any stdlib": a module the record does not name still fails.
 #: Kept as its own set rather than folded into the one above because the two
 #: answer different questions when this next goes red: "which interpreter" and
 #: "which OS" are separate investigations.
-DRIFTS_BY_PLATFORM = {"nturl2path"}
+DRIFTS_BY_PLATFORM = {"nturl2path", "_scproxy"}
 
 #: Everything the diff is permitted to contain, on any interpreter or platform.
 ALLOWED = UNIQUELY_IMPORTED | DRIFTS_BY_INTERPRETER | DRIFTS_BY_PLATFORM
@@ -206,6 +210,16 @@ def _missing_load_bearing(with_code: str = _WITH, base_code: str = _BASE) -> set
     base = _top_level_modules(base_code)
     added = _uniquely_imported(with_code, base_code)
     return {name for name in LOAD_BEARING if name not in added and name not in base}
+
+
+def test_every_drift_allowance_names_a_standard_library_module() -> None:
+    """The drift sets excuse CPython's own modules, by name, and nothing else: a name
+    there that is no stdlib module (a typo, or a dependency recorded as "drift") would
+    let a real cost through on every platform. ``sys.stdlib_module_names`` lists every
+    platform's, ``_scproxy`` and ``nturl2path`` included."""
+    drifts = DRIFTS_BY_INTERPRETER | DRIFTS_BY_PLATFORM
+    assert drifts <= sys.stdlib_module_names, sorted(drifts - sys.stdlib_module_names)
+    assert not drifts & UNIQUELY_IMPORTED, "a drift is not what this integration imports"
 
 
 def test_the_load_bearing_imports_are_still_there() -> None:

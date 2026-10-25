@@ -110,7 +110,7 @@ class SessionLedger(BaseModel):
 def sessions(
     project_id: str | None, *, session: str | None = None, role: str | None = None
 ) -> list[TeamSession]:
-    """The sessions ``metrics tokens`` reads, oldest first: the project's, or every
+    """The sessions ``metrics ledger`` reads, oldest first: the project's, or every
     project's for ``None``; narrowed to an id prefix and to a role, a numbered seat
     (``coder2``) counting as its role."""
     with store_session() as store:

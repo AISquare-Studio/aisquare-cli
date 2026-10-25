@@ -604,9 +604,9 @@ def test_tick_frames_that_paint_after_the_accounts_wait_still_cost_one_read_afte
     counting = threading.Lock()
     read_fleet = shell_module._read_fleet
 
-    def slow_fleet(show_captured: bool, viewed: Any = None, scope: Any = None) -> Any:
+    def slow_fleet(show_captured: bool, *args: Any, **kwargs: Any) -> Any:
         frames.wait(HOLD_S)
-        return read_fleet(show_captured, viewed, scope)
+        return read_fleet(show_captured, *args, **kwargs)
 
     def reader() -> AccountsOverview:
         with counting:
@@ -676,9 +676,9 @@ def test_a_frame_orders_its_calls_and_the_accounts_reads_by_count_not_by_the_clo
     frames.set()
     read_fleet = shell_module._read_fleet
 
-    def slow_fleet(show_captured: bool, viewed: Any = None, scope: Any = None) -> Any:
+    def slow_fleet(show_captured: bool, *args: Any, **kwargs: Any) -> Any:
         frames.wait(HOLD_S)
-        return read_fleet(show_captured, viewed, scope)
+        return read_fleet(show_captured, *args, **kwargs)
 
     def reader() -> AccountsOverview:
         reads[0] += 1  # one read at a time

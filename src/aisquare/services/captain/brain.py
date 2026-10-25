@@ -182,7 +182,14 @@ def find() -> FleetAgent | None:
     home = captain_state.home_project()
     for status in fleet.list_agents(home):
         agent = status.agent
-        if agent.role != fleet.CAPTAIN_ROLE or agent.ended_at is not None:
+        # The captain's own row, by how it was launched, never by its role alone: a role
+        # declared as `captain` and spawned into the home while the captain was off is
+        # not the captain once it is on (review of #240, R2-m5).
+        if (
+            agent.role != fleet.CAPTAIN_ROLE
+            or agent.ended_at is not None
+            or not fleet.is_the_captains_row(agent)
+        ):
             continue
         if status.state == "exited":
             return None

@@ -569,6 +569,51 @@ def test_a_burst_of_keys_waiting_on_a_busy_agent_holds_up_no_read(
     assert slowest < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.5, slowest
 
 
+def test_keys_whose_wait_ran_out_are_refused_before_the_store_is_read(
+    project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Delta review of #274, n3: the burst above flaked under load (3.11 s against 3.0 s).
+    Its taps leave the write pool in waves, and each tap whose wait had run out still read
+    the store for its row before it was refused, so every wave after the first cost a row
+    read. A slow store (here 0.3 s a read, a loaded CI runner's sqlite) put the last taps
+    past their wait by more than a second. Refused before the read, they answer at once."""
+    tmux = _serving(monkeypatch, Tmux(OLDER))
+    real = remote_server._remote_turn_pinned
+
+    def slow_store(*args: Any, **kwargs: Any) -> FleetAgent:
+        time.sleep(0.3)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(remote_server, "_remote_turn_pinned", slow_store)
+    runtime = make_runtime()
+    app = build_app(runtime, sources=_sources(), writes=live_writes(), dist_dir=tmp_path)
+    taps = 36  # four waves past the first on the 8 write threads
+    answers: list[tuple[int, float]] = []
+    action = remote_agent_lock(project.id, "coder-1")
+    assert action.acquire(blocking=False)
+    try:
+        with make_client(app) as client:
+            assert unlock(client, runtime).status_code == 200
+            runtime.set_allow_write(True)
+            url = f"{base(runtime)}/api/send-keys"
+
+            def tap() -> None:
+                sent = time.monotonic()
+                response = client.post(url, json={"agent": "coder-1", "keys": ["Down"]})
+                answers.append((response.status_code, time.monotonic() - sent))
+
+            tappers = [threading.Thread(target=tap) for _ in range(taps)]
+            for tapper in tappers:
+                tapper.start()
+            for tapper in tappers:
+                tapper.join(timeout=30)
+    finally:
+        action.release()
+    assert [status for status, _ in answers] == [409] * taps and tmux.sent == []
+    slowest = max(elapsed for _, elapsed in answers)
+    assert slowest < remote_server.SEND_KEYS_LOCK_WAIT_SECONDS + 1.0, slowest
+
+
 def test_keys_queued_behind_actions_holding_every_write_thread_are_not_typed_as_one_ends(
     project: ProjectInfo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -647,7 +692,7 @@ def _replace(project: ProjectInfo, pane_id: str = "%2") -> FleetAgent:
     """What a ``fleet restart`` or a usage-limit hand-over in another process leaves: the
     row ended, and a younger one holding the label. Neither takes the agent's lock."""
     with store_session() as store:
-        store.end_fleet_agent("agt_coder-1")
+        store.end_fleet_agent("agt_coder-1", ended_by="stopped")
     row = FleetAgent(
         id="agt_coder-1-2",
         project_id=project.id,
@@ -706,7 +751,7 @@ def test_keys_pinned_to_a_row_that_ended_with_no_replacement_yet_are_stale_not_a
     (merge of round 5 of #243). Unpinned, no row is still a gone agent."""
     tmux = _serving(monkeypatch, Tmux(OLDER))
     with store_session() as store:
-        store.end_fleet_agent("agt_coder-1")
+        store.end_fleet_agent("agt_coder-1", ended_by="stopped")
     send = live_writes().handlers["send-keys"]
     with pytest.raises(RequestError) as refused:
         send({"agent": "coder-1", "agent_id": "agt_coder-1", "keys": ["1"]})

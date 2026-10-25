@@ -697,6 +697,22 @@ def test_a_project_persona_shadows_bundled_and_a_broken_one_is_listed_not_fatal(
     assert f"✗ {_user_layer() / 'broken'}: no SKILL.md" in rows
 
 
+def test_show_json_names_what_the_persona_shadows_as_list_json_does(
+    runner: CliRunner, repo: Path
+) -> None:
+    """``show --json`` built its entry with no root, so ``shadows`` was always ``[]`` for a
+    project persona ``list --json`` reports as shadowing (review of #201, R1-F5)."""
+    _skill(repo / ".aisquare" / "personas", "skeptic", description="Our own skeptic.")
+    _skill(_user_layer(), "skeptic", description="My own skeptic.")
+
+    code, listed = _json(runner, "list")
+    shown_code, shown = _json(runner, "show", "skeptic")
+
+    listed_skeptic = next(entry for entry in listed["personas"] if entry["name"] == "skeptic")
+    assert (code, shown_code) == (0, 0)
+    assert shown["shadows"] == listed_skeptic["shadows"] == ["user", "bundled"]
+
+
 # --- persona attach (docs/plans/spawn-personas.md §7 "P8") ---------------------------------
 
 

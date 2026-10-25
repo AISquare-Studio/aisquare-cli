@@ -158,6 +158,44 @@ def test_a_fork_is_cut_at_its_sources_commit_not_on_a_branch_an_earlier_agent_le
     assert _git("rev-parse", stale, cwd=project.root) == left_at, "the stale branch never moved"
 
 
+def test_a_fork_of_a_source_whose_tree_was_removed_is_cut_at_the_sources_branch(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    """Review of #240, R1-F7: with the exited source's worktree removed, ``_head_of`` said
+    ``None`` and the fork was cut at the checkout's HEAD, resuming a conversation about
+    commits it lacked. The row records the branch; the fork is cut at its tip."""
+    source = fleet_service.spawn(project, "coder", worktree=True).agent
+    tree = Path(source.cwd)
+    head = _commit(tree, "done.txt")
+    _exits(tmux, project, source)
+    _git("worktree", "remove", "--force", str(tree), cwd=project.root)
+    assert head != _git("rev-parse", "HEAD", cwd=project.root)
+
+    receipt = fleet_service.hand_off(project, source.label)
+
+    own = Path(receipt.started.agent.cwd)
+    assert _git("rev-parse", "HEAD", cwd=own) == head, "cut at the source's own commit"
+    assert any("worktree is gone" in note and "its branch" in note for note in receipt.notes)
+
+
+def test_a_fork_whose_source_left_neither_tree_nor_branch_says_so(
+    tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo
+) -> None:
+    source = fleet_service.spawn(project, "coder", worktree=True).agent
+    tree = Path(source.cwd)
+    branch = _branch(tree)
+    _commit(tree, "done.txt")
+    _exits(tmux, project, source)
+    _git("worktree", "remove", "--force", str(tree), cwd=project.root)
+    _git("branch", "-D", branch, cwd=project.root)
+
+    receipt = fleet_service.hand_off(project, source.label)
+
+    own = Path(receipt.started.agent.cwd)
+    assert _git("rev-parse", "HEAD", cwd=own) == _git("rev-parse", "HEAD", cwd=project.root)
+    assert any("worktree and branch are gone" in note for note in receipt.notes), receipt.notes
+
+
 @pytest.mark.parametrize("held_by", ["a worktree", "a branch"])
 def test_the_next_free_label_is_one_no_tree_and_no_branch_holds_either(
     tmux: FakeTmux, claude_on_path: Path, project: ProjectInfo, held_by: str

@@ -987,7 +987,7 @@ def test_c_copies_the_selected_feed_onto_the_native_clipboard_and_osc52(
             await pilot.pause()
             selected = pilot.app.screen.get_selected_text()
             await pilot.press("c")
-            for _ in range(100):
+            for _ in range(400):  # the toast is raised once the native write is over
                 if pilot.app._notifications:
                     break
                 await pilot.pause(0.05)

@@ -29,6 +29,7 @@ from aisquare.cli.ui.spawn import SpawnDialog
 from aisquare.cli.ui.views import welcome
 from aisquare.cli.ui.views.accounts import AccountsView
 from aisquare.cli.ui.views.personas_tab import AttachRequested, PersonasTab
+from aisquare.cli.ui.views.project import ProjectView
 from aisquare.cli.ui.views.welcome import WelcomeView
 from aisquare.core import tmux as tmux_core
 from aisquare.core.tmux import Completed, TmuxServer
@@ -184,7 +185,10 @@ def test_the_pickers_new_account_comes_back_with_the_new_slot_selected(
     async def go(pilot: Pilot[None], app: Shell) -> dict[str, Any]:
         app.post_message(ProjectSelected(project.id))
         await settle_page(app)
-        tab = app.query_one(f"#project-{project.id}").query_one(PersonasTab)
+        view = app.query_one(f"#project-{project.id}", ProjectView)
+        view.active = "tab-personas"  # built when first opened (review of #201, R1-F10)
+        await settle_page(app)
+        tab = view.query_one(PersonasTab)
         tab.post_message(AttachRequested("skeptic", "new"))
         await settle_page(app)
         picker = app.screen

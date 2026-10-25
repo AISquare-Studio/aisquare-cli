@@ -412,6 +412,16 @@ class StoreSources:
 # --- keys ---------------------------------------------------------------------------------------
 
 
+def _default_sources() -> StoreSources:
+    """The store, with GitHub's approved pull requests as ``pr`` items when ``[watch]
+    github`` is on (P2-W2, #284: the Phase 2 ``gh`` provider); none otherwise, so a refresh
+    never leaves the machine."""
+    from aisquare.services import github_prs  # lazy: only a queue read needs it
+
+    provider = github_prs.queue_provider()
+    return StoreSources() if provider is None else StoreSources(pull_requests=provider)
+
+
 def normalise(text: str) -> str:
     """The comparison form of a request: lower-case, ids, seqs and timestamps stripped,
     whitespace collapsed — so the same ask about a different task id is the same ask.
@@ -754,7 +764,7 @@ class AttentionQueue:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.path = path if path is not None else queue_path()
-        self._sources: Sources = sources if sources is not None else StoreSources()
+        self._sources: Sources = sources if sources is not None else _default_sources()
         self._clock = clock if clock is not None else lambda: datetime.now(UTC)
 
     # -- reads --

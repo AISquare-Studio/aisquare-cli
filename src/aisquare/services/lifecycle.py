@@ -206,6 +206,8 @@ def initialize(
             # The home's own sentence where it has one: it is never packed, so the opt-in
             # line would name a `project onboard` that packs nothing there (D5, #42).
             notes.append(f"Snapshot: {report.snapshot_note or SNAPSHOT_OPT_IN}.")
+        if report.code_index is not None:
+            notes.append(f"Code index: {report.code_index}.")
 
     for agent in agents:
         try:

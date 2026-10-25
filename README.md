@@ -116,6 +116,7 @@ backed by one SQLite file: no daemon, no cloud dependency. Sign in with
 - [Claude Code](https://claude.com/claude-code) for the agents, and tmux 3.2+
   for the fleet.
 - Node 22+, optional, for a codebase snapshot packed on demand (`aisquare project onboard`).
+  The symbol index (`aisquare code find|refs|similar`) needs nothing extra for Python.
 
 The package is `aisquare-cli`; the command is `aisquare`, with `asq` as the
 short alias.

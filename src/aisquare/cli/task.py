@@ -119,6 +119,22 @@ def add(
             help="Task this one depends on: its number (12, #12) or id (repeat for several).",
         ),
     ] = None,
+    project: Annotated[
+        str | None,
+        typer.Option(
+            "--project",
+            help="A parent manager's delegation: add it on this member's board "
+            "(a member of a group this board parents).",
+        ),
+    ] = None,
+    origin: Annotated[
+        str | None,
+        typer.Option(
+            "--origin",
+            help="With --project: the task on this board it is delegated from; its status "
+            "changes route back here.",
+        ),
+    ] = None,
     as_session: SessionRef = None,
 ) -> None:
     """Add a shared task. Re-adding the same task is safe — you get the original.
@@ -148,10 +164,19 @@ def add(
         )
     try:
         task, created = team_service.add_task(
-            title, key=key, detail=detail, role=role, needs=needs, session_ref=as_session
+            title,
+            key=key,
+            detail=detail,
+            role=role,
+            needs=needs,
+            session_ref=as_session,
+            project=project,
+            origin=origin,
         )
     except ValueError as exc:
-        fail(str(exc), error="invalid_needs")
+        said = str(exc)
+        delegation = said.startswith(("--project", "--origin"))
+        fail(said, error="invalid_delegation" if delegation else "invalid_needs")
     except KeyError as exc:
         # The session resolves first in add_task, so a KeyError here names a
         # --needs ref — blame it, not the (valid) --as session.

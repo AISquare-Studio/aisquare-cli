@@ -2341,3 +2341,57 @@ def test_a_server_the_fleet_starts_holds_no_team_variable(
     names = {line.partition("=")[0] for line in held if "=" in line and not line.startswith("-")}
     assert not names & set(spawn.TEAM_ENV_VARS), held
     assert "AISQUARE_HOME=/tmp/asq-home-kept" in held
+
+
+# --- [fleet] pane_clipboard and mouse on (#83's tmux residuals: #100, #101) ----------------
+
+#: A pane program's OSC 52 copy of "hello": what #101 measured tmux dropping.
+_OSC52 = ["sh", "-c", "printf '\\033]52;c;aGVsbG8=\\007'; exec cat"]
+
+
+def _pane_clipboard(value: str) -> None:
+    from aisquare.core.config import load_config, save_config
+
+    config = load_config()
+    config.fleet.pane_clipboard = value  # type: ignore[assignment]
+    save_config(config)
+
+
+def test_the_bundled_conf_turns_the_mouse_on_and_keeps_the_clipboard_off() -> None:
+    lines = BUNDLED_CONF.splitlines()
+    assert "set -g mouse on" in lines and "set -g mouse off" not in lines
+    assert "set -g set-clipboard off" in lines
+    on = tmux_module.bundled_conf(pane_clipboard=True).splitlines()
+    assert [line for line in on if line not in lines] == ["set -g set-clipboard on"]
+
+
+@requires_tmux
+@pytest.mark.parametrize(("setting", "kept"), [("off", False), ("on", True)])
+def test_live_a_panes_osc52_copy_is_kept_only_with_pane_clipboard_on(
+    live: TmuxServer, setting: str, kept: bool
+) -> None:
+    """Off (the default), a program's clipboard write is dropped (#101, measured on 3.2a);
+    ``pane_clipboard = "on"`` keeps it as tmux's paste buffer, which an attached terminal
+    is handed."""
+    _pane_clipboard(setting)
+    _spawn(live, "asq-test-osc", "w0", _OSC52)
+    assert live.run("show-options", "-gv", "set-clipboard").strip() == setting
+
+    def buffered() -> bool:
+        return any(live.show_buffer(name) == "hello" for name in live.list_buffers())
+
+    assert _wait(buffered, timeout=3.0) is kept
+
+
+@requires_tmux
+def test_live_with_the_mouse_on_the_wheel_goes_to_a_program_that_asked_for_it(
+    live: TmuxServer,
+) -> None:
+    """``fleet attach`` with ``mouse on`` (#100): tmux's own wheel binding hands a notch to
+    the pane when its program asked for the mouse (``mouse_any_flag``, which Claude Code
+    sets), and enters copy mode over tmux's history otherwise. Asserted on the server's
+    binding, which the bundled conf leaves as tmux ships it."""
+    _spawn(live, "asq-test-wheel", "w0", CAT)
+    assert live.run("show-options", "-gv", "mouse").strip() == "on"
+    binding = live.run("list-keys", "-T", "root", "WheelUpPane")
+    assert "mouse_any_flag" in binding and "send-keys -M" in binding, binding

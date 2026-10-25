@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from typer.testing import CliRunner
 from aisquare.cli.app import app
 from aisquare.core.store import store_session
 from aisquare.core.workspace import current_project
+from aisquare.services import hooks as hooks_service
 
 _PACK = '<files>\n<file path="a.py">\nprint("hi")\n</file>\n</files>\n'
 
@@ -217,6 +219,66 @@ def test_a_preference_is_left_out_only_when_it_is_whole_lines_of_a_claude_md(
     assert "- Use uv\n" in result.stdout
     assert "- Never push\n" in result.stdout
     assert "without review" not in result.stdout
+
+
+# --- the symbol index at session start (#285) -------------------------------------------
+
+
+def _index(work_dir: Path) -> str:
+    from aisquare.core import code_index
+
+    (work_dir / "mod.py").write_text("def helper():\n    pass\n", encoding="utf-8")
+    project_id = current_project(work_dir).id
+    code_index.build(project_id, work_dir)
+    return project_id
+
+
+def test_a_session_start_names_no_code_command_even_where_there_is_an_index(
+    runner: CliRunner, work_dir: Path
+) -> None:
+    """Main's #346 took the session-start directive out (no pointer rides every request), and
+    the sync of main 8eb18a8a kept it out: the index is the MCP tool's (``code_lookup``, once
+    one is built) and the CLI's, never a session-start line."""
+
+    def started() -> str:
+        result = runner.invoke(
+            app, ["hook", "session-start"], input=json.dumps({"cwd": str(work_dir)})
+        )
+        assert result.exit_code == 0, result.output
+        return result.stdout
+
+    assert "aisquare code" not in started()
+    _index(work_dir)
+    assert "aisquare code" not in started()
+
+
+def test_a_session_start_refreshes_the_index_detached_and_at_most_once_a_minute(
+    work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.conftest import REAL_REFRESH_CODE_INDEX, REAL_START_CODE_INDEX
+
+    started: list[tuple[list[str], Path | None]] = []
+    monkeypatch.setattr(hooks_service, "start_code_index", REAL_START_CODE_INDEX)
+    monkeypatch.setattr(
+        hooks_service, "_detach", lambda argv, *, cwd=None: started.append((argv, cwd))
+    )
+    project = current_project(work_dir)
+
+    REAL_REFRESH_CODE_INDEX(project)
+    assert started == [], "no index: building one is onboard's, not a session start's"
+
+    _index(work_dir)
+    REAL_REFRESH_CODE_INDEX(project)
+    REAL_REFRESH_CODE_INDEX(project)
+    [(argv, cwd)] = started
+    assert argv[-3:] == ["--quiet", "code", "index"] and cwd == project.root
+
+    from aisquare.core import code_index
+
+    stamp = code_index.code_dir(project.id) / "refreshed"
+    os.utime(stamp, (stamp.stat().st_mtime - 61, stamp.stat().st_mtime - 61))
+    REAL_REFRESH_CODE_INDEX(project)
+    assert len(started) == 2, "a minute on, the next session start refreshes again"
 
 
 def _spooled_prompts() -> list[str]:

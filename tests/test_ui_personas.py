@@ -90,6 +90,7 @@ from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
+from tests.fleet_fakes import list_agents_as
 from tests.ui_workers import settle_page, settle_until_held
 
 T = TypeVar("T")
@@ -1171,9 +1172,7 @@ def targets(project: ProjectInfo, monkeypatch: pytest.MonkeyPatch) -> list[Fleet
         persona="mentor",
     )
     agents = [FleetAgentStatus(agent=agent, state="waiting")]
-    monkeypatch.setattr(
-        fleet_service, "list_agents", lambda target, *, live_only=True: list(agents)
-    )
+    list_agents_as(monkeypatch, lambda target, *, live_only=True: list(agents))
     overview = AccountsOverview(
         claude=ClaudeInstall(installed=True, binary="/usr/bin/claude"),
         accounts=[

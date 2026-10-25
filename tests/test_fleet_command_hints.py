@@ -20,8 +20,9 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "aisquare"
 
-_HAND_BUILT = re.compile(r"\baisquare fleet (?!(?:reap|shutdown) --all\b)[a-z]")
-"""``aisquare fleet`` and a word: any verb, except the two that walk every project."""
+_HAND_BUILT = re.compile(r"\baisquare fleet (?!(?:reap|shutdown) --all\b|(?:gate|capacity)\b)[a-z]")
+"""``aisquare fleet`` and a word: any verb, except those that walk every project: ``reap
+--all``, ``shutdown --all``, and ``gate`` and ``capacity``, which take no ``--project`` (#283)."""
 
 _NO_PROJECT_IN_QUESTION = (
     "the fleet UI's refusal: it covers every project, and the listing it points to is the "
@@ -153,6 +154,7 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "_replaced"): _FLEET_OP,
     ("services/fleet.py", "_in_hand_over"): _FLEET_OP,
     ("services/fleet.py", "spawn"): _FLEET_OP,
+    ("services/fleet.py", "_refuse_by_group"): _FLEET_OP,
     ("services/fleet.py", "_in_place_of_recorded"): _FLEET_OP,
     ("services/fleet.py", "_exited_note"): "each exited row's own ``project_id``",
     ("services/fleet.py", "_tell"): _FLEET_OP,

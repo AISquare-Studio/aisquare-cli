@@ -44,12 +44,12 @@ from aisquare.core.locking import lock_exclusive, unlock
 from aisquare.core.state_file import read_state, update_state
 from aisquare.core.tmux import Completed
 from aisquare.models import FleetAgentStatus, ProjectInfo
-from aisquare.services import fleet as fleet_service
 from aisquare.services import remote_page, remote_server
 from aisquare.services.ngrok_tunnel import INSTALL_HINT, NgrokTunnel, Tunnel, build_public_url
 from aisquare.services.remote_server import UNLOCK_GLOBAL_FAILURES, Runtime, UnlockBudget
 from tests import toast_log
 from tests.fake_clipboard import NEEDS_POSIX, TEXT, install
+from tests.fleet_fakes import list_agents_as
 from tests.test_remote_control import FakeServer, FakeTunnel, SlowServer, fake_tunnel_factory
 from tests.ui_workers import settle_page
 
@@ -105,7 +105,7 @@ def no_agents(monkeypatch: pytest.MonkeyPatch) -> None:
     def none(project: ProjectInfo, *, live_only: bool = True) -> list[FleetAgentStatus]:
         return []
 
-    monkeypatch.setattr(fleet_service, "list_agents", none)
+    list_agents_as(monkeypatch, none)
 
 
 def drive(

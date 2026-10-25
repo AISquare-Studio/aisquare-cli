@@ -5,7 +5,8 @@ holds that is not about one project: permission mode, worktree, persona and acco
 per role, the fleet's escape key, agent cap, worktree root and native-teams switch,
 how launches pick an account, what a usage limit does and what the accounts share.
 *User preferences* is ``[ui]``, how ``asq`` shows things to the person at it: today
-*Always show project directory* (``ui.always_show_project_path``). *Remote* is Remote
+*Always show project directory* (``ui.always_show_project_path``); and below it
+``[updates]``, *Check for a new release daily* (``updates.check``). *Remote* is Remote
 control (``views.settings_remote``). Save, Reload and Reset all sit under the tabs and
 act on the first two; they hide on *Remote*, whose every control acts at once.
 
@@ -13,8 +14,8 @@ act on the first two; they hide on *Remote*, whose every control acts at once.
 view, the rest a click away). *Agent settings* shows the *Captain (experimental)* box on
 top (``views.settings_captain``: it saves at once, as it did on the hub) and how launches
 pick an account and what a usage limit does; its *Advanced* holds the roles, the fleet
-and the rest of the accounts' rules. *User preferences* shows its switch, and folds the
-note on setting it from a shell. *Remote* shows Turn on/off, the token field when one is
+and the rest of the accounts' rules. *User preferences* shows its two switches, and
+folds the note on setting one from a shell. *Remote* shows Turn on/off, the token field when one is
 needed and the link, QR and password while on; its own *Advanced* holds the rest. A
 Save refused for a folded field opens that *Advanced*, so the reason is never out of
 sight. The project's own
@@ -141,12 +142,14 @@ _ACCOUNT_SWITCHES = {
 }
 """``[accounts]``'s two switches, by id → field: what the accounts share
 (``core.claude_sharing``)."""
+UPDATES_CHECK = "updates-check"
+"""``[updates] check``'s switch: asq's daily release check (``services.updates``)."""
 _UI_SWITCHES = {"ui-always-show-path": "always_show_project_path"}
 """*User preferences*' switches, by id → ``[ui]`` field."""
 AGENT_TAB = "tab-agent-settings"
 """The *Agent settings* tab's pane id: roles, the fleet, accounts. Shown first."""
 PREFERENCES_TAB = "tab-user-preferences"
-"""The *User preferences* tab's pane id: ``[ui]``."""
+"""The *User preferences* tab's pane id: ``[ui]``, and ``[updates]`` below it."""
 REMOTE_TAB = "tab-remote"
 """The *Remote* tab's pane id: Remote control, which acts at once (no Save)."""
 AGENT_ADVANCED = "agent-settings-advanced"
@@ -308,8 +311,8 @@ class ConfirmReset(ModalScreen[bool]):
 
 class AppSettingsView(Vertical):
     """The machine-wide settings in three tabs — *Agent settings* (the captain, roles,
-    fleet, accounts), *User preferences* (``[ui]``) and *Remote* — and under the first two
-    Save, Reload, Reset all."""
+    fleet, accounts), *User preferences* (``[ui]``, ``[updates]``) and *Remote* — and under
+    the first two Save, Reload, Reset all."""
 
     DEFAULT_CSS = """
     AppSettingsView { padding: 1 1 0 1; }
@@ -368,6 +371,9 @@ class AppSettingsView(Vertical):
         "Show each project's path under its name in the sidebar. "
         "Off: shown only when two projects share a name."
     )
+    UPDATES_SECTION: ClassVar[tuple[str, str]] = ("Updates", "whether asq looks for a new release")
+    # One line: at 80x24, beside the sidebar, three pushed the tab's Advanced one scroll down.
+    UPDATES_CHECK_ABOUT: ClassVar[str] = "Off: no PyPI lookup, no ⬆ row in the sidebar."
     PREFERENCES_FROM_A_SHELL: ClassVar[tuple[str, str]] = (
         "Set from a shell (",
         "), a preference shows after Reload here or when asq next starts, not live.",
@@ -381,6 +387,7 @@ class AppSettingsView(Vertical):
         config = self._read_config()
         self.fleet = config.fleet
         self.accounts = config.accounts
+        self.updates = config.updates
         self.ui = config.ui
         self._roles: list[str] = role_order(self.fleet)
         self._account_bindings: dict[str, str] = settings_service.role_account_bindings(config)
@@ -660,6 +667,11 @@ class AppSettingsView(Vertical):
         yield Static(
             Text(self.ALWAYS_SHOW_PATH_ABOUT), id="ui-always-show-path-about", classes="about"
         )
+        yield Static(section_title(*self.UPDATES_SECTION), classes="section")
+        with Horizontal(classes="row preference"):
+            yield Label("Check for a new release daily", classes="preference-label")
+            yield Switch(self.updates.check, id=UPDATES_CHECK)
+        yield Static(Text(self.UPDATES_CHECK_ABOUT), id="updates-check-about", classes="about")
         before, after = self.PREFERENCES_FROM_A_SHELL
         with Collapsible(
             title="Advanced", collapsed=True, id=PREFERENCES_ADVANCED, classes="advanced"
@@ -709,6 +721,7 @@ class AppSettingsView(Vertical):
         values["native-teams"] = self.query_one("#native-teams", Switch).value
         for wid in (*_ACCOUNT_SWITCHES, *_UI_SWITCHES):
             values[wid] = self.query_one(f"#{wid}", Switch).value
+        values[UPDATES_CHECK] = self.query_one(f"#{UPDATES_CHECK}", Switch).value
         return values
 
     def _changed(self) -> set[str]:
@@ -761,6 +774,8 @@ class AppSettingsView(Vertical):
         )
         for wid, key in _ACCOUNT_SWITCHES.items():
             self.query_one(f"#{wid}", Switch).value = getattr(self.accounts, key)
+        self.updates = config.updates
+        self.query_one(f"#{UPDATES_CHECK}", Switch).value = self.updates.check
         self.ui = config.ui
         for wid, key in _UI_SWITCHES.items():
             self.query_one(f"#{wid}", Switch).value = getattr(self.ui, key)
@@ -927,6 +942,9 @@ class AppSettingsView(Vertical):
             self._refused(accounts)
             return
         config.accounts = accounts
+        if UPDATES_CHECK in changed:
+            check = self.query_one(f"#{UPDATES_CHECK}", Switch).value
+            config.updates = config.updates.model_copy(update={"check": check})
         config.ui = self._form_ui(config.ui, changed)
         try:
             written = save_config(config)

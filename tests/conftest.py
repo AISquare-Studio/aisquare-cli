@@ -919,6 +919,37 @@ def no_native_clipboard(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(clipboard, "osc52_terminal", lambda env: "accepts")
 
 
+PYPI_CLOSED = "PyPI is not asked from the test suite"
+"""What :func:`no_pypi` answers for every PyPI lookup a test did not supply its own for."""
+
+
+@pytest.fixture(autouse=True)
+def no_pypi(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    """Never ask PyPI from a test; answer as an offline machine does.
+
+    ``install_route.fetch_latest`` is the one request to PyPI in the package: ``aisquare
+    upgrade`` and asq's daily release check (``services.updates``) both ask it. Every
+    ``FleetApp`` a test builds runs that check, and only the route kept it offline: a
+    checkout is never checked, and the suite runs editable. From a non-editable install
+    (``pip install .``, a uv tool, a packager's run) the UI tests asked PyPI twenty
+    times in two files, and waited out a timeout each where the network is firewalled
+    (review of #301, M1). The answer is the one an offline machine gets, which every
+    caller already takes as "no answer". Tests of the lookup and the upgrade put their own
+    over this one (``tests/installer_seams.py``, ``machine`` in test_lifecycle_upgrade.py)
+    or call the real function they took at import. Each ask is kept, for a probe.
+    """
+    from aisquare.services import install_route
+
+    asked: list[dict[str, object]] = []
+
+    def offline(timeout: float = 0.0, **kwargs: object) -> install_route.LatestRelease:
+        asked.append(dict(kwargs))
+        return install_route.LatestRelease(None, PYPI_CLOSED)
+
+    monkeypatch.setattr(install_route, "fetch_latest", offline)
+    return asked
+
+
 @pytest.fixture(autouse=True)
 def no_hook_binary_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never run a hook's aisquare for its version; answer as this install.

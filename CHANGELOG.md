@@ -319,6 +319,37 @@ machine default, and every release now carries its own installer.**
   on the way: a private `_running` on a Textual screen shadows the message
   pump's own flag and silently leaves every button of the screen dead; the
   dialog's flag is `_spawning`.
+- **asq says when a newer aisquare is out, and updates in one confirmed click.**
+  At most once a day asq asks PyPI what `aisquare upgrade --check` asks it (at
+  start when the last answer is 24 hours old, and again each day while it
+  runs, off the UI thread). A newer release shows as `⬆ 0.8.3 · restart to
+  update` under *⚙ Settings*, until asq runs that version or a newer one, with
+  one toast the first time each release is found. The row opens a confirm
+  dialog with the live agent count, which asks PyPI again as it opens and keeps
+  its button off until PyPI answers, for 5 s at most by the clock (after which
+  it says "the newest release", the last check's number as that, and a later
+  answer is ignored; nothing newer closes it with a toast); *Restart & update*
+  hands the terminal to
+  `aisquare upgrade` the way Doctor's Update does, with no y/N and unpinned, and
+  asq reopens by itself on the new version, in the view it had open. The fleet's tmux panes
+  and their sessions keep running; the agents alive at the press are recorded,
+  and any whose pane is gone after the reopen is restarted on its session
+  (`fleet restart`). The toast says `✓ aisquare 0.8.3 — 2 agents reattached`,
+  and names each restart and its reason. An agent stopped on purpose since the
+  press, or one that exited 0, is left and named, as *Restart all* leaves it. The record is that reopen's alone: a
+  reopen that cannot start drops it, and one not taken within ten minutes of
+  the run handing back to asq is never acted on. A failed install stays on
+  screen with
+  "Press Enter to go back to asq", and the old version reopens. Homebrew, pip
+  and pipx installs get the row and a dialog with the command that updates
+  them; a checkout or an editable install is never checked. A failed lookup
+  (offline) is silent and tried again within the hour. Off with
+  `aisquare config set updates.check false` (`[updates] check`), or the
+  *Check for a new release daily* switch in App settings ▸ User preferences
+  ▸ Updates. What it found lives in the store's
+  `ui_state`. `aisquare upgrade`, `--check`, `--reopen` and Doctor's Update
+  behave as before; the new `upgrade --one-click` and `ui --after-update` are
+  hidden.
 - **No role at all**: `aisquare fleet spawn agent` and `aisquare launch agent` start a
   plain, general-purpose Claude Code session (labelled `agent-1` and on) that joins the
   board and its fleet row like any agent but has no standing cycle, no mission and no

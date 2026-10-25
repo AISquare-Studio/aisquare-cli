@@ -1077,7 +1077,8 @@ Three places to change one:
   `aisquare config set fleet.roles.coder.permission_mode acceptEdits`, or edit
   the file directly;
 - **in the UI** — *⚙ Settings ▸ App settings* writes the same config: its *Agent
-  settings* tab holds these, and *User preferences* how `asq` shows things (`[ui]`);
+  settings* tab holds these, and *User preferences* how `asq` shows things (`[ui]`)
+  and whether it looks for a new release (`[updates]`);
   its third tab, *Remote*, is Remote control. Each tab shows the few settings a new
   user needs — *Agent settings* the *Captain (experimental)* box, how launches pick
   an account and what a usage limit does — and folds the rest under **Advanced**
@@ -1448,7 +1449,10 @@ config is bundled and regenerated (do not edit it): status line off,
 `remain-on-exit on` so a crashed agent's last screen stays readable, truecolor,
 extended keys on so shift+enter and friends reach Claude Code, mouse off (the
 UI owns the mouse), monitor-activity on. One server for every project; one
-session per project; one window per agent.
+session per project; one window per agent. Agents survive an update of aisquare:
+`aisquare launch` hands each pane to the agent's own program, so no aisquare
+code runs in a pane, and asq's ⬆ *Restart & update* reattaches them after it
+reopens, restarting any whose pane is gone ([Updating from asq](install.md#updating-from-asq)).
 
 **Each agent is asked of its own server.** A spawn records the socket its
 server says it listens on, and every fleet command — `fleet ls` and the UI,

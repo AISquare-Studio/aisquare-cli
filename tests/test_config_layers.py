@@ -249,6 +249,8 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "import": {"engine": "auto", "api_model": "claude-opus-5"},
         },
         "experimental": {"captain": False},
+        # asq's daily release check (services.updates).
+        "updates": {"check": True},
         # App settings ▸ User preferences, added since.
         "ui": {"always_show_project_path": False},
         # The role-less agent, a default since review of #405 (M1).

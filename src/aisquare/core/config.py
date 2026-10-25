@@ -762,6 +762,17 @@ class AccountsSettings(BaseModel):
     share_settings: bool = False
 
 
+class UpdatesSettings(BaseModel):
+    """``[updates]`` — asq's daily release check (``services.updates``).
+
+    ``check`` on, the default: asq asks PyPI at most once a day whether a newer aisquare is
+    out and, when one is, offers it under *⚙ Settings*. Off, it never asks. ``aisquare
+    upgrade`` asks whenever it is run, whatever this says.
+    """
+
+    check: bool = True
+
+
 class UiSettings(BaseModel):
     """``[ui]`` — how ``asq`` shows things to the person at it: the *User preferences* tab
     of App settings.
@@ -791,6 +802,7 @@ class AppConfig(BaseModel):
     team: TeamSettings = Field(default_factory=TeamSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
     accounts: AccountsSettings = Field(default_factory=AccountsSettings)
+    updates: UpdatesSettings = Field(default_factory=UpdatesSettings)
     snapshot: SnapshotSettings = Field(default_factory=SnapshotSettings)
     experiment: ExperimentSettings = Field(default_factory=ExperimentSettings)
     experimental: ExperimentalSettings = Field(default_factory=ExperimentalSettings)

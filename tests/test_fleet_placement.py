@@ -63,6 +63,10 @@ MADE: dict[str, dict[str, str]] = {
             "today's socket, asked whether a running server lost its path before a replay "
             "stops its agent (`_refuse_a_freed_socket`); nothing named"
         ),
+        "_refuse_a_cross_agent_start": (
+            "today's socket, asked as the replay's refusal asks it, before a hand-off onto "
+            "another agent stops its agent (task #15); nothing named"
+        ),
     },
     "services/diagnostics.py": {
         "_check_tmux": "the default socket: is tmux installed, which version",
@@ -129,6 +133,10 @@ ACTS: dict[str, dict[str, str]] = {
         ),
         "_refuse_a_replay_that_cannot_start": (
             "today's socket, a freed path probed before a replay stops its agent"
+        ),
+        "_refuse_a_cross_agent_start": (
+            "today's socket, a freed path probed before a hand-off onto another agent "
+            "stops its agent"
         ),
     },
     "services/diagnostics.py": {

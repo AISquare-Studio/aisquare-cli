@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import re
 import shutil
+import stat
 import subprocess
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
@@ -41,12 +42,12 @@ from pathlib import Path
 from aisquare.core import atomic, paths
 from aisquare.core import claude_accounts as claude_accounts_core
 from aisquare.core.agent_adapters import get_adapter, recorded_adapter
+from aisquare.core.agent_adapters.transcripts import lines_backwards, lines_forward
 from aisquare.core.launch_seal import LaunchRecord
 from aisquare.core.spawn import git_env
 from aisquare.core.workspace import git_argv
 from aisquare.models import FleetAgent, TeamEvent, TeamTask
 from aisquare.services import claude_accounts as claude_accounts_service
-from aisquare.services import transcript as transcript_service
 
 PROMPT_MAX = 6_000
 """Most UTF-8 bytes of the brief a first prompt carries. A positional prompt is one argument
@@ -58,7 +59,12 @@ FILE_MAX = 48_000
 """Most UTF-8 bytes of the brief file (:func:`write`)."""
 
 TURNS = 80
-"""The newest records of the source's transcript a brief reads (``read_page``'s ``limit``)."""
+"""The newest records of the source's transcript a brief reads."""
+
+SCAN_BUDGET = 2_000_000
+"""Most bytes read back from the end of the source's transcript (and as many ahead, for a
+record a later line completes), as a Transcript page reads: one pasted attachment can be
+megabytes on one line."""
 
 WIDTH = 110
 """The columns the conversation is wrapped to, as the Transcript tab wraps a page."""
@@ -160,16 +166,16 @@ class HandoffBrief:
             ]
         if self.task is not None:
             whose = f"{self.source}'s task, not yours" if self.fork else "your task"
-            lines.append(f"Task ({whose}): {_one_line(self.task.title)} ({self.task.id}).")
+            lines.append(f"Task ({whose}): {_single_line(self.task.title)} ({self.task.id}).")
             if self.task.detail and self.task.detail.strip():
                 lines.append(f"Contract: {_clip(self.task.detail.strip(), DETAIL_MAX)}")
         if self.claims and not self.fork:
             lines.append("Claims, now yours:")
-            lines.extend(f"- {_task_ref(task)} {_one_line(task.title)}" for task in self.claims)
+            lines.extend(f"- {_task_ref(task)} {_single_line(task.title)}" for task in self.claims)
         if self.entries:
             lines.append(f"{self.source}'s last board entries:")
             lines.extend(
-                f"- {event.kind}: {_clip(_one_line(event.text), ENTRY_MAX)}"
+                f"- {event.kind}: {_clip(_single_line(event.text), ENTRY_MAX)}"
                 for event in self.entries
             )
         if self.git is not None:
@@ -228,18 +234,34 @@ def build(
 def conversation(record: LaunchRecord, *, turns: int = TURNS) -> tuple[str, ...]:
     """The newest ``turns`` records of the session ``record`` holds, as its agent's own
     transcript reader renders them, as plain lines (no terminal escapes), oldest first:
-    the human's words, the agent's, and each call as one line. ``()`` for none."""
+    the human's words, the agent's, and each call as one line. ``()`` for none.
+
+    The walk Remote's Transcript tab pages with (``AgentTranscript.records`` over the lines
+    read back from the end, then ``page_lines``), done here rather than through
+    ``services.transcript``: a hand-over's worker is on the hook path, which reaches no
+    Remote code (tests/test_remote_names_stay_off_the_hook_graph.py)."""
     facts = record.session
-    if facts is None or not facts.transcript:
+    adapter = recorded_adapter(record.agent)
+    reader = adapter.transcript_reader if adapter is not None else None
+    if facts is None or not facts.transcript or reader is None:
         return ()
     path = Path(facts.transcript)
-    if not path.is_absolute():
-        return ()
     try:
-        page = transcript_service.read_page(path, limit=turns, width=WIDTH, agent=record.agent)
+        if not path.is_absolute() or not stat.S_ISREG(path.stat().st_mode):
+            return ()  # a regular file only: a pipe would hold the hand-over for a writer
+        end = path.stat().st_size
+        walked = lines_backwards(path, end, budget=SCAN_BUDGET)
+        ahead = lines_forward(path, end, budget=SCAN_BUDGET)  # read only if the reader asks
+        turns_seen: list[list[str]] = []
+        for _offset, entry in reader.records(walked, ahead):
+            rendered = [] if entry is None else reader.page_lines(entry, WIDTH)
+            if rendered:
+                turns_seen.append(rendered)
+                if len(turns_seen) >= turns:
+                    break
     except Exception:  # the brief goes without it, never the hand-off
         return ()
-    return tuple(_plain(line) for line in page.lines)
+    return tuple(_plain(line) for rendered in reversed(turns_seen) for line in rendered)
 
 
 def git_state(tree: Path) -> GitState | None:
@@ -436,7 +458,7 @@ def _plain(line: str) -> str:
     return _ESCAPES.sub("", line).rstrip()
 
 
-def _one_line(text: str) -> str:
+def _single_line(text: str) -> str:
     return " ".join(text.split())
 
 

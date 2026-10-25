@@ -129,6 +129,8 @@ Excluded, the fleet's own plumbing (docs/plans/fleet-tui.md §3.4):
   * ``services/fleet.py::_git`` — ``git worktree`` (add, remove, list) and the
     branch queries behind ``fleet reap`` (§3.5); no model, stripped, as every git
     seam is (:func:`git_env`).
+  * ``services/handoff.py::_git`` — ``git status``/``log``/``branch`` read into a hand-off
+    brief across agents (task #15 of #113); no model, stripped, as every git seam is.
   * ``services/fleet.py::_run_native`` — ``codex queue`` for ``fleet tell`` to a
     busy Codex agent: a client of the agent's local session store, no model;
     stripped, so the caller's identity is not handed to a Codex process.
@@ -432,6 +434,13 @@ SEAMS: dict[str, Seam] = {
         "`git worktree add/remove/list` and `git branch --merged` for the fleet's "
         "per-coder worktrees (docs/plans/fleet-tui.md §3.5). No model process; "
         "stripped, as every git seam is (`git_env()`)",
+        strips_identity=True,
+    ),
+    "aisquare/services/handoff.py::_git": Seam(
+        EXCLUDED,
+        "`git status --porcelain`, `git log --oneline` and `git branch --show-current` "
+        "of the tree a hand-off across agents leaves, for its brief (task #15 of #113). "
+        "No model process; stripped, as every git seam is (`git_env()`)",
         strips_identity=True,
     ),
     "aisquare/core/tmux.py::_sysctl": Seam(

@@ -10952,16 +10952,10 @@ def restart(
             )
         if persona:
             _chosen_persona(project, runs_as, persona, role_settings(runs_as, settings()), [])
-        choice = (
-            claude_accounts_service.choose(
-                _account_wanted(account, slot),
-                role=runs_as,
-                project=project,
-                agent=replays.id if replays is not None else claude_accounts_core.AGENT,
-            )
-            if replays is None or replays.accounts is not None
-            else claude_accounts_service.AccountChoice(account=None, source=None)
-        )
+        whose = replays.id if replays is not None else claude_accounts_core.AGENT
+        choice = claude_accounts_service.AccountChoice(account=None, source=None)
+        if replays is None or replays.accounts is not None:
+            choice = _replacement_account(account, slot, role=runs_as, project=project, whose=whose)
     except (FleetError, claude_accounts_service.NoSuchAccount) as exc:
         raise FleetError(f"cannot restart {label!r}: {exc}") from exc
     account = str(choice.account.slot) if choice.account is not None else None
@@ -11448,6 +11442,29 @@ def _handoff_row(
             f"{agent_id} is labelled {agent.label!r}, not {label!r} — nothing was done"
         )
     return agent
+
+
+def _replacement_account(
+    account: str | None, slot: int | None, *, role: str, project: ProjectInfo, whose: str
+) -> claude_accounts_service.AccountChoice:
+    """The account a restart's replacement runs on: the one asked for, else the record's slot.
+
+    A record with no slot ran under the plain home, its spawn's ladder having chosen none:
+    its replacement asks for the agent's plain slot by name, which the window's launch
+    honours too. Asked of the ladder (``choose(None)``), a binding, a default or the
+    headroom rung added since moved it onto another account, though Restart all says it
+    keeps its account, and a Codex row lost its thread there (SMOKE9 F1 of #113); main moved
+    a Claude Code row the same way. A plain home that is not there (Codex's before its first
+    run) holds no thread, and the resolver refuses it: then the ladder decides, as before."""
+    if account is None and slot is None:
+        plain = str(claude_accounts_core.kind(whose).plain_slot)
+        try:
+            return claude_accounts_service.choose(plain, role=role, project=project, agent=whose)
+        except claude_accounts_service.NoSuchAccount:
+            pass
+    return claude_accounts_service.choose(
+        _account_wanted(account, slot), role=role, project=project, agent=whose
+    )
 
 
 def _account_wanted(account: str | None, slot: int | None) -> str | None:

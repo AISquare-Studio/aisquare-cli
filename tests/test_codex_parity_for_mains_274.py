@@ -19,18 +19,28 @@ import pytest
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import claude_accounts as accounts_core
 from aisquare.core import harness
 from aisquare.core.store import store_session
-from aisquare.models import FleetAgent, ProjectInfo
+from aisquare.models import FleetAgent, ProjectInfo, TeamTask
+from aisquare.services import claude_accounts as accounts_service
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
 from tests.test_codex_account_switch import codex_on_path  # noqa: F401 - fixture, by name
+from tests.test_codex_fleet_parity import (  # noqa: F401 - fixtures, by name
+    THREAD_ONE,
+    Codex,
+    _native,
+    _rollout,
+    codex_agent,
+)
 from tests.test_fleet_bulk import _project
 from tests.test_fleet_bulk import tmux as bulk_tmux  # noqa: F401 - fixture, by name
 from tests.test_fleet_service import (  # noqa: F401 - fixtures, by name
     FakeTmux,
     _add_task,
     _command,
+    claude_on_path,
     project,
     repo,
     tmux,
@@ -158,3 +168,50 @@ def test_a_restarted_codex_manager_is_told_its_dead_team_on_its_command_line(
     command = project_service.fleet_command("restart", named, "coder-auth")
     assert f"`{command}`" in prompt, prompt
     assert f"coder-auth (exited ({KILLED})" in prompt and "1 of your team died" in prompt
+
+
+# --- SMOKE9 F1: a record with no slot keeps the plain home on a restart ---------------------
+
+
+def test_a_claude_code_row_on_no_account_is_restarted_on_its_plain_home(
+    tmux: FakeTmux,  # noqa: F811
+    claude_on_path: Path,  # noqa: F811
+    project: ProjectInfo,  # noqa: F811
+) -> None:
+    """Main's bug too: a row spawned on "(this shell's)" (no slot) went back through the
+    ladder, and the machine default moved it to slot 2. Restart all says it keeps the account.
+    Asked for one, it still moves."""
+    source = fleet_service.spawn(project, "coder", worktree=False).agent
+    assert source.account_slot is None
+    accounts_core.create_account()  # slot 2
+    accounts_service.set_default("2")
+
+    kept = fleet_service.restart(project, source.label).started
+    plain = accounts_core.default_account().slot
+    assert kept.account_slot == plain, "its own plain home, named so the window keeps it too"
+    assert _command(tmux)[_command(tmux).index("--account") + 1] == str(plain)
+
+    moved = fleet_service.restart(project, kept.label, account="2").started
+    assert moved.account_slot == 2
+
+
+def test_a_codex_row_on_no_account_is_restarted_on_its_home_and_resumes_its_thread(
+    codex_agent: tuple[Codex, TeamTask],  # noqa: F811
+    tmux: FakeTmux,  # noqa: F811
+) -> None:
+    """SMOKE9 F1 of #113: a Codex coder spawned on "(this shell's)" was moved by Restart all
+    onto the managed slot the ladder picked, where its thread is not, and started fresh."""
+    codex, _task = codex_agent
+    _rollout(codex, THREAD_ONE)
+    codex.start(THREAD_ONE)
+    assert codex.agent.account_slot is None
+    slot = accounts_core.create_account("codex")
+    accounts_service.set_default(str(slot.slot))
+
+    receipt = fleet_service.restart(codex.project, codex.agent.label)
+
+    plain = accounts_core.default_account(agent="codex").slot
+    assert receipt.resumed is True and receipt.started.account_slot == plain
+    native = _native(_command(tmux))
+    at = native.index("resume")
+    assert native[at : at + 2] == ["resume", THREAD_ONE]

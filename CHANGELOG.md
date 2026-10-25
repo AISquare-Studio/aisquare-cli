@@ -31,6 +31,19 @@ fleet still running, and every release now carries its own installer.**
   its own URL. The default one-liner is unchanged: the copy on `main`, which
   installs the latest release, in the README, `docs/install.md` and the repair
   command `aisquare upgrade` prints. `docs/install.md` shows how to pin.
+- **The one-liner on `main` runs the release's own installer** (#402). Main's
+  `install.sh` installs the latest release, but its steps and checks are main's,
+  which can be ahead of that release. Unstamped, it now downloads the latest
+  release's own `install.sh` (or release V's, with `--version V`), checks that it is
+  a POSIX sh script stamped with the version it should install, and runs it with
+  the same arguments, saying `using the v0.9.0 installer`. On any failure (no
+  network, a 404 for a release before 0.9.0 or one whose installers are not yet
+  attached, a check that fails) it says `using this installer (…)` and carries on
+  itself. A stamped release script never hands off, and a second hop is stopped.
+  `--no-handoff`, `AISQUARE_INSTALL_NO_HANDOFF=1`, `--offline` and
+  `AISQUARE_INSTALL_PACKAGE` keep main's copy. The install it makes is pinned to the
+  release, as a release URL's is: asq's update row and `aisquare upgrade` move it on.
+  `install.ps1` hands WSL main's `install.sh`, so the hand-off happens there.
 - **Accounts: *Log in again* on any signed-in row.** The login column offers the same
   sign-in flow as *Log in* (as a secondary button) on a row that reads fine, so a fresh
   login no longer needs `aisquare accounts run <slot>` and `/login` by hand. Its tooltip

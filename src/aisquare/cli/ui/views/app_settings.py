@@ -205,10 +205,12 @@ FALLBACK_AGENT_TIP = (
 """The form's fields beside the per-role rows, by id: what :meth:`AppSettingsView._changed`
 compares with what they showed when the form was read."""
 _ACCOUNT_SWITCHES = {
+    "accounts-cross-agent": "cross_agent_handover",
     "accounts-share-trust": "share_trust",
     "accounts-share-settings": "share_settings",
 }
-"""``[accounts]``'s two switches, by id → field: what the accounts share
+"""``[accounts]``'s switches, by id → field: whether a hand-over may cross agents once its
+own agent's accounts are all full (``services.handoff``), and what the accounts share
 (``core.claude_sharing``)."""
 _UI_SWITCHES = {"ui-always-show-path": "always_show_project_path"}
 """*User preferences*' switches, by id → ``[ui]`` field."""
@@ -889,6 +891,9 @@ class AppSettingsView(Vertical):
                 type="integer",
                 id="accounts-wait-minutes",
             )
+        with Horizontal(classes="row"):
+            yield Label("hand off across agents")
+            yield Switch(self.accounts.cross_agent_handover, id="accounts-cross-agent")
         with Horizontal(classes="row"):
             yield Label("share folder trust")
             yield Switch(self.accounts.share_trust, id="accounts-share-trust")

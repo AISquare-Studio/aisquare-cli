@@ -409,6 +409,29 @@ def test_settings_switches_what_the_accounts_share() -> None:
     assert _config_toml()["accounts"] == {"share_trust": False, "share_settings": True}
 
 
+def test_settings_switches_the_hand_over_across_agents_off_and_on() -> None:
+    """``cross_agent_handover`` (on by default, task #15) is a switch in the accounts section:
+    off, Save writes it and nothing else; the form reopens on what the file holds."""
+
+    async def scenario(pilot: Pilot[None], host: AppHost) -> bool:
+        await pilot.pause()
+        shown = host.query_one("#accounts-cross-agent", Switch).value
+        host.query_one("#accounts-cross-agent", Switch).value = False
+        host.query_one("#save-settings", Button).press()
+        await settle(pilot)
+        return shown
+
+    assert drive(scenario) is True  # the default
+    assert _config_toml()["accounts"] == {"cross_agent_handover": False}
+    assert load_config().accounts.cross_agent_handover is False
+
+    async def reopened(pilot: Pilot[None], host: AppHost) -> bool:
+        await pilot.pause()
+        return host.query_one("#accounts-cross-agent", Switch).value
+
+    assert drive(reopened) is False
+
+
 def test_reset_all_asks_first_then_keeps_a_backup_and_shows_the_defaults() -> None:
     """Reset all is a dialog first: Cancel changes nothing; Reset all moves the file aside to a
     backup it names, and the form shows the defaults."""
@@ -951,6 +974,7 @@ FOLDED = {
         "#native-teams",
         "#accounts-switch-at",
         "#accounts-wait-minutes",
+        "#accounts-cross-agent",
         "#accounts-share-trust",
         "#accounts-share-settings",
         "#agent-settings-note",

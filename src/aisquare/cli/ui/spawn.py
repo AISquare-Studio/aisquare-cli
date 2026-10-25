@@ -501,6 +501,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._source: FleetAgentStatus | None = None
         """The teammate the form hands off from; ``None`` is the plain spawn."""
         self._plain: PlainFields | None = None
+        self._fresh_left = False
+        """What Start fresh held before a hand-off across agents locked it (:meth:`_hold_fresh`)."""
         """What the teammate's prefill replaced, kept while one is chosen (``_give_back``)."""
 
     # --- what the form reads when it opens ----------------------------------------------
@@ -1073,6 +1075,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
     @on(Select.Changed, "#spawn-approval")
     def _agent_changed(self) -> None:
         self._follow_agent()
+        if self._source is not None:
+            self._apply_handoff()  # its note and its Start fresh follow the agent picked
 
     @on(Input.Changed, "#spawn-binary")
     def _binary_changed(self) -> None:
@@ -1216,7 +1220,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self._persona_touched = True
         self._put_persona(agent.persona or NO_PERSONA, rebuild=True)
         with self.prevent(Select.Changed):
-            self.query_one("#spawn-agent", Select).value = agent.agent or ROLE_AGENT
+            # Its own agent by name, never "the role's": the Agent is the owner's to change,
+            # and another than this one is a hand-off across agents (:meth:`_crossing_onto`).
+            self.query_one("#spawn-agent", Select).value = agent.agent or DEFAULT_AGENT
         own = str(agent.account_slot) if agent.account_slot is not None else THIS_SHELL
         self._preset_account = own or None
         self._follow_agent()
@@ -1264,8 +1270,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         label = self.query_one("#spawn-label", Input)
         worktree = self.query_one("#spawn-worktree", Switch)
         prompt = self.query_one("#spawn-prompt", TextArea)
+        # The Agent stays the owner's to pick: another agent than the teammate's is a hand-off
+        # across agents (task #15), which starts fresh there with a brief of the work.
         for selector in (
-            "#spawn-agent",
             "#spawn-binary",
             "#spawn-intent",
             "#spawn-permission",
@@ -1287,10 +1294,19 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             self._relabel(self._role)
             submit.label = "Spawn"
             self._note("#spawn-how-note", None)
+            self._hold_fresh(False)
             self._validate()
             return
         agent = source.agent
         worktree.disabled = True
+        onto = self._crossing_onto()
+        self._hold_fresh(onto is not None)
+        across = (
+            f" on {get_adapter(onto).label}, fresh: a conversation does not move between "
+            "agents, so a brief of its work goes with it instead"
+            if onto is not None
+            else ""
+        )
         if take_over:
             if agent.task_id and agent.task_id not in {t.id for t in self._tasks}:
                 task.set_options(
@@ -1311,6 +1327,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
                 f"{agent.label} is stopped, after one question, and the new agent takes over "
                 "its claims, its task and its tree, resuming its session unless Start fresh "
                 "is checked."
+                if onto is None
+                else f"{agent.label} is stopped, after one question, and the new agent takes "
+                f"over its claims, its task and its tree{across}."
             )
         else:
             task.value = NO_TASK
@@ -1326,10 +1345,34 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             note = (
                 f"{agent.label} keeps running. The fork takes a new label, {where}, and no "
                 "claims, and resumes its conversation unless Start fresh is checked."
+                if onto is None
+                else f"{agent.label} keeps running. The fork takes a new label, {where}, and "
+                f"no claims, and starts{across}."
             )
         task.disabled = True
         self._note("#spawn-how-note", note, style="dim")
         self._validate()
+
+    def _crossing_onto(self) -> str | None:
+        """The agent a hand-off starts on when it is another than its teammate's: the Agent
+        field's pick (or, unpicked, the role's); ``None`` for the teammate's own agent."""
+        if self._source is None:
+            return None
+        own = self._source.agent.agent or DEFAULT_AGENT
+        onto = self.launch_agent()
+        return onto if onto and onto != own else None
+
+    def _hold_fresh(self, held: bool) -> None:
+        """A hand-off across agents is always fresh: Start fresh checked and locked while one
+        is shown, and given back as the owner left it once none is."""
+        fresh = self.query_one("#spawn-fresh", Checkbox)
+        if held and not fresh.disabled:
+            self._fresh_left = fresh.value
+            fresh.value = True
+            fresh.disabled = True
+        elif not held and fresh.disabled:
+            fresh.value = self._fresh_left
+            fresh.disabled = False
 
     def handoff_kwargs(self) -> dict[str, Any]:
         """The keywords a hand-off sends: ``None`` wherever the form shows the teammate's own."""
@@ -1360,6 +1403,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             "prompt": None if take_over or not prompt.strip() else prompt,
             # The row the form shows, not whoever carries its label by the time it runs.
             "agent_id": agent.id,
+            "to_agent": self._crossing_onto(),
         }
 
     @on(Input.Changed, "#spawn-label")

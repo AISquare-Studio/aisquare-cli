@@ -1552,9 +1552,10 @@ NO_CHANGE: Kwargs = {
     "persona": None,
     "label": None,
     "prompt": None,
+    "to_agent": None,
 }
-"""What a hand-off sends for a form that shows the teammate's own: its role, account and persona.
-Its ``agent_id``, the row the form shows, is sent as well, and is each test's own."""
+"""What a hand-off sends for a form that shows the teammate's own: its role, account, persona
+and agent. Its ``agent_id``, the row the form shows, is sent as well, and is each test's own."""
 
 
 def test_the_hand_off_field_lists_the_open_teammates_and_none_is_todays_spawn(
@@ -2027,11 +2028,13 @@ def test_the_accounts_are_read_once_off_the_ui_thread_whatever_the_agent_or_role
     assert labels == ["(this shell's)", "2 · account 2 · slot2@example.com"]
 
 
-def test_a_codex_teammate_hands_off_on_its_own_accounts_and_its_agent_is_locked(
+def test_a_codex_teammate_hands_off_on_its_own_agent_and_accounts_until_another_is_picked(
     git_project: ProjectInfo,
     hand_offs: HandOffRecorder,
     teammates: list[FleetAgentStatus],
 ) -> None:
+    """Its own agent, named, and its accounts; the Agent stays the owner's to change (task
+    #15: a hand-off across agents), so it is not locked."""
     mate = teammate(git_project, slot=5)
     teammates.append(
         mate.model_copy(update={"agent": mate.agent.model_copy(update={"agent": "codex"})})
@@ -2052,7 +2055,64 @@ def test_a_codex_teammate_hands_off_on_its_own_accounts_and_its_agent_is_locked(
         return seen
 
     seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
-    assert seen == ["codex", True, "5", ["", "5"], "", ["", "2"]]
+    assert seen == ["codex", False, "5", ["", "5"], "", ["", "2"]]
+
+
+@pytest.mark.parametrize("take_over", [False, True])
+def test_another_agent_picked_for_a_hand_off_starts_it_fresh_there_with_the_brief(
+    git_project: ProjectInfo,
+    hand_offs: HandOffRecorder,
+    teammates: list[FleetAgentStatus],
+    take_over: bool,
+) -> None:
+    """Task #15: a Codex teammate handed off onto Claude Code. The Account offers Claude
+    Code's accounts, Start fresh is checked and locked (no conversation moves between
+    agents), the note says the brief goes instead, and the hand-off sends the agent. Its own
+    agent picked again gives Start fresh back as the owner left it."""
+    mate = teammate(git_project, slot=5)
+    teammates.append(
+        mate.model_copy(update={"agent": mate.agent.model_copy(update={"agent": "codex"})})
+    )
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[Any]:
+        select(dialog, "from").value = teammates[0].agent.id
+        await settle(pilot)
+        if take_over:
+            dialog.query_one("#spawn-take-over", RadioButton).value = True
+            await settle(pilot)
+        fresh = dialog.query_one("#spawn-fresh", Checkbox)
+        select(dialog, "agent").value = "claude-code"
+        await settle(pilot)
+        seen: list[Any] = [
+            offered(dialog, "account"),
+            fresh.value,
+            fresh.disabled,
+            note(dialog, "#spawn-how-note"),
+        ]
+        select(dialog, "agent").value = "codex"
+        await settle(pilot)
+        seen += [fresh.value, fresh.disabled]
+        select(dialog, "agent").value = "claude-code"
+        await settle(pilot)
+        select(dialog, "account").value = "2"
+        await settle(pilot)
+        await pilot.click("#spawn-submit")
+        await settle(pilot)
+        if take_over:
+            await pilot.click("#take-over-yes")
+            await settle(pilot)
+        return seen
+
+    seen = drive(git_project, scenario, accounts=lambda: agents_overview(*MIXED))
+    accounts, checked, locked, said, *given_back = seen
+    assert accounts == ["", "2"] and (checked, locked) == (True, True)
+    assert said is not None and "Claude Code" in said
+    assert "a conversation does not move between agents" in said and "brief" in said
+    assert given_back == [False, False]
+    [(_, source, sent)] = hand_offs.calls
+    assert source == "coder-1"
+    assert (sent["to_agent"], sent["fresh"], sent["account"]) == ("claude-code", True, "2")
+    assert sent["mode"] == ("take_over" if take_over else "fork")
 
 
 # --- review of #240, R2-m5: the captain's label in the dialog ---------------------------------

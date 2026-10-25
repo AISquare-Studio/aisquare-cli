@@ -873,6 +873,12 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._release_asked_at = 0.0
         """When the release check was last asked (``time.monotonic``): the housekeeping tick
         asks again once ``updates.ASK_EVERY_SECONDS`` have passed (:meth:`_housekeeping`)."""
+        self._release_off = False
+        """``[updates] check`` as App settings last read it, off: the row is taken away at once
+        (:meth:`on_ui_settings_changed`); a check asked after reads the setting itself."""
+        self._release_stale = False
+        """A check was running as ``[updates] check`` was switched: its answer is dropped, and
+        asked again if the check is on (:meth:`on_ui_settings_changed`)."""
         self._refreshed: tuple[str | None] | None = None
         """PyPI's answer to the update dialog's own ask (``updates.refresh_latest``), once it
         has landed: ``(None,)`` when the lookup found none. ``None`` while it is out."""
@@ -2423,6 +2429,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
     def _release_checked(self, event: Worker.StateChanged) -> None:
         """Show the ⬆ row for the release the check found, or take it away; the first time a
         release is found, one toast says so. A check that failed changes nothing, silently."""
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            return
+        if self._release_stale:
+            # Asked before the switch was saved: its answer is for the setting that was.
+            self._release_stale = False
+            if not self._release_off:
+                self.check_release()
+            return
         if event.state is not WorkerState.SUCCESS:
             return
         offer = event.worker.result
@@ -2712,11 +2726,26 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self.refresh_accounts()
 
     def on_ui_settings_changed(self, event: UiSettingsChanged) -> None:
-        """App settings saved, reloaded or reset: the sidebar's directory lines follow now."""
+        """App settings saved, reloaded or reset: the sidebar's directory lines follow now, and
+        the release check. Switched off, the ⬆ row goes at once; switched on, the check asks
+        at once. Both waited for the hourly ask, up to an hour, while the switch's own line
+        said "no ⬆ row", and the row still opened its dialog (review of #301, m2)."""
         always = event.ui.always_show_project_path
         if always != self.always_show_project_path:
             self.always_show_project_path = always
             self.sidebar.show_paths(always)
+        if event.updates is None:
+            return
+        was_off, self._release_off = self._release_off, not event.updates.check
+        if was_off == self._release_off:
+            return
+        if any(worker.name == CHECK_WORKER and not worker.is_finished for worker in self.workers):
+            self._release_stale = True
+        if self._release_off:
+            self.release = None
+            self.sidebar.show_update(None)
+        else:
+            self.check_release()
 
     def on_usage_read(self, event: UsageRead) -> None:
         """The Accounts page read usage (a tick, or *↻ Refresh usage*): the dot reads the

@@ -21,7 +21,7 @@ from typing import Any, ClassVar, TypeVar
 import pytest
 from textual.pilot import Pilot
 from textual.timer import Timer
-from textual.widgets import Button, Static
+from textual.widgets import Button, Static, Switch
 from textual.worker import Worker
 from typer.testing import CliRunner
 
@@ -34,6 +34,7 @@ from aisquare.cli.ui.remote_control import RemoteController
 from aisquare.cli.ui.sidebar import (
     ALIVE_STATES,
     UPDATE_KEY,
+    AppSettingsSelected,
     SettingsRow,
     StatusLine,
     UpdateRow,
@@ -50,6 +51,7 @@ from aisquare.cli.ui.update import (
 )
 from aisquare.cli.ui.views.doctor import DoctorView
 from aisquare.core import selfcli
+from aisquare.core.config import load_config
 from aisquare.models import FleetAgent
 from aisquare.services import install_route, lifecycle, updates
 from aisquare.services.install_route import Facts, InstallRoute, LatestRelease
@@ -243,6 +245,53 @@ def test_the_hourly_ask_takes_the_row_away_once_nothing_newer_is_offered() -> No
 
     assert _drive(body, release_check=lambda: answers.pop(0)) == (True, False)
     assert answers == []
+
+
+@pytest.mark.parametrize("held", [None, "off", "on"], ids=["idle", "across-off", "across-on"])
+def test_the_release_check_switch_takes_the_row_away_and_brings_it_back_at_once(
+    monkeypatch: pytest.MonkeyPatch, held: str | None
+) -> None:
+    """Review of #301, m2: saved off in App settings, the ⬆ row stayed up and clickable, and a
+    click asked PyPI, until the hourly ask; saved on again, it waited for that ask too. The
+    save takes the row away at once, and asks again at once. A check asked before a save
+    and answered after it answers for the setting that was: across the off save it brings
+    no row back, and across the on save its "none" is dropped and the check asked again."""
+    asks: list[bool] = []
+    hold = threading.Event()
+    hold.set()
+
+    def check() -> updates.Offer | None:
+        enabled = load_config().updates.check
+        asks.append(enabled)
+        hold.wait(30)
+        return OFFER if enabled else None
+
+    async def save(app: FleetApp, on: bool) -> None:
+        if held == ("on" if on else "off"):
+            hold.clear()  # asked before this save, answered after it
+            app.check_release()
+        app.query_one("#updates-check", Switch).value = on
+        app.query_one("#save-settings", Button).press()
+        # Messages only: the check this test holds open is a worker settle_page waits for.
+        await settle_page(app, group="no-worker-of-this-name")
+        hold.set()
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> list[object]:
+        seen: list[object] = [app.query_one(UpdateRow).display]
+        app.post_message(AppSettingsSelected())
+        await settle_page(app)
+        await save(app, False)
+        await settle_page(app)
+        seen += [app.query_one(UpdateRow).display, app.release]
+        await save(app, True)
+        await settle_until(app, lambda: app.query_one(UpdateRow).display, timeout=5)
+        seen += [app.query_one(UpdateRow).display, asks[-1]]
+        return seen
+
+    seen = _drive(body, release_check=check)
+
+    assert seen == [True, False, None, True, True], (seen, asks)
+    assert load_config().updates.check is True
 
 
 # --- the dialog -------------------------------------------------------------------------------

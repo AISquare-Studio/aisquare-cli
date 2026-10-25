@@ -96,6 +96,7 @@ from aisquare.core.config import (
     FleetSettings,
     RoleLaunchProfile,
     UiSettings,
+    UpdatesSettings,
     load_config,
     save_config,
 )
@@ -256,11 +257,13 @@ class RoleRow(NamedTuple):
 
 class UiSettingsChanged(Message):
     """App settings re-read the file — after a Save, a Reload or a Reset all: ``[ui]`` as
-    it now holds it, for the app, which holds what the sidebar reads of it."""
+    it now holds it, for the app, which holds what the sidebar reads of it, and ``[updates]``,
+    whose release check the app stops or asks again at once (review of #301, m2)."""
 
-    def __init__(self, ui: UiSettings) -> None:
+    def __init__(self, ui: UiSettings, updates: UpdatesSettings | None = None) -> None:
         super().__init__()
         self.ui = ui
+        self.updates = updates
 
 
 def section_title(title: str, about: str) -> Text:
@@ -795,7 +798,7 @@ class AppSettingsView(Vertical):
             row.account.value = bound or NO_ACCOUNT
         self._shown = self._field_values()
         self._load_accounts()  # the slots as they are now, off the UI thread
-        self.post_message(UiSettingsChanged(self.ui))
+        self.post_message(UiSettingsChanged(self.ui, self.updates))
 
     # --- writing -----------------------------------------------------------------------
 

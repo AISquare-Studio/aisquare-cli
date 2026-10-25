@@ -573,6 +573,41 @@ def test_no_dialog_opens_over_a_hand_off_set_while_its_plan_was_read(
     assert refresh is None, "the dialog's ask is let go"
 
 
+@pytest.mark.parametrize(
+    ("learned", "row"),
+    [
+        ("not-runnable", "⬆︎ 0.9.1 · how to update"),
+        ("newer-release", "⬆︎ 0.9.2 · restart to update"),
+    ],
+    ids=["not-runnable", "newer-release"],
+)
+def test_the_next_check_keeps_what_the_dialog_learned(
+    monkeypatch: pytest.MonkeyPatch, fresh: Fresh, learned: str, row: str
+) -> None:
+    """Review of #301, n4: the next hourly check repainted the row from the route alone and
+    the release it read. The dialog's plan had found uv gone from PATH (the row said how to
+    update; the check said restart again), or its own ask had found 0.9.2 (the check, read
+    before that answer was written, put 0.9.1 back). The row keeps what the dialog learned."""
+    gone = dataclasses.replace(_plan(), reason="uv is not on PATH")
+    plan = gone if learned == "not-runnable" else _plan()
+    monkeypatch.setattr(lifecycle, "upgrade_plan", lambda *a, **k: plan)
+    if learned == "newer-release":
+        fresh.answer = "0.9.2"
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[str, str]:
+        app.query_one(UpdateRow).activate()
+        await settle_page(app)
+        assert isinstance(app.screen, UpdateScreen), app.screen
+        app.screen.dismiss(False)
+        await settle_page(app)
+        before = shown(app.query_one(UpdateRow))
+        app.check_release()  # answers OFFER: 0.9.1, runnable, as the route alone says
+        await settle_page(app)
+        return before, shown(app.query_one(UpdateRow))
+
+    assert _drive(body) == (row, row)
+
+
 def test_the_row_says_what_the_dialogs_plan_says(
     tmp_path: Path,
     script: Script,  # noqa: F811

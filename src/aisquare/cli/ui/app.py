@@ -879,6 +879,9 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         self._release_stale = False
         """A check was running as ``[updates] check`` was switched: its answer is dropped, and
         asked again if the check is on (:meth:`on_ui_settings_changed`)."""
+        self._planned_runnable: bool | None = None
+        """Whether the update dialog's last plan could run the update here: the row says what
+        it said, whatever the route alone says at the next check (:meth:`_release_checked`)."""
         self._refreshed: tuple[str | None] | None = None
         """PyPI's answer to the update dialog's own ask (``updates.refresh_latest``), once it
         has landed: ``(None,)`` when the lookup found none. ``None`` while it is out."""
@@ -2442,6 +2445,8 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         offer = event.worker.result
         if offer is not None and not isinstance(offer, updates_service.Offer):
             return
+        if offer is not None:
+            offer = self._kept_from_the_dialog(offer)
         self.release = offer
         if offer is None:
             self.sidebar.show_update(None)
@@ -2455,6 +2460,21 @@ class FleetApp(SelectionHost, inherit_bindings=False):
                 timeout=10,
                 markup=False,
             )
+
+    def _kept_from_the_dialog(self, offer: updates_service.Offer) -> updates_service.Offer:
+        """``offer`` as the check found it, with what the update dialog learned since kept: the
+        newer of the two releases (a check that read before the dialog's ask wrote its answer
+        put the older back), and the dialog plan's word on whether asq can run the update
+        (the route alone undid it at the next check; review of #301, n4)."""
+        shown = self.release
+        if (
+            shown is not None
+            and lifecycle_service.newer_release(shown.version, offer.version) is True
+        ):
+            offer = replace(offer, version=shown.version, announce=False)
+        if self._planned_runnable is not None:
+            offer = replace(offer, runnable=self._planned_runnable)
+        return offer
 
     def on_update_selected(self, event: UpdateSelected) -> None:
         """The ⬆ row: read how this install updates, off the UI thread; the dialog opens on
@@ -2592,6 +2612,7 @@ class FleetApp(SelectionHost, inherit_bindings=False):
             return
         if not isinstance(plan, lifecycle_service.UpgradePlan):
             return
+        self._planned_runnable = plan.runnable
         if plan.runnable != offer.runnable:
             # The row was decided from the install's route alone; the dialog's plan has the
             # last word (uv gone from PATH since, say), and the row says what it says.

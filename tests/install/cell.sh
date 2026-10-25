@@ -40,6 +40,10 @@ WORKDIR=${WORKDIR:-/work}
 STUBDIR=${STUBDIR:-$HOME/pkg-stub}
 STUB_LOG=${STUB_LOG:-${TMPDIR:-/tmp}/pkg-stub.log}
 SKIP_AGENT=${CELL_SKIP_AGENT:-1}
+# Every run here grades THIS tree's install.sh, so none hands off to the latest
+# release's own (install.sh's `hand_off`). CI passes a wheel, which turns it off
+# as well, but runs 3 and 4 drop the wheel and a cell run by hand may have none.
+export AISQUARE_INSTALL_NO_HANDOFF=1
 
 fail() {
     printf '\n### FAIL: %s\n' "$*" >&2
@@ -94,6 +98,16 @@ if command -v curl >/dev/null 2>&1; then
 else
     command -v wget >/dev/null 2>&1 || fail "neither curl nor wget after prep"
     head1 "downloader: wget only (this cell tests the fallback)"
+    # install.sh's hand-off fetches with `wget -t 1 -T 30 -O-` (fetch_quick).
+    # This wget must take those options and fail only on the address; an
+    # option it rejects prints its usage instead.
+    said=$(wget -t 1 -T 5 -O- http://127.0.0.1:9/ 2>&1 >/dev/null || true)
+    case "$said" in
+        *"nvalid option"* | *"nrecognized option"* | *"Usage:"*)
+            fail "this wget rejects install.sh's options: $said"
+            ;;
+    esac
+    head1 "wget takes -t 1 -T 30 -O-"
 fi
 
 AGENT_FLAG=""

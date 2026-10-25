@@ -325,7 +325,7 @@ def test_prompt_submit_delivers_teammate_delta_once(
     runner.invoke(app, ["task", "add", "wire auth", "--as", "bbbb2222"])
 
     first = _prompt(runner, PLANNER, work_dir)
-    assert "<aisquare-team-delta>" in first.stdout
+    assert "<aisquare-team-delta board=" in first.stdout
     assert "wire auth" in first.stdout
     second = _prompt(runner, PLANNER, work_dir)  # nothing new → nothing injected
     assert second.stdout.strip() == ""
@@ -1790,7 +1790,9 @@ def test_each_delta_line_names_its_board_and_only_the_sessions_own_board_is_read
 
     lines = [line for line in delta.splitlines() if line.startswith("- ")]
     assert lines, delta
-    assert all(line.startswith(f"- [{board.root.name}] ") for line in lines), lines
+    # Named once, in the block's header: one delta reads one board (P1 WS-2, #279).
+    assert f'<aisquare-team-delta board="{board.root.name}">' in delta
+    assert all(line.startswith("- #") for line in lines), lines
     assert "wire auth" in delta and "the other train's news" not in delta
 
 
@@ -1890,11 +1892,18 @@ def test_the_limited_line_says_who_moves_the_agent() -> None:
 
         return TeamEvent(id="e", project_id="p", kind=kind, text=text, created_at=now)
 
-    assert team_service._wakes_manager(event("limited", by_hand))
+    from aisquare.models import TeamSession
+
+    manager = TeamSession(id="m", project_id="p", role="manager", started_at=now, last_seen_at=now)
+
+    def wakes(one: Any) -> bool:
+        return team_service.wake_class(one, manager) == "wake"  # P1 WS-2's one rule (#279)
+
+    assert wakes(event("limited", by_hand))
     # On the KIND, never the wording (review of #304): the phrase in a plain `limited` line
     # still wakes, and the hand-over's own kind does not, whatever it says.
-    assert team_service._wakes_manager(event("limited", moving))
-    assert not team_service._wakes_manager(event(team_service.LIMITED_HANDING_OVER, by_hand))
+    assert wakes(event("limited", moving))
+    assert not wakes(event(team_service.LIMITED_HANDING_OVER, by_hand))
     assert "handover_failed" in team_service.MANAGER_WAKE_KINDS
     from aisquare.services import remote_needs
 

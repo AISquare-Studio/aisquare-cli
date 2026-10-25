@@ -92,6 +92,13 @@ dependencies = [
   # from 1.5, so from Python 3.12): elsewhere Remote starts an ngrok on PATH, as
   # it always did (ngrok_sdk.bundled_ngrok).
   "ngrok>=1.4; sys_platform == 'darwin' or (sys_platform == 'win32' and (platform_machine != 'ARM64' or python_version >= '3.12')) or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64' or platform_machine == 'armv7l'))",
+  # Every HTTPS call verifies against the OS trust store (core/tls.py). A
+  # python.org Python on macOS ships no CA bundle, so without these every usage
+  # read failed CERTIFICATE_VERIFY_FAILED while curl worked. truststore asks the
+  # Keychain / Windows store / distro bundle; certifi is the fallback for an
+  # interpreter truststore cannot use. Both pure Python, imported lazily.
+  "truststore>=0.10",
+  "certifi>=2024.7.4",
 ]
 
 [project.optional-dependencies]

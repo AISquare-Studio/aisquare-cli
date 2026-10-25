@@ -611,7 +611,7 @@ def test_https_is_fetched_in_process_http_and_oversized_responses_are_refused(
     fetched: list[tuple[str, float]] = []
     skill = b"---\nname: web-skill\ndescription: From the web.\n---\nBody.\n"
 
-    def urlopen(request: Any, timeout: float) -> _Response:
+    def urlopen(request: Any, timeout: float, **_: Any) -> _Response:
         fetched.append((request.full_url, timeout))
         return _Response(skill if "small" in request.full_url else b"z" * (2 * 1024 * 1024 + 10))
 

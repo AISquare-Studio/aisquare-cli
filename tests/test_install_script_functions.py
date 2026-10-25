@@ -86,7 +86,12 @@ def sh(
     inside one test.
     """
     environment = dict(os.environ)
-    environment.update({"AISQUARE_INSTALL_LIB": "1", "NO_COLOR": "1"})
+    # The hand-off to the release's own installer is
+    # tests/test_install_script_handoff.py's subject; here it would put a
+    # download in front of the function under test.
+    environment.update(
+        {"AISQUARE_INSTALL_LIB": "1", "NO_COLOR": "1", "AISQUARE_INSTALL_NO_HANDOFF": "1"}
+    )
     # A pinned version keeps `resolve` off the network in every test that does
     # not deliberately exercise the lookup.
     environment.setdefault("AISQUARE_INSTALL_VERSION", "9.9.9")
@@ -993,6 +998,9 @@ def _piped_into_sh_with_a_terminal(
             "NO_COLOR": "1",
             "AISQUARE_INSTALL_LIB": "0",
             "AISQUARE_INSTALL_VERSION": "",
+            # This tree's own prompt is the subject; the handed-off one is
+            # tests/test_install_script_handoff.py's.
+            "AISQUARE_INSTALL_NO_HANDOFF": "1",
         }
     )
 

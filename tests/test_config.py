@@ -7,9 +7,11 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import tomli_w
 from typer.testing import CliRunner
 
 from aisquare.cli.app import app
+from aisquare.core import harness
 from aisquare.core.config import (
     CONFIG_VERSION,
     REVIEWER_ARGS,
@@ -426,28 +428,39 @@ def test_a_reviewer_saved_with_the_former_restricted_default_loads_with_a_shell(
     """0.6.0 and 0.7.0 launched the reviewer `--restricted`, which removes Bash, and any
     `config set` wrote that default into the file. A new default alone would leave
     every such file launching a reviewer that cannot run `gh` — this machine's did.
-    The old default is replaced by today's, so the reviewer still cannot edit files."""
+    The old default is replaced by today's: none, the deny being the role's own
+    (`RoleProfile.denied_tools`), so the reviewer still cannot edit files."""
     target = tmp_path / "config.toml"
     target.write_text(_SAVED_BY_0_7_0_REVIEWER, encoding="utf-8")
     loaded = load_config(target)
     reviewer = loaded.fleet.roles["reviewer"]
-    assert reviewer.extra_args == list(REVIEWER_ARGS)
+    assert reviewer.extra_args == []
     assert reviewer.worktree is True, "only the old default goes; the rest stays as saved"
     save_config(loaded, target)
     saved = tomllib.loads(target.read_text(encoding="utf-8"))
-    assert saved["fleet"]["roles"]["reviewer"]["extra_args"] == list(REVIEWER_ARGS), (
+    assert saved["fleet"]["roles"]["reviewer"]["extra_args"] == [], (
         "today's default, in the reviewer's table written whole for older builds"
     )
-    assert load_config(target).fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
+    policy = harness.tool_policy(
+        "reviewer", binary="claude", args=[], fleet=load_config(target).fleet
+    )
+    assert {"Edit", "Write", "NotebookEdit"} <= set(policy.denied)
 
 
 def test_the_built_in_reviewer_keeps_its_shell_and_is_denied_the_tools_that_edit() -> None:
     """Bash is what `gh pr diff` and `gh pr review` run on; Edit, Write and NotebookEdit
     are what a prompt injected through the PR it reads would edit the tree with. One
-    token: a separate list would swallow the next plain word on the command line."""
+    token: a separate list would swallow the next plain word on the command line. The
+    deny is the role's own, so no `extra_args` stands in for it (#280)."""
     reviewer = FleetSettings().roles["reviewer"]
-    assert reviewer.extra_args == ["--disallowedTools=Edit Write NotebookEdit"]
-    assert "--restricted" not in reviewer.extra_args
+    assert reviewer.extra_args == []
+    assert harness.ROLE_PROFILES["reviewer"].denied_tools == ["Edit", "Write", "NotebookEdit"]
+    policy = harness.tool_policy("reviewer", binary="claude", args=[], fleet=FleetSettings())
+    tokens = [arg for arg in policy.args if arg.startswith("--disallowedTools")]
+    assert len(tokens) == 1 and {"Edit", "Write", "NotebookEdit"} <= set(
+        tokens[0].partition("=")[2].split()
+    )
+    assert "--restricted" not in policy.args
 
 
 def test_the_former_reviewer_default_is_replaced_once_and_chosen_afterwards_is_kept(
@@ -460,7 +473,7 @@ def test_the_former_reviewer_default_is_replaced_once_and_chosen_afterwards_is_k
     target = tmp_path / "config.toml"
     target.write_text(_SAVED_BY_0_7_0_REVIEWER, encoding="utf-8")
     loaded = load_config(target)
-    assert loaded.fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
+    assert loaded.fleet.roles["reviewer"].extra_args == []
     save_config(loaded, target)
     assert tomllib.loads(target.read_text(encoding="utf-8"))["config_version"] == CONFIG_VERSION
 
@@ -509,10 +522,12 @@ def test_config_set_of_the_former_reviewer_default_takes_effect() -> None:
     assert load_config().fleet.roles["reviewer"].extra_args == ["--restricted"]
 
 
-def test_the_reviewer_default_set_by_config_set_round_trips() -> None:
+def test_the_former_reviewer_default_set_by_config_set_round_trips() -> None:
     """`config set` splits a list on commas and `config get` joins one with them, so the
-    default's tool names are apart by spaces: what `get` prints, `set` takes back whole."""
+    0.8.0-0.8.2 default's tool names are apart by spaces: set back by hand, for an older
+    build sharing the home, what `get` prints `set` takes back whole."""
     key = "fleet.roles.reviewer.extra_args"
+    assert settings_service.set_value(key, REVIEWER_ARGS[0]) == REVIEWER_ARGS[0]
     printed = settings_service.get_value(key)
     assert settings_service.set_value(key, printed) == printed
     assert load_config().fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
@@ -527,3 +542,52 @@ def test_a_reviewer_given_more_than_the_former_default_keeps_it(tmp_path: Path) 
     )
     reviewer = load_config(target).fleet.roles["reviewer"]
     assert reviewer.extra_args == ["--restricted", "--tools", "Bash"]
+
+
+def _v2_reviewer(target: Path, extra_args: list[str]) -> None:
+    """``target`` as 0.8.1/0.8.2 saved it: version 2, the reviewer's table written whole."""
+    target.write_text(
+        tomli_w.dumps(
+            {
+                "config_version": 2,
+                "fleet": {
+                    "roles": {
+                        "reviewer": {
+                            "permission_mode": "auto",
+                            "worktree": True,
+                            "extra_args": extra_args,
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_the_v2_reviewer_default_leaves_once_and_a_list_chosen_afterwards_stays(
+    tmp_path: Path,
+) -> None:
+    """Every 0.8.1/0.8.2 save holds :data:`REVIEWER_ARGS` for the reviewer, chosen or not.
+    Kept, it stayed on the command line, where ``allow_tools`` cannot reach. The 2 -> 3
+    step drops it once; set again afterwards, it is a choice and stays."""
+    target = tmp_path / "config.toml"
+    _v2_reviewer(target, list(REVIEWER_ARGS))
+    loaded = load_config(target)
+    assert loaded.fleet.roles["reviewer"].extra_args == []
+    save_config(loaded, target)
+    assert tomllib.loads(target.read_text(encoding="utf-8"))["config_version"] == CONFIG_VERSION
+
+    chosen = load_config(target)
+    chosen.fleet.roles["reviewer"].extra_args = list(REVIEWER_ARGS)
+    save_config(chosen, target)
+    save_config(load_config(target), target)  # any later save, of any key
+    assert load_config(target).fleet.roles["reviewer"].extra_args == list(REVIEWER_ARGS)
+
+
+def test_the_2_to_3_step_keeps_a_reviewer_list_someone_wrote(tmp_path: Path) -> None:
+    """Only the exact 0.8.0-0.8.2 default is dropped; one more word makes it the user's."""
+    target = tmp_path / "config.toml"
+    written = [*REVIEWER_ARGS, "--model", "opus"]
+    _v2_reviewer(target, written)
+    assert load_config(target).fleet.roles["reviewer"].extra_args == written

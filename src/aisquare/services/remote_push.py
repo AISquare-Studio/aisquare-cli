@@ -716,8 +716,9 @@ def push_https_transport(endpoint: str, headers: dict[str, str], body: bytes) ->
     the timeout is 10 s, and at most 4 KiB of the answer is read.
     """
     import http.client
-    import ssl
     from urllib.parse import urlsplit
+
+    from aisquare.core import tls
 
     if not push_host_allowed(endpoint):
         raise ValueError(f"not an allowed push service: {endpoint[:80]!r}")
@@ -727,7 +728,7 @@ def push_https_transport(endpoint: str, headers: dict[str, str], body: bytes) ->
         parts.hostname or "",
         443,
         timeout=PUSH_TIMEOUT_SECONDS,
-        context=ssl.create_default_context(),
+        context=tls.ssl_context(),
     )
     try:
         connection.request("POST", target, body=body, headers=headers)

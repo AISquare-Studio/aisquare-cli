@@ -73,7 +73,6 @@ from string import Formatter
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import SplitResult, urlsplit
-from urllib.request import urlopen
 
 from aisquare.core import harness, insights, outbox, paths, spawn
 from aisquare.core.atomic import write_replacing
@@ -85,6 +84,7 @@ from aisquare.core.config import (
     save_config,
 )
 from aisquare.core.store import store_session
+from aisquare.core.tls import urlopen
 
 #: Vars the wiring wants to set. If the user's environment already defines one
 #: they are routing Anthropic traffic deliberately (custom gateway, another

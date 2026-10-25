@@ -636,7 +636,8 @@ def test_a_v35_store_gains_the_first_prompt_columns_and_a_second_open_changes_no
     once = _contents(db)
     open_store().close()
 
-    assert SCHEMA_VERSION == 36 and _contents(db) == once
+    # W1a's step is v36; P1 WS-2's (#279) is v37 on a train that holds both.
+    assert SCHEMA_VERSION >= 36 and _contents(db) == once
     assert old is not None and (old.first_prompt, old.first_prompt_at) == (None, None)
     assert _db_path() == db
 

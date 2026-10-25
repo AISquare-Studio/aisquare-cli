@@ -362,6 +362,44 @@ def test_a_release_copy_of_this_tree_runs_its_own_dry_run(machine: Machine) -> N
     assert machine.leftovers() == []
 
 
+def _node_lines(output: str) -> list[str]:
+    """What a run says about Node and the Chrome DevTools extra that needs it."""
+    return [
+        line.strip() for line in output.splitlines() if "Node" in line or "chrome-devtools" in line
+    ]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [(), ("--with", "chrome-devtools"), ("--with=chrome-devtools",)],
+    ids=["no-extra", "with", "with="],
+)
+def test_the_hand_off_and_this_copy_agree_on_node(machine: Machine, extra: tuple[str, ...]) -> None:
+    """#399 made Node optional: installed for the Chrome DevTools extra alone, chosen with
+    ``--with chrome-devtools``. Whichever script runs, the release's (handed off, ``--with``
+    passed through and known to its parse_args) or this one (no hand-off), the same flags
+    plan the same Node. Main's copy installs nothing before it hands off."""
+    machine.serve_latest(stamped_copy())
+    machine.pypi(STAMP)
+
+    handed = machine.run(*DRY, *extra)
+    kept = machine.run(*DRY, *extra, env={"AISQUARE_INSTALL_NO_HANDOFF": "1"})
+
+    assert handed.returncode == 0 and kept.returncode == 0, f"{handed.stdout}\n{kept.stdout}"
+    assert handed.stdout.splitlines()[0].strip() == "using the v7.7.7 installer", handed.stdout
+    assert "using" not in kept.stdout.splitlines()[0], kept.stdout
+    assert _node_lines(handed.stdout) == _node_lines(kept.stdout)
+    installs_node = "==> Installing Node 22 (browser tools need 22.12+)"
+    if extra:
+        assert _node_lines(handed.stdout).count(installs_node) == 1, handed.stdout
+    else:
+        assert installs_node not in _node_lines(handed.stdout), handed.stdout
+        assert any(
+            "optional; --with chrome-devtools adds it" in line
+            for line in _node_lines(handed.stdout)
+        )
+
+
 def test_a_wget_only_machine_hands_off_too(machine: Machine) -> None:
     """Alpine ships BusyBox wget and no curl, and gets the release's script all the same."""
     (machine.bin / "curl").unlink()

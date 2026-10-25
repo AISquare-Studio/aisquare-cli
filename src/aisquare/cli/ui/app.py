@@ -2569,7 +2569,14 @@ class FleetApp(SelectionHost, inherit_bindings=False):
         ]
 
     def _update_planned(self, event: Worker.StateChanged) -> None:
-        """Open the update dialog on the plan read for it, or say why it could not be read."""
+        """Open the update dialog on the plan read for it, or say why it could not be read.
+
+        Not once a hand-over waits (``hand_off``, Doctor's Update or Uninstall pressed while
+        the plan was read): the click checks it, and the dialog opened over the hand-over all
+        the same (review of #301, n3)."""
+        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self.hand_off is not None:
+            self._let_go_of_refresh()  # no dialog opens to take its answer
+            return
         offer = self.release
         if event.state is WorkerState.ERROR:
             self._let_go_of_refresh()  # no dialog opens to take its answer

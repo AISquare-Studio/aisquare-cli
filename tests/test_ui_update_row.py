@@ -543,6 +543,36 @@ def test_an_update_kept_waiting_names_the_row_to_press_again(
     assert hand_off is None
 
 
+def test_no_dialog_opens_over_a_hand_off_set_while_its_plan_was_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #301, n3: the row was clicked, and Doctor's Update handed over while the
+    dialog's plan was being read. The click checks for a hand-over, the plan's answer did
+    not, and the dialog opened over it. It opens none; the dialog's ask is let go."""
+    gate = threading.Event()
+    asked: list[bool] = []
+
+    def plan(*_args: Any, **_kwargs: Any) -> UpgradePlan:
+        asked.append(True)
+        gate.wait(30)
+        return _plan()
+
+    monkeypatch.setattr(lifecycle, "upgrade_plan", plan)
+
+    async def body(pilot: Pilot[None], app: FleetApp) -> tuple[bool, object]:
+        app.query_one(UpdateRow).activate()
+        await settle_until(app, lambda: asked, group="no-worker-of-this-name")
+        app.hand_off = ("upgrade", "--reopen")  # Doctor's Update, as it was pressed
+        gate.set()
+        await settle_page(app)
+        return isinstance(app.screen, UpdateScreen), app._refresh_worker
+
+    opened, refresh = _drive(body)
+
+    assert opened is False, "no dialog over the hand-over"
+    assert refresh is None, "the dialog's ask is let go"
+
+
 def test_the_row_says_what_the_dialogs_plan_says(
     tmp_path: Path,
     script: Script,  # noqa: F811

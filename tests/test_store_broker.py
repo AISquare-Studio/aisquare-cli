@@ -1726,7 +1726,8 @@ def test_a_refusal_names_its_paths_as_they_are_and_its_remedy_by_the_root_that_h
     with pytest.raises(store_broker.LaunchRefused) as refusal:
         _installed_at(monkeypatch, Path("/tmp/asq-tools-x"))
         store_broker.refuse_inside(writes, project, codex)
-    assert "outside /tmp" in str(refusal.value), str(refusal.value)
+    # The root as the sandbox names it, resolved: macOS's /tmp is /private/tmp (r18 minor 2).
+    assert f"outside {Path('/tmp').resolve()}" in str(refusal.value), str(refusal.value)
 
 
 def test_a_brokered_context_show_reads_only_the_pools_the_agent_is_given(

@@ -32,6 +32,7 @@ from typing import Any, TypeVar
 
 import pytest
 from textual.app import App
+from textual.geometry import Size
 from textual.notifications import SeverityLevel
 from textual.pilot import Pilot
 from textual.widget import Widget
@@ -88,7 +89,7 @@ from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.captain import state as captain_state
 from tests.fleet_fakes import list_agents_as
-from tests.ui_workers import settle_page, settle_workers
+from tests.ui_workers import settle_page, settle_until, settle_workers
 
 T = TypeVar("T")
 SIZE = (120, 50)
@@ -368,6 +369,21 @@ async def unfolded(pilot: Pilot[Any]) -> None:
     await settle(pilot)
     await pilot.wait_for_scheduled_animations()
     await pilot.pause()
+
+
+async def resized(pilot: Pilot[Any], width: int, height: int) -> None:
+    """Resize the terminal and wait until the screen is laid out at that size.
+
+    ``Pilot.resize_terminal`` returns once the app looks idle, and the app hands a resize on
+    to its screen from a timer (``App._on_resize``), so the screen could still be laid out at
+    the old size. A click then aimed where *Advanced*'s title was in the 120x50 dialog: at
+    80x24 off the screen (``OutOfBounds``), at 80x45 on nothing, and the section stayed
+    folded (#298's full matrix, windows-latest, push run 40222702828). The screen's own size
+    is set in the same reflow that places the dialog, so that is what is waited for."""
+    size = Size(width, height)
+    await pilot.resize_terminal(width, height)
+    await settle_until(pilot.app, lambda: pilot.app.screen.outer_size == size)
+    assert pilot.app.screen.outer_size == size, "the screen was never laid out at the new size"
 
 
 # --- the row opens it -----------------------------------------------------------------
@@ -787,6 +803,34 @@ def test_the_remote_control_switch_follows_the_role_until_touched_and_is_sent_th
     assert seen[5:] == [False, None], "back to coder: off is coder's default again"
 
 
+def test_a_resize_the_app_hands_on_late_is_waited_for(
+    git_project: ProjectInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``resized`` waits for the layout, not for the app to look idle. With the app's hand-on
+    of a resize held 150 ms, as a loaded runner's timer can hold it, a click on *Advanced*'s
+    title at 80x24 still lands and unfolds it; after ``Pilot.resize_terminal`` alone it was
+    aimed at the 120x50 dialog's title, off the screen."""
+    hand_on = App._check_resize
+    held: list[bool] = []
+
+    def late(app: App[Any]) -> None:
+        if app._resize_timer is not None and not held:
+            held.append(True)
+            app._resize_timer.stop()
+            app._resize_timer = app.set_timer(0.15, lambda: late(app))
+            return
+        hand_on(app)
+
+    monkeypatch.setattr(Host, "_check_resize", late)
+
+    async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[object]:
+        await resized(pilot, 80, 24)
+        await open_advanced(pilot)
+        return [held, advanced(dialog).collapsed]
+
+    assert drive(git_project, scenario) == [[True], False]
+
+
 def test_the_remote_control_note_wraps_at_80_columns(git_project: ProjectInfo) -> None:
     """At 80 columns the note beside the switch was laid out on one line wider than its row
     and painted cut, '…or the Cl' (#335's walk). It wraps in its row now. The label is
@@ -794,7 +838,7 @@ def test_the_remote_control_note_wraps_at_80_columns(git_project: ProjectInfo) -
     Settings (owner call W4-8, revised at the main sync), and it is painted whole."""
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
-        await pilot.resize_terminal(80, 45)
+        await resized(pilot, 80, 45)
         await open_advanced(pilot)  # the row is in Advanced
         note = dialog.query_one("#spawn-remote-note", Static)
         note.scroll_visible(animate=False)
@@ -827,7 +871,7 @@ def test_the_claude_remote_control_label_reads_on_one_line(
     width (#411's review). It is painted on one line, at 80 columns and wide."""
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
-        await pilot.resize_terminal(*size)
+        await resized(pilot, *size)
         await open_advanced(pilot)
         switch = dialog.query_one("#spawn-remote", Switch)
         switch.scroll_visible(animate=False)
@@ -852,7 +896,7 @@ def test_every_row_of_the_open_dialog_fits_80x24_and_each_label_one_line(
     teammates.append(teammate(git_project, role="tester", label="tester-1"))
 
     async def scenario(pilot: Pilot[None], host: Host, dialog: SpawnDialog) -> list[str]:
-        await pilot.resize_terminal(80, 24)
+        await resized(pilot, 80, 24)
         select(dialog, "from").value = teammates[0].agent.id
         await settle(pilot)
         assert dialog.query_one("#spawn-how-row").display

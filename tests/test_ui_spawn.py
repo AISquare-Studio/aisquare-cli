@@ -85,7 +85,7 @@ from aisquare.services import personas as personas_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
 from aisquare.services.captain import state as captain_state
-from tests.ui_workers import settle_page, settle_workers
+from tests.ui_workers import released, settle_page, settle_workers
 
 T = TypeVar("T")
 SIZE = (120, 50)
@@ -331,18 +331,6 @@ def note(dialog: SpawnDialog, selector: str) -> str | None:
 
 def submit(dialog: SpawnDialog) -> Button:
     return dialog.query_one("#spawn-submit", Button)
-
-
-async def released(pilot: Pilot[Any], button: Button) -> None:
-    """Wait out a press's ``-active`` effect, during which ``Button`` ignores a click: a
-    click inside it presses nothing. Its end is a 0.2 s timer, so wait on the class, not
-    on a guess at the clock (windows-latest, CI run 40144039659: the second *Spawn* of
-    the take-over test landed inside it and the question never came)."""
-    for _ in range(250):
-        if not button.has_class("-active"):
-            return
-        await pilot.pause(0.02)
-    raise AssertionError(f"#{button.id} stayed pressed")
 
 
 def label_input(dialog: SpawnDialog) -> Input:
@@ -856,9 +844,9 @@ def test_a_fleet_error_keeps_the_dialog_open_with_the_message_and_spawn_re_enabl
             submit(dialog).disabled,
             dialog.query_one("#spawn-cancel", Button).disabled,
         ]
-        # Past the first press's 0.2 s "-active" effect, during which Button ignores
-        # a click — then a second press must spawn again: re-enabled for real.
-        await pilot.pause(submit(dialog).active_effect_duration + 0.1)
+        # Past the first press's "-active" effect, during which Button ignores a
+        # click — then a second press must spawn again: re-enabled for real.
+        await released(pilot, submit(dialog))
         await pilot.click("#spawn-submit")
         await settle(pilot)
         seen.append(list(host.results))

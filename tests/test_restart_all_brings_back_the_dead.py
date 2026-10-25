@@ -26,6 +26,7 @@ from aisquare.core.tmux import TmuxError, WindowInfo
 from aisquare.models import FleetAgent, ProjectInfo
 from aisquare.services import fleet as fleet_service
 from aisquare.services import project as project_service
+from aisquare.services import team as team_service
 from tests.rendered import ANSI
 from tests.test_fleet_bulk import (  # noqa: F401 (fixtures)
     Fleet,
@@ -35,7 +36,7 @@ from tests.test_fleet_bulk import (  # noqa: F401 (fixtures)
     fleet,
     tmux,
 )
-from tests.test_fleet_service import FakeTmux, _add_task, _first_lines
+from tests.test_fleet_service import FakeTmux, _add_task, _board_session, _first_lines
 
 KILLED = 143
 """An outside SIGTERM's exit status, as the 16:50 crash recorded it."""
@@ -382,7 +383,7 @@ def test_a_row_that_dies_between_the_plan_and_its_turn_keeps_its_window_and_come
     assert coder.id in targets and targets[coder.id].dead, "the next Restart all brings it back"
 
 
-def test_a_row_that_exits_0_before_its_turn_is_left_and_its_manager_woken(
+def test_a_row_that_exits_0_before_its_turn_is_left_and_announced_once_without_a_wake(
     fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
     tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
     monkeypatch: pytest.MonkeyPatch,
@@ -399,6 +400,29 @@ def test_a_row_that_exits_0_before_its_turn_is_left_and_its_manager_woken(
     assert _outcomes(fleet, report.receipts)["alpha/coder-1"][0] == "skipped"
     assert _exited(fleet.alpha, coder) == [f"{coder.label} exited (0)"]
     assert not [n for n in nudges if f"{coder.label} exited" in n], "a clean exit is news"
+
+
+def test_a_clean_exit_that_released_a_claim_is_left_and_its_held_back_wake_is_owed(
+    fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
+    tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """m1 under P1 WS-2: an exit 0 that let go of a claim wakes the manager (a clean exit
+    alone is news). The turn's look records it with that wake-up held back, then leaves
+    the row, since it ended by itself, and owes the manager the wake-up: once, on top of
+    the one board announcement (``_still_to_restart``'s owed loop)."""
+    coder = fleet.agents["alpha/coder-1"]
+    _board_session(coder, "working")
+    task = _add_task(fleet.alpha, "held by the coder")
+    team_service.claim_task(task.id, session_ref=coder.session_id)
+    _dies_before_its_turn(tmux, coder, 0, monkeypatch)
+    nudges = _nudges(monkeypatch)
+
+    report = fleet_service.bulk("restart")
+
+    assert _outcomes(fleet, report.receipts)["alpha/coder-1"][0] == "skipped"
+    assert _exited(fleet.alpha, coder) == [f"{coder.label} exited (0)"]
+    assert nudges.count(f"{coder.label} exited") == 1, "m1: the held-back wake-up is owed"
 
 
 def test_a_restart_whose_vanished_row_another_reader_ends_first_still_died(
@@ -603,7 +627,7 @@ def test_a_fleet_stop_that_lands_mid_restart_is_never_undone(
     assert not [a for a in _live_rows(fleet.alpha) if a.label == coder.label]
 
 
-def test_a_row_another_reader_recorded_first_wakes_the_manager_once(
+def test_a_row_another_reader_recorded_first_is_announced_once(
     fleet: Fleet,  # noqa: F811 — pytest resolves fixtures by NAME
     tmux: FakeTmux,  # noqa: F811 — pytest resolves fixtures by NAME
     monkeypatch: pytest.MonkeyPatch,

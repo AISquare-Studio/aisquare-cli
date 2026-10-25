@@ -308,7 +308,7 @@ def test_latest_context_reads_the_last_request_from_the_tail(tmp_path: Path) -> 
     assert transcripts.latest_context_tokens(tmp_path / "missing.jsonl") is None
 
 
-def test_metrics_tokens_prints_counts_never_text(runner: CliRunner, work_dir: Path) -> None:
+def test_metrics_ledger_prints_counts_never_text(runner: CliRunner, work_dir: Path) -> None:
     path = _fixture(work_dir / "t.jsonl")
     project = team_project(work_dir)
     with store_session() as store:

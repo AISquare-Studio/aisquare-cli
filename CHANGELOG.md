@@ -917,6 +917,15 @@ adapter.**
 
 ### Fixed
 
+- **A restart keeps an agent that ran on no account on its own home.** An agent spawned
+  with no account (*(this shell's)*, or before any default was set) ran under the plain
+  home, but `fleet restart`, *Restart all…* and a hand-off's Take over asked the account
+  ladder again, and a binding or default set since moved it onto another account, though
+  the dialog says it keeps its account. A Claude Code agent kept its conversation there,
+  but its account changed silently. A Codex agent lost its thread and started fresh, and
+  so did a hand-off's Fork of one. Each now asks for the agent's plain slot by name, so the
+  replacement's row shows `#1` (Claude Code) or `#0` (Codex) where it showed no slot. A
+  plain home that is not there yet holds nothing to keep, and the ladder decides as before.
 - **Restart all brings back the agents that died** (#38). After an outside SIGTERM
   killed every agent of a fleet (exit 143), *Settings ▸ Fleet ▸ Restart all…* and
   `fleet restart --all` listed each one as exited and restarted none: they acted on

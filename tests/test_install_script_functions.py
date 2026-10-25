@@ -1549,10 +1549,10 @@ def test_a_usage_back_off_at_install_time_is_expected_not_amber(tmp_path: Path) 
     2, so a transient rate limit turned a good install amber. It says nothing about the
     install: expected, explained, exit 0. Another amber row still exits 2 (control)."""
     result = _summary_then_handoff(
-        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain claude-account-backoff'", node=True
+        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain claude-account-backoff'"
     )
     control = _summary_then_handoff(
-        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain claude-accounts'", node=True
+        tmp_path, "WANT_SYSTEM_DEPS=1; DOCTOR_AMBER='brain claude-accounts'"
     )
 
     assert "UNEXPECTED=0" in result.stdout and result.returncode == 0, result.stdout

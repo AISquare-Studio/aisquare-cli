@@ -1330,14 +1330,19 @@ def usage_backoffs(
     accounts: Sequence[ClaudeAccount], *, now: datetime | None = None
 ) -> dict[int, UsageBackoff]:
     """The waits still running for ``accounts``, by slot: doctor's line, and a test's look.
-    A store that cannot be opened reads as none."""
+    A store that cannot be opened reads as none.
+
+    Whose login a slot holds is read only for a slot with a wait recorded: on macOS that read
+    can be the Keychain, once per slot on every doctor run (review of #408, n2)."""
     moment = now or _now()
     try:
         with store_session() as store:
             held = _read_backoffs(store, [account.slot for account in accounts])
     except sqlite3.Error:
         return {}
-    logins = {account.slot: _login_key(account, moment) for account in accounts}
+    logins = {
+        account.slot: _login_key(account, moment) for account in accounts if account.slot in held
+    }
     return {
         slot: backoff
         for slot, backoff in held.items()

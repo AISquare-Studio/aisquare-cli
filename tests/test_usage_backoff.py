@@ -363,6 +363,29 @@ def test_doctor_names_the_backed_off_accounts(fake_home: Path) -> None:
     assert line.fix is not None and "does not clear a rate limit" in line.fix
 
 
+def test_doctors_look_reads_the_login_only_of_a_slot_with_a_wait(
+    fake_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #408, n2: doctor's row read every slot's login (a Keychain read per slot on
+    macOS) on every run. It reads it only for a slot with a wait recorded."""
+    work = _slot("work@example.com", "tok-work")
+    spare = _slot("spare@example.com", "tok-spare")
+    service.read_usage([work], now=NOW, fetch=_Endpoint({"tok-work": 429}))
+    asked: list[int] = []
+    real = service._login_key
+
+    def counted(account: Any, now: datetime) -> str | None:
+        asked.append(account.slot)
+        return real(account, now)
+
+    monkeypatch.setattr(service, "_login_key", counted)
+
+    waiting = service.usage_backoffs([work, spare], now=NOW)
+
+    assert set(waiting) == {work.slot}
+    assert asked == [work.slot], "the slot with no wait is not read"
+
+
 def test_removing_an_account_forgets_its_wait(fake_home: Path) -> None:
     work = _slot("work@example.com", "tok-work")
     service.read_usage([work], now=NOW, fetch=_Endpoint({"tok-work": 429}))

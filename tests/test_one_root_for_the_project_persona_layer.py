@@ -222,7 +222,7 @@ def test_launch_asks_the_helper(
 
     assert result.exit_code == 0, result.output
     argv = captured["argv"]
-    # After the role's own flags (its tool policy, P1 WS-1), before the operator's line.
+    # Anywhere on the line: the role's tool policy (P1 WS-1) comes before it.
     flag = argv.index(launch_cli.SYSTEM_PROMPT_FLAG)
     assert "You are solo." in Path(argv[flag + 1]).read_text(encoding="utf-8")
 

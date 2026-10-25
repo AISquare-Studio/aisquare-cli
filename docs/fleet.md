@@ -1072,8 +1072,9 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   permission or kept going by a note is left alone, and so is one whose turn left background
   work running, which the `/exit` of a move would kill — a background command, a `Monitor`,
   a background subagent or a skill forked in the background whose final notice (the one
-  with a status; a Monitor's events have none) is not in its transcript yet, until that
-  work has reported (a `TaskStop` of it, or a Monitor's own timeout, ends it too) — and one
+  with a status; a Monitor's events have none) is not in its transcript yet, its
+  subagents' transcripts included, until that work has reported (a `TaskStop` of it, or a
+  Monitor's own timeout, ends it too) — and one
   with a message queued during its turn, which starts the next turn as this one ends. The
   move waits five seconds after the turn end, past the start-up of the hook a just-typed
   prompt runs, so that prompt is stamped on the board; then, before the stop and again once

@@ -35,6 +35,7 @@ from aisquare.services import fleet as fleet_service
 from aisquare.services import hooks as hooks_service
 from aisquare.services import settings as settings_service
 from aisquare.services import team as team_service
+from tests import captain_screens
 from tests.test_claude_accounts import NOW
 from tests.test_usage_aware_accounts import _payload, _slot, _Usage
 
@@ -1485,3 +1486,156 @@ def test_two_workers_that_both_would_warn_post_one_line(
 
     lines = [text for kind, text in _events(work) if kind == team_service.BEFORE_LIMIT_KIND]
     assert len(lines) == 1
+
+
+# --------------------------------------------------------------------------- round 3's gaps
+
+
+def test_background_work_a_subagent_launched_is_the_sessions_too(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[list[str]],
+) -> None:
+    """R3-m1: a subagent's own background Bash is recorded in ITS transcript,
+    ``<session>/subagents/agent-<id>.jsonl`` (``isSidechain``), and its notice lands in the
+    main one: 19 on this machine, 6 of 10 traced still running at a main turn end. Read from
+    there, it holds the agent until the main transcript has its final notice."""
+    endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
+    _settings(before_limit="switch")
+    _agent(work)
+    _on_record(endpoint)
+    subagents = _transcript(work).with_suffix("") / "subagents"
+    subagents.mkdir(parents=True)
+    launch = {**_result(_RESULTS["bash"]("bcypsv05f")), "isSidechain": True}
+    _write(subagents / "agent-a28e6f180cb6091aa.jsonl", {**launch, "agentId": "a28e6f180cb6091aa"})
+
+    _stop(runner, work)
+    assert started == [] and _cool_down(work) is None
+
+    _completes(work, "bcypsv05f")  # in the main transcript, as Claude Code delivers it
+    _stop(runner, work)
+    assert started == [_worker()]
+
+
+class _Pane:
+    """A tmux server whose one capture is ``frame``, or raises."""
+
+    def __init__(self, frame: list[str] | None) -> None:
+        self.frame = frame
+
+    def capture(self, pane_id: str) -> Any:
+        if self.frame is None:
+            raise OSError("no such pane")
+        return SimpleNamespace(lines=self.frame)
+
+
+_PROMPT_HOOK_RUNNING = [
+    "● Done.",
+    "",
+    "· Nucleating… (running UserPromptSubmit hook · 1s)",
+    "",
+    captain_screens.REAL_TOP_RULE,
+    f"{captain_screens.MARK} ",
+    captain_screens.REAL_RULE,
+    "  esc to interrupt",
+]
+"""Claude Code 2.1.310 while a prompt's ``UserPromptSubmit`` hook runs, from the lines review
+round 2 captured: the spinner above an empty box, ``esc to interrupt`` in the footer. The
+prompt is on neither the board nor the transcript yet."""
+
+
+@pytest.mark.parametrize(
+    ("frame", "shows"),
+    [
+        (captain_screens.REAL_IDLE, "idle"),
+        (captain_screens.REAL_IDLE_AFTER_STOP, "idle"),
+        (captain_screens.REAL_WORKING, "busy"),
+        (_PROMPT_HOOK_RUNNING, "busy"),
+        (captain_screens.REAL_CHOOSER, "unknown"),
+        (captain_screens.REAL_TRUST, "unknown"),
+        (None, "unknown"),
+    ],
+    ids=["idle", "idle after a stop", "mid-turn", "prompt hook", "chooser", "trust", "no capture"],
+)
+def test_the_pane_is_read_from_real_frames(
+    monkeypatch: pytest.MonkeyPatch, frame: list[str] | None, shows: str
+) -> None:
+    """R3-m2: ``_pane_shows`` on real captures — Claude Code idle at its prompt, mid-turn, its
+    spinner while a prompt's hook runs, a dialog — and a capture that fails, which reads as
+    ``unknown``, never ``idle``."""
+    monkeypatch.setattr(fleet_service, "server_of", lambda agent, config=None: _Pane(frame))
+    agent = SimpleNamespace(pane_id="%3")
+
+    assert hooks_service._pane_shows(agent) == shows  # type: ignore[arg-type]
+
+
+def test_a_pane_that_cannot_be_captured_stops_the_move(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[list[str]],
+    nudged: list[str],
+) -> None:
+    """R3-m2: the last check fails CLOSED. A capture that raises is no idle prompt: no
+    ``/exit``, the cool-down given back, and no turn said that nobody saw begin."""
+    endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
+    _settings(before_limit="switch")
+    _agent(work)
+    _on_record(endpoint)
+    _stop(runner, work)
+    monkeypatch.setattr(fleet_service, "server_of", lambda agent, config=None: _Pane(None))
+    exited: list[str] = []
+
+    def switch(project: ProjectInfo, label: str, **kwargs: Any) -> Any:
+        kwargs["before_stop"]()
+        kwargs["after_mark"]()
+        exited.append(label)
+        raise AssertionError("moved past a pane it could not see")
+
+    monkeypatch.setattr(fleet_service, "switch", switch)
+    _work(runner)
+
+    assert exited == [] and nudged == [] and _cool_down(work) is None
+    assert _state() == "waiting"
+
+
+@pytest.mark.parametrize("kind", ["user", "assistant"])
+def test_a_prompt_or_a_reply_after_the_turn_end_is_activity(
+    fake_home: Path,
+    work: ProjectInfo,
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    started: list[list[str]],
+    nudged: list[str],
+    kind: str,
+) -> None:
+    """R3-m2: a ``user`` or ``assistant`` record after the turn end is a turn begun — the one
+    witness left when a prompt's hook failed before it stamped ``prompted_at`` — and what Claude
+    Code writes at an idle prompt (``stop_hook_summary``, ``turn_duration``) is not."""
+    endpoint = _accounts(monkeypatch, work=_payload(92), home=_payload(10))
+    _settings(before_limit="switch")
+    _agent(work)
+    _on_record(endpoint)
+    _stop(runner, work)
+    size = _transcript(work).stat().st_size
+    _turn_end_record(work)
+    assert not transcripts.activity_since(_transcript(work), size)
+    _write(
+        _transcript(work),
+        {"type": kind, "timestamp": _stamp(), "message": {"role": kind, "content": "go on"}},
+    )
+    assert transcripts.activity_since(_transcript(work), size)
+    exited: list[str] = []
+
+    def switch(project: ProjectInfo, label: str, **kwargs: Any) -> Any:
+        kwargs["before_stop"]()
+        exited.append(label)
+        raise AssertionError("moved into a turn")
+
+    monkeypatch.setattr(fleet_service, "switch", switch)
+    _work(runner)
+
+    assert exited == [] and nudged == [] and _state() == "working"

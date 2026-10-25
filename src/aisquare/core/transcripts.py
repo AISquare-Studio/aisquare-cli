@@ -350,13 +350,35 @@ def background_running(
     ``/exit`` then kills it, and a resumed conversation waits for a notice that never comes.
     ``[accounts] before_limit`` moves nobody while it runs (``services.hooks``).
 
+    Work a SUBAGENT launched is the session's too: its launch is in the subagent's own
+    transcript, ``<session>/subagents/agent-<id>.jsonl`` beside ``path``, and its notice lands
+    in the main one (review of #423, round 3: 19 on this machine, 6 of 10 traced still running
+    at a main turn end). Those files are read for launches and stops first, then ``path``,
+    whose notices end them.
+
     ``since`` leaves out launches written before it — the start of the process that runs the
     agent now (its fleet row's): a restart or a switch resumes the conversation, not the work,
     and its launches would otherwise read as running for good. A launch on a line too long to
     parse (:data:`_LINE_MAX_BYTES`) is read by its id alone and counted. Read whole, line by
-    line; ``OSError`` when the file cannot be read.
+    line; ``OSError`` when a file cannot be read.
     """
     running: dict[str, datetime | None] = {}
+    for transcript in (*_subagent_transcripts(path), path):
+        _read_background(transcript, running, since)
+    moment = now or datetime.now(tz=UTC)
+    return [task for task, until in running.items() if until is None or until > moment]
+
+
+def _subagent_transcripts(path: Path) -> list[Path]:
+    """The transcripts of the subagents the session at ``path`` ran: ``<session>/subagents``."""
+    folder = path.with_suffix("") / "subagents"
+    return sorted(folder.glob("*.jsonl")) if folder.is_dir() else []
+
+
+def _read_background(
+    path: Path, running: dict[str, datetime | None], since: datetime | None
+) -> None:
+    """Add the launches of ``path`` to ``running`` and take out what ended there."""
     with path.open("rb") as handle:
         for raw in handle:
             if not any(mark in raw for mark in _LAUNCH_MARKS):
@@ -376,8 +398,6 @@ def background_running(
                 continue
             for task, until in _launches(record, when):
                 running[task] = until
-    moment = now or datetime.now(tz=UTC)
-    return [task for task, until in running.items() if until is None or until > moment]
 
 
 def _notices_with_a_status(raw: bytes) -> list[str]:

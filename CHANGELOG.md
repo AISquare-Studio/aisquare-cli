@@ -48,8 +48,10 @@ fleet still running, and every release now carries its own installer.**
   board's prompt stamp, a queued message or notice taken in the transcript) and that the
   pane shows Claude Code idle at its prompt — the check that catches a prompt typed in the
   last moment, whose spinner shows before it reaches the board or the transcript — and
-  leaves the agent alone if not. The manager and the captain are not moved before a limit. The board says
-  `switched … (before limit)`, and the manager is woken only if the move fails.
+  leaves the agent alone if not. Work a subagent launched counts too (its own transcript,
+  under the session's `subagents/`). The manager and the captain are not moved before a
+  limit. The board says `switched … (before limit)`, and the manager is woken only if the
+  move fails.
   `warn` puts one `before_limit` line on the board per crossing of the line (for you; it
   reaches no agent's prompt). No move when the windows over the line reset within
   `wait_if_reset_within_minutes`, when no other account is under the line, for an agent put

@@ -1066,6 +1066,7 @@ trade-off is first.
 | 24 | P1-WS5d (pytest-xdist) landing via this train | Merged into `rc/p0-reliability` so every train gets it through the syncs; P1's release notes say so; `-n auto` in the Makefile and CI `check`, not `addopts`; the ambient job stays serial | #309 | `pytest -p no:xdist` runs serially |
 | 25 | W0's scale and oldest Claude Code version | 5 sessions, not 20; 2.1.223 as the oldest (the fleet's resume floor) | #320 | The as-written run after all four trains are on `main` |
 | 26 | The version number | 0.9.0 proposed: a store migration (schema 36) and new receipt fields | — | The owner sets it when cutting the release |
+| 27 | A command-line first message at Claude Code's first-run Security notes (main's #32 L2, the owner's D1) | (a): the spawn presses past the notes only where it types the first message (`first_prompt = "type"`). An argv agent at the notes reads `attention` ("Claude Code's first-run Security notes screen — press Enter in its window"): before any hook through the trust-question read, and once its SessionStart has fired, past `prompt_ack_seconds`, when its row moves to `unsent` and the board gets one `prompt_unsent` that wakes the manager (P0-FU1). A prompt after a human's Enter takes it. Checked in the post-main live run: does the positional prompt run as the first turn after that Enter | #404, P0-FU1 | (b): the argv spawn presses past the notes itself, a screen poll on every spawn; a P0 follow-up if the live check fails |
 
 ### Known gaps
 

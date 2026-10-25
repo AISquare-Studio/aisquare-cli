@@ -10,9 +10,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 **The captain: an experimental voice-and-text agent that runs every project's fleet
 for you, off until you turn it on. Personas: run any agent as someone. Remote control
-needs nothing more installed. Restart all brings back agents that died, the agent
-pane keeps up with your typing, the first enabled, signed-in account is the
-machine default, and every release now carries its own installer.**
+needs nothing more installed. Work briefs and the evidence gate: a task linked to a
+brief's requirements is done only on a fresh pass from an `asq exec` report. Restart
+all brings back agents that died, the agent pane keeps up with your typing, the first
+enabled, signed-in account is the machine default, and every release now carries its
+own installer.**
 
 ### Added
 
@@ -204,7 +206,7 @@ machine default, and every release now carries its own installer.**
   there says so rather than that the pack is opt-in (a pack of it left from before
   is not served, and the next onboard or `init` deletes it). Removing it from the
   fleet hides it again. Every other role, fleet row and board, and the store
-  (schema v35), are the same either way. Four fleet changes that came with it are
+  (schema v36), are the same either way. Four fleet changes that came with it are
   not behind the switch, on or off: a tmux server the fleet starts holds no team
   variable, doctor's `fleet server env` row, the board each delta and wake-up line
   names, and `serve --stdio`'s idle clock (all under Fixed, below).
@@ -491,10 +493,14 @@ machine default, and every release now carries its own installer.**
   launches on its own directory after the upgrade. A headroom pick still
   overrides the binding, as before. An old default that is signed out or
   disabled no longer gets the launch: the next enabled, signed-in account does.
-- The store migrates to schema v35 on first open, from 0.8.2's v32, in three steps: v35
-  adds two tables, `usage_session` and `usage_turn`, for `aisquare metrics tokens`. v34
-  adds `fleet_agent.ended_by`, how an agent's row ended (`stopped` on aisquare's word,
-  `died` otherwise; NULL on a row from before it, read by its exit status, #38). The
+- The store migrates to schema v36 on first open, from 0.8.2's v32, in four steps: v36
+  adds the `brief` table and its `brief_number` index, for work briefs. The briefs
+  branches (#300, #306, #341) stamped it v34: such a store reads v34 with `brief` and
+  without `ended_by`, the presence pass adds the column before v35, and v36 finds
+  `brief` in place. v35 adds two tables, `usage_session` and `usage_turn`, for
+  `aisquare metrics tokens`. v34 adds `fleet_agent.ended_by`, how an agent's row
+  ended (`stopped` on aisquare's word, `died` otherwise; NULL on a row from before
+  it, read by its exit status, #38). The
   token-metrics branch (#346) stamped its tables v34 too: its store reads v34 without
   `ended_by`, and the presence pass adds the column before v35, which finds its tables
   in place (#42). v33

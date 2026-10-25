@@ -110,13 +110,13 @@ TRANSIENT_AMBER="claude-account-backoff"
 
 # The installed RELEASE's rows for the codebase snapshot this tree removed
 # (#399): `repomix`, `snapshot` and `tiktoken`. This script installs the latest
-# release, and every release up to 0.9.0 has them. `repomix` goes amber with a
+# release, and every release up to 0.8.2 has them. `repomix` goes amber with a
 # Node below 22 or no npm, which this script no longer upgrades unless the
 # Chrome DevTools extra is chosen; `snapshot` in 0.8.2 with no project or no Node
 # to pack with. Neither is a state this run caused or could fix. Measured by the
 # review of #399: `--yes` on Debian 12's own Node 18 exited 2 on `repomix`. The
 # same reasoning keeps `--with tiktoken` above install_cli; drop both once a
-# release without these rows is the latest on PyPI.
+# release without these rows (0.9.0 on) is the latest on PyPI.
 RELEASE_ERA_AMBER="repomix snapshot tiktoken"
 
 # --- options (§3.5) ---------------------------------------------------------
@@ -1089,13 +1089,13 @@ Open a new shell and rerun, or add it by hand:
 # ---------------------------------------------------------------------------
 
 # tiktoken STAYS, though this tree no longer uses it (#399). This script installs
-# the latest RELEASE, and every release up to 0.9.0 has a `tiktoken` doctor row
+# the latest RELEASE, and every release up to 0.8.2 has a `tiktoken` doctor row
 # that goes amber without it on a machine with Node, which the Chrome DevTools
 # extra makes.
 # Measured in the container matrix: run 4 upgraded to the release, its doctor
 # called tiktoken unexpected, and the run exited 2. Drop `--with tiktoken` here,
 # with RELEASE_ERA_AMBER and docs/install.md's by-hand line, once a release
-# without that row is the latest on PyPI.
+# without that row (0.9.0 on) is the latest on PyPI.
 
 install_cli() {
     _target=$INSTALL_TARGET

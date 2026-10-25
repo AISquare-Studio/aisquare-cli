@@ -7,7 +7,7 @@
 # AISQUARE_INSTALL_PACKAGE is a wheel built from it) and chooses
 # --with chrome-devtools, so its Node is 22.12 or newer. But install.sh installs
 # the latest release from PyPI for everyone else, and that release's doctor can
-# have rows this tree no longer has: up to 0.9.0, the codebase snapshot's
+# have rows this tree no longer has: up to 0.8.2, the codebase snapshot's
 # `repomix`, `snapshot` and `tiktoken` (#399). The review of #399 found
 # `curl … | sh -s -- --yes` on Debian 12's own Node 18 exiting 2 on `repomix`,
 # which no cell could see. This one installs the release there, with the flags
@@ -36,8 +36,8 @@ head1() { printf '\n=== %s ===\n' "$*"; }
 
 # THIS TREE'S SCRIPT, not the release's. Once main's install.sh hands off to the
 # script attached to the latest release (#402), a run with AISQUARE_INSTALL_PACKAGE
-# unset downloads that one instead, and 0.9.0's still upgrades Node for Repomix, so
-# the Node check below would grade 0.9.0's installer. The variable, not
+# unset downloads that one instead, so the Node check below would grade the
+# release's installer, not this tree's. The variable, not
 # --no-handoff: until #402 merges, parse_args refuses the flag, and nothing reads
 # the variable.
 AISQUARE_INSTALL_NO_HANDOFF=1

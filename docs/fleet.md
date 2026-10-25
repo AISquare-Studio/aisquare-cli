@@ -2019,6 +2019,11 @@ follows it:
 - `capture.enabled = false` now stops prompt capture: `aisquare log` stays empty and
   nothing is spooled ([reference](reference.md#configuration-keys)).
 - `aisquare doctor` gains a `fleet-delivery` row.
+- The codebase snapshot is gone, and `aisquare doctor` loses its `repomix`, `snapshot`
+  and `tiktoken` rows. The first command deletes the old packs under
+  `~/.aisquare/projects/<id>/snapshot/`, once, and nothing else. A `[snapshot]` section
+  in `config.toml` is no longer read: doctor's config row says so, and the next save
+  drops it.
 - **On a shared machine**, a first message on the command line can be read by other
   local users in `ps` while the agent runs. `aisquare config set fleet.first_prompt
   type` keeps it off the command line.
@@ -2026,7 +2031,8 @@ follows it:
 **Moving back** to 0.8.2 or earlier with `aisquare upgrade --version <v>` is safe. An
 older build opens a v36 store as it is, without migrating it down, and never reads the
 three columns. It ignores the new config keys and types first messages as it always
-did.
+did. It packs a project again on `project onboard` and `init` where its Node can,
+with its default `[snapshot]` settings once a save here has dropped yours.
 
 ## Troubleshooting
 

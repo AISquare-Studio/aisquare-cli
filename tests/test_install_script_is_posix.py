@@ -228,7 +228,7 @@ def test_the_upgrade_restates_the_tiktoken_extra(source: str) -> None:
     Dropping it would leave a machine whose `tiktoken` doctor line went amber
     only after an UPGRADE — the hardest kind of regression to attribute. This
     tree has no such row (#399), but the script installs the latest RELEASE, and
-    every release up to 0.9.0 has it (the install.sh comment above install_cli).
+    every release up to 0.8.2 has it (the install.sh comment above install_cli).
     """
     upgrade = re.search(
         r"uv tool install --force[^\n]*(\n\s+[^\n]*)*?\"\$_spec\"", source

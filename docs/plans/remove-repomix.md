@@ -2,7 +2,8 @@
 
 > **Status: the plan of PR #399, implemented there.** #399 removes the codebase snapshot
 > and its packer from the CLI completely, on `main` after #274 (merged at `8eb18a8a`). It
-> is not in 0.9.0, which ships first; its CHANGELOG entries sit under `[Unreleased]`. The
+> ships in 0.9.0: the owner had it merged into #401's branch (`feat/versioned-installers`),
+> the 0.9.0 release PR, on 2026-10-25, so its CHANGELOG entries sit under `[0.9.0]`. The
 > owner's decisions of 2026-10-24 are recorded below. This file began as a handoff (#57,
 > `4b9ae1fd`); what that handoff found, with its names and line numbers, is kept in
 > [History](#history).
@@ -115,7 +116,7 @@ own any more.
   picks.
 - **tiktoken** counted pack tokens and nothing else, and it was never a dependency in
   `pyproject.toml`, so `uv.lock` does not change. `install.sh` still adds it, on
-  purpose: the script installs the latest *release*, and a release up to 0.9.0 has a
+  purpose: the script installs the latest *release*, and a release up to 0.8.2 has a
   `tiktoken` doctor row that goes amber without it on a machine with Node, which the
   Chrome DevTools extra makes. The container matrix measured it: run 4 upgraded to the release,
   its doctor called tiktoken unexpected, and the run exited 2. So `--with tiktoken`
@@ -199,8 +200,11 @@ own any more.
   edits. The PDFs: see the PR body for which could be regenerated here.
 - `docs/plans/one-line-install.md` and `docs/plans/fleet-tui.md` are historical plans; each
   carries a status note at the top rather than a rewrite.
-- `CHANGELOG.md`: under `[Unreleased]`, a Changed entry for `install.sh` and a Removed
-  entry for the snapshot. Released entries are left as they are.
+- `CHANGELOG.md`: under `[0.9.0]`, a Changed entry for `install.sh` and a Removed
+  entry for the snapshot. Released entries are left as they are. Three of 0.9.0's own
+  lines the removal made untrue in the same release are taken out: the captain home is
+  never packed, `init`'s pack is opt-in through `project onboard`, and the docs sweep
+  skips worktrees the way `core/snapshot.py` did.
 
 ## Not this snapshot: kept
 
@@ -216,7 +220,8 @@ own any more.
 ## How to verify
 
 - A case-insensitive `git grep` for the packer's name (see History) finds the CHANGELOG
-  (the removal entry, and the released and 0.9.0-bound entries as history), this file's
+  (the removal entry, the released entries as history, and 0.9.0's line that session
+  start no longer points agents at the pack), this file's
   History section, and the two historical plans.
 - `git grep -n 'core.snapshot\|snapshot_core\|SnapshotSettings' -- src tests` finds
   nothing.
@@ -235,8 +240,8 @@ own any more.
 - Drop `--with tiktoken` from `install.sh` (its comment above `install_cli` says why it
   stays), the cells' run 4, Remote's fallback hint and `docs/install.md`'s by-hand line,
   and `RELEASE_ERA_AMBER` with it, once a release without those doctor rows is the
-  latest on PyPI. That is the first release that ships this script, so it goes on that
-  release PR's checklist.
+  latest on PyPI: 0.9.0, the release that ships this script, so it can go in the first
+  change after 0.9.0 is on PyPI.
 - The decks still say session start hands over the project's prompt history; #346 removed
   that line too. Left for the owner, with the generator's templates.
 - `install.sh`'s short-circuit does not look at the project: a current machine set up with

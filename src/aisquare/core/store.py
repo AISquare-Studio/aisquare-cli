@@ -547,8 +547,8 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
     store another line stamped past 17 without ever running it.
     "On purpose" is read off what the row already carries: context entries, a
     codename (it entered the fleet), linked repos, board activity, a fleet
-    agent — and a codebase snapshot on disk, which ``project onboard`` wrote up to
-    0.9 and ``init`` up to 0.8 (:func:`_snapshot_on_disk`). Everything else — the
+    agent — and a codebase snapshot on disk, which ``project onboard`` and ``init``
+    wrote up to 0.8.2 (:func:`_snapshot_on_disk`). Everything else — the
     23 of 27 registrations on the reporting machine that held nothing but
     captured prompts — stays hidden, reachable through ``project list --all``.
 
@@ -590,8 +590,8 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
 def _snapshot_on_disk(project_id: str) -> bool:
     """Whether the project's old pack is on disk; one that cannot be looked at is no evidence.
 
-    Builds up to 0.9 packed a project on ``project onboard`` (up to 0.8, on ``init``
-    too), and wrote ``projects/<id>/snapshot/snapshot.json`` beside the pack. The packer is gone,
+    Builds up to 0.8.2 packed a project on ``project onboard`` and on ``init``, and
+    wrote ``projects/<id>/snapshot/snapshot.json`` beside the pack. The packer is gone,
     but a store from 0.6 or older still reaches this backfill, and for a project the
     owner added and never used, that file is its only mark. So the check is a plain
     path, with no packer to import, and :func:`_remove_old_packs` deletes the packs
@@ -617,7 +617,7 @@ _OLD_PACKS_REMOVED = "old-packs-removed"
 
 
 def _remove_old_packs() -> None:
-    """Delete the codebase packs builds up to 0.9 left in ``projects/<id>/snapshot/``, once.
+    """Delete the codebase packs builds up to 0.8.2 left in ``projects/<id>/snapshot/``, once.
 
     Called by :func:`open_store` after :func:`_migrate`, and never before it: the v17
     backfill reads a pack's ``snapshot.json`` as evidence (:func:`_snapshot_on_disk`),

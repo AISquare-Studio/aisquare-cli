@@ -86,6 +86,6 @@ aisquare project prune --missing --worktrees  # the stale ones, after a confirma
 context pool with one fact per marker it finds at the root (`pyproject.toml`,
 `package.json`, `Cargo.toml`, a `Makefile`, a `Dockerfile` and a few more). A
 second run seeds nothing; `--refresh` reads the markers again and adds only the
-facts that are new. It runs no packer: up to 0.9, `onboard` also packed a
-codebase snapshot, and the first command of a later version deletes the old
+facts that are new. It runs no packer: up to 0.8.2, `onboard` also packed a
+codebase snapshot, and the first command of 0.9.0 or later deletes the old
 packs under `~/.aisquare/projects/<id>/snapshot/`.

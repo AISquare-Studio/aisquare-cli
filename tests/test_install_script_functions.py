@@ -1838,7 +1838,7 @@ _RELEASE_ROWS = ("brain repomix", "brain snapshot", "brain tiktoken", "brain rep
 def test_the_installed_releases_snapshot_rows_are_expected(
     tmp_path: Path, amber: str, flags: str
 ) -> None:
-    """install.sh installs the latest RELEASE, and up to 0.9.0 its doctor has `repomix`
+    """install.sh installs the latest RELEASE, and up to 0.8.2 its doctor has `repomix`
     (amber with a Node below 22, which this script no longer upgrades unasked, or no
     npm), `snapshot` (0.8.2, with no project or no Node to pack with) and `tiktoken`.
     Review of #399, MAJOR 1: `--yes` on Debian 12's own Node 18 exited 2 on `repomix`.

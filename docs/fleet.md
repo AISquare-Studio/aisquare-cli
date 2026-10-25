@@ -2340,10 +2340,10 @@ threshold or a timer.
 
 ## Upgrading
 
-To 0.9.0 from 0.8.2: the store migrates itself from v32 to v38 on first open, and
-the config file moves to version 3, once. The three steps below are all 0.9.0's: the
-first messages (v36), the token diet (v37 and config version 3), then capacity and
-setup (v38).
+To 0.9.0 from 0.8.2: the store migrates itself from v32 to v39 on first open, and
+the config file moves to version 3, once. The four steps below are all 0.9.0's: the
+first messages (v36), the token diet (v37 and config version 3), capacity and setup
+(v38), then work briefs (v39).
 
 ### To 0.9.0, part 1: verified first messages (store schema 36)
 
@@ -2487,11 +2487,25 @@ before the step, reads as before. The symbol index is its own SQLite file per pr
   `claude-accounts sharing` and `fleet watcher`.
 
 **Moving back** with `aisquare upgrade --version <v>` is safe for the store: an older build
-opens a v38 store as it is, without migrating it down, and never reads the five columns. A
+opens a v39 store as it is, without migrating it down, and never reads the five columns. A
 group's parent, its routes and its cap, and every task's link to its origin, are then
 ignored, and come back on the next upgrade. The new config keys are ignored by an older
 build. Shared accounts stay linked: run `aisquare accounts share --disable <parts>` before
 moving back to put each account's own entries back.
+
+### To 0.9.0, part 4: work briefs (store schema 39)
+
+**The store migrates itself on first open, from v38 to v39, in one step.** v39 adds the
+`brief` table and its `brief_number` index, for work briefs and the evidence gate
+([work-briefs.md](work-briefs.md)). Its script is `CREATE … IF NOT EXISTS` only. A store
+that a pre-release build of the briefs branches (#306, #341, #417) stamped v34, v36, v37
+or v38 already holds `brief`, and converges the same way as the steps above: the presence
+pass adds what a step under its stamp left out (for #417's v38, part 3's columns), and
+v39 finds `brief` in place, its briefs intact. No config key is added, and a task no
+brief links is done exactly as before.
+
+**Moving back** with `aisquare upgrade --version <v>` is safe for the store: an older build
+opens a v39 store as it is, without migrating it down, and never reads the `brief` table.
 
 ## Troubleshooting
 

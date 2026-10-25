@@ -898,10 +898,10 @@ The owner approves the train on these. Each row is one call: the default this tr
 | 23 | `code.enabled` default | **true**: `init` and `onboard` build the index in the background | #327, #385 | `aisquare config set code.enabled false` |
 | 24 | The session-start refresh | throttled by time (once a minute per project), not by HEAD or dirtiness | #327 | Code |
 | 25 | Which checkout the index covers | the project's root checkout; a worktree coder queries the main checkout's index | #327 | Code |
-| 26 | The directive's two `aisquare code` lines | kept, though the live sample shows no token saving (Grep/Glob fell a third) | #327 | Code (the index and commands stay without it) |
+| 26 | The directive's two `aisquare code` lines | withdrawn: main's #346 removed the session-start directive, and the sync of main 8eb18a8a kept it out (the live sample showed no token saving: Grep/Glob fell a third) | #327 | — (the index, the commands and the `code_lookup` MCP tool stay) |
 | 27 | A query with no index yet | builds it inline, saying so; beside a background build it fails fast with `index_busy` | #385 | Code |
 | 28 | The snapshot index's format | one JSON array, one entry per line, still `index.json` (not JSONL) | #328 | Code |
-| 29 | W6's linkage columns amend #140's "no group id in board tables" | the three `project_group` columns and the two `team_task` origin columns (schema 36) | #381 | — |
+| 29 | W6's linkage columns amend #140's "no group id in board tables" | the three `project_group` columns and the two `team_task` origin columns (schema 38; 36 before the sync of main 8eb18a8a) | #381 | — |
 | 30 | What routes up by default | questions to the manager, the parent or nobody, `task_blocked`, `result`, delegated tasks' status changes | #381 | `aisquare project group route <group> --kinds …` / `--pattern` / `--off` |
 | 31 | The storm guard | one routed line per child per 60 s, the rest folded into a count; a question, a blocked task and `--to parent` never folded | #381 | Code |
 | 32 | The subtree-pause refusal | only under a parent; a person's own spawn on a paused board still goes ahead | #381 | Code |

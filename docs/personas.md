@@ -66,18 +66,20 @@ block.
 ## Where personas live
 
 ```text
-<repo>/.aisquare/personas/<name>/SKILL.md     project — shared with the repo, wins
+<project>/.aisquare/personas/<name>/SKILL.md  project — shared with the repo, wins
 $AISQUARE_HOME/personas/<name>/SKILL.md       user    — this machine, every project
 (inside the aisquare package)                 bundled — ships with the CLI, read-only
 ```
 
-The project layer is the git repository around your working directory. When
-two layers hold the same name the higher one wins, and `persona list` marks the
-winner `(shadows bundled)`. A directory that does not load is listed as
+The project layer is the project your working directory is in: its git
+repository's principal checkout, else the nearest folder marked as one (`.aisquare`,
+`.hg`); outside any project there is none. Spawn, launch, the session's briefing,
+`persona` and the Personas tab all read the same one. When two layers hold the same
+name the higher one wins, and `persona list` marks the winner `(shadows bundled)`. A directory that does not load is listed as
 `✗ <path>: <reason>` and never hides the others.
 
 Claude Code's own skill directories — `<config dir>/skills/` and
-`<repo>/.claude/skills/` — are **not** a layer: most skills are workflows, not
+`<project>/.claude/skills/` — are **not** a layer: most skills are workflows, not
 personalities. They are where `persona import` finds skills and where
 `persona export --skill` puts personas.
 
@@ -141,8 +143,8 @@ with. The variable applies when the agent has no fleet row, or a row with no
 persona, and either one wins over a persona a session recorded earlier. Attaching
 another persona replaces it, and the agent is told which one it replaces.
 In `asq`, the Spawn dialog (`＋ spawn agent` under a project) asks for the
-persona right after who runs the agent — role, account, binary — with the role's
-default preselected and the persona's description under the field; `(none)`
+persona in its **Advanced** section, right after who runs the agent — *Pick…*,
+binary — with the role's default preselected and the persona's description under the field; `(none)`
 spawns without one even when the role has a default. The Settings tab sets each
 role's default persona, and an agent running as a persona carries a dim
 `· skeptic` on its sidebar row.
@@ -261,8 +263,8 @@ and extra args — and the list comes back with the new bind selected. **+ New
 account** takes you to the Accounts page and starts its sign-in for a new slot;
 come back to the Personas tab when it has signed in.
 
-The same picker is the Spawn dialog's **Pick…**: from `＋ spawn agent`, Pick…
-opens it with Binds first and fills the dialog's role, binary or account from
+The same picker is the Spawn dialog's **Pick…**, under **Advanced**: from
+`＋ spawn agent`, Pick… opens it with Binds first and fills the dialog's role, binary or account from
 what you choose, keeping everything else you typed. **Import…** beside the
 dialog's Persona field imports a persona and selects it.
 
@@ -363,11 +365,14 @@ is converted into a skill by an engine: a name, a one-line description, a body o
 at most 4,000 characters that keeps the source's intent, and notes on what it
 dropped. `--llm` sends a recognised skill through an engine anyway, to reshape
 it; `--condense` asks for a shorter body — the remedy for a skill over the
-4,000-character soft cap, or even over the 12,000 hard cap. Either keeps the
-skill's name — `--name`, else the name a copy would take — so only a source with
-no name of its own is named by the engine. `--no-llm` forbids the path, for a
-script that must never spend a token. The source is given to the engine as data,
-never as instructions.
+4,000-character soft cap, or even over the 12,000 hard cap. A source keeps its own
+name on this path too — `--name`, else a skill directory's name (whether or not its
+`SKILL.md` is recognised), else the name a copy of the file would take — and that
+name is held to the naming rule before any engine runs. Only a source with no name
+of its own is named by the engine: a file, a page or stdin that is not a recognised
+skill, or stdin whose frontmatter names nothing usable. `--no-llm` forbids the path,
+for a script that must never spend a token. The source is given to the engine as
+data, never as instructions.
 
 The engines, tried in this order unless `--engine` picks one:
 
@@ -384,8 +389,10 @@ The engines, tried in this order unless `--engine` picks one:
 **An engine import costs money or quota**, and the output says which engine and
 model ran. The draft is held to the same rules as a copied skill (one retry, told
 what failed), written to `$AISQUARE_HOME/personas/.drafts/<name>/SKILL.md` before
-anything else, and shown — frontmatter, the first twelve body lines, the character
-count, engine, model and notes — for a `y/N`. `--yes` saves without asking. With
+anything else (a kept draft imported again, the retry after `import_invalid`, writes
+its new draft to `.drafts/retry/<name>/`, never over itself), and shown —
+frontmatter, the first twelve body lines, the character count, engine, model and
+notes — for a `y/N`. `--yes` saves without asking. With
 `--json`, or without a terminal, the draft is kept and the import exits
 `needs_confirmation` with the draft's path; importing that path saves it. A draft
 that fails validation twice is kept as well (`import_invalid`). A saved import

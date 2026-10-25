@@ -367,6 +367,17 @@ call, and stands still while a call is running, so a tool call longer than the
 deadline is answered rather than cut off mid-wait (the captain's
 `ask_manager` waits up to 600s under a 300s default).
 
+Every MCP client is on the board as a session of its own, `mcp:<client>:<project>`
+(`AISQUARE_SERVE_CLIENT`, else `remote`), and every live one counts as a teammate. That
+includes the aisquare MCP server a session mounts for its own tools: no row tells the two
+apart for sure. So a solo session (see "Less per-request context" in the CHANGELOG) that
+calls one of aisquare's board tools, such as `team_board`, reads as a team from then on,
+and gets the board, the full MCP instructions and the team block on new starts, until
+that row goes stale 30 minutes after its last call. This is a known limitation: it costs
+tokens, and never hides a teammate. Precise detection of a session's own server is a
+planned follow-up: the plan is in draft
+[PR #397](https://github.com/AISquare-Studio/aisquare-cli/pull/397).
+
 ### Phone control (`aisquare remote`)
 
 The fleet on your phone: one feed of everything waiting on you across every
@@ -376,14 +387,17 @@ you. Once you allow writes, the phone can answer a prompt, type to an agent, or
 stop, restart or switch it. It is one server on `127.0.0.1:8750` behind your own
 ngrok tunnel, and the page it serves ships inside aisquare-cli.
 
+Nothing to install: the server and the ngrok agent come with aisquare-cli. Paste
+your free ngrok token once, in `aisquare ui` → *⚙ Settings* → *Remote control*.
+
 ```sh
-uv tool install --python 3.13 --with tiktoken 'aisquare-cli[remote]'   # pipx, pip or more extras: docs/remote.md
 export AISQUARE_REMOTE_NGROK_URL=https://your-name.ngrok-free.app   # your static domain
 aisquare remote allow-write on       # read-only until you say so
 ```
 
-Then press `R` in `aisquare ui` and switch Remote on: the panel starts the server
-and ngrok on that domain itself, and shows the link, a QR code and the passphrase.
+Then turn Remote on in Settings, or press `R` and switch it on: the panel starts
+the server and ngrok on that domain itself, and shows the link, a QR code and the
+passphrase.
 Without the fleet UI, start both yourself instead, never beside the panel: a domain
 holds one tunnel, so a second ngrok on it fails:
 

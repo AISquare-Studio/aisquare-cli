@@ -712,14 +712,37 @@ def test_running_session_auto_joins_on_prompt_after_activation(
 ) -> None:
     # Session starts BEFORE the orchestrator is active: silent, unregistered.
     assert _start(runner, CODER, work_dir).stdout.strip() == ""
-    # The orchestrator activates afterwards (e.g. someone ran `team on`).
+    # The orchestrator activates afterwards (e.g. someone ran `team on`), and a
+    # teammate is on the board: alone, the session would join unbriefed and silent
+    # (tests/test_team_block_needs_a_team.py).
     runner.invoke(app, ["team", "on"])
+    _start(runner, PLANNER, work_dir)
     # Its next prompt registers it and delivers the full board + protocol.
     first = _prompt(runner, CODER, work_dir)
     assert "<aisquare-team>" in first.stdout
     assert "You are team session bbbb2222" in first.stdout
     # After that, it behaves like any registered session (quiet when quiet).
     assert _prompt(runner, CODER, work_dir).stdout.strip() == ""
+
+
+def test_a_session_that_joins_on_its_prompt_is_briefed_with_its_persona(
+    runner: CliRunner, work_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Launched with ``--persona`` before the team was on, it joined at its first prompt:
+    the row recorded no persona and the board came without the block, until a ``/clear``
+    (review of #201, R1-F3). The join is its first injection, and briefs it as a start does;
+    the next prompt is a delta again, with no persona text."""
+    monkeypatch.setenv("AISQUARE_PERSONA", "skeptic")
+    assert _start(runner, CODER, work_dir).stdout.strip() == ""
+    runner.invoke(app, ["team", "on"])
+
+    first = _prompt(runner, CODER, work_dir).stdout
+    with store_session() as store:
+        joined = store.get_session(CODER)
+
+    assert joined is not None and joined.persona == "skeptic"
+    assert '<aisquare-persona name="skeptic"' in first
+    assert "aisquare-persona" not in _prompt(runner, CODER, work_dir).stdout
 
 
 def test_role_cycles_are_injected_automatically(

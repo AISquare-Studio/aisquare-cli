@@ -164,6 +164,10 @@ PROJECT_OF: dict[tuple[str, str], str] = {
     ("services/fleet.py", "_send_it_later"): _FLEET_OP,
     ("services/fleet.py", "unsent_detail"): "the project the listing reads, whose agent it is",
     ("services/fleet.py", "_past_trust_prompt"): _FLEET_OP,
+    ("services/fleet.py", "_at_input_box"): _FLEET_OP,
+    ("services/fleet.py", "_dead_team_line"): (
+        "the project of the manager restarted, whose dead team the line names (#38)"
+    ),
     ("services/fleet.py", "_forget"): (
         _FLEET_OP + ", or each stranded row's own (``_refuse_a_freed_socket``)"
     ),

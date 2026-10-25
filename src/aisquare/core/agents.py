@@ -135,6 +135,11 @@ def _claude_home(config_dir: Path | None = None) -> Path:
     return _home() / ".claude"
 
 
+def claude_home() -> Path:
+    """The config directory the ``claude`` command reads (:func:`_claude_home`)."""
+    return _claude_home()
+
+
 def claude_json_paths(config_dir: Path) -> list[Path]:
     """Every place Claude Code could be keeping ``config_dir``'s ``.claude.json``.
 

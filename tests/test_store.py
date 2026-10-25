@@ -472,10 +472,13 @@ def test_migrations_reach_the_current_schema_version() -> None:
     # v27 a project's nickname, v28 which token took a usage reading (its fingerprint),
     # v29 a task's number on its board, v30 its unique index, v31 the branch of a fleet
     # agent's worktree (review of #259, round 15), v32 the board a fleet agent reads (round 25),
-    # v33 the persona a session and a fleet agent run as (#201), v34 a fleet agent's first
-    # message and a session's last prompt (P0-W1a, #122), v35 who caused a board event and
-    # its details (P1 WS-2, #279)
-    assert version == SCHEMA_VERSION == 36
+    # v33 the persona a session and a fleet agent run as (#201), v34 how a fleet agent's
+    # row ended, stopped or died (#38), v35 session token usage (#346, stamped v34 there),
+    # v36 a fleet agent's first message and a session's last prompt (P0-W1a, #122, stamped
+    # v34 on rc/p0-reliability), v37 who caused a board event and its details (P1 WS-2,
+    # #279, stamped v35 on rc/p1-token-diet), v38 a group's parent manager and a task's
+    # origin (P2-W6, #199, stamped v36 on rc/p2-capacity-setup)
+    assert version == SCHEMA_VERSION == 38
 
 
 def test_a_v14_store_gains_nullable_persona_columns_through_the_persona_step() -> None:
@@ -1298,15 +1301,60 @@ def test_a_foreign_store_a_build_without_the_pass_carried_on_converges_too(
 _SCHEMAS = Path(__file__).parent / "fixtures" / "store_schemas"
 _RC_V21_SCHEMAS = ("rc_v21_owner_home.sql", "rc_v21_owner_asqui.sql", "rc_v21_fresh.sql")
 _PERSONA_COLUMNS = {("column", "team_session.persona"), ("column", "fleet_agent.persona")}
+_ENDED_BY_COLUMN = {("column", "fleet_agent.ended_by")}
+"""v34's product (#38), one step past the persona step on every shape."""
+#: v35 (token metrics, #346): the two usage tables and their indexes, on top of v34.
+_USAGE_STEP = {
+    ("table", "usage_session"),
+    ("index", "usage_session_project"),
+    ("table", "usage_turn"),
+    ("index", "usage_turn_session"),
+    *(
+        ("column", f"usage_session.{column}")
+        for column in (
+            "session_id",
+            "project_id",
+            "transcript_path",
+            "state",
+            "usage",
+            "turns",
+            "total_tokens",
+            "weighted",
+            "cost_usd",
+            "started_at",
+            "updated_at",
+            "ended_at",
+        )
+    ),
+    *(
+        ("column", f"usage_turn.{column}")
+        for column in (
+            "id",
+            "session_id",
+            "project_id",
+            "trace_id",
+            "seq",
+            "trigger",
+            "recorded_at",
+            "usage",
+            "total_tokens",
+            "weighted",
+            "cost_usd",
+            "scan_ms",
+        )
+    ),
+}
 _FIRST_PROMPT_COLUMNS = {
     ("column", "team_session.prompted_at"),
     ("column", "fleet_agent.first_prompt"),
     ("column", "fleet_agent.first_prompt_at"),
 }
-"""v34's products (P0-W1a): no dump of an older store holds them, every store reaches them."""
-#: P1 WS-2's step (#279, v35): who caused a board event, and its details.
+"""v36's products (P0-W1a): no dump of an older store holds them, every store reaches them."""
+#: P1 WS-2's step (#279, v37; v35 on rc/p1-token-diet): who caused a board event, and its
+#: details.
 _EVENT_ACTOR_COLUMNS = {("column", "team_event.actor"), ("column", "team_event.meta")}
-#: v36 (P2-W6, #199): a group's parent, rules and cap; a task's origin.
+#: P2-W6's step (#199, v38; v36 on rc/p2-capacity-setup): a group's parent, rules and cap;
+#: a task's origin.
 _PARENT_COLUMNS = {
     ("column", "project_group.parent_project_id"),
     ("column", "project_group.route"),
@@ -1506,6 +1554,8 @@ def test_mains_v24_store_gains_the_persona_columns_and_keeps_every_row() -> None
     assert shape == (
         _replayed_shape("main_v32_fresh.sql")
         | _PERSONA_COLUMNS
+        | _ENDED_BY_COLUMN
+        | _USAGE_STEP
         | _FIRST_PROMPT_COLUMNS
         | _EVENT_ACTOR_COLUMNS
         | _PARENT_COLUMNS
@@ -1574,16 +1624,22 @@ def test_one_schema_is_mains_v32_with_the_persona_columns_and_the_rcs_v21_with_m
     plus main's v22 to v32, and the RC's v24 plus main's v25 to v32, and nothing else. The
     persona columns are #201's v33, one step on main's v32 with an empty script and the two
     columns as its products, so a store that holds them already (the RC's) is not changed
-    by it."""
+    by it. v34 adds ``fleet_agent.ended_by`` (#38) on top, v35 the two token-usage tables
+    (#346), v36 the first message's three columns (P0-W1a), v37 a board event's actor and
+    details (P1 WS-2), and nothing else."""
     fresh = _built(SCHEMA_VERSION)
+    persona = _built(33)
 
-    assert SCHEMA_VERSION == 36
-    later = _FIRST_PROMPT_COLUMNS | _EVENT_ACTOR_COLUMNS | _PARENT_COLUMNS  # v34, v35, v36
-    assert fresh == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS | later
+    assert SCHEMA_VERSION == 38
+    assert fresh == _built(37) | _PARENT_COLUMNS
+    assert _built(37) == _built(36) | _EVENT_ACTOR_COLUMNS
+    assert _built(36) == persona | _ENDED_BY_COLUMN | _USAGE_STEP | _FIRST_PROMPT_COLUMNS
+    assert _built(35) == persona | _ENDED_BY_COLUMN | _USAGE_STEP
+    assert _built(34) == persona | _ENDED_BY_COLUMN
+    assert persona == _replayed_shape("main_v32_fresh.sql") | _PERSONA_COLUMNS
     for schema in _RC_V21_SCHEMAS:
-        steps = _MAINS_STEPS_PAST_21 | _mains_steps_past_24() | later
-        assert fresh == _replayed_shape(schema) | steps
-    assert fresh == _replayed_shape("rc_v24_fresh.sql") | _mains_steps_past_24() | later
+        assert persona == _replayed_shape(schema) | _MAINS_STEPS_PAST_21 | _mains_steps_past_24()
+    assert persona == _replayed_shape("rc_v24_fresh.sql") | _mains_steps_past_24()
     open_store().close()
     raw = sqlite3.connect(str(_db_path()))
     try:
@@ -1684,7 +1740,7 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
     _schema_again, rows_again = _contents(db)
     version, shape, notnull = _persona_shape(db)
 
-    assert version == SCHEMA_VERSION == 36, label
+    assert version == SCHEMA_VERSION == 38, label
     assert shape == _built(SCHEMA_VERSION), label
     assert notnull == {"team_session": 0, "fleet_agent": 0}, label
     assert old_session is not None and old_session.persona == persona, label
@@ -1695,11 +1751,11 @@ def test_every_store_in_the_wild_reaches_the_persona_step_with_its_rows(
 
 
 def test_a_fresh_store_is_built_with_the_persona_step() -> None:
-    """No file at all: v1 to v34, the same shape as every cohort above reaches."""
+    """No file at all: v1 to v37, the same shape as every cohort above reaches."""
     open_store().close()
     version, shape, notnull = _persona_shape(_db_path())
 
-    assert version == SCHEMA_VERSION == 36
+    assert version == SCHEMA_VERSION == 38
     assert shape == _built(SCHEMA_VERSION)
     assert {("column", "team_session.persona"), ("column", "fleet_agent.persona")} <= shape
     assert notnull == {"team_session": 0, "fleet_agent": 0}
@@ -1720,6 +1776,469 @@ def test_the_persona_step_is_the_columns_alone_on_top_of_main_s_ladder() -> None
         column == "persona" for step, products in _PRODUCTS.items() if step != 32
         for _table, column, _ in products.columns
     )  # fmt: skip
+
+
+# --- two branches stamped v34 (#42): #38's ended_by and #346's usage tables ---------------
+#
+# #274 and #346 each added a step v34: #38's ``fleet_agent.ended_by``, and #346's two token
+# usage tables. Merged, #38's stays v34 and #346's is v35. A store that ran either branch reads
+# v34 and holds only its own step's products, and must reach v35 with both. #346's step is
+# replayed from its DDL as that branch shipped it (827da39f), frozen here, never this ladder's.
+
+#: #346's v34 as its branch shipped it, the store a run of that branch left.
+_USAGE_V34_OF_346 = """
+CREATE TABLE IF NOT EXISTS usage_session (
+    session_id      TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL,
+    transcript_path TEXT,
+    state           TEXT NOT NULL DEFAULT '{}',
+    usage           TEXT NOT NULL DEFAULT '{}',
+    turns           INTEGER NOT NULL DEFAULT 0,
+    total_tokens    INTEGER NOT NULL DEFAULT 0,
+    weighted        REAL NOT NULL DEFAULT 0,
+    cost_usd        REAL NOT NULL DEFAULT 0,
+    started_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    ended_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS usage_session_project ON usage_session (project_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS usage_turn (
+    id           TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL,
+    project_id   TEXT NOT NULL,
+    trace_id     TEXT,
+    seq          INTEGER NOT NULL,
+    trigger      TEXT NOT NULL CHECK (trigger IN ('stop', 'stop_failure', 'session_end')),
+    recorded_at  TEXT NOT NULL,
+    usage        TEXT NOT NULL,
+    total_tokens INTEGER NOT NULL,
+    weighted     REAL NOT NULL,
+    cost_usd     REAL NOT NULL,
+    scan_ms      REAL
+);
+CREATE INDEX IF NOT EXISTS usage_turn_session ON usage_turn (session_id, seq);
+INSERT INTO usage_session (session_id, project_id, state, usage, turns, total_tokens,
+                           weighted, cost_usd, started_at, updated_at)
+    VALUES ('ses_old', 'prj_used', '{"offset": 812}', '{}', 2, 4096, 1.5, 0.25,
+            '2026-10-20T00:00:00+00:00', '2026-10-20T00:05:00+00:00');
+INSERT INTO usage_turn (id, session_id, project_id, seq, trigger, recorded_at, usage,
+                        total_tokens, weighted, cost_usd)
+    VALUES ('utn_old', 'ses_old', 'prj_used', 1, 'stop', '2026-10-20T00:05:00+00:00', '{}',
+            4096, 1.5, 0.25);
+"""
+
+#: What a run of #274's v34 left: an agent row that ended on aisquare's word.
+_ENDED_BY_V34_OF_274 = (
+    "UPDATE fleet_agent SET ended_at = '2026-10-20T00:09:00+00:00', "
+    "exit_status = 0, ended_by = 'stopped' WHERE id = 'agt_old';"
+)
+
+
+def test_the_two_v34_steps_are_v34_and_v35_each_idempotent() -> None:
+    """#38's step stays v34 (an empty script, the column in ``_PRODUCTS[33]``); #346's is
+    v35 (``CREATE ... IF NOT EXISTS`` only, its tables and indexes in ``_PRODUCTS[34]``).
+    Run twice on one store, each leaves what it left once."""
+    from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
+
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 38
+    assert _MIGRATIONS[33] == ""
+    assert _PRODUCTS[33] == _Products(columns=(("fleet_agent", "ended_by", "TEXT"),))
+    assert _PRODUCTS[34] == _Products(
+        ("usage_session", "usage_session_project", "usage_turn", "usage_turn_session")
+    )
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(SCHEMA_VERSION):
+            _run_step(conn, step)
+        once = _shape(conn)
+        _run_step(conn, 33)
+        _run_step(conn, 34)
+        assert _shape(conn) == once
+    finally:
+        conn.close()
+    assert once == (
+        _built(33)
+        | _ENDED_BY_COLUMN
+        | _USAGE_STEP
+        | _FIRST_PROMPT_COLUMNS
+        | _EVENT_ACTOR_COLUMNS
+        | _PARENT_COLUMNS
+    )
+
+
+@pytest.mark.parametrize(
+    ("steps", "after", "label"),
+    [
+        pytest.param(
+            33, _A_SESSION_AND_AN_AGENT + _USAGE_V34_OF_346, "#346", id="#346's v34: usage tables"
+        ),
+        pytest.param(
+            34, _A_SESSION_AND_AN_AGENT + _ENDED_BY_V34_OF_274, "#38", id="#38's v34: ended_by"
+        ),
+    ],
+)  # fmt: skip
+def test_a_store_from_either_branchs_v34_reaches_v35_with_both_steps(
+    steps: int, after: str, label: str
+) -> None:
+    """Stamped v34 by either branch, a store opens at v35 with ``fleet_agent.ended_by`` AND
+    the two usage tables and their indexes: the schema a fresh store has, nothing missing.
+    Its rows read back unchanged on every column they had; the store then writes and reads
+    both steps' data, and a second open changes nothing."""
+    from aisquare.models import SessionUsage, TurnUsage
+
+    db = _at_version(steps, after=_TWO_PROJECTS + after, stamp=34)
+    before, columns = _rows(db)
+    raw = sqlite3.connect(str(db))
+    try:
+        stamped = _shape(raw)
+    finally:
+        raw.close()
+    assert (("column", "fleet_agent.ended_by") in stamped) == (label == "#38"), "the fixture"
+    assert (("table", "usage_session") in stamped) == (label == "#346"), "the fixture"
+
+    with store_session() as store:
+        missing = store.missing_schema()
+        old_agent = store.get_fleet_agent("agt_old")
+        old_usage = store.session_usage("ses_old")
+    after_rows, _ = _rows(db, columns)
+
+    now = datetime(2026, 10, 24, tzinfo=UTC)
+    with store_session() as store:
+        ended = store.end_fleet_agent("agt_1", exit_status=143, ended_by="died")
+        wrote = store.record_usage(
+            SessionUsage(
+                session_id="ses_new", project_id="prj_used", started_at=now, updated_at=now
+            ),
+            TurnUsage(
+                id="utn_new",
+                session_id="ses_new",
+                project_id="prj_used",
+                seq=1,
+                trigger="stop",
+                recorded_at=now,
+                total_tokens=7,
+            ),
+            previous_state=None,
+        )
+        turns = store.turn_usages("ses_new")
+    once = _contents(db)
+    open_store().close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        version = raw.execute("PRAGMA user_version").fetchone()[0]
+        shape = _shape(raw)
+    finally:
+        raw.close()
+    assert (version, missing) == (SCHEMA_VERSION, []), label
+    assert shape == _built(SCHEMA_VERSION), f"{label}: not the schema a fresh store has"
+    assert shape >= _ENDED_BY_COLUMN | _USAGE_STEP, label
+    assert after_rows == before, f"{label}: a row the store held changed on a column it had"
+    assert old_agent is not None
+    if label == "#38":
+        assert old_agent.ended_by == "stopped", "#38's own row keeps how it ended"
+        assert old_usage is None
+    else:
+        assert old_agent.ended_by is None, "a row from before v34 reads NULL"
+        assert old_usage is not None and (old_usage.turns, old_usage.total_tokens) == (2, 4096)
+        assert old_usage.state == '{"offset": 812}', "#346's scan resumes where it stopped"
+    assert ended.ended_by == "died"
+    assert wrote and [turn.total_tokens for turn in turns] == [7]
+    assert _contents(db) == once, f"{label}: a second open changed the store"
+
+
+# --- the trains' own steps on main's v35 (sync of main 8eb18a8a, 2026-10-24) -------------------
+#
+# Main owns v34 (#38's ``ended_by``) and v35 (#346's usage tables). Each release train stamped
+# its own step at its branch's top, and moves past main's on the sync, in train order:
+# rc/p0-reliability's v34 (P0-W1a's first-message columns) is v36 here, and
+# rc/p1-token-diet's v35 (P1 WS-2's event columns, on top of its own v34 = P0-W1a's) is v37,
+# and rc/p2-capacity-setup's v36 (P2-W6's parent columns, on top of v34 and v35) is v38.
+# A store that ran a
+# lineage reads that lineage's top version with only that lineage's products, and must reach
+# head with every product of every lineage. A train's step is replayed from its DDL as the
+# branch shipped it, frozen here, never this ladder's; a later train adds its own case.
+
+#: rc/p0-reliability's v34 as it shipped (P0-W1a, f1de966a): an empty script, the three
+#: columns added by the ladder, with what a run of it wrote on a session and an agent.
+_FIRST_PROMPT_V34_OF_RC_P0 = """
+ALTER TABLE team_session ADD COLUMN prompted_at TEXT;
+ALTER TABLE fleet_agent ADD COLUMN first_prompt TEXT;
+ALTER TABLE fleet_agent ADD COLUMN first_prompt_at TEXT;
+UPDATE team_session SET prompted_at = '2026-10-23T00:01:00+00:00' WHERE id = 'ses_old';
+UPDATE fleet_agent SET first_prompt = 'acked', first_prompt_at = '2026-10-23T00:01:00+00:00'
+    WHERE id = 'agt_old';
+"""
+
+#: rc/p1-token-diet's v35 as it shipped (P1 WS-2, b2ecee3f), on top of its v34 (rc/p0's
+#: above): an empty script, the two columns added by the ladder, with an event a run of it
+#: wrote carrying both.
+_EVENT_ACTOR_V35_OF_RC_P1 = (
+    _FIRST_PROMPT_V34_OF_RC_P0
+    + """
+ALTER TABLE team_event ADD COLUMN actor TEXT;
+ALTER TABLE team_event ADD COLUMN meta TEXT;
+INSERT INTO team_event (id, project_id, session_id, kind, text, created_at, actor, meta)
+    VALUES ('evt_old', 'prj_used', 'ses_old', 'agent_exited', 'coder-1 exited (1)',
+            '2026-10-23T00:02:00+00:00', 'user', '{"status": 1}');
+"""
+)
+
+#: rc/p2-capacity-setup's v36 as it shipped (P2-W6, #199), on top of its v34 and v35 (rc/p1's
+#: above): an empty script, the five columns added by the ladder, with a group a run of it
+#: gave a parent, rules and a cap.
+_PARENT_V36_OF_RC_P2 = (
+    _EVENT_ACTOR_V35_OF_RC_P1
+    + """
+ALTER TABLE project_group ADD COLUMN parent_project_id TEXT;
+ALTER TABLE project_group ADD COLUMN route TEXT;
+ALTER TABLE project_group ADD COLUMN max_agents INTEGER;
+ALTER TABLE team_task ADD COLUMN origin_task_id TEXT;
+ALTER TABLE team_task ADD COLUMN origin_project_id TEXT;
+INSERT INTO project_group (id, name, created_at, parent_project_id, route, max_agents)
+    VALUES ('grp_old', 'app', '2026-10-23T00:03:00+00:00', 'prj_seen', '{"off": true}', 4);
+"""
+)
+
+#: What a run of main's v35 left: #38's stopped row and #346's scan state and turn.
+_MAINS_V35_ROWS = (
+    _ENDED_BY_V34_OF_274
+    + """
+INSERT INTO usage_session (session_id, project_id, state, usage, turns, total_tokens,
+                           weighted, cost_usd, started_at, updated_at)
+    VALUES ('ses_old', 'prj_used', '{"offset": 812}', '{}', 2, 4096, 1.5, 0.25,
+            '2026-10-20T00:00:00+00:00', '2026-10-20T00:05:00+00:00');
+INSERT INTO usage_turn (id, session_id, project_id, seq, trigger, recorded_at, usage,
+                        total_tokens, weighted, cost_usd)
+    VALUES ('utn_old', 'ses_old', 'prj_used', 1, 'stop', '2026-10-20T00:05:00+00:00', '{}',
+            4096, 1.5, 0.25);
+"""
+)
+
+
+def test_the_first_prompt_step_is_v36_past_mains_two_and_idempotent() -> None:
+    """rc/p0's step moved from v34 to v36 on the sync: an empty script, its three columns in
+    ``_PRODUCTS[35]``, main's v34 and v35 under it as main has them. Run twice, it leaves what
+    it left once."""
+    from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
+
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 38
+    assert _MIGRATIONS[35] == ""
+    assert _PRODUCTS[33] == _Products(columns=(("fleet_agent", "ended_by", "TEXT"),))
+    assert _PRODUCTS[35] == _Products(
+        columns=(
+            ("team_session", "prompted_at", "TEXT"),
+            ("fleet_agent", "first_prompt", "TEXT"),
+            ("fleet_agent", "first_prompt_at", "TEXT"),
+        )
+    )
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(SCHEMA_VERSION):
+            _run_step(conn, step)
+        once = _shape(conn)
+        _run_step(conn, 35)
+        assert _shape(conn) == once
+    finally:
+        conn.close()
+    assert once == _built(35) | _FIRST_PROMPT_COLUMNS | _EVENT_ACTOR_COLUMNS | _PARENT_COLUMNS
+
+
+def test_the_event_actor_step_is_v37_past_the_first_prompt_and_idempotent() -> None:
+    """rc/p1's step moved from v35 to v37 on the sync: an empty script, its two columns in
+    ``_PRODUCTS[36]``, past main's v34 and v35 and P0-W1a's v36. Run twice, it leaves what it
+    left once."""
+    from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
+
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 38
+    assert _MIGRATIONS[36] == ""
+    assert _PRODUCTS[36] == _Products(
+        columns=(("team_event", "actor", "TEXT"), ("team_event", "meta", "TEXT"))
+    )
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(SCHEMA_VERSION):
+            _run_step(conn, step)
+        once = _shape(conn)
+        _run_step(conn, 36)
+        assert _shape(conn) == once
+    finally:
+        conn.close()
+    assert once == _built(36) | _EVENT_ACTOR_COLUMNS | _PARENT_COLUMNS
+
+
+def test_the_parent_step_is_v38_past_the_event_actor_and_idempotent() -> None:
+    """rc/p2's step moved from v36 to v38 on the sync: an empty script, its five columns in
+    ``_PRODUCTS[37]``, past main's v34 and v35, P0-W1a's v36 and P1 WS-2's v37. Run twice, it
+    leaves what it left once."""
+    from aisquare.core.store import _MIGRATIONS, _PRODUCTS, _Products, _run_step
+
+    assert SCHEMA_VERSION == len(_MIGRATIONS) == 38
+    assert _MIGRATIONS[37] == ""
+    assert _PRODUCTS[37] == _Products(
+        columns=(
+            ("project_group", "parent_project_id", "TEXT"),
+            ("project_group", "route", "TEXT"),
+            ("project_group", "max_agents", "INTEGER"),
+            ("team_task", "origin_task_id", "TEXT"),
+            ("team_task", "origin_project_id", "TEXT"),
+        )
+    )
+    conn = sqlite3.connect(":memory:")
+    try:
+        for step in range(SCHEMA_VERSION):
+            _run_step(conn, step)
+        once = _shape(conn)
+        _run_step(conn, 37)
+        assert _shape(conn) == once
+    finally:
+        conn.close()
+    assert once == _built(37) | _PARENT_COLUMNS
+
+
+@pytest.mark.parametrize(
+    ("steps", "after", "stamp", "label"),
+    [
+        pytest.param(
+            35, _A_SESSION_AND_AN_AGENT + _MAINS_V35_ROWS, 35, "main",
+            id="main's v35: ended_by and the usage tables",
+        ),
+        pytest.param(
+            33, _A_SESSION_AND_AN_AGENT + _FIRST_PROMPT_V34_OF_RC_P0, 34, "rc/p0",
+            id="rc/p0's v34: the first-message columns",
+        ),
+        pytest.param(
+            33, _A_SESSION_AND_AN_AGENT + _EVENT_ACTOR_V35_OF_RC_P1, 35, "rc/p1",
+            id="rc/p1's v35: the first-message and event-actor columns",
+        ),
+        pytest.param(
+            33, _A_SESSION_AND_AN_AGENT + _PARENT_V36_OF_RC_P2, 36, "rc/p2",
+            id="rc/p2's v36: the first-message, event-actor and parent columns",
+        ),
+    ],
+)  # fmt: skip
+def test_a_store_from_main_or_a_train_reaches_head_with_every_lineages_steps(
+    steps: int, after: str, stamp: int, label: str
+) -> None:
+    """Stamped by main's v35, rc/p0's v34, rc/p1's v35 or rc/p2's v36, a store opens at head
+    with ``fleet_agent.ended_by``, the usage tables and their indexes, the first message's
+    three columns, a board event's actor and details AND a group's parent, rules and cap and
+    a task's origin: the schema a fresh store has, nothing missing. Its rows read back
+    unchanged on every column they had; the store then writes and reads every lineage's
+    data, and a second open changes nothing.
+
+    Bites: with the presence pass off, the rc/p0 store fails on ``ended_by``; with v36 out
+    of the ladder, main's store has no ``first_prompt``; with v35's CREATE not ``IF NOT
+    EXISTS``, a store that holds the tables fails to open; with v37 out of the ladder, main's
+    and rc/p0's stores have no ``team_event.actor``; with v38 out of it, no store but rc/p2's
+    has ``project_group.parent_project_id``; with the presence pass off, rc/p2's store fails
+    on ``ended_by`` too."""
+    from aisquare.models import FleetAgent, SessionUsage, TeamEvent
+
+    db = _at_version(steps, after=_TWO_PROJECTS + after, stamp=stamp)
+    before, columns = _rows(db)
+    raw = sqlite3.connect(str(db))
+    try:
+        stamped = _shape(raw)
+    finally:
+        raw.close()
+    assert (("column", "fleet_agent.ended_by") in stamped) == (label == "main"), "the fixture"
+    assert (("table", "usage_session") in stamped) == (label == "main"), "the fixture"
+    assert (("column", "fleet_agent.first_prompt") in stamped) == (label != "main"), "fixture"
+    assert (("column", "team_event.actor") in stamped) == (label in ("rc/p1", "rc/p2")), "fixture"
+    assert (("column", "project_group.route") in stamped) == (label == "rc/p2"), "the fixture"
+
+    with store_session() as store:
+        missing = store.missing_schema()
+        old_agent = store.get_fleet_agent("agt_old")
+        old_session = store.get_session("ses_old")
+        old_usage = store.session_usage("ses_old")
+        old_event = store.get_event("evt_old")
+        old_group = store.group_settings("grp_old")
+    after_rows, _ = _rows(db, columns)
+
+    now = datetime(2026, 10, 24, tzinfo=UTC)
+    with store_session() as store:
+        posted = store.add_team_event(
+            TeamEvent(
+                id="evt_new",
+                project_id="prj_used",
+                kind="agent_exited",
+                text="coder-2 exited (0)",
+                created_at=now,
+                actor="user",
+                meta={"status": 0},
+            )
+        )
+        given = store.upsert_fleet_agent(
+            FleetAgent(
+                id="agt_new",
+                project_id="prj_used",
+                label="coder-2",
+                role="coder",
+                pane_id="%2",
+                session_id="ses_new",
+                cwd=Path("/w/used"),
+                created_at=now,
+                first_prompt="pending",
+                first_prompt_at=now,
+            )
+        )
+        taken = store.mark_prompted("ses_new", now, agent_id="agt_new")
+        ended = store.end_fleet_agent("agt_1", exit_status=143, ended_by="died")
+        wrote = store.record_usage(
+            SessionUsage(
+                session_id="ses_new", project_id="prj_used", started_at=now, updated_at=now
+            ),
+            None,
+            previous_state=None,
+        )
+        acked = store.get_fleet_agent("agt_new")
+        read_back = store.get_event_by_seq(posted.seq)
+    once = _contents(db)
+    open_store().close()
+
+    raw = sqlite3.connect(str(db))
+    try:
+        version = raw.execute("PRAGMA user_version").fetchone()[0]
+        shape = _shape(raw)
+    finally:
+        raw.close()
+    assert (version, missing) == (SCHEMA_VERSION, []), label
+    assert shape == _built(SCHEMA_VERSION), f"{label}: not the schema a fresh store has"
+    assert shape >= (
+        _ENDED_BY_COLUMN
+        | _USAGE_STEP
+        | _FIRST_PROMPT_COLUMNS
+        | _EVENT_ACTOR_COLUMNS
+        | _PARENT_COLUMNS
+    ), label
+    assert after_rows == before, f"{label}: a row the store held changed on a column it had"
+    assert old_agent is not None and old_session is not None
+    if label in ("rc/p1", "rc/p2"):
+        assert old_event is not None
+        assert (old_event.actor, old_event.meta) == ("user", {"status": 1}), "rc/p1's own event"
+    else:
+        assert old_event is None
+    if label == "rc/p2":
+        assert old_group == GroupSettings(
+            group_id="grp_old", parent_project_id="prj_seen", route={"off": True}, max_agents=4
+        ), "rc/p2's own group keeps its parent, rules and cap"
+    else:
+        assert old_group == GroupSettings(group_id="grp_old"), "no group, no settings"
+    assert read_back is not None and (read_back.actor, read_back.meta) == ("user", {"status": 0})
+    if label == "main":
+        assert old_agent.ended_by == "stopped", "#38's own row keeps how it ended"
+        assert old_usage is not None and old_usage.state == '{"offset": 812}'
+        assert (old_agent.first_prompt, old_session.prompted_at) == (None, None), "not tracked"
+    else:
+        assert (old_agent.first_prompt, old_agent.ended_by, old_usage) == ("acked", None, None)
+        assert old_session.prompted_at == datetime(2026, 10, 23, 0, 1, tzinfo=UTC)
+    assert given.first_prompt == "pending" and taken
+    assert acked is not None and (acked.first_prompt, acked.first_prompt_at) == ("acked", now)
+    assert ended.ended_by == "died" and wrote
+    assert _contents(db) == once, f"{label}: a second open changed the store"
 
 
 # --- doctor's database row reads the schema, not only the file (review of #203) ---------------
@@ -3212,10 +3731,11 @@ def test_a_fleet_row_is_read_as_the_columns_it_is_written_with_whatever_follows_
     SQL. Both lists come from one tuple, and a read names each column as it is written."""
     later = (*store_module._FLEET_AGENT_FIELDS, "later")
     read = store_module._read_list(later, {"board": "COALESCE(board, project_id)"})
-    # `persona` (v33) and the first message's two (v34) are the columns that came after it,
-    # and are read as written.
+    # `persona` (v33), `ended_by` (v34) and the first message's two (v36) are the columns
+    # that came after it, and are read as written.
     assert read.endswith(
-        ", COALESCE(board, project_id) AS board, persona, first_prompt, first_prompt_at, later"
+        ", COALESCE(board, project_id) AS board, persona, ended_by, first_prompt, "
+        "first_prompt_at, later"
     ), read
 
     cursor = store._conn.execute(  # type: ignore[attr-defined]
@@ -3318,91 +3838,3 @@ def test_fleet_manager_board_is_the_newest_manager_rows_a_live_one_first() -> No
         assert store.fleet_manager_board(PROJECT.id) == "prj_hub", "the newest, stopped"
         store.upsert_fleet_agent(row(0, "manager", "prj_m"))
         assert store.fleet_manager_board(PROJECT.id) == "prj_m", "a live one first"
-
-
-def test_a_store_another_line_stamped_v34_gains_w1a_and_ws2_columns_by_presence() -> None:
-    """The manager's cross-workspace rule (board seq 1104): another line (feat/token-savings)
-    stamps its own v34 with tables of its own and none of P0-W1a's or P1 WS-2's columns. The
-    version alone would skip both steps; the presence pass adds all five, and its tables stay."""
-    with store_session():
-        pass  # a fresh store, at this build's version
-    raw = sqlite3.connect(str(_db_path()))
-    try:
-        for table, column in (
-            ("team_session", "prompted_at"),
-            ("fleet_agent", "first_prompt"),
-            ("fleet_agent", "first_prompt_at"),
-            ("team_event", "actor"),
-            ("team_event", "meta"),
-        ):
-            raw.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
-        raw.execute("CREATE TABLE usage_session (id TEXT PRIMARY KEY)")  # the other line's
-        raw.execute("INSERT INTO usage_session VALUES ('kept')")
-        for table, column in (
-            ("project_group", "parent_project_id"),
-            ("project_group", "route"),
-            ("project_group", "max_agents"),
-            ("team_task", "origin_task_id"),
-            ("team_task", "origin_project_id"),
-        ):
-            raw.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
-        raw.execute("PRAGMA user_version = 34")
-        raw.commit()
-    finally:
-        raw.close()
-
-    with store_session():
-        pass
-
-    raw = sqlite3.connect(str(_db_path()))
-    try:
-        columns = {
-            table: {row[1] for row in raw.execute(f"PRAGMA table_info({table})")}
-            for table in ("team_session", "fleet_agent", "team_event")
-        }
-        assert {"prompted_at"} <= columns["team_session"]
-        assert {"first_prompt", "first_prompt_at"} <= columns["fleet_agent"]
-        assert {"actor", "meta"} <= columns["team_event"]
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 36
-        assert raw.execute("SELECT id FROM usage_session").fetchall() == [("kept",)]
-    finally:
-        raw.close()
-
-
-def test_a_store_another_line_stamped_v35_gains_the_parent_columns_by_presence() -> None:
-    """P2-W6 (#199): a store another line carried to v35 with none of v36's columns gains
-    all five, and a group and a task it held keep their rows."""
-    with store_session() as store:
-        group = store.create_project_group("app")
-    raw = sqlite3.connect(str(_db_path()))
-    try:
-        for table, column in (
-            ("project_group", "parent_project_id"),
-            ("project_group", "route"),
-            ("project_group", "max_agents"),
-            ("team_task", "origin_task_id"),
-            ("team_task", "origin_project_id"),
-        ):
-            raw.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
-        raw.execute("PRAGMA user_version = 35")
-        raw.commit()
-    finally:
-        raw.close()
-
-    with store_session() as store:
-        settings = store.group_settings(group.id)
-        kept = store.get_project_group(group.id)
-
-    raw = sqlite3.connect(str(_db_path()))
-    try:
-        columns = {
-            table: {row[1] for row in raw.execute(f"PRAGMA table_info({table})")}
-            for table in ("project_group", "team_task")
-        }
-        assert {"parent_project_id", "route", "max_agents"} <= columns["project_group"]
-        assert {"origin_task_id", "origin_project_id"} <= columns["team_task"]
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 36
-    finally:
-        raw.close()
-    assert kept is not None and kept.name == "app"
-    assert settings == GroupSettings(group_id=group.id), "no parent, no rules, no cap"

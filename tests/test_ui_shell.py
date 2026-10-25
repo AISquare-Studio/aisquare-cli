@@ -109,7 +109,7 @@ from aisquare.services import project_groups as groups_service
 from aisquare.services.captain import state as captain_state
 from tests import guard_clock, toast_log
 from tests.pane_harness import FakePane, FakeTmux, asks_a_server, move, press, release, socket_of
-from tests.ui_workers import settle_page
+from tests.ui_workers import settle_page, settle_until_held
 
 T = TypeVar("T")
 SIZE = (140, 40)
@@ -668,11 +668,16 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
     # Slots 1 and 4 unaliased: the registry's built-in names, "plain claude" and "account 4".
     monkeypatch.setattr(accounts_service, "slot_labels", lambda store=None: {2: "work", 3: "max"})
 
-    async def bar(pilot: Pilot[None], agent_id: str) -> tuple[int, str]:
+    async def bar(pilot: Pilot[None], agent_id: str, *, wider_than: int = 0) -> tuple[int, str]:
         app = fleet_app(pilot)
         await pilot.click(row_for(app, agent_id))
         await settle(app)
         header = app.query_one(f"#agent-{agent_id} #agent-header", Static)
+        # A resize reaches the screen from a 1/120 s timer that settle() does not wait for:
+        # on windows-latest the 140-column read measured the 90-column header (#401).
+        await settle_until_held(
+            app, lambda: header.content_size.width > wider_than, what="the header's new width"
+        )
         (strip,) = header.render_lines(Region(0, 0, header.outer_size.width, 1))
         return header.content_size.width, strip.text.strip()
 
@@ -690,7 +695,7 @@ def test_in_a_90_column_terminal_the_agent_view_gives_way_in_its_label_first(
         }
         await pilot.resize_terminal(140, 30)
         await settle(app)
-        seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m")
+        seen["wide"] = await bar(pilot, "agt_a_coder-01k8zq7m", wider_than=60)
         return seen
 
     seen = drive(

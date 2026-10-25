@@ -6,12 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-10-24
+## [0.9.0] - 2026-10-25
 
 **The captain: an experimental voice-and-text agent that runs every project's fleet
 for you, off until you turn it on. Personas: run any agent as someone. Remote control
 needs nothing more installed. Restart all brings back agents that died, the agent
-pane keeps up with your typing, and every release now carries its own installer.**
+pane keeps up with your typing, the first account in Accounts is the machine
+default, and every release now carries its own installer.**
 
 ### Added
 
@@ -494,7 +495,6 @@ pane keeps up with your typing, and every release now carries its own installer.
   a teammate). `aisquare config get/set fleet.roles.agent.*` now works, so the
   no-role agent's permission mode, worktree and extra args can be set like any
   role's; another role the config does not have is still an unknown key.
-
 - **Restart all brings back the agents that died** (#38). After an outside SIGTERM
   killed every agent of a fleet (exit 143), *Settings ▸ Fleet ▸ Restart all…* and
   `fleet restart --all` listed each one as exited and restarted none: they acted on

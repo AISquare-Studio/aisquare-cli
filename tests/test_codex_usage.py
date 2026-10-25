@@ -117,6 +117,33 @@ def test_an_unpriced_request_before_the_first_edit_adds_no_weighted_tokens(tmp_p
     assert (scan.first_edit.tokens, scan.first_edit.weighted) == (1010, 0.0)
 
 
+def test_a_forks_rollout_counts_its_own_record_never_its_parents_running_total(
+    tmp_path: Path,
+) -> None:
+    """r17 minor 2 of #113, measured on Codex 0.164.0 (SMOKE9 item 11): a fork's rollout
+    (``session_meta.forked_from_id``) replays none of its parent's ``token_usage_record``
+    lines. Only its running ``thread_token_usage`` (and ``token_count`` totals) carry the
+    parent's tokens: the fork's one record of 1230 says 3690. Read by each record's own
+    ``usage``, the fork counts its request alone, and a hand-off Fork is never billed twice."""
+    meta = _line(
+        0,
+        "session_meta",
+        {"id": "fork", "forked_from_id": "parent", "cli_version": "0.164.0"},
+    )
+    count = _line(
+        3, "event_msg", {"type": "token_count", "info": {"total_token_usage": {"total": 3690}}}
+    )
+    found = _scan(
+        tmp_path / "rollout-fork.jsonl",
+        meta,
+        _turn(1, "t1", "gpt-6.1-sol"),
+        _record(2, "t1", "resp_fork", input=1200, output=30, running=3690),
+        count,
+    ).delta
+    sol = found.models["gpt-6.1-sol"]
+    assert (sol.requests, sol.total) == (1, 1230)
+
+
 def test_a_long_prompt_is_priced_at_the_long_context_rates(tmp_path: Path) -> None:
     found = _scan(
         tmp_path / "r.jsonl",

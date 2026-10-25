@@ -450,11 +450,10 @@ fleet still running, and every release now carries its own installer.**
   is promoted too, once. No schema step. A machine that never set a default and
   has accounts signed in now launches on the first enabled, signed-in one. A
   `team bind <role> --env CLAUDE_CONFIG_DIR=…` written by hand wins over the
-  preferred account. That is a change where an older build set a machine
-  default and headroom does not pick (`pick = "default"`, or no usage readable):
-  the default won over such a binding, and now the binding does, so that role
-  launches on its own directory after the upgrade. A headroom pick still
-  overrides the binding, as before. An old default that is signed out or
+  preferred account and over a headroom pick. That is a change where an older
+  build set a machine default, or where headroom picks: either won over such a
+  binding, and now the binding does, so that role launches on its own directory
+  after the upgrade. A hand-over still moves it. An old default that is signed out or
   disabled no longer gets the launch: the next enabled, signed-in account does.
 - **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and
   the suite on one Linux leg (py3.12), the Linux package job and the other jobs
@@ -578,6 +577,12 @@ fleet still running, and every release now carries its own installer.**
 
 ### Fixed
 
+- **A headroom pick no longer overrides a hand-written `CLAUDE_CONFIG_DIR`
+  binding.** With `[accounts] pick = "headroom"` (the default) and usage
+  readable, a role bound with `team bind <role> --env CLAUDE_CONFIG_DIR=…` (or
+  `--env-file`) launched on the picked account instead of its own directory;
+  the rank-1 default already left it alone. Both silent defaults now do. The
+  flag, an account binding, a project default and a hand-over still win over it.
 - **Spawn dialog follow-ups to #303.** With Role *(none) — general-purpose
   Claude* and no persona, the Persona note says *plain Claude: no role, no
   persona* instead of "runs as its role alone". The *Pick…* note under Advanced

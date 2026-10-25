@@ -506,8 +506,9 @@ def launch(
     # login. The machine's default is the first enabled, signed-in account
     # (#406), so something chooses whenever one is signed in. Nothing chooses
     # when none is, or when the role's binding sets Claude Code's directory
-    # itself and no flag, account binding, project default or headroom pick
-    # names an account: then the environment is left as the binding made it.
+    # itself and no flag, account binding or project default names an account
+    # (rank 1 and a headroom pick are silent defaults, #9): then the
+    # environment is left as the binding made it.
     try:
         choice = claude_accounts_service.choose(account, role=role, project=project)
     except claude_accounts_service.NoSuchAccount as exc:

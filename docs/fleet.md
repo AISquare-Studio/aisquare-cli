@@ -962,7 +962,8 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   with several, the one with room comes before it (*Headroom*, below). With no
   account signed in, a launch runs on whatever `claude` the shell already has,
   exactly as before any of this existed — and so does a role whose binding sets
-  `CLAUDE_CONFIG_DIR` by hand (`team bind <role> --env`): rank 1 never overrides it. The
+  `CLAUDE_CONFIG_DIR` by hand (`team bind <role> --env`): neither rank 1 nor a headroom
+  pick overrides it (a hand-over still moves it). The
   agent's info line and `fleet ls` name the account it was resolved to, and its
   sidebar row shows the slot (`#2`).
 - **Headroom.** By default — `[accounts] pick = "headroom"`, *launches pick* in

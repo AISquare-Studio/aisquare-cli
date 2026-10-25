@@ -460,7 +460,9 @@ def choose(
     ``spread=True``, which a hand-over passes — the preferred account gives way to
     :func:`headroom_choice`, the account with room in both of its windows,
     ``exclude`` naming the slot a hand-over is leaving. When no account's usage
-    can be read, the preferred account decides exactly as before. A launch reads
+    can be read, the preferred account decides exactly as before. Like the preferred
+    account, a launch's headroom pick leaves a binding that sets
+    ``CLAUDE_CONFIG_DIR`` by hand alone; a hand-over's still moves it. A launch reads
     usage through the cache, a minute deep (:data:`PICK_MAX_AGE_SECONDS`); a
     hand-over (``spread=True``) reads it live.
 
@@ -529,6 +531,16 @@ def choose(
                 )
             else:
                 return AccountChoice(preferred, "project default", notes)
+    # The rungs below are SILENT defaults: neither may restore this shell's variables over
+    # a `team bind <role> --env CLAUDE_CONFIG_DIR=…` someone wrote by hand, which is what
+    # applying an account does (core.apply_launch_env). That binding launched on its own
+    # directory before rank 1 was the default, and still does (review of #406, M1), whether
+    # rank 1 or a headroom pick would have chosen (#9). A flag, an account binding or a
+    # project default still win over it, and so does a hand-over's pick (``spread``), whose
+    # whole point is to move the agent elsewhere.
+    hand_written = _binding_names_a_directory(role)
+    if hand_written and spread is None:
+        return AccountChoice(None, None, notes)
     settings = accounts_settings()
     by_headroom = spread if spread is not None else settings.pick == "headroom"
     if by_headroom:
@@ -549,13 +561,7 @@ def choose(
         notes.extend(more)
         if picked is not None:
             return AccountChoice(picked, "headroom", notes)
-    if _binding_names_a_directory(role):
-        # The preferred rung is a SILENT default: it must not restore this shell's
-        # variables over a `team bind <role> --env CLAUDE_CONFIG_DIR=…` someone wrote
-        # by hand, which is what applying slot 1 does (core.apply_launch_env). That
-        # binding launched on its own directory before rank 1 was the default, and
-        # still does (review of #406, M1). A flag, an account binding, a project
-        # default or a headroom pick still win over it, as they always did.
+    if hand_written:  # a hand-over that found no room: rank 1 is still a silent default
         return AccountChoice(None, None, notes)
     preferred = preferred_account(accounts, skip, notes)
     if preferred is not None:

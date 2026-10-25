@@ -37,7 +37,7 @@ from aisquare.models import ProjectInfo
 from aisquare.services import claude_accounts as service
 from aisquare.services import diagnostics
 from aisquare.services import settings as settings_service
-from tests.test_claude_accounts import _installed, _sign_in
+from tests.test_claude_accounts import LIVE_USAGE, _installed, _sign_in
 
 CORRUPT = b"this is not a sqlite database, and the accounts surface must say so in words"
 
@@ -596,6 +596,51 @@ def test_rank_1_never_overrides_a_hand_written_config_dir_binding(
     # The control: a role with no such binding gets rank 1, and an account binding or the
     # flag still win over the hand-written directory, as they always did.
     assert service.choose(role="tester", project=work).source == "preferred"
+    assert service.choose("2", role="coder", project=work).source == "flag"
+    settings_service.bind_role("coder", account="2")
+    assert service.choose(role="coder", project=work).source == "role binding"
+
+
+@pytest.mark.parametrize("bound", ["env", "env_files"])
+def test_a_headroom_pick_never_overrides_a_hand_written_config_dir_binding(
+    fake_home: Path,
+    work: ProjectInfo,
+    handover: dict[str, Any],
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    bound: str,
+) -> None:
+    """#9: with ``pick = "headroom"`` and usage READABLE, the headroom rung picked an account
+    and applying it replaced the directory ``team bind coder --env CLAUDE_CONFIG_DIR=…`` set
+    by hand. A headroom pick is a silent default like rank 1, so it leaves the binding alone
+    (the same guard as review of #406, M1, one rung up)."""
+    config = load_config()
+    config.accounts = AccountsSettings(pick="headroom")
+    save_config(config)
+    monkeypatch.setattr(
+        service, "_http_get", lambda url, headers, timeout: (200, json.dumps(LIVE_USAGE).encode())
+    )
+    core.create_account()
+    _signed_in(1)
+    _signed_in(2)
+    # The control first: usage is readable, so a role with no such binding IS picked by headroom.
+    assert service.choose(role="tester", project=work).source == "headroom"
+    if bound == "env":
+        settings_service.bind_role("coder", env={core.CONFIG_DIR_VAR: "/hand/written"})
+    else:
+        secret = fake_home / "config-dir.txt"
+        secret.write_text("/hand/written\n", encoding="utf-8")
+        settings_service.bind_role("coder", env_files={core.CONFIG_DIR_VAR: str(secret)})
+
+    choice = service.choose(role="coder", project=work)
+    assert choice.account is None and choice.source is None  # nothing chose: left as written
+    launched = runner.invoke(app, ["launch", "coder"])
+    assert launched.exit_code == 0, launched.output
+    assert handover["env"][core.CONFIG_DIR_VAR] == "/hand/written"
+
+    # A hand-over still moves the agent: that is what it is for.
+    assert service.choose(role="coder", project=work, spread=True).source == "headroom"
+    # The flag and an account binding still win over the hand-written directory.
     assert service.choose("2", role="coder", project=work).source == "flag"
     settings_service.bind_role("coder", account="2")
     assert service.choose(role="coder", project=work).source == "role binding"

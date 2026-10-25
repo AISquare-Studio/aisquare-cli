@@ -24,7 +24,13 @@ from aisquare.core.orchestrator import FLEET_AGENT_ENV_VAR, team_project
 from aisquare.core.store import store_session
 from aisquare.models import FleetAgent, FleetAgentStatus, ProjectInfo
 from aisquare.services import fleet as fleet_service
-from aisquare.services.fleet import ALREADY_EXITED, THIS_SESSION, BulkReceipt, FleetError
+from aisquare.services.fleet import (
+    ALREADY_EXITED,
+    STOPPED_ON_PURPOSE,
+    THIS_SESSION,
+    BulkReceipt,
+    FleetError,
+)
 from tests import fakebin
 from tests.rendered import ANSI
 from tests.test_fleet_service import FakeClock, FakeTmux, _add_task, _board_session, _git
@@ -159,7 +165,9 @@ def test_an_exited_agent_is_left_as_it_is(
     report = fleet_service.bulk(action)
 
     outcomes = _outcomes(fleet, report.receipts)
-    assert outcomes.pop("beta/coder-1") == ("skipped", "exited")
+    # Exit 0 is an agent that ended by itself: a restart leaves it as a stop does (#38).
+    why = "exited" if action == "stop" else fleet_service.ENDED_CLEANLY
+    assert outcomes.pop("beta/coder-1") == ("skipped", why)
     assert outcomes == {key: ("done", None) for key in ALL - {"beta/coder-1"}}
     assert exited.pane_id not in tmux.killed  # its last screen stays, as a 💤 row's does
     assert report.ok
@@ -202,7 +210,11 @@ def test_an_agent_that_ends_after_the_read_is_skipped_on_its_turn_and_left_as_it
     report = fleet_service.bulk(action, shown=plan, on_receipt=_ends_when_alpha_is_done(fleet, end))
 
     outcomes = _outcomes(fleet, report.receipts)
-    assert outcomes.pop("beta/coder-1") == ("skipped", ALREADY_EXITED)
+    # A restart reads the end again on its turn (#38): one that died is started again, and
+    # these are left by the same rule — exit 0 ended by itself, a stop was on purpose.
+    restart_why = {"exits": fleet_service.ENDED_CLEANLY, "stopped elsewhere": STOPPED_ON_PURPOSE}
+    why = ALREADY_EXITED if action == "stop" else restart_why[how]
+    assert outcomes.pop("beta/coder-1") == ("skipped", why)
     assert outcomes == {key: ("done", None) for key in ALL - {"beta/coder-1"}}
     with store_session() as store:
         assert not [
@@ -433,7 +445,9 @@ def test_a_shown_row_whose_label_went_to_another_agent_is_skipped_and_the_new_on
     report = fleet_service.bulk(action, shown=shown)
 
     outcomes = _outcomes(fleet, report.receipts)
-    assert outcomes.pop("alpha/coder-1") == ("skipped", ALREADY_EXITED)
+    # A restart says its row is gone (#38): it may have died, which a restart acts on.
+    why = ALREADY_EXITED if action == "stop" else fleet_service.GONE_SINCE
+    assert outcomes.pop("alpha/coder-1") == ("skipped", why)
     assert outcomes == {key: ("done", None) for key in ALL - {"alpha/coder-1"}}
     assert new.id in _live_ids(fleet.alpha)
 

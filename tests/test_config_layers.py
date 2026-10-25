@@ -245,6 +245,8 @@ def test_the_v1_snapshot_differs_from_today_only_by_the_headroom_defaults() -> N
             "import": {"engine": "auto", "api_model": "claude-opus-5"},
         },
         "experimental": {"captain": False},
+        # App settings ▸ User preferences, added since.
+        "ui": {"always_show_project_path": False},
         # The first message's two (P0-W1a, #122).
         "fleet": {
             "first_prompt": "argv",

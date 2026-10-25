@@ -3,10 +3,10 @@
 **Your agent starts every session already oriented.** `agents connect
 claude-code` installs lifecycle hooks into `~/.claude/settings.json` (merged
 carefully — your existing hooks are never touched). From then on, each session
-begins with a directive pointing Claude at a packed snapshot of the codebase
-(structure-only skeleton first, full contents on demand — orders of magnitude
-cheaper than grepping around), your in-scope context entries, and the
-project's prompt history.
+begins with your in-scope context entries, less any preference a `CLAUDE.md`
+Claude Code loads already holds (it would be in front of the agent twice), and
+your prompts are captured for `aisquare log`. A session with a team also gets
+the board and its protocol; a solo one does not.
 
 **Your agent remembers what you tell it.** `aisquare remember "prefer pytest
 over unittest"` persists across every session and every project. Context
@@ -83,12 +83,11 @@ aisquare project forget ../old-checkout       # one registration; --purge delete
 aisquare project prune --missing --worktrees  # the stale ones, after a confirmation (or --yes)
 ```
 
-`aisquare project onboard` (also run by `init`) packs the codebase with
-Repomix into three artifacts under `~/.aisquare/projects/<id>/snapshot/`: a
-**full pack** (every file), a **skeleton** (structure + signatures — the
-cheap thing agents read first), and a **per-file index** (char offsets +
-token counts, so an agent can open one file's slice of the pack instead of
-all of it). Re-run with `--refresh` after big changes.
+`aisquare project onboard` packs the codebase on demand with Repomix (`init`
+no longer does, and no agent is pointed at the pack) into three artifacts
+under `~/.aisquare/projects/<id>/snapshot/`: a **full pack** (every file), a
+**skeleton** (structure + signatures), and a **per-file index** (char offsets +
+token counts, for opening one file's slice of the pack instead of all of it). Re-run with `--refresh` after big changes.
 
 A pack has to fit a **token budget**: `[snapshot] max_tokens` in
 `~/.aisquare/config.toml`, 150 000 by default (the cap the server packs with).
@@ -96,9 +95,7 @@ The full pack is tried first, then a compressed one; when even that is over,
 the compressed pack is kept as the **skeleton** with its per-file index and the
 full pack is skipped — `onboard` and `aisquare doctor` both say `snapshot:
 skeleton only: 2030000 tokens, 1234 files indexed; full pack skipped over
-budget 150000 (10990000 tokens)`, and agents are oriented from it as usual.
-The budget gates only the full pack: an agent is handed paths and opens slices
-through the index, never a whole pack in a prompt. To keep the full pack too,
+budget 150000 (10990000 tokens)`. The budget gates only the full pack. To keep the full pack too,
 raise the budget or leave more out, then re-pack:
 
 ```sh

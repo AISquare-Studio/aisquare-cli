@@ -208,6 +208,26 @@ def test_a_codex_launch_gets_the_trust_another_codex_slot_gave_and_says_so(
     assert not core.claude_json_path(core.default_account()).exists(), "no Claude file made"
 
 
+@pytest.mark.skipif(not can_symlink(), reason="needs symlinks")
+def test_a_codex_launch_through_a_linked_folder_is_trusted_by_its_real_path(
+    checkout: Path, fake_home: Path, tmp_path: Path
+) -> None:
+    """Codex looks a folder up by its resolved path (macOS's /var/tmp is /private/var/tmp;
+    measured again in SMOKE9 item 10: trusted as /var/tmp/… it still asked). A launch from a
+    linked spelling of the checkout is given the real root's table, never the link's."""
+    root = _real(checkout)
+    link = tmp_path / "linked-checkout"
+    link.symlink_to(checkout, target_is_directory=True)
+    given, asked = _slot("two@x.dev"), _slot("three@x.dev")
+    codex_sharing.grant_trust(given.config_dir, root)
+
+    notes = service.share_for_launch(link / "src", account=asked)
+
+    assert notes == [f"{root} is trusted on account 2 — now on account 3 too"]
+    keys = set(tomllib.loads(_config(asked)).get("projects", {}))
+    assert keys == {root} and str(link) not in keys
+
+
 def test_a_codex_no_is_never_overridden_and_accounts_trust_says_so(
     checkout: Path, fake_home: Path, runner: CliRunner
 ) -> None:

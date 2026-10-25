@@ -456,25 +456,24 @@ fleet still running, and every release now carries its own installer.**
   after the upgrade. A hand-over still moves it. An old default that is signed
   out or disabled no longer gets the launch: the next enabled, signed-in account
   does.
-- **An account with no usage to show reads `!` on the Accounts page, and says why
-  on hover** (#13 on the board). With no reading and none kept, the row read
+- **An account with no usage to show reads `!` on the Accounts page, and says
+  why on hover** (#13 on the board). With no reading and none kept, the row read
   `⚠ token missing` cut to its 16-wide cell and `—`, which looked like no usage
   rather than an error. Now one `!` stands across the session and week used
-  columns, the resets are empty, and hovering it shows what is wrong and the fix:
-  `the login Keychain is locked`, then `fix: unlock the login keychain (Keychain
-  Access, or log out and back in), then ↻ Refresh usage (or --refresh)`. Where
-  nothing done on the machine helps (an HTTP 5xx, an answer it cannot read) it
-  says so. *Log in* stays beside the rows that need one, and a kept reading
-  still shows its numbers and age. `accounts list --usage` and `accounts usage`
-  have no hover, so they print the reason with the same fix after it (`the
-  stored token has expired; fix: press Log in, …`), a slot with no login too,
-  which printed `—`. In `--json` such a row's `usage` carries `cause`
-  (`token_expired`, `not_signed_in`, `keychain_locked`, `rate_limited`…) and
-  `fix`, where a slot with no login said `null`. Its `reason` no longer carries a
-  fix of its own, so a token that
-  expired or was rejected reads `the stored token has expired` or `the token was
-  rejected (HTTP 401)`, and a locked or refusing Keychain reads without the
-  `— unlock it …` tail.
+  columns, the resets are empty, and hovering it shows what is wrong and the
+  fix: `the login Keychain is locked`, then `fix: unlock the login keychain
+  (Keychain Access, or log out and back in), then ↻ Refresh usage (or
+  --refresh)`. Where nothing done on the machine helps (an HTTP 5xx, an answer
+  it cannot read) it says so. *Log in* stays beside the rows that need one, and
+  a kept reading still shows its numbers and age. `accounts list --usage` and
+  `accounts usage` have no hover, so they print the reason with the same fix
+  after it (`the stored token has expired; fix: press Log in, …`), a slot with
+  no login too, which printed `—`. In `--json` such a row's `usage` carries
+  `cause` (`token_expired`, `not_signed_in`, `keychain_locked`, `rate_limited`…)
+  and `fix`, where a slot with no login said `null`. Its `reason` no longer
+  carries a fix of its own, so a token that expired or was rejected reads `the
+  stored token has expired` or `the token was rejected (HTTP 401)`, and a locked
+  or refusing Keychain reads without the `— unlock it …` tail.
 - **A pull request into a release train (`rc/**`) runs lean CI**: lint, mypy and
   the suite on one Linux leg (py3.12), the Linux package job and the other jobs
   bar the ambient legs and the demo. Pushes to `rc/**` and `main`, PRs into

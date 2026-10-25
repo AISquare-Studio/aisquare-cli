@@ -149,7 +149,9 @@ nonignored files, file by file.
   nested repositories included, so a change put back before the run ended still
   refuses it.
 - Known limits: a file created and deleted within one run, and a case-only
-  rename on a case-insensitive file system (git is blind to it too).
+  rename on a case-insensitive file system (git is blind to it too). And on
+  Windows a change put back with its old modification time, e.g. via utime or by
+  renaming the original back, is not seen.
 - A worktree is fingerprinted as its own files, under the board's one project.
 
 **The store.** Main is at schema v33. The brief table takes the next free

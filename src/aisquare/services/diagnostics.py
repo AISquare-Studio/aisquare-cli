@@ -1829,7 +1829,9 @@ def _claude_account_backoff_checks() -> list[DoctorCheck]:
     return [
         _warn(
             "claude-account-backoff",
-            f"usage reads backed off after HTTP 429 for {len(parts)} account(s): "
+            # A 429, or a 503 that named a wait (Retry-After): it said 'after HTTP 429' for
+            # either (the tester's pass on #401, (d)).
+            f"usage reads backed off after HTTP 429 or 503 for {len(parts)} account(s): "
             + " · ".join(parts),
             "Nothing to do — reads resume by themselves when the wait ends, and the last good "
             "reading is shown meanwhile. Logging in again does not clear a rate limit; poll "

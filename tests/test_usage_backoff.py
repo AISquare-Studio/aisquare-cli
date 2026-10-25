@@ -347,6 +347,19 @@ def test_a_pick_skips_a_backed_off_account_whose_reading_is_old(fake_home: Path)
 # --------------------------------------------------------------------------- doctor, removal
 
 
+def test_a_503_with_retry_after_is_named_by_doctor_as_a_back_off(fake_home: Path) -> None:
+    """The tester's pass on #401, (d): an account backed off after a 503 with ``Retry-After``
+    was named by doctor's row as backed off 'after HTTP 429'. Worded for both."""
+    work = _slot("work@example.com", "tok-work")
+    held = service.read_usage(
+        [work], now=NOW, fetch=_Endpoint({"tok-work": (503, {"Retry-After": "600"})})
+    )
+    assert held[work.slot].rate_limited, "control: the 503 named a wait"
+    checks = {c.name: c for c in diagnostics._claude_accounts_checks()}
+    line = checks["claude-account-backoff"]
+    assert "after HTTP 429 or 503" in line.detail and "account 2" in line.detail, line.detail
+
+
 def test_doctor_names_the_backed_off_accounts(fake_home: Path) -> None:
     work = _slot("work@example.com", "tok-work")
     _slot("spare@example.com", "tok-spare")
@@ -362,6 +375,7 @@ def test_doctor_names_the_backed_off_accounts(fake_home: Path) -> None:
     line = checks["claude-account-backoff"]
     assert line.status == "warn"
     assert f"account 2 rate-limited until {until.astimezone().strftime('%H:%M')}" in line.detail
+    assert "after HTTP 429 or 503" in line.detail, "a 503 with Retry-After backs off too (d)"
     assert "spare" not in line.detail and "account 3" not in line.detail
     assert line.fix is not None and "does not clear a rate limit" in line.fix
 

@@ -333,6 +333,18 @@ def submit(dialog: SpawnDialog) -> Button:
     return dialog.query_one("#spawn-submit", Button)
 
 
+async def released(pilot: Pilot[Any], button: Button) -> None:
+    """Wait out a press's ``-active`` effect, during which ``Button`` ignores a click: a
+    click inside it presses nothing. Its end is a 0.2 s timer, so wait on the class, not
+    on a guess at the clock (windows-latest, CI run 40144039659: the second *Spawn* of
+    the take-over test landed inside it and the question never came)."""
+    for _ in range(250):
+        if not button.has_class("-active"):
+            return
+        await pilot.pause(0.02)
+    raise AssertionError(f"#{button.id} stayed pressed")
+
+
 def label_input(dialog: SpawnDialog) -> Input:
     return dialog.query_one("#spawn-label", Input)
 
@@ -1638,6 +1650,7 @@ def test_take_over_locks_the_label_and_task_to_the_teammates_and_asks_first(
         await pilot.click("#take-over-no")
         await settle(pilot)
         assert isinstance(host.screen, SpawnDialog) and hand_offs.calls == []
+        await released(pilot, submit(dialog))
         await pilot.click("#spawn-submit")
         await settle(pilot)
         await pilot.click("#take-over-yes")

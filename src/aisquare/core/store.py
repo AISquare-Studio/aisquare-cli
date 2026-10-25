@@ -574,9 +574,11 @@ def _adopt_onboarded_projects(connection: sqlite3.Connection) -> None:
         "SELECT id, root FROM project WHERE onboarded_at IS NULL AND forgotten_at IS NULL"
     ).fetchall()
     # Never the aisquare home's own row: builds before D5 packed the home too, and that
-    # pack is no sign the owner added it (main's snapshot.exists() said the same).
+    # pack is no sign the owner added it (main's snapshot.exists() said the same). The
+    # stat first: only a row with a pack has its root resolved, so roots on dead mounts
+    # cost nothing.
     with_snapshot = [
-        row[0] for row in rows if not is_the_home(Path(row[1])) and _snapshot_on_disk(str(row[0]))
+        row[0] for row in rows if _snapshot_on_disk(str(row[0])) and not is_the_home(Path(row[1]))
     ]
     for project_id in with_snapshot:
         connection.execute(

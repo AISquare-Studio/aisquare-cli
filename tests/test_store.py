@@ -2851,6 +2851,34 @@ def test_the_homes_old_pack_does_not_list_the_home(isolated_home: Path) -> None:
     assert not pack.exists()
 
 
+def test_the_backfill_resolves_no_root_for_a_row_without_a_pack(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asking whether a row is the home resolves its root, which can hang on a dead mount,
+    and most captured rows have no pack. So the stat comes first, and only a row with a
+    pack is asked (review of #399, n11)."""
+    after = (
+        "INSERT INTO project (id, root, name, linked_repos, created_at) VALUES "
+        "('prj_bare', '/gone/mount/bare', 'bare', '[]', '2026-09-01T00:00:00+00:00'),"
+        " ('prj_packed', '/w/packed', 'packed', '[]', '2026-09-01T00:00:00+00:00');\n"
+    )
+    _at_version(16, after=after)
+    _old_pack("prj_packed")
+    asked: list[str] = []
+    is_the_home = store_module.is_the_home
+
+    def spy(root: Path) -> bool:
+        asked.append(str(root))
+        return is_the_home(root)
+
+    monkeypatch.setattr(store_module, "is_the_home", spy)
+    with store_session():
+        pass
+
+    assert "/w/packed" in asked, "control: a row with a pack is asked"
+    assert "/gone/mount/bare" not in asked
+
+
 def test_old_packs_go_once_and_nothing_outside_projects_is_followed(
     isolated_home: Path, tmp_path: Path
 ) -> None:

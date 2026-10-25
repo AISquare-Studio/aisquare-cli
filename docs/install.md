@@ -61,7 +61,7 @@ curl -fsSL .../install.sh | sh -s -- --yes --no-agent
 | `--yes` | Never prompt, and do not open the UI at the end. For CI and Dockerfiles. |
 | `--dry-run` | Print every command, run none. |
 | `--no-agent` | Skip Claude Code. |
-| `--no-system-deps` | Skip tmux, gh and git, and ask about no optional extra. |
+| `--no-system-deps` | Skip tmux, gh and git, and ask about no optional extra. An extra named with `--with` still installs, with the package manager and `sudo`. |
 | `--with chrome-devtools` | Install the optional Chrome DevTools MCP without asking: Node 22.12+, then the MCP registered with Claude Code (not under `--no-agent`, nor when it is already registered). `--yes` alone asks nothing and installs no extra. |
 | `--project DIR` | Register `DIR` instead of the current directory. |
 | `--no-project` | Set up the machine, register nothing. |

@@ -1560,12 +1560,15 @@ install_chrome_devtools() { install_node; }
 # top-level "mcpServers" block, and only that block is read: other top-level maps
 # are keyed by name too (skillUsage counts a skill called chrome-devtools, which
 # the plugin ships), and a project's local servers sit deeper in. `{$` passes over
-# an empty `"mcpServers": {}`. A file laid out some other way reads as absent, and
-# `claude mcp add` then answers that it exists, which register_devtools_mcp
-# reports the same way.
+# an empty `"mcpServers": {}`. Inside the block, the package counts as well as the
+# name: the name is the operator's to choose, as doctor's browser tools row holds,
+# and a server named `devtools` that runs chrome-devtools-mcp is this one already.
+# `[@"]` after it, so chrome-devtools-mcp-docs is not. A file laid out some other
+# way reads as absent, and `claude mcp add` then answers that it exists, which
+# register_devtools_mcp reports the same way.
 devtools_mcp_registered() {
     sed -n '/^  "mcpServers": {$/,/^  }/p' "$(claude_json)" 2>/dev/null |
-        grep -q "^    \"$DEVTOOLS_MCP_NAME\": " && return 0
+        grep -q -e "^    \"$DEVTOOLS_MCP_NAME\": " -e '"chrome-devtools-mcp[@"]' && return 0
     _dr_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
     grep -q '"chrome-devtools-mcp@[^"]*": *true' "${_dr_dir%/}/settings.json" 2>/dev/null
 }
@@ -1685,22 +1688,25 @@ _reread_node() {
 _ensure_npx() {
     have npx && return 0
     _en_why="there is no package manager to install npm with"
+    _en_fix="Install npm by hand: $(pkg_hint npm)"
     if [ -n "$PKG" ]; then
         debug "node is present but npx is not — installing npm"
         if pkg_install npm; then
             [ "$DRY_RUN" = 1 ] && return 0
             hash -r 2>/dev/null || true
             have npx && return 0
+            _en_why="npm installed but npx is not on PATH"
+            _en_fix="Put the directory that holds npm's npx on PATH."
+        else
+            _en_why="npm did not install"
         fi
-        _en_why="npm did not install"
     fi
     if [ "$DRY_RUN" = 1 ]; then
-        note "would warn: Node $NODE_VERSION is here but npx is not, and $_en_why.
-         By hand: $(pkg_hint npm)"
+        note "would warn: Node $NODE_VERSION is here without npx: $_en_why. $_en_fix"
         return 1
     fi
-    warn "Node $NODE_VERSION is here but npx is not, and $_en_why: the Chrome
-         DevTools MCP is started with npx. Install it with: $(pkg_hint npm)"
+    warn "Node $NODE_VERSION is here without npx: $_en_why. The Chrome DevTools
+         MCP is started with npx. $_en_fix"
     return 1
 }
 
@@ -2507,6 +2513,8 @@ Options
   -y, --yes            Never prompt, and do not launch the UI at the end.
       --no-agent       Skip Claude Code.
       --no-system-deps Skip tmux, gh and git, and ask about no optional extra.
+                       An extra named with --with still installs, with the
+                       package manager and sudo.
       --with EXTRA     Install an optional extra without asking. One for now:
                        chrome-devtools (Node 22.12+, and the Chrome DevTools
                        MCP registered with Claude Code at user scope; undo

@@ -1635,15 +1635,46 @@ def test_an_extra_is_installed_only_when_chosen(
         assert "optional; --with chrome-devtools adds it" in result.stdout + result.stderr
 
 
+def test_no_system_deps_says_a_named_extra_still_installs(tmp_path: Path) -> None:
+    """For provisioning scripts: --no-system-deps asks about no extra, but one named with
+    --with wins (the `with-no-system-deps` case above), and that one still uses the
+    package manager and sudo. The help and the page say so (review of #399, n13)."""
+    usage = " ".join(sh("usage", path=base_path(tmp_path)).stdout.split())
+    page = " ".join((REPO / "docs" / "install.md").read_text(encoding="utf-8").split())
+
+    said = (
+        "An extra named with {0}--with{0} still installs, with the package manager and {0}sudo{0}."
+    )
+    assert "ask about no optional extra. " + said.format("") in usage, usage
+    assert "ask about no optional extra. " + said.format("`") in page
+
+
+@pytest.mark.parametrize(
+    ("status", "said"),
+    [
+        (
+            0,
+            "npm installed but npx is not on PATH. The Chrome DevTools MCP is started with"
+            " npx. Put the directory that holds npm's npx on PATH.",
+        ),
+        (
+            100,
+            "npm did not install. The Chrome DevTools MCP is started with npx. Install npm by"
+            " hand: sudo apt install npm",
+        ),
+    ],
+    ids=["npm-installed-no-npx", "npm-failed"],
+)
 def test_npm_is_installed_only_for_a_run_that_chose_the_extra_and_a_failure_is_said(
-    tmp_path: Path,
+    tmp_path: Path, status: int, said: str
 ) -> None:
     """A Node at the floor with no npx (npm is its own package on Arch, Alpine and
     Debian's nodejs): a run that did not choose the extra installs nothing, and one that
-    did installs npm beside it. When npm then brings no npx, that is said, where it
-    happened (review of #399, m5): the summary's "see the warning above" points at it."""
+    did installs npm beside it. When that brings no npx, that is said, where it happened
+    (review of #399, m5), and as it happened: npm failing, or npm in and npx still not on
+    PATH (n12). The summary's "see the warning above" points at it."""
     log = tmp_path / "calls.log"
-    pkg = stub_dir(tmp_path, "pkg", "apt-get", body=f'printf "%s\\n" "$*" >>"{log}"\nexit 0')
+    pkg = stub_dir(tmp_path, "pkg", "apt-get", body=f'printf "%s\\n" "$*" >>"{log}"\nexit {status}')
 
     def run(chosen: str) -> str:
         result = sh(
@@ -1659,10 +1690,7 @@ def test_npm_is_installed_only_for_a_run_that_chose_the_extra_and_a_failure_is_s
     chosen = " ".join(run("chrome-devtools").split())
     assert "Node 22.12.0 — current" in chosen
     assert "install -y npm" in log.read_text(encoding="utf-8"), "the chosen run gets its npx"
-    assert (
-        "Node 22.12.0 is here but npx is not, and npm did not install: the Chrome DevTools"
-        " MCP is started with npx. Install it with: sudo apt install npm"
-    ) in chosen
+    assert f"Node 22.12.0 is here without npx: {said}" in chosen, chosen
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["run", "dry-run"])
@@ -1679,14 +1707,12 @@ def test_no_package_manager_for_npm_is_said_as_it_is(tmp_path: Path, dry_run: bo
     said = " ".join((result.stdout + result.stderr).split())
 
     assert "npm did not install" not in said
-    reason = (
-        "Node 22.12.0 is here but npx is not, and there is no package manager to install npm with"
-    )
+    reason = "Node 22.12.0 is here without npx: there is no package manager to install npm with"
     if dry_run:
-        assert f"would warn: {reason}. By hand: apt install npm" in said, said
+        assert f"would warn: {reason}. Install npm by hand: apt install npm" in said, said
         assert "WARNINGS=0" in said
     else:
-        assert f"{reason}: the Chrome DevTools MCP is started with npx." in said, said
+        assert f"{reason}. The Chrome DevTools MCP is started with npx." in said, said
         assert "WARNINGS=1" in said
 
 
@@ -1972,6 +1998,36 @@ _USER_SCOPE_AMONG_OTHERS = """{
   "skillUsage": {}
 }
 """
+#: The same package under a name the operator chose: doctor's browser tools row counts
+#: it by package, and so does the check (review of #399, m11).
+_NAMED_OTHERWISE = """{
+  "mcpServers": {
+    "devtools": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@latest"
+      ],
+      "env": {}
+    }
+  }
+}
+"""
+#: A package whose name only starts with the MCP's: not it.
+_LOOKALIKE_PACKAGE = """{
+  "mcpServers": {
+    "docs": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "chrome-devtools-mcp-docs"
+      ],
+      "env": {}
+    }
+  }
+}
+"""
 
 
 def _fake_claude(
@@ -2074,7 +2130,15 @@ def test_a_run_that_chose_the_extra_registers_the_mcp_once(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    "where", ["user-scope", "among-others", "claude-config-dir", "plugin", "claude-says-so"]
+    "where",
+    [
+        "user-scope",
+        "among-others",
+        "named-otherwise",
+        "claude-config-dir",
+        "plugin",
+        "claude-says-so",
+    ],
 )
 def test_an_mcp_already_registered_is_left_alone_in_one_line(tmp_path: Path, where: str) -> None:
     """In the user config, in CLAUDE_CONFIG_DIR's, or brought by the chrome-devtools-mcp
@@ -2088,6 +2152,8 @@ def test_an_mcp_already_registered_is_left_alone_in_one_line(tmp_path: Path, whe
         (home / ".claude.json").write_text(_USER_SCOPE, encoding="utf-8")
     elif where == "among-others":
         (home / ".claude.json").write_text(_USER_SCOPE_AMONG_OTHERS, encoding="utf-8")
+    elif where == "named-otherwise":
+        (home / ".claude.json").write_text(_NAMED_OTHERWISE, encoding="utf-8")
     elif where == "claude-config-dir":
         config = tmp_path / "config"
         config.mkdir()
@@ -2125,6 +2191,7 @@ def test_an_mcp_already_registered_is_left_alone_in_one_line(tmp_path: Path, whe
         (_USER_SCOPE, None, True),  # in ~/.claude.json while Claude Code reads elsewhere
         (_SKILL_USAGE, None, False),  # a skill of that name, no server
         (_ANOTHER_SERVER_THEN_SKILL_USAGE, None, False),
+        (_LOOKALIKE_PACKAGE, None, False),
         (None, None, False),
     ],
     ids=[
@@ -2133,6 +2200,7 @@ def test_an_mcp_already_registered_is_left_alone_in_one_line(tmp_path: Path, whe
         "outside-claude-config-dir",
         "skill-usage-only",
         "another-server-then-skill-usage",
+        "lookalike-package",
         "no-config",
     ],
 )
@@ -2231,8 +2299,8 @@ def test_a_node_without_npx_is_not_registered_and_the_extra_did_not_install(
     tmp_path: Path,
 ) -> None:
     """A Node with no npx cannot start the MCP, so registering it would leave Claude Code
-    a server that fails. npm not installing is the extra not installing: said once,
-    where it happened, and the run exits 2 naming the extra."""
+    a server that fails. No npx after npm is the extra not installing: said once, where
+    it happened, and the run exits 2 naming the extra."""
     stubs, log = _fake_claude(tmp_path)
     (stubs / "npx").unlink()
     pkg = stub_dir(tmp_path, "pkg", "apt-get")
@@ -2245,7 +2313,7 @@ def test_a_node_without_npx_is_not_registered_and_the_extra_did_not_install(
 
     warning = " ".join(result.stderr.split())
     assert _mcp_adds(log) == []
-    assert "is here but npx is not, and npm did not install" in warning
+    assert "is here without npx: npm installed but npx is not on PATH" in warning
     assert "Chrome DevTools MCP not registered: there is no npx to start it" in result.stdout
     assert _NODE_FAILED in result.stdout
     assert "WARNINGS=1 UNEXPECTED=1" in result.stdout

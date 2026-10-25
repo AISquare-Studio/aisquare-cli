@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from aisquare.core import pricing
+from aisquare.core.agent_adapters import usage_tally
 from aisquare.core.agent_adapters.types import FirstEdit, UsageScan
 from aisquare.core.pricing import RequestTokens
 from aisquare.core.usage import AISQUARE_MARKERS, ModelUsage, Usage
@@ -213,7 +214,7 @@ def scan(transcript: Path, state: ScanState | None = None) -> tuple[Usage, ScanS
     for order, path in enumerate(transcript_files(transcript)):
         key = str(path)
         start = state.offsets.get(key, 0)
-        raw, consumed, restarted = _read_from(path, start)
+        raw, consumed, restarted = usage_tally.appended(path, start)
         if consumed:
             state.offsets[key] = (0 if restarted else start) + consumed
         newest = state.newest.get(key, state.newest.get("", ""))
@@ -234,33 +235,6 @@ def scan(transcript: Path, state: ScanState | None = None) -> tuple[Usage, ScanS
         _account(entry, usage, state)
     _trim(state)
     return usage, state
-
-
-def _read_from(path: Path, start: int) -> tuple[list[bytes], int, bool]:
-    """The complete lines of ``path`` from byte ``start``, how many bytes they span, and
-    whether it was read from its beginning instead.
-
-    A file that shrank below ``start`` (rewritten, not appended to) is read again from
-    the beginning, and :func:`scan` counts only its entries newer than the newest it
-    read before. The dedupe by message id remembers only :data:`_RECENT_IDS`, so a longer
-    session read again counted its older requests a second time (#45, n4).
-    """
-    restarted = False
-    try:
-        with path.open("rb") as handle:
-            handle.seek(0, 2)
-            end = handle.tell()
-            if end < start:
-                start, restarted = 0, True
-            handle.seek(start)
-            data = handle.read(end - start)
-    except OSError:
-        return [], 0, False
-    cut = data.rfind(b"\n")
-    if cut < 0:
-        return [], 0, restarted  # no complete line yet: a reply still being written
-    complete = data[: cut + 1]
-    return complete.split(b"\n"), len(complete), restarted
 
 
 def _entries(lines: Iterable[bytes]) -> Iterator[dict[str, Any]]:

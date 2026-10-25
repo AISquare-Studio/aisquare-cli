@@ -272,13 +272,13 @@ def test_a_stop_reads_only_the_bytes_appended_since_the_last(
     """The regression that matters on the hook's path, held on bytes, not time: after
     the first record a Stop seeks to where the last one stopped and reads exactly what
     the turn appended, never the session's history again."""
-    from aisquare.core.agent_adapters import claude_usage as usage_core
+    from aisquare.core.agent_adapters import usage_tally
 
     transcript = tmp_path / f"{SESSION}.jsonl"
     _big_transcript(transcript)
     assert metrics_service.record_usage(SESSION, str(transcript), tmp_path, trigger="stop")
     reads: list[tuple[int, int]] = []
-    real_read_from = usage_core._read_from
+    real_read_from = usage_tally.appended
 
     def counting(path: Path, start: int) -> tuple[list[bytes], int, bool]:
         lines, consumed, restarted = real_read_from(path, start)
@@ -286,7 +286,7 @@ def test_a_stop_reads_only_the_bytes_appended_since_the_last(
             reads.append((start, consumed))
         return lines, consumed, restarted
 
-    monkeypatch.setattr(usage_core, "_read_from", counting)
+    monkeypatch.setattr(usage_tally, "appended", counting)
     for n in range(3):
         before = transcript.stat().st_size
         _append(transcript, _assistant(f"new{n}", "Read"), _assistant(f"new{n}", "Read"))
@@ -359,8 +359,8 @@ def test_a_codex_stop_records_its_rollouts_tokens_priced_off_codexs_own_list(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """SCOPE #113 274, L2: the record reads through the session's own agent's reader
-    (``AgentTranscript.usage``). A Codex session recorded nothing (``core.usage`` read Claude
-    Code's shapes alone, behind ``capabilities.transcript_usage``); its Stop records what its
+    (``AgentTranscript.usage``). A Codex session recorded nothing, its transcript read with
+    Claude Code's shapes alone before this lane; its Stop records what its
     rollout's ``token_usage_record`` lines add, priced off OpenAI's list, its session end
     nothing twice, and ``metrics tokens`` names that list."""
     from aisquare.core.agent_adapters import get_adapter

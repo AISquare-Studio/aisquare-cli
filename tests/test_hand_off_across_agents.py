@@ -324,6 +324,8 @@ def test_a_codex_agent_switched_onto_claude_code_starts_fresh_there_with_the_bri
 
     restarted = fleet_service.restart(project, agent.label, fresh=True)
     assert restarted.started.agent == "claude-code" and not restarted.crossed
+    forked = fleet_service.hand_off(project, agent.label, mode="fork", fresh=True)
+    assert forked.started.agent.agent == "claude-code"  # a Fork of it stays there too
 
 
 def test_a_claude_code_agent_switched_to_a_codex_account_takes_the_brief_as_its_argument(

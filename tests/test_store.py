@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, tzinfo
 from pathlib import Path
@@ -2878,7 +2879,7 @@ def test_a_projects_dir_the_cleanup_cannot_read_never_breaks_the_open(
         except OSError:
             pytest.skip("this filesystem cannot make symlinks")
     elif damage == "unreadable":
-        if os.name != "posix" or os.geteuid() == 0:
+        if sys.platform == "win32" or os.geteuid() == 0:  # mypy narrows on sys.platform
             pytest.skip("needs POSIX permissions that bind this user")
         _old_pack("prj_a")
         projects.chmod(0)

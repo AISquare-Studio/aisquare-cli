@@ -566,8 +566,9 @@ fleet still running, and every release now carries its own installer.**
   a failure older than the five-minute cache showed `—`. A kept reading is never taken for
   a live one: a headroom pick uses it only inside the pick's own window with neither window
   reset since, and otherwise skips it with a note giving its age; the fleet's dot ignores
-  one older than five minutes. A wait is the login's: a slot signed into another login is
-  not held to it. `--json` readings carry `rate_limited`, `rate_limited_until` and
+  one older than five minutes. A wait is the signed-in account's: a token refresh or *Log
+  in again* to the same account keeps it, and a slot signed into another account is not
+  held to it. `--json` readings carry `kept`, `rate_limited`, `rate_limited_until` and
   `last_failed_reason`.
 - **Restart all brings back the agents that died** (#38). After an outside SIGTERM
   killed every agent of a fleet (exit 143), *Settings ▸ Fleet ▸ Restart all…* and

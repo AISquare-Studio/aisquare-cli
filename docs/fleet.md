@@ -849,7 +849,9 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   a headroom pick and a hand-over all honour it: no request goes out for that
   account before it ends. `aisquare doctor` lists the accounts backed off and
   until when (`claude-account-backoff`). Logging in again does not clear a rate
-  limit. If you script usage, poll no more often than the cache's five minutes
+  limit: the wait is the signed-in account's, kept across a token refresh, and only
+  another account signed into the slot is asked at once. In `--json` a reading that
+  is not live says `"kept": true`. If you script usage, poll no more often than the cache's five minutes
   (`aisquare accounts usage --json`, without `--refresh`): every surface shares the
   one cached reading. A token the
   endpoint refuses shows at once (`⚠ token rejected`), and an expired one says

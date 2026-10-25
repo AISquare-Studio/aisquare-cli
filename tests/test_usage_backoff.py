@@ -389,6 +389,31 @@ def test_doctors_look_reads_the_login_only_of_a_slot_with_a_wait(
     assert asked == [work.slot], "the slot with no wait is not read"
 
 
+def test_a_kept_reading_has_no_trend(fake_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review of #408, n4: the page's trend ("≈ N min to the limit") was worked out for a kept
+    reading too, describing a moment that can be hours ago. A kept one has none; a live one
+    still has its own (control)."""
+    work = _slot("work@example.com", "tok-work")
+    pace = object()
+    asked: list[int] = []
+
+    def trend(slot: int, reading: ClaudeUsage, **_: Any) -> object:
+        asked.append(slot)
+        return pace
+
+    monkeypatch.setattr(service, "usage_trend", trend)
+    endpoint = _Endpoint({"tok-work": _payload(40)})
+    live = service.cached_usage_with_trends([work], now=NOW, fetch=endpoint)[work.slot]
+    endpoint.by_token["tok-work"] = (429, {"Retry-After": "600"})
+    _new_process()
+    later = NOW + timedelta(minutes=6)
+    kept = service.cached_usage_with_trends([work], now=later, fetch=endpoint)[work.slot]
+
+    assert live[1] is pace and not service.is_kept(live[0])
+    assert service.is_kept(kept[0]) and kept[0].session_percent == 40
+    assert kept[1] is None and asked == [work.slot], "no trend asked for the kept one"
+
+
 def test_removing_an_account_forgets_its_wait(fake_home: Path) -> None:
     work = _slot("work@example.com", "tok-work")
     service.read_usage([work], now=NOW, fetch=_Endpoint({"tok-work": 429}))

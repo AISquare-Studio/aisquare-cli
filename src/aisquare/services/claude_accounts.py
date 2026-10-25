@@ -1761,12 +1761,18 @@ def cached_usage_with_trends(
     which every fetch here still records, in ONE store session after the
     readings. A store that cannot be opened costs the trends, never the
     readings.
+
+    A kept reading (:func:`is_kept`) has no trend: its pace, "≈ N min to the limit", was
+    worked out for a moment that can be hours ago (review of #408, n4).
     """
     readings = cached_usage(accounts, max_age=max_age, force=force, now=now, fetch=fetch)
     try:
         with store_session() as store:
             return {
-                slot: (reading, usage_trend(slot, reading, now=now, store=store))
+                slot: (
+                    reading,
+                    None if is_kept(reading) else usage_trend(slot, reading, now=now, store=store),
+                )
                 for slot, reading in readings.items()
             }
     except sqlite3.Error:

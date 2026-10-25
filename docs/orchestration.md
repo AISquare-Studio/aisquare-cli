@@ -512,13 +512,16 @@ breaks.
 
 **TLS.** Usage reads, like every HTTPS call the CLI makes, verify the server
 against the OS trust store (the macOS Keychain, Windows' store, the distro
-bundle on Linux) through `truststore`, falling back to `certifi`; set
-`SSL_CERT_FILE` (or `SSL_CERT_DIR`) to use a bundle of your own, e.g. behind a
-proxy that re-signs HTTPS. A row that says *TLS certificate could not be
+bundle on Linux) through `truststore`, or through `certifi` where `truststore`
+cannot be imported. Set `SSL_CERT_FILE` (or `SSL_CERT_DIR`) to add a bundle of your
+own, e.g. behind a proxy that re-signs HTTPS: it is trusted beside the interpreter's
+default paths, as before. On a machine with no trust store at all (a minimal
+container with no CA files), name certifi's: `SSL_CERT_FILE=$(python -m certifi)`. A row that says *TLS certificate could not be
 verified* is that, not the endpoint: `aisquare doctor --live`'s `tls` row
 performs one handshake to api.anthropic.com (through `HTTPS_PROXY` when one
-applies, as every request does) and names the trust source it used. Plain
-`http://` calls never build the context, so a bad bundle affects only HTTPS.
+applies, as every request does) and names the trust source it used. A plain
+`http://` call uses the context only to verify a redirect to `https://`, and goes
+without it when the bundle will not load, so a bad bundle affects only HTTPS.
 
 Accounts laid out some other way — a wrapper script, a proxy, a directory you
 made yourself — still bind to a role as a **launch profile**: a binary, a set

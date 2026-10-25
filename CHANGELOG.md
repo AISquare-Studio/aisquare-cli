@@ -823,13 +823,16 @@ fleet still running, and every release now carries its own installer.**
   `CERTIFICATE_VERIFY_FAILED` and each account said *could not reach the usage
   endpoint (URLError)* while `curl` to the same URL worked. Every HTTPS caller —
   usage, IAM, explainability, CI, persona import, the upgrade check, remote push
-  — now goes through one lazily built context (`core/tls.py`): `SSL_CERT_FILE` /
-  `SSL_CERT_DIR` when set, else the OS store via `truststore`, else `certifi`
-  (both now declared dependencies). A certificate that does not verify says
+  — now goes through one lazily built context (`core/tls.py`, one per thread):
+  `SSL_CERT_FILE` / `SSL_CERT_DIR` when set, added to the interpreter's default paths
+  as the stdlib always did, else the OS store via `truststore`, else `certifi` where
+  `truststore` cannot be imported (both now declared dependencies). Every rung
+  requires a certificate, checks the hostname and refuses below TLS 1.2. A certificate that does not verify says
   *TLS certificate could not be verified* with a hint instead of a bare
   `URLError`, and a bundle `SSL_CERT_FILE` names that will not load says *the
-  CA bundle could not be loaded*. Plain `http://` calls never build the
-  context. `aisquare doctor --live` gains a `tls` row: one verified handshake
+  CA bundle could not be loaded*. A plain `http://` call uses the context only
+  to verify a redirect to `https://`, and goes without it when the bundle will
+  not load. `aisquare doctor --live` gains a `tls` row: one verified handshake
   to api.anthropic.com, through `HTTPS_PROXY` when one applies, naming the
   trust source in use.
 - **Under an exported `AISQUARE_TEAM_HUB`, the captain stays on its home board,

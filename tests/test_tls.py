@@ -156,9 +156,9 @@ def fresh_context(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Each test builds its own context: the cache is per process, the environment per test."""
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
-    tls._cached.cache_clear()
+    tls.forget_contexts()
     yield
-    tls._cached.cache_clear()
+    tls.forget_contexts()
 
 
 @pytest.fixture
@@ -238,7 +238,7 @@ def test_truststore_is_preferred_and_certifi_is_the_fallback(
     assert tls.trust_source() == tls.SOURCE_TRUSTSTORE
     assert context.verify_mode is ssl.CERT_REQUIRED and context.check_hostname
 
-    tls._cached.cache_clear()
+    tls.forget_contexts()
     monkeypatch.setitem(sys.modules, "truststore", None)
     fallback = tls.ssl_context()
     assert tls.trust_source() == tls.SOURCE_CERTIFI
@@ -532,6 +532,150 @@ def test_a_live_doctor_run_from_the_suite_connects_nowhere_off_this_machine(
     assert rows["tls"]["status"] == "warn" and TLS_CLOSED in rows["tls"]["detail"], rows["tls"]
 
 
+def test_a_stalled_handshake_holds_up_no_other_thread(https_server: _Server) -> None:
+    """Review of #403, m1 (the reviewer's repro): truststore holds a context's lock across the
+    whole handshake, and one context served the process, so a handshake to a peer that
+    never answers held up every other thread's for its whole timeout. Each thread has its
+    own context: the second handshake, to a peer that answers at once, does not wait."""
+    import socket
+    import time
+
+    silent = socket.socket()
+    silent.bind(("127.0.0.1", 0))
+    silent.listen(1)  # takes the TCP connection, never answers the ClientHello
+    answering = int(https_server.url.split(":")[2].split("/")[0])
+    took: dict[str, float] = {}
+
+    def shake(name: str, port: int, timeout: float) -> None:
+        began = time.monotonic()
+        with contextlib.suppress(OSError):  # the stalled one times out; the other may not verify
+            tls.handshake("127.0.0.1", port=port, timeout=timeout)
+        took[name] = time.monotonic() - began
+
+    try:
+        stalled = threading.Thread(target=shake, args=("stalled", silent.getsockname()[1], 3.0))
+        stalled.start()
+        time.sleep(0.2)
+        shake("answered", answering, 5.0)
+        stalled.join(10)
+    finally:
+        silent.close()
+
+    assert took["stalled"] >= 2.5, took  # control: it really stalled
+    assert took["answered"] < 1.0, f"held up behind the stalled handshake: {took}"
+
+
+def test_a_malformed_proxy_port_is_a_warning_naming_https_proxy_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #403, m2: ``HTTPS_PROXY=http://proxy.invalid:abc`` raised ValueError out of the
+    tls row's port, and nothing caught it, so it took the whole of ``doctor --live`` down.
+    It is a warning naming the variable, never its value (it may carry credentials)."""
+    import urllib.request
+
+    from aisquare.services import diagnostics
+
+    monkeypatch.setattr(
+        urllib.request, "getproxies", lambda: {"https": "http://user:s3cr3t@proxy.invalid:abc"}
+    )
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: False)
+    monkeypatch.setattr(tls, "handshake", REAL_HANDSHAKE)
+
+    row = diagnostics._check_tls()
+
+    assert row.status.value == "warn" and "HTTPS_PROXY" in row.detail, row.detail
+    assert row.fix == tls.PROXY_FIX
+    assert "s3cr3t" not in row.detail and "user" not in row.detail
+    with pytest.raises(tls.ProxyURLError):
+        tls.handshake("api.anthropic.com")
+
+
+def _serial(ca_file: Path) -> int:
+    from cryptography import x509
+
+    return x509.load_pem_x509_certificate(ca_file.read_bytes()).serial_number
+
+
+def test_ssl_cert_file_adds_to_the_default_paths_as_the_stdlib_did(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Review of #403, n2: ``SSL_CERT_FILE`` made the context trust that bundle ALONE, where the
+    stdlib's own context (every call before #403) read the default paths beside it, so a
+    bundle holding only a re-signing proxy's CA failed every public host reached directly.
+    The env rung trusts both."""
+    (tmp_path / "proxy").mkdir()
+    (tmp_path / "public").mkdir()
+    proxy_ca, _leaf, _key = _private_ca(tmp_path / "proxy")
+    public_ca, _leaf2, _key2 = _private_ca(tmp_path / "public")
+
+    def load_default_certs(self: ssl.SSLContext, purpose: Any = None) -> None:
+        self.load_verify_locations(cafile=str(public_ca))  # stands for the system's roots
+
+    monkeypatch.setattr(ssl.SSLContext, "load_default_certs", load_default_certs)
+    monkeypatch.setenv("SSL_CERT_FILE", str(proxy_ca))
+
+    trusted = {int(str(ca["serialNumber"]), 16) for ca in tls.ssl_context().get_ca_certs()}
+
+    assert tls.trust_source() == tls.SOURCE_ENV
+    assert _serial(proxy_ca) in trusted, "the bundle named"
+    assert _serial(public_ca) in trusted, "and the default paths beside it"
+
+
+@pytest.mark.parametrize("rung", ["env", "truststore", "certifi"])
+def test_every_rung_requires_a_certificate_the_hostname_and_tls_1_2(
+    monkeypatch: pytest.MonkeyPatch, https_server: _Server, rung: str
+) -> None:
+    """Review of #403, n9: the floor and the checks are set on each rung, not left to the
+    interpreter's or its OpenSSL's defaults."""
+    import ssl as ssl_module
+
+    if rung == "env":
+        monkeypatch.setenv("SSL_CERT_FILE", str(https_server.ca_file))
+    elif rung == "certifi":
+        monkeypatch.setitem(sys.modules, "truststore", None)
+    floors: list[object] = []
+    real = tls._unhardened
+
+    def loose() -> tuple[ssl.SSLContext, str]:
+        context, source = real()
+        context.check_hostname = False
+        context.verify_mode = ssl_module.CERT_NONE
+        context.minimum_version = ssl_module.TLSVersion.TLSv1
+        floors.append(source)
+        return context, source
+
+    monkeypatch.setattr(tls, "_unhardened", loose)  # an interpreter with loose defaults
+
+    context = tls.ssl_context()
+
+    assert floors, "control: built through the loose stand-in"
+    assert context.verify_mode is ssl_module.CERT_REQUIRED and context.check_hostname
+    assert context.minimum_version is ssl_module.TLSVersion.TLSv1_2
+
+
+@pytest.mark.parametrize("named", [True, False], ids=["env-bundle", "os-store"])
+def test_a_certificate_failure_points_at_the_bundle_when_the_bundle_is_the_source(
+    monkeypatch: pytest.MonkeyPatch, https_server: _Server, named: bool
+) -> None:
+    """Review of #403, n4: with ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` already the source, a
+    certificate that did not verify was told to set ``SSL_CERT_FILE``. It names the bundle
+    then; with the OS store it still says to set one (control)."""
+    from aisquare.services import diagnostics
+
+    if named:
+        monkeypatch.setenv("SSL_CERT_FILE", str(https_server.ca_file))
+
+    def refused(host: str) -> None:
+        raise ssl.SSLCertVerificationError(1, "certificate verify failed")
+
+    monkeypatch.setattr(tls, "handshake", refused)
+
+    row = diagnostics._check_tls()
+
+    assert row.status.value == "fail"
+    assert row.fix == (tls.BUNDLE_FIX if named else tls.CERT_FIX), row.fix
+
+
 def test_doctors_tls_row_is_live_only() -> None:
     from aisquare.services import diagnostics
 
@@ -595,15 +739,27 @@ def test_a_bundle_that_will_not_load_fails_https_and_leaves_plain_http_alone(
 
 
 @pytest.mark.parametrize("scheme", ["https", "http"])
-def test_the_ci_exchange_builds_the_context_before_its_clock_and_only_for_https(
+def test_the_ci_exchange_leaves_the_context_to_the_thread_that_sends(
     monkeypatch: pytest.MonkeyPatch, scheme: str
 ) -> None:
-    """Review of #403: the trust store's first build (~15 ms against the stdlib's ~3 ms)
-    landed inside the exchange's ``elapsed_ms``, the latency the CI experiment measures."""
+    """Review of #403, m1 and n6: the calling thread built the context before the clock,
+    in every hook process with the CI experiment on. A context is per thread now (truststore
+    holds its lock across a handshake), so one built there would serve nothing: the
+    exchange's own thread builds it, at its first https request. The opener is still built
+    before the clock."""
     from aisquare.services import ci_client
 
     events: list[tuple[str, float]] = []
-    monkeypatch.setattr(tls, "ssl_context", lambda: events.append(("context", 0.0)))
+    caller = threading.get_ident()
+    monkeypatch.setattr(
+        tls,
+        "ssl_context",
+        lambda: (
+            events.append(("context on the caller", 0.0))
+            if threading.get_ident() == caller
+            else None
+        ),
+    )
     ci_client._opener.cache_clear()
     monkeypatch.setattr(ci_client, "build_opener", lambda *_: events.append(("opener", 0.0)))
 
@@ -614,9 +770,7 @@ def test_the_ci_exchange_builds_the_context_before_its_clock_and_only_for_https(
     monkeypatch.setattr(ci_client, "_blocking_exchange", exchange)
     ci_client.exchange(f"{scheme}://ci.example/run", method="GET", deadline_ms=5000)
 
-    assert [name for name, _ in events] == (
-        ["opener", "context", "started"] if scheme == "https" else ["opener", "started"]
-    )
+    assert [name for name, _ in events] == ["opener", "started"]
     ci_client._opener.cache_clear()  # the stand-in opener is no one else's
 
 

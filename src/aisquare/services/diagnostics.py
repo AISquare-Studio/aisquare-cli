@@ -1865,17 +1865,23 @@ def _check_tls() -> DoctorCheck:
         return _fail("tls", f"the TLS context could not be built: {exc}", tls.CERT_FIX)
     proxy = tls.https_proxy(_TLS_PROBE_HOST)
     via = ""
-    if proxy:  # host:port only: a proxy URL may carry credentials, which no row prints
-        where = urlsplit(proxy if "://" in proxy else f"http://{proxy}")
-        via = f" through the proxy {where.hostname}:{where.port or 443}"
     try:
+        if proxy:  # host:port only: a proxy URL may carry credentials, which no row prints
+            where, port, _user, _password = tls.proxy_endpoint(proxy)
+            via = f" through the proxy {where}:{port}"
         tls.handshake(_TLS_PROBE_HOST)
+    except tls.ProxyURLError as exc:
+        # A malformed HTTPS_PROXY took the whole of doctor --live down (review of #403, m2).
+        return _warn("tls", f"{exc}; nothing was dialled", tls.PROXY_FIX)
     except OSError as exc:
         if tls.cert_failure(exc):
+            # The env bundle is already what refused it: point at the bundle, not at
+            # SSL_CERT_FILE as a remedy (review of #403, n4).
+            fix = tls.BUNDLE_FIX if source == tls.SOURCE_ENV else tls.CERT_FIX
             return _fail(
                 "tls",
                 f"{_TLS_PROBE_HOST}'s certificate did not verify against {source}: {exc}",
-                tls.CERT_FIX,
+                fix,
             )
         return _warn(
             "tls",

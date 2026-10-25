@@ -41,7 +41,6 @@ the base install must stay unchanged and this path has to work without the
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import threading
@@ -254,15 +253,12 @@ def exchange(
     hook has already waited too long, and counting it would hide exactly the
     latency being measured.
     """
-    # The opener and, for https, the context are built once per process before the clock:
-    # elapsed_ms measures the exchange, not this process's first setup — the OS trust
-    # store's ~15 ms, and on 3.12+ the ~3 ms default context HTTPSHandler builds itself
-    # (review of #403). A bundle that will not load raises again inside the exchange,
-    # which maps it to a reason.
+    # The opener is built once per process before the clock (on 3.12+ HTTPSHandler builds a
+    # ~3 ms default context of its own). The verified context is the exchange thread's own,
+    # built at its first https request: one per thread, as truststore holds a context's lock
+    # across a handshake (review of #403, m1), and only when a request is sent (n6). A bundle
+    # that will not load raises inside the exchange, which maps it to a reason.
     _opener()
-    if tls.is_https(url):
-        with contextlib.suppress(OSError):
-            tls.ssl_context()
     started = time.monotonic()
     deadline_s = max(deadline_ms, 1) / 1000.0
     box: list[Exchange] = []

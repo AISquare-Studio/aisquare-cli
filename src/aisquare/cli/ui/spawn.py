@@ -683,6 +683,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             self._note("#spawn-how-note", None)
             self._note("#spawn-from-note", self._sources_unavailable, style="dim")
         self._describe_persona()
+        self._lock_other_screens()
         self._validate()
         if self._accounts is not None:
             self.run_worker(
@@ -834,6 +835,7 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
             # never needs set_options — which would put "(none)" in the field first.
             self._put_persona(self._persona_default(role))
         self.query_one("#spawn-binary", Input).placeholder = self._binary_hint(role)
+        self._describe_persona()  # the empty persona reads differently with no role
         self._validate()
 
     @on(Select.Changed, "#spawn-persona")
@@ -868,6 +870,8 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         found = next((p for p in self._personas if p.name == value), None)
         if self._personas_unavailable:
             text, style = self._personas_unavailable, "dim"
+        elif not value and self._role == NO_ROLE:
+            text, style = "(plain Claude: no role, no persona)", "dim"
         elif not value:
             text, style = "(no persona — the agent runs as its role alone)", "dim"
         elif found is None:
@@ -1288,6 +1292,9 @@ class SpawnDialog(ModalScreen[fleet_service.SpawnReceipt | None]):
         self.query_one("#spawn-pick", Button).disabled = (
             self._spawning or self._captain or self._source is not None
         )
+        # What Pick… does says nothing beside one that will not press. A running spawn
+        # gives it back, so the note stays through that and the form does not jump.
+        self.query_one("#spawn-pick-note").display = not self._captain and self._source is None
         self.query_one("#spawn-import", Button).disabled = self._spawning
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:

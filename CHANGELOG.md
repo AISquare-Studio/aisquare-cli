@@ -839,8 +839,9 @@ fleet still running, and every release now carries its own installer.**
   endpoint (URLError)* while `curl` to the same URL worked. Every HTTPS caller —
   usage, IAM, explainability, CI, persona import, the upgrade check, remote push
   — now goes through one lazily built context (`core/tls.py`, one per thread):
-  `SSL_CERT_FILE` / `SSL_CERT_DIR` when set, added to the interpreter's default paths
-  as the stdlib always did, else the OS store via `truststore`, else `certifi` where
+  `SSL_CERT_FILE` / `SSL_CERT_DIR` when set, trusted as the stdlib always did
+  (`SSL_CERT_FILE` replaces OpenSSL's default CA file, so a proxy's bundle must hold
+  the public roots too; `SSL_CERT_DIR` adds to it), else the OS store via `truststore`, else `certifi` where
   `truststore` cannot be imported (both now declared dependencies). Every rung
   requires a certificate, checks the hostname and refuses below TLS 1.2. A certificate that does not verify says
   *TLS certificate could not be verified* with a hint instead of a bare

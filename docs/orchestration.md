@@ -513,9 +513,13 @@ breaks.
 **TLS.** Usage reads, like every HTTPS call the CLI makes, verify the server
 against the OS trust store (the macOS Keychain, Windows' store, the distro
 bundle on Linux) through `truststore`, or through `certifi` where `truststore`
-cannot be imported. Set `SSL_CERT_FILE` (or `SSL_CERT_DIR`) to add a bundle of your
-own, e.g. behind a proxy that re-signs HTTPS: it is trusted beside the interpreter's
-default paths, as before. On a machine with no trust store at all (a minimal
+cannot be imported. `SSL_CERT_FILE` and `SSL_CERT_DIR` still name a bundle of your
+own, e.g. behind a proxy that re-signs HTTPS, and trust what they did before, as
+OpenSSL reads them: `SSL_CERT_FILE` REPLACES the default CA file, so the bundle must
+hold the public roots as well as the proxy's CA (append it to a copy of them);
+`SSL_CERT_DIR`, a directory of hashed certificates (`openssl rehash`), replaces only
+the default directory and so adds to the default file. On Windows both add to the
+Windows store. On a machine with no trust store at all (a minimal
 container with no CA files), name certifi's: `SSL_CERT_FILE=$(python -m certifi)`. A row that says *TLS certificate could not be
 verified* is that, not the endpoint: `aisquare doctor --live`'s `tls` row
 performs one handshake to api.anthropic.com (through `HTTPS_PROXY` when one

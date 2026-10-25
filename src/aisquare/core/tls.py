@@ -11,11 +11,15 @@ and the usage rows said "could not reach the usage endpoint (URLError)" while
 ORDER, first that applies:
 
 1. ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` set: the operator named a bundle (a proxy that
-   re-signs HTTPS). It is the stdlib's context as it was before this module: the
-   interpreter's default paths, which OpenSSL takes those two variables into, AND the
-   named bundle, loaded explicitly so one that will not load says so. Exclusive, a
-   bundle holding only the proxy's CA failed every public host reached directly
-   (review of #403, n2).
+   re-signs HTTPS). It is the stdlib's context as it was before this module, and
+   trusts what that trusted: OpenSSL's default paths are those two variables when
+   set, so ``SSL_CERT_FILE`` REPLACES the default CA file (only the default
+   directory stays) and ``SSL_CERT_DIR`` replaces the default directory (the default
+   file stays). A bundle in ``SSL_CERT_FILE`` must hold the public roots too, then;
+   a hashed ``SSL_CERT_DIR`` adds to them. On Windows both add to the Windows store,
+   which the stdlib loads first. No wider than OpenSSL and Python make it: trust is
+   not silently widened (review of #401, m3). The bundle is loaded explicitly as
+   well, so one that will not load says so.
 2. ``truststore``: the OS trust store — the macOS Keychain, Windows' store, the
    distro bundle on Linux — so a corporate CA the machine trusts is trusted here.
 3. ``certifi``: Mozilla's bundle, for an interpreter that cannot import ``truststore``.
@@ -51,7 +55,8 @@ SOURCE_CERTIFI = "certifi's CA bundle"
 SOURCE_DEFAULT = "the interpreter's default CA paths"
 
 #: What to do about a certificate that did not verify: doctor's fix line.
-CERT_FIX = "set SSL_CERT_FILE to your CA bundle if a proxy re-signs HTTPS"
+#: SSL_CERT_FILE replaces the default CA file, so the bundle it names holds both (m3).
+CERT_FIX = "if a proxy re-signs HTTPS, set SSL_CERT_FILE to a bundle of its CA and the public roots"
 #: The hint a certificate failure carries, short enough for a usage row.
 CERT_HINT = f"{CERT_FIX}, or see `aisquare doctor --live`"
 #: What to do about a bundle that will not load: doctor's fix line, and a usage row's hint.
@@ -111,8 +116,9 @@ def _unhardened() -> tuple[ssl.SSLContext, str]:
     capath = os.environ.get("SSL_CERT_DIR") or None
     if cafile or capath:
         try:
-            # The defaults (OpenSSL reads these two variables into them), then the bundle
-            # named, loaded so one that will not load raises: the stdlib's own context.
+            # The defaults, which OpenSSL takes these two variables INTO (SSL_CERT_FILE
+            # replaces the default file), then the bundle named, loaded so one that will
+            # not load raises: the stdlib's own context, trusting no more than it did.
             context = ssl.create_default_context()
             context.load_verify_locations(cafile=cafile, capath=capath)
             return context, SOURCE_ENV

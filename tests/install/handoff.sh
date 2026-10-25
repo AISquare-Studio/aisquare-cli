@@ -197,7 +197,8 @@ for name in $SHELLS; do
     head1 "$shell: piped, as curl … | sh runs it"
     : >"$WORK/fetch.log"
     set +e
-    # shellcheck disable=SC2086
+    # A pipe, not `<`: stdin must be one, as under `curl … | sh` (SC2002).
+    # shellcheck disable=SC2086,SC2002
     cat "$ROOT/install.sh" |
         env PATH="$CURL_PATH" HOME="$WORK/home" TMPDIR="$WORK/tmp" NO_COLOR=1 \
             $shell -s -- $DRY >"$WORK/out" 2>&1

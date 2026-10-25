@@ -597,6 +597,16 @@ def test_the_variant_name_is_declared_and_closed(ambient: str, suite_step: str) 
             f"{variant} is not an accepted value of the closed set, so a variant "
             "the matrix really does run would fail the job instead of running it"
         )
+    # And nothing it accepts may be a value no ambient leg runs — `none` least of all,
+    # the legs' word for "no ambient": accepted here, a leg so labelled would run the
+    # proxy-down branch and log "ambient premise holds: none". Found by mutation.
+    arms = [line for line in body[1:catchall] if ")" in line]
+    patterns = {p.strip() for line in arms for p in line.split(")")[0].split("|")}
+    runs = {leg["ambient"] for leg in jobs("test", lean=False)} - {"none"}
+    assert patterns <= runs, (
+        f"the closed set accepts {sorted(patterns - runs)}, which no ambient leg runs, "
+        "so a leg with no ambient of that name gets one anyway"
+    )
     assert "exit 1" in "\n".join(body[catchall:]), (
         "an unknown variant no longer FAILS the step — anything short of that "
         "leaves the run green, which is the state this guard exists to prevent"

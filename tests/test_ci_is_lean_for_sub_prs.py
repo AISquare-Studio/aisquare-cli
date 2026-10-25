@@ -25,7 +25,7 @@ FULL_LEGS = {
     "py3.12": ("ubuntu-latest", "3.12", "on", "none", 4),
     "py3.13-ambient-proxy-up": ("ubuntu-latest", "3.13", "on", "proxy-up", 4),
     "py3.12-captain-off": ("ubuntu-latest", "3.12", "off", "none", 4),
-    "windows-py3.12": ("windows-latest", "3.12", "on", "none", 7),
+    "windows-py3.12": ("windows-latest", "3.12", "on", "none", 8),
 }
 
 #: What only the ``lint`` job runs, once, rather than every leg.

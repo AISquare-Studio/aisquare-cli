@@ -7312,6 +7312,7 @@ def switch(
     ack_wait: float = 0.0,
     force: bool = False,
     max_age: float | None = None,
+    after_mark: Callable[[], None] | None = None,
 ) -> SwitchReceipt:
     """Move a running agent to another Claude account — the hand-over of #146.
 
@@ -7381,6 +7382,11 @@ def switch(
     candidates through the cache, a launch's minute deep, so the pick reads them from there
     and asks the endpoint nothing more. An agent named to its account
     (``LaunchSpec.account_pinned``) stays pinned on the one it is moved to.
+
+    ``after_mark`` is a last check asked once the session is marked handing over, before the
+    ``/exit``: what ``before_stop`` saw can have changed by then, and the mark hides a turn's
+    ``working`` from every later reader. It raises to refuse; the mark is taken back and
+    nothing has been stopped.
     """
     with store_session() as store:
         agent = _live_agent(store, project, label, agent_id=agent_id)
@@ -7496,6 +7502,12 @@ def switch(
         _live_agent(store, project, label, agent_id=agent.id)
     if session is not None:
         _mark_handing_over(project, agent, session, "switch", label)
+        if after_mark is not None:
+            try:
+                after_mark()
+            except BaseException:
+                _unmark_handing_over(session)
+                raise
     try:
         handed_over = stop(project, label, handover=True, agent_id=agent.id)
     finally:

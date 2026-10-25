@@ -25,6 +25,7 @@ an entry of its own in place of the reply — ``"model": "<synthetic>"``,
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -293,3 +294,166 @@ def _entries(lines: list[bytes]) -> Iterator[dict[str, Any]]:
             continue
         if isinstance(entry, dict):
             yield entry
+
+
+# --- background work and activity: is a turn end a safe point (F2 of #400) ------------
+
+_LAUNCH_MARKS = (b'"backgroundTaskId"', b'"async_launched"', b"<task-id>", b'"TaskStop"')
+"""What a line must hold to say anything of background work: a launch, a notice, a stop. Every
+other line is skipped unparsed, so a scan of an 18 MB transcript parses a handful of them."""
+_TASK_ID = re.compile(rb"<task-id>\s*([^<\s]+)\s*</task-id>")
+_BACKGROUND_ID = re.compile(rb'"backgroundTaskId"\s*:\s*"([^"]+)"')
+_AGENT_ID = re.compile(rb'"agentId"\s*:\s*"([^"]+)"')
+
+
+def background_running(path: Path, *, since: datetime | None = None) -> list[str]:
+    """The ids of the background work the transcript at ``path`` started and has not seen end:
+    a ``run_in_background`` Bash (or one Claude Code moved to the background at its timeout,
+    ``toolUseResult.backgroundTaskId``) or a background subagent (``status:
+    "async_launched"``, its ``agentId``) with no ``<task-notification>`` naming it after the
+    launch, and no ``TaskStop`` of it. Shapes as Claude Code 2.1.310 writes them.
+
+    A turn can end with such work still running, and the agent's own process runs it: an
+    ``/exit`` then kills the shell or the subagent, and a resumed conversation waits for a
+    notice that never comes. ``[accounts] before_limit`` moves nobody while it runs
+    (``services.hooks``).
+
+    ``since`` leaves out launches written before it — the start of the process that runs
+    the agent now (its fleet row's): a restart or a switch resumes the conversation, not the
+    work, and its launches would otherwise read as running for good. A launch on a line too
+    long to parse (:data:`_LINE_MAX_BYTES`) is read by its id alone and counted. Read whole, line
+    by line; ``OSError`` when the file cannot be read.
+    """
+    running: dict[str, None] = {}
+    with path.open("rb") as handle:
+        for raw in handle:
+            if not any(mark in raw for mark in _LAUNCH_MARKS):
+                continue
+            for done in _TASK_ID.findall(raw):
+                running.pop(done.decode(errors="replace"), None)
+            record = _parsed(raw)
+            if record is None:
+                if len(raw) > _LINE_MAX_BYTES:
+                    for launched in _launched_ids_of_raw(raw):
+                        running[launched] = None
+                continue
+            when = _timestamp(record)
+            if since is not None and when is not None and when < since:
+                continue
+            for launched in _launched_ids(record):
+                running[launched] = None
+            for stopped in _stopped_ids(record):
+                running.pop(stopped, None)
+    return list(running)
+
+
+_ACTIVITY_MARKS = (
+    b'"type":"user"',
+    b'"type":"assistant"',
+    b'"queue-operation"',
+    b'"type": "user"',
+    b'"type": "assistant"',
+)
+
+
+def activity_since(path: Path, offset: int) -> bool:
+    """Whether the transcript at ``path`` shows a turn begun after byte ``offset`` — a turn
+    end's size — or one about to begin.
+
+    Begun: a ``user`` record (a prompt, a task's notice, a tool's result) or an ``assistant``
+    one after ``offset``. Claude Code writes a prompt's record when it is SUBMITTED, before its
+    ``UserPromptSubmit`` hook runs, so this sees a turn the board does not yet: that hook is a
+    process of its own, and its stamp lands up to seconds later under load (#423's tester:
+    1.4 to 1.9 s). What Claude Code writes at an idle prompt (``system`` records, titles, modes,
+    attachments) is no turn. About to begin: a message queued during the turn and not yet
+    taken, a ``queue-operation`` ``enqueue`` with no ``dequeue`` or ``remove`` after it, which
+    Claude Code submits once the turn ends. A file shorter than ``offset`` (rewritten) counts
+    as activity. ``OSError`` when it cannot be read.
+    """
+    queued = 0
+    with path.open("rb") as handle:
+        if handle.seek(0, 2) < offset:
+            return True
+        handle.seek(0)
+        position = 0
+        for raw in handle:
+            start, position = position, position + len(raw)
+            if not any(mark in raw for mark in _ACTIVITY_MARKS):
+                continue
+            record = _parsed(raw)
+            if record is None:
+                if start >= offset and len(raw) > _LINE_MAX_BYTES:
+                    return True  # too long to read: a pasted prompt as like as anything
+                continue
+            kind = record.get("type")
+            if kind == "queue-operation":
+                operation = record.get("operation")
+                if operation == "enqueue":
+                    queued += 1
+                elif operation in ("dequeue", "remove"):
+                    queued = max(0, queued - 1)
+            elif start >= offset and kind in ("user", "assistant"):
+                return True
+    return queued > 0
+
+
+def _launched_ids(record: dict[str, Any]) -> list[str]:
+    result = record.get("toolUseResult")
+    if not isinstance(result, dict):
+        return []
+    found: list[str] = []
+    task = result.get("backgroundTaskId")
+    if isinstance(task, str) and task:
+        found.append(task)
+    agent = result.get("agentId")
+    if result.get("status") == "async_launched" and isinstance(agent, str) and agent:
+        found.append(agent)
+    return found
+
+
+def _launched_ids_of_raw(raw: bytes) -> list[str]:
+    """:func:`_launched_ids` of a line too long to parse, by its ids alone."""
+    found = [match.decode(errors="replace") for match in _BACKGROUND_ID.findall(raw)]
+    if b'"async_launched"' in raw:
+        found.extend(match.decode(errors="replace") for match in _AGENT_ID.findall(raw))
+    return found
+
+
+def _stopped_ids(record: dict[str, Any]) -> list[str]:
+    """The ids an assistant record's ``TaskStop`` calls name: the agent stopped them itself."""
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return []
+    found: list[str] = []
+    for block in _content_blocks(message.get("content")):
+        tool_input = block.get("input")
+        if block.get("type") != "tool_use" or block.get("name") != "TaskStop":
+            continue
+        if isinstance(tool_input, dict):
+            found.extend(
+                value
+                for key in ("task_id", "shell_id")
+                if isinstance(value := tool_input.get(key), str) and value
+            )
+    return found
+
+
+_LINE_MAX_BYTES = 262_144
+"""Longest line the background and activity scans parse (a pasted attachment can be megabytes
+on one line); a longer one is read by its ids alone, or counted as activity."""
+
+
+def _parsed(raw: bytes) -> dict[str, Any] | None:
+    if len(raw) > _LINE_MAX_BYTES:
+        return None
+    try:
+        record = json.loads(raw)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _content_blocks(content: object) -> list[dict[str, Any]]:
+    if isinstance(content, list):
+        return [block for block in content if isinstance(block, dict)]
+    return []

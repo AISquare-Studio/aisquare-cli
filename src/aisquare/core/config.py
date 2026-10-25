@@ -772,13 +772,15 @@ class AccountsSettings(BaseModel):
     saved keeps either only where it differs from them (``_V1_DEFAULTS``).
 
     ``before_limit`` (F2 of #400, off by default) acts BEFORE a limit, where ``on_limit``
-    acts after one: when a fleet agent's account reads over ``switch_at``, at its next turn
-    end or idle notice — never mid-turn — ``switch`` hands it over the way ``on_limit``
-    does, to an account under the line, and ``warn`` only says so on the board. The line
-    is ``switch_at`` itself, not a second threshold: it is where every pick counts an
-    account full, so a lower one would move agents onto accounts barely emptier, and a
-    higher one would leave them on accounts no pick would choose. A window over it that
-    resets within ``wait_if_reset_within_minutes`` is waited for, as it is after a limit
+    acts after one: when a fleet agent's account reads over ``switch_at`` (not the manager's
+    or the captain's), at its next turn end or idle notice — never mid-turn, nor with
+    background work its turn left running or a message queued for its next turn —
+    ``switch`` hands it over the way ``on_limit`` does, to an account under the line, and
+    ``warn`` only says so on the board, once per crossing of the line. The line is
+    ``switch_at`` itself, not a second threshold: it is where every pick counts an account
+    full, so a lower one would move agents onto accounts barely emptier, and a higher one
+    would leave them on accounts no pick would choose. Windows over it that reset within
+    ``wait_if_reset_within_minutes`` are waited for, as after a limit, in both modes
     (``services.hooks.check_before_limit``).
 
     ``prefer`` orders the accounts under ``switch_at`` (#277): ``priority``, the default,

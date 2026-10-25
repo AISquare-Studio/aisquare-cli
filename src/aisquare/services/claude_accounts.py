@@ -2605,24 +2605,26 @@ def choose_for_handover(
 #
 # ``[accounts] before_limit`` moves (or, ``warn``, names) a fleet agent whose account reads
 # over ``switch_at``, at a turn end or an idle notice (``services.hooks.check_before_limit``).
-# Nothing here polls: the agent's own account is read through the shared cache, five minutes
-# deep, and the accounts it could go to a launch's minute deep, so a fleet ending turns every
-# few seconds asks the endpoint about an account no more often than those two depths allow,
-# and never during a back-off. A kept reading (:func:`is_kept`) is no live one, and moves
-# nobody.
+# Nothing here polls, and the hooks fetch nothing: they decide from what is ON RECORD
+# (``on_record=True``: the shared cache's readings, five minutes deep, no request), and only
+# the detached worker reads through the cache, which may ask the endpoint (the agent's account
+# five minutes deep, the accounts it could go to a launch's minute deep), never during a
+# back-off. A kept reading (:func:`is_kept`) is no live one, and moves nobody.
 
 
 @dataclass(frozen=True)
-class NearLimit:
-    """An account a live reading puts over ``switch_at`` for an agent of ``family``."""
+class LineReading:
+    """An account's live reading against ``switch_at``, for an agent of ``family``."""
 
     account: ClaudeAccount
     reading: ClaudeUsage
     used: float
     """Percent used of its fuller window (:func:`headroom_percent`)."""
+    over: bool
+    """At or over the line: the account counts as full."""
     lifts_at: datetime | None
     """When every window over the line has reset, and the account is under it again; ``None``
-    when one of them named no reset."""
+    when one of them named no reset, or none is over."""
 
     def lifts_within(self, minutes: int, *, now: datetime | None = None) -> bool:
         """Whether the account is under the line again within ``minutes``: a wait that is
@@ -2632,21 +2634,41 @@ class NearLimit:
         return self.lifts_at - (now or _now()) <= timedelta(minutes=minutes)
 
 
-def near_limit(
+def has_passed(when: datetime, *, now: datetime | None = None) -> bool:
+    """Whether ``when`` — a window's reset — is past, by the clock readings are taken on."""
+    return when <= (now or _now())
+
+
+def _on_record(
+    accounts: Sequence[ClaudeAccount], *, max_age: float, now: datetime | None = None
+) -> dict[int, ClaudeUsage]:
+    """What :func:`cached_usage` would serve ``accounts`` without a fetch: each one's reading
+    recorded in the last ``max_age`` seconds for the token it holds now. Nothing is asked."""
+    moment = now or _now()
+    tokens = {
+        account.slot: token
+        for account in accounts
+        if (token := _token_fingerprint(account, moment)) is not None
+    }
+    return _served(accounts, tokens, since=moment - timedelta(seconds=max_age), now=moment)
+
+
+def line_reading(
     slot: int,
     *,
     switch_at: int,
     family: str | None = None,
+    on_record: bool = False,
     fetch: Fetch | None = None,
     now: datetime | None = None,
-) -> NearLimit | None:
-    """Account ``slot``, when a live reading through the cache puts it at or over ``switch_at``
-    for an agent of ``family``; ``None`` when it is under, cannot be read, or the reading is
-    a kept one (the last good figure of a failed read, or a back-off's): a figure of unknown
-    age moves no agent. A registry that cannot be read is no answer either.
+) -> LineReading | None:
+    """Account ``slot`` against ``switch_at`` for an agent of ``family``, by a LIVE reading;
+    ``None`` when there is none: the account cannot be read, or the reading is a kept one (the
+    last good figure of a failed read, or a back-off's), which moves no agent — and with
+    ``on_record``, when nothing is on record. A registry that cannot be read is no answer.
 
-    Read through :func:`cached_usage`, :data:`USAGE_MAX_AGE_SECONDS` deep: a turn end asks the
-    endpoint only when no process has read the account in the last five minutes.
+    ``on_record`` reads what the cache holds and asks nothing: a hook's read. Otherwise it is
+    read through :func:`cached_usage`, :data:`USAGE_MAX_AGE_SECONDS` deep: the worker's.
     """
     accounts, note = _read_for_handover()
     if accounts is None or note is not None:
@@ -2654,11 +2676,14 @@ def near_limit(
     account = next((a for a in accounts if a.slot == slot), None)
     if account is None or not core.signed_in(account):
         return None
-    reading = cached_usage([account], fetch=fetch, now=now)[slot]
-    if not reading.available or is_kept(reading):
+    if on_record:
+        reading = _on_record([account], max_age=USAGE_MAX_AGE_SECONDS, now=now).get(slot)
+    else:
+        reading = cached_usage([account], fetch=fetch, now=now)[slot]
+    if reading is None or not reading.available or is_kept(reading):
         return None
     used = headroom_percent(reading, family)
-    if used is None or used < switch_at:
+    if used is None:
         return None
     windows = [
         (reading.session_percent, reading.session_resets_at),
@@ -2671,7 +2696,48 @@ def near_limit(
     over = [when for percent, when in windows if percent is not None and percent >= switch_at]
     resets = [when for when in over if when is not None]
     lifts_at = max(resets) if resets and len(resets) == len(over) else None
-    return NearLimit(account, reading, used, lifts_at)
+    return LineReading(account, reading, used, used >= switch_at, lifts_at)
+
+
+def room_on_record(
+    leaving: int, *, switch_at: int, family: str | None = None, now: datetime | None = None
+) -> bool:
+    """Whether an account other than ``leaving`` may take an agent of ``family``, by what is on
+    record alone (nothing is asked): ``False`` only when every candidate the automatic pick
+    would weigh (:func:`choose_for_handover`) is known not to — at a limit mark for the family,
+    its family week spent, or its live reading on record at or over ``switch_at`` — or the
+    registry cannot be read, when that pick takes nothing. A candidate with no live reading on
+    record may: only a read can say, and that is the worker's.
+
+    A hook's question (F2 of #400): with every other account over the line, a turn end then
+    reads none of them, however long that lasts, where a pick a minute deep re-read each one a
+    minute at every turn end.
+    """
+    accounts, note = _read_for_handover()
+    if accounts is None or note is not None:
+        return False
+    moment = now or _now()
+    marks = limit_marks(now=moment)
+    candidates = [
+        account
+        for account in accounts
+        if not account.disabled
+        and account.slot != leaving
+        and core.signed_in(account)
+        and not any(mark.blocks(family) for mark in marks.get(account.slot, []))
+    ]
+    readings = _on_record(candidates, max_age=USAGE_MAX_AGE_SECONDS, now=moment)
+    for account in candidates:
+        reading = readings.get(account.slot)
+        if reading is None or not reading.available or is_kept(reading):
+            return True
+        own = reading.family_week_percent.get(family) if family is not None else None
+        if own is not None and own >= 100:
+            continue
+        used = headroom_percent(reading, family)
+        if used is None or used < switch_at:
+            return True
+    return False
 
 
 def account_pin(role: str | None, *, named: bool) -> str | None:

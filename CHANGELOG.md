@@ -40,16 +40,24 @@ fleet still running, and every release now carries its own installer.**
 - **Move an agent before its account runs out** (F2 of #400): `[accounts] before_limit`,
   `off` by default for this release. With `switch`, a fleet agent whose account reads at or
   over `switch_at` is handed to an account under the line at its next turn end or idle
-  notice, never mid-turn, by the same detached hand-over `on_limit = "switch"` uses after a
-  limit; the board says `switched … (before limit)`, and the manager is woken only if the
-  move fails. `warn` only puts a `before_limit` line on the board naming the move. No move
-  when the windows over the line reset within `wait_if_reset_within_minutes`, when no other
-  account is under the line, for an agent put on its account by name (`--account`, a role's
-  account binding, a binding that sets `CLAUDE_CONFIG_DIR`), in a paused fleet, or within
-  ten minutes of the agent's last start, move or warning. No polling: the reads go through
-  the usage cache and honour a back-off, and a kept reading moves nobody. The spawn records
-  whether its account was named (`account_pinned` in the row's launch spec), which a
-  restart, a switch and a fork keep; rows spawned before this read as not pinned.
+  notice, never mid-turn, and never while its turn left a `run_in_background` command or a
+  background subagent running (read off its transcript), which an `/exit` would kill, or
+  with a message queued for its next turn. The move waits five seconds after the turn end,
+  then, before the stop and again once the agent is marked as being moved, checks that
+  nothing began since (the board's prompt stamp, and the transcript, where a prompt shows
+  before its hook stamps the board) and that the pane is idle, and leaves the agent alone
+  if not. The manager and the captain are not moved before a limit. The board says
+  `switched … (before limit)`, and the manager is woken only if the move fails.
+  `warn` puts one `before_limit` line on the board per crossing of the line (for you; it
+  reaches no agent's prompt). No move when the windows over the line reset within
+  `wait_if_reset_within_minutes`, when no other account is under the line, for an agent put
+  on its account by name (`--account`, a role's account binding, a binding that sets
+  `CLAUDE_CONFIG_DIR`), in a paused fleet, or within ten minutes of the agent's start or the
+  last look at it. No polling, and no usage request from a hook: the turn end decides from
+  the usage cache whether to look, and a detached worker (`aisquare hook before-limit`) does
+  the reads, through the cache and honouring a back-off; a kept reading moves nobody. The
+  spawn records whether its account was named (`account_pinned` in the row's launch spec),
+  which a restart, a switch and a fork keep; rows spawned before this read as not pinned.
 - **Exact token usage per session** — `aisquare metrics tokens [--session S]
   [--project P | --all]` (`--json` too). The Stop, StopFailure and SessionEnd hooks
   read only the bytes the session's transcript gained since the last record, plus its

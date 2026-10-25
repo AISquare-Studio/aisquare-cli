@@ -174,7 +174,7 @@ PROJECT_OF: dict[tuple[str, str], str] = {
         "the limited agent's own row's project (``agent.project_id``), which the "
         "hand-over moves it in (#277)"
     ),
-    ("services/hooks.py", "_act_before_limit"): (
+    ("services/hooks.py", "_warn"): (
         "the agent's own row's project (``agent.project_id``), which ``before_limit = "
         '"warn"`` names the switch in (F2 of #400)'
     ),

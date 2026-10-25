@@ -19,16 +19,18 @@ default agent does.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from aisquare.core import claude_accounts as claude_accounts_core
-from aisquare.core import harness, insights, orchestrator, paths, selfcli
+from aisquare.core import harness, insights, orchestrator, paths, selfcli, transcripts
 from aisquare.core import spawn as spawn_core
 from aisquare.core.config import AccountsSettings, load_config
 from aisquare.core.injection import build_block, claude_md_files, without_loaded_preferences
@@ -242,7 +244,7 @@ def turn_stopped(
     auto_mode.record_refusals(session_id)
     if decision is None:
         # The turn is over: a decision keeps it going, and mid-turn is no place to move it.
-        check_before_limit(session_id)
+        check_before_limit(session_id, transcript_path=transcript_path)
     return decision
 
 
@@ -252,6 +254,7 @@ def needs_attention(
     session_id: str | None = None,
     message: str | None = None,
     notification_type: str | None = None,
+    transcript_path: str | None = None,
 ) -> None:
     """Route a Claude Code notification by its TYPE: a bell, a feed line, or nothing (#153).
 
@@ -262,7 +265,7 @@ def needs_attention(
             session_id, cwd, message, notification_type=notification_type
         )
         if team_service.is_idle_notice(notification_type, message):
-            check_before_limit(session_id)
+            check_before_limit(session_id, transcript_path=transcript_path)
 
 
 def turn_failed(
@@ -473,54 +476,138 @@ def fresh_replacement_refusal(agent: FleetAgent, *, now: datetime | None = None)
     )
 
 
-_BEFORE_LIMIT_KEY = "before_limit:{project}:{label}"
-"""The ``team_meta`` row holding when ``[accounts] before_limit`` last acted on a label — a
-warning posted, a hand-over started: the clock of its :data:`HANDOVER_COOLDOWN`. By label, so
-the replacement a move starts inherits it."""
+_BEFORE_LIMIT_KEY = "before-limit:{project}:{label}"
+"""The ``ui_state`` row holding the turn end that last started the before-limit worker for a
+label (:class:`_TurnEnd`, as JSON): the clock of its :data:`HANDOVER_COOLDOWN`, and what the
+move checks the agent has not moved past. Claimed compare-and-set, so two hooks of one agent
+start one worker; by label, so the replacement a move starts inherits it. The worker gives it
+back when it ends on something the next turn end can decide from the cache alone."""
+
+BEFORE_LIMIT_SETTLE_SECONDS = 5.0
+"""How long after the turn end a before-limit move waits before its checks: past the start-up
+of the hook a prompt queued at the turn end runs (``UserPromptSubmit``, a process of its own,
+1.4 to 1.9 s under load on #423's tester's machine), so the board and the transcript both say
+whether that prompt began a turn before anything is marked or stopped."""
+
+_sleep = time.sleep
+"""The settle's wait (:data:`BEFORE_LIMIT_SETTLE_SECONDS`), a name of its own for a test to
+replace."""
+
+_NOT_MOVED_EARLY = frozenset({team_service.MANAGER_ROLE, team_service.CAPTAIN_ROLE})
+"""The roles ``before_limit`` leaves alone. The manager runs the fleet's loop — woken by board
+writes, its Stop often kept going — and a move resumes it on another account between two of
+its decisions, for no limit hit; the captain is the owner's own. A limit still moves either
+(``on_limit``)."""
+
+_WARNED_KEY = "before-limit-warned:{project}:{label}"
+"""The ``ui_state`` row saying ``before_limit = "warn"`` has named this crossing of the line for a
+label: the slot, and when its windows over the line reset. Re-armed — the row forgotten — when
+the account reads under the line, those windows have reset, or the agent runs elsewhere."""
 
 
 @dataclass(frozen=True)
-class _BeforeLimitPlan:
-    """What :func:`_plan_before_limit` found: an idle fleet agent whose account reads over the
-    line, and the account under it a hand-over would take."""
+class _TurnEnd:
+    """The turn end a before-limit look started from: when, and how long the transcript was.
+    Anything the agent began after it — a prompt stamped (``prompted_at``), a record written
+    (``transcript.activity_since``) — means it is no longer at that safe point."""
+
+    at: datetime
+    transcript: Path | None
+    offset: int | None
+
+    def dump(self) -> str:
+        return json.dumps(
+            {
+                "at": self.at.isoformat(),
+                "transcript": str(self.transcript) if self.transcript else None,
+                "offset": self.offset,
+            }
+        )
+
+    @classmethod
+    def load(cls, raw: str | None) -> _TurnEnd | None:
+        try:
+            data = json.loads(raw) if raw else None
+            if not isinstance(data, dict):
+                return None
+            where = data.get("transcript")
+            offset = data.get("offset")
+            return cls(
+                datetime.fromisoformat(data["at"]),
+                Path(where) if isinstance(where, str) and where else None,
+                offset if isinstance(offset, int) else None,
+            )
+        except (ValueError, TypeError, KeyError):
+            return None
+
+    @classmethod
+    def now(cls, transcript: Path | None) -> _TurnEnd:
+        """This moment, with the transcript's length now (``None`` when it cannot be read)."""
+        try:
+            offset = transcript.stat().st_size if transcript is not None else None
+        except OSError:
+            offset = None
+        return cls(datetime.now(tz=UTC), transcript, offset)
+
+    def begun_since(self, session: TeamSession) -> bool:
+        """Whether ``session`` began a turn after this turn end, or is about to: its prompt
+        stamped since, or its transcript grown by a prompt, a notice or the agent's own words,
+        or a message queued and not yet taken. A transcript that cannot be read cannot say it
+        has not: it has."""
+        if session.prompted_at is not None and session.prompted_at > self.at:
+            return True
+        if self.transcript is None or self.offset is None:
+            return True
+        try:
+            return transcripts.activity_since(self.transcript, self.offset)
+        except OSError:
+            return True
+
+
+@dataclass(frozen=True)
+class _BeforeLimitAgent:
+    """The fleet agent a before-limit check is about, read once: idle at its prompt, in a fleet
+    no pause holds, on an account nobody named for it."""
 
     session: TeamSession
     agent: FleetAgent
     project: ProjectInfo
-    near: claude_accounts_service.NearLimit
-    target: ClaudeAccount
+    slot: int
     family: str | None
+    transcript: Path | None
 
 
-def check_before_limit(session_id: str) -> None:
+def check_before_limit(session_id: str, *, transcript_path: str | None = None) -> None:
     """``[accounts] before_limit`` at a safe point (F2 of #400): a turn end, or the idle notice.
 
-    ``off``, the default, reads nothing. Otherwise a FLEET agent waiting at its prompt whose
-    account reads at or over ``switch_at`` (``claude_accounts.near_limit``: a live reading
-    through the cache, never a kept one) is, under ``switch``, handed over the way ``on_limit``
-    hands a limited one — the same detached worker (:func:`hand_over`), which ``fleet
-    switch``es it to an account under the line, and the board's ``switched`` line says
-    ``(before limit)``. Under ``warn`` the board gets a ``before_limit`` line naming the move,
-    and nothing else happens. Neither wakes the manager; a hand-over that fails does
+    ``off``, the default, reads nothing. Otherwise the hook DECIDES WHETHER TO LOOK, from what
+    is on record and nothing else — no usage request goes out from a turn end, so a hung
+    endpoint never holds one — and a detached worker (``aisquare hook before-limit``,
+    :func:`before_limit_worker`) reads what it must and acts: under ``switch`` it hands the
+    agent over the way ``on_limit`` hands a limited one (:func:`hand_over`), and the board's
+    ``switched`` line says ``(before limit)``; under ``warn`` it puts one ``before_limit`` line
+    on the board per crossing of the line. Neither wakes the manager; a move that fails does
     (``handover_failed``).
 
-    Nothing is done for an agent mid-turn (any state but ``waiting``), a hand-typed session,
-    a project ``fleet pause`` holds, an agent put on its account by name (``--account``, a
-    role's account binding, a binding that sets ``CLAUDE_CONFIG_DIR`` by hand:
-    ``claude_accounts.account_pin``), one started, moved or warned about within
-    :data:`HANDOVER_COOLDOWN`, an account whose windows over the line reset within
-    ``wait_if_reset_within_minutes``, or when no other account is under the line.
+    The hook looks no further for an agent that is not waiting at its prompt (mid-turn,
+    asking, parked, being moved), a hand-typed session, a project ``fleet pause`` holds, an
+    agent put on its account by name (``claude_accounts.account_pin``), one started within
+    :data:`HANDOVER_COOLDOWN` or looked at within it, an account the cache reads under the
+    line (or over it with every window over it resetting within
+    ``wait_if_reset_within_minutes``), a crossing ``warn`` has named, background work its turn
+    left running (``transcript.background_running``: an ``/exit`` would kill it), or when the
+    cache says no other account is under the line (``claude_accounts.room_on_record``).
 
     An extra on the turn end, never part of it: it swallows its own failures, said on stderr,
-    so a Stop is never reported as lost for it. It polls nothing; the reads are the cache's.
+    so a Stop is never reported as lost for it.
     """
     settings = claude_accounts_service.accounts_settings()
     if settings.before_limit == "off" or not orchestrator.team_enabled():
         return
     try:
-        plan = _plan_before_limit(session_id, settings)
-        if plan is not None:
-            _act_before_limit(plan, settings)
+        found = _worth_a_look(session_id, settings, transcript_path)
+        if found is not None:
+            _start_the_worker(found, settings)
     except Exception as exc:  # the turn ended all the same; only the early move is lost
         sys.stderr.write(
             f"aisquare: before-limit check failed ({type(exc).__name__}: {exc}) — the agent "
@@ -528,28 +615,14 @@ def check_before_limit(session_id: str) -> None:
         )
 
 
-def _before_limit_key(agent: FleetAgent) -> str:
-    return _BEFORE_LIMIT_KEY.format(project=agent.project_id, label=agent.label)
+def _key(template: str, agent: FleetAgent) -> str:
+    return template.format(project=agent.project_id, label=agent.label)
 
 
-def _cooling(agent: FleetAgent, last: str | None, now: datetime) -> bool:
-    """Whether ``agent`` is inside its cool-down: its row started less than
-    :data:`HANDOVER_COOLDOWN` ago (a spawn, a restart, a switch: where a launch just put it),
-    or ``last``, its label's :data:`_BEFORE_LIMIT_KEY` row, is that recent."""
-    if now - agent.created_at < HANDOVER_COOLDOWN:
-        return True
-    try:
-        acted = datetime.fromisoformat(last) if last else None
-    except ValueError:
-        acted = None
-    return acted is not None and now - acted < HANDOVER_COOLDOWN
-
-
-def _plan_before_limit(session_id: str, settings: AccountsSettings) -> _BeforeLimitPlan | None:
-    """The move ``check_before_limit`` makes for ``session_id``, or ``None``. The cheap checks
-    first — the board, the config — and the usage reads last: the agent's own account, then
-    only for an account over the line the others, as the pick reads them."""
-    now = datetime.now(tz=UTC)
+def _before_limit_agent(
+    session_id: str, transcript_path: str | None = None
+) -> _BeforeLimitAgent | None:
+    """The agent of ``session_id`` when it is one ``before_limit`` may act on, or ``None``."""
     with store_session() as store:
         session = store.get_session(session_id)
         if session is None or session.state != "waiting":
@@ -558,90 +631,283 @@ def _plan_before_limit(session_id: str, settings: AccountsSettings) -> _BeforeLi
         project = store.get_project(agent.project_id) if agent is not None else None
         if agent is None or project is None:
             return None  # a hand-typed session is the operator's to move
-        if team_service.fleet_paused(store, agent):
+        if harness.base_role(agent.role) in _NOT_MOVED_EARLY:
             return None
-        if _cooling(agent, store.get_meta(_before_limit_key(agent)), now):
+        if team_service.fleet_paused(store, agent):
             return None
     named = agent.launch_spec is not None and agent.launch_spec.account_pinned
     if claude_accounts_service.account_pin(agent.role, named=named) is not None:
         return None
-    leaving = claude_accounts_service.leaving_slot(agent.account_slot, session.account)
-    if leaving is None:
+    slot = claude_accounts_service.leaving_slot(agent.account_slot, session.account)
+    if slot is None:
         return None  # which account it runs on is not known: there is nothing to read
-    family = harness.model_family(session.model)
-    near = claude_accounts_service.near_limit(leaving, switch_at=settings.switch_at, family=family)
-    if near is None or near.lifts_within(settings.wait_if_reset_within_minutes):
-        return None
-    choice = claude_accounts_service.choose_for_handover(
-        role=agent.role,
-        project=project,
-        exclude=(leaving,),
-        automatic=True,
-        family=family,
-        max_age=claude_accounts_service.PICK_MAX_AGE_SECONDS,
+    return _BeforeLimitAgent(
+        session,
+        agent,
+        project,
+        slot,
+        harness.model_family(session.model),
+        _transcript_of(session, transcript_path),
     )
-    if choice.account is None:
-        return None  # no account under the line: it carries on where it is
-    return _BeforeLimitPlan(session, agent, project, near, choice.account, family)
 
 
-def _act_before_limit(plan: _BeforeLimitPlan, settings: AccountsSettings) -> None:
-    """Start the cool-down, then warn (``warn``) or start the hand-over worker (``switch``)."""
-    session, agent = plan.session, plan.agent
+def _transcript_of(session: TeamSession, given: str | None) -> Path | None:
+    """The transcript the agent writes: the hook's, else the board's (a session resumed under
+    another account keeps writing its first one, ``fleet.switch``); ``None`` with neither."""
+    for candidate in (given, session.transcript_path):
+        if candidate and Path(candidate).is_file():
+            return Path(candidate)
+    return None
+
+
+def _background_work(transcript: Path | None, since: datetime) -> bool:
+    """Whether the agent's turn left background work running (a ``run_in_background`` Bash, a
+    background subagent) that an ``/exit`` would kill; ``since`` is the start of the process
+    running it, its fleet row's. A transcript that cannot be read cannot say it left none: it
+    counts as running."""
+    if transcript is None:
+        return True
+    try:
+        return bool(transcripts.background_running(transcript, since=since))
+    except OSError:
+        return True
+
+
+def _cooling(agent: FleetAgent, stamp: str | None, now: datetime) -> bool:
+    """Whether ``agent`` is inside its cool-down: its row started less than
+    :data:`HANDOVER_COOLDOWN` ago (a spawn, a restart, a switch: where a launch just put it),
+    or ``stamp``, its label's :data:`_BEFORE_LIMIT_KEY` row, is that recent."""
+    if now - agent.created_at < HANDOVER_COOLDOWN:
+        return True
+    looked = _TurnEnd.load(stamp)
+    return looked is not None and now - looked.at < HANDOVER_COOLDOWN
+
+
+def _warned(raw: str | None, slot: int) -> bool:
+    """Whether :data:`_WARNED_KEY`'s row ``raw`` names this crossing: the same slot, and its
+    windows over the line not reset since."""
+    try:
+        data = json.loads(raw) if raw else None
+        until = datetime.fromisoformat(data["until"]) if data and data.get("until") else None
+    except (ValueError, TypeError, KeyError):
+        return False
+    if not isinstance(data, dict) or data.get("slot") != slot:
+        return False
+    return until is None or not claude_accounts_service.has_passed(until)
+
+
+def _worth_a_look(
+    session_id: str, settings: AccountsSettings, transcript_path: str | None
+) -> _BeforeLimitAgent | None:
+    """The hook's half: the agent to start the worker for, its cool-down CLAIMED, or ``None``.
+    From what is on record alone; the cheap checks first, the transcript only for an account
+    over the line, or one the cache cannot tell."""
+    found = _before_limit_agent(session_id, transcript_path)
+    if found is None:
+        return None
+    agent = found.agent
+    now = datetime.now(tz=UTC)
     with store_session() as store:
-        store.set_meta(_before_limit_key(agent), datetime.now(tz=UTC).isoformat())
-    if settings.before_limit == "warn":
-        used = claude_accounts_service.describe_headroom(
-            plan.near.account, plan.near.reading, plan.family
-        )
-        team_service.hook_before_limit(
-            session.project_id,
-            f"{agent.label}: {used} — over the {settings.switch_at}%-used line; "
-            f"{claude_accounts_core.label(plan.target)} has room — "
-            f"`{project_service.fleet_command('switch', plan.project, agent.label)}` moves it "
-            '(`before_limit = "warn"`)',
-            session_id=session.id,
-        )
-        return
-    argv = selfcli.argv_for(["--quiet", "hook", "hand-over", session.id, "--before-limit"])
+        stamp = store.ui_state(_key(_BEFORE_LIMIT_KEY, agent))
+        warned = store.ui_state(_key(_WARNED_KEY, agent))
+    if _cooling(agent, stamp, now):
+        return None
+    line = claude_accounts_service.line_reading(
+        found.slot, switch_at=settings.switch_at, family=found.family, on_record=True
+    )
+    if line is not None and not line.over:
+        if warned is not None:  # back under the line: the next crossing is warned again
+            with store_session() as store:
+                store.replace_ui_state(_key(_WARNED_KEY, agent), warned, None)
+        return None
+    if line is not None and line.lifts_within(settings.wait_if_reset_within_minutes):
+        return None
+    if settings.before_limit == "warn" and _warned(warned, found.slot):
+        return None
+    if _background_work(found.transcript, agent.created_at):
+        return None  # its next turn end, once the work has reported, asks again
+    turn_end = _TurnEnd.now(found.transcript)
+    if turn_end.begun_since(found.session):
+        return None  # a message queued during the turn starts the next one now
+    if line is not None and not claude_accounts_service.room_on_record(
+        found.slot, switch_at=settings.switch_at, family=found.family
+    ):
+        return None  # every other account is over the line: no read, no worker
+    with store_session() as store:
+        if not store.replace_ui_state(_key(_BEFORE_LIMIT_KEY, agent), stamp, turn_end.dump()):
+            return None  # another hook of this agent claimed it first
+    return found
+
+
+def _start_the_worker(found: _BeforeLimitAgent, settings: AccountsSettings) -> None:
+    argv = selfcli.argv_for(["--quiet", "hook", "before-limit", found.session.id])
     try:
         _detach(argv)
     except OSError as exc:
-        team_service.hook_handover_failed(
-            session.project_id,
-            f"{agent.label}: not moved before its limit — could not start the hand-over "
-            f"worker ({exc})",
-            session_id=session.id,
-            label=agent.label,
-        )
+        _give_back(found.agent)
+        if settings.before_limit == "switch":
+            team_service.hook_handover_failed(
+                found.session.project_id,
+                f"{found.agent.label}: not moved before its limit — could not start the "
+                f"hand-over worker ({exc})",
+                session_id=found.session.id,
+                label=found.agent.label,
+            )
 
 
-def _ask_again_next_time(agent: FleetAgent) -> None:
-    """Give back the cool-down a before-limit move took and did not use: the agent began a
-    turn first, and its next turn end may move it."""
+def _give_back(agent: FleetAgent) -> None:
+    """Give back the cool-down a look took and did not use: the next turn end may look again."""
     with store_session() as store:
-        store.delete_meta(_before_limit_key(agent))
+        stamp = store.ui_state(_key(_BEFORE_LIMIT_KEY, agent))
+        if stamp is not None:
+            store.replace_ui_state(_key(_BEFORE_LIMIT_KEY, agent), stamp, None)
+
+
+def before_limit_worker(session_id: str) -> None:
+    """The detached half of ``[accounts] before_limit`` (``aisquare hook before-limit``).
+
+    Started by a turn end's hook (:func:`check_before_limit`) that found the agent worth a
+    look; it asks again what that hook asked, reads what the hook would not (the agent's
+    account through the cache, five minutes deep, then the accounts it could go to a minute
+    deep, as the move's pick does: ``choose_for_handover(automatic=True)``), and warns or
+    moves (:func:`hand_over`). It wakes nobody unless a move that went ahead fails.
+
+    The cool-down the hook claimed is given back when it ends on what the next turn end can
+    decide from the cache — the agent busy again, background work started, the account under
+    the line or about to reset — and kept when a read failed or no account had room, so a
+    failing endpoint or a full fleet is asked at most once a cool-down per agent.
+    """
+    settings = claude_accounts_service.accounts_settings()
+    if settings.before_limit == "off" or not orchestrator.team_enabled():
+        return
+    found = _before_limit_agent(session_id)
+    if found is None:
+        with store_session() as store:
+            agent = store.fleet_agent_for_session(session_id)
+        if agent is not None:
+            _give_back(agent)
+        return
+    agent = found.agent
+    if datetime.now(tz=UTC) - agent.created_at < HANDOVER_COOLDOWN:
+        return  # started or moved within the cool-down: the hook would not have asked
+    if _background_work(found.transcript, agent.created_at):
+        _give_back(agent)
+        return
+    line = claude_accounts_service.line_reading(
+        found.slot, switch_at=settings.switch_at, family=found.family
+    )
+    if line is None:
+        return  # no live reading: the cool-down is spent, so a failing read is not retried
+    if not line.over or line.lifts_within(settings.wait_if_reset_within_minutes):
+        _give_back(agent)
+        return
+    with store_session() as store:
+        warned = store.ui_state(_key(_WARNED_KEY, agent))
+    if settings.before_limit == "warn" and _warned(warned, found.slot):
+        return
+    choice = claude_accounts_service.choose_for_handover(
+        role=agent.role,
+        project=found.project,
+        exclude=(found.slot,),
+        automatic=True,
+        family=found.family,
+        max_age=claude_accounts_service.PICK_MAX_AGE_SECONDS,
+    )
+    if choice.account is None:
+        return  # no account under the line: it carries on where it is, and nobody is told
+    if settings.before_limit == "warn":
+        _warn(found, line, choice.account, settings, warned)
+        return
+    with store_session() as store:
+        claimed = _TurnEnd.load(store.ui_state(_key(_BEFORE_LIMIT_KEY, agent)))
+    hand_over(session_id, before_limit=True, turn_end=claimed or _TurnEnd.now(found.transcript))
+
+
+def _warn(
+    found: _BeforeLimitAgent,
+    line: claude_accounts_service.LineReading,
+    target: ClaudeAccount,
+    settings: AccountsSettings,
+    warned: str | None,
+) -> None:
+    """``warn``'s one line for this crossing, and the row that says it was said."""
+    agent = found.agent
+    crossing = json.dumps(
+        {"slot": found.slot, "until": line.lifts_at.isoformat() if line.lifts_at else None}
+    )
+    with store_session() as store:
+        if not store.replace_ui_state(_key(_WARNED_KEY, agent), warned, crossing):
+            return  # another worker said it
+    used = claude_accounts_service.describe_headroom(line.account, line.reading, found.family)
+    team_service.hook_before_limit(
+        found.session.project_id,
+        f"{agent.label}: {used} — over the {settings.switch_at}%-used line; "
+        f"{claude_accounts_core.label(target)} has room — "
+        f"`{project_service.fleet_command('switch', found.project, agent.label)}` moves it "
+        '(`before_limit = "warn"`)',
+        session_id=found.session.id,
+    )
 
 
 class _StartedATurn(Exception):
-    """Raised by a before-limit hand-over's last check: the agent took a prompt meanwhile."""
+    """Raised by a before-limit hand-over's checks: the agent took a prompt meanwhile, or its
+    turn left background work. ``prompted``: a prompt it took, which the hand-over mark hid."""
+
+    def __init__(self, session_id: str, *, prompted: bool = False) -> None:
+        super().__init__(session_id)
+        self.prompted = prompted
 
 
-def _still_waiting(session_id: str) -> Callable[[], None]:
-    """``fleet.switch``'s ``before_stop`` for a move before the limit: the agent is still at
-    its prompt, or :class:`_StartedATurn` refuses before anything is stopped — a turn that
-    began since the hook decided is not one to cut short."""
+def _still_waiting(session_id: str, turn_end: _TurnEnd) -> Callable[[], None]:
+    """``fleet.switch``'s ``before_stop`` for a move before the limit, asked once the turn end
+    has settled (:data:`BEFORE_LIMIT_SETTLE_SECONDS`): the agent still waits at its prompt, has
+    begun nothing since ``turn_end`` (:meth:`_TurnEnd.begun_since`: the board's stamp, and the
+    transcript, which shows a prompt before its hook stamps the board) and left no background
+    work, or :class:`_StartedATurn` refuses before anything is marked or stopped."""
 
     def check() -> None:
-        with store_session() as store:
-            session = store.get_session(session_id)
-        if session is None or session.state != "waiting":
+        found = _before_limit_agent(session_id)
+        if found is None:
+            raise _StartedATurn(session_id)
+        if turn_end.begun_since(found.session):
+            raise _StartedATurn(session_id, prompted=True)
+        if _background_work(found.transcript, found.agent.created_at):
             raise _StartedATurn(session_id)
 
     return check
 
 
-def hand_over(session_id: str, *, reason: str | None = None, before_limit: bool = False) -> None:
+def _still_idle_after_mark(session_id: str, turn_end: _TurnEnd) -> Callable[[], None]:
+    """``fleet.switch``'s ``after_mark``: the same, asked again once the hand-over mark is on,
+    so a prompt that lands between ``before_stop`` and the mark is not cut short — the mark
+    hides its ``working`` (``touch_session`` keeps ``switching``), not its ``prompted_at`` nor
+    its transcript record — and what the pane shows: Claude Code's input box idle with no
+    spinner (``pane_idle.box_idle_now``, which fails closed)."""
+
+    def check() -> None:
+        from aisquare.services import fleet as fleet_service  # lazy, as in `hand_over`
+        from aisquare.services import pane_idle
+
+        with store_session() as store:
+            session = store.get_session(session_id)
+            agent = store.fleet_agent_for_session(session_id)
+        if session is None or agent is None or turn_end.begun_since(session):
+            raise _StartedATurn(session_id, prompted=True)
+        if not pane_idle.box_idle_now(fleet_service.server_of(agent), agent.pane_id):
+            raise _StartedATurn(session_id, prompted=True)
+        if _background_work(_transcript_of(session, None), agent.created_at):
+            raise _StartedATurn(session_id)
+
+    return check
+
+
+def hand_over(
+    session_id: str,
+    *,
+    reason: str | None = None,
+    before_limit: bool = False,
+    turn_end: _TurnEnd | None = None,
+) -> None:
     """Move the limited fleet agent of ``session_id`` — the detached half of the hand-over.
 
     Runs in the worker :func:`_detach` started, after the hook that decided it
@@ -665,11 +931,13 @@ def hand_over(session_id: str, *, reason: str | None = None, before_limit: bool 
     nearly every hand-over, account advice included, for the other agents to
     read (review of the #203 final-round fixes, F2).
 
-    ``before_limit`` is the move ``[accounts] before_limit`` makes (F2 of #400,
-    :func:`check_before_limit`): the reason is ``before limit``, the row is the one the hook
-    read, the pick reads the cache a minute deep, as the hook just did, and it is made only
-    while the agent still waits at its prompt — a turn begun since is left alone, and the
-    next turn end asks again. Its brakes are silent, as the hook asked them already; a
+    ``before_limit`` is the move ``[accounts] before_limit`` makes (F2 of #400), called in
+    the worker that decided it (:func:`before_limit_worker`): the reason is ``before limit``,
+    the row is the one it read, the pick reads the cache a minute deep, as that worker just
+    did, and it is made only while the agent still waits at its prompt with no background
+    work — asked before the hand-over mark (``before_stop``) and again after it
+    (``after_mark``: its ``prompted_at``, its pane). A turn begun since is left alone and the
+    next turn end asks again. Its brakes are silent, as the worker asked them already; a
     refusal from the switch is ``handover_failed``, the one line that wakes the manager.
     """
     with store_session() as store:
@@ -684,7 +952,7 @@ def hand_over(session_id: str, *, reason: str | None = None, before_limit: bool 
         # In flight or limited: another path has it. At work again since the hook asked: no
         # move now, and the next turn end asks again, the cool-down not spent on it.
         if session.state not in (team_service.HANDOVER_STATE, "limited"):
-            _ask_again_next_time(agent)
+            _give_back(agent)
         return
     if session.state == team_service.HANDOVER_STATE:
         team_service.hook_note(
@@ -715,9 +983,14 @@ def hand_over(session_id: str, *, reason: str | None = None, before_limit: bool 
 
     not_moved = f"{agent.label}: not switched"
     own_reset = _own_reset(session)
+    checks: tuple[Callable[[], None] | None, Callable[[], None] | None] = (None, None)
     if before_limit:
         reason = claude_accounts_core.BEFORE_LIMIT_REASON
         not_moved, own_reset = f"{agent.label}: not moved before its limit", ""
+        end = turn_end or _TurnEnd.now(_transcript_of(session, None))
+        settled = end.at + timedelta(seconds=BEFORE_LIMIT_SETTLE_SECONDS)
+        _sleep(max(0.0, (settled - datetime.now(tz=UTC)).total_seconds()))
+        checks = (_still_waiting(session.id, end), _still_idle_after_mark(session.id, end))
     try:
         receipt = fleet_service.switch(
             project,
@@ -726,11 +999,17 @@ def hand_over(session_id: str, *, reason: str | None = None, before_limit: bool 
             spawned_by=HANDOVER_SPAWNER,
             automatic=True,
             agent_id=agent.id if before_limit else None,
-            before_stop=_still_waiting(session.id) if before_limit else None,
+            before_stop=checks[0],
+            after_mark=checks[1],
             max_age=claude_accounts_service.PICK_MAX_AGE_SECONDS if before_limit else None,
         )
-    except _StartedATurn:
-        _ask_again_next_time(agent)  # not a failure: nobody is told, nobody woken
+    except _StartedATurn as started:
+        # Not a failure: nobody is told, nobody woken. A prompt the mark hid has its turn
+        # said, as its own hook would have said it (the mark is taken back to `waiting`).
+        if started.prompted:
+            with store_session() as store:
+                store.touch_session(session.id, state="working")
+        _give_back(agent)
         return
     except fleet_service.FleetError as exc:
         # The manager's to act on (#277): the refusal names `fleet switch` or the reset.

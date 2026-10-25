@@ -13409,6 +13409,7 @@ def test_only_an_account_named_at_the_spawn_pins_the_agent_and_its_replacements_
     restart and a switch name the row's slot or the target's to the resolver, a ``--account``
     of sorts, which must neither pin an agent nobody pinned nor unpin one somebody did."""
     _two_slots_with_usage(monkeypatch, work=10, personal=20)
+    _settings(monkeypatch, max_agents_per_project=8)  # two agents, then three forks
     named = fleet_service.spawn(project, "coder", worktree=False, account="3").agent
     picked = fleet_service.spawn(project, "coder", worktree=False).agent
     assert named.launch_spec is not None and named.launch_spec.account_pinned
@@ -13416,16 +13417,58 @@ def test_only_an_account_named_at_the_spawn_pins_the_agent_and_its_replacements_
     for agent in (named, picked):
         _with_transcript(agent, tmp_path / "missing.jsonl")
 
-    restarted = fleet_service.restart(project, picked.label)
-    switched = fleet_service.switch(project, named.label, to="2")
+    def pinned(agent: FleetAgent) -> bool:
+        assert agent.launch_spec is not None
+        return agent.launch_spec.account_pinned
 
-    assert restarted.started.launch_spec is not None
-    assert not restarted.started.launch_spec.account_pinned
-    assert switched.started.launch_spec is not None
-    assert switched.started.launch_spec.account_pinned
+    # A restart names the row's own slot: it neither pins nor unpins.
+    assert not pinned(fleet_service.restart(project, picked.label).started)
+    assert pinned(fleet_service.restart(project, named.label).started)
+    # A switch keeps the pin, on the account it moves the agent to.
+    assert pinned(fleet_service.switch(project, named.label, to="2").started)
     # A take-over that names an account is somebody's choice: pinned there.
-    taken = fleet_service.restart(project, picked.label, account="3")
-    assert taken.started.launch_spec is not None and taken.started.launch_spec.account_pinned
+    assert pinned(fleet_service.restart(project, picked.label, account="3").started)
+    # A fork: the source's pin with no account named, the dialog's own choice with one, and
+    # none on "(this shell's)", which names no account.
+    assert pinned(fleet_service.hand_off(project, named.label).started.agent)
+    unpinned = fleet_service.spawn(project, "coder", worktree=False).agent
+    _with_transcript(unpinned, tmp_path / "missing.jsonl")
+    assert not pinned(fleet_service.hand_off(project, unpinned.label).started.agent)
+    assert pinned(fleet_service.hand_off(project, unpinned.label, account="2").started.agent)
+    shell = fleet_service.hand_off(
+        project, named.label, account=fleet_service.THIS_SHELL_ACCOUNT
+    ).started.agent
+    assert not pinned(shell)
+
+
+def test_a_switch_whose_after_mark_check_refuses_takes_the_mark_back_and_stops_nothing(
+    tmux: FakeTmux,
+    claude_on_path: Path,
+    project: ProjectInfo,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``after_mark`` (F2 of #400, m3 of #423's review): asked once the session is marked
+    handing over, before the ``/exit``. A refusal there — a prompt that landed after
+    ``before_stop`` looked — takes the mark back and leaves the agent running."""
+    _two_slots_with_usage(monkeypatch, work=92, personal=10)
+    agent = fleet_service.spawn(project, "coder", worktree=False, account="2").agent
+    _with_transcript(agent, tmp_path / "missing.jsonl")
+    before = _session_state(agent.session_id or "")
+    seen: list[str] = []
+
+    def after_mark() -> None:
+        seen.append(_session_state(agent.session_id or ""))
+        raise RuntimeError("a prompt landed")
+
+    with pytest.raises(RuntimeError, match="a prompt landed"):
+        fleet_service.switch(project, agent.label, to="3", after_mark=after_mark)
+
+    assert seen == [team_service.HANDOVER_STATE]  # asked with the mark on
+    assert _session_state(agent.session_id or "") == before  # and the mark taken back
+    assert agent.pane_id not in tmux.killed
+    assert not [typed for typed in tmux.typed if typed[0] == agent.pane_id]
+    assert [status.agent.id for status in fleet_service.list_agents(project)] == [agent.id]
 
 
 def test_the_receipts_are_immutable() -> None:

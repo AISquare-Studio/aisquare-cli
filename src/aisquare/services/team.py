@@ -162,7 +162,9 @@ LIMITED_HANDING_OVER = "limited_handing_over"
 LIMITED_KINDS: frozenset[str] = frozenset({"limited", LIMITED_HANDING_OVER})
 #: The line ``[accounts] before_limit = "warn"`` writes when an agent's account reads over
 #: ``switch_at`` and another has room (F2 of #400): the move ``switch`` would have made, named,
-#: and no wake — the agent is still working. ``switch`` writes ``switched`` instead.
+#: once per crossing of the line. The operator's to act on, so a human-board kind: no wake,
+#: and in no teammate's delta (:data:`HUMAN_BOARD_KINDS`), where six agents on one full
+#: account took a slot of every delta each. ``switch`` writes ``switched`` instead.
 BEFORE_LIMIT_KIND = "before_limit"
 #: What that line says of the hand-over.
 HANDING_OVER_SAID = "moving it to another account automatically"
@@ -173,7 +175,8 @@ HANDING_OVER_SAID = "moving it to another account automatically"
 #: prompt, and each one would take a ``_DELTA_LIMIT`` slot from the real news.
 #: ``captain_action`` is the captain's audit line (``services.captain.actions``):
 #: one per tool call, reads included, for the owner — the effects it records
-#: (a note, a claim, a tell) reach teammates as their own events.
+#: (a note, a claim, a tell) reach teammates as their own events. ``before_limit`` is
+#: ``[accounts] before_limit = "warn"``'s line: a move for the operator to make.
 #:
 #: No agent-facing reader shows any of them: not the delta or the wake-up, and not
 #: the recent updates of a briefing (:func:`_briefing_events`) or of the MCP
@@ -182,7 +185,9 @@ HANDING_OVER_SAID = "moving it to another account automatically"
 #: captain briefed the next coder with five audit lines and no decision, and a run
 #: of 62 of them hid a coder's result from a waiting manager's wake-up (review of
 #: #240, finding 11).
-HUMAN_BOARD_KINDS: frozenset[str] = frozenset({"attention", "notice", "captain_action"})
+HUMAN_BOARD_KINDS: frozenset[str] = frozenset(
+    {"attention", "notice", "captain_action", BEFORE_LIMIT_KIND}
+)
 
 #: The one of them the human board's own recent list leaves out too (``aisquare
 #: board``, its watch): the audit is one line per captain tool call, with the tool's

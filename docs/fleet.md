@@ -1065,25 +1065,38 @@ c1/c2/c3 shell aliases people write by hand, owned by the tool instead.
   "switch"` moves a fleet agent before its account runs out instead of after.
   When the agent's turn ends (the `Stop` hook), or Claude Code's idle notice says it has sat
   at its prompt for a minute, and its account reads at or over `switch_at` (85 % used by
-  default, the line every pick counts as full), the same detached hand-over as
+  default, the line every pick counts as full), the same kind of detached hand-over as
   `on_limit = "switch"` moves it to an account under the line, resuming its session.
   The board says `switched … (before limit)` and the replacement is told it moved
   before its usage limit. It never happens mid-turn: an agent that is working, asking for
-  permission or kept going by a note is left alone, and one that takes a prompt between the
-  check and the stop is left alone too, and asked again at its next turn end. Nothing
-  moves when the windows over the line reset within `wait_if_reset_within_minutes`, when no
-  other account is under the line (the agent goes on where it is, and nobody is woken), for
-  an agent put on its account by name (`--account` at the spawn or in the Spawn dialog, `team
-  bind <role> --account`, or a binding that sets `CLAUDE_CONFIG_DIR` by hand), in a project
-  `fleet pause` holds (on the board its agents read, the hub's under one), or for an agent
-  started, moved or warned about in the last ten minutes. The manager is woken only when
-  a move that went ahead fails (`handover_failed`). `warn` makes no move: it puts one
-  `before_limit` line on the board naming the account, the account with room and the `fleet
-  switch` that moves it, at most once in ten minutes per agent. No loop polls for it: the
-  agent's account is read through the usage cache (five minutes deep, a back-off honoured),
-  and only when that reads over the line are the others read, a minute deep as for a
-  launch, which is also what the move picks from. A kept reading (the last good figure of a
-  failed read) moves nobody.
+  permission or kept going by a note is left alone, and so is one whose turn left background
+  work running — a `run_in_background` command or a background subagent with no completion
+  notice in its transcript yet, which the `/exit` of a move would kill — until that work has
+  reported, and one with a message queued during its turn, which starts the next turn as
+  this one ends. The move waits five seconds after the turn end, past the start-up of the
+  hook a just-submitted prompt runs; then, before the stop and again once the agent is
+  marked as being moved, it checks that nothing began since the turn end — no prompt
+  stamped on the board, no prompt, notice or reply in the transcript (Claude Code writes a
+  prompt there as it is submitted, before its hook stamps the board) — that the pane shows
+  Claude Code idle at its prompt, and that no background work has started; if anything
+  has, the agent is left alone and its next turn end asks again. The manager and the
+  captain are never moved before a limit (a limit still moves them). Nothing moves when the
+  windows over the line reset within `wait_if_reset_within_minutes`, when no other account
+  is under the line (the agent goes on where it is, and nobody is woken), for an agent put
+  on its account by name (`--account` at the spawn or in the Spawn dialog, `team bind <role>
+  --account`, or a binding that sets `CLAUDE_CONFIG_DIR` by hand), in a project `fleet
+  pause` holds (on the board its agents read, the hub's under one), or for an agent started
+  or looked at in the last ten minutes. The manager is woken only when a move that went
+  ahead fails (`handover_failed`). `warn` makes no move: it puts one `before_limit` line on
+  the board for each crossing of the line, naming the account, the account with room and
+  the `fleet switch` that moves it; it is said again only once the account has read under
+  the line or its windows have reset, and it is for you, not the agents (it reaches no
+  teammate's prompt). No loop polls, and a turn end asks the usage endpoint nothing: the
+  hook decides from what the usage cache already holds whether to look, and a worker
+  detached from it does the reads, through the cache (the agent's account five minutes
+  deep, a back-off honoured; the others a minute deep, as for a launch, which is what the
+  move then picks from). With every other account over the line, turn ends read none of
+  them. A kept reading (the last good figure of a failed read) moves nobody.
 - **Folder trust.** Claude Code asks *"Is this a project you created or one you
   trust?"* the first time it starts in a folder, once **per account** — and the
   answer it highlights is *No, exit*. So a yes on account 2 left every agent on
